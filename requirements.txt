@@ -1,0 +1,6 @@
+# Core dependencies for the slide generator
+gradio>=4.0.0
+databricks-sdk>=0.20.0
+pathlib
+typing-extensions
+

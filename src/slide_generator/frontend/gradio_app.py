@@ -1,44 +1,19 @@
 import html
 import gradio as gr
 from pathlib import Path
-import python.tools.html_slides as html_slides
-import python.tools.UC_tools as UC_tools
-import python.chatbot.chatbot as chatbot
-import python.chatbot.chatbot_langchain as chatbot_langchain
+from slide_generator.tools import html_slides
+from slide_generator.core import chatbot
+from slide_generator.config import config, get_output_path
 from databricks.sdk import WorkspaceClient
 
 ws = WorkspaceClient(product='slide-generator')
 
-SYSTEM_PROMPT = """
-You are a slide creation assistant. Users interact with you to create their slide decks with natural language. You have access to a set of tools that can update a HTML slide deck. These are tools available to you;
-
-tool_add_title_slide: Add a title slide to the deck.
-tool_add_agenda_slide: Add an agenda slide to the deck.
-tool_add_content_slide: Add a content slide to the deck.
-tool_get_html: Get the current HTML of the deck.
-tool_write_html: Write the current HTML to a file.
-query_genie_space: Query a Databricks Genie space and get back a json of structured data, which is the output from converting a pandas dataframe to a json(orient="records).
-retrieval_tool: retrieve information from a vector search index containing information about the company EY.
-
-You need to decide which tool to use to update the deck.
-Be creative in how you layout the content slides when choosing the number of columns.
-"""
-
 # Initialize chatbot and conversation state
 html_deck = html_slides.HtmlDeck()
-LLM_ENDPOINT_NAME = "databricks-claude-sonnet-4"
-chatbot_instance = chatbot.Chatbot(
-    html_deck=html_deck,
-    llm_endpoint_name=LLM_ENDPOINT_NAME,
-    ws=ws,
-    tool_dict=UC_tools.UC_tools
-    )
-#chatbot_instance = chatbot_langchain.ChatbotLangChain(html_deck=html_deck, llm_endpoint_name=LLM_ENDPOINT_NAME, ws=ws)
-
-
+chatbot_instance = chatbot.Chatbot(html_deck=html_deck, llm_endpoint_name=config.llm_endpoint, ws=ws)
 
 # Dual conversation lists - OpenAI format for LLM, Gradio format for display
-openai_conversation = [{"role": "system", "content": SYSTEM_PROMPT}]
+openai_conversation = [{"role": "system", "content": config.system_prompt}]
 gradio_conversation = []  # Don't include system message in Gradio display
 
 
@@ -88,6 +63,7 @@ def update_conversations_with_openai_message(openai_msg):
     gradio_msg = openai_to_gradio_message(openai_msg)
     if gradio_msg is not None:
         gradio_conversation.append(gradio_msg)
+
 
 
 def handle_user_input(user_input):
@@ -198,6 +174,18 @@ with gr.Blocks(theme=gr.themes.Soft()) as demo:
 
 
 
-if __name__ == "__main__":
+def main():
+    """Main entry point for the Gradio application"""
     print("🚀 Starting Slide Generator with Stateless Chatbot Integration")
-    demo.launch(share=False, show_error=True)
+    print(f"📊 Using LLM endpoint: {config.llm_endpoint}")
+    print(f"📁 Output directory: {config.output_dir}")
+    
+    demo.launch(
+        server_name=config.gradio_host,
+        server_port=config.gradio_port,
+        share=config.gradio_share,
+        show_error=True
+    )
+
+if __name__ == "__main__":
+    main()
