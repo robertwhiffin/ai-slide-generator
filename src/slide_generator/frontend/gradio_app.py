@@ -1,7 +1,7 @@
 import html
 import gradio as gr
 from pathlib import Path
-from slide_generator.tools import html_slides
+from slide_generator.tools import html_slides, uc_tools
 from slide_generator.core import chatbot
 from slide_generator.config import config, get_output_path
 from databricks.sdk import WorkspaceClient
@@ -10,7 +10,12 @@ ws = WorkspaceClient(product='slide-generator')
 
 # Initialize chatbot and conversation state
 html_deck = html_slides.HtmlDeck()
-chatbot_instance = chatbot.Chatbot(html_deck=html_deck, llm_endpoint_name=config.llm_endpoint, ws=ws)
+chatbot_instance = chatbot.Chatbot(
+    html_deck=html_deck,
+    llm_endpoint_name=config.llm_endpoint,
+    ws=ws,
+    tool_dict=uc_tools.UC_tools
+    )
 
 # Dual conversation lists - OpenAI format for LLM, Gradio format for display
 openai_conversation = [{"role": "system", "content": config.system_prompt}]
