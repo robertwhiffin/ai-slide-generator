@@ -55,59 +55,6 @@ class Chatbot:
         self.ws = ws
         self.model_serving_client = self.ws.serving_endpoints.get_open_ai_client()
     
-    # def _execute_tool(self, tool_call):
-    #     """Execute a tool call and return the result"""
-    #     function_name = tool_call.function.name
-    #     function_args = json.loads(tool_call.function.arguments)
-        
-    #     if function_name == "tool_add_title_slide":
-    #         self.html_deck.add_title_slide(
-    #             title=function_args["title"], 
-    #             subtitle=function_args["subtitle"], 
-    #             authors=function_args["authors"], 
-    #             date=function_args["date"]
-    #         )
-    #         return "Title slide added/replaced at position 0"
-        
-    #     elif function_name == "tool_add_agenda_slide":
-    #         self.html_deck.add_agenda_slide(agenda_points=function_args["agenda_points"])
-    #         return "Agenda slide added/replaced at position 1"
-        
-    #     elif function_name == "tool_add_content_slide":
-    #         self.html_deck.add_content_slide(
-    #             title=function_args["title"],
-    #             subtitle=function_args["subtitle"],
-    #             num_columns=function_args["num_columns"],
-    #             column_contents=function_args["column_contents"]
-    #         )
-    #         return "Content slide added"
-        
-    #     elif function_name == "tool_get_html":
-    #         return f"Current HTML deck ({len(self.html_deck.to_html())} characters):\n{self.html_deck.to_html()[:500]}..."
-        
-    #     elif function_name == "tool_write_html":
-    #         from pathlib import Path
-    #         output_path = Path(function_args["output_path"])
-    #         output_path.parent.mkdir(parents=True, exist_ok=True)
-    #         output_path.write_text(self.html_deck.to_html(), encoding="utf-8")
-    #         return f"HTML written to {output_path}"
-        
-    #     elif function_name == "tool_reorder_slide":
-    #         from_pos = function_args["from_position"]
-    #         to_pos = function_args["to_position"]
-    #         try:
-    #             self.html_deck.reorder_slide(from_pos, to_pos)
-    #             return f"Moved slide from position {from_pos} to position {to_pos}"
-    #         except ValueError as e:
-    #             return f"Error reordering slide: {str(e)}"
-        
-    #     else:
-    #         try:
-    #             return self.tool_dict[function_name]["function"](**function_args)
-    #         except KeyError as e:
-    #             return f"Unknown tool: {function_name}"
-    #         except Exception as e:
-    #             return f"Error executing {function_name}: {str(e)}"
     
     def _call_llm(self, conversation: List[Dict], tools: List[Dict]):
         """Make a call to the LLM with the given conversation and tools"""
