@@ -20,6 +20,134 @@ import json
 
 
 @dataclass
+class Slide:
+    """Represents a single slide with its content and metadata.
+    
+    This class can represent different types of slides (title, agenda, content)
+    by using the slide_type field and storing type-specific data in metadata.
+    """
+    title: str = ""
+    subtitle: str = ""
+    content: str = ""
+    slide_type: str = "content"  # "title", "agenda", "content", or "custom"
+    metadata: Dict[str, Any] = None
+    
+    def __post_init__(self):
+        if self.metadata is None:
+            self.metadata = {}
+    
+    def to_html(self, theme: 'SlideTheme') -> str:
+        """Convert this slide to HTML based on its type."""
+        if self.slide_type == "title":
+            return self._render_title_slide(theme)
+        elif self.slide_type == "agenda":
+            return self._render_agenda_slide(theme)
+        elif self.slide_type == "content":
+            return self._render_content_slide(theme)
+        elif self.slide_type == "custom":
+            return self._render_custom_slide(theme)
+        else:
+            raise ValueError(f"Unknown slide_type: {self.slide_type}")
+    
+    def _render_title_slide(self, theme: 'SlideTheme') -> str:
+        """Render a title slide."""
+        authors = self.metadata.get('authors', [])
+        date = self.metadata.get('date', '')
+        authors_str = ", ".join(authors) if authors else ""
+        byline = " • ".join([p for p in [authors_str, date] if p])
+        
+        return (
+            f"<div class=\"title-slide\">"
+            f"  <div class=\"title-bar\"></div>"
+            f"  <h1 class=\"title\">{_escape(self.title)}</h1>"
+            f"  <div class=\"subtitle\">{_escape(self.subtitle)}</div>"
+            f"  <div class=\"body\">{_escape(byline)}</div>"
+            f"</div>"
+        )
+    
+    def _render_agenda_slide(self, theme: 'SlideTheme') -> str:
+        """Render an agenda slide."""
+        agenda_points = self.metadata.get('agenda_points', [])
+        count = len(agenda_points)
+        
+        # Adaptive font size based on number of points
+        if count <= 4:
+            size_class = "agenda-size-large"
+        elif count <= 8:
+            size_class = "agenda-size-medium"
+        else:
+            size_class = "agenda-size-small"
+        
+        def render_list(items: List[str], start_index: int) -> str:
+            lis: List[str] = []
+            for i, text in enumerate(items, start=start_index):
+                lis.append(
+                    f"<li class=\"agenda-item\"><span class=\"agenda-num\">{i}</span><span>{_escape(text)}</span></li>"
+                )
+            inner = ''.join(lis) or '<li class="agenda-item">(No agenda items)</li>'
+            return f'<ul class="agenda-list">{inner}</ul>'
+
+        if count > 8:
+            import math
+            first_len = math.ceil(count / 2)
+            first_col = render_list(list(agenda_points[:first_len]), 1)
+            second_col = render_list(list(agenda_points[first_len:]), first_len + 1)
+            lists_html = f"<div class=\"agenda-columns {size_class}\"><div>{first_col}</div><div>{second_col}</div></div>"
+        else:
+            lists_html = f"<div class=\"{size_class}\">{render_list(list(agenda_points), 1)}</div>"
+
+        return (
+            f"<div class=\"agenda-slide\">"
+            f"  <h2 class=\"title\">{_escape(self.title or 'Agenda')}</h2>"
+            f"  <div class=\"title-bar\"></div>"
+            f"  {lists_html}"
+            f"</div>"
+        )
+    
+    def _render_content_slide(self, theme: 'SlideTheme') -> str:
+        """Render a content slide."""
+        num_columns = self.metadata.get('num_columns', 1)
+        column_contents = self.metadata.get('column_contents', [[]])
+        
+        if num_columns not in (1, 2, 3):
+            num_columns = 1
+        if len(column_contents) != num_columns:
+            column_contents = [[] for _ in range(num_columns)]
+
+        cols_html: List[str] = []
+        for idx in range(num_columns):
+            items = column_contents[idx] if idx < len(column_contents) else []
+            bullets = "".join(f"<li>{_escape(i)}</li>" for i in items)
+            cols_html.append(f"<div class=\"col\"><ul>{bullets}</ul></div>")
+
+        dividers_class = " with-dividers" if num_columns > 1 else ""
+        return (
+            f"<div class=\"content-slide\">"
+            f"  <h2 class=\"title\">{_escape(self.title)}</h2>"
+            f"  <div class=\"title-bar\"></div>"
+            f"  <div class=\"subtitle\">{_escape(self.subtitle)}</div>"
+            f"  <div class=\"columns{dividers_class}\" style=\"--cols:{num_columns}\">{''.join(cols_html)}</div>"
+            f"</div>"
+        )
+    
+    def _render_custom_slide(self, theme: 'SlideTheme') -> str:
+        """Render a custom slide with title, subtitle, and custom content."""
+        # Only show title/subtitle if they are provided
+        title_html = f"<h2 class=\"title\">{_escape(self.title)}</h2>" if self.title else ""
+        title_bar_html = "<div class=\"title-bar\"></div>" if self.title else ""
+        subtitle_html = f"<div class=\"subtitle\">{_escape(self.subtitle)}</div>" if self.subtitle else ""
+        
+        return (
+            f"<div class=\"content-slide\">"
+            f"  {title_html}"
+            f"  {title_bar_html}"
+            f"  {subtitle_html}"
+            f"  <div class=\"custom-content\">{self.content}</div>"
+            f"</div>"
+        )
+
+
+@dataclass
 class SlideTheme:
     """Common theme for HTML slides.
 
@@ -47,6 +175,10 @@ class SlideTheme:
     header_bar_height_px: int = 0
     logo_url: str | None = None
     footer_text: str | None = None
+    # Bottom-right logo configuration
+    bottom_right_logo_url: str | None = None
+    bottom_right_logo_height_px: int = 40
+    bottom_right_logo_margin_px: int = 20
     # Title slide specific styling
     title_bar_rgb: Tuple[int, int, int] = (0, 122, 255)  # short blue bar above title
     title_font_family: str = "'DM Sans', 'Liberation Sans', Arial, Helvetica, sans-serif"
@@ -191,6 +323,11 @@ class SlideTheme:
           border-right: none;
           padding-right: 0;
         }}
+        /* Custom slide content styling */
+        .reveal .custom-content {{
+          margin-top: 16px;
+          line-height: 1.6;
+        }}
         /* Optional brand chrome */
         .brand-header {{
           position: absolute; left: 0; top: 0; right: 0;
@@ -207,6 +344,16 @@ class SlideTheme:
           color: {self.rgb(self.subtitle_color_rgb)}; font-size: 12px;
           display: flex; align-items: center; justify-content: space-between;
         }}
+        /* Bottom-right logo styling */
+        .bottom-right-logo {{
+          position: fixed;
+          bottom: {self.bottom_right_logo_margin_px}px;
+          right: {self.bottom_right_logo_margin_px}px;
+          height: {self.bottom_right_logo_height_px}px;
+          width: auto;
+          z-index: 1000;
+          opacity: 0.9;
+        }}
         """
     
     
@@ -217,13 +364,13 @@ class HtmlDeck:
 
     def __init__(self, theme: SlideTheme | None = None) -> None:
         self.theme = theme or SlideTheme()
-        self._slides_html: List[str] = []
+        self._slides: List[Slide] = []
         self.TOOLS = [
   {
     "type": "function",
     "function": {
       "name": "tool_add_title_slide",
-      "description": "Add or replace the title slide at position 0 (first slide).",
+      "description": "Add or replace the title slide at position 0 (first slide). Creates a Slide object with title slide type.",
       "parameters": {
         "type": "object",
         "properties": {
@@ -241,7 +388,7 @@ class HtmlDeck:
     "type": "function",
     "function": {
       "name": "tool_add_agenda_slide",
-      "description": "Add or replace the agenda slide at position 1 (second slide); auto-splits to two columns if more than 8 points.",
+      "description": "Add or replace the agenda slide at position 1 (second slide). Creates a Slide object with agenda slide type; auto-splits to two columns if more than 8 points.",
       "parameters": {
         "type": "object",
         "properties": {
@@ -256,7 +403,7 @@ class HtmlDeck:
     "type": "function",
     "function": {
       "name": "tool_add_content_slide",
-      "description": "Append a content slide with 1–3 columns of bullets.",
+      "description": "Append a content slide with 1–3 columns of bullets. Creates a Slide object with content slide type.",
       "parameters": {
         "type": "object",
         "properties": {
@@ -269,6 +416,56 @@ class HtmlDeck:
           }
         },
         "required": ["title", "subtitle", "num_columns", "column_contents"],
+        "additionalProperties": False
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "tool_add_custom_html_slide",
+      "description": "Add a slide with custom HTML content directly from LLM. Creates a Slide object with custom slide type.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "html_content": { "type": "string" },
+          "title": { "type": "string" },
+          "subtitle": { "type": "string" }
+        },
+        "required": ["html_content"],
+        "additionalProperties": False
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "tool_get_slide_details",
+      "description": "Get details for a specific slide. If attribute is specified, returns that attribute value. If no attribute, returns full slide HTML.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "slide_number": { "type": "integer", "minimum": 0 },
+          "attribute": { "type": "string" }
+        },
+        "required": ["slide_number"],
+        "additionalProperties": False
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "tool_modify_slide_details",
+      "description": "Modify a specific attribute of a slide in place. Can modify title, subtitle, content, slide_type, or metadata fields.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "slide_number": { "type": "integer", "minimum": 0 },
+          "attribute": { "type": "string" },
+          "content": { "type": ["string", "array", "object", "integer", "boolean"] }
+        },
+        "required": ["slide_number", "attribute", "content"],
         "additionalProperties": False
       }
     }
@@ -319,33 +516,34 @@ class HtmlDeck:
   }
 ]
 
+    def reset_slides(self) -> None:
+        """Reset the slides to the initial empty deck"""
+        self._slides = []
+
     def add_raw_slide(self, inner_html: str) -> None:
         """Add a slide to the end of the deck"""
-        self._slides_html.append(f"<section>{inner_html}</section>")
+        slide = Slide(content=inner_html, slide_type="custom")
+        self._slides.append(slide)
     
-    def set_slide_at_position(self, position: int, inner_html: str) -> None:
+    def set_slide_at_position(self, position: int, slide: Slide) -> None:
         """Set a slide at a specific position, extending the list if necessary"""
-        slide_html = f"<section>{inner_html}</section>"
-        
         # Extend the list with empty slides if position is beyond current length
-        while len(self._slides_html) <= position:
-            self._slides_html.append("")
+        while len(self._slides) <= position:
+            self._slides.append(Slide())
         
-        self._slides_html[position] = slide_html
+        self._slides[position] = slide
     
-    def insert_slide_at_position(self, position: int, inner_html: str) -> None:
+    def insert_slide_at_position(self, position: int, slide: Slide) -> None:
         """Insert a slide at a specific position, shifting other slides down
         
         Example: If deck has slides [0, 1, 2, 3, 4] and we insert at position 2,
         the result will be [0, 1, NEW, 2, 3, 4] - slides 2+ shift right by 1
         """
-        slide_html = f"<section>{inner_html}</section>"
-        
         # If position is beyond current length, just append
-        if position >= len(self._slides_html):
-            self._slides_html.append(slide_html)
+        if position >= len(self._slides):
+            self._slides.append(slide)
         else:
-            self._slides_html.insert(position, slide_html)
+            self._slides.insert(position, slide)
     
     def reorder_slide(self, from_position: int, to_position: int) -> None:
         """Move a slide from one position to another, shifting other slides as needed
@@ -358,68 +556,36 @@ class HtmlDeck:
         - Insert at position 3: [0, 1, 2, 5, 3, 4, 6, 7]
         - Final result: Slide 5 is now at position 3, old slides 3-4 shifted right
         """
-        if from_position < 0 or from_position >= len(self._slides_html):
+        if from_position < 0 or from_position >= len(self._slides):
             raise ValueError(f"from_position {from_position} is out of range")
         if to_position < 0:
             raise ValueError(f"to_position {to_position} cannot be negative")
         
         # Remove the slide from its current position
-        slide = self._slides_html.pop(from_position)
+        slide = self._slides.pop(from_position)
         
         # Insert it at the new position (clamp to valid range)
-        actual_to_position = min(to_position, len(self._slides_html))
-        self._slides_html.insert(actual_to_position, slide)
+        actual_to_position = min(to_position, len(self._slides))
+        self._slides.insert(actual_to_position, slide)
 
     def add_title_slide(self, *, title: str, subtitle: str, authors: List[str], date: str) -> None:
         """Add or replace the title slide at position 0 (first slide)"""
-        authors_str = ", ".join(authors) if authors else ""
-        byline = " • ".join([p for p in [authors_str, date] if p])
-        inner = (
-            f"<div class=\"title-slide\">"
-            f"  <div class=\"title-bar\"></div>"
-            f"  <h1 class=\"title\">{_escape(title)}</h1>"
-            f"  <div class=\"subtitle\">{_escape(subtitle)}</div>"
-            f"  <div class=\"body\">{_escape(byline)}</div>"
-            f"</div>"
+        slide = Slide(
+            title=title,
+            subtitle=subtitle,
+            slide_type="title",
+            metadata={"authors": authors, "date": date}
         )
-        self.set_slide_at_position(0, inner)
+        self.set_slide_at_position(0, slide)
 
     def add_agenda_slide(self, *, agenda_points: List[str]) -> None:
         """Add or replace the agenda slide at position 1 (second slide)"""
-        count = len(agenda_points)
-        # Adaptive font size based on number of points (good default at <=4)
-        if count <= 4:
-            size_class = "agenda-size-large"
-        elif count <= 8:
-            size_class = "agenda-size-medium"
-        else:
-            size_class = "agenda-size-small"
-        def render_list(items: List[str], start_index: int) -> str:
-            lis: List[str] = []
-            for i, text in enumerate(items, start=start_index):
-                lis.append(
-                    f"<li class=\"agenda-item\"><span class=\"agenda-num\">{i}</span><span>{_escape(text)}</span></li>"
-                )
-            inner = ''.join(lis) or '<li class="agenda-item">(No agenda items)</li>'
-            return f'<ul class="agenda-list">{inner}</ul>'
-
-        if count > 8:
-            import math
-            first_len = math.ceil(count / 2)
-            first_col = render_list(list(agenda_points[:first_len]), 1)
-            second_col = render_list(list(agenda_points[first_len:]), first_len + 1)
-            lists_html = f"<div class=\"agenda-columns {size_class}\"><div>{first_col}</div><div>{second_col}</div></div>"
-        else:
-            lists_html = f"<div class=\"{size_class}\">{render_list(list(agenda_points), 1)}</div>"
-
-        inner = (
-            f"<div class=\"agenda-slide\">"
-            f"  <h2 class=\"title\">Agenda</h2>"
-            f"  <div class=\"title-bar\"></div>"
-            f"  {lists_html}"
-            f"</div>"
+        slide = Slide(
+            title="Agenda",
+            slide_type="agenda",
+            metadata={"agenda_points": agenda_points}
         )
-        self.set_slide_at_position(1, inner)
+        self.set_slide_at_position(1, slide)
 
     def add_content_slide(
         self,
@@ -434,26 +600,133 @@ class HtmlDeck:
         if len(column_contents) != num_columns:
             raise ValueError("len(column_contents) must equal num_columns")
 
-        cols_html: List[str] = []
-        for idx in range(num_columns):
-            items = column_contents[idx] if idx < len(column_contents) else []
-            bullets = "".join(f"<li>{_escape(i)}</li>" for i in items)
-            cols_html.append(f"<div class=\"col\"><ul>{bullets}</ul></div>")
-
-        dividers_class = " with-dividers" if num_columns > 1 else ""
-        inner = (
-            f"<div class=\"content-slide\">"
-            f"  <h2 class=\"title\">{_escape(title)}</h2>"
-            f"  <div class=\"title-bar\"></div>"
-            f"  <div class=\"subtitle\">{_escape(subtitle)}</div>"
-            f"  <div class=\"columns{dividers_class}\" style=\"--cols:{num_columns}\">{''.join(cols_html)}</div>"
-            f"</div>"
+        slide = Slide(
+            title=title,
+            subtitle=subtitle,
+            slide_type="content",
+            metadata={"num_columns": num_columns, "column_contents": column_contents}
         )
-        self.add_raw_slide(inner)
+        self._slides.append(slide)
+
+    def add_custom_html_slide(self, html_content: str, title: str = "", subtitle: str = "") -> None:
+        """Add a slide with custom HTML content directly from LLM.
+        
+        Args:
+            html_content: Raw HTML content for the slide
+            title: Optional title for reference
+            subtitle: Optional subtitle for reference
+        """
+        slide = Slide(
+            title=title,
+            subtitle=subtitle,
+            content=html_content,
+            slide_type="custom"
+        )
+        self._slides.append(slide)
+
+    def get_slide_details(self, slide_number: int, attribute: str = None) -> Union[str, Any]:
+        """Get slide details for a specific slide number and optional attribute.
+        
+        Args:
+            slide_number: 0-based slide index
+            attribute: Optional attribute to retrieve ('title', 'subtitle', 'content', 'slide_type', etc.)
+                      If None, returns the full slide HTML for LLM consumption
+        
+        Returns:
+            If attribute is specified, returns that attribute value
+            If attribute is None, returns the full slide HTML string
+        """
+        slide_number = int(slide_number)
+        if slide_number < 0 or slide_number >= len(self._slides):
+            raise ValueError(f"Slide number {slide_number} is out of range (0-{len(self._slides)-1})")
+        
+        slide = self._slides[slide_number]
+        
+        if attribute is None:
+            # Return full slide HTML for LLM
+            return f"<section>{slide.to_html(self.theme)}</section>"
+        
+        # Return specific attribute
+        if hasattr(slide, attribute):
+            return getattr(slide, attribute)
+        elif attribute in slide.metadata:
+            return slide.metadata[attribute]
+        else:
+            raise ValueError(f"Attribute '{attribute}' not found in slide {slide_number}")
+
+    def modify_slide_details(self, slide_number: int, attribute: str, content: Any) -> None:
+        """Modify slide details for a specific slide number and attribute.
+        
+        Args:
+            slide_number: 0-based slide index
+            attribute: Attribute to modify ('title', 'subtitle', 'content', 'slide_type', etc.)
+            content: New value for the attribute
+        """
+        if slide_number < 0 or slide_number >= len(self._slides):
+            raise ValueError(f"Slide number {slide_number} is out of range (0-{len(self._slides)-1})")
+        
+        slide = self._slides[slide_number]
+        
+        # Modify the attribute
+        if hasattr(slide, attribute):
+            setattr(slide, attribute, content)
+        else:
+            # Store in metadata if it's not a direct attribute
+            slide.metadata[attribute] = content
+
+    # Tool functions for LLM integration
+    def tool_add_title_slide(self, **kwargs) -> str:
+        """Tool function for add_title_slide"""
+        self.add_title_slide(**kwargs)
+        return f"Title slide added/updated at position 0"
+
+    def tool_add_agenda_slide(self, **kwargs) -> str:
+        """Tool function for add_agenda_slide"""  
+        self.add_agenda_slide(**kwargs)
+        return f"Agenda slide added/updated at position 1"
+
+    def tool_add_content_slide(self, **kwargs) -> str:
+        """Tool function for add_content_slide"""
+        self.add_content_slide(**kwargs)
+        return f"Content slide added at position {len(self._slides)-1}"
+
+    def tool_add_custom_html_slide(self, **kwargs) -> str:
+        """Tool function for add_custom_html_slide"""
+        self.add_custom_html_slide(**kwargs)
+        return f"Custom HTML slide added at position {len(self._slides)-1}"
+
+    def tool_get_html(self, **kwargs) -> str:
+        """Tool function to get full HTML"""
+        return self.to_html()
+
+    def tool_write_html(self, output_path: str, **kwargs) -> str:
+        """Tool function to write HTML to file"""
+        html_content = self.to_html()
+        with open(output_path, 'w', encoding='utf-8') as f:
+            f.write(html_content)
+        return f"HTML saved to: {output_path}"
+
+    def tool_reorder_slide(self, from_position: int, to_position: int, **kwargs) -> str:
+        """Tool function for reorder_slide"""
+        self.reorder_slide(from_position, to_position)
+        return f"Moved slide from position {from_position} to {to_position}"
+
+    def tool_get_slide_details(self, slide_number: int, attribute: str = None, **kwargs) -> str:
+        """Tool function for get_slide_details"""
+        result = self.get_slide_details(slide_number, attribute)
+        if attribute is None:
+            return f"Full HTML for slide {slide_number}:\n{result}"
+        else:
+            return f"Slide {slide_number} {attribute}: {result}"
+
+    def tool_modify_slide_details(self, slide_number: int, attribute: str, content: Any, **kwargs) -> str:
+        """Tool function for modify_slide_details"""
+        self.modify_slide_details(slide_number, attribute, content)
+        return f"Modified slide {slide_number} {attribute} to: {content}"
 
     def to_html(self) -> str:
         css_overrides = self.theme.build_base_css()
-        slides = "".join(self._slides_html)
+        slides = "".join(f"<section>{slide.to_html(self.theme)}</section>" for slide in self._slides)
         header_logo = (
             f"<img class=\"logo\" src=\"{_escape(self.theme.logo_url)}\" alt=\"logo\"/>"
             if self.theme.logo_url else ""
@@ -461,6 +734,12 @@ class HtmlDeck:
         footer = _escape(self.theme.footer_text) if self.theme.footer_text else ""
         header_html = f"<div class=\"brand-header\">{header_logo}</div>" if self.theme.header_bar_height_px else ""
         footer_html = f"<div class=\"brand-footer\">{footer}</div>" if footer else ""
+        
+        # Add bottom-right logo if configured
+        bottom_right_logo_html = (
+            f"<img class=\"bottom-right-logo\" src=\"{_escape(self.theme.bottom_right_logo_url)}\" alt=\"EY Parthenon Logo\"/>"
+            if self.theme.bottom_right_logo_url else ""
+        )
         return f"""
 <!doctype html>
 <html lang="en">
@@ -485,6 +764,7 @@ class HtmlDeck:
     </div>
   </div>
   {footer_html}
+  {bottom_right_logo_html}
   <script src="https://unpkg.com/reveal.js/dist/reveal.js"></script>
   <script>
     const deck = new Reveal({{

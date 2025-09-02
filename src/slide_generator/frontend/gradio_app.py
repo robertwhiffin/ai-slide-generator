@@ -1,5 +1,6 @@
 import html
 import gradio as gr
+import base64
 from pathlib import Path
 from slide_generator.tools import html_slides, uc_tools
 from slide_generator.core import chatbot
@@ -8,8 +9,24 @@ from databricks.sdk import WorkspaceClient
 
 ws = WorkspaceClient(product='slide-generator')
 
-# Initialize chatbot and conversation state
-html_deck = html_slides.HtmlDeck()
+def get_logo_base64():
+    """Load the EY-Parthenon logo and encode it as base64 for embedding in HTML."""
+    logo_path = Path(__file__).parent.parent / "assets" / "EY-Parthenon_Logo_2021.svg"
+    try:
+        with open(logo_path, 'rb') as logo_file:
+            logo_data = logo_file.read()
+            return base64.b64encode(logo_data).decode('utf-8')
+    except FileNotFoundError:
+        print(f"Warning: Logo file not found at {logo_path}")
+        return ""
+
+# Initialize chatbot and conversation state with EY-Parthenon branding
+ey_theme = html_slides.SlideTheme(
+    bottom_right_logo_url="data:image/svg+xml;base64," + get_logo_base64(),
+    bottom_right_logo_height_px=50,
+    bottom_right_logo_margin_px=20
+)
+html_deck = html_slides.HtmlDeck(theme=ey_theme)
 chatbot_instance = chatbot.Chatbot(
     html_deck=html_deck,
     llm_endpoint_name=config.llm_endpoint,
@@ -31,14 +48,21 @@ def openai_to_gradio_message(openai_msg):
         return gr.ChatMessage(role="user", content=openai_msg["content"])
     
     elif openai_msg["role"] == "assistant":
-        if "tool_calls" in openai_msg:
+        if "tool_calls" in openai_msg and openai_msg["content"]:
             # Assistant with tool calls
-            content = openai_msg["content"] if openai_msg["content"] else "Using a tool"
-            return gr.ChatMessage(
-                role="assistant",
-                content=content,
-                metadata={"title": "🔧 Using a tool"}
-            )
+            content = openai_msg["content"] 
+            tool_content = f"Calling tool {openai_msg['tool_calls'][0]['function']['name']} with arguments {openai_msg['tool_calls'][0]['function']['arguments']}"
+            return [
+                gr.ChatMessage(
+                    role="assistant",
+                    content=content
+                ),
+                gr.ChatMessage(
+                    role="assistant",
+                    content=tool_content,
+                    metadata={"title": "🔧 Using a tool"}
+                ),
+                ]
         else:
             # Regular assistant message
             return gr.ChatMessage(role="assistant", content=openai_msg["content"])
@@ -66,7 +90,10 @@ def update_conversations_with_openai_message(openai_msg):
     """Add OpenAI message to both conversation lists"""
     openai_conversation.append(openai_msg)
     gradio_msg = openai_to_gradio_message(openai_msg)
-    if gradio_msg is not None:
+    if type(gradio_msg) is list:
+        gradio_conversation.extend(gradio_msg)
+
+    elif gradio_msg is not None:
         gradio_conversation.append(gradio_msg)
 
 
@@ -82,7 +109,7 @@ def handle_user_input(user_input):
     yield gradio_conversation, ""
     
     # Main conversation loop until finish_reason == "stop"
-    max_iterations = 10
+    max_iterations = 30
     iteration = 0
     
     while iteration < max_iterations:
@@ -147,6 +174,7 @@ with gr.Blocks(theme=gr.themes.Soft()) as demo:
             )
             input_box = gr.Textbox(
                 placeholder="Enter your slide creation request here...",
+                value="Generate a succinct report EY Parthenon. Do not generate more than 5 slides. Use the information available in your tools. Use visualisations. Include an overview slide of EY Parthenon. Think about your response.",
                 lines=2,
                 max_lines=5
             )
@@ -155,7 +183,10 @@ with gr.Blocks(theme=gr.themes.Soft()) as demo:
         with gr.Column():
             gr.Markdown("## 🎯 Generated Slides")
             slides_display = gr.HTML(value=update_slides())
-            update_button = gr.Button("🔄 Refresh Slides", variant="secondary")
+            with gr.Row():
+                update_button = gr.Button("🔄 Refresh Slides", variant="secondary")
+                reset_button = gr.Button("🔄 Reset Slides", variant="secondary")
+                export_button = gr.Button("🔄 Export Slides", variant="secondary")
             update_button.click(fn=update_slides, inputs=None, outputs=slides_display)
             chatbox.change(fn=update_slides, outputs=slides_display)
             
@@ -176,7 +207,8 @@ with gr.Blocks(theme=gr.themes.Soft()) as demo:
             gr.Markdown("Gradio Conversation")
             gradio_conversation_display = gr.Textbox(value=gradio_conversation, lines=10)
             gradio_conversation_display.select(fn=lambda: gradio_conversation_display, outputs=gradio_conversation_display)
-
+        assistant_response_textbox=gr.Textbox(value='', lines=10)
+        assistant_response_textbox.select(fn=lambda: chatbot_instance.call_llm(openai_conversation)[0], inputs=assistant_response_textbox, outputs=assistant_response_textbox)
 
 
 def main():

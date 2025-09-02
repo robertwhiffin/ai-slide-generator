@@ -1,4 +1,5 @@
 from databricks.sdk import WorkspaceClient
+from databricks.sdk.service.serving import ChatMessage, ChatMessageRole
 from unitycatalog.ai.core.databricks import DatabricksFunctionClient
 import pandas as pd
 ws = WorkspaceClient(product='slide-generator', profile='e2-demo-field-eng-aws')
@@ -42,43 +43,72 @@ def retrieval_tool(question: str) -> str:
     return content
 
 
+def visualisation_tool(question: str) -> str:
+    client = WorkspaceClient()
+
+    message = [ChatMessage(role=ChatMessageRole.USER, content=question)]
+
+    response = client.serving_endpoints.query(name="t2t-c3c7406d-endpoint", messages = message)
+
+    return response.choices[0].message.content 
+
 UC_tools = {
     "retrieval_tool": {
         "description": 
-{
-"type": "function",
-"function": {
-"name": "retrieval_tool",
-"description": "Retrieves information from a vector search index containing information about the company EY",
-"parameters": {
-"type": "object",
-"properties": {
-"question": { "type": "string" }
-},
-"required": ["question"],
-"additionalProperties": False
-}
-}},
+        {
+            "type": "function",
+            "function": {
+                "name": "retrieval_tool",
+                "description": "Retrieves information from a vector search index containing information about the company EY",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "question": { "type": "string" }
+                        },
+                    "required": ["question"],
+                    "additionalProperties": False
+                        }
+                    }
+            },
         "function": retrieval_tool
-        }
-    ,
+        },
     "query_genie_space": {
         "description": 
-{
-"type": "function",
-"function": {
-"name": "query_genie_space",
-"description": "Sends a question to a Databricks Genie space and returns the response. A Genie space is a text2sql tool. This space contains structured data about the spend ",
-"parameters": {
-"type": "object",
-"properties": {
-"question": { "type": "string" }
-},
-"required": ["question"],
-"additionalProperties": False
-},
-}},
-        "function": query_genie_space
-    
-}
+        {
+            "type": "function",
+                "function": {
+                    "name": "query_genie_space",
+                    "description": "Sends a question to a Databricks Genie space and returns the response. A Genie space is a text2sql tool. This space contains structured data about the spend ",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "question": { "type": "string" }
+                            },
+                "required": ["question"],
+                "additionalProperties": False
+                        },
+                    }
+            },
+        "function": query_genie_space    
+    },
+    "visualisation_tool": {
+        "description": 
+        {
+            "type": "function",
+                "function": {
+                    "name": "visualisation_tool",
+                    "description": "Send structured data to a visualisation tool. Optional but not required to specify the type of visualisation. Returns a D3 visualisation",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "question": { "type": "string" }
+                            },
+                "required": ["question"],
+                "additionalProperties": False
+                        },
+                    }
+            },
+        "function": visualisation_tool    
+    },
+
     }
