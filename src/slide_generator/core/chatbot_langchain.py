@@ -104,6 +104,11 @@ class ReorderSlideInput(BaseModel):
     to_position: int = Field(description="Target position for the slide", ge=0)
 
 
+class DeleteSlideInput(BaseModel):
+    """Input schema for deleting slides."""
+    position: int = Field(description="Position of the slide to delete", ge=0)
+
+
 # LangChain tools that wrap HtmlDeck functionality
 class TitleSlideTool(BaseTool):
     """Tool for adding a title slide."""
@@ -226,6 +231,18 @@ class ReorderSlideTool(BaseTool):
             return f"Error reordering slide: {str(e)}"
 
 
+class DeleteSlideTool(BaseTool):
+    """Tool for deleting slides."""
+    name: str = "tool_delete_slide"
+    description: str = "Delete a slide at the specified position. Slides are 0-indexed. Deleting a slide shifts all subsequent slides left by 1 position."
+    args_schema: type[BaseModel] = DeleteSlideInput
+    html_deck: HtmlDeck
+    
+    def _run(self, position: int) -> str:
+        """Execute the tool."""
+        return self.html_deck.tool_delete_slide(position)
+
+
 class ChatbotLangChain:
     """A LangChain-powered chatbot class for creating slide decks using LLM tools"""
     
@@ -283,6 +300,7 @@ class ChatbotLangChain:
             GetHtmlTool(html_deck=self.html_deck),
             WriteHtmlTool(html_deck=self.html_deck),
             ReorderSlideTool(html_deck=self.html_deck),
+            DeleteSlideTool(html_deck=self.html_deck),
         ]
     
     def _convert_openai_to_langchain_messages(self, conversation: List[Dict]) -> List[BaseMessage]:

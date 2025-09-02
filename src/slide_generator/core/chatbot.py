@@ -203,6 +203,13 @@ class Chatbot:
             self.html_deck.add_custom_html_slide(html_content, title, subtitle)
             return f"Custom HTML slide added"
         
+        elif function_name == "tool_delete_slide":
+            position = function_args["position"]
+            try:
+                return self.html_deck.tool_delete_slide(position)
+            except ValueError as e:
+                return f"Error deleting slide: {str(e)}"
+        
         else:
             try:
                 return self.tool_dict[function_name]["function"](**function_args)
