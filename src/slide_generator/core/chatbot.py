@@ -163,7 +163,7 @@ class Chatbot:
             return "Content slide added"
         
         elif function_name == "tool_get_html":
-            return f"Current HTML deck ({len(self.html_deck.to_html())} characters):\n{self.html_deck.to_html()[:500]}..."
+            return self.html_deck.to_html()
         
         elif function_name == "tool_write_html":
             from pathlib import Path
@@ -180,6 +180,28 @@ class Chatbot:
                 return f"Moved slide from position {from_pos} to position {to_pos}"
             except ValueError as e:
                 return f"Error reordering slide: {str(e)}"
+            
+        elif function_name == "tool_get_slide_details":
+            slide_number = function_args["slide_number"]
+            try:
+                attribute = function_args["attribute"]
+            except KeyError as e:
+                attribute = None
+            return self.html_deck.get_slide_details(slide_number, attribute)
+        
+        elif function_name == "tool_modify_slide_details":
+            slide_number = function_args["slide_number"]
+            attribute = function_args["attribute"]
+            content = function_args["content"]
+            self.html_deck.modify_slide_details(slide_number, attribute, content)
+            return f"Modified slide {slide_number} {attribute} to: {content}"
+        
+        elif function_name == "tool_add_custom_html_slide":
+            html_content = function_args["html_content"]
+            title = function_args["title"]
+            subtitle = function_args["subtitle"]
+            self.html_deck.add_custom_html_slide(html_content, title, subtitle)
+            return f"Custom HTML slide added"
         
         else:
             try:

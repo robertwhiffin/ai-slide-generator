@@ -1,14 +1,14 @@
 """
 LangChain-based chatbot for creating slide decks using LLM tools.
 
-This module provides a drop-in replacement for the original chatbot class,
-using LangChain for LLM interactions instead of direct Databricks SDK calls.
+This module provides a proper LangChain implementation using agents and proper tool patterns,
+replacing the original manual tool calling approach with LangChain's built-in capabilities.
 
 Dependencies:
-    pip install langchain-databricks langchain-core
+    pip install langchain-databricks langchain-core pydantic
 
 Usage:
-    # Drop-in replacement for original chatbot
+    # Proper LangChain implementation
     from slide_generator.core.chatbot_langchain import ChatbotLangChain
     from slide_generator.tools.html_slides import HtmlDeck
     from databricks.sdk import WorkspaceClient
@@ -26,23 +26,204 @@ Usage:
     response = chatbot.call_llm(conversation)
     
 Features:
-    - Uses LangChain's ChatDatabricks for LLM interactions
-    - Automatic tool binding and calling
-    - Seamless conversion between OpenAI and LangChain message formats
-    - Same interface as original chatbot for easy migration
-    - Enhanced error handling and tool execution
+    - Uses LangChain's proper agent pattern with AgentExecutor
+    - Pydantic-based tool definitions for better validation
+    - Native LangChain message handling without manual conversions
+    - Automatic tool execution through LangChain agents
+    - Maintains backward compatibility with original chatbot interface
 """
 
 from slide_generator.tools.html_slides import HtmlDeck
 import json
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Union
 from databricks.sdk import WorkspaceClient
+from pathlib import Path
 
 # LangChain imports
-from langchain_core.messages import BaseMessage, HumanMessage, AIMessage, ToolMessage
-from langchain_core.tools import Tool
+from langchain_core.messages import BaseMessage, HumanMessage, AIMessage, SystemMessage
+from langchain_core.tools import BaseTool
 from langchain_databricks import ChatDatabricks
-from langchain_core.utils.function_calling import convert_to_openai_tool
+from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
+from langchain.agents import create_tool_calling_agent, AgentExecutor
+from langchain_core.runnables import Runnable
+
+# Pydantic imports for tool schemas
+from pydantic import BaseModel, Field
+
+
+# Pydantic models for tool schemas
+class TitleSlideInput(BaseModel):
+    """Input schema for adding a title slide."""
+    title: str = Field(description="The main title of the slide")
+    subtitle: str = Field(description="The subtitle of the slide")
+    authors: List[str] = Field(description="List of authors")
+    date: str = Field(description="Date string for the slide")
+
+
+class AgendaSlideInput(BaseModel):
+    """Input schema for adding an agenda slide."""
+    agenda_points: List[str] = Field(description="List of agenda points")
+
+
+class ContentSlideInput(BaseModel):
+    """Input schema for adding a content slide."""
+    title: str = Field(description="The title of the slide")
+    subtitle: str = Field(description="The subtitle of the slide")
+    num_columns: int = Field(description="Number of columns (1-3)", ge=1, le=3)
+    column_contents: List[List[str]] = Field(description="List of columns, each containing a list of bullet points")
+
+
+class CustomHtmlSlideInput(BaseModel):
+    """Input schema for adding a custom HTML slide."""
+    html_content: str = Field(description="Custom HTML content for the slide")
+    title: Optional[str] = Field(default="", description="Title of the slide")
+    subtitle: Optional[str] = Field(default="", description="Subtitle of the slide")
+
+
+class SlideDetailsInput(BaseModel):
+    """Input schema for getting slide details."""
+    slide_number: int = Field(description="The slide number (0-indexed)", ge=0)
+    attribute: Optional[str] = Field(default=None, description="Specific attribute to get")
+
+
+class ModifySlideInput(BaseModel):
+    """Input schema for modifying slide details."""
+    slide_number: int = Field(description="The slide number (0-indexed)", ge=0)
+    attribute: str = Field(description="Attribute to modify")
+    content: Union[str, List, Dict, int, bool] = Field(description="New content for the attribute")
+
+
+class WriteHtmlInput(BaseModel):
+    """Input schema for writing HTML to disk."""
+    output_path: str = Field(description="Output file path")
+
+
+class ReorderSlideInput(BaseModel):
+    """Input schema for reordering slides."""
+    from_position: int = Field(description="Current position of the slide", ge=0)
+    to_position: int = Field(description="Target position for the slide", ge=0)
+
+
+# LangChain tools that wrap HtmlDeck functionality
+class TitleSlideTool(BaseTool):
+    """Tool for adding a title slide."""
+    name: str = "tool_add_title_slide"
+    description: str = "Add or replace the title slide at position 0 (first slide). Creates a Slide object with title slide type."
+    args_schema: type[BaseModel] = TitleSlideInput
+    html_deck: HtmlDeck
+    
+    def _run(self, title: str, subtitle: str, authors: List[str], date: str) -> str:
+        """Execute the tool."""
+        self.html_deck.add_title_slide(title=title, subtitle=subtitle, authors=authors, date=date)
+        return "Title slide added/replaced at position 0"
+
+
+class AgendaSlideTool(BaseTool):
+    """Tool for adding an agenda slide."""
+    name: str = "tool_add_agenda_slide"
+    description: str = "Add or replace the agenda slide at position 1 (second slide). Creates a Slide object with agenda slide type; auto-splits to two columns if more than 8 points."
+    args_schema: type[BaseModel] = AgendaSlideInput
+    html_deck: HtmlDeck
+    
+    def _run(self, agenda_points: List[str]) -> str:
+        """Execute the tool."""
+        self.html_deck.add_agenda_slide(agenda_points=agenda_points)
+        return "Agenda slide added/replaced at position 1"
+
+
+class ContentSlideTool(BaseTool):
+    """Tool for adding a content slide."""
+    name: str = "tool_add_content_slide"
+    description: str = "Append a content slide with 1–3 columns of bullets. Creates a Slide object with content slide type."
+    args_schema: type[BaseModel] = ContentSlideInput
+    html_deck: HtmlDeck
+    
+    def _run(self, title: str, subtitle: str, num_columns: int, column_contents: List[List[str]]) -> str:
+        """Execute the tool."""
+        self.html_deck.add_content_slide(
+            title=title, subtitle=subtitle, num_columns=num_columns, column_contents=column_contents
+        )
+        return "Content slide added"
+
+
+class CustomHtmlSlideTool(BaseTool):
+    """Tool for adding a custom HTML slide."""
+    name: str = "tool_add_custom_html_slide"
+    description: str = "Add a slide with custom HTML content directly from LLM. Creates a Slide object with custom slide type."
+    args_schema: type[BaseModel] = CustomHtmlSlideInput
+    html_deck: HtmlDeck
+    
+    def _run(self, html_content: str, title: str = "", subtitle: str = "") -> str:
+        """Execute the tool."""
+        self.html_deck.add_custom_html_slide(html_content=html_content, title=title, subtitle=subtitle)
+        return "Custom HTML slide added"
+
+
+class SlideDetailsTool(BaseTool):
+    """Tool for getting slide details."""
+    name: str = "tool_get_slide_details"
+    description: str = "Get details for a specific slide. If attribute is specified, returns that attribute value. If no attribute, returns full slide HTML."
+    args_schema: type[BaseModel] = SlideDetailsInput
+    html_deck: HtmlDeck
+    
+    def _run(self, slide_number: int, attribute: Optional[str] = None) -> str:
+        """Execute the tool."""
+        return self.html_deck.get_slide_details(slide_number=slide_number, attribute=attribute)
+
+
+class ModifySlideTool(BaseTool):
+    """Tool for modifying slide details."""
+    name: str = "tool_modify_slide_details"
+    description: str = "Modify a specific attribute of a slide in place. Can modify title, subtitle, content, slide_type, or metadata fields."
+    args_schema: type[BaseModel] = ModifySlideInput
+    html_deck: HtmlDeck
+    
+    def _run(self, slide_number: int, attribute: str, content: Union[str, List, Dict, int, bool]) -> str:
+        """Execute the tool."""
+        return self.html_deck.modify_slide_details(slide_number=slide_number, attribute=attribute, content=content)
+
+
+class GetHtmlTool(BaseTool):
+    """Tool for getting the current HTML deck."""
+    name: str = "tool_get_html"
+    description: str = "Return the current full HTML string for the deck."
+    html_deck: HtmlDeck
+    
+    def _run(self) -> str:
+        """Execute the tool."""
+        html_content = self.html_deck.to_html()
+        return f"Current HTML deck ({len(html_content)} characters):\n{html_content[:500]}..."
+
+
+class WriteHtmlTool(BaseTool):
+    """Tool for writing HTML to disk."""
+    name: str = "tool_write_html"
+    description: str = "Write the current HTML string to disk and return the saved path."
+    args_schema: type[BaseModel] = WriteHtmlInput
+    html_deck: HtmlDeck
+    
+    def _run(self, output_path: str) -> str:
+        """Execute the tool."""
+        output_path = Path(output_path)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text(self.html_deck.to_html(), encoding="utf-8")
+        return f"HTML written to {output_path}"
+
+
+class ReorderSlideTool(BaseTool):
+    """Tool for reordering slides."""
+    name: str = "tool_reorder_slide"
+    description: str = "Move a slide from one position to another. Slides are 0-indexed. Moving a slide shifts other slides: if slide 5 moves to position 3, slides 3-4 shift right to positions 4-5."
+    args_schema: type[BaseModel] = ReorderSlideInput
+    html_deck: HtmlDeck
+    
+    def _run(self, from_position: int, to_position: int) -> str:
+        """Execute the tool."""
+        try:
+            self.html_deck.reorder_slide(from_position, to_position)
+            return f"Moved slide from position {from_position} to position {to_position}"
+        except ValueError as e:
+            return f"Error reordering slide: {str(e)}"
 
 
 class ChatbotLangChain:
@@ -67,95 +248,42 @@ class ChatbotLangChain:
             databricks_workspace_client=ws
         )
         
-        # Convert HTML deck tools to LangChain tools
-        self.langchain_tools = self._create_langchain_tools()
+        # Create LangChain tools
+        self.tools = self._create_langchain_tools()
         
-        # Bind tools to the LLM
-        self.llm_with_tools = self.llm.bind_tools(self.langchain_tools)
+        # Create prompt template for the agent
+        self.prompt = ChatPromptTemplate.from_messages([
+            ("system", "You are a helpful assistant that creates slide decks. Use the available tools to help users create and modify slides."),
+            MessagesPlaceholder(variable_name="chat_history", optional=True),
+            ("human", "{input}"),
+            MessagesPlaceholder(variable_name="agent_scratchpad"),
+        ])
+        
+        # Create the agent
+        self.agent = create_tool_calling_agent(self.llm, self.tools, self.prompt)
+        
+        # Create the agent executor
+        self.agent_executor = AgentExecutor(
+            agent=self.agent, 
+            tools=self.tools, 
+            verbose=False,
+            return_intermediate_steps=True,
+            handle_parsing_errors=True
+        )
     
-    def _create_langchain_tools(self) -> List[Tool]:
-        """Convert HtmlDeck tools to LangChain tool format"""
-        langchain_tools = []
-        
-        for tool_spec in self.html_deck.TOOLS:
-            function_spec = tool_spec["function"]
-            tool_name = function_spec["name"]
-            tool_description = function_spec["description"]
-            
-            # Create a LangChain tool
-            langchain_tool = Tool(
-                name=tool_name,
-                description=tool_description,
-                func=lambda args, name=tool_name: self._execute_tool_by_name(name, args)
-            )
-            
-            # Add the OpenAI schema for proper tool calling
-            langchain_tool.args_schema = None  # LangChain will infer from OpenAI format
-            langchain_tool._openai_tool_spec = tool_spec
-            
-            langchain_tools.append(langchain_tool)
-        
-        return langchain_tools
-    
-    def _execute_tool_by_name(self, tool_name: str, args: str) -> str:
-        """Execute a tool by name with string arguments"""
-        try:
-            # Parse arguments if they're a string
-            if isinstance(args, str):
-                function_args = json.loads(args)
-            else:
-                function_args = args
-            
-            return self._execute_tool_from_dict(tool_name, function_args)
-        except Exception as e:
-            return f"Error executing tool {tool_name}: {str(e)}"
-    
-    def _execute_tool_from_dict(self, function_name: str, function_args: Dict) -> str:
-        """Execute a tool call from dictionary format"""
-        if function_name == "tool_add_title_slide":
-            self.html_deck.add_title_slide(
-                title=function_args["title"], 
-                subtitle=function_args["subtitle"], 
-                authors=function_args["authors"], 
-                date=function_args["date"]
-            )
-            return "Title slide added/replaced at position 0"
-        
-        elif function_name == "tool_add_agenda_slide":
-            self.html_deck.add_agenda_slide(agenda_points=function_args["agenda_points"])
-            return "Agenda slide added/replaced at position 1"
-        
-        elif function_name == "tool_add_content_slide":
-            self.html_deck.add_content_slide(
-                title=function_args["title"],
-                subtitle=function_args["subtitle"],
-                num_columns=function_args["num_columns"],
-                column_contents=function_args["column_contents"]
-            )
-            return "Content slide added"
-        
-        elif function_name == "tool_get_html":
-            html_content = self.html_deck.to_html()
-            return f"Current HTML deck ({len(html_content)} characters):\n{html_content[:500]}..."
-        
-        elif function_name == "tool_write_html":
-            from pathlib import Path
-            output_path = Path(function_args["output_path"])
-            output_path.parent.mkdir(parents=True, exist_ok=True)
-            output_path.write_text(self.html_deck.to_html(), encoding="utf-8")
-            return f"HTML written to {output_path}"
-        
-        elif function_name == "tool_reorder_slide":
-            from_pos = function_args["from_position"]
-            to_pos = function_args["to_position"]
-            try:
-                self.html_deck.reorder_slide(from_pos, to_pos)
-                return f"Moved slide from position {from_pos} to position {to_pos}"
-            except ValueError as e:
-                return f"Error reordering slide: {str(e)}"
-        
-        else:
-            return f"Unknown tool: {function_name}"
+    def _create_langchain_tools(self) -> List[BaseTool]:
+        """Create LangChain tools that wrap HtmlDeck functionality"""
+        return [
+            TitleSlideTool(html_deck=self.html_deck),
+            AgendaSlideTool(html_deck=self.html_deck),
+            ContentSlideTool(html_deck=self.html_deck),
+            CustomHtmlSlideTool(html_deck=self.html_deck),
+            SlideDetailsTool(html_deck=self.html_deck),
+            ModifySlideTool(html_deck=self.html_deck),
+            GetHtmlTool(html_deck=self.html_deck),
+            WriteHtmlTool(html_deck=self.html_deck),
+            ReorderSlideTool(html_deck=self.html_deck),
+        ]
     
     def _convert_openai_to_langchain_messages(self, conversation: List[Dict]) -> List[BaseMessage]:
         """Convert OpenAI format conversation to LangChain messages"""
@@ -166,69 +294,18 @@ class ChatbotLangChain:
             content = msg["content"]
             
             if role == "system":
-                # LangChain doesn't have a SystemMessage in the same way, 
-                # so we'll include it as the first message or in the prompt
-                messages.append(HumanMessage(content=f"System: {content}"))
+                messages.append(SystemMessage(content=content))
             elif role == "user":
                 messages.append(HumanMessage(content=content))
             elif role == "assistant":
-                if "tool_calls" in msg:
-                    # Assistant message with tool calls
-                    ai_msg = AIMessage(
-                        content=content,
-                        tool_calls=[
-                            {
-                                "name": tc["function"]["name"],
-                                "args": json.loads(tc["function"]["arguments"]),
-                                "id": tc["id"]
-                            }
-                            for tc in msg["tool_calls"]
-                        ]
-                    )
-                    messages.append(ai_msg)
-                else:
-                    # Regular assistant message
-                    messages.append(AIMessage(content=content))
+                messages.append(AIMessage(content=content))
             elif role == "tool":
-                # Tool result message
-                messages.append(ToolMessage(
-                    content=content,
-                    tool_call_id=msg.get("tool_call_id", "unknown")
-                ))
+                # Skip tool messages as they're handled by the agent executor
+                continue
         
         return messages
     
-    def _convert_langchain_to_openai_message(self, message: BaseMessage) -> Dict:
-        """Convert LangChain message back to OpenAI format"""
-        if isinstance(message, AIMessage):
-            result = {
-                "role": "assistant",
-                "content": message.content or ""
-            }
-            
-            # Handle tool calls
-            if hasattr(message, 'tool_calls') and message.tool_calls:
-                result["tool_calls"] = [
-                    {
-                        "id": tc.get("id", f"call_{i}"),
-                        "type": "function",
-                        "function": {
-                            "name": tc["name"],
-                            "arguments": json.dumps(tc["args"])
-                        }
-                    }
-                    for i, tc in enumerate(message.tool_calls)
-                ]
-            
-            return result
-        else:
-            # Fallback for other message types
-            return {
-                "role": "assistant",
-                "content": str(message.content)
-            }
-    
-    def call_llm(self, conversation: List[Dict]) -> Dict:
+    def call_llm(self, conversation: List[Dict]) -> tuple[Dict, bool]:
         """
         Call LLM with conversation history and return the response message.
         
@@ -236,24 +313,56 @@ class ChatbotLangChain:
             conversation: The complete conversation history in OpenAI format
             
         Returns:
-            Dict containing the assistant's response message or error
+            Tuple of (assistant message dict, is_finished boolean)
         """
+        try:
             # Convert OpenAI format to LangChain messages
-        langchain_messages = self._convert_openai_to_langchain_messages(conversation)
-        
-        # Call LangChain LLM with tools
-        response = self.llm_with_tools.invoke(langchain_messages)
-        
-        # Convert response back to OpenAI format
-        assistant_message = self._convert_langchain_to_openai_message(response)
-        # this isnt working, langchain uses a different format for the response
-        
-        return assistant_message, response.choices[0].finish_reason == "stop"
-
+            langchain_messages = self._convert_openai_to_langchain_messages(conversation)
+            
+            # Create the input for the agent - use the last human message as input
+            # and the previous messages as chat history
+            if langchain_messages and isinstance(langchain_messages[-1], HumanMessage):
+                input_message = langchain_messages[-1].content
+                chat_history = langchain_messages[:-1] if len(langchain_messages) > 1 else []
+            else:
+                input_message = ""
+                chat_history = langchain_messages
+            
+            # Run the agent
+            result = self.agent_executor.invoke({
+                "input": input_message,
+                "chat_history": chat_history
+            })
+            
+            # Extract the output
+            output = result.get("output", "")
+            
+            # Check if tools were used (indicates more processing needed)
+            intermediate_steps = result.get("intermediate_steps", [])
+            is_finished = len(intermediate_steps) == 0 or not any(
+                step for step in intermediate_steps if step[0].tool != "Final Answer"
+            )
+            
+            assistant_message = {
+                "role": "assistant",
+                "content": output
+            }
+            
+            return assistant_message, is_finished
+            
+        except Exception as e:
+            error_message = {
+                "role": "assistant",
+                "content": f"Error: {str(e)}"
+            }
+            return error_message, True
     
     def execute_tool_call(self, tool_call_dict: Dict) -> Dict:
         """
         Execute a single tool call and return the result message.
+        
+        Note: This method is maintained for compatibility but is not used
+        in the LangChain agent implementation as tools are executed automatically.
         
         Args:
             tool_call_dict: Dictionary containing tool call information
@@ -261,15 +370,10 @@ class ChatbotLangChain:
         Returns:
             Dict containing the tool result message
         """
-        function_name = tool_call_dict["function"]["name"]
-        function_args = json.loads(tool_call_dict["function"]["arguments"])
-        
-        result = self._execute_tool_from_dict(function_name, function_args)
-        
         return {
             "role": "tool",
-            "tool_call_id": tool_call_dict["id"],
-            "content": result
+            "tool_call_id": tool_call_dict.get("id", "unknown"),
+            "content": "Tool execution handled automatically by LangChain agent"
         }
     
     def get_html_deck(self) -> HtmlDeck:
@@ -283,7 +387,6 @@ class ChatbotLangChain:
     def save_deck(self, output_path: str) -> str:
         """Save the deck to a file"""
         try:
-            from pathlib import Path
             output_path = Path(output_path)
             output_path.parent.mkdir(parents=True, exist_ok=True)
             output_path.write_text(self.html_deck.to_html(), encoding="utf-8")
@@ -304,12 +407,6 @@ if __name__ == "__main__":
     print("LangChain Chatbot Example")
     print("=" * 40)
     
-    # This would replace:
-    # from python.chatbot.chatbot import Chatbot
-    # 
-    # With:
-    # from python.chatbot.chatbot_langchain import ChatbotLangChain as Chatbot
-    
     print("""
     Migration from original chatbot:
     
@@ -329,10 +426,12 @@ if __name__ == "__main__":
     print("""
     Key Benefits of LangChain Version:
     ================================
-    ✅ Native LangChain integration
-    ✅ Better tool handling and validation
-    ✅ Enhanced error handling
+    ✅ Proper LangChain agent pattern with AgentExecutor
+    ✅ Pydantic-based tool validation and schema enforcement
+    ✅ Native LangChain message handling
+    ✅ Automatic tool execution without manual calling
+    ✅ Better error handling and debugging
     ✅ Easier to extend with LangChain ecosystem
-    ✅ More robust message format conversion
-    ✅ Drop-in replacement - same interface
+    ✅ No manual finish reason checking - handled by agents
+    ✅ Drop-in replacement - same interface maintained
     """)

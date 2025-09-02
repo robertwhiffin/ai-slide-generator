@@ -4,3 +4,9 @@ databricks-sdk>=0.20.0
 pathlib
 typing-extensions
 
+# LangChain dependencies for chatbot_langchain.py
+langchain-core>=0.1.0
+langchain-databricks>=0.1.0
+langchain>=0.1.0
+pydantic>=2.0.0
+
