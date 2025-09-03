@@ -441,7 +441,7 @@ class HtmlDeck:
     "type": "function",
     "function": {
       "name": "tool_get_slide_details",
-      "description": "Get details for a specific slide. If attribute is specified, returns that attribute value. If no attribute, returns full slide HTML.",
+      "description": "Get details for a specific slide. If attribute is specified, returns that attribute value. If no attribute, returns full slide HTML. Attribute can be title, subtitle, or content.",
       "parameters": {
         "type": "object",
         "properties": {
@@ -513,6 +513,21 @@ class HtmlDeck:
         "additionalProperties": False
       }
     }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "tool_delete_slide",
+      "description": "Delete a slide at the specified position. Slides are 0-indexed. Deleting a slide shifts all subsequent slides left by 1 position.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "position": { "type": "integer", "minimum": 0 }
+        },
+        "required": ["position"],
+        "additionalProperties": False
+      }
+    }
   }
 ]
 
@@ -567,6 +582,24 @@ class HtmlDeck:
         # Insert it at the new position (clamp to valid range)
         actual_to_position = min(to_position, len(self._slides))
         self._slides.insert(actual_to_position, slide)
+
+    def delete_slide(self, position: int) -> None:
+        """Delete a slide at the specified position
+        
+        Args:
+            position: 0-based index of the slide to delete
+            
+        Raises:
+            ValueError: If position is out of range
+            
+        Example: Deleting slide 2 from deck [0, 1, 2, 3, 4] results in [0, 1, 3, 4]
+                 - Slides after the deleted position shift left by 1
+        """
+        if position < 0 or position >= len(self._slides):
+            raise ValueError(f"Position {position} is out of range (0-{len(self._slides)-1})")
+        
+        # Remove the slide at the specified position
+        self._slides.pop(position)
 
     def add_title_slide(self, *, title: str, subtitle: str, authors: List[str], date: str) -> None:
         """Add or replace the title slide at position 0 (first slide)"""
@@ -710,6 +743,21 @@ class HtmlDeck:
         """Tool function for reorder_slide"""
         self.reorder_slide(from_position, to_position)
         return f"Moved slide from position {from_position} to {to_position}"
+
+    def tool_delete_slide(self, position: int, **kwargs) -> str:
+        """Tool function for delete_slide"""
+        position = int(position)
+        if position < 0 or position >= len(self._slides):
+            return f"Error: Position {position} is out of range (0-{len(self._slides)-1})"
+        
+        # Get slide info before deletion for confirmation message
+        slide = self._slides[position]
+        slide_info = f"slide {position}"
+        if hasattr(slide, 'title') and slide.title:
+            slide_info += f" ('{slide.title}')"
+        
+        self.delete_slide(position)
+        return f"Deleted {slide_info}. Deck now has {len(self._slides)} slides."
 
     def tool_get_slide_details(self, slide_number: int, attribute: str = None, **kwargs) -> str:
         """Tool function for get_slide_details"""

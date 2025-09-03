@@ -208,7 +208,7 @@ with gr.Blocks(theme=gr.themes.Soft()) as demo:
             gradio_conversation_display = gr.Textbox(value=gradio_conversation, lines=10)
             gradio_conversation_display.select(fn=lambda: gradio_conversation_display, outputs=gradio_conversation_display)
         assistant_response_textbox=gr.Textbox(value='', lines=10)
-        assistant_response_textbox.select(fn=lambda: chatbot_instance.call_llm(openai_conversation)[0], inputs=assistant_response_textbox, outputs=assistant_response_textbox)
+        assistant_response_textbox.select(fn=lambda: chatbot_instance.call_llm(openai_conversation)[-1], outputs=assistant_response_textbox)
 
 
 def main():
