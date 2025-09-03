@@ -441,7 +441,7 @@ class HtmlDeck:
     "type": "function",
     "function": {
       "name": "tool_get_slide_details",
-      "description": "Get details for a specific slide. If attribute is specified, returns that attribute value. If no attribute, returns full slide HTML.",
+      "description": "Get details for a specific slide. If attribute is specified, returns that attribute value. If no attribute, returns full slide HTML. Attribute can be title, subtitle, or content.",
       "parameters": {
         "type": "object",
         "properties": {
