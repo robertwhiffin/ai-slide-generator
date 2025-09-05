@@ -7,7 +7,7 @@ from slide_generator.core import chatbot
 from slide_generator.config import config, get_output_path
 from databricks.sdk import WorkspaceClient
 
-ws = WorkspaceClient(product='slide-generator')
+ws = WorkspaceClient(product='slide-generator', profile='e2-demo-field-eng-aws')
 
 def get_logo_base64():
     """Load the EY-Parthenon logo and encode it as base64 for embedding in HTML."""

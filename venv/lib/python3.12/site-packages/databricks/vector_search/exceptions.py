@@ -1,0 +1,3 @@
+
+class InvalidInputException(Exception):
+    pass

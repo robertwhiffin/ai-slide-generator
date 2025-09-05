@@ -13,6 +13,8 @@ const ViewerContainer = styled.div`
   display: flex;
   flex-direction: column;
   height: 100%;
+  flex: 1;
+  max-height: calc(100vh - 120px);
 `;
 
 const SlideDisplay = styled.div`
@@ -20,10 +22,10 @@ const SlideDisplay = styled.div`
   border: 1px solid #e5e7eb;
   border-radius: 8px;
   overflow: hidden;
-  background: #f9fafb;
-  margin-bottom: 20px;
+  background: white;
   position: relative;
-  min-height: 400px;
+  height: calc(100vh - 200px);
+  max-height: calc(100vh - 200px);
 `;
 
 const IFrame = styled.iframe`
@@ -33,58 +35,6 @@ const IFrame = styled.iframe`
   background: white;
 `;
 
-const ButtonContainer = styled.div`
-  display: flex;
-  gap: 12px;
-  flex-wrap: wrap;
-`;
-
-const Button = styled.button<{ $variant?: 'primary' | 'secondary' | 'danger' }>`
-  padding: 10px 20px;
-  border: none;
-  border-radius: 6px;
-  font-weight: 600;
-  cursor: pointer;
-  transition: all 0.2s;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  
-  ${props => {
-    switch (props.$variant) {
-      case 'primary':
-        return `
-          background: #667eea;
-          color: white;
-          &:hover:not(:disabled) {
-            background: #5a67d8;
-          }
-        `;
-      case 'danger':
-        return `
-          background: #ef4444;
-          color: white;
-          &:hover:not(:disabled) {
-            background: #dc2626;
-          }
-        `;
-      default:
-        return `
-          background: #f3f4f6;
-          color: #374151;
-          border: 1px solid #d1d5db;
-          &:hover:not(:disabled) {
-            background: #e5e7eb;
-          }
-        `;
-    }
-  }}
-
-  &:disabled {
-    opacity: 0.6;
-    cursor: not-allowed;
-  }
-`;
 
 const EmptyState = styled.div`
   display: flex;
@@ -126,6 +76,23 @@ const LoadingOverlay = styled.div`
   color: #667eea;
 `;
 
+const NavigationHint = styled.div`
+  position: absolute;
+  top: 16px;
+  right: 16px;
+  background: rgba(0, 0, 0, 0.8);
+  color: white;
+  padding: 8px 12px;
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 500;
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  backdrop-filter: blur(4px);
+`;
+
 const SlideViewer: React.FC<SlideViewerProps> = ({
   html,
   onRefresh,
@@ -145,6 +112,12 @@ const SlideViewer: React.FC<SlideViewerProps> = ({
           </LoadingOverlay>
         )}
         
+        {hasSlides && (
+          <NavigationHint>
+            Use arrow keys to navigate
+          </NavigationHint>
+        )}
+        
         {hasSlides ? (
           <IFrame
             srcDoc={html}
@@ -159,18 +132,6 @@ const SlideViewer: React.FC<SlideViewerProps> = ({
           </EmptyState>
         )}
       </SlideDisplay>
-      
-      <ButtonContainer>
-        <Button onClick={onRefresh} disabled={isRefreshing}>
-          🔄 Refresh Slides
-        </Button>
-        <Button onClick={onReset}>
-          🗑️ Reset Slides
-        </Button>
-        <Button onClick={onExport} $variant="primary">
-          💾 Export Slides
-        </Button>
-      </ButtonContainer>
     </ViewerContainer>
   );
 };

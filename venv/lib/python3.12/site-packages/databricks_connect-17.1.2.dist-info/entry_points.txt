@@ -1,0 +1,4 @@
+[console_scripts]
+_databricks-connect-register-pyspark-installation = databricks.connect.scripts.register_pyspark_installation:main
+databricks-connect = databricks.connect.cli:main
+

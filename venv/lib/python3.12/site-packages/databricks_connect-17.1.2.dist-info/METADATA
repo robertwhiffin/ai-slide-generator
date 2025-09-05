@@ -1,0 +1,69 @@
+Metadata-Version: 2.1
+Name: databricks-connect
+Version: 17.1.2
+Summary: Databricks Connect Client
+Home-page: UNKNOWN
+Author: Databricks
+Author-email: feedback@databricks.com
+License: Databricks Proprietary License
+Platform: UNKNOWN
+Classifier: Development Status :: 5 - Production/Stable
+Classifier: License :: Other/Proprietary License
+Classifier: Programming Language :: Python :: 3.12
+Classifier: Programming Language :: Python :: Implementation :: CPython
+Classifier: Programming Language :: Python :: Implementation :: PyPy
+Provides: pyspark
+Obsoletes: pyspark
+Requires-Python: ==3.12.*
+Description-Content-Type: text/markdown
+Requires-Dist: databricks-sdk (>=0.46.0)
+Requires-Dist: googleapis-common-protos (>=1.65.0)
+Requires-Dist: grpcio-status (>=1.67.0)
+Requires-Dist: grpcio (>=1.67.0)
+Requires-Dist: numpy (>=1.15)
+Requires-Dist: packaging (>=23.2)
+Requires-Dist: pandas (>=1.0.5)
+Requires-Dist: py4j (==0.10.9.9)
+Requires-Dist: pyarrow (>=10.0.0)
+Requires-Dist: setuptools (>=68.0.0)
+Requires-Dist: six
+Provides-Extra: connect
+Requires-Dist: googleapis-common-protos (>=1.65.0) ; extra == 'connect'
+Requires-Dist: grpcio-status (>=1.67.0) ; extra == 'connect'
+Requires-Dist: grpcio (>=1.67.0) ; extra == 'connect'
+Requires-Dist: numpy (>=1.21) ; extra == 'connect'
+Requires-Dist: pandas (>=1.0.5) ; extra == 'connect'
+Requires-Dist: pyarrow (>=10.0.0) ; extra == 'connect'
+Provides-Extra: ml
+Requires-Dist: numpy (>=1.21) ; extra == 'ml'
+Provides-Extra: mllib
+Requires-Dist: numpy (>=1.21) ; extra == 'mllib'
+Provides-Extra: pandas_on_spark
+Requires-Dist: numpy (>=1.21) ; extra == 'pandas_on_spark'
+Requires-Dist: pandas (>=1.0.5) ; extra == 'pandas_on_spark'
+Requires-Dist: pyarrow (>=10.0.0) ; extra == 'pandas_on_spark'
+Provides-Extra: pipelines
+Requires-Dist: googleapis-common-protos (>=1.65.0) ; extra == 'pipelines'
+Requires-Dist: grpcio-status (>=1.67.0) ; extra == 'pipelines'
+Requires-Dist: grpcio (>=1.67.0) ; extra == 'pipelines'
+Requires-Dist: numpy (>=1.21) ; extra == 'pipelines'
+Requires-Dist: pandas (>=1.0.5) ; extra == 'pipelines'
+Requires-Dist: pyarrow (>=10.0.0) ; extra == 'pipelines'
+Requires-Dist: pyyaml (>=3.11) ; extra == 'pipelines'
+Provides-Extra: sql
+Requires-Dist: numpy (>=1.21) ; extra == 'sql'
+Requires-Dist: pandas (>=1.0.5) ; extra == 'sql'
+Requires-Dist: pyarrow (>=10.0.0) ; extra == 'sql'
+
+# Databricks Connect
+
+Databricks Connect allows you to connect popular IDEs such as Visual Studio Code, PyCharm, IntelliJ IDEA,
+notebook servers, and other custom applications to Databricks clusters.
+
+Databricks Connect is a client library for the Databricks Runtime. It allows you to write code using Spark APIs and
+run them remotely on a Databricks cluster instead of in the local Spark session.
+
+Refer to the official docs at https://docs.databricks.com/en/dev-tools/databricks-connect/python/index.html
+
+
+

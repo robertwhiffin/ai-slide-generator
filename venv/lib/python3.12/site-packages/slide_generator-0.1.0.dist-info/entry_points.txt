@@ -1,0 +1,2 @@
+[console_scripts]
+slide-generator = slide_generator.__main__:main

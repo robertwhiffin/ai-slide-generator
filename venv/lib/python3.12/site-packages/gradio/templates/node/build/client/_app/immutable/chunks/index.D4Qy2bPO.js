@@ -1,0 +1,2 @@
+import{E as e,b as t,d as n,c as o,g as _,i as l,l as c,e as i,m,p as r,a as d,s as g,t as p}from"./2.DPLbyeoY.js";export{e as Embed,t as all_common_keys,n as changeLocale,o as create_components,_ as get_initial_locale,l as is_translation_metadata,c as language_choices,i as load_translations,m as mount_css,r as prefix_css,d as process_langs,g as setupi18n,p as translate_if_needed};
+//# sourceMappingURL=index.D4Qy2bPO.js.map

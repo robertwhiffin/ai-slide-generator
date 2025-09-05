@@ -353,6 +353,71 @@ class SlideTheme:
           width: auto;
           z-index: 1000;
           opacity: 0.9;
+          display: none; /* Hidden by default */
+        }}
+        
+        /* Only show logo when we have actual slide content */
+        .reveal.has-real-slides ~ .bottom-right-logo {{
+          display: block !important;
+        }}
+        
+        /* Hide navigation controls - focus on keyboard navigation */
+        .reveal .controls {{
+          display: none !important;
+        }}
+        
+        /* Center and style the slide number - but only show when we have real slides */
+        .reveal .slide-number {{
+          position: fixed !important;
+          bottom: 20px !important;
+          left: 50% !important;
+          transform: translateX(-50%) !important;
+          right: auto !important;
+          background: rgba(37, 99, 235, 0.9) !important;
+          color: white !important;
+          padding: 6px 12px !important;
+          border-radius: 16px !important;
+          font-weight: 500 !important;
+          font-size: 14px !important;
+          z-index: 1000 !important;
+          box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2) !important;
+          display: none !important; /* Hidden by default */
+        }}
+        
+        /* Only show slide number when we have valid content and it's properly formatted */
+        .reveal.has-real-slides .slide-number {{
+          display: block !important;
+        }}
+        
+        /* Hide slide number in all error cases */
+        .reveal .slide-number:empty,
+        .reveal .slide-number[data-total="0"],
+        .reveal:not(.has-slides) .slide-number {{
+          display: none !important;
+        }}
+        
+        /* Hide if it contains invalid text */
+        .reveal .slide-number:contains('NaN'),
+        .reveal .slide-number:contains('undefined') {{
+          display: none !important;
+        }}
+        
+        /* Ensure keyboard navigation works */
+        .reveal.focused {{
+          outline: none;
+        }}
+        
+        /* Message about keyboard navigation */
+        .reveal .navigation-hint {{
+          position: fixed;
+          top: 20px;
+          right: 20px;
+          background: rgba(0, 0, 0, 0.8);
+          color: white;
+          padding: 8px 12px;
+          border-radius: 6px;
+          font-size: 12px;
+          z-index: 1001;
         }}
         """
     
@@ -783,10 +848,10 @@ class HtmlDeck:
         header_html = f"<div class=\"brand-header\">{header_logo}</div>" if self.theme.header_bar_height_px else ""
         footer_html = f"<div class=\"brand-footer\">{footer}</div>" if footer else ""
         
-        # Add bottom-right logo if configured
+        # Only show bottom-right logo if there are actual slides
         bottom_right_logo_html = (
             f"<img class=\"bottom-right-logo\" src=\"{_escape(self.theme.bottom_right_logo_url)}\" alt=\"EY Parthenon Logo\"/>"
-            if self.theme.bottom_right_logo_url else ""
+            if self.theme.bottom_right_logo_url and len(self._slides) > 0 else ""
         )
         return f"""
 <!doctype html>
@@ -806,7 +871,7 @@ class HtmlDeck:
 </head>
 <body>
   {header_html}
-  <div class="reveal">
+  <div class="reveal{' has-slides' if len(self._slides) > 0 else ''}">
     <div class="slides">
       {slides}
     </div>
@@ -815,13 +880,86 @@ class HtmlDeck:
   {bottom_right_logo_html}
   <script src="https://unpkg.com/reveal.js/dist/reveal.js"></script>
   <script>
+    // Initialize Reveal.js with keyboard-focused navigation
     const deck = new Reveal({{
       hash: true,
-      slideNumber: true,
+      slideNumber: 'c/t',  // Current slide / Total slides
       transition: 'slide',
-      center: false
+      center: false,
+      controls: false,     // Hide visual controls, use keyboard only
+      keyboard: {{
+        // Enable all keyboard shortcuts
+        13: 'next',        // Enter key
+        32: 'next',        // Spacebar  
+        37: 'prev',        // Left arrow
+        39: 'next',        // Right arrow
+        38: 'prev',        // Up arrow
+        40: 'next',        // Down arrow
+        72: 'prev',        // H key (back)
+        76: 'next',        // L key (forward)
+      }},
+      touch: true,
+      embedded: true,      // Better for iframe embedding
+      backgroundTransition: 'fade'
     }});
-    deck.initialize();
+    
+    // Initialize and focus for keyboard events
+    deck.initialize().then(() => {{
+      // Ensure the deck can receive keyboard events
+      const reveal = document.querySelector('.reveal');
+      if (reveal) {{
+        reveal.setAttribute('tabindex', '0');
+        reveal.focus();
+        
+        // Add click handler to maintain focus
+        reveal.addEventListener('click', () => {{
+          reveal.focus();
+        }});
+        
+        // Update slide number display to prevent NaN and only show when appropriate
+        deck.on('slidechanged', (event) => {{
+          const reveal = document.querySelector('.reveal');
+          const slideNumber = document.querySelector('.reveal .slide-number');
+          const hasActualSlides = document.querySelectorAll('.reveal .slides section').length > 0;
+          
+          if (slideNumber && reveal && hasActualSlides) {{
+            const current = event.indexh + 1;
+            const total = deck.getTotalSlides();
+            if (total > 0 && !isNaN(current) && !isNaN(total)) {{
+              reveal.classList.add('has-real-slides');
+              slideNumber.textContent = `${{current}}/${{total}}`;
+              slideNumber.setAttribute('data-total', total.toString());
+            }} else {{
+              reveal.classList.remove('has-real-slides');
+              slideNumber.style.display = 'none';
+            }}
+          }}
+        }});
+        
+        // Check if we have real slide content and set appropriate classes
+        const reveal = document.querySelector('.reveal');
+        const hasActualSlides = document.querySelectorAll('.reveal .slides section').length > 0;
+        const slideNumber = document.querySelector('.reveal .slide-number');
+        
+        if (hasActualSlides && reveal) {{
+          reveal.classList.add('has-real-slides');
+          const total = deck.getTotalSlides();
+          if (total > 0 && !isNaN(total) && slideNumber) {{
+            slideNumber.textContent = `1/${{total}}`;
+            slideNumber.setAttribute('data-total', total.toString());
+          }}
+        }} else {{
+          if (reveal) {{
+            reveal.classList.remove('has-real-slides');
+          }}
+          if (slideNumber) {{
+            slideNumber.textContent = '';
+            slideNumber.setAttribute('data-total', '0');
+            slideNumber.style.display = 'none';
+          }}
+        }}
+      }}
+    }});
   </script>
 </body>
 <!-- Generated by html_slides.py (Reveal.js) -->
