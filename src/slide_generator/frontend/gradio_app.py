@@ -167,21 +167,22 @@ def export_to_pptx():
         # Import here to avoid startup errors if dependencies are missing
         from slide_generator.tools.html_to_pptx import HtmlToPptxConverter
         
-        # Create temporary file for PPTX output
-        with tempfile.NamedTemporaryFile(suffix='.pptx', delete=False) as tmp_file:
-            temp_path = tmp_file.name
+        # Create output file with timestamp for uniqueness
+        import datetime
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        output_path = get_output_path(f"slides_{timestamp}.pptx")
         
         # Convert HTML deck to PPTX
         converter = HtmlToPptxConverter(chatbot_instance.html_deck)
         
         # Run async conversion in sync context
         async def convert():
-            return await converter.convert_to_pptx(temp_path, include_charts=True)
+            return await converter.convert_to_pptx(str(output_path), include_charts=True)
         
         result_path = asyncio.run(convert())
         
         # Return the file path for download
-        return temp_path
+        return str(output_path)
         
     except ImportError as e:
         gr.Error("PPTX export dependencies not installed. Run: pip install python-pptx playwright")
@@ -234,8 +235,9 @@ with gr.Blocks(theme=gr.themes.Soft()) as demo:
                 reset_button = gr.Button("🗑️ Reset Slides", variant="secondary")
                 export_button = gr.Button("📊 Export to PPTX", variant="primary")
             
-            # Create a hidden download component
-            download_file = gr.File(visible=False)
+            # Add a file download component
+            with gr.Row():
+                download_file = gr.File(label="📥 Download PPTX", visible=True)
             
             update_button.click(fn=update_slides, inputs=None, outputs=slides_display)
             reset_button.click(fn=reset_slides, inputs=None, outputs=[chatbox, slides_display])
