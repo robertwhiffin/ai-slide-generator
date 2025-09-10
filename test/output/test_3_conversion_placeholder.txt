@@ -1,0 +1,22 @@
+# HTML to PPTX Conversion Placeholder
+
+This file serves as a placeholder for the PPTX output that will be generated
+when the HTML to PPTX conversion functionality is implemented.
+
+## Expected Implementation Steps:
+1. Parse HTML slides content
+2. Extract slide titles, content, and styling
+3. Convert to PPTX format using python-pptx or similar library
+4. Preserve EY Parthenon branding and theme
+5. Handle embedded visualizations and charts
+
+## Input HTML File:
+/Users/homayoon.moradi/p/dbx-projects/10x/ai-slide-generator/test/output/test_1_output.html
+
+## Expected Features:
+- Title slides
+- Agenda slides  
+- Content slides with multiple columns
+- Custom HTML slides
+- Logo and branding preservation
+- Chart and visualization embedding
