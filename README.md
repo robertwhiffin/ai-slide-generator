@@ -8,6 +8,7 @@ This project provides tools to create professional HTML slide presentations with
 - Clean, modern design using Reveal.js
 - Customizable themes and styling
 - Support for title slides, agenda slides, and content slides
+- PowerPoint export with chart preservation
 - LLM-friendly tool functions for programmatic slide creation
 
 ## Key Changes: Instance-Based Approach
