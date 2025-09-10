@@ -528,6 +528,22 @@ class HtmlDeck:
         "additionalProperties": False
       }
     }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "tool_export_to_pptx",
+      "description": "Export the current slide deck to PowerPoint (.pptx) format with chart preservation",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "output_path": { "type": "string", "description": "Path where the .pptx file will be saved" },
+          "include_charts": { "type": "boolean", "description": "Whether to capture and include charts/visualizations", "default": True }
+        },
+        "required": ["output_path"],
+        "additionalProperties": False
+      }
+    }
   }
 ]
 
@@ -771,6 +787,14 @@ class HtmlDeck:
         """Tool function for modify_slide_details"""
         self.modify_slide_details(slide_number, attribute, content)
         return f"Modified slide {slide_number} {attribute} to: {content}"
+
+    def tool_export_to_pptx(self, output_path: str, include_charts: bool = True, **kwargs) -> str:
+        """Tool function for exporting to PowerPoint"""
+        try:
+            from .html_to_pptx import tool_export_to_pptx
+            return tool_export_to_pptx(self, output_path, include_charts)
+        except ImportError as e:
+            return f"Error: Required dependencies not available for PPTX export: {str(e)}"
 
     def to_html(self) -> str:
         css_overrides = self.theme.build_base_css()

@@ -1,6 +1,8 @@
 import html
 import gradio as gr
 import base64
+import tempfile
+import asyncio
 from pathlib import Path
 from slide_generator.tools import html_slides, uc_tools
 from slide_generator.core import chatbot
@@ -159,6 +161,50 @@ def update_slides():
     return iframe
 
 
+def export_to_pptx():
+    """Export current slides to PowerPoint format"""
+    try:
+        # Import here to avoid startup errors if dependencies are missing
+        from slide_generator.tools.html_to_pptx import HtmlToPptxConverter
+        
+        # Create temporary file for PPTX output
+        with tempfile.NamedTemporaryFile(suffix='.pptx', delete=False) as tmp_file:
+            temp_path = tmp_file.name
+        
+        # Convert HTML deck to PPTX
+        converter = HtmlToPptxConverter(chatbot_instance.html_deck)
+        
+        # Run async conversion in sync context
+        async def convert():
+            return await converter.convert_to_pptx(temp_path, include_charts=True)
+        
+        result_path = asyncio.run(convert())
+        
+        # Return the file path for download
+        return temp_path
+        
+    except ImportError as e:
+        gr.Error("PPTX export dependencies not installed. Run: pip install python-pptx playwright")
+        return None
+    except Exception as e:
+        gr.Error(f"Error exporting to PPTX: {str(e)}")
+        return None
+
+
+def reset_slides():
+    """Reset the slide deck to start fresh"""
+    global chatbot_instance, openai_conversation, gradio_conversation
+    
+    # Reset the HTML deck
+    chatbot_instance.html_deck.reset_slides()
+    
+    # Reset conversations but keep system prompt
+    openai_conversation = [{"role": "system", "content": config.system_prompt}]
+    gradio_conversation = []
+    
+    return gradio_conversation, update_slides()
+
+
 with gr.Blocks(theme=gr.themes.Soft()) as demo:
     gr.Markdown("""# 🎨 EY Slide Generator Demo""")
     gr.Markdown("Create professional slide decks using natural language with AI assistance")
@@ -185,9 +231,15 @@ with gr.Blocks(theme=gr.themes.Soft()) as demo:
             slides_display = gr.HTML(value=update_slides())
             with gr.Row():
                 update_button = gr.Button("🔄 Refresh Slides", variant="secondary")
-                reset_button = gr.Button("🔄 Reset Slides", variant="secondary")
-                export_button = gr.Button("🔄 Export Slides", variant="secondary")
+                reset_button = gr.Button("🗑️ Reset Slides", variant="secondary")
+                export_button = gr.Button("📊 Export to PPTX", variant="primary")
+            
+            # Create a hidden download component
+            download_file = gr.File(visible=False)
+            
             update_button.click(fn=update_slides, inputs=None, outputs=slides_display)
+            reset_button.click(fn=reset_slides, inputs=None, outputs=[chatbox, slides_display])
+            export_button.click(fn=export_to_pptx, inputs=None, outputs=download_file)
             chatbox.change(fn=update_slides, outputs=slides_display)
             
             gr.Markdown("### 💡 Tips:")
