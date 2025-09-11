@@ -77,7 +77,7 @@ slide-generator/
 │       ├── ci.yml                   # Continuous integration
 │       └── deploy.yml               # Deployment workflow
 │
-└── output/                           # Generated files (keep as is)
+└── test/output/                     # Generated files (keep as is)
     ├── .gitkeep                     # Keep directory in git
     └── *.html                       # Generated slides (ignored by git)
 ```

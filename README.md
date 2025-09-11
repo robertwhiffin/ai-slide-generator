@@ -45,7 +45,7 @@ tool_add_agenda_slide(
 
 # Save the deck
 from html_slides import tool_save_deck
-tool_save_deck(deck, "output/my_slides.html")
+tool_save_deck(deck, "test/output/my_slides.html")
 ```
 
 ### With Custom Theme
@@ -85,7 +85,7 @@ def llm_create_slides(deck_instance):
     )
     
     # Save
-    tool_save_deck(deck_instance, "output/llm_generated_slides.html")
+    tool_save_deck(deck_instance, "test/output/llm_generated_slides.html")
 ```
 
 ## Available Tool Functions
@@ -111,7 +111,7 @@ python/
 │   └── html_slides_demo.py     # Demo script
 ├── frontend/
 │   └── gradio_frontend.py      # Gradio web interface
-└── output/                     # Generated slide files
+└── test/output/               # Generated slide files
 ```
 
 ## Running the Demo
