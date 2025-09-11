@@ -35,6 +35,10 @@ except ImportError:
     PYTHON_PPTX_AVAILABLE = False
 
 from .html_slides import HtmlDeck, Slide
+from .visual_capture_engine import (
+    VisualizationCaptureEngine, VisualizationArea, CaptureMetrics, 
+    DebugMode, SpatialCollisionDetector
+)
 
 
 @dataclass
@@ -67,12 +71,13 @@ class HtmlToPptxConverter:
         self.slides = html_deck._slides
         self.theme = html_deck.theme
         
-    async def convert_to_pptx(self, output_path: str, include_charts: bool = True) -> str:
-        """Convert HTML slides to PowerPoint format.
+    async def convert_to_pptx(self, output_path: str, include_charts: bool = True, enhanced_capture: bool = True) -> str:
+        """Convert HTML slides to PowerPoint format with enhanced capture.
         
         Args:
             output_path: Path where the .pptx file will be saved
             include_charts: Whether to capture and include charts/visualizations
+            enhanced_capture: Use enhanced container-level capture (recommended)
             
         Returns:
             Path to the saved PowerPoint file
@@ -85,17 +90,25 @@ class HtmlToPptxConverter:
         prs.slide_height = Inches(7.5)
         
         if include_charts:
-            # Use Playwright to capture charts and visual elements
-            charts = await self._capture_charts()
+            if enhanced_capture:
+                print("🚀 Using enhanced container-level capture...")
+                charts = await self._capture_charts_enhanced()
+            else:
+                print("📝 Using legacy element-by-element capture...")
+                charts = await self._capture_charts()  # Legacy method
         else:
             charts = []
         
-        # Convert each slide
+        # Convert each slide with enhanced visualization placement
         for i, slide in enumerate(self.slides):
-            await self._convert_slide(prs, slide, i, charts)
+            if enhanced_capture and charts and isinstance(charts[0], VisualizationArea):
+                await self._convert_slide_enhanced(prs, slide, i, charts)
+            else:
+                await self._convert_slide(prs, slide, i, charts)
         
         # Save the presentation
         prs.save(output_path)
+        print(f"💾 PowerPoint saved: {output_path}")
         return output_path
     
     async def _capture_charts(self) -> List[ChartElement]:
@@ -115,36 +128,152 @@ class HtmlToPptxConverter:
             # Load the HTML content
             await page.set_content(html_content)
             
-            # Wait for content to load
-            await page.wait_for_timeout(3000)
+            # Wait for content to load and Reveal.js to initialize
+            await page.wait_for_timeout(2000)
             
-            # Find chart elements in the HTML (simplified approach)
+            # Wait for Reveal.js to be ready
+            try:
+                await page.wait_for_function("typeof Reveal !== 'undefined' && Reveal.isReady && Reveal.isReady()", timeout=10000)
+            except:
+                # If Reveal.js doesn't load, continue anyway (we can still capture elements)
+                print("Warning: Reveal.js not ready, continuing with static capture")
+            
+            # Find visual elements in the HTML (enhanced approach)
             chart_selectors = [
-                'div[style*="background: linear-gradient"]',  # Custom gradient charts
-                'svg',  # SVG charts
-                'canvas',  # Canvas charts
+                'svg',  # SVG graphics and charts
+                'canvas',  # Canvas charts (Chart.js, D3.js)
                 '.chart-container',  # Chart containers
+                '.plotly-graph-div',  # Plotly charts
+                '.d3-chart',  # D3.js visualizations
+                '.visualization',  # Generic visualization containers
+                '.custom-content',  # Custom content that may contain charts
+                'div[style*="background: linear-gradient"]',  # Custom gradient charts
+                'div[style*="background: #"][style*="height:"][style*="width:"]',  # CSS bar chart elements
+                'div[style*="background: rgb"][style*="height:"][style*="width:"]',  # CSS bar chart elements (rgb format)
+                '.recharts-wrapper',  # Recharts
+                '.highcharts-container',  # Highcharts
+                '.apexcharts-canvas',  # ApexCharts
             ]
             
-            # Look for charts across all slides
+            # First, check for global visual elements (like logos)
+            global_selectors = ['.bottom-right-logo', 'img[src*="data:image"]', 'img.bottom-right-logo']
+            
+            print(f"🔍 Looking for global visual elements...")
+            captured_global_elements = set()  # Track captured elements to avoid duplicates
+            
+            for selector in global_selectors:
+                print(f"  Checking selector: {selector}")
+                elements = await page.query_selector_all(selector)
+                for element in elements:
+                    try:
+                        # Check if element is visible and has content
+                        is_visible = await element.is_visible()
+                        if not is_visible:
+                            continue
+                        
+                        # Get element dimensions and position as unique identifier
+                        box = await element.bounding_box()
+                        if not box or box['width'] < 20 or box['height'] < 20:
+                            continue  # Skip very small elements
+                        
+                        # Create unique identifier for this element (position + size)
+                        element_id = f"{int(box['x'])}_{int(box['y'])}_{int(box['width'])}_{int(box['height'])}"
+                        
+                        # Skip if we've already captured this element
+                        if element_id in captured_global_elements:
+                            continue
+                        
+                        # Capture screenshot of the element
+                        screenshot_data = await element.screenshot(type='png')
+                        captured_global_elements.add(element_id)
+                        
+                        print(f"📸 Captured global visual: {selector} ({int(box['width'])}x{int(box['height'])}px)")
+                        
+                        # Add this visual element to all slides (since it's global)
+                        for slide_idx, slide in enumerate(self.slides):
+                            chart = ChartElement(
+                                selector=selector,
+                                slide_index=slide_idx,
+                                element_type=self._get_element_type(selector),
+                                screenshot_data=screenshot_data,
+                                width=int(box['width']),
+                                height=int(box['height'])
+                            )
+                            charts.append(chart)
+                    except Exception as e:
+                        # Skip this element if there's an error
+                        continue
+            
+            # Look for slide-specific charts and visuals
             for slide_idx, slide in enumerate(self.slides):
+                print(f"🔍 Checking slide {slide_idx}...")
+                
+                # Try to navigate to specific slide if Reveal.js is available
+                try:
+                    await page.evaluate(f"Reveal.slide({slide_idx}, 0)")
+                    await page.wait_for_timeout(1000)  # Wait for slide transition
+                    print(f"  ✅ Navigated to slide {slide_idx}")
+                except:
+                    # If navigation fails, try alternative approach
+                    print(f"  ⚠️ Navigation failed, trying to show slide {slide_idx} manually")
+                    try:
+                        # Try to make the slide visible by modifying CSS
+                        await page.evaluate(f"""
+                            const slides = document.querySelectorAll('.reveal .slides section');
+                            slides.forEach((slide, idx) => {{
+                                if (idx === {slide_idx}) {{
+                                    slide.style.display = 'block';
+                                    slide.style.visibility = 'visible';
+                                    slide.style.opacity = '1';
+                                }} else {{
+                                    slide.style.display = 'none';
+                                }}
+                            }});
+                        """)
+                        await page.wait_for_timeout(500)
+                    except:
+                        print(f"  ❌ Failed to make slide {slide_idx} visible")
+                
                 for selector in chart_selectors:
-                    elements = await page.query_selector_all(f'.reveal .slides section:nth-child({slide_idx + 1}) {selector}')
+                    # Look within the current slide
+                    slide_selector = f'.reveal .slides section:nth-child({slide_idx + 1})'
+                    elements = await page.query_selector_all(f'{slide_selector} {selector}')
+                    
+                    print(f"  Slide {slide_idx}: Found {len(elements)} elements for selector '{selector}'")
                     
                     for element in elements:
                         try:
                             # Check if element is visible and has content
                             is_visible = await element.is_visible()
                             if not is_visible:
+                                print(f"    Skipping invisible element: {selector}")
                                 continue
                             
                             # Get element dimensions
                             box = await element.bounding_box()
-                            if not box or box['width'] < 50 or box['height'] < 50:
-                                continue  # Skip small elements
+                            if not box:
+                                print(f"    Skipping element with no bounding box: {selector}")
+                                continue
+                                
+                            print(f"    Element size: {int(box['width'])}x{int(box['height'])}px")
                             
-                            # Capture screenshot of the element
-                            screenshot_data = await element.screenshot()
+                            # For custom-content, capture even if small (it contains the chart)
+                            if 'custom-content' in selector:
+                                min_size = 200  # Larger minimum for chart containers
+                            else:
+                                min_size = 50
+                                
+                            if box['width'] < min_size or box['height'] < min_size:
+                                print(f"    Skipping small element: {selector} ({int(box['width'])}x{int(box['height'])}px)")
+                                continue
+                            
+                            # Capture screenshot of the element with higher quality
+                            screenshot_data = await element.screenshot(
+                                type='png',
+                                animations='disabled'  # Ensure static capture
+                            )
+                            
+                            print(f"📸 Captured slide {slide_idx} visual: {selector} ({int(box['width'])}x{int(box['height'])}px)")
                             
                             chart = ChartElement(
                                 selector=selector,
@@ -156,23 +285,467 @@ class HtmlToPptxConverter:
                             )
                             charts.append(chart)
                         except Exception as e:
-                            # Skip this element if there's an error
+                            print(f"    Error capturing {selector}: {str(e)}")
                             continue
             
             await browser.close()
         
+        print(f"📊 Visual capture summary: Found {len(charts)} visual elements")
+        if charts:
+            for chart in charts:
+                print(f"  - {chart.element_type} on slide {chart.slide_index}: {chart.selector}")
+        else:
+            print("  - No visual elements detected")
+        
         return charts
     
     def _get_element_type(self, selector: str) -> str:
-        """Determine the type of chart element from its selector."""
+        """Determine the type of visual element from its selector."""
         if selector == 'svg':
             return 'svg'
         elif selector == 'canvas':
             return 'canvas'
-        elif 'chart' in selector.lower():
+        elif 'logo' in selector.lower():
+            return 'logo'
+        elif 'img' in selector.lower():
+            return 'image'
+        elif any(chart_lib in selector.lower() for chart_lib in ['plotly', 'd3', 'recharts', 'highcharts', 'apex']):
+            return 'chart'
+        elif 'chart' in selector.lower() or 'visualization' in selector.lower():
             return 'chart'
         else:
             return 'custom'
+    
+    # Enhanced capture methods
+    async def _capture_charts_enhanced(self) -> List[VisualizationArea]:
+        """Enhanced chart capture with container-first intelligence."""
+        import time
+        start_time = time.time()
+        
+        charts = []
+        metrics = CaptureMetrics()
+        
+        async with async_playwright() as p:
+            browser = await p.chromium.launch()
+            page = await browser.new_page()
+            await page.set_viewport_size({"width": 1920, "height": 1080})
+            
+            # Initialize capture engine
+            capture_engine = VisualizationCaptureEngine()
+            
+            html_content = self.html_deck.to_html()
+            await page.set_content(html_content)
+            await page.wait_for_timeout(2000)
+            
+            # Wait for Reveal.js
+            try:
+                await page.wait_for_function(
+                    "typeof Reveal !== 'undefined' && Reveal.isReady && Reveal.isReady()", 
+                    timeout=10000
+                )
+            except:
+                print("⚠️  Reveal.js not ready, using static capture mode")
+            
+            # Process each slide
+            for slide_idx in range(len(self.slides)):
+                print(f"🎯 Processing slide {slide_idx} with enhanced capture...")
+                
+                # Navigate to slide
+                await self._navigate_to_slide_enhanced(page, slide_idx)
+                
+                # Reset collision detector for each slide
+                capture_engine.collision_detector = SpatialCollisionDetector()
+                
+                # Capture visualizations by priority
+                slide_charts = await self._capture_slide_visualizations_by_priority(
+                    page, slide_idx, capture_engine, metrics
+                )
+                charts.extend(slide_charts)
+            
+            await browser.close()
+        
+        # Record timing
+        metrics.capture_time_ms = int((time.time() - start_time) * 1000)
+        
+        # Log metrics
+        print(f"📊 Enhanced capture summary: {len(charts)} visualizations captured")
+        metrics.log_metrics()
+        
+        # Save debug screenshots if enabled
+        DebugMode.save_debug_screenshots(charts, "test/output/debug")
+        
+        return charts
+
+    async def _navigate_to_slide_enhanced(self, page, slide_idx: int):
+        """Enhanced slide navigation with fallback strategies."""
+        try:
+            await page.evaluate(f"Reveal.slide({slide_idx}, 0)")
+            await page.wait_for_timeout(1000)  # Wait for slide transition
+            print(f"  ✅ Navigated to slide {slide_idx}")
+        except:
+            # Fallback: try to make the slide visible by modifying CSS
+            print(f"  ⚠️ Navigation failed, trying to show slide {slide_idx} manually")
+            try:
+                await page.evaluate(f"""
+                    const slides = document.querySelectorAll('.reveal .slides section');
+                    slides.forEach((slide, idx) => {{
+                        if (idx === {slide_idx}) {{
+                            slide.style.display = 'block';
+                            slide.style.visibility = 'visible';
+                            slide.style.opacity = '1';
+                        }} else {{
+                            slide.style.display = 'none';
+                        }}
+                    }});
+                """)
+                await page.wait_for_timeout(500)
+            except:
+                print(f"  ❌ Failed to make slide {slide_idx} visible")
+
+    async def _capture_slide_visualizations_by_priority(
+        self, page, slide_idx: int, capture_engine: VisualizationCaptureEngine, 
+        metrics: CaptureMetrics
+    ) -> List[VisualizationArea]:
+        """Capture visualizations using priority-based approach."""
+        
+        slide_charts = []
+        slide_selector = f'.reveal .slides section:nth-child({slide_idx + 1})'
+        
+        # Process by priority levels (1=highest to 5=lowest)
+        for priority_level in sorted(capture_engine.priority_selectors.keys()):
+            selectors = capture_engine.priority_selectors[priority_level]
+            
+            print(f"  🔍 Priority {priority_level}: Checking {len(selectors)} selectors...")
+            
+            for selector in selectors:
+                # Look within current slide
+                elements = await page.query_selector_all(f'{slide_selector} {selector}')
+                metrics.total_elements_found += len(elements)
+                print(f"    📋 '{selector}': found {len(elements)} elements")
+                
+                for element in elements:
+                    # Enhanced element processing
+                    visualization = await self._process_element_enhanced(
+                        element, selector, slide_idx, priority_level, capture_engine
+                    )
+                    
+                    if visualization:
+                        slide_charts.append(visualization)
+                        metrics.add_capture(visualization, priority_level <= 3)  # P1-P3 are containers
+                        print(f"    ✅ Captured: {selector} "
+                              f"({visualization.width}x{visualization.height}px, "
+                              f"confidence: {visualization.confidence_score:.1f})")
+                    else:
+                        metrics.add_collision_prevention()
+        
+        return slide_charts
+
+    async def _process_element_enhanced(
+        self, element, selector: str, slide_idx: int, priority_level: int, 
+        capture_engine: VisualizationCaptureEngine
+    ) -> Optional[VisualizationArea]:
+        """Enhanced element processing with collision detection."""
+        
+        try:
+            # Check visibility
+            if not await element.is_visible():
+                DebugMode.log_capture_decision("invisible", selector, "SKIP", "Element not visible")
+                return None
+            
+            # Get bounding box
+            box = await element.bounding_box()
+            if not box:
+                DebugMode.log_capture_decision("no_box", selector, "SKIP", "No bounding box")
+                return None
+            
+            # Enhanced size filtering based on priority
+            min_sizes = {1: 300, 2: 250, 3: 200, 4: 150, 5: 100}
+            min_size = min_sizes.get(priority_level, 200)
+            
+            if box['width'] < min_size or box['height'] < min_size:
+                DebugMode.log_capture_decision(
+                    f"{int(box['width'])}x{int(box['height'])}px", 
+                    selector, "SKIP", f"Too small (min: {min_size}px)"
+                )
+                return None
+            
+            # Check spatial collision
+            if not capture_engine.collision_detector.is_area_available(
+                box['x'], box['y'], box['width'], box['height']
+            ):
+                DebugMode.log_capture_decision(
+                    f"{int(box['width'])}x{int(box['height'])}px", 
+                    selector, "SKIP", "Spatial collision detected"
+                )
+                return None
+            
+            # Enhanced screenshot with optimization
+            screenshot_data = await element.screenshot(
+                type='png',
+                animations='disabled',
+                omit_background=False,  # Include backgrounds for CSS charts
+                timeout=10000
+            )
+            
+            # Register captured area
+            capture_engine.collision_detector.register_captured_area(
+                box['x'], box['y'], box['width'], box['height']
+            )
+            
+            # Calculate confidence score
+            confidence = capture_engine.calculate_visualization_confidence(selector, box, priority_level)
+            
+            # Create enhanced visualization area
+            visualization = VisualizationArea(
+                selector=selector,
+                bounding_box=box,
+                element_type=capture_engine.get_enhanced_element_type(selector, box),
+                priority_level=priority_level,
+                screenshot_data=screenshot_data,
+                slide_index=slide_idx,
+                confidence_score=confidence
+            )
+            
+            DebugMode.log_capture_decision(
+                f"{int(box['width'])}x{int(box['height'])}px", 
+                selector, "CAPTURE", f"Confidence: {confidence:.2f}"
+            )
+            
+            return visualization
+            
+        except Exception as e:
+            DebugMode.log_capture_decision("error", selector, "SKIP", f"Error: {str(e)}")
+            return None
+    
+    async def _convert_slide_enhanced(self, prs: Presentation, slide: Slide, slide_index: int, 
+                                    charts: List[VisualizationArea]) -> None:
+        """Enhanced slide conversion with intelligent visualization placement."""
+        
+        slide_layout = prs.slide_layouts[6]  # Blank layout
+        ppt_slide = prs.slides.add_slide(slide_layout)
+        
+        # Filter visualizations for this slide
+        slide_visualizations = [c for c in charts if c.slide_index == slide_index]
+        
+        print(f"  🎯 Converting slide {slide_index}: {len(slide_visualizations)} visualizations")
+        
+        # Use enhanced conversion methods
+        if slide.slide_type == "title":
+            await self._convert_title_slide(ppt_slide, slide)
+        elif slide.slide_type == "agenda":
+            await self._convert_agenda_slide(ppt_slide, slide)
+        elif slide.slide_type in ["content", "custom"]:
+            await self._convert_content_slide_enhanced(ppt_slide, slide, slide_index, slide_visualizations)
+
+    async def _convert_content_slide_enhanced(self, ppt_slide, slide: Slide, slide_index: int, 
+                                            visualizations: List[VisualizationArea]) -> None:
+        """Enhanced content slide conversion with visualization intelligence."""
+        
+        print(f"  📝 Enhanced conversion: slide '{slide.title}', {len(visualizations)} visualizations")
+        
+        # Add standard slide elements (title, subtitle, blue bar)
+        content_top = await self._add_standard_slide_elements(ppt_slide, slide)
+        
+        # Separate text content from visualizations
+        column_contents = slide.metadata.get('column_contents', [])
+        has_text_content = bool(column_contents)
+        has_visualizations = bool(visualizations)
+        
+        print(f"  📋 Content analysis: text_columns={len(column_contents)}, visualizations={len(visualizations)}")
+        
+        # Intelligent layout decision
+        if has_visualizations and has_text_content:
+            # Mixed content: text above, visualizations below
+            await self._add_slide_column_content(ppt_slide, column_contents, content_top)
+            viz_top = content_top + Inches(2.5)  # Leave room for text
+            await self._add_visualizations_to_slide_enhanced(ppt_slide, visualizations, viz_top)
+            
+        elif has_visualizations and not has_text_content:
+            # Visualization-only slide: use full space
+            await self._add_visualizations_to_slide_enhanced(ppt_slide, visualizations, content_top)
+            
+        elif has_text_content and not has_visualizations:
+            # Text-only slide: use existing logic
+            await self._add_slide_column_content(ppt_slide, column_contents, content_top)
+            
+        else:
+            # Fallback: try HTML parsing
+            print(f"  🔄 Fallback: parsing HTML content")
+            slide_data = self._parse_slide_content(slide.content)
+            columns = slide_data.get('columns', [])
+            if columns:
+                await self._add_parsed_column_content(ppt_slide, columns, content_top)
+
+    async def _add_standard_slide_elements(self, ppt_slide, slide: Slide) -> Inches:
+        """Add standard slide elements (title, subtitle, blue bar) and return content start position."""
+        
+        # Add title
+        title_box = ppt_slide.shapes.add_textbox(Inches(1), Inches(0.5), Inches(11), Inches(1))
+        title_frame = title_box.text_frame
+        title_frame.text = slide.title or "Untitled"
+        
+        # Style title
+        title_para = title_frame.paragraphs[0]
+        title_para.font.size = Pt(32)
+        title_para.font.bold = True
+        title_para.font.color.rgb = RGBColor(0, 0, 0)
+        
+        # Add blue accent bar
+        blue_bar = ppt_slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, Inches(1), Inches(1.6), Inches(1.2), Inches(0.1))
+        blue_bar.fill.solid()
+        blue_bar.fill.fore_color.rgb = RGBColor(0, 122, 255)
+        blue_bar.line.fill.background()
+        
+        # Add subtitle if present
+        content_top = Inches(2.5)
+        if slide.subtitle:
+            subtitle_box = ppt_slide.shapes.add_textbox(Inches(1), Inches(2), Inches(11), Inches(0.5))
+            subtitle_frame = subtitle_box.text_frame
+            subtitle_frame.text = slide.subtitle
+            
+            # Style subtitle
+            subtitle_para = subtitle_frame.paragraphs[0]
+            subtitle_para.font.size = Pt(20)
+            subtitle_para.font.color.rgb = RGBColor(102, 163, 255)
+            
+            content_top = Inches(3)
+        
+        return content_top
+
+    async def _add_visualizations_to_slide_enhanced(
+        self, ppt_slide, visualizations: List[VisualizationArea], top_position: Inches
+    ) -> None:
+        """Enhanced PowerPoint visualization placement with intelligent layout."""
+        
+        if not visualizations:
+            return
+        
+        # Separate by type and priority
+        logos = [v for v in visualizations if v.element_type == 'logo']
+        dashboards = [v for v in visualizations if 'dashboard' in v.element_type]
+        charts = [v for v in visualizations if v.element_type not in ['logo'] and 'dashboard' not in v.element_type]
+        
+        # Sort by confidence (highest first)
+        charts.sort(key=lambda x: x.confidence_score, reverse=True)
+        
+        print(f"  📋 Layout planning: {len(logos)} logos, {len(dashboards)} dashboards, {len(charts)} charts")
+        
+        # Handle dashboards (full width, high priority)
+        for dashboard in dashboards:
+            await self._place_dashboard_visualization(ppt_slide, dashboard, top_position)
+            top_position += Inches(4.5)  # Reserve space for dashboard
+        
+        # Handle charts with intelligent grid layout
+        if charts:
+            await self._place_charts_in_grid(ppt_slide, charts, top_position)
+        
+        # Handle logos (always in designated positions)
+        for logo in logos:
+            await self._place_logo_visualization(ppt_slide, logo)
+
+    async def _place_charts_in_grid(
+        self, ppt_slide, charts: List[VisualizationArea], top_position: Inches
+    ) -> None:
+        """Place multiple charts in intelligent grid layout."""
+        
+        num_charts = len(charts)
+        
+        # Determine optimal grid layout
+        if num_charts == 1:
+            grid_layout = (1, 1)
+            chart_width, chart_height = Inches(10), Inches(4)
+        elif num_charts == 2:
+            grid_layout = (2, 1)  # Side by side
+            chart_width, chart_height = Inches(5), Inches(4)
+        elif num_charts <= 4:
+            grid_layout = (2, 2)  # 2x2 grid
+            chart_width, chart_height = Inches(5), Inches(3)
+        else:
+            grid_layout = (3, 2)  # 3x2 grid (first 6 charts)
+            chart_width, chart_height = Inches(3.5), Inches(2.5)
+            charts = charts[:6]  # Limit to 6 charts max per slide
+        
+        cols, rows = grid_layout
+        
+        for i, chart in enumerate(charts):
+            row = i // cols
+            col = i % cols
+            
+            # Calculate position
+            left = Inches(1 + col * (chart_width.inches + 0.5))
+            top = Inches(top_position.inches + row * (chart_height.inches + 0.5))
+            
+            # Maintain aspect ratio if possible
+            original_aspect = chart.bounding_box['width'] / chart.bounding_box['height']
+            target_aspect = chart_width.inches / chart_height.inches
+            
+            # Store current dimensions for display
+            current_width = chart_width.inches
+            current_height = chart_height.inches
+            
+            if abs(original_aspect - target_aspect) > 0.3:  # Significant aspect ratio difference
+                if original_aspect > target_aspect:
+                    # Chart is wider, reduce height
+                    adjusted_height = Inches(chart_width.inches / original_aspect)
+                    chart_height = min(chart_height, adjusted_height)
+                    current_height = chart_height.inches
+                else:
+                    # Chart is taller, reduce width  
+                    adjusted_width = Inches(chart_height.inches * original_aspect)
+                    chart_width = min(chart_width, adjusted_width)
+                    current_width = chart_width.inches
+            
+            # Place the visualization
+            img_stream = io.BytesIO(chart.screenshot_data)
+            picture = ppt_slide.shapes.add_picture(
+                img_stream, left, top, chart_width, chart_height
+            )
+            
+            print(f"  📍 Placed chart {i+1}: {chart.element_type} at "
+                  f"({left.inches:.1f}, {top.inches:.1f}) "
+                  f"{current_width:.1f}x{current_height:.1f}\"")
+
+    async def _place_dashboard_visualization(
+        self, ppt_slide, dashboard: VisualizationArea, top_position: Inches
+    ) -> None:
+        """Place dashboard visualization with full width layout."""
+        
+        # Dashboards get full slide width
+        dashboard_width = Inches(11)
+        dashboard_height = Inches(4)
+        
+        # Maintain aspect ratio for dashboards
+        original_aspect = dashboard.bounding_box['width'] / dashboard.bounding_box['height']
+        if dashboard_width.inches / dashboard_height.inches > original_aspect:
+            # Reduce width to maintain aspect ratio
+            dashboard_width = Inches(dashboard_height.inches * original_aspect)
+        
+        left = Inches(1)
+        top = top_position
+        
+        img_stream = io.BytesIO(dashboard.screenshot_data)
+        picture = ppt_slide.shapes.add_picture(
+            img_stream, left, top, dashboard_width, dashboard_height
+        )
+        
+        print(f"  📊 Placed dashboard: {dashboard.element_type} "
+              f"({dashboard_width.inches:.1f}x{dashboard_height.inches:.1f}\")")
+
+    async def _place_logo_visualization(self, ppt_slide, logo: VisualizationArea) -> None:
+        """Place logo visualization in appropriate position."""
+        if 'bottom-right' in logo.selector:
+            # Position logo in bottom-right corner
+            logo_width = Inches(min(1.5, logo.width / 96))  # Convert px to inches, max 1.5"
+            logo_height = Inches(min(1.0, logo.height / 96))  # Convert px to inches, max 1.0"
+            
+            left = Inches(13.33 - 1.5)  # Near right edge
+            top = Inches(7.5 - 1.2)  # Near bottom edge
+            
+            img_stream = io.BytesIO(logo.screenshot_data)
+            picture = ppt_slide.shapes.add_picture(
+                img_stream, left, top, logo_width, logo_height
+            )
+            print(f"  🏷️  Placed logo: bottom-right ({logo_width.inches:.1f}x{logo_height.inches:.1f}\")")
     
     async def _convert_slide(self, prs: Presentation, slide: Slide, slide_index: int, charts: List[ChartElement]) -> None:
         """Convert a single HTML slide to PowerPoint."""
@@ -188,9 +761,9 @@ class HtmlToPptxConverter:
         elif slide.slide_type == "agenda":
             await self._convert_agenda_slide(ppt_slide, slide)
         elif slide.slide_type == "content":
-            await self._convert_content_slide(ppt_slide, slide, slide_charts)
+            await self._convert_content_slide(ppt_slide, slide, slide_index, charts)
         elif slide.slide_type == "custom":
-            await self._convert_custom_slide(ppt_slide, slide, slide_charts)
+            await self._convert_custom_slide(ppt_slide, slide, slide_index, charts)
     
     async def _convert_title_slide(self, ppt_slide, slide: Slide) -> None:
         """Convert a title slide to PowerPoint."""
@@ -327,14 +900,18 @@ class HtmlToPptxConverter:
             text_para.font.size = Pt(18)
             text_para.font.color.rgb = RGBColor(0, 0, 0)
     
-    async def _convert_content_slide(self, ppt_slide, slide: Slide, charts: List[ChartElement]) -> None:
+    async def _convert_content_slide(self, ppt_slide, slide: Slide, slide_index: int, charts: List[ChartElement]) -> None:
         """Convert a content slide to PowerPoint."""
+        # Extract data directly from slide object structure
+        print(f"  📝 Converting content slide: title='{slide.title}', subtitle='{slide.subtitle}'")
+        print(f"  📝 Metadata keys: {list(slide.metadata.keys())}")
+        
         # Add title
         title_box = ppt_slide.shapes.add_textbox(
             Inches(1), Inches(0.5), Inches(11), Inches(1)
         )
         title_frame = title_box.text_frame
-        title_frame.text = slide.title
+        title_frame.text = slide.title or "Untitled"
         
         # Style title
         title_para = title_frame.paragraphs[0]
@@ -367,24 +944,53 @@ class HtmlToPptxConverter:
             
             content_top = Inches(3)
         
-        # Add charts if present
-        if charts:
-            await self._add_charts_to_slide(ppt_slide, charts, content_top)
+        # Separate logos from other visual content
+        slide_charts = [c for c in charts if c.slide_index == slide_index]
+        content_charts = [c for c in slide_charts if c.element_type != 'logo']
+        logos = [c for c in slide_charts if c.element_type == 'logo']
+        
+        print(f"  📝 Slide {slide_index}: Found {len(content_charts)} content charts and {len(logos)} logos")
+        
+        # Always try to add column content first (for content slides)
+        column_contents = slide.metadata.get('column_contents', [])
+        print(f"  📝 Column metadata: {slide.metadata}")
+        print(f"  📝 Found {len(column_contents)} columns with content: {column_contents}")
+        
+        if column_contents:
+            print(f"  📝 Adding column content for slide {slide_index}")
+            await self._add_slide_column_content(ppt_slide, column_contents, content_top)
+        elif content_charts:
+            print(f"  📝 Adding charts for slide {slide_index}")
+            await self._add_charts_to_slide(ppt_slide, content_charts, content_top)
         else:
-            # Add column content
-            await self._add_column_content(ppt_slide, slide, content_top)
+            print(f"  📝 No column_contents or charts, trying parsed content fallback")
+            # Fallback: try to use parsed content
+            slide_data = self._parse_slide_content(slide.content)
+            columns = slide_data.get('columns', [])
+            if columns:
+                print(f"  📝 Using parsed columns as fallback: {len(columns)} columns")
+                await self._add_parsed_column_content(ppt_slide, columns, content_top)
+        
+        # Always add logos (they don't interfere with content)
+        if logos:
+            print(f"  📝 Adding {len(logos)} logos to slide {slide_index}")
+            await self._add_charts_to_slide(ppt_slide, logos, content_top)
     
-    async def _convert_custom_slide(self, ppt_slide, slide: Slide, charts: List[ChartElement]) -> None:
+    async def _convert_custom_slide(self, ppt_slide, slide: Slide, slide_index: int, charts: List[ChartElement]) -> None:
         """Convert a custom slide to PowerPoint."""
+        # Extract data from slide content using HTML parsing
+        slide_data = self._parse_slide_content(slide.content)
+        
         content_top = Inches(0.5)
         
         # Add title if present
-        if slide.title:
+        title = slide_data.get('title', slide.title)
+        if title:
             title_box = ppt_slide.shapes.add_textbox(
                 Inches(1), Inches(0.5), Inches(11), Inches(1)
             )
             title_frame = title_box.text_frame
-            title_frame.text = slide.title
+            title_frame.text = title
             
             # Style title
             title_para = title_frame.paragraphs[0]
@@ -404,12 +1010,13 @@ class HtmlToPptxConverter:
             content_top = Inches(2.5)
         
         # Add subtitle if present
-        if slide.subtitle:
+        subtitle = slide_data.get('subtitle', slide.subtitle)
+        if subtitle:
             subtitle_box = ppt_slide.shapes.add_textbox(
                 Inches(1), content_top, Inches(11), Inches(0.5)
             )
             subtitle_frame = subtitle_box.text_frame
-            subtitle_frame.text = slide.subtitle
+            subtitle_frame.text = subtitle
             
             # Style subtitle
             subtitle_para = subtitle_frame.paragraphs[0]
@@ -418,47 +1025,103 @@ class HtmlToPptxConverter:
             
             content_top += Inches(0.7)
         
+        # Filter charts for this specific slide
+        slide_charts = [c for c in charts if c.slide_index == slide_index]
+        
         # Add charts if present
-        if charts:
-            await self._add_charts_to_slide(ppt_slide, charts, content_top)
+        if slide_charts:
+            await self._add_charts_to_slide(ppt_slide, slide_charts, content_top)
+        elif slide_data.get('has_chart'):
+            # This slide should have a chart but we didn't capture it
+            # Add a placeholder or try to extract from content
+            note_box = ppt_slide.shapes.add_textbox(
+                Inches(1), content_top, Inches(11), Inches(1)
+            )
+            note_frame = note_box.text_frame
+            note_frame.text = "[Chart visualization from HTML - see original for full details]"
+            
+            # Style note
+            note_para = note_frame.paragraphs[0]
+            note_para.font.size = Pt(14)
+            note_para.font.color.rgb = RGBColor(100, 100, 100)
+            note_para.font.italic = True
         else:
-            # Add custom HTML content as text (simplified)
-            # Note: Full HTML parsing would require additional libraries
-            text_content = self._extract_text_from_html(slide.content)
-            if text_content:
-                content_box = ppt_slide.shapes.add_textbox(
-                    Inches(1), content_top, Inches(11), Inches(4)
-                )
-                content_frame = content_box.text_frame
-                content_frame.text = text_content
-                
-                # Style content
-                content_para = content_frame.paragraphs[0]
-                content_para.font.size = Pt(16)
-                content_para.font.color.rgb = RGBColor(20, 20, 20)
+            # Add parsed column content if available
+            columns = slide_data.get('columns', [])
+            if columns:
+                await self._add_parsed_column_content(ppt_slide, columns, content_top)
+            else:
+                # Fallback to basic text content
+                text_content = self._extract_text_from_html(slide.content)
+                if text_content and len(text_content) > 50:  # Only add if substantial content
+                    content_box = ppt_slide.shapes.add_textbox(
+                        Inches(1), content_top, Inches(11), Inches(4)
+                    )
+                    content_frame = content_box.text_frame
+                    content_frame.text = text_content[:500] + "..." if len(text_content) > 500 else text_content
+                    
+                    # Style content
+                    content_para = content_frame.paragraphs[0]
+                    content_para.font.size = Pt(16)
+                    content_para.font.color.rgb = RGBColor(20, 20, 20)
     
     async def _add_charts_to_slide(self, ppt_slide, charts: List[ChartElement], top_position: Inches) -> None:
-        """Add chart images to the PowerPoint slide."""
+        """Add visual elements (charts, logos, images) to the PowerPoint slide."""
         if not charts:
             return
         
-        # Layout charts on the slide
-        charts_per_row = min(2, len(charts))  # Maximum 2 charts per row
-        chart_width = Inches(5.5)
-        chart_height = Inches(3.5)
+        # Separate different types of visual elements
+        logos = [c for c in charts if c.element_type == 'logo']
+        content_visuals = [c for c in charts if c.element_type != 'logo']
         
-        for i, chart in enumerate(charts):
-            row = i // charts_per_row
-            col = i % charts_per_row
+        # Handle logos (position them correctly)
+        for logo in logos:
+            if 'bottom-right' in logo.selector:
+                # Position logo in bottom-right corner
+                logo_width = Inches(min(1.5, logo.width / 96))  # Convert px to inches, max 1.5"
+                logo_height = Inches(min(1.0, logo.height / 96))  # Convert px to inches, max 1.0"
+                
+                left = Inches(13.33 - 1.5)  # Near right edge
+                top = Inches(7.5 - 1.2)  # Near bottom edge
+                
+                img_stream = io.BytesIO(logo.screenshot_data)
+                picture = ppt_slide.shapes.add_picture(
+                    img_stream, left, top, logo_width, logo_height
+                )
+        
+        # Handle content visuals (charts, graphs, etc.)
+        if content_visuals:
+            # Layout content visuals appropriately
+            visuals_per_row = min(2, len(content_visuals))  # Maximum 2 visuals per row
             
-            left = Inches(1 + col * 6)
-            top = top_position + Inches(row * 4)
-            
-            # Add the chart image
-            img_stream = io.BytesIO(chart.screenshot_data)
-            picture = ppt_slide.shapes.add_picture(
-                img_stream, left, top, chart_width, chart_height
-            )
+            for i, visual in enumerate(content_visuals):
+                row = i // visuals_per_row
+                col = i % visuals_per_row
+                
+                # Calculate size based on original dimensions but constrained
+                max_width = Inches(5.5) if visuals_per_row == 2 else Inches(11)
+                max_height = Inches(3.5)
+                
+                # Maintain aspect ratio
+                aspect_ratio = visual.width / visual.height if visual.height > 0 else 1
+                
+                if max_width / max_height > aspect_ratio:
+                    # Height is the limiting factor
+                    visual_height = max_height
+                    visual_width = Inches(max_height.inches * aspect_ratio)
+                else:
+                    # Width is the limiting factor
+                    visual_width = max_width
+                    visual_height = Inches(max_width.inches / aspect_ratio)
+                
+                left = Inches(1 + col * 6)
+                top = top_position + Inches(row * 4)
+                
+                # Add the visual element
+                img_stream = io.BytesIO(visual.screenshot_data)
+                picture = ppt_slide.shapes.add_picture(
+                    img_stream, left, top, visual_width, visual_height
+                )
     
     async def _add_column_content(self, ppt_slide, slide: Slide, top_position: Inches) -> None:
         """Add column content to the slide."""
@@ -492,6 +1155,156 @@ class HtmlToPptxConverter:
                     para.font.size = Pt(16)
                     para.font.color.rgb = RGBColor(20, 20, 20)
     
+    def _parse_slide_content(self, html_content: str) -> dict:
+        """Parse HTML slide content to extract structured data."""
+        import re
+        
+        data = {
+            'title': '',
+            'subtitle': '',
+            'columns': [],
+            'has_chart': False
+        }
+        
+        # Debug: log first 200 chars of content being parsed
+        print(f"  📝 Parsing content (first 200 chars): {html_content[:200]}...")
+        
+        # Extract title
+        title_match = re.search(r'<h2 class="title">(.*?)</h2>', html_content, re.DOTALL)
+        if title_match:
+            data['title'] = self._extract_text_from_html(title_match.group(1))
+            print(f"  📝 Found title: {data['title']}")
+        
+        # Extract subtitle
+        subtitle_match = re.search(r'<div class="subtitle">(.*?)</div>', html_content, re.DOTALL)
+        if subtitle_match:
+            data['subtitle'] = self._extract_text_from_html(subtitle_match.group(1))
+            print(f"  📝 Found subtitle: {data['subtitle']}")
+        
+        # Check for custom chart content
+        if 'custom-content' in html_content:
+            data['has_chart'] = True
+            print(f"  📝 Found chart content")
+        
+        # Extract column content - improved pattern matching
+        # First try to find the columns container
+        columns_pattern = r'<div class="columns[^"]*"[^>]*>(.*?)</div>\s*</div>'
+        columns_match = re.search(columns_pattern, html_content, re.DOTALL)
+        
+        if not columns_match:
+            # Try alternative pattern - sometimes the closing tags are different
+            columns_pattern = r'<div class="columns[^"]*"[^>]*>(.*?)</div></div>'
+            columns_match = re.search(columns_pattern, html_content, re.DOTALL)
+        
+        if columns_match:
+            columns_html = columns_match.group(1)
+            print(f"  📝 Found columns HTML (first 200 chars): {columns_html[:200]}...")
+            
+            # Find all column divs - use non-greedy matching
+            col_pattern = r'<div class="col">(.*?)</div>(?=(?:\s*<div class="col")|(?:\s*</div>)|$)'
+            col_matches = re.findall(col_pattern, columns_html, re.DOTALL)
+            
+            print(f"  📝 Found {len(col_matches)} columns with strict pattern")
+            
+            # If no matches, try a simpler approach
+            if not col_matches:
+                # Split by <div class="col"> and process each piece
+                col_splits = re.split(r'<div class="col">', columns_html)
+                for i, split in enumerate(col_splits[1:], 1):  # Skip first empty split
+                    # Find the end of this column (next <div> or end)
+                    col_end = re.search(r'</div>', split)
+                    if col_end:
+                        col_html = split[:col_end.start()]
+                        col_matches.append(col_html)
+                
+                print(f"  📝 Found {len(col_matches)} columns with split approach")
+            
+            for i, col_html in enumerate(col_matches):
+                print(f"  📝 Processing column {i+1}: {col_html[:100]}...")
+                
+                # Extract list items from each column
+                items = []
+                li_pattern = r'<li>(.*?)</li>'
+                li_matches = re.findall(li_pattern, col_html, re.DOTALL)
+                
+                print(f"  📝 Found {len(li_matches)} list items in column {i+1}")
+                
+                for li_content in li_matches:
+                    item_text = self._extract_text_from_html(li_content)
+                    if item_text.strip():
+                        items.append(item_text.strip())
+                        print(f"  📝 Added item: {item_text.strip()}")
+                
+                if items:
+                    data['columns'].append(items)
+        else:
+            print(f"  📝 No columns pattern matched")
+        
+        print(f"  📝 Final parsed data: {data}")
+        return data
+    
+    async def _add_slide_column_content(self, ppt_slide, column_contents: list, top_position: Inches) -> None:
+        """Add column content directly from slide metadata to the slide."""
+        if not column_contents:
+            return
+            
+        num_columns = len(column_contents)
+        column_width = Inches(11 / num_columns - 0.5) if num_columns > 1 else Inches(10)
+        
+        print(f"  📝 Adding {num_columns} columns to slide")
+        
+        for col_idx, items in enumerate(column_contents):
+            if not items:  # Skip empty columns
+                continue
+                
+            left = Inches(1 + col_idx * (11 / num_columns))
+            
+            print(f"  📝 Column {col_idx+1}: {len(items)} items at position {left}")
+            
+            # Create bullet list
+            content_box = ppt_slide.shapes.add_textbox(
+                left, top_position, column_width, Inches(4)
+            )
+            content_frame = content_box.text_frame
+            
+            for i, item in enumerate(items):
+                if i > 0:
+                    para = content_frame.add_paragraph()
+                else:
+                    para = content_frame.paragraphs[0]
+                
+                para.text = f"• {item}"
+                para.font.size = Pt(16)
+                para.font.color.rgb = RGBColor(20, 20, 20)
+                print(f"  📝 Added bullet: {item}")
+
+    async def _add_parsed_column_content(self, ppt_slide, columns: list, top_position: Inches) -> None:
+        """Add parsed column content to the slide (legacy method for parsed HTML)."""
+        if not columns:
+            return
+            
+        num_columns = len(columns)
+        column_width = Inches(11 / num_columns - 0.5)
+        
+        for col_idx, items in enumerate(columns):
+            left = Inches(1 + col_idx * (11 / num_columns))
+            
+            # Create bullet list
+            content_box = ppt_slide.shapes.add_textbox(
+                left, top_position, column_width, Inches(4)
+            )
+            content_frame = content_box.text_frame
+            
+            for i, item in enumerate(items):
+                if i > 0:
+                    para = content_frame.add_paragraph()
+                else:
+                    para = content_frame.paragraphs[0]
+                
+                para.text = f"• {item}"
+                para.font.size = Pt(16)
+                para.font.color.rgb = RGBColor(20, 20, 20)
+    
     def _extract_text_from_html(self, html_content: str) -> str:
         """Extract plain text from HTML content."""
         # Simple HTML tag removal (for basic conversion)
@@ -504,20 +1317,21 @@ class HtmlToPptxConverter:
 
 
 # Tool integration functions
-def tool_export_to_pptx(deck: HtmlDeck, output_path: str, include_charts: bool = True) -> str:
-    """Export HTML deck to PowerPoint format.
+def tool_export_to_pptx(deck: HtmlDeck, output_path: str, include_charts: bool = True, enhanced_capture: bool = True) -> str:
+    """Export HTML deck to PowerPoint format with enhanced capture.
     
     Args:
         deck: The HtmlDeck instance to export
         output_path: Path where the .pptx file will be saved
         include_charts: Whether to capture and include charts/visualizations
+        enhanced_capture: Use enhanced container-level capture (recommended)
         
     Returns:
         Success message with saved file path
     """
     async def _export():
         converter = HtmlToPptxConverter(deck)
-        return await converter.convert_to_pptx(output_path, include_charts)
+        return await converter.convert_to_pptx(output_path, include_charts, enhanced_capture)
     
     # Run the async conversion
     try:
