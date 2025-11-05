@@ -9,8 +9,8 @@ import time
 from typing import Any, Optional
 
 import mlflow
+import pandas as pd
 from databricks.sdk import WorkspaceClient
-from databricks.sdk.service.genie import MessageQuery
 
 from src.config.client import get_databricks_client
 from src.config.settings import get_settings
@@ -32,20 +32,19 @@ def query_genie_space(
     Query Databricks Genie space for data using natural language or SQL.
 
     This tool connects to a Databricks Genie space and executes queries to retrieve data.
-    It supports both starting new conversations and continuing existing ones.
 
     Args:
         query: Natural language question or SQL query to execute
-        conversation_id: Optional conversation ID to continue an existing conversation
+        conversation_id: Optional conversation ID (not currently used with start_conversation_and_wait)
         genie_space_id: Optional Genie space ID (defaults to config value)
 
     Returns:
         Dictionary containing:
-            - data: List of data rows returned by the query
-            - conversation_id: ID for continuing the conversation
+            - data: List of data dictionaries returned by the query
+            - conversation_id: ID for the conversation
             - row_count: Number of rows returned
-            - query_type: "natural_language" or "sql"
-            - sql: The SQL statement that was executed (if available)
+            - columns: List of column names
+            - json_output: JSON string of the data
             - execution_time_seconds: Time taken to execute the query
 
     Raises:
@@ -65,47 +64,37 @@ def query_genie_space(
     # Set span attributes for tracing
     mlflow.set_span_attribute("genie.space_id", space_id)
     mlflow.set_span_attribute("genie.query", query[:200])  # Truncate for logging
-    mlflow.set_span_attribute("genie.has_conversation_id", conversation_id is not None)
 
     try:
-        # Create or continue conversation
-        if conversation_id is None:
-            # Start new conversation
-            conversation = client.genie.start_conversation(space_id=space_id)
-            conversation_id = conversation.conversation_id
-            mlflow.set_span_attribute("genie.new_conversation", True)
-        else:
-            mlflow.set_span_attribute("genie.new_conversation", False)
-
-        # Execute query
-        message = client.genie.execute_message_query(
-            space_id=space_id,
-            conversation_id=conversation_id,
-            content=MessageQuery(query=query),
+        # Start conversation and wait for completion
+        response = client.genie.start_conversation_and_wait(
+            space_id=space_id, content=query
         )
 
-        # Wait for completion (with timeout from settings)
-        result = client.genie.wait_for_message_query(
+        conversation_id = response.conversation_id
+        message_id = response.message_id
+        attachment_ids = [_.attachment_id for _ in response.attachments]
+
+        # Get query result from first attachment
+        if not attachment_ids:
+            raise GenieToolError("No attachments in response")
+
+        attachment_response = client.genie.get_message_attachment_query_result(
             space_id=space_id,
             conversation_id=conversation_id,
-            message_id=message.message_id,
-            timeout=settings.genie.timeout if hasattr(settings.genie, "timeout") else 60,
+            message_id=message_id,
+            attachment_id=attachment_ids[0],
         )
 
-        # Extract data from result
-        data = []
-        sql_statement = None
+        # Extract data and columns from response
+        response_dict = attachment_response.as_dict()["statement_response"]
+        columns = [_["name"] for _ in response_dict["manifest"]["schema"]["columns"]]
+        data_array = response_dict["result"]["data_array"]
 
-        if result.attachments and len(result.attachments) > 0:
-            attachment = result.attachments[0]
-            if hasattr(attachment, "query_result") and attachment.query_result:
-                # Extract data array
-                if hasattr(attachment.query_result, "data_array"):
-                    data = attachment.query_result.data_array or []
-
-                # Extract SQL statement
-                if hasattr(attachment.query_result, "statement_text"):
-                    sql_statement = attachment.query_result.statement_text
+        # Create DataFrame and convert to records
+        df = pd.DataFrame(data_array, columns=columns)
+        json_output = df.to_json(orient="records")
+        data = df.to_dict(orient="records")
 
         execution_time = time.time() - start_time
         row_count = len(data)
@@ -122,14 +111,14 @@ def query_genie_space(
         # Set additional span attributes
         mlflow.set_span_attribute("genie.row_count", row_count)
         mlflow.set_span_attribute("genie.execution_time_seconds", execution_time)
-        mlflow.set_span_attribute("genie.has_sql", sql_statement is not None)
+        mlflow.set_span_attribute("genie.column_count", len(columns))
 
         return {
             "data": data,
             "conversation_id": conversation_id,
             "row_count": row_count,
-            "query_type": "natural_language",
-            "sql": sql_statement,
+            "columns": columns,
+            "json_output": json_output,
             "execution_time_seconds": execution_time,
         }
 

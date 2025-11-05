@@ -53,29 +53,40 @@ def mock_mlflow():
 
 def test_query_genie_space_success(mock_databricks_client, mock_settings, mock_mlflow):
     """Test successful Genie query."""
-    # Setup mock conversation
-    conversation = Mock()
-    conversation.conversation_id = "conv-123"
-    mock_databricks_client.genie.start_conversation.return_value = conversation
-
-    # Setup mock message
-    message = Mock()
-    message.message_id = "msg-456"
-    mock_databricks_client.genie.execute_message_query.return_value = message
-
-    # Setup mock result with data
-    result = Mock()
+    # Setup mock conversation response
+    conversation_response = Mock()
+    conversation_response.conversation_id = "conv-123"
+    conversation_response.message_id = "msg-456"
+    
+    # Setup mock attachment
     attachment = Mock()
-    query_result = Mock()
-    query_result.data_array = [
-        {"region": "APAC", "sales": 1000000},
-        {"region": "EMEA", "sales": 800000},
-    ]
-    query_result.statement_text = "SELECT * FROM sales"
-    attachment.query_result = query_result
-    result.attachments = [attachment]
+    attachment.attachment_id = "attach-789"
+    conversation_response.attachments = [attachment]
+    
+    mock_databricks_client.genie.start_conversation_and_wait.return_value = conversation_response
 
-    mock_databricks_client.genie.wait_for_message_query.return_value = result
+    # Setup mock attachment query result
+    attachment_result = Mock()
+    attachment_result.as_dict.return_value = {
+        "statement_response": {
+            "manifest": {
+                "schema": {
+                    "columns": [
+                        {"name": "region"},
+                        {"name": "sales"}
+                    ]
+                }
+            },
+            "result": {
+                "data_array": [
+                    ["APAC", 1000000],
+                    ["EMEA", 800000],
+                ]
+            }
+        }
+    }
+    
+    mock_databricks_client.genie.get_message_attachment_query_result.return_value = attachment_result
 
     # Execute query
     response = query_genie_space(query="What were Q4 sales?")
@@ -83,57 +94,68 @@ def test_query_genie_space_success(mock_databricks_client, mock_settings, mock_m
     # Verify response
     assert response["row_count"] == 2
     assert response["conversation_id"] == "conv-123"
-    assert response["query_type"] == "natural_language"
-    assert response["sql"] == "SELECT * FROM sales"
+    assert "columns" in response
+    assert response["columns"] == ["region", "sales"]
     assert len(response["data"]) == 2
     assert response["data"][0]["region"] == "APAC"
+    assert response["data"][0]["sales"] == 1000000
+    assert "json_output" in response
 
     # Verify client calls
-    mock_databricks_client.genie.start_conversation.assert_called_once()
-    mock_databricks_client.genie.execute_message_query.assert_called_once()
-    mock_databricks_client.genie.wait_for_message_query.assert_called_once()
+    mock_databricks_client.genie.start_conversation_and_wait.assert_called_once()
+    mock_databricks_client.genie.get_message_attachment_query_result.assert_called_once()
 
 
-def test_query_genie_space_with_conversation_id(
+def test_query_genie_space_no_attachments(
     mock_databricks_client, mock_settings, mock_mlflow
 ):
-    """Test Genie query continuing existing conversation."""
-    # Setup mock message
-    message = Mock()
-    message.message_id = "msg-789"
-    mock_databricks_client.genie.execute_message_query.return_value = message
+    """Test Genie query with no attachments (error case)."""
+    # Setup mock conversation response with no attachments
+    conversation_response = Mock()
+    conversation_response.conversation_id = "conv-123"
+    conversation_response.message_id = "msg-456"
+    conversation_response.attachments = []
+    
+    mock_databricks_client.genie.start_conversation_and_wait.return_value = conversation_response
 
-    # Setup mock result
-    result = Mock()
-    result.attachments = []
-    mock_databricks_client.genie.wait_for_message_query.return_value = result
+    # Execute query and expect error
+    with pytest.raises(GenieToolError) as exc_info:
+        query_genie_space(query="Test query")
 
-    # Execute query with existing conversation ID
-    response = query_genie_space(query="Show more details", conversation_id="existing-conv-id")
-
-    # Verify conversation was not started (reused existing)
-    mock_databricks_client.genie.start_conversation.assert_not_called()
-
-    # Verify execute was called with existing conversation
-    assert response["conversation_id"] == "existing-conv-id"
+    assert "No attachments in response" in str(exc_info.value)
 
 
 def test_query_genie_space_no_data(mock_databricks_client, mock_settings, mock_mlflow):
     """Test Genie query returning no data."""
-    # Setup mock conversation
-    conversation = Mock()
-    conversation.conversation_id = "conv-empty"
-    mock_databricks_client.genie.start_conversation.return_value = conversation
+    # Setup mock conversation response
+    conversation_response = Mock()
+    conversation_response.conversation_id = "conv-empty"
+    conversation_response.message_id = "msg-empty"
+    
+    attachment = Mock()
+    attachment.attachment_id = "attach-empty"
+    conversation_response.attachments = [attachment]
+    
+    mock_databricks_client.genie.start_conversation_and_wait.return_value = conversation_response
 
-    # Setup mock message
-    message = Mock()
-    message.message_id = "msg-empty"
-    mock_databricks_client.genie.execute_message_query.return_value = message
-
-    # Setup mock result with no data
-    result = Mock()
-    result.attachments = []
-    mock_databricks_client.genie.wait_for_message_query.return_value = result
+    # Setup mock attachment result with empty data
+    attachment_result = Mock()
+    attachment_result.as_dict.return_value = {
+        "statement_response": {
+            "manifest": {
+                "schema": {
+                    "columns": [
+                        {"name": "col1"}
+                    ]
+                }
+            },
+            "result": {
+                "data_array": []
+            }
+        }
+    }
+    
+    mock_databricks_client.genie.get_message_attachment_query_result.return_value = attachment_result
 
     # Execute query
     response = query_genie_space(query="Non-existent data")
@@ -146,7 +168,7 @@ def test_query_genie_space_no_data(mock_databricks_client, mock_settings, mock_m
 def test_query_genie_space_error(mock_databricks_client, mock_settings, mock_mlflow):
     """Test Genie query with error."""
     # Setup mock to raise exception
-    mock_databricks_client.genie.start_conversation.side_effect = Exception("Connection error")
+    mock_databricks_client.genie.start_conversation_and_wait.side_effect = Exception("Connection error")
 
     # Execute query and expect error
     with pytest.raises(GenieToolError) as exc_info:

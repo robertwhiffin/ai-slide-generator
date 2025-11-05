@@ -4,7 +4,7 @@
 
 # LLM Configuration
 llm:
-  endpoint: "databricks-llama-3-1-70b-instruct"  # Model serving endpoint name
+  endpoint: "databricks-claude-sonnet-4-5"  # Model serving endpoint name
   temperature: 0.7
   max_tokens: 4096
   top_p: 0.95
@@ -26,7 +26,7 @@ llm:
 
 # Genie Configuration
 genie:
-  default_space_id: "01234567-89ab-cdef-0123-456789abcdef"  # Replace with actual Genie space ID
+  default_space_id: "01effebcc2781b6bbb749077a55d31e3"  # Replace with actual Genie space ID
   timeout: 60  # seconds
   max_retries: 3
   retry_delay: 2  # seconds
