@@ -11,7 +11,13 @@ from typing import Any
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-from src.config.loader import ConfigurationError, load_config, load_prompts, merge_with_env
+from src.config.loader import (
+    ConfigurationError,
+    load_config,
+    load_mlflow_config,
+    load_prompts,
+    merge_with_env,
+)
 
 
 # Pydantic models for configuration sections
@@ -134,6 +140,80 @@ class FeatureFlags(BaseSettings):
     enable_batch_processing: bool = False
 
 
+class MLFlowTracingSettings(BaseSettings):
+    """MLFlow tracing configuration."""
+
+    enabled: bool = True
+    backend: str = "databricks"
+    sample_rate: float = 1.0
+    capture_input_output: bool = True
+    capture_model_config: bool = True
+    max_trace_depth: int = 10
+
+    @field_validator("sample_rate")
+    @classmethod
+    def validate_sample_rate(cls, v: float) -> float:
+        if not 0.0 <= v <= 1.0:
+            raise ValueError("sample_rate must be between 0.0 and 1.0")
+        return v
+
+
+class MLFlowServingEnvironment(BaseSettings):
+    """MLFlow serving configuration for an environment."""
+
+    endpoint_name: str
+    workload_size: str = "Small"
+    scale_to_zero_enabled: bool = True
+    min_scale: int = 0
+    max_scale: int = 3
+
+    @field_validator("workload_size")
+    @classmethod
+    def validate_workload_size(cls, v: str) -> str:
+        valid_sizes = ["Small", "Medium", "Large"]
+        if v not in valid_sizes:
+            raise ValueError(f"workload_size must be one of: {', '.join(valid_sizes)}")
+        return v
+
+
+class MLFlowSettings(BaseSettings):
+    """MLFlow configuration for experiment tracking and model serving."""
+
+    model_config = SettingsConfigDict(extra="allow")
+
+    # Tracking
+    tracking_uri: str = "databricks"
+    experiment_name: str
+
+    # Tracing
+    tracing: MLFlowTracingSettings
+
+    # Registry
+    registry_uri: str = "databricks-uc"
+    model_name: str
+    dev_model_name: str
+
+    # Serving environments
+    serving_dev: MLFlowServingEnvironment
+    serving_prod: MLFlowServingEnvironment
+
+    # Logging options
+    log_models: bool = True
+    log_input_examples: bool = True
+    log_model_signatures: bool = True
+    log_system_metrics: bool = True
+    log_artifacts: bool = True
+
+    # Metrics tracking
+    track_latency: bool = True
+    track_token_usage: bool = True
+    track_cost: bool = True
+
+    # Cost estimation (USD per 1M tokens)
+    cost_per_million_input_tokens: float = 1.0
+    cost_per_million_output_tokens: float = 3.0
+
+
 class AppSettings(BaseSettings):
     """
     Main application settings.
@@ -160,6 +240,7 @@ class AppSettings(BaseSettings):
     output: OutputSettings
     logging: LoggingSettings
     features: FeatureFlags = Field(default_factory=FeatureFlags)
+    mlflow: MLFlowSettings
 
     # Prompts (loaded separately)
     prompts: dict[str, Any] = Field(default_factory=dict)
@@ -189,9 +270,26 @@ def create_settings() -> AppSettings:
         # Load YAML configuration
         config = load_config()
         prompts = load_prompts()
+        mlflow_config = load_mlflow_config()
 
         # Merge with environment overrides
         config = merge_with_env(config)
+
+        # Get current user from environment for MLFlow experiment name
+        import os
+        from databricks.sdk import WorkspaceClient
+        
+        try:
+            w = WorkspaceClient()
+            username = w.current_user.me().user_name
+        except Exception:
+            # Fallback to environment variable or default
+            username = os.getenv("USER", "default_user")
+
+        # Format experiment name with username
+        mlflow_config["tracking"]["experiment_name"] = mlflow_config["tracking"][
+            "experiment_name"
+        ].format(username=username)
 
         # Create nested Pydantic models
         llm_settings = LLMSettings(**config["llm"])
@@ -200,6 +298,36 @@ def create_settings() -> AppSettings:
         output_settings = OutputSettings(**config["output"])
         logging_settings = LoggingSettings(**config["logging"])
         feature_flags = FeatureFlags(**config.get("features", {}))
+
+        # Create MLFlow settings
+        mlflow_tracing = MLFlowTracingSettings(**mlflow_config["tracing"])
+        mlflow_serving_dev = MLFlowServingEnvironment(**mlflow_config["serving"]["dev"])
+        mlflow_serving_prod = MLFlowServingEnvironment(**mlflow_config["serving"]["prod"])
+
+        mlflow_settings = MLFlowSettings(
+            tracking_uri=mlflow_config["tracking"]["uri"],
+            experiment_name=mlflow_config["tracking"]["experiment_name"],
+            tracing=mlflow_tracing,
+            registry_uri=mlflow_config["registry"]["uri"],
+            model_name=mlflow_config["registry"]["model_name"],
+            dev_model_name=mlflow_config["registry"]["dev_model_name"],
+            serving_dev=mlflow_serving_dev,
+            serving_prod=mlflow_serving_prod,
+            log_models=mlflow_config["logging"]["log_models"],
+            log_input_examples=mlflow_config["logging"]["log_input_examples"],
+            log_model_signatures=mlflow_config["logging"]["log_model_signatures"],
+            log_system_metrics=mlflow_config["logging"]["log_system_metrics"],
+            log_artifacts=mlflow_config["logging"]["log_artifacts"],
+            track_latency=mlflow_config["metrics"]["track_latency"],
+            track_token_usage=mlflow_config["metrics"]["track_token_usage"],
+            track_cost=mlflow_config["metrics"]["track_cost"],
+            cost_per_million_input_tokens=mlflow_config["metrics"][
+                "cost_per_million_tokens"
+            ]["input"],
+            cost_per_million_output_tokens=mlflow_config["metrics"][
+                "cost_per_million_tokens"
+            ]["output"],
+        )
 
         # Create main settings object
         # Environment variables will be loaded automatically by Pydantic
@@ -210,6 +338,7 @@ def create_settings() -> AppSettings:
             output=output_settings,
             logging=logging_settings,
             features=feature_flags,
+            mlflow=mlflow_settings,
             prompts=prompts,
             environment=config.get("environment", "development"),
         )

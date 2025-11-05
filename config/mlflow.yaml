@@ -1,0 +1,72 @@
+# MLFlow Configuration for AI Slide Generator
+# Experiment tracking, tracing, and model serving configuration
+
+# Tracking Configuration
+tracking:
+  uri: "databricks"  # Use Databricks workspace for tracking
+  experiment_name: "/Users/{username}/ai-slide-generator"  # Will be formatted with actual username
+  
+# Tracing Configuration
+tracing:
+  enabled: true
+  backend: "databricks"  # Uses Databricks native tracing
+  sample_rate: 1.0  # Trace 100% of requests (1.0 = 100%, 0.5 = 50%, etc.)
+  capture_input_output: true  # Log inputs and outputs for each span
+  capture_model_config: true  # Log model configuration
+  max_trace_depth: 10  # Maximum depth of nested spans
+  
+# Model Registry Configuration
+registry:
+  uri: "databricks-uc"  # Unity Catalog
+  model_name: "main.ml_models.slide_generator"
+  dev_model_name: "main.ml_models.slide_generator_dev"
+  
+# Serving Configuration
+serving:
+  dev:
+    endpoint_name: "slide-generator-dev"
+    workload_size: "Small"  # Small, Medium, Large
+    scale_to_zero_enabled: true
+    min_scale: 0
+    max_scale: 3
+  prod:
+    endpoint_name: "slide-generator"
+    workload_size: "Medium"
+    scale_to_zero_enabled: false
+    min_scale: 1
+    max_scale: 5
+    
+# Logging Configuration  
+logging:
+  log_models: true
+  log_input_examples: true
+  log_model_signatures: true
+  log_system_metrics: true
+  log_artifacts: true
+  artifact_location: "dbfs:/mlflow/ai-slide-generator/artifacts"
+  
+# Autologging Configuration
+autologging:
+  enabled: false  # We'll do manual logging for fine-grained control
+  log_models: false
+  log_datasets: false
+  
+# Metrics Configuration
+metrics:
+  # Track these metrics for each run
+  track_latency: true
+  track_token_usage: true
+  track_cost: true
+  track_quality: true
+  
+  # Cost calculation (approximate USD per 1M tokens)
+  cost_per_million_tokens:
+    input: 1.0
+    output: 3.0
+    
+# Tags Configuration
+default_tags:
+  project: "ai-slide-generator"
+  framework: "custom-agent"
+  deployment_target: "model-serving"
+
