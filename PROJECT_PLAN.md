@@ -62,40 +62,37 @@ An API-driven system that generates HTML slide decks using LLMs integrated with 
 ```
 User Question
     ↓
-Agent with System Prompt
+Agent (LangChain + System Prompt)
     ↓
-Agent decides to use query_genie_space tool
+LLM decides to use query_genie_space tool
     ↓
 Tool queries Databricks Genie → Returns Data
     ↓
-Agent analyzes data (may call tool again)
-    ↓
-Agent constructs narrative
-    ↓
-Agent generates HTML slides
+LLM handles everything:
+  - Data analysis
+  - Narrative construction  
+  - HTML slide generation
     ↓
 HTML String Output
-(All steps tracked via MLFlow + Tracing)
+(All tracked via MLFlow + Tracing)
 ```
 
 ### Workflow Stages
 
 1. **Question Reception**: User submits natural language question via API
-2. **Agent Initialization**: Agent loads with system prompt and available tools
-3. **Tool Selection**: Agent decides to use `query_genie_space` tool for data
-4. **Data Retrieval**: Tool queries Databricks Genie space (natural language or SQL)
-5. **Tool Response**: Agent receives formatted data from tool
-6. **Iterative Refinement**: Agent may call tool multiple times for additional data
-7. **Data Analysis**: Agent analyzes all retrieved data to identify insights
-8. **Narrative Construction**: Agent builds coherent data-driven story
-9. **HTML Generation**: Agent produces professional HTML slides
-10. **MLFlow Logging**: Metrics, traces, and artifacts logged to Databricks
-11. **Output Delivery**: Returns complete HTML string
+2. **Agent Initialization**: Simple LangChain model with system prompt and registered tools
+3. **LLM Execution**: LLM uses tools, analyzes data, constructs narrative, and generates HTML in a single execution flow
+   - LLM may call tools multiple times if needed
+   - All analysis and generation happens within the LLM's reasoning
+   - No separate orchestration steps
+4. **MLFlow Logging**: Metrics, traces, and artifacts logged to Databricks
+5. **Output Delivery**: Returns complete HTML string
 
 ## Technology Stack
 
 ### Core Technologies
 - **Python 3.10+**: Primary language
+- **LangChain**: Agent framework for tool-using LLM patterns
 - **Databricks SDK**: Integration with Databricks services
 - **Databricks Genie API**: SQL-based data retrieval
 - **Databricks LLM Serving**: AI/LLM inference
@@ -104,7 +101,6 @@ HTML String Output
 
 ### Supporting Libraries
 - **httpx**: Async HTTP client for API calls
-- **Jinja2**: HTML template generation (if needed)
 - **python-dotenv**: Environment variable management (secrets only)
 - **PyYAML**: YAML configuration file parsing
 - **pytest**: Testing framework
@@ -112,7 +108,7 @@ HTML String Output
 
 ### MLOps & Observability
 - **MLFlow**: Experiment tracking, model versioning, and metrics logging
-- **MLFlow Tracing**: Distributed tracing for agent execution steps
+- **MLFlow Tracing**: Distributed tracing for LangChain agent execution
 - **Databricks MLFlow Integration**: Native integration with Databricks workspace
 
 ## Folder Structure
@@ -262,22 +258,21 @@ ai-slide-generator/
 **All services use the singleton Databricks client from `src/config/client.py`**
 
 #### `agent.py`
-**Purpose**: Main tool-using agent that orchestrates slide generation
-- Implements the LLM agent with tool-calling capabilities
-- Manages conversation state and context
-- Orchestrates the workflow: question → tools → narrative → HTML
-- Integrates MLFlow for experiment tracking
-- Implements tracing for observability and debugging
-- Handles retry logic and error recovery
-- Loads system prompts from config
-- Returns final HTML slide deck
+**Purpose**: Simple LangChain agent wrapper that orchestrates slide generation
 
-**Key Components**:
-- `SlideGeneratorAgent`: Main agent class
-- MLFlow experiment tracking setup
-- Trace logging for each agent step
-- Tool execution loop
-- Response formatting
+**Implementation**:
+- A LangChain model that registers tools defined in `tools.py`
+- Integrates with MLFlow for tracking and tracing
+- A simple chain that delegates all heavy lifting to the LLM
+- The LLM handles data analysis, narrative construction, and HTML generation in a single execution
+- This module only manages:
+  - LLM client setup (using singleton Databricks client)
+  - Tool registration
+  - System prompt injection
+  - MLFlow tracking/tracing
+  - Input/output handling
+
+**Key Point**: No complex orchestration. The agent doesn't orchestrate separate steps for analysis, narrative, or HTML generation. The system prompt instructs the LLM to do everything, and the LLM figures it out using the available tools.
 
 #### `tools.py`
 **Purpose**: Defines tools available to the agent
@@ -337,7 +332,7 @@ ai-slide-generator/
 - CI/CD pipeline configured
 
 ### Phase 2: Agent & Tools Implementation (Week 2)
-**Goal**: Implement tool-using agent with Databricks integration
+**Goal**: Implement simple LangChain agent with Databricks integration
 
 **Tasks**:
 1. Implement Genie tool (`tools.py`)
@@ -352,35 +347,49 @@ ai-slide-generator/
    - Set up trace logging configuration
    - Test basic logging and tracing
 3. Implement agent (`agent.py`)
-   - Create `SlideGeneratorAgent` class
+   - Create simple LangChain wrapper
    - Connect to Databricks model serving endpoint
-   - Implement tool-calling loop
+   - Register tools and bind to LangChain model
    - Add MLFlow experiment tracking
-   - Add tracing for each agent step
-   - Load system prompts from config
-   - Test basic agent execution
+   - Enable automatic tracing for LangChain
+   - Load system prompt from config
+   - Test basic agent execution with LLM doing all the work
 
 **Deliverables**:
 - Working Genie tool with tests
 - MLFlow tracking configured and tested
-- Working agent with tool-calling capability
-- Sample queries returning data via agent
+- Simple agent wrapper that lets LLM handle everything
+- Sample queries returning HTML slides via agent
 - Integration test suite
 - Trace logs viewable in Databricks
 
-### Phase 3: Slide generation (Week 3)
-**Goal**: Define and refine the system prompts and html constraints passed to the LLM
+### Phase 3: Prompt Engineering & Slide Generation (Week 3)
+**Goal**: Refine system prompts to guide LLM in generating high-quality HTML slides
 
 **Tasks**:
-1. Design HTML slide templates
-2. Add styling (CSS)
-3. Implement data visualization embedding
-4. Add chart/graph generation
-5. Optimize slide layout
-6. Handle various slide types (title, content, data, conclusion)
+1. Craft comprehensive system prompt in `config/prompts.yaml`
+   - Instructions for using tools to gather data
+   - Guidelines for data analysis and insight extraction
+   - Narrative structure requirements
+   - HTML/CSS generation instructions
+2. Define HTML slide structure in prompts
+   - Professional slide templates (title, content, data, conclusion)
+   - CSS styling requirements
+   - Data visualization guidelines
+   - Responsive design instructions
+3. Iterate on prompt quality
+   - Test with various questions
+   - Refine based on output quality
+   - Add examples and few-shot demonstrations
+4. Validate outputs
+   - Check HTML quality and structure
+   - Verify data accuracy
+   - Assess narrative coherence
 
 **Deliverables**:
-- System returns a data driven narrative of HTML slides.
+- Well-crafted system prompts that guide LLM to produce high-quality HTML slides
+- Consistent, professional slide outputs
+- Documentation of prompt engineering decisions
 
 ### Phase 4: Robustness & Polish (Week 5)
 **Goal**: Production readiness
@@ -466,32 +475,30 @@ ai-slide-generator/
 
 ### Step 6: Agent Implementation
 1. Create `src/services/agent.py`:
-   - Create `SlideGeneratorAgent` class
-   - Accept Databricks client (from `get_databricks_client()`)
+   - Create simple LangChain agent wrapper
+   - Use Databricks client (from `get_databricks_client()`)
    - Load LLM parameters from settings (config.yaml)
-   - Load system prompts from settings (prompts.yaml)
-2. Implement tool-calling loop:
+   - Load system prompt from settings (prompts.yaml)
+2. Set up LangChain with tools:
    - Register available tools (from `tools.py`)
-   - Send messages with tool schemas to LLM
-   - Parse tool call requests from LLM
-   - Execute tools and return results
-   - Continue conversation until completion
+   - Bind tools to LangChain model
+   - LangChain handles the tool-calling loop automatically
 3. Add MLFlow tracking:
    - Start MLFlow run for each request
    - Log parameters (question, max_slides, etc.)
    - Log metrics (execution time, token usage, etc.)
    - Log artifacts (generated HTML)
 4. Add tracing:
-   - Trace each agent step (tool calls, LLM responses)
-   - Log input/output for each step
-   - Track token usage per step
-   - Enable debugging via trace logs
+   - Enable MLFlow tracing for LangChain
+   - Automatic trace logging of tool calls and LLM responses
+   - Track token usage per invocation
 5. Implement `generate_slides()` method:
-   - Main entry point for slide generation
-   - Orchestrates: question → tool use → narrative → HTML
-   - Returns final HTML string
+   - Main entry point: accepts question, returns HTML
+   - Invokes LangChain agent with system prompt
+   - LLM does all the work (tool use, analysis, narrative, HTML generation)
+   - Returns final HTML string from LLM
 6. Add error handling and retry logic
-7. Add unit tests with mocked client and tools
+7. Add unit tests with mocked client and LLM responses
 
 ### Step 7: Prompt Management
 1. Define prompt structure in `config/prompts.yaml`:
@@ -507,15 +514,7 @@ ai-slide-generator/
 4. Add examples and few-shot demonstrations
 5. Create helper functions in agent to load and format prompts
 
-### Step 8: HTML Generation
-1. Design base HTML template
-2. Create slide templates (title, content, data, etc.)
-3. Add CSS styling
-4. Implement dynamic content insertion
-5. Add chart/visualization support
-6. Ensure responsive design
-
-### Step 9: API Layer
+### Step 8: API Layer
 1. Create FastAPI application
 2. Define request/response models
 3. Implement `/generate-slides` endpoint
@@ -523,18 +522,18 @@ ai-slide-generator/
 5. Implement health check endpoint
 6. Add request logging
 
-### Step 10: Testing
+### Step 9: Testing
 1. Write unit tests for tools:
    - Test `query_genie_space` with mocked Databricks client
    - Test error handling and edge cases
    - Test result formatting
 2. Write unit tests for agent:
-   - Mock LLM responses with tool calls
-   - Mock tool execution
-   - Test conversation flow
+   - Mock LLM responses (with tool calls and HTML output)
+   - Test that agent correctly invokes LangChain
    - Test MLFlow logging calls
+   - Test error handling
 3. Create integration tests:
-   - Test agent with real tools (mocked Databricks)
+   - Test agent with real tool implementations (mocked Databricks)
    - Test complete workflow with sample questions
    - Verify MLFlow metrics and traces
 4. Build end-to-end test:
@@ -544,10 +543,10 @@ ai-slide-generator/
 5. Add mock objects and fixtures:
    - Mock WorkspaceClient
    - Mock Genie API responses
-   - Mock LLM completions with tool calls
+   - Mock LLM completions (with tool calls and final HTML)
    - MLFlow tracking fixtures
 
-### Step 11: Documentation
+### Step 10: Documentation
 1. Write API documentation
 2. Create architecture documentation
 3. Add code comments and docstrings
@@ -555,7 +554,7 @@ ai-slide-generator/
 5. Create example gallery
 6. Update README.md
 
-### Step 12: Deployment Preparation
+### Step 11: Deployment Preparation
 1. Create deployment scripts
 2. Set up Docker container (optional)
 3. Configure environment for production
@@ -614,11 +613,11 @@ def query_genie_space(query: str, conversation_id: Optional[str] = None) -> dict
 ```
 
 ### Agent Architecture
-- **Tool-Using Agent**: LLM that can call tools to gather data
-- **Tool Registry**: Dynamic tool registration and schema validation
-- **Conversation Loop**: Agent → Tool Call → Tool Execution → Agent → Repeat
-- **State Management**: Track conversation history and tool outputs
-- **Prompt Engineering**: System prompts guide tool use and output generation
+- **Simple LangChain Wrapper**: Thin wrapper around LangChain's agent pattern
+- **Tool Registration**: Register tools from `tools.py` and bind to LangChain model
+- **LLM Does Everything**: Single system prompt instructs LLM to use tools, analyze data, create narrative, and generate HTML
+- **No Orchestration Logic**: Agent doesn't orchestrate separate steps - LangChain and the LLM handle tool calling automatically
+- **Prompt Engineering**: Well-crafted system prompt is key to guiding LLM behavior
 
 ### MLFlow Integration
 - **Experiment Tracking**: Log all slide generation runs
@@ -642,12 +641,11 @@ def query_genie_space(query: str, conversation_id: Optional[str] = None) -> dict
 - **Error Handling**: Handle SQL errors gracefully
 - **Shared Client**: Use singleton client instance
 
-### HTML Generation
-- **Template Design**: Create professional, clean layouts
-- **Data Visualization**: Embed charts/graphs effectively
-- **Responsive Design**: Ensure slides render well in different contexts
-- **Performance**: Keep HTML lightweight and fast to render
-- **Configuration**: Template settings from config.yaml
+### HTML Generation (via LLM)
+- **Prompt-Driven**: HTML generation handled by LLM based on system prompt instructions
+- **Guidelines in Prompts**: System prompt includes HTML/CSS structure, styling requirements, and layout guidance
+- **No Templates in Code**: No HTML templates in the codebase - LLM generates from scratch based on prompt
+- **Flexibility**: LLM can adapt HTML structure based on data and narrative needs
 
 ### Error Handling
 - **Retry Logic**: Implement exponential backoff for API failures
@@ -657,15 +655,15 @@ def query_genie_space(query: str, conversation_id: Optional[str] = None) -> dict
 - **Configuration Errors**: Fail fast on invalid YAML or missing secrets
 
 ### Testing Strategy
-- **Unit Tests**: Test agent and tools in isolation
+- **Unit Tests**: Test tools and agent wrapper in isolation
 - **Mock Client**: Mock `get_databricks_client()` for all service tests
-- **Mock Tools**: Mock tool execution for agent tests
-- **Mock LLM**: Mock LLM responses for predictable agent behavior
-- **Integration Tests**: Test agent with real tools (mocked Databricks)
+- **Mock LLM**: Mock LangChain LLM responses (with tool calls and HTML output) for predictable behavior
+- **Integration Tests**: Test agent with real tool implementations (mocked Databricks)
 - **End-to-End Tests**: Test complete workflow with sample questions
-- **MLFlow Tests**: Verify logging, metrics, and tracing
+- **MLFlow Tests**: Verify logging, metrics, and tracing for LangChain execution
 - **Mock Data**: Use mocked Genie responses for consistent testing
 - **Configuration Tests**: Test YAML loading and validation
+- **Focus on Integration**: Since agent is simple wrapper, focus testing on tool quality and LLM prompt effectiveness
 
 ## Configuration Requirements
 
