@@ -8,18 +8,23 @@ An API-driven system that generates HTML slide decks using LLMs. The system take
 
 **Output**: HTML slide deck with data visualizations and narrative
 
+**Architecture**: Agent-based system with tool-calling capabilities and MLOps integration
+
 **Process**:
-1. LLM analyzes question intent
-2. Queries Databricks Genie space for relevant data via SQL
-3. Analyzes retrieved data to identify patterns and insights
-4. Constructs coherent data-driven narrative
-5. Generates professional HTML slides
+1. Agent receives question and analyzes intent
+2. Agent uses `query_genie_space` tool to retrieve data from Databricks Genie
+3. Agent may call tool multiple times to gather comprehensive data
+4. Agent analyzes data to identify patterns and insights
+5. Agent constructs coherent data-driven narrative
+6. Agent generates professional HTML slides
+7. MLFlow tracks execution metrics, traces, and artifacts
 
 ## Technologies
 
 - **Python 3.10+**: Core language for robust type support and modern features
 - **Databricks SDK**: Integration with Databricks LLM serving and Genie APIs
 - **Databricks Genie**: SQL-based structured data retrieval with natural language interface
+- **MLFlow**: Experiment tracking, metrics logging, and distributed tracing
 - **FastAPI**: Lightweight, high-performance API framework for endpoints
 - **Pydantic**: Data validation and settings management for type safety
 - **uv**: Fast Python package manager for dependency management
@@ -28,12 +33,21 @@ An API-driven system that generates HTML slide decks using LLMs. The system take
 
 ### Why These Technologies?
 - **Databricks LLM + Genie**: Native integration provides seamless data access and AI capabilities
+- **Agent Architecture**: Modern LLM pattern with tool-calling for flexible, extensible design
+- **MLFlow**: Built-in observability for debugging and experiment tracking in Databricks
 - **FastAPI**: Async support and automatic API documentation generation
 - **Pydantic**: Strong typing ensures data validation and reduces runtime errors
 - **PyYAML**: Flexible configuration management for prompts and settings
 - **uv**: Significantly faster than pip for dependency resolution
 
 ## Architecture Highlights
+
+### Agent-Based Architecture
+- **Tool-Using Agent**: LLM agent that can call tools (starting with Genie) to gather data
+- **Modular Tools**: Extensible tool system with Pydantic schemas
+- **Conversation Loop**: Agent decides which tools to use and when
+- **MLFlow Integration**: All runs tracked with metrics, parameters, and traces
+- **Observability**: Step-by-step tracing visible in Databricks workspace
 
 ### YAML-Based Configuration
 - **Separation of Concerns**: Secrets in `.env`, application config in YAML files
@@ -42,7 +56,7 @@ An API-driven system that generates HTML slide decks using LLMs. The system take
 - **Team Collaboration**: Non-technical users can adjust prompts and settings
 
 ### Singleton Databricks Client
-- **Efficiency**: Single `WorkspaceClient` instance shared across all services
+- **Efficiency**: Single `WorkspaceClient` instance shared across agent and tools
 - **Thread-Safe**: Proper locking prevents race conditions
 - **Reduced Overhead**: Minimizes connection and authentication overhead
 - **Simplified Testing**: Mock once, reuse everywhere
@@ -64,6 +78,11 @@ genie:
   default_space_id: "your-genie-space-id"
   timeout: 60
 
+mlflow:
+  tracking_uri: "databricks"
+  experiment_name: "/Users/<your-user>/ai-slide-generator"
+  enable_tracing: true
+
 output:
   default_max_slides: 10
   html_template: "professional"
@@ -72,11 +91,21 @@ output:
 **config/prompts.yaml:**
 ```yaml
 system_prompt: |
-  You are an expert data analyst...
+  You are an expert data analyst with access to tools.
+  Use the query_genie_space tool to gather data...
   
-intent_analysis: |
-  Analyze this question: {question}
-  Determine required data...
+tool_instructions: |
+  Use tools strategically to gather comprehensive data...
+
+tools:
+  - name: "query_genie_space"
+    description: "Query Databricks Genie for data"
+    parameters:
+      type: "object"
+      properties:
+        query:
+          type: "string"
+          description: "Natural language or SQL query"
 ```
 
 ## Documentation

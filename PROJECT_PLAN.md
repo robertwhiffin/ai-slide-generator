@@ -6,8 +6,10 @@ An API-driven system that generates HTML slide decks using LLMs integrated with 
 
 ### Key Characteristics
 - **API-driven**: No frontend interface
-- **LLM-powered**: Uses Databricks-served LLM for intelligence
+- **Agent-based**: LLM agent with tool-calling capabilities
+- **Tool-driven**: Agent uses tools (starting with Genie) to gather data
 - **Data-driven**: Integrates with Databricks Genie for SQL-based data retrieval
+- **MLOps-enabled**: MLFlow for experiment tracking and distributed tracing
 - **Output**: HTML string representing a complete slide deck
 
 ### Key Architectural Decisions
@@ -33,7 +35,7 @@ An API-driven system that generates HTML slide decks using LLMs integrated with 
 **Rationale**: Single shared WorkspaceClient instance for efficiency and consistency
 
 - **Implementation**: Thread-safe singleton pattern in `src/config/client.py`
-- **Usage**: All services (LLM, Genie, etc.) use `get_databricks_client()`
+- **Usage**: All services (agent, tools) use `get_databricks_client()`
 - **Benefits**:
   - Reduced connection overhead
   - Consistent authentication state
@@ -41,35 +43,54 @@ An API-driven system that generates HTML slide decks using LLMs integrated with 
   - Simplified testing (mock once, use everywhere)
   - No duplicate connections
 
+#### 3. Agent-Based Architecture with MLOps
+**Rationale**: Modern LLM agent pattern with built-in observability and tracking
+
+- **Tool-Using Agent**: LLM agent that can call functions (tools) to gather data
+- **Tools**: Modular, extensible tools (starting with Genie) that agent can invoke
+- **MLFlow Integration**: Track experiments, metrics, and parameters
+- **Distributed Tracing**: Observe agent execution step-by-step
+- **Benefits**:
+  - Flexible and extensible (easy to add new tools)
+  - Built-in observability for debugging
+  - Experiment tracking for model optimization
+  - Clean separation of concerns (agent vs tools)
+  - Industry-standard pattern for LLM applications
+
 ## System Workflow
 
 ```
 User Question
     ↓
-System Prompt + LLM
+Agent with System Prompt
     ↓
-Intent Understanding & Data Planning
+Agent decides to use query_genie_space tool
     ↓
-Databricks Genie SQL Queries
+Tool queries Databricks Genie → Returns Data
     ↓
-Data Retrieval & Analysis
+Agent analyzes data (may call tool again)
     ↓
-Narrative Construction
+Agent constructs narrative
     ↓
-HTML Slide Generation
+Agent generates HTML slides
     ↓
 HTML String Output
+(All steps tracked via MLFlow + Tracing)
 ```
 
 ### Workflow Stages
 
-1. **Question Reception**: User submits natural language question
-2. **Intent Analysis**: LLM interprets question and determines data requirements
-3. **Data Retrieval**: System queries Databricks Genie space via SQL
-4. **Data Analysis**: LLM analyzes retrieved data to understand patterns/insights
-5. **Narrative Building**: LLM constructs coherent data-driven story
-6. **Slide Generation**: LLM produces HTML slides with visualizations and content
-7. **Output Delivery**: Returns complete HTML string
+1. **Question Reception**: User submits natural language question via API
+2. **Agent Initialization**: Agent loads with system prompt and available tools
+3. **Tool Selection**: Agent decides to use `query_genie_space` tool for data
+4. **Data Retrieval**: Tool queries Databricks Genie space (natural language or SQL)
+5. **Tool Response**: Agent receives formatted data from tool
+6. **Iterative Refinement**: Agent may call tool multiple times for additional data
+7. **Data Analysis**: Agent analyzes all retrieved data to identify insights
+8. **Narrative Construction**: Agent builds coherent data-driven story
+9. **HTML Generation**: Agent produces professional HTML slides
+10. **MLFlow Logging**: Metrics, traces, and artifacts logged to Databricks
+11. **Output Delivery**: Returns complete HTML string
 
 ## Technology Stack
 
@@ -88,6 +109,11 @@ HTML String Output
 - **PyYAML**: YAML configuration file parsing
 - **pytest**: Testing framework
 - **ruff**: Linting and formatting
+
+### MLOps & Observability
+- **MLFlow**: Experiment tracking, model versioning, and metrics logging
+- **MLFlow Tracing**: Distributed tracing for agent execution steps
+- **Databricks MLFlow Integration**: Native integration with Databricks workspace
 
 ## Folder Structure
 
@@ -113,9 +139,8 @@ ai-slide-generator/
 │   │   └── routes.py                 # API endpoints
 │   ├── services/
 │   │   ├── __init__.py
-│   │   ├── llm_service.py            # Databricks LLM integration
-│   │   ├── genie_service.py          # Databricks Genie integration
-│   │   └── slide_generator.py        # Orchestration service
+│   │   ├── agent.py                  # Tool-using agent with MLFlow/tracing
+│   │   └── tools.py                  # Agent tools (Genie, etc.)
 │   └── utils/
 │       ├── __init__.py
 │       ├── error_handling.py         # Error handling utilities
@@ -125,9 +150,8 @@ ai-slide-generator/
 │   ├── conftest.py                   # Pytest fixtures
 │   ├── unit/
 │   │   ├── __init__.py
-│   │   ├── test_llm_service.py
-│   │   ├── test_genie_service.py
-│   │   └── test_slide_generator.py
+│   │   ├── test_agent.py
+│   │   └── test_tools.py
 │   └── integration/
 │       ├── __init__.py
 │       └── test_end_to_end.py
@@ -233,49 +257,41 @@ ai-slide-generator/
   - Response: `{ "html": str, "metadata": dict }`
 
 ### 3. Services (`src/services/`)
-**Purpose**: Core business logic
+**Purpose**: Core business logic - Tool-using agent architecture
 
 **All services use the singleton Databricks client from `src/config/client.py`**
 
-#### `llm_service.py`
-- Interface to Databricks LLM serving
-- Initialization:
-  - `__init__()`: Receives Databricks client via dependency injection
-  - Uses `get_databricks_client()` from `src/config/client.py`
-- Methods:
-  - `generate_completion(prompt, tools)`: Send prompts to LLM
-  - `stream_completion()`: Stream responses if needed
-  - Handle function calling for Genie integration
-- Configuration:
-  - LLM parameters loaded from `config.yaml`
-  - Prompts loaded from `prompts.yaml` via settings
+#### `agent.py`
+**Purpose**: Main tool-using agent that orchestrates slide generation
+- Implements the LLM agent with tool-calling capabilities
+- Manages conversation state and context
+- Orchestrates the workflow: question → tools → narrative → HTML
+- Integrates MLFlow for experiment tracking
+- Implements tracing for observability and debugging
+- Handles retry logic and error recovery
+- Loads system prompts from config
+- Returns final HTML slide deck
 
-#### `genie_service.py`
-- Interface to Databricks Genie
-- Initialization:
-  - `__init__()`: Receives Databricks client via dependency injection
-  - Uses same `get_databricks_client()` instance as LLM service
-- Methods:
-  - `create_conversation()`: Initialize Genie conversation
-  - `send_message(conversation_id, message)`: Send SQL request
-  - `get_query_results(message_id)`: Retrieve data
-  - `format_results_for_llm()`: Transform data for LLM consumption
-- Configuration:
-  - Genie space ID and settings from `config.yaml`
+**Key Components**:
+- `SlideGeneratorAgent`: Main agent class
+- MLFlow experiment tracking setup
+- Trace logging for each agent step
+- Tool execution loop
+- Response formatting
 
-#### `slide_generator.py`
-- Orchestrates the entire workflow
-- Coordinates between LLM and Genie services
-- Methods:
-  - `generate_slides(question)`: Main entry point
-  - `_analyze_intent(question)`: Understand what data is needed
-  - `_retrieve_data(data_requirements)`: Get data from Genie
-  - `_analyze_data(raw_data)`: Process and understand data
-  - `_generate_narrative(data_insights)`: Create story
-  - `_create_html_slides(narrative)`: Produce final HTML
-- Configuration:
-  - Workflow settings and output formats from `config.yaml`
-  - All prompts loaded from `prompts.yaml`
+#### `tools.py`
+**Purpose**: Defines tools available to the agent
+- Implements Pydantic-based tool schemas
+- Each tool is a function the agent can call
+- Tools return structured data to the agent
+
+**Tools**:
+1. `query_genie_space`: Query Databricks Genie for data
+   - Takes natural language question or SQL
+   - Manages Genie conversation state
+   - Returns formatted data results
+   - Handles pagination and errors
+
 
 ### 4. Utils (`src/utils/`)
 **Purpose**: Shared utilities
@@ -320,26 +336,37 @@ ai-slide-generator/
 - Configuration loading tested and validated
 - CI/CD pipeline configured
 
-### Phase 2: Databricks Integration (Week 2)
-**Goal**: Integrate with Databricks LLM and Genie
+### Phase 2: Agent & Tools Implementation (Week 2)
+**Goal**: Implement tool-using agent with Databricks integration
 
 **Tasks**:
-1. Implement LLM service
+1. Implement Genie tool (`tools.py`)
+   - Define Pydantic tool schema for `query_genie_space`
+   - Connect to Databricks Genie API
+   - Implement conversation management
+   - Test data retrieval and formatting
+   - Handle errors and pagination
+2. Set up MLFlow integration
+   - Configure MLFlow tracking URI (Databricks workspace)
+   - Create experiment for slide generation
+   - Set up trace logging configuration
+   - Test basic logging and tracing
+3. Implement agent (`agent.py`)
+   - Create `SlideGeneratorAgent` class
    - Connect to Databricks model serving endpoint
-   - Test basic completions
-   - Implement function calling if needed
-2. Implement Genie service
-   - Connect to Genie space
-   - Test conversation creation
-   - Test data retrieval
-   - Implement result formatting
-3. Integrate LLM with Genie via a tool
+   - Implement tool-calling loop
+   - Add MLFlow experiment tracking
+   - Add tracing for each agent step
+   - Load system prompts from config
+   - Test basic agent execution
 
 **Deliverables**:
-- Working LLM service with tests
-- Working Genie service with tests
-- Sample queries returning data
+- Working Genie tool with tests
+- MLFlow tracking configured and tested
+- Working agent with tool-calling capability
+- Sample queries returning data via agent
 - Integration test suite
+- Trace logs viewable in Databricks
 
 ### Phase 3: Slide generation (Week 3)
 **Goal**: Define and refine the system prompts and html constraints passed to the LLM
@@ -407,50 +434,78 @@ ai-slide-generator/
 3. Implement retry logic for initialization failures
 4. Add error handling for authentication issues
 
-### Step 4: LLM Service
-1. Create `src/services/llm_service.py`:
-   - Accept Databricks client in `__init__()` (from `get_databricks_client()`)
-   - Connect to Databricks model serving endpoint
-   - Load LLM parameters from settings (config.yaml)
-   - Load prompts from settings (prompts.yaml)
-2. Implement `generate_completion()` method
-3. Handle response parsing
-4. Add support for function calling (for Genie integration)
-5. Implement token counting/management
-6. Add unit tests with mocked client
-
-### Step 5: Genie Service
-1. Create `src/services/genie_service.py`:
-   - Accept same Databricks client in `__init__()` (singleton instance)
-   - Connect to Databricks Genie API
+### Step 4: Genie Tool Implementation
+1. Create `src/services/tools.py`:
+   - Define Pydantic schema for `query_genie_space` tool
+   - Accept Databricks client (from `get_databricks_client()`)
    - Load Genie settings from settings (config.yaml)
-2. Implement conversation management
-3. Build SQL query execution flow
-4. Parse and format results
-5. Handle pagination if needed
-6. Add result caching (optional)
-7. Add unit tests with mocked client
+2. Implement `query_genie_space()` function:
+   - Connect to Databricks Genie API
+   - Create/manage Genie conversations
+   - Execute natural language or SQL queries
+   - Parse and format results for agent consumption
+   - Handle pagination, errors, and edge cases
+3. Add comprehensive docstrings for tool parameters
+4. Add unit tests with mocked Databricks client
+5. Test with sample queries
 
-### Step 6: Prompt Management
+### Step 5: MLFlow Integration Setup
+1. Add MLFlow configuration to `config/config.yaml`:
+   - Tracking URI (Databricks workspace)
+   - Experiment name for slide generation - from config
+   - Trace logging settings
+   - Metrics to track (latency, token usage, etc.)
+2. Create MLFlow initialization utility:
+   - Set tracking URI to Databricks workspace
+   - Create/get experiment
+   - Configure trace logging
+3. Test MLFlow connectivity:
+   - Log test run to Databricks
+   - Verify traces appear in workspace
+   - Test metric and parameter logging
+
+### Step 6: Agent Implementation
+1. Create `src/services/agent.py`:
+   - Create `SlideGeneratorAgent` class
+   - Accept Databricks client (from `get_databricks_client()`)
+   - Load LLM parameters from settings (config.yaml)
+   - Load system prompts from settings (prompts.yaml)
+2. Implement tool-calling loop:
+   - Register available tools (from `tools.py`)
+   - Send messages with tool schemas to LLM
+   - Parse tool call requests from LLM
+   - Execute tools and return results
+   - Continue conversation until completion
+3. Add MLFlow tracking:
+   - Start MLFlow run for each request
+   - Log parameters (question, max_slides, etc.)
+   - Log metrics (execution time, token usage, etc.)
+   - Log artifacts (generated HTML)
+4. Add tracing:
+   - Trace each agent step (tool calls, LLM responses)
+   - Log input/output for each step
+   - Track token usage per step
+   - Enable debugging via trace logs
+5. Implement `generate_slides()` method:
+   - Main entry point for slide generation
+   - Orchestrates: question → tool use → narrative → HTML
+   - Returns final HTML string
+6. Add error handling and retry logic
+7. Add unit tests with mocked client and tools
+
+### Step 7: Prompt Management
 1. Define prompt structure in `config/prompts.yaml`:
    - Main system prompt (paste existing prompt here)
-   - Intent analysis template
-   - Data interpretation template
-   - Narrative construction template
-   - HTML generation template
+   - Tool use instructions
+   - HTML generation guidelines
+   - Narrative structure template
 2. Add prompt variables/placeholders for dynamic content
-3. Define function calling schemas for Genie in prompts.yaml
-4. Add examples and few-shot demonstrations in prompts
-5. Create helper functions in services to load and format prompts
-
-### Step 7: Orchestration Service
-1. Implement main `generate_slides()` method
-2. Build intent analysis stage
-3. Connect to Genie for data retrieval
-4. Implement data analysis logic
-5. Build narrative construction
-6. Create HTML generation stage
-7. Add state management between stages
+3. Define tool schemas in YAML format:
+   - `query_genie_space` schema
+   - Input parameters and descriptions
+   - Output format specifications
+4. Add examples and few-shot demonstrations
+5. Create helper functions in agent to load and format prompts
 
 ### Step 8: HTML Generation
 1. Design base HTML template
@@ -469,11 +524,28 @@ ai-slide-generator/
 6. Add request logging
 
 ### Step 10: Testing
-1. Write unit tests for each service
-2. Create integration tests for workflows
-3. Build end-to-end test with sample questions
-4. Add mock objects for external dependencies
-5. Implement test fixtures
+1. Write unit tests for tools:
+   - Test `query_genie_space` with mocked Databricks client
+   - Test error handling and edge cases
+   - Test result formatting
+2. Write unit tests for agent:
+   - Mock LLM responses with tool calls
+   - Mock tool execution
+   - Test conversation flow
+   - Test MLFlow logging calls
+3. Create integration tests:
+   - Test agent with real tools (mocked Databricks)
+   - Test complete workflow with sample questions
+   - Verify MLFlow metrics and traces
+4. Build end-to-end test:
+   - Use real Databricks connection (dev environment)
+   - Test with actual Genie space
+   - Verify HTML output quality
+5. Add mock objects and fixtures:
+   - Mock WorkspaceClient
+   - Mock Genie API responses
+   - Mock LLM completions with tool calls
+   - MLFlow tracking fixtures
 
 ### Step 11: Documentation
 1. Write API documentation
@@ -528,29 +600,45 @@ def get_databricks_client() -> WorkspaceClient:
                 )
     return _client_instance
 
-# Usage in services:
-# llm_service.py
-class LLMService:
+# Usage in agent and tools:
+# agent.py
+class SlideGeneratorAgent:
     def __init__(self):
         self.client = get_databricks_client()  # Reuses same instance
+        self.mlflow_client = MlflowClient()
         
-# genie_service.py  
-class GenieService:
-    def __init__(self):
-        self.client = get_databricks_client()  # Same instance as LLM
+# tools.py  
+def query_genie_space(query: str, conversation_id: Optional[str] = None) -> dict:
+    client = get_databricks_client()  # Same instance as agent
+    # Tool implementation...
 ```
 
-### LLM Integration
-- **Function Calling**: Use for structured Genie queries
-- **Context Management**: Track conversation state across stages
-- **Token Limits**: Monitor and manage token usage
-- **Streaming**: Consider streaming for long responses
-- **Prompt Loading**: Load prompts from YAML, format with variables
+### Agent Architecture
+- **Tool-Using Agent**: LLM that can call tools to gather data
+- **Tool Registry**: Dynamic tool registration and schema validation
+- **Conversation Loop**: Agent → Tool Call → Tool Execution → Agent → Repeat
+- **State Management**: Track conversation history and tool outputs
+- **Prompt Engineering**: System prompts guide tool use and output generation
 
-### Genie Integration
-- **Conversation State**: Maintain Genie conversation IDs
-- **Query Optimization**: Ensure efficient SQL generation
-- **Result Formatting**: Transform data for LLM consumption
+### MLFlow Integration
+- **Experiment Tracking**: Log all slide generation runs
+- **Parameters**: Track input questions, settings, model parameters
+- **Metrics**: Log latency, token usage, tool calls, success rate
+- **Artifacts**: Store generated HTML, intermediate outputs
+- **Tracing**: Distributed traces for each agent step
+- **Databricks Integration**: Native MLFlow in Databricks workspace
+
+### Tool Implementation
+- **Pydantic Schemas**: Type-safe tool definitions
+- **Genie Tool**: Query Databricks Genie for data
+- **Tool Results**: Structured data returned to agent
+- **Error Handling**: Tools handle errors and return meaningful messages
+- **Future Tools**: Extensible architecture for adding new tools
+
+### Genie Integration (via Tool)
+- **Conversation State**: Maintain Genie conversation IDs across calls
+- **Query Flexibility**: Support natural language and SQL queries
+- **Result Formatting**: Transform data for agent consumption
 - **Error Handling**: Handle SQL errors gracefully
 - **Shared Client**: Use singleton client instance
 
@@ -569,11 +657,14 @@ class GenieService:
 - **Configuration Errors**: Fail fast on invalid YAML or missing secrets
 
 ### Testing Strategy
-- **Unit Tests**: Test each component in isolation
+- **Unit Tests**: Test agent and tools in isolation
 - **Mock Client**: Mock `get_databricks_client()` for all service tests
-- **Integration Tests**: Test service interactions
-- **End-to-End Tests**: Test complete workflows
-- **Mock Data**: Use mocked responses for consistent testing
+- **Mock Tools**: Mock tool execution for agent tests
+- **Mock LLM**: Mock LLM responses for predictable agent behavior
+- **Integration Tests**: Test agent with real tools (mocked Databricks)
+- **End-to-End Tests**: Test complete workflow with sample questions
+- **MLFlow Tests**: Verify logging, metrics, and tracing
+- **Mock Data**: Use mocked Genie responses for consistent testing
 - **Configuration Tests**: Test YAML loading and validation
 
 ## Configuration Requirements
@@ -611,6 +702,14 @@ genie:
   timeout: 60
   max_retries: 3
 
+# MLFlow Configuration
+mlflow:
+  tracking_uri: "databricks"  # Use Databricks workspace
+  experiment_name: "/Users/<your-user>/ai-slide-generator"
+  enable_tracing: true
+  log_artifacts: true
+  log_model_params: true
+
 # API Configuration
 api:
   host: "0.0.0.0"
@@ -637,61 +736,97 @@ logging:
 **Purpose**: Store all system prompts and templates for easy modification
 
 ```yaml
-# Main System Prompt
+# Main System Prompt for Agent
 system_prompt: |
-  You are an expert data analyst and presentation creator...
-  [Full system prompt here]
-
-# Stage-Specific Prompts
-intent_analysis: |
-  Analyze the following question and determine:
-  1. What data is needed
-  2. What SQL queries might be required
-  3. Expected output structure
+  You are an expert data analyst and presentation creator with access to tools.
   
-  Question: {question}
-
-data_interpretation: |
-  Given the following data, identify key insights:
-  Data: {data}
+  Your goal is to:
+  1. Understand the user's question about data
+  2. Use the query_genie_space tool to retrieve relevant data
+  3. Analyze the data to identify key insights
+  4. Create a compelling narrative for a slide presentation
+  5. Generate professional HTML slides with the narrative and visualizations
   
-  Focus on:
-  - Trends and patterns
-  - Anomalies
-  - Actionable insights
-
-narrative_construction: |
-  Create a coherent narrative for a slide deck using these insights:
-  {insights}
+  Guidelines:
+  - Use tools strategically to gather data
+  - Make multiple tool calls if needed to get complete information
+  - Analyze data thoroughly before creating the narrative
+  - Generate {max_slides} slides maximum
+  - Include data visualizations where appropriate
+  - Ensure slides are professional and clear
   
-  Structure the narrative with:
-  - Introduction
-  - Key findings (3-5 points)
-  - Conclusion and recommendations
+  Always respond with the final HTML slide deck as a complete string.
 
-html_generation: |
-  Generate HTML slides based on this narrative:
-  {narrative}
+# Tool Use Instructions
+tool_instructions: |
+  When you need data to answer the user's question, use the query_genie_space tool.
+  
+  The tool accepts:
+  - query: Natural language question or SQL query
+  - conversation_id: (optional) Continue previous conversation
+  
+  You can call the tool multiple times to gather different data or refine queries.
+  
+  Example:
+  - First call: Get sales data for 2023
+  - Second call: Get regional breakdown
+  - Third call: Compare to previous year
+
+# HTML Generation Guidelines
+html_guidelines: |
+  Generate HTML slides with the following structure:
+  
+  1. Title slide with question/topic
+  2. Executive summary (key findings)
+  3. Data slides (3-7 slides depending on complexity)
+  4. Insights and analysis
+  5. Conclusion and recommendations
   
   Requirements:
-  - Professional styling
-  - Clear data visualizations
-  - {max_slides} slides maximum
+  - Use semantic HTML5
+  - Include inline CSS for styling
+  - Make slides print-friendly
+  - Use clean, professional design
+  - Include data tables or charts where appropriate
+  - Maximum {max_slides} slides total
 
-# Function Calling Schema
-genie_function_schema:
-  name: "query_genie"
-  description: "Query Databricks Genie space for data"
-  parameters:
-    type: "object"
-    properties:
-      query:
-        type: "string"
-        description: "Natural language query or SQL"
-      conversation_id:
-        type: "string"
-        description: "Optional conversation ID to continue"
-    required: ["query"]
+# Narrative Structure Template
+narrative_template: |
+  Structure your data narrative with:
+  
+  Introduction:
+  - Context for the question
+  - What data was analyzed
+  
+  Key Findings (3-5 main points):
+  - Most important insights
+  - Supporting data and evidence
+  - Visual representations
+  
+  Analysis:
+  - Trends and patterns
+  - Anomalies or outliers
+  - Comparisons and context
+  
+  Conclusion:
+  - Summary of findings
+  - Actionable recommendations
+  - Next steps
+
+# Tool Schemas
+tools:
+  - name: "query_genie_space"
+    description: "Query Databricks Genie space to retrieve data using natural language or SQL"
+    parameters:
+      type: "object"
+      properties:
+        query:
+          type: "string"
+          description: "Natural language question or SQL query to execute"
+        conversation_id:
+          type: "string"
+          description: "Optional conversation ID to continue a previous Genie conversation"
+      required: ["query"]
 ```
 
 ### Configuration Loading Order
