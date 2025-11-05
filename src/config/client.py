@@ -66,6 +66,7 @@ def get_databricks_client(
         try:
             # Determine authentication method
             if profile_name:
+                # Explicit profile parameter takes precedence
                 auth_method = "profile"
                 logger.info(
                     "Initializing Databricks client with profile",
@@ -74,23 +75,42 @@ def get_databricks_client(
                 _client_instance = WorkspaceClient(profile=profile_name)
 
             else:
-                # Use environment variables or settings
-                auth_method = "environment"
+                # Check settings for profile or credentials
                 try:
                     settings = get_settings()
-                    logger.info(
-                        "Initializing Databricks client from settings",
-                        extra={
-                            "host": settings.databricks_host,
-                            "environment": settings.environment,
-                        },
-                    )
-                    _client_instance = WorkspaceClient(
-                        host=settings.databricks_host,
-                        token=settings.databricks_token,
-                    )
+                    
+                    # Try profile from settings first (preferred)
+                    if settings.databricks_profile:
+                        auth_method = "profile_from_settings"
+                        logger.info(
+                            "Initializing Databricks client with profile from settings",
+                            extra={"profile": settings.databricks_profile},
+                        )
+                        _client_instance = WorkspaceClient(profile=settings.databricks_profile)
+                    
+                    # Fall back to host/token from settings
+                    elif settings.databricks_host and settings.databricks_token:
+                        auth_method = "settings"
+                        logger.info(
+                            "Initializing Databricks client from settings",
+                            extra={
+                                "host": settings.databricks_host,
+                                "environment": settings.environment,
+                            },
+                        )
+                        _client_instance = WorkspaceClient(
+                            host=settings.databricks_host,
+                            token=settings.databricks_token,
+                        )
+                    else:
+                        # Fall back to environment variables only
+                        auth_method = "environment"
+                        logger.info("Initializing Databricks client from environment variables")
+                        _client_instance = WorkspaceClient()
+                        
                 except Exception:
                     # Fall back to environment variables only
+                    auth_method = "environment"
                     logger.info("Initializing Databricks client from environment variables")
                     _client_instance = WorkspaceClient()
 

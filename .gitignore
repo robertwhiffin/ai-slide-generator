@@ -36,3 +36,6 @@ Thumbs.db
 output/
 *.log
 
+# MLflow
+mlruns/
+

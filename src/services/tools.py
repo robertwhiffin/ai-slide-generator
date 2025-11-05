@@ -26,7 +26,6 @@ class GenieToolError(Exception):
 def query_genie_space(
     query: str,
     conversation_id: Optional[str] = None,
-    genie_space_id: Optional[str] = None,
 ) -> dict[str, Any]:
     """
     Query Databricks Genie space for data using natural language or SQL.
@@ -36,7 +35,6 @@ def query_genie_space(
     Args:
         query: Natural language question or SQL query to execute
         conversation_id: Optional conversation ID (not currently used with start_conversation_and_wait)
-        genie_space_id: Optional Genie space ID (defaults to config value)
 
     Returns:
         Dictionary containing:
@@ -57,7 +55,7 @@ def query_genie_space(
     """
     client = get_databricks_client()
     settings = get_settings()
-    space_id = genie_space_id or settings.genie.space_id
+    space_id = settings.genie.space_id
 
     start_time = time.time()
 
@@ -66,12 +64,18 @@ def query_genie_space(
     mlflow.set_span_attribute("genie.query", query[:200])  # Truncate for logging
 
     try:
-        # Start conversation and wait for completion
-        response = client.genie.start_conversation_and_wait(
-            space_id=space_id, content=query
-        )
-
-        conversation_id = response.conversation_id
+        if conversation_id is None:
+            # Start conversation and wait for completion
+            response = client.genie.start_conversation_and_wait(
+                space_id=space_id, content=query
+            )
+            conversation_id = response.conversation_id
+        else:
+            response = client.genie.create_message_and_wait(
+                space_id=space_id, conversation_id=conversation_id, content=query
+            )
+            
+        
         message_id = response.message_id
         attachment_ids = [_.attachment_id for _ in response.attachments]
 
@@ -115,11 +119,7 @@ def query_genie_space(
 
         return {
             "data": data,
-            "conversation_id": conversation_id,
-            "row_count": row_count,
-            "columns": columns,
-            "json_output": json_output,
-            "execution_time_seconds": execution_time,
+            "conversation_id": conversation_id
         }
 
     except Exception as e:
@@ -175,66 +175,8 @@ def get_tool_schema() -> dict[str, Any]:
                             "Use this to ask follow-up questions in the same context."
                         ),
                     },
-                    "genie_space_id": {
-                        "type": "string",
-                        "description": (
-                            "Optional Genie space ID. If not provided, uses the default "
-                            "space configured in settings."
-                        ),
-                    },
                 },
                 "required": ["query"],
             },
         },
     }
-
-
-def format_tool_result_for_llm(result: dict[str, Any]) -> str:
-    """
-    Format tool result for LLM consumption.
-
-    Converts the raw tool result into a human-readable format that the LLM
-    can easily understand and incorporate into its response.
-
-    Args:
-        result: Tool result dictionary from query_genie_space
-
-    Returns:
-        Formatted string representation of the result
-
-    Example:
-        >>> result = query_genie_space("What were Q4 sales?")
-        >>> formatted = format_tool_result_for_llm(result)
-        >>> print(formatted)
-        Retrieved 5 rows in 2.3 seconds.
-        SQL: SELECT * FROM sales WHERE quarter = 'Q4'
-        Data:
-        [...]
-    """
-    lines = []
-
-    # Summary
-    lines.append(
-        f"Retrieved {result['row_count']} rows in "
-        f"{result['execution_time_seconds']:.2f} seconds."
-    )
-
-    # SQL (if available)
-    if result.get("sql"):
-        lines.append(f"\nSQL: {result['sql']}")
-
-    # Data
-    if result["data"]:
-        lines.append("\nData:")
-        # Format data nicely (limit to first 100 rows for context window)
-        data_preview = result["data"][:100]
-        for i, row in enumerate(data_preview, 1):
-            lines.append(f"{i}. {row}")
-
-        if result["row_count"] > 100:
-            lines.append(f"\n... and {result['row_count'] - 100} more rows")
-    else:
-        lines.append("\nNo data returned.")
-
-    return "\n".join(lines)
-

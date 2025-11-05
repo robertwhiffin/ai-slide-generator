@@ -8,7 +8,6 @@ import pytest
 
 from src.services.tools import (
     GenieToolError,
-    format_tool_result_for_llm,
     get_tool_schema,
     query_genie_space,
 )
@@ -92,14 +91,11 @@ def test_query_genie_space_success(mock_databricks_client, mock_settings, mock_m
     response = query_genie_space(query="What were Q4 sales?")
 
     # Verify response
-    assert response["row_count"] == 2
     assert response["conversation_id"] == "conv-123"
-    assert "columns" in response
-    assert response["columns"] == ["region", "sales"]
+    assert "data" in response
     assert len(response["data"]) == 2
     assert response["data"][0]["region"] == "APAC"
     assert response["data"][0]["sales"] == 1000000
-    assert "json_output" in response
 
     # Verify client calls
     mock_databricks_client.genie.start_conversation_and_wait.assert_called_once()
@@ -161,8 +157,9 @@ def test_query_genie_space_no_data(mock_databricks_client, mock_settings, mock_m
     response = query_genie_space(query="Non-existent data")
 
     # Verify response
-    assert response["row_count"] == 0
+    assert "data" in response
     assert len(response["data"]) == 0
+    assert response["conversation_id"] == "conv-empty"
 
 
 def test_query_genie_space_error(mock_databricks_client, mock_settings, mock_mlflow):
@@ -190,59 +187,5 @@ def test_get_tool_schema():
     assert params["type"] == "object"
     assert "query" in params["properties"]
     assert "conversation_id" in params["properties"]
-    assert "genie_space_id" in params["properties"]
     assert params["required"] == ["query"]
-
-
-def test_format_tool_result_for_llm():
-    """Test formatting tool result for LLM."""
-    result = {
-        "data": [
-            {"region": "APAC", "sales": 1000000},
-            {"region": "EMEA", "sales": 800000},
-        ],
-        "row_count": 2,
-        "sql": "SELECT * FROM sales",
-        "execution_time_seconds": 2.5,
-    }
-
-    formatted = format_tool_result_for_llm(result)
-
-    assert "Retrieved 2 rows" in formatted
-    assert "2.50 seconds" in formatted
-    assert "SELECT * FROM sales" in formatted
-    assert "APAC" in formatted
-    assert "EMEA" in formatted
-
-
-def test_format_tool_result_no_data():
-    """Test formatting empty tool result."""
-    result = {
-        "data": [],
-        "row_count": 0,
-        "sql": None,
-        "execution_time_seconds": 1.0,
-    }
-
-    formatted = format_tool_result_for_llm(result)
-
-    assert "Retrieved 0 rows" in formatted
-    assert "No data returned" in formatted
-
-
-def test_format_tool_result_truncation():
-    """Test formatting tool result with many rows (should truncate)."""
-    # Create result with > 100 rows
-    data = [{"id": i, "value": f"val_{i}"} for i in range(150)]
-    result = {
-        "data": data,
-        "row_count": 150,
-        "sql": "SELECT * FROM large_table",
-        "execution_time_seconds": 5.0,
-    }
-
-    formatted = format_tool_result_for_llm(result)
-
-    assert "Retrieved 150 rows" in formatted
-    assert "and 50 more rows" in formatted  # Should show truncation message
 

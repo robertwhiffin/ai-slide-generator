@@ -230,8 +230,9 @@ class AppSettings(BaseSettings):
     )
 
     # Secrets from environment variables
-    databricks_host: str = Field(..., description="Databricks workspace URL")
-    databricks_token: str = Field(..., description="Databricks access token")
+    databricks_host: str = Field(default="", description="Databricks workspace URL")
+    databricks_token: str = Field(default="", description="Databricks access token")
+    databricks_profile: str = Field(default="", description="Databricks CLI profile name")
 
     # Application configuration (from YAML)
     llm: LLMSettings
@@ -251,9 +252,9 @@ class AppSettings(BaseSettings):
     @field_validator("databricks_host")
     @classmethod
     def validate_databricks_host(cls, v: str) -> str:
-        if not v.startswith(("https://", "http://")):
+        if v and not v.startswith(("https://", "http://")):
             raise ValueError("databricks_host must start with https:// or http://")
-        return v.rstrip("/")
+        return v.rstrip("/") if v else ""
 
 
 def create_settings() -> AppSettings:
@@ -341,6 +342,7 @@ def create_settings() -> AppSettings:
             mlflow=mlflow_settings,
             prompts=prompts,
             environment=config.get("environment", "development"),
+            databricks_profile=config.get("databricks", {}).get("profile", ""),
         )
 
         return settings
