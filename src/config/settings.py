@@ -57,8 +57,13 @@ class LLMSettings(BaseSettings):
 class GenieSettings(BaseSettings):
     """Genie configuration settings."""
 
-    space_id: str
-    space_description: str
+    model_config = SettingsConfigDict(extra="allow", populate_by_name=True)
+
+    space_id: str = Field(alias="default_space_id")
+    timeout: int = 60
+    max_retries: int = 3
+    retry_delay: int = 2
+    poll_interval: int = 2
 
 class APISettings(BaseSettings):
     """API configuration settings."""

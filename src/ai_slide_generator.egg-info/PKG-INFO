@@ -12,10 +12,17 @@ Requires-Dist: httpx>=0.25.0
 Requires-Dist: jinja2>=3.1.0
 Requires-Dist: python-dotenv>=1.0.0
 Requires-Dist: pyyaml>=6.0.0
+Requires-Dist: mlflow>=2.10.0
+Requires-Dist: opentelemetry-api>=1.20.0
+Requires-Dist: opentelemetry-sdk>=1.20.0
+Requires-Dist: pandas>=2.0.0
 Provides-Extra: dev
 Requires-Dist: pytest>=7.4.0; extra == "dev"
 Requires-Dist: pytest-asyncio>=0.21.0; extra == "dev"
 Requires-Dist: pytest-cov>=4.1.0; extra == "dev"
+Requires-Dist: pytest-mock>=3.12.0; extra == "dev"
+Requires-Dist: pytest-html>=4.0.0; extra == "dev"
+Requires-Dist: pytest-metadata>=3.0.0; extra == "dev"
 Requires-Dist: ruff>=0.1.0; extra == "dev"
 Requires-Dist: mypy>=1.6.0; extra == "dev"
 Requires-Dist: types-pyyaml>=6.0.0; extra == "dev"

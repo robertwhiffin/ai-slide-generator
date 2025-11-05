@@ -131,11 +131,29 @@ tools:
    ```
 
 2. **Install dependencies:**
+   
+   **Option A: Using uv (recommended - faster):**
    ```bash
    uv sync
    ```
+   
+   **Option B: Using pip:**
+   ```bash
+   # Create virtual environment
+   python -m venv .venv
+   source .venv/bin/activate
+   
+   # Install core dependencies
+   pip install -r requirements.txt
+   
+   # Install development dependencies (for testing)
+   pip install -r requirements-dev.txt
+   
+   # Or install from pyproject.toml with dev dependencies
+   pip install -e ".[dev]"
+   ```
 
-3. **Activate virtual environment:**
+3. **Activate virtual environment (if not already active):**
    ```bash
    source .venv/bin/activate
    ```

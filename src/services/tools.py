@@ -2,13 +2,10 @@
 Tools for the slide generator agent.
 
 This module implements tools that the agent can use to gather data and perform tasks.
-All tools are instrumented with MLFlow tracing for observability.
 """
 
-import time
 from typing import Any, Optional
 
-import mlflow
 import pandas as pd
 from databricks.sdk import WorkspaceClient
 
@@ -22,7 +19,8 @@ class GenieToolError(Exception):
     pass
 
 
-@mlflow.trace(name="query_genie_space", span_type="TOOL")
+
+
 def query_genie_space(
     query: str,
     conversation_id: Optional[str] = None,
@@ -33,35 +31,26 @@ def query_genie_space(
     This tool connects to a Databricks Genie space and executes queries to retrieve data.
 
     Args:
-        query: Natural language question or SQL query to execute
+        query: Natural language question
         conversation_id: Optional conversation ID (not currently used with start_conversation_and_wait)
 
     Returns:
         Dictionary containing:
-            - data: List of data dictionaries returned by the query
+            - data: JSON string of the data
             - conversation_id: ID for the conversation
-            - row_count: Number of rows returned
-            - columns: List of column names
-            - json_output: JSON string of the data
-            - execution_time_seconds: Time taken to execute the query
 
     Raises:
         GenieToolError: If query execution fails
 
     Example:
-        >>> result = query_genie_space("What were Q4 2023 sales?")
-        >>> print(f"Retrieved {result['row_count']} rows")
+        >>> result = query_genie_space("show me a sample of data")
         >>> print(result['data'])
     """
     client = get_databricks_client()
     settings = get_settings()
     space_id = settings.genie.space_id
 
-    start_time = time.time()
 
-    # Set span attributes for tracing
-    mlflow.set_span_attribute("genie.space_id", space_id)
-    mlflow.set_span_attribute("genie.query", query[:200])  # Truncate for logging
 
     try:
         if conversation_id is None:
@@ -97,25 +86,8 @@ def query_genie_space(
 
         # Create DataFrame and convert to records
         df = pd.DataFrame(data_array, columns=columns)
-        json_output = df.to_json(orient="records")
-        data = df.to_dict(orient="records")
+        data = df.to_json(orient="records")
 
-        execution_time = time.time() - start_time
-        row_count = len(data)
-
-        # Log metrics to MLFlow
-        mlflow.log_metrics(
-            {
-                "genie.result_row_count": row_count,
-                "genie.execution_time_seconds": execution_time,
-                "genie.success": 1,
-            }
-        )
-
-        # Set additional span attributes
-        mlflow.set_span_attribute("genie.row_count", row_count)
-        mlflow.set_span_attribute("genie.execution_time_seconds", execution_time)
-        mlflow.set_span_attribute("genie.column_count", len(columns))
 
         return {
             "data": data,
@@ -123,18 +95,6 @@ def query_genie_space(
         }
 
     except Exception as e:
-        execution_time = time.time() - start_time
-
-        # Log failure to MLFlow
-        mlflow.log_metrics(
-            {
-                "genie.success": 0,
-                "genie.execution_time_seconds": execution_time,
-            }
-        )
-        mlflow.set_span_attribute("genie.error", str(e))
-        mlflow.set_span_attribute("genie.error_type", type(e).__name__)
-
         raise GenieToolError(f"Failed to query Genie space: {e}") from e
 
 
@@ -180,3 +140,4 @@ def get_tool_schema() -> dict[str, Any]:
             },
         },
     }
+
