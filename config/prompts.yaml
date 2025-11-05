@@ -1,0 +1,183 @@
+# AI Slide Generator Prompts
+# All system prompts and templates for the slide generation workflow
+
+# Main System Prompt
+system_prompt: |
+  You are an expert data analyst and presentation creator. Your role is to:
+  1. Understand user questions about data
+  2. Query data sources to retrieve relevant information
+  3. Analyze data to extract meaningful insights
+  4. Create compelling narratives that tell a data-driven story
+  5. Generate professional HTML slide presentations
+  
+  You have access to Databricks Genie for querying structured data using natural language.
+  Always cite your sources and ensure insights are grounded in the retrieved data.
+
+# Stage 1: Intent Analysis
+intent_analysis: |
+  Analyze the following question and determine what data is needed to answer it comprehensively.
+  
+  Question: {question}
+  
+  Please provide:
+  1. **Data Requirements**: What specific data or metrics are needed?
+  2. **Query Strategy**: What types of queries should be executed?
+  3. **Expected Insights**: What patterns or insights should we look for?
+  4. **Slide Structure**: How many slides would be appropriate? (between {min_slides} and {max_slides})
+  
+  Format your response as JSON:
+  {{
+    "data_requirements": ["requirement1", "requirement2"],
+    "query_strategy": "description of approach",
+    "expected_insights": ["insight1", "insight2"],
+    "suggested_slide_count": <number>
+  }}
+
+# Stage 2: Data Interpretation
+data_interpretation: |
+  Given the following data retrieved from queries, identify key insights and patterns.
+  
+  Data:
+  {data}
+  
+  Original Question: {question}
+  
+  Please analyze this data and provide:
+  1. **Key Findings**: Most important discoveries from the data (3-5 points)
+  2. **Trends**: Notable patterns or trends
+  3. **Anomalies**: Anything unexpected or noteworthy
+  4. **Actionable Insights**: What actions or decisions does this data support?
+  
+  Focus on insights that directly address the user's question.
+  
+  Format your response as JSON:
+  {{
+    "key_findings": ["finding1", "finding2"],
+    "trends": ["trend1", "trend2"],
+    "anomalies": ["anomaly1"],
+    "actionable_insights": ["insight1", "insight2"],
+    "summary": "brief overall summary"
+  }}
+
+# Stage 3: Narrative Construction
+narrative_construction: |
+  Create a coherent narrative for a slide deck using these insights.
+  
+  Original Question: {question}
+  Data Insights: {insights}
+  Target Slides: {target_slides}
+  
+  Structure the narrative with:
+  1. **Title Slide**: Compelling title that captures the main message
+  2. **Introduction**: Context and why this analysis matters (1 slide)
+  3. **Key Findings**: Main insights with supporting data (3-5 slides)
+  4. **Deep Dive**: Detailed analysis of most important finding (1-2 slides)
+  5. **Conclusion**: Summary and recommendations (1 slide)
+  
+  Format your response as JSON:
+  {{
+    "title": "presentation title",
+    "subtitle": "optional subtitle",
+    "slides": [
+      {{
+        "type": "title|content|data|conclusion",
+        "title": "slide title",
+        "content": "main text content",
+        "data_visualization": "description of chart/graph if needed",
+        "talking_points": ["point1", "point2"]
+      }}
+    ]
+  }}
+
+# Stage 4: HTML Generation
+html_generation: |
+  Generate a complete HTML slide deck based on this narrative.
+  
+  Narrative: {narrative}
+  Template Style: {template_style}
+  Include Metadata: {include_metadata}
+  
+  Requirements:
+  1. Create a self-contained HTML file with embedded CSS
+  2. Use the "{template_style}" style (professional/minimal/colorful)
+  3. Include smooth transitions between slides
+  4. Make slides responsive and print-friendly
+  5. Add navigation controls (next/previous/slide numbers)
+  6. Include data visualizations where specified
+  7. Ensure accessibility (proper semantic HTML, ARIA labels)
+  
+  The HTML should:
+  - Use a clean, modern design
+  - Have consistent typography and spacing
+  - Include the presentation metadata if requested
+  - Be ready to present without any additional setup
+  
+  Return ONLY the complete HTML string, no additional text or formatting.
+
+# Genie Function Calling Schema
+genie_function_schema:
+  name: "query_genie"
+  description: |
+    Query Databricks Genie space for data. Genie can understand natural language questions
+    and convert them to SQL queries against the configured data sources.
+  parameters:
+    type: "object"
+    properties:
+      query:
+        type: "string"
+        description: "Natural language question or SQL query to execute"
+      conversation_id:
+        type: "string"
+        description: "Optional conversation ID to continue an existing conversation"
+    required: ["query"]
+
+# Error Messages
+errors:
+  no_data_found: |
+    No data was found to answer your question. This could mean:
+    1. The data doesn't exist in the configured Genie space
+    2. The query was too specific and returned no results
+    3. There may be a permissions issue
+    
+    Please try rephrasing your question or broadening the scope.
+  
+  query_timeout: |
+    The data query took too long to complete. This could be due to:
+    1. Complex query requiring significant computation
+    2. Large dataset being processed
+    3. System load
+    
+    Please try a more specific question or retry later.
+  
+  invalid_question: |
+    The question could not be processed. Please ensure:
+    1. The question is clear and specific
+    2. It relates to data available in the system
+    3. It's a complete question (not a fragment)
+
+# HTML Templates (CSS styles)
+html_styles:
+  professional: |
+    /* Professional theme with blue accent */
+    --primary-color: #2563eb;
+    --secondary-color: #1e40af;
+    --background: #ffffff;
+    --text-color: #1f2937;
+    --accent-color: #3b82f6;
+  
+  minimal: |
+    /* Minimal theme with grayscale */
+    --primary-color: #000000;
+    --secondary-color: #4b5563;
+    --background: #ffffff;
+    --text-color: #1f2937;
+    --accent-color: #6b7280;
+  
+  colorful: |
+    /* Colorful theme with gradient */
+    --primary-color: #8b5cf6;
+    --secondary-color: #ec4899;
+    --background: #ffffff;
+    --text-color: #1f2937;
+    --accent-color: #f59e0b;
+

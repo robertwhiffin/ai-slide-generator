@@ -1,7 +1,17 @@
 README.md
 pyproject.toml
+src/__init__.py
 src/ai_slide_generator.egg-info/PKG-INFO
 src/ai_slide_generator.egg-info/SOURCES.txt
 src/ai_slide_generator.egg-info/dependency_links.txt
 src/ai_slide_generator.egg-info/requires.txt
 src/ai_slide_generator.egg-info/top_level.txt
+src/api/__init__.py
+src/config/__init__.py
+src/config/client.py
+src/config/loader.py
+src/config/settings.py
+src/services/__init__.py
+src/utils/__init__.py
+src/utils/error_handling.py
+src/utils/logging_config.py

@@ -1,0 +1,72 @@
+# AI Slide Generator Configuration
+# This file contains application settings (no secrets)
+# Secrets (tokens, credentials) should be in .env file
+
+# LLM Configuration
+llm:
+  endpoint: "databricks-llama-3-1-70b-instruct"  # Model serving endpoint name
+  temperature: 0.7
+  max_tokens: 4096
+  top_p: 0.95
+  timeout: 120  # seconds
+  # Optional: Override these for specific stages
+  stages:
+    intent_analysis:
+      temperature: 0.3  # Lower for more focused analysis
+      max_tokens: 1024
+    data_interpretation:
+      temperature: 0.5
+      max_tokens: 2048
+    narrative_construction:
+      temperature: 0.7
+      max_tokens: 2048
+    html_generation:
+      temperature: 0.4  # Lower for more consistent HTML
+      max_tokens: 8192
+
+# Genie Configuration
+genie:
+  default_space_id: "01234567-89ab-cdef-0123-456789abcdef"  # Replace with actual Genie space ID
+  timeout: 60  # seconds
+  max_retries: 3
+  retry_delay: 2  # seconds
+  poll_interval: 2  # seconds for checking query status
+
+# API Configuration
+api:
+  host: "0.0.0.0"
+  port: 8000
+  cors_enabled: true
+  cors_origins:
+    - "http://localhost:3000"
+    - "http://localhost:8000"
+  request_timeout: 180  # seconds
+  max_concurrent_requests: 10
+
+# Output Configuration
+output:
+  default_max_slides: 10
+  min_slides: 3
+  max_slides: 20
+  html_template: "professional"  # professional, minimal, colorful
+  include_metadata: true
+  include_source_citations: true
+
+# Logging Configuration
+logging:
+  level: "INFO"  # DEBUG, INFO, WARNING, ERROR, CRITICAL
+  format: "json"  # json, text
+  include_request_id: true
+  log_file: "logs/app.log"
+  max_file_size_mb: 10
+  backup_count: 5
+
+# Feature Flags
+features:
+  enable_caching: false
+  enable_streaming: false
+  enable_batch_processing: false
+
+databricks:
+  profile: "logfood"
+

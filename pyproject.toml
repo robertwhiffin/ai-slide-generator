@@ -6,15 +6,27 @@ build-backend = "setuptools.build_meta"
 name = "ai-slide-generator"
 version = "0.1.0"
 description = "AI-powered slide generation using Databricks"
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 dependencies = [
     "databricks-sdk>=0.20.0",
+    "fastapi>=0.104.0",
+    "uvicorn[standard]>=0.24.0",
+    "pydantic>=2.4.0",
+    "pydantic-settings>=2.0.0",
+    "httpx>=0.25.0",
+    "jinja2>=3.1.0",
+    "python-dotenv>=1.0.0",
+    "pyyaml>=6.0.0",
 ]
 
 [project.optional-dependencies]
 dev = [
-    "pytest>=7.0.0",
+    "pytest>=7.4.0",
+    "pytest-asyncio>=0.21.0",
+    "pytest-cov>=4.1.0",
     "ruff>=0.1.0",
+    "mypy>=1.6.0",
+    "types-pyyaml>=6.0.0",
 ]
 
 [tool.ruff]

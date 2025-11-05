@@ -2,8 +2,20 @@ Metadata-Version: 2.4
 Name: ai-slide-generator
 Version: 0.1.0
 Summary: AI-powered slide generation using Databricks
-Requires-Python: >=3.9
+Requires-Python: >=3.10
 Requires-Dist: databricks-sdk>=0.20.0
+Requires-Dist: fastapi>=0.104.0
+Requires-Dist: uvicorn[standard]>=0.24.0
+Requires-Dist: pydantic>=2.4.0
+Requires-Dist: pydantic-settings>=2.0.0
+Requires-Dist: httpx>=0.25.0
+Requires-Dist: jinja2>=3.1.0
+Requires-Dist: python-dotenv>=1.0.0
+Requires-Dist: pyyaml>=6.0.0
 Provides-Extra: dev
-Requires-Dist: pytest>=7.0.0; extra == "dev"
+Requires-Dist: pytest>=7.4.0; extra == "dev"
+Requires-Dist: pytest-asyncio>=0.21.0; extra == "dev"
+Requires-Dist: pytest-cov>=4.1.0; extra == "dev"
 Requires-Dist: ruff>=0.1.0; extra == "dev"
+Requires-Dist: mypy>=1.6.0; extra == "dev"
+Requires-Dist: types-pyyaml>=6.0.0; extra == "dev"

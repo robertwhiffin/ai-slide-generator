@@ -1,30 +1,172 @@
 # AI Slide Generator
 
-AI-powered slide generation using Databricks.
+An API-driven system that generates HTML slide decks using LLMs. The system takes natural language questions, queries structured data through Databricks Genie, and produces professional HTML presentations with data-driven insights.
+
+## Overview
+
+**Input**: Natural language question (e.g., "Produce a 10-page report on the consumption history of my account")
+
+**Output**: HTML slide deck with data visualizations and narrative
+
+**Process**:
+1. LLM analyzes question intent
+2. Queries Databricks Genie space for relevant data via SQL
+3. Analyzes retrieved data to identify patterns and insights
+4. Constructs coherent data-driven narrative
+5. Generates professional HTML slides
 
 ## Technologies
 
-- **Python 3.9+**: Core language
-- **Databricks SDK**: For Databricks platform integration
-- **uv**: Fast Python package manager
+- **Python 3.10+**: Core language for robust type support and modern features
+- **Databricks SDK**: Integration with Databricks LLM serving and Genie APIs
+- **Databricks Genie**: SQL-based structured data retrieval with natural language interface
+- **FastAPI**: Lightweight, high-performance API framework for endpoints
+- **Pydantic**: Data validation and settings management for type safety
+- **uv**: Fast Python package manager for dependency management
+- **pytest**: Testing framework for comprehensive test coverage
+- **ruff**: Fast linting and formatting for code quality
+
+### Why These Technologies?
+- **Databricks LLM + Genie**: Native integration provides seamless data access and AI capabilities
+- **FastAPI**: Async support and automatic API documentation generation
+- **Pydantic**: Strong typing ensures data validation and reduces runtime errors
+- **PyYAML**: Flexible configuration management for prompts and settings
+- **uv**: Significantly faster than pip for dependency resolution
+
+## Architecture Highlights
+
+### YAML-Based Configuration
+- **Separation of Concerns**: Secrets in `.env`, application config in YAML files
+- **Easy Customization**: Modify prompts, LLM parameters, and output settings without code changes
+- **Version Control**: YAML files can be safely committed and tracked
+- **Team Collaboration**: Non-technical users can adjust prompts and settings
+
+### Singleton Databricks Client
+- **Efficiency**: Single `WorkspaceClient` instance shared across all services
+- **Thread-Safe**: Proper locking prevents race conditions
+- **Reduced Overhead**: Minimizes connection and authentication overhead
+- **Simplified Testing**: Mock once, reuse everywhere
+- **Flexible Authentication**: Supports multiple authentication methods:
+  - **Environment variables**: Default method using `DATABRICKS_HOST` and `DATABRICKS_TOKEN`
+  - **Profile**: Use Databricks CLI profiles from `~/.databrickscfg`
+  - **Direct credentials**: Pass host and token directly for programmatic access
+
+### Configuration Examples
+
+**config/config.yaml:**
+```yaml
+llm:
+  endpoint: "databricks-llama-3-1-70b-instruct"
+  temperature: 0.7
+  max_tokens: 4096
+
+genie:
+  default_space_id: "your-genie-space-id"
+  timeout: 60
+
+output:
+  default_max_slides: 10
+  html_template: "professional"
+```
+
+**config/prompts.yaml:**
+```yaml
+system_prompt: |
+  You are an expert data analyst...
+  
+intent_analysis: |
+  Analyze this question: {question}
+  Determine required data...
+```
+
+## Documentation
+
+- **[PROJECT_PLAN.md](PROJECT_PLAN.md)**: Comprehensive project plan with architecture, milestones, and implementation steps
+- **[pyproject.toml](pyproject.toml)**: Project configuration and dependencies
 
 ## Getting Started
 
-1. **Install dependencies:**
+### Prerequisites
+- Python 3.10 or higher
+- Databricks workspace with:
+  - Model serving endpoint deployed
+  - Genie space configured
+  - Appropriate API access permissions
+
+### Installation
+
+1. **Clone repository:**
+   ```bash
+   git clone <repository-url>
+   cd ai-slide-generator
+   ```
+
+2. **Install dependencies:**
    ```bash
    uv sync
    ```
 
-2. **Activate virtual environment:**
+3. **Activate virtual environment:**
    ```bash
    source .venv/bin/activate
    ```
 
-3. **Configure Databricks authentication:**
-   Set up your Databricks credentials using one of these methods:
-   - Environment variables: `DATABRICKS_HOST`, `DATABRICKS_TOKEN`
-   - Databricks CLI configuration: `~/.databrickscfg`
-   - Azure CLI for Azure Databricks
+4. **Configure environment:**
+   
+   The project uses a two-tier configuration system:
+   
+   **a) Secrets (Environment Variables):**
+   ```bash
+   cp .env.example .env
+   # Edit .env with your Databricks credentials
+   ```
+   
+   Required in `.env`:
+   - `DATABRICKS_HOST`: Your Databricks workspace URL
+   - `DATABRICKS_TOKEN`: Personal access token
+   
+   **b) Application Settings (YAML):**
+   ```bash
+   cp config/config.example.yaml config/config.yaml
+   # Edit config/config.yaml with your settings
+   ```
+   
+   Configure in `config/config.yaml`:
+   - LLM endpoint name and parameters
+   - Genie space ID
+   - Output formatting options
+   - API settings
+   
+   **c) Prompts (YAML):**
+   ```bash
+   # Edit config/prompts.yaml with your system prompts
+   ```
+   
+   Customize prompts for:
+   - System prompt (main instructions)
+   - Intent analysis
+   - Data interpretation
+   - Narrative construction
+   - HTML generation
+
+### Running the Application
+
+```bash
+uvicorn src.main:app --reload
+```
+
+API will be available at `http://localhost:8000`
+
+### Making Requests
+
+```bash
+curl -X POST http://localhost:8000/generate-slides \
+  -H "Content-Type: application/json" \
+  -d '{
+    "question": "Produce a 10-page report on consumption history",
+    "max_slides": 10
+  }'
+```
 
 ## Development
 
@@ -38,18 +180,63 @@ uv sync --extra dev
 pytest
 ```
 
+### Run tests with coverage:
+```bash
+pytest --cov=src tests/
+```
+
 ### Format and lint:
 ```bash
+# Check code
 ruff check .
+
+# Format code
 ruff format .
+
+# Type check
+mypy src/
 ```
 
 ## Project Structure
 
 ```
-.
-├── pyproject.toml      # Project configuration and dependencies
-├── src/                # Source code
-└── tests/              # Test suite
+ai-slide-generator/
+├── src/
+│   ├── api/              # FastAPI endpoints and request/response models
+│   ├── config/           # Configuration and settings management
+│   ├── services/         # Core business logic (LLM, Genie, orchestration)
+│   ├── prompts/          # System prompts and templates
+│   ├── models/           # Data models and validation
+│   └── utils/            # Shared utilities and helpers
+├── tests/
+│   ├── unit/             # Unit tests
+│   └── integration/      # Integration tests
+├── examples/             # Example questions and outputs
+├── docs/                 # Additional documentation
+├── pyproject.toml        # Project configuration
+├── PROJECT_PLAN.md       # Detailed project plan
+└── README.md             # This file
 ```
+
+## Current Status
+
+**Phase 1 - Foundation Setup**: ✅ Complete
+
+Completed:
+- ✅ Project structure and folder organization
+- ✅ YAML-based configuration system (`config.yaml` and `prompts.yaml`)
+- ✅ Singleton Databricks client with flexible authentication (profile, host/token, environment)
+- ✅ Pydantic-based settings management with validation
+- ✅ Comprehensive error handling and logging
+- ✅ Pytest framework with fixtures and unit tests (15 tests passing)
+
+**Next Phase**: Databricks Integration (LLM and Genie services) - see [PROJECT_PLAN.md](PROJECT_PLAN.md) for details
+
+## Contributing
+
+See [PROJECT_PLAN.md](PROJECT_PLAN.md) for development guidelines and implementation steps.
+
+## License
+
+*License information to be added*
 
