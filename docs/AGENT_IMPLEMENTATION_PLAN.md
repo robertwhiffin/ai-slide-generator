@@ -281,6 +281,59 @@ except Exception as e:
     raise AgentError(f"Slide generation failed: {e}") from e
 ```
 
+## Capturing LLM Thinking for Chat Interface
+
+**Requirement**: Expose all details of LLM's thinking in a chat interface
+
+To support this, we need to capture:
+1. Each message from the LLM (including reasoning)
+2. Tool calls made by the LLM
+3. Tool responses
+4. Intermediate steps and decisions
+
+**Implementation Strategy**: Use `return_intermediate_steps=True` in AgentExecutor
+
+```python
+# When creating AgentExecutor
+agent_executor = AgentExecutor(
+    agent=agent, 
+    tools=[genie_tool],
+    return_intermediate_steps=True,  # KEY: Captures all steps
+    verbose=True,  # Optional: logs to console
+)
+
+# Result structure with intermediate_steps
+result = agent_executor.invoke({"question": question})
+# result = {
+#     "output": "final HTML string",
+#     "intermediate_steps": [
+#         (AgentAction(tool='query_genie_space', tool_input={...}), "tool output"),
+#         (AgentAction(tool='query_genie_space', tool_input={...}), "tool output"),
+#         ...
+#     ]
+# }
+```
+
+### Message Structure for Chat Interface
+
+```python
+from typing import TypedDict, Literal
+
+class ChatMessage(TypedDict):
+    """Represents a single message in the conversation."""
+    role: Literal["system", "user", "assistant", "tool"]
+    content: str
+    tool_call: dict | None  # If role=assistant and making tool call
+    tool_call_id: str | None  # If role=tool
+    timestamp: str
+
+class SlideGenerationResult(TypedDict):
+    """Complete result with all conversation details."""
+    html: str  # Final HTML output
+    messages: list[ChatMessage]  # All messages for chat interface
+    metadata: dict  # Additional metadata (tokens, latency, etc.)
+```
+
 ## Class Structure
 
 ```python
@@ -300,6 +353,7 @@ class SlideGeneratorAgent:
     4. Generating HTML slides
     
     All operations are traced via MLflow for observability.
+    All intermediate steps are captured for chat interface display.
     """
     
     def __init__(self):
@@ -333,7 +387,31 @@ class SlideGeneratorAgent:
         pass
     
     def _create_agent_executor(self) -> AgentExecutor:
-        """Create agent executor with model, tools, and prompt."""
+        """
+        Create agent executor with model, tools, and prompt.
+        
+        IMPORTANT: Set return_intermediate_steps=True to capture all
+        messages for chat interface display.
+        """
+        pass
+    
+    def _format_messages_for_chat(
+        self, 
+        question: str,
+        intermediate_steps: list[tuple],
+        final_output: str
+    ) -> list[dict]:
+        """
+        Format agent execution into chat messages.
+        
+        Args:
+            question: User's question
+            intermediate_steps: List of (AgentAction, observation) tuples
+            final_output: Final HTML output
+            
+        Returns:
+            List of chat messages for UI display
+        """
         pass
     
     def generate_slides(
@@ -341,7 +419,7 @@ class SlideGeneratorAgent:
         question: str,
         max_slides: int = 10,
         genie_space_id: str | None = None,
-    ) -> str:
+    ) -> dict:
         """
         Generate HTML slides from a natural language question.
         
@@ -351,7 +429,10 @@ class SlideGeneratorAgent:
             genie_space_id: Optional Genie space ID (uses default if None)
         
         Returns:
-            HTML string containing complete slide deck
+            Dictionary containing:
+                - html: HTML string containing complete slide deck
+                - messages: List of all messages for chat interface
+                - metadata: Execution metadata (tokens, latency, etc.)
         
         Raises:
             AgentError: If generation fails
@@ -493,9 +574,20 @@ from src.services.tools import query_genie_space
    - Verify variables interpolated correctly
    - Verify prompt structure correct
 
-4. **Test Generate Slides (Mocked LLM)**
-   - Mock LangChain agent executor
+4. **Test Message Formatting** ⭐ NEW
+   - Test `_format_messages_for_chat()` with sample intermediate steps
+   - Verify user message included
+   - Verify tool call messages formatted correctly
+   - Verify tool response messages formatted correctly
+   - Verify final assistant message included
+   - Verify message order preserved
+   - Verify timestamps present
+
+5. **Test Generate Slides (Mocked LLM)**
+   - Mock LangChain agent executor with intermediate_steps
    - Verify invoke called with correct params
+   - Verify intermediate_steps captured
+   - Verify messages formatted and returned
    - Verify MLflow tracing called
    - Verify error handling
 
@@ -506,8 +598,15 @@ from src.services.tools import query_genie_space
    - Mock LLM responses (with tool calls)
    - Verify end-to-end flow
    - Verify MLflow traces created
+   - **Verify complete message history captured** ⭐ NEW
+   - **Verify messages match expected chat format** ⭐ NEW
 
-2. **Test Error Scenarios**
+2. **Test Message Capture with Multiple Tool Calls** ⭐ NEW
+   - Mock scenario with 2-3 Genie tool calls
+   - Verify all tool calls captured in messages
+   - Verify conversation flow maintained
+
+3. **Test Error Scenarios**
    - Tool execution failure
    - LLM timeout
    - Invalid configuration
@@ -528,6 +627,10 @@ Based on PROJECT_PLAN.md Phase 2:
 - [ ] Sample queries returning HTML slides via agent
 - [ ] Integration test suite created
 - [ ] Trace logs viewable in Databricks
+- [ ] **Intermediate steps captured via `return_intermediate_steps=True`** ⭐ NEW
+- [ ] **All messages formatted for chat interface** ⭐ NEW
+- [ ] **Message structure includes tool calls and responses** ⭐ NEW
+- [ ] **Tests verify message capture and formatting** ⭐ NEW
 
 ## Implementation Steps
 
@@ -563,14 +666,75 @@ Based on PROJECT_PLAN.md Phase 2:
 
 ### Step 7: Implement generate_slides Method
 - Add MLflow tracing context
-- Invoke agent executor
+- Invoke agent executor with `return_intermediate_steps=True`
+- Extract intermediate steps from result
+- Format messages for chat interface via `_format_messages_for_chat()`
 - Handle errors
-- Return HTML output
+- Return structured response (html, messages, metadata)
+
+### Step 7.5: Implement _format_messages_for_chat Method
+- Parse intermediate_steps list
+- Convert AgentAction and observations to chat messages
+- Include tool calls and tool responses
+- Add timestamps
+- Maintain conversation order
+- Return formatted message list
+
+**Example Implementation**:
+```python
+def _format_messages_for_chat(
+    self, 
+    question: str,
+    intermediate_steps: list[tuple],
+    final_output: str
+) -> list[dict]:
+    """Format agent execution into chat messages."""
+    messages = []
+    
+    # User message
+    messages.append({
+        "role": "user",
+        "content": question,
+        "timestamp": datetime.utcnow().isoformat(),
+    })
+    
+    # Process intermediate steps
+    for action, observation in intermediate_steps:
+        # Assistant message with tool call
+        messages.append({
+            "role": "assistant",
+            "content": f"Using tool: {action.tool}",
+            "tool_call": {
+                "name": action.tool,
+                "arguments": action.tool_input,
+            },
+            "timestamp": datetime.utcnow().isoformat(),
+        })
+        
+        # Tool response message
+        messages.append({
+            "role": "tool",
+            "content": str(observation),
+            "tool_call_id": action.tool,
+            "timestamp": datetime.utcnow().isoformat(),
+        })
+    
+    # Final assistant message with HTML
+    messages.append({
+        "role": "assistant",
+        "content": final_output,
+        "timestamp": datetime.utcnow().isoformat(),
+    })
+    
+    return messages
+```
 
 ### Step 8: Write Unit Tests
 - Test each component in isolation
 - Mock external dependencies
 - Test error handling
+- **Test message formatting**: Verify `_format_messages_for_chat()` correctly converts intermediate steps
+- **Test message structure**: Ensure messages have correct roles, content, and timestamps
 
 ### Step 9: Write Integration Tests
 - Test end-to-end flow
@@ -624,13 +788,93 @@ Based on PROJECT_PLAN.md Phase 2:
 - [LangChain StructuredTool](https://python.langchain.com/docs/modules/tools/custom_tools)
 - PROJECT_PLAN.md - Phase 2 (lines 334-364)
 
+## API Response Format Update
+
+The API response format will need to be updated to support the chat interface:
+
+**Before** (simple HTML string):
+```python
+# Response
+{"html": "<html>...</html>"}
+```
+
+**After** (structured with messages):
+```python
+# Response
+{
+    "html": "<html>...</html>",
+    "messages": [
+        {
+            "role": "user",
+            "content": "What were sales in Q4?",
+            "timestamp": "2025-11-05T20:00:00Z"
+        },
+        {
+            "role": "assistant",
+            "content": "Using tool: query_genie_space",
+            "tool_call": {
+                "name": "query_genie_space",
+                "arguments": {"query": "SELECT..."}
+            },
+            "timestamp": "2025-11-05T20:00:01Z"
+        },
+        {
+            "role": "tool",
+            "content": "[{...data...}]",
+            "tool_call_id": "query_genie_space",
+            "timestamp": "2025-11-05T20:00:03Z"
+        },
+        {
+            "role": "assistant",
+            "content": "<html>...slides...</html>",
+            "timestamp": "2025-11-05T20:00:10Z"
+        }
+    ],
+    "metadata": {
+        "tokens_used": 1234,
+        "latency_seconds": 10.5,
+        "tool_calls": 2
+    }
+}
+```
+
+This structure allows a chat UI to display:
+- User's question
+- Each tool call the LLM makes
+- Data returned from tools
+- Final HTML output
+- Complete conversation flow
+
+## Future Enhancement: Streaming Support
+
+For real-time chat interface updates, streaming can be added later:
+
+```python
+# Use astream_events for streaming
+async for event in agent_executor.astream_events({"question": question}):
+    if event["event"] == "on_chat_model_stream":
+        # Stream token-by-token output
+        yield event["data"]["chunk"]
+    elif event["event"] == "on_tool_start":
+        # Notify UI that tool is being called
+        yield {"type": "tool_start", "tool": event["name"]}
+    elif event["event"] == "on_tool_end":
+        # Send tool result
+        yield {"type": "tool_result", "data": event["data"]}
+```
+
+This is **not required for Phase 2** but the architecture supports it.
+
 ## Next Steps
 
 After this plan is approved:
 1. Implement `src/services/agent.py` following this plan
-2. Write unit tests in `tests/unit/test_agent.py`
-3. Write integration tests in `tests/integration/test_agent_integration.py`
-4. Manual testing with Databricks connection
-5. Verify traces appear in Databricks MLflow UI
-6. Iterate on system prompts based on output quality
+2. Implement `_format_messages_for_chat()` method for message formatting
+3. Write unit tests in `tests/unit/test_agent.py` (including message formatting tests)
+4. Write integration tests in `tests/integration/test_agent_integration.py` (including message capture tests)
+5. Update API response models to include messages field
+6. Manual testing with Databricks connection
+7. Verify traces appear in Databricks MLflow UI
+8. Verify message capture works correctly
+9. Iterate on system prompts based on output quality
 
