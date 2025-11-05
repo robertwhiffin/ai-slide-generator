@@ -1,0 +1,121 @@
+---
+description: Unit testing guidelines for concise and effective test coverage
+globs: tests/**/*.py
+---
+
+# Unit Testing Guidelines
+
+## Test Conciseness Principles
+
+### Default Test Structure
+Most functions should have **only 2 unit tests**:
+1. **Happy Path Test** - Valid inputs with multiple scenarios
+2. **Error Handling Test** - Invalid inputs and edge cases
+
+### Consolidate Related Scenarios
+Instead of separate tests for each condition, combine related validations:
+
+```python
+# ✅ Good: Consolidated valid scenarios
+def test_function_name_valid_inputs(self):
+    """Test function with various valid inputs."""
+    # Test multiple valid scenarios in one test
+    assert function(valid_input_1) == expected_1
+    assert function(valid_input_2) == expected_2
+    assert function(edge_case_valid) == expected_3
+
+# ✅ Good: Consolidated error scenarios  
+def test_function_name_error_handling(self):
+    """Test function error handling."""
+    with pytest.raises(ValueError):
+        function(invalid_input_1)
+    with pytest.raises(TypeError):
+        function(invalid_input_2)
+```
+
+```python
+# ❌ Bad: Too many separate tests
+def test_function_with_input_1(self):
+def test_function_with_input_2(self):
+def test_function_with_edge_case(self):
+def test_function_missing_column_1(self):
+def test_function_missing_column_2(self):
+def test_function_null_values(self):
+def test_function_empty_dataframe(self):
+```
+
+## When to Add More Tests
+
+Only create additional tests for:
+- **Complex functions** with multiple distinct code paths
+- **Critical business logic** requiring detailed validation
+- **Integration points** with external systems
+- **Performance-sensitive** functions
+
+## Test Naming Convention
+
+Use descriptive names that capture the test scope:
+- `test_<function_name>_valid_scenarios`
+- `test_<function_name>_error_handling`
+- `test_<function_name>_integration` (if needed)
+
+## Fixtures and Setup
+
+Keep fixtures simple and focused:
+- One fixture per test data type
+- Combine related test data in single fixtures
+- Avoid over-engineered test setup
+
+## Example: Before and After
+
+### Before (Too Many Tests)
+```python
+def test_add_column_successful_calculation(self):
+def test_add_column_missing_columns(self):
+def test_add_column_zero_distance_handling(self):
+def test_add_column_null_values(self):
+def test_add_column_empty_dataframe(self):
+def test_add_column_return_type(self):
+def test_add_column_preserves_columns(self):
+```
+
+### After (Concise)
+```python
+def test_add_avg_fare_per_mile_by_zones_valid_scenarios(self, test_dataframe):
+    """Test function with valid inputs including edge cases."""
+    result_df = add_avg_fare_per_mile_by_zones(test_dataframe)
+    
+    # Test column addition
+    assert "avg_fare_per_mile_by_zones" in result_df.columns
+    
+    # Test return type  
+    assert isinstance(result, DataFrame)
+    
+    # Test column preservation
+    assert len(result_df.columns) == len(test_dataframe.columns) + 1
+    
+    # Test calculations with various scenarios
+    results = result_df.collect()
+    # ... validate multiple scenarios in one test
+
+def test_add_avg_fare_per_mile_by_zones_error_handling(self, spark_session):
+    """Test function error handling and edge cases."""
+    # Test missing columns
+    with pytest.raises(ValueError, match="Missing required columns"):
+        add_avg_fare_per_mile_by_zones(incomplete_df)
+    
+    # Test empty DataFrame handling
+    empty_result = add_avg_fare_per_mile_by_zones(empty_df)
+    assert empty_result.count() == 0
+    
+    # Test null value handling
+    null_result = add_avg_fare_per_mile_by_zones(null_df)
+    assert null_result.count() == len(null_data)
+```
+
+## Benefits of Concise Testing
+- Faster test execution
+- Easier maintenance
+- Focus on essential functionality
+- Clearer test intent
+- Reduced test code complexity

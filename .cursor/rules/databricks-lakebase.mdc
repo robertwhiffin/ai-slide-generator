@@ -1,0 +1,23 @@
+---
+alwaysApply: false
+---
+Ensure the service behaves like a singleton. That is, there should only be a single connection offered at once. If the connection doesn't yet exist on a call to query(), it creates the connection. If the connection is expired (that is, the time this connection was made was >59 minutes ago), it refreshes the connection.
+
+should expose as functional services like: **Lakebase.query()**, where the class is called Lakebase. this function should accept a string query, and return the rows if the query was successful or throw the encountered error if not. Do not manipulate the data afterwards or put it into a dataframe - return it as it is.
+
+**CRITICAL**: The query() method must ALWAYS call both cursor.fetchall() AND connection.commit() for every query, regardless of query type (SELECT, INSERT, UPDATE, DELETE), because all queries should be RETURNING \*. This ensures:
+
+1. INSERT/UPDATE queries with RETURNING clauses return their results to the frontend (RETURNING \*)
+2. All transactions are properly committed to the database
+3. Consistent behavior across all query types
+
+eg
+
+```python
+with self._connection.cursor() as cursor:
+    cursor.execute(sql)
+
+    rows = cursor.fetchall()
+    self._connection.commit()
+    return rows
+```

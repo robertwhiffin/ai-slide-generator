@@ -1,0 +1,7 @@
+---
+description:
+globs:
+alwaysApply: true
+---
+
+We will be building a web app. Please keep a short README.md that summarizes the purpose of the project, specifies technologies used and why, and how to get started using it. After each request, determine if this needs to be changed, and update it if so.
