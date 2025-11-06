@@ -21,11 +21,7 @@ from src.config.loader import (
 
 
 # Pydantic models for configuration sections
-class LLMStageSettings(BaseSettings):
-    """Settings for a specific LLM stage."""
 
-    temperature: float = 0.7
-    max_tokens: int = 4096
 
 
 class LLMSettings(BaseSettings):
@@ -49,7 +45,7 @@ class LLMSettings(BaseSettings):
     @field_validator("max_tokens")
     @classmethod
     def validate_max_tokens(cls, v: int) -> int:
-        if v < 1 or v > 32000:
+        if v < 1 or v > 64000:
             raise ValueError("max_tokens must be between 1 and 32000")
         return v
 
@@ -60,10 +56,7 @@ class GenieSettings(BaseSettings):
     model_config = SettingsConfigDict(extra="allow", populate_by_name=True)
 
     space_id: str = Field(alias="default_space_id")
-    timeout: int = 60
-    max_retries: int = 3
-    retry_delay: int = 2
-    poll_interval: int = 2
+    description: str = Field(alias="description")
 
 class APISettings(BaseSettings):
     """API configuration settings."""
@@ -187,7 +180,7 @@ class MLFlowSettings(BaseSettings):
     model_config = SettingsConfigDict(extra="allow")
 
     # Tracking
-    tracking_uri: str = "databricks"
+    tracking_uri: str = "databricks-uc"
     experiment_name: str
 
     # Tracing

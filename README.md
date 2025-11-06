@@ -22,9 +22,11 @@ An API-driven system that generates HTML slide decks using LLMs. The system take
 ## Technologies
 
 - **Python 3.10+**: Core language for robust type support and modern features
+- **LangChain**: Agent framework for tool-calling and multi-step workflows
+- **databricks-langchain**: Official Databricks LangChain integration for ChatDatabricks
 - **Databricks SDK**: Integration with Databricks LLM serving and Genie APIs
 - **Databricks Genie**: SQL-based structured data retrieval with natural language interface
-- **MLFlow**: Experiment tracking, metrics logging, and distributed tracing
+- **MLflow 3.0+**: Experiment tracking, metrics logging, and distributed tracing
 - **FastAPI**: Lightweight, high-performance API framework for endpoints
 - **Pydantic**: Data validation and settings management for type safety
 - **uv**: Fast Python package manager for dependency management
@@ -32,9 +34,10 @@ An API-driven system that generates HTML slide decks using LLMs. The system take
 - **ruff**: Fast linting and formatting for code quality
 
 ### Why These Technologies?
+- **LangChain + ChatDatabricks**: Official agent framework with native Databricks support for tool-calling
 - **Databricks LLM + Genie**: Native integration provides seamless data access and AI capabilities
 - **Agent Architecture**: Modern LLM pattern with tool-calling for flexible, extensible design
-- **MLFlow**: Built-in observability for debugging and experiment tracking in Databricks
+- **MLflow 3.0**: Manual tracing with custom spans for complete observability
 - **FastAPI**: Async support and automatic API documentation generation
 - **Pydantic**: Strong typing ensures data validation and reduces runtime errors
 - **PyYAML**: Flexible configuration management for prompts and settings
@@ -111,6 +114,8 @@ tools:
 ## Documentation
 
 - **[PROJECT_PLAN.md](PROJECT_PLAN.md)**: Comprehensive project plan with architecture, milestones, and implementation steps
+- **[docs/AGENT_IMPLEMENTATION_PLAN.md](docs/AGENT_IMPLEMENTATION_PLAN.md)**: Detailed agent implementation specifications
+- **[docs/IMPLEMENTATION_SUMMARY.md](docs/IMPLEMENTATION_SUMMARY.md)**: Summary of Phase 2 implementation with testing guide
 - **[pyproject.toml](pyproject.toml)**: Project configuration and dependencies
 
 ## Getting Started
@@ -249,17 +254,27 @@ mypy src/
 ```
 ai-slide-generator/
 ├── src/
-│   ├── api/              # FastAPI endpoints and request/response models
 │   ├── config/           # Configuration and settings management
-│   ├── services/         # Core business logic (LLM, Genie, orchestration)
-│   ├── prompts/          # System prompts and templates
-│   ├── models/           # Data models and validation
-│   └── utils/            # Shared utilities and helpers
+│   │   ├── client.py     # Singleton Databricks client
+│   │   ├── settings.py   # Pydantic settings with YAML/env loading
+│   │   └── loader.py     # YAML configuration loaders
+│   └── services/         # Core business logic
+│       ├── agent.py      # SlideGeneratorAgent with LangChain (✅ NEW)
+│       └── tools.py      # Genie tool for data queries
+├── config/
+│   ├── config.yaml       # Application configuration
+│   ├── mlflow.yaml       # MLflow tracking and serving config
+│   └── prompts.yaml      # System prompts and templates (✅ NEW)
 ├── tests/
 │   ├── unit/             # Unit tests
+│   │   ├── test_agent.py # Agent unit tests (✅ NEW)
+│   │   └── test_tools.py # Tool unit tests
 │   └── integration/      # Integration tests
-├── examples/             # Example questions and outputs
-├── docs/                 # Additional documentation
+│       ├── test_agent_integration.py  # Agent integration tests (✅ NEW)
+│       └── test_genie_integration.py  # Genie integration tests
+├── docs/                 # Documentation
+│   ├── AGENT_IMPLEMENTATION_PLAN.md  # Agent implementation specs
+│   └── IMPLEMENTATION_SUMMARY.md     # Phase 2 summary (✅ NEW)
 ├── pyproject.toml        # Project configuration
 ├── PROJECT_PLAN.md       # Detailed project plan
 └── README.md             # This file
@@ -268,16 +283,25 @@ ai-slide-generator/
 ## Current Status
 
 **Phase 1 - Foundation Setup**: ✅ Complete
-
-Completed:
 - ✅ Project structure and folder organization
 - ✅ YAML-based configuration system (`config.yaml` and `prompts.yaml`)
-- ✅ Singleton Databricks client with flexible authentication (profile, host/token, environment)
+- ✅ Singleton Databricks client with flexible authentication
 - ✅ Pydantic-based settings management with validation
 - ✅ Comprehensive error handling and logging
-- ✅ Pytest framework with fixtures and unit tests (15 tests passing)
+- ✅ Pytest framework with fixtures and unit tests
 
-**Next Phase**: Databricks Integration (LLM and Genie services) - see [PROJECT_PLAN.md](PROJECT_PLAN.md) for details
+**Phase 2 - LangChain Agent Implementation**: ✅ Complete
+- ✅ SlideGeneratorAgent with ChatDatabricks integration
+- ✅ LangChain StructuredTool for Genie queries
+- ✅ AgentExecutor with multi-turn tool calling
+- ✅ MLflow manual tracing with custom span attributes
+- ✅ Message formatting for chat interface support
+- ✅ Comprehensive unit tests (all passing)
+- ✅ Integration tests with mocked responses (all passing)
+- ✅ System prompt configuration in `config/prompts.yaml`
+- ✅ Complete conversation history capture
+
+**Next Phase**: FastAPI Integration and Frontend - see [PROJECT_PLAN.md](PROJECT_PLAN.md) for details
 
 ## Contributing
 

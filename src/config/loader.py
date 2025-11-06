@@ -117,11 +117,7 @@ def load_prompts() -> dict[str, Any]:
 
     # Validate required prompts
     required_prompts = [
-        "system_prompt",
-        "intent_analysis",
-        "data_interpretation",
-        "narrative_construction",
-        "html_generation",
+        "system_prompt"
     ]
     missing_prompts = [key for key in required_prompts if key not in prompts]
 

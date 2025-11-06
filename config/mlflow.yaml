@@ -4,7 +4,7 @@
 # Tracking Configuration
 tracking:
   uri: "databricks"  # Use Databricks workspace for tracking
-  experiment_name: "/Users/{username}/ai-slide-generator"  # Will be formatted with actual username
+  experiment_name: "/Workspace/Users/robert.whiffin@databricks.com/ai-slide-generator"  # Will be formatted with actual username
   
 # Tracing Configuration
 tracing:
