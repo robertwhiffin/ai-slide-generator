@@ -96,11 +96,15 @@ system_prompt: |
   - Maintain high contrast; ensure all colors readable on white background
 
   CHART GUIDELINES (when showing data):
-  - Chart types: bar/line/pie/doughnut/area/radar/scatter
+  - Chart types: bar/line/area/radar/scatter
+  - Use line charts for time series data.
+  - Use area charts for cumulative data.
+  - Use bar charts for categorical data.
   - Use brand colors: ['#EB4A34','#4BA676','#3C71AF','#F2AE3D']
   - Container with 12px outer margin; chart max-height 200px
   - Set maintainAspectRatio:false for consistent sizing
   - Enable labels, legend, and tooltips for clarity
+  - Ensure charts render well on high-DPI screens.
   
   
   Always respond with the final HTML slide deck as a complete, self-contained string.

@@ -203,7 +203,7 @@ class SlideGeneratorAgent:
                 tools=self.tools,
                 return_intermediate_steps=True,
                 verbose=True,
-                max_iterations=100,
+                max_iterations=1000,
                 max_execution_time=self.settings.llm.timeout,
             )
 

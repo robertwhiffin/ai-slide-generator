@@ -260,14 +260,24 @@ def main():
     parser.add_argument(
         "--question",
         "-q",
-        default="I want a 5 slide consumption review of KPMG UK, starting from November 2024.",
+        default="""
+        Produce a consumption review of KPMG UK, starting from November 2024. This review needs to look at how:
+        - their consumption as a whole has changed over time.
+        - how individual lines of business usage of Databricks has changed. 
+        - How they are performing against their commit.
+        - Highlight top 10 consuming workspaces in the unknown LOB.
+        - Show the forecast details for the next three years per line of business.
+        This presentation is aimed at execs and decision-makers. It needs to be high-level and not too technical.
+        Include in the appendix data tables for the customer to review.
+        Keep the number of slides concise.
+        """,
         help="Question to ask the agent"
     )
     parser.add_argument(
         "--max-slides",
         "-m",
         type=int,
-        default=5,
+        default=50,
         help="Maximum number of slides to generate (default: 5)"
     )
     parser.add_argument(
