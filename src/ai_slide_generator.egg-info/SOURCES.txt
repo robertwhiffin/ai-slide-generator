@@ -13,6 +13,8 @@ src/config/loader.py
 src/config/settings.py
 src/models/__init__.py
 src/models/mlflow_wrapper.py
+src/models/slide.py
+src/models/slide_deck.py
 src/services/__init__.py
 src/services/agent.py
 src/services/tools.py
