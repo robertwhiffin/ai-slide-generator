@@ -401,7 +401,7 @@ def main():
     parser.add_argument(
         "--question",
         "-q",
-        default="Create a brief overview of Q3 sales performance with 3-5 slides",
+        default="Create a brief overview of KPMG UK Consumption with 3-5 slides",
         help="Initial question to start the conversation"
     )
     parser.add_argument(

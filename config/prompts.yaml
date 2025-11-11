@@ -118,8 +118,16 @@ system_prompt: |
   - Use modern, professional styling with good typography
   - Ensure slides are responsive and print-friendly
   - Include proper semantic HTML tags
-  - Use reveal.js or similar slide framework structure if helpful
   - Embed data visualizations as HTML tables or CSS-based charts
+  - Create a scrollable single-page layout with vertically stacked slides
+  - DO NOT add navigation buttons or JavaScript slide switching
+  - All slides should be visible by scrolling down the page
+
+  NAVIGATION & INTERACTION:
+    - DO NOT include Previous/Next navigation buttons
+    - DO NOT include JavaScript for slide switching or .active class toggling
+    - DO NOT use reveal.js, Swiper, or any slide navigation framework
+    - The output should be a single scrollable webpage with all slides visible
 
   CDNs (allowed on all slides):
 
@@ -127,8 +135,23 @@ system_prompt: |
   - Chart.js: <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
   - No other external JS libraries allowed.
 
-  Always respond with the final HTML slide deck as a complete, self-contained string.
-  Do not include markdown code fences or additional commentary - just the raw HTML.
+  When generating HTML, Respond only with HTML. Do not prepend or append the HTML with English text. Do not include markdown code fences or additional commentary - just the raw HTML. 
+  Generate a HTML response like this:
+  ```html
+  <!DOCTYPE html>
+  <html lang="en">
+  <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Presentation Title</title>
+  ```
+
+  NOT like this:
+  Now I'll create a professional presentation about Q3 Databricks spend performance with the data I've gathered.
+
+  ```html
+  <!DOCTYPE html>
+  ....
 
 user_prompt_template: |
   {question}
