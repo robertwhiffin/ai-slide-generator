@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Test Presentation</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            font-family: Arial, sans-serif;
+        }
+        .slide {
+            width: 100vw;
+            height: 100vh;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            page-break-after: always;
+        }
+        h1 {
+            color: #333;
+            font-size: 3rem;
+        }
+    </style>
+</head>
+<body>
+
+<div class="slide">
+    <h1>Slide 1: Title Slide</h1>
+    <div class="subtitle">Welcome to the presentation</div>
+</div>
+
+<div class="slide">
+    <h1>Slide 2: Content Slide</h1>
+    <div class="content">
+        <p>This is some content</p>
+        <ul>
+            <li>Point 1</li>
+            <li>Point 2</li>
+        </ul>
+    </div>
+</div>
+
+<div class="slide">
+    <h1>Slide 3: Chart Slide</h1>
+    <canvas id="myChart"></canvas>
+</div>
+
+<script>
+    // Chart.js configuration
+    const ctx = document.getElementById('myChart');
+    if (ctx) {
+        new Chart(ctx, {
+            type: 'bar',
+            data: {
+                labels: ['Red', 'Blue', 'Yellow'],
+                datasets: [{
+                    label: '# of Votes',
+                    data: [12, 19, 3]
+                }]
+            }
+        });
+    }
+</script>
+
+</body>
+</html>
+
