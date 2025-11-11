@@ -130,17 +130,24 @@ class SlideDeck:
             head_meta=head_meta
         )
     
-    def add_slide(self, slide: Slide, position: Optional[int] = None) -> None:
-        """Insert slide at position (or append if position is None).
+    def insert_slide(self, slide: Slide, position: int) -> None:
+        """Insert slide at the specified position.
         
         Args:
-            slide: The Slide object to add
-            position: Index to insert at (None = append to end)
+            slide: The Slide object to insert
+            position: Index to insert at
+        Raises:
+            IndexError: If position is out of range
         """
-        if position is None:
-            self.slides.append(slide)
-        else:
-            self.slides.insert(position, slide)
+        self.slides.insert(position, slide)
+
+    def append_slide(self, slide: Slide) -> None:
+        """Append a slide to the end of the slide deck.
+        
+        Args:
+            slide: The Slide object to append
+        """
+        self.slides.append(slide)
     
     def remove_slide(self, index: int) -> Slide:
         """Remove and return slide at index.

@@ -78,7 +78,7 @@ class TestCompleteWorkflow:
         cloned = deck.slides[0].clone()
         
         # Insert at position 1
-        deck.add_slide(cloned, position=1)
+        deck.insert_slide(cloned, position=1)
         
         assert len(deck.slides) == 4
         assert "Title Slide" in deck.slides[0].html
@@ -240,7 +240,7 @@ class TestEdgeCasesIntegration:
 </div>'''
         
         custom_slide = Slide(html=custom_html, slide_id="custom_1")
-        deck.add_slide(custom_slide, position=1)
+        deck.insert_slide(custom_slide, position=1)
         
         # Save and verify
         output_path = tmp_path / "with_custom.html"
@@ -258,7 +258,7 @@ class TestEdgeCasesIntegration:
         
         # Add a slide
         slide = Slide(html='<div class="slide"><h1>First</h1></div>')
-        deck.add_slide(slide)
+        deck.append_slide(slide)
         
         assert len(deck) == 1
         

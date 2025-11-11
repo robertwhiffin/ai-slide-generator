@@ -162,21 +162,21 @@ class TestHTMLParsing:
 class TestSlideOperations:
     """Test slide manipulation operations."""
     
-    def test_add_slide_at_end(self, sample_deck):
-        """Test adding slide at end of deck."""
+    def test_append_slide(self, sample_deck):
+        """Test appending slide at end of deck."""
         new_slide = Slide(html='<div class="slide"><h1>New Slide</h1></div>')
         initial_count = len(sample_deck)
         
-        sample_deck.add_slide(new_slide)
+        sample_deck.append_slide(new_slide)
         
         assert len(sample_deck) == initial_count + 1
         assert sample_deck.slides[-1] == new_slide
     
-    def test_add_slide_at_position(self, sample_deck):
+    def test_insert_slide(self, sample_deck):
         """Test inserting slide at specific position."""
         new_slide = Slide(html='<div class="slide"><h1>Inserted</h1></div>')
         
-        sample_deck.add_slide(new_slide, position=1)
+        sample_deck.insert_slide(new_slide, position=1)
         
         assert len(sample_deck) == 3
         assert sample_deck.slides[1] == new_slide
@@ -200,7 +200,7 @@ class TestSlideOperations:
     def test_move_slide(self, sample_deck):
         """Test moving slide from one position to another."""
         # Add a third slide for clearer testing
-        sample_deck.add_slide(Slide(html='<div class="slide"><h1>Slide 3</h1></div>'))
+        sample_deck.append_slide(Slide(html='<div class="slide"><h1>Slide 3</h1></div>'))
         
         # Move slide from index 2 to index 0
         sample_deck.move_slide(from_index=2, to_index=0)

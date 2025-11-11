@@ -246,11 +246,11 @@ removed = deck.remove_slide(3)      # Remove a slide
 
 # Add new slides
 new_slide = Slide(html='<div class="slide"><h1>New Slide</h1></div>')
-deck.add_slide(new_slide, position=4)
+deck.insert_slide(new_slide, position=4)
 
 # Clone existing slide
 cloned = deck[0].clone()
-deck.add_slide(cloned)
+deck.append_slide(cloned)
 
 # Modify CSS globally
 deck.css = deck.css.replace('#EB4A34', '#00A3E0')

@@ -1,6 +1,11 @@
 """Demo script showing slide parser capabilities."""
 
+import sys
 from pathlib import Path
+
+# Add parent directory to path to allow imports
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
 from src.models import SlideDeck, Slide
 
 
@@ -52,8 +57,8 @@ def main():
         cloned = deck[0].clone()
         print(f"   ✓ Cloned slide 1")
         
-        # Add cloned slide at position 1
-        deck.add_slide(cloned, position=1)
+        # Insert cloned slide at position 1
+        deck.insert_slide(cloned, position=1)
         print(f"   ✓ Inserted clone at position 2")
         print(f"   ✓ New slide count: {len(deck)}")
     
