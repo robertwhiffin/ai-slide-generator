@@ -29,6 +29,8 @@ An API-driven system that generates HTML slide decks using LLMs. The system take
 - **MLflow 3.0+**: Experiment tracking, metrics logging, and distributed tracing
 - **FastAPI**: Lightweight, high-performance API framework for endpoints
 - **Pydantic**: Data validation and settings management for type safety
+- **BeautifulSoup4**: HTML parsing for slide deck manipulation
+- **lxml**: Fast HTML parser backend for BeautifulSoup
 - **uv**: Fast Python package manager for dependency management
 - **pytest**: Testing framework for comprehensive test coverage
 - **ruff**: Fast linting and formatting for code quality
@@ -40,6 +42,7 @@ An API-driven system that generates HTML slide decks using LLMs. The system take
 - **MLflow 3.0**: Manual tracing with custom spans for complete observability
 - **FastAPI**: Async support and automatic API documentation generation
 - **Pydantic**: Strong typing ensures data validation and reduces runtime errors
+- **BeautifulSoup4**: Robust HTML parsing that handles AI-generated slides with varying structure
 - **PyYAML**: Flexible configuration management for prompts and settings
 - **uv**: Significantly faster than pip for dependency resolution
 
@@ -114,6 +117,7 @@ tools:
 ## Documentation
 
 - **[PROJECT_PLAN.md](PROJECT_PLAN.md)**: Comprehensive project plan with architecture, milestones, and implementation steps
+- **[SLIDE_PARSER_DESIGN.md](SLIDE_PARSER_DESIGN.md)**: Detailed slide parser design and implementation specifications
 - **[docs/AGENT_IMPLEMENTATION_PLAN.md](docs/AGENT_IMPLEMENTATION_PLAN.md)**: Detailed agent implementation specifications
 - **[docs/IMPLEMENTATION_SUMMARY.md](docs/IMPLEMENTATION_SUMMARY.md)**: Summary of Phase 2 implementation with testing guide
 - **[pyproject.toml](pyproject.toml)**: Project configuration and dependencies
@@ -220,6 +224,47 @@ curl -X POST http://localhost:8000/generate-slides \
   }'
 ```
 
+### Using the Slide Parser
+
+The slide parser allows you to parse, manipulate, and reconstruct HTML slide decks:
+
+```python
+from src.models.slide_deck import SlideDeck
+from src.models.slide import Slide
+
+# Parse existing HTML file
+deck = SlideDeck.from_html("output/slides.html")
+
+# Access slides
+print(f"Number of slides: {len(deck)}")
+first_slide = deck[0]
+
+# Manipulate slides
+deck.swap_slides(0, 1)              # Swap first two slides
+deck.move_slide(from_index=5, to_index=2)  # Move slide
+removed = deck.remove_slide(3)      # Remove a slide
+
+# Add new slides
+new_slide = Slide(html='<div class="slide"><h1>New Slide</h1></div>')
+deck.add_slide(new_slide, position=4)
+
+# Clone existing slide
+cloned = deck[0].clone()
+deck.add_slide(cloned)
+
+# Modify CSS globally
+deck.css = deck.css.replace('#EB4A34', '#00A3E0')
+
+# Reconstruct and save
+deck.save("output/modified_slides.html")
+
+# For web APIs
+deck_json = deck.to_dict()  # JSON-serializable dict
+slide_html = deck.render_slide(3)  # Render individual slide
+```
+
+See [SLIDE_PARSER_DESIGN.md](SLIDE_PARSER_DESIGN.md) for detailed design and API documentation.
+
 ## Development
 
 ### Install dev dependencies:
@@ -258,25 +303,34 @@ ai-slide-generator/
 │   │   ├── client.py     # Singleton Databricks client
 │   │   ├── settings.py   # Pydantic settings with YAML/env loading
 │   │   └── loader.py     # YAML configuration loaders
+│   ├── models/           # Data models
+│   │   ├── slide.py      # Slide class for individual slides (✅ NEW)
+│   │   └── slide_deck.py # SlideDeck class for parsing/knitting HTML (✅ NEW)
 │   └── services/         # Core business logic
-│       ├── agent.py      # SlideGeneratorAgent with LangChain (✅ NEW)
+│       ├── agent.py      # SlideGeneratorAgent with LangChain
 │       └── tools.py      # Genie tool for data queries
 ├── config/
 │   ├── config.yaml       # Application configuration
 │   ├── mlflow.yaml       # MLflow tracking and serving config
-│   └── prompts.yaml      # System prompts and templates (✅ NEW)
+│   └── prompts.yaml      # System prompts and templates
 ├── tests/
+│   ├── fixtures/
+│   │   └── sample_slides.html  # Sample HTML for testing (✅ NEW)
 │   ├── unit/             # Unit tests
-│   │   ├── test_agent.py # Agent unit tests (✅ NEW)
-│   │   └── test_tools.py # Tool unit tests
+│   │   ├── test_agent.py       # Agent unit tests
+│   │   ├── test_slide.py       # Slide class tests (✅ NEW)
+│   │   ├── test_slide_deck.py  # SlideDeck class tests (✅ NEW)
+│   │   └── test_tools.py       # Tool unit tests
 │   └── integration/      # Integration tests
-│       ├── test_agent_integration.py  # Agent integration tests (✅ NEW)
-│       └── test_genie_integration.py  # Genie integration tests
+│       ├── test_agent_integration.py      # Agent integration tests
+│       ├── test_genie_integration.py      # Genie integration tests
+│       └── test_slide_deck_integration.py # Slide deck integration tests (✅ NEW)
 ├── docs/                 # Documentation
 │   ├── AGENT_IMPLEMENTATION_PLAN.md  # Agent implementation specs
-│   └── IMPLEMENTATION_SUMMARY.md     # Phase 2 summary (✅ NEW)
+│   └── IMPLEMENTATION_SUMMARY.md     # Phase 2 summary
 ├── pyproject.toml        # Project configuration
 ├── PROJECT_PLAN.md       # Detailed project plan
+├── SLIDE_PARSER_DESIGN.md # Slide parser design (✅ NEW)
 └── README.md             # This file
 ```
 
@@ -300,6 +354,18 @@ ai-slide-generator/
 - ✅ Integration tests with mocked responses (all passing)
 - ✅ System prompt configuration in `config/prompts.yaml`
 - ✅ Complete conversation history capture
+
+**Phase 3 - Slide Parser Implementation**: ✅ Complete
+- ✅ `Slide` class for wrapping individual slide HTML
+- ✅ `SlideDeck` class for parsing, manipulating, and reconstructing HTML
+- ✅ BeautifulSoup4 integration for robust HTML parsing
+- ✅ Support for CSS, JavaScript, and metadata extraction
+- ✅ Slide manipulation operations (add, remove, move, swap)
+- ✅ HTML reconstruction (knitting) for full decks and individual slides
+- ✅ Web API support with JSON serialization (`to_dict()`)
+- ✅ Round-trip testing (parse → manipulate → save → parse)
+- ✅ 64 comprehensive tests (all passing)
+- ✅ Integration with existing output directory
 
 **Next Phase**: FastAPI Integration and Frontend - see [PROJECT_PLAN.md](PROJECT_PLAN.md) for details
 
