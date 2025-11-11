@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Message as MessageType } from '../../types/message';
+import type { Message as MessageType } from '../../types/message';
 
 interface MessageProps {
   message: MessageType;
@@ -78,4 +78,3 @@ export const Message: React.FC<MessageProps> = ({ message }) => {
     </div>
   );
 };
-

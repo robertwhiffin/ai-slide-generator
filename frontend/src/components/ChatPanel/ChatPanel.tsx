@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
-import { Message, ChatResponse } from '../../types/message';
-import { SlideDeck } from '../../types/slide';
+import type { Message } from '../../types/message';
+import type { SlideDeck } from '../../types/slide';
 import { MessageList } from './MessageList';
 import { ChatInput } from './ChatInput';
 import { api } from '../../services/api';
@@ -60,4 +60,3 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({ onSlidesGenerated }) => {
     </div>
   );
 };
-

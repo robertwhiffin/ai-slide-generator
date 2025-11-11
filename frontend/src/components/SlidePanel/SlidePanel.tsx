@@ -1,5 +1,5 @@
 import React from 'react';
-import { SlideDeck } from '../../types/slide';
+import type { SlideDeck } from '../../types/slide';
 import { SlideTile } from './SlideTile';
 
 interface SlidePanelProps {
@@ -42,4 +42,3 @@ export const SlidePanel: React.FC<SlidePanelProps> = ({ slideDeck }) => {
     </div>
   );
 };
-

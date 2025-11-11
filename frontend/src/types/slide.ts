@@ -12,4 +12,3 @@ export interface SlideDeck {
   scripts: string;
   slides: Slide[];
 }
-

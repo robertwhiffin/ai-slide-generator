@@ -1,5 +1,5 @@
-import React, { useMemo } from 'react';
-import { Slide, SlideDeck } from '../../types/slide';
+import React, { useMemo, useRef, useState, useEffect } from 'react';
+import type { Slide, SlideDeck } from '../../types/slide';
 
 interface SlideTileProps {
   slide: Slide;
@@ -7,7 +7,33 @@ interface SlideTileProps {
   index: number;
 }
 
+const SLIDE_WIDTH = 1280;
+const SLIDE_HEIGHT = 720;
+const MAX_SCALE = 1.5;
+
 export const SlideTile: React.FC<SlideTileProps> = ({ slide, slideDeck, index }) => {
+  const containerRef = useRef<HTMLDivElement>(null);
+  const [scale, setScale] = useState(1);
+
+  // Calculate scale based on container width
+  useEffect(() => {
+    const updateScale = () => {
+      if (containerRef.current) {
+        const containerWidth = containerRef.current.offsetWidth;
+        // Scale to fit width, but cap at MAX_SCALE (1.5x)
+        const calculatedScale = Math.min(containerWidth / SLIDE_WIDTH, MAX_SCALE);
+        setScale(calculatedScale);
+      }
+    };
+
+    // Initial calculation
+    updateScale();
+
+    // Update on window resize
+    window.addEventListener('resize', updateScale);
+    return () => window.removeEventListener('resize', updateScale);
+  }, []);
+
   // Build complete HTML for iframe
   const slideHTML = useMemo(() => {
     return `
@@ -29,6 +55,9 @@ export const SlideTile: React.FC<SlideTileProps> = ({ slide, slideDeck, index })
     `.trim();
   }, [slide.html, slideDeck.css, slideDeck.scripts, slideDeck.external_scripts]);
 
+  // Calculate scaled dimensions
+  const scaledHeight = SLIDE_HEIGHT * scale;
+
   return (
     <div className="bg-white rounded-lg shadow-md overflow-hidden">
       {/* Slide Header */}
@@ -40,14 +69,20 @@ export const SlideTile: React.FC<SlideTileProps> = ({ slide, slideDeck, index })
       </div>
 
       {/* Slide Preview */}
-      <div className="relative bg-gray-200" style={{ paddingBottom: '56.25%' }}>
+      <div 
+        ref={containerRef}
+        className="relative bg-gray-200 overflow-hidden"
+        style={{ height: `${scaledHeight}px` }}
+      >
         <iframe
           srcDoc={slideHTML}
           title={`Slide ${index + 1}`}
-          className="absolute top-0 left-0 w-full h-full border-0"
+          className="absolute top-0 left-0 border-0"
           sandbox="allow-scripts"
           style={{
-            transform: 'scale(1)',
+            width: `${SLIDE_WIDTH}px`,
+            height: `${SLIDE_HEIGHT}px`,
+            transform: `scale(${scale})`,
             transformOrigin: 'top left',
           }}
         />
@@ -55,4 +90,3 @@ export const SlideTile: React.FC<SlideTileProps> = ({ slide, slideDeck, index })
     </div>
   );
 };
-

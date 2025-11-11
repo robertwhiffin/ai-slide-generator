@@ -1,5 +1,5 @@
 import React, { useEffect, useRef } from 'react';
-import { Message as MessageType } from '../../types/message';
+import type { Message as MessageType } from '../../types/message';
 import { Message } from './Message';
 
 interface MessageListProps {
@@ -32,4 +32,3 @@ export const MessageList: React.FC<MessageListProps> = ({ messages, isLoading })
     </div>
   );
 };
-

@@ -1,4 +1,4 @@
-import { SlideDeck } from './slide';
+import type { SlideDeck } from './slide';
 
 export type MessageRole = 'user' | 'assistant' | 'tool';
 
@@ -23,4 +23,3 @@ export interface ChatResponse {
     tool_calls: number;
   };
 }
-

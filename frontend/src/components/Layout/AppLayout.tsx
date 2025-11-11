@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
+import type { SlideDeck } from '../../types/slide';
 import { ChatPanel } from '../ChatPanel/ChatPanel';
 import { SlidePanel } from '../SlidePanel/SlidePanel';
-import { SlideDeck } from '../../types/slide';
 
 export const AppLayout: React.FC = () => {
   const [slideDeck, setSlideDeck] = useState<SlideDeck | null>(null);
@@ -29,4 +29,3 @@ export const AppLayout: React.FC = () => {
     </div>
   );
 };
-
