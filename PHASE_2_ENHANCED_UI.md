@@ -449,198 +449,70 @@ export const api = {
 
 ---
 
-### Step 4: Real-Time Chat Updates with Streaming (Estimated: 4-5 hours)
+### Step 4: Amusing Loading Messages (Estimated: 1 hour)
 
 #### 4.1 Problem Statement
 
-Currently, the chat interface waits for the entire agent conversation to complete (including all tool calls and final response) before showing any messages. This creates a poor UX where users wait 10-30 seconds with no feedback.
+Currently, the chat interface shows only a spinning circle while users wait 10-30 seconds for the agent to respond. This is boring and gives no feedback about what's happening.
 
-**Goal**: Show messages in real-time as they occur:
+**Goal**: Make waiting more entertaining with amusing, tongue-in-cheek loading messages:
 1. User message appears immediately when sent
-2. Tool calls appear as they execute
-3. Assistant response appears when available
-4. Loading indicator shows while agent is working
+2. Show rotating funny messages while agent works
+3. Keep it lighthearted and playful
 
-#### 4.2 Backend - Add Streaming Endpoint
+#### 4.2 Funny Loading Messages
 
-**`src/api/routes/chat.py`**
+Create a collection of amusing messages to rotate through:
 
-Add a streaming endpoint using Server-Sent Events (SSE):
-
-```python
-from fastapi import APIRouter, HTTPException
-from fastapi.responses import StreamingResponse
-import json
-import asyncio
-from typing import AsyncGenerator
-
-router = APIRouter(prefix="/api", tags=["chat"])
-
-# ... existing chat endpoint ...
-
-@router.post("/chat/stream")
-async def send_message_stream(request: ChatRequest) -> StreamingResponse:
-    """
-    Send a message with real-time streaming updates.
-    
-    Streams events as they occur:
-    - user_message: User's message
-    - tool_call: Tool execution started
-    - tool_result: Tool execution completed
-    - assistant_message: Final assistant response
-    - slides_generated: Slides are ready
-    - error: Error occurred
-    """
-    
-    async def generate_events() -> AsyncGenerator[str, None]:
-        try:
-            # Immediately send user message
-            yield f"data: {json.dumps({'type': 'user_message', 'content': request.message, 'timestamp': datetime.utcnow().isoformat()})}\n\n"
-            
-            # Simulate streaming by yielding events as agent works
-            # This is a simplified version - real implementation would require
-            # modifying the agent to yield intermediate results
-            
-            # For now, we can show "thinking" state
-            yield f"data: {json.dumps({'type': 'agent_thinking', 'message': 'Analyzing your request...'})}\n\n"
-            await asyncio.sleep(0.5)
-            
-            # Run the actual agent (this still blocks, but we've shown user message)
-            chat_service = get_chat_service()
-            result = chat_service.send_message(
-                message=request.message,
-                max_slides=request.max_slides
-            )
-            
-            # Stream each message from the result
-            for msg in result["messages"]:
-                event_type = {
-                    'user': 'user_message',
-                    'tool': 'tool_call',
-                    'assistant': 'assistant_message'
-                }.get(msg['role'], 'message')
-                
-                yield f"data: {json.dumps({'type': event_type, **msg})}\n\n"
-                await asyncio.sleep(0.1)  # Small delay for visual effect
-            
-            # Send slide deck if available
-            if result.get("slide_deck"):
-                yield f"data: {json.dumps({'type': 'slides_generated', 'slide_deck': result['slide_deck']})}\n\n"
-            
-            # Send completion event
-            yield f"data: {json.dumps({'type': 'complete', 'metadata': result['metadata']})}\n\n"
-            
-        except Exception as e:
-            yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
-    
-    return StreamingResponse(
-        generate_events(),
-        media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-            "X-Accel-Buffering": "no",
-        }
-    )
-```
-
-**Note**: For true streaming, you'd need to modify the agent to yield intermediate results. For Phase 2, we can:
-1. Show user message immediately
-2. Show "thinking" indicator
-3. Stream the completed messages with small delays for visual effect
-
-#### 4.3 Frontend - Update API Client for Streaming
-
-**`src/services/api.ts`**
-
-Add streaming method:
+**`src/utils/loadingMessages.ts`** (new file)
 
 ```typescript
-export const api = {
-  // ... existing methods ...
+export const LOADING_MESSAGES = [
+  "🧠 Teaching the AI about comedy timing...",
+  "📊 Convincing data to tell its story...",
+  "🎨 Making slides less boring than usual...",
+  "🔮 Consulting the data oracle...",
+  "🎭 Rehearsing the presentation...",
+  "📈 Turning numbers into narratives...",
+  "☕ Waiting for the AI to finish its coffee...",
+  "🎪 Juggling your data points...",
+  "🎯 Aiming for chart perfection...",
+  "🚀 Launching queries into the data stratosphere...",
+  "🎼 Composing a data symphony...",
+  "🔍 Finding insights hiding in plain sight...",
+  "🧙 Casting data visualization spells...",
+  "🎨 Choosing the perfect shade of corporate blue...",
+  "📚 Reading 'Slide Design for Dummies'...",
+  "🎲 Rolling for critical insights...",
+  "🌟 Sprinkling some data magic...",
+  "🎭 Method acting as a bar chart...",
+  "🔬 Conducting very serious data science...",
+  "🎨 Arguing with Comic Sans about life choices...",
+];
 
-  /**
-   * Send a message with real-time streaming updates
-   * Phase 4: Add sessionId parameter
-   */
-  async sendMessageStream(
-    message: string,
-    maxSlides: number,
-    onEvent: (event: ChatEvent) => void
-  ): Promise<void> {
-    const response = await fetch(`${API_BASE_URL}/api/chat/stream`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        message,
-        max_slides: maxSlides,
-      }),
-    });
-
-    if (!response.ok) {
-      throw new ApiError(response.status, 'Failed to send message');
-    }
-
-    const reader = response.body?.getReader();
-    const decoder = new TextDecoder();
-
-    if (!reader) {
-      throw new Error('No response body');
-    }
-
-    try {
-      while (true) {
-        const { done, value } = await reader.read();
-        
-        if (done) break;
-
-        const chunk = decoder.decode(value);
-        const lines = chunk.split('\n\n');
-
-        for (const line of lines) {
-          if (line.startsWith('data: ')) {
-            const data = line.slice(6);
-            try {
-              const event = JSON.parse(data);
-              onEvent(event);
-            } catch (e) {
-              console.error('Failed to parse SSE event:', e);
-            }
-          }
-        }
-      }
-    } finally {
-      reader.releaseLock();
-    }
-  },
+export const getRandomLoadingMessage = (): string => {
+  return LOADING_MESSAGES[Math.floor(Math.random() * LOADING_MESSAGES.length)];
 };
 
-// New event type
-export interface ChatEvent {
-  type: 'user_message' | 'tool_call' | 'tool_result' | 'assistant_message' | 
-        'slides_generated' | 'agent_thinking' | 'complete' | 'error';
-  content?: string;
-  message?: string;
-  timestamp?: string;
-  slide_deck?: SlideDeck;
-  metadata?: any;
-  tool_call?: any;
-}
+export const getRotatingLoadingMessage = (index: number): string => {
+  return LOADING_MESSAGES[index % LOADING_MESSAGES.length];
+};
 ```
 
-#### 4.4 Frontend - Update ChatPanel for Streaming
+#### 4.3 Frontend - Update ChatPanel with Funny Messages
 
 **`src/components/ChatPanel/ChatPanel.tsx`**
 
+Update to show user message immediately and cycle through funny loading messages:
+
 ```typescript
-import React, { useState } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import type { Message } from '../../types/message';
 import type { SlideDeck } from '../../types/slide';
 import { MessageList } from './MessageList';
 import { ChatInput } from './ChatInput';
-import { api, ChatEvent } from '../../services/api';
+import { api } from '../../services/api';
+import { getRotatingLoadingMessage } from '../../utils/loadingMessages';
 
 interface ChatPanelProps {
   onSlidesGenerated: (slideDeck: SlideDeck) => void;
@@ -651,87 +523,66 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({ onSlidesGenerated }) => {
   const [isLoading, setIsLoading] = useState(false);
   const [loadingMessage, setLoadingMessage] = useState<string>('');
   const [error, setError] = useState<string | null>(null);
+  const messageIndexRef = useRef(0);
+  const intervalRef = useRef<NodeJS.Timeout | null>(null);
 
   const handleSendMessage = async (content: string, maxSlides: number) => {
     setIsLoading(true);
     setError(null);
-    setLoadingMessage('Sending message...');
+
+    // 1. Show user message immediately
+    setMessages(prev => [...prev, {
+      role: 'user',
+      content: content,
+      timestamp: new Date().toISOString(),
+    }]);
+
+    // 2. Start rotating through funny messages
+    messageIndexRef.current = 0;
+    setLoadingMessage(getRotatingLoadingMessage(0));
+    
+    intervalRef.current = setInterval(() => {
+      messageIndexRef.current += 1;
+      setLoadingMessage(getRotatingLoadingMessage(messageIndexRef.current));
+    }, 3000); // Change message every 3 seconds
 
     try {
-      await api.sendMessageStream(content, maxSlides, (event: ChatEvent) => {
-        switch (event.type) {
-          case 'user_message':
-            // Add user message immediately
-            setMessages(prev => [...prev, {
-              role: 'user',
-              content: event.content || content,
-              timestamp: event.timestamp || new Date().toISOString(),
-            }]);
-            setLoadingMessage('Processing...');
-            break;
-
-          case 'agent_thinking':
-            setLoadingMessage(event.message || 'Thinking...');
-            break;
-
-          case 'tool_call':
-            // Add tool call message
-            setMessages(prev => [...prev, {
-              role: 'assistant',
-              content: `Using tool: ${event.tool_call?.name || 'unknown'}`,
-              timestamp: event.timestamp || new Date().toISOString(),
-              tool_call: event.tool_call,
-            }]);
-            setLoadingMessage('Executing tool...');
-            break;
-
-          case 'tool_result':
-            // Add tool result message
-            setMessages(prev => [...prev, {
-              role: 'tool',
-              content: event.content || '',
-              timestamp: event.timestamp || new Date().toISOString(),
-            }]);
-            setLoadingMessage('Analyzing results...');
-            break;
-
-          case 'assistant_message':
-            // Add assistant message
-            setMessages(prev => [...prev, {
-              role: 'assistant',
-              content: event.content || '',
-              timestamp: event.timestamp || new Date().toISOString(),
-            }]);
-            setLoadingMessage('Generating slides...');
-            break;
-
-          case 'slides_generated':
-            // Update slides
-            if (event.slide_deck) {
-              onSlidesGenerated(event.slide_deck);
-            }
-            setLoadingMessage('Complete!');
-            break;
-
-          case 'complete':
-            setIsLoading(false);
-            setLoadingMessage('');
-            break;
-
-          case 'error':
-            setError(event.message || 'An error occurred');
-            setIsLoading(false);
-            setLoadingMessage('');
-            break;
-        }
-      });
+      // 3. Call API (blocking, but user sees funny messages)
+      const response = await api.sendMessage(content, maxSlides);
+      
+      // 4. Stop rotating messages
+      if (intervalRef.current) {
+        clearInterval(intervalRef.current);
+      }
+      
+      // 5. Add real messages (skip user message as we already showed it)
+      const newMessages = response.messages.filter(m => m.role !== 'user');
+      setMessages(prev => [...prev, ...newMessages]);
+      
+      // 6. Update slides
+      if (response.slide_deck) {
+        onSlidesGenerated(response.slide_deck);
+      }
     } catch (err) {
       console.error('Failed to send message:', err);
       setError(err instanceof Error ? err.message : 'Failed to send message');
+    } finally {
+      if (intervalRef.current) {
+        clearInterval(intervalRef.current);
+      }
       setIsLoading(false);
       setLoadingMessage('');
     }
   };
+
+  // Cleanup interval on unmount
+  useEffect(() => {
+    return () => {
+      if (intervalRef.current) {
+        clearInterval(intervalRef.current);
+      }
+    };
+  }, []);
 
   return (
     <div className="flex flex-col h-full bg-gray-50">
@@ -739,7 +590,7 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({ onSlidesGenerated }) => {
       <div className="p-4 border-b bg-white">
         <h2 className="text-lg font-semibold">Chat</h2>
         {loadingMessage && (
-          <p className="text-xs text-gray-500 mt-1">{loadingMessage}</p>
+          <p className="text-xs text-gray-600 mt-1 italic">{loadingMessage}</p>
         )}
       </div>
 
@@ -762,88 +613,14 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({ onSlidesGenerated }) => {
 };
 ```
 
-#### 4.5 Testing Real-Time Updates
-
-1. **Immediate User Message**: 
-   - Send a message
-   - User message should appear instantly
-   - No waiting for agent
-
-2. **Loading States**:
-   - "Processing..." should show after user message
-   - "Executing tool..." during tool calls
-   - "Analyzing results..." after tool completion
-   - "Generating slides..." for final response
-
-3. **Progressive Updates**:
-   - Tool calls appear as they execute
-   - Tool results appear after each tool
-   - Assistant message appears when ready
-   - Slides appear last
-
-4. **Error Handling**:
-   - If agent fails, error message shows
-   - Previous messages remain visible
-   - User can retry
-
-#### 4.6 Alternative: Simpler Approach (If SSE is Complex)
-
-If Server-Sent Events are too complex for Phase 2, use this simpler approach:
-
-**Optimistic UI Updates**:
-
-```typescript
-const handleSendMessage = async (content: string, maxSlides: number) => {
-  setIsLoading(true);
-  setError(null);
-
-  // 1. Show user message immediately (optimistic)
-  setMessages(prev => [...prev, {
-    role: 'user',
-    content: content,
-    timestamp: new Date().toISOString(),
-  }]);
-
-  // 2. Show "thinking" message
-  const thinkingId = Date.now();
-  setMessages(prev => [...prev, {
-    role: 'assistant',
-    content: 'Analyzing your request and gathering data...',
-    timestamp: new Date().toISOString(),
-    id: thinkingId, // temporary ID
-  }]);
-
-  try {
-    // 3. Call API (blocking)
-    const response = await api.sendMessage(content, maxSlides);
-    
-    // 4. Remove thinking message
-    setMessages(prev => prev.filter(m => m.id !== thinkingId));
-    
-    // 5. Add real messages
-    setMessages(prev => [...prev, ...response.messages]);
-    
-    // 6. Update slides
-    if (response.slide_deck) {
-      onSlidesGenerated(response.slide_deck);
-    }
-  } catch (err) {
-    // Remove thinking message on error
-    setMessages(prev => prev.filter(m => m.id !== thinkingId));
-    setError(err instanceof Error ? err.message : 'Failed to send message');
-  } finally {
-    setIsLoading(false);
-  }
-};
-```
-
-This simpler approach:
+This approach:
 - ✅ Shows user message immediately
-- ✅ Shows thinking indicator
-- ✅ Doesn't require backend changes
-- ❌ Doesn't show tool calls in real-time (but still better UX than Phase 1)
+- ✅ Cycles through funny messages every 3 seconds
+- ✅ No backend changes required
+- ✅ Makes waiting entertaining
+- ✅ Still shows the spinner for visual feedback
 
-**Recommendation**: Start with the simpler approach for Phase 2, add true streaming in a later phase if needed.
+**Bonus**: Add more messages to the list over time based on user feedback!
 
 ---
 
@@ -1349,14 +1126,15 @@ export const AppLayout: React.FC = () => {
 
 ### Step 8: Testing (Estimated: 2-3 hours)
 
-#### 8.0 Test Real-Time Chat Updates
+#### 8.0 Test Amusing Loading Messages
 
 1. Send a message
 2. Verify user message appears immediately
-3. Verify "thinking" indicator shows
-4. Verify messages arrive progressively (if using SSE)
-5. Verify slides appear after completion
-6. Test error scenarios (network failure)
+3. Watch loading messages rotate every 3 seconds
+4. Verify messages are funny/entertaining
+5. Verify final response appears correctly
+6. Test that interval stops on completion
+7. Test error scenarios (network failure)
 
 #### 8.1 Test Drag-and-Drop
 
@@ -1446,7 +1224,7 @@ export const AppLayout: React.FC = () => {
 # AI Slide Generator - Phase 2 Enhanced UI
 
 ## New Features in Phase 2
-- ✅ Real-time chat updates (messages appear as they occur)
+- ✅ Amusing loading messages (entertaining wait experience)
 - ✅ Drag-and-drop slide reordering
 - ✅ HTML editor (Monaco) for slide editing
 - ✅ Duplicate slides
@@ -1536,11 +1314,11 @@ export const AppLayout: React.FC = () => {
 
 ---
 
-## Estimated Total Time: 21-28 hours
+## Estimated Total Time: 18-24 hours
 
 - Backend: 3-4 hours
 - Frontend Setup: 1-2 hours
-- Real-Time Chat Updates: 4-5 hours (or 1-2 if using simpler approach)
+- Amusing Loading Messages: 1 hour
 - Drag-and-Drop: 3-4 hours
 - HTML Editor: 3-4 hours
 - Testing: 2-3 hours
