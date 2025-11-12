@@ -122,6 +122,13 @@ class SlideGeneratorAgent:
                     "experiment_id": self.experiment_id,
                 },
             )
+            # Enable LangChain autologging
+            try:
+                mlflow.langchain.autolog()
+                logger.info("MLflow LangChain autologging enabled")
+            except Exception as e:
+                logger.error(f"Failed to enable MLflow LangChain autologging: {e}")
+                pass
         except Exception as e:
             logger.warning(f"Failed to configure MLflow: {e}")
             # Continue without MLflow if it fails

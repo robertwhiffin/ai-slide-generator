@@ -18,6 +18,17 @@ NC='\033[0m' # No Color
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$PROJECT_ROOT"
 
+# Load environment variables from .env file
+if [ -f .env ]; then
+    echo -e "${BLUE}🔧 Loading environment variables from .env...${NC}"
+    set -a  # Automatically export all variables
+    source .env
+    set +a  # Disable automatic export
+    echo -e "${GREEN}✅ Environment variables loaded${NC}"
+else
+    echo -e "${YELLOW}⚠️  No .env file found. Using system environment variables.${NC}"
+fi
+
 # Check if .venv exists
 if [ ! -d ".venv" ]; then
     echo -e "${YELLOW}⚠️  Virtual environment not found. Creating one...${NC}"
