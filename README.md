@@ -2,7 +2,7 @@
 
 A full-stack web application that generates HTML slide decks using LLMs. The system provides a chat interface where users can ask natural language questions, and the AI agent queries structured data through Databricks Genie to produce professional HTML presentations with data-driven insights and visualizations.
 
-**Current Phase**: Phase 2 - Enhanced UI with drag-and-drop editing, HTML editor, and amusing loading messages
+**Current Phase**: Phase 2 Complete - Enhanced UI with drag-and-drop editing, HTML editor, debugging tools, and defensive chart rendering
 
 ## Overview
 
@@ -21,16 +21,27 @@ A full-stack web application that generates HTML slide decks using LLMs. The sys
 6. Agent generates professional HTML slides
 7. MLFlow tracks execution metrics, traces, and artifacts
 
-## Phase 2 Features (Current)
+## Phase 2 Features (Complete)
 
 ### Enhanced User Experience
-- ✅ **Amusing Loading Messages**: Rotating funny messages while the agent works (every 3 seconds)
+- ✅ **Amusing Loading Messages**: Rotating funny messages at bottom of chat while the agent works (every 3 seconds)
 - ✅ **Drag-and-Drop Reordering**: Click and drag slides to reorder them
 - ✅ **HTML Editor**: Edit slide HTML directly with Monaco editor (VS Code experience)
+- ✅ **Intelligent Validation**: Accepts multi-class divs (e.g., `class="slide title-slide"`)
 - ✅ **Slide Duplication**: One-click slide copying
 - ✅ **Slide Deletion**: Remove unwanted slides (with confirmation)
 - ✅ **Visual Feedback**: Smooth animations and loading states
 - ✅ **Optimistic Updates**: UI updates immediately with backend sync
+
+### Debugging & Quality
+- ✅ **Raw HTML Views**: Two debugging tabs to inspect AI-generated HTML
+  - "Raw HTML (Rendered)": View full HTML output in iframe
+  - "Raw HTML (Text)": Inspect raw HTML as plain text
+- ✅ **Defensive Chart Rendering**: Belt-and-braces approach to prevent rendering errors
+  - Frontend try-catch wrapper around chart scripts
+  - Updated AI prompt to generate defensive JavaScript with null checks
+- ✅ **Interactive Parser Test**: `test_parser_interactive.py` script for debugging HTML parsing
+- ✅ **Raw HTML Storage**: Backend stores original AI output for comparison
 
 ### User Interactions
 
@@ -52,10 +63,25 @@ A full-stack web application that generates HTML slide decks using LLMs. The sys
 - **Delete**: Click trash icon (🗑️) to delete (confirms before deleting, prevents deleting last slide)
 
 ### Technical Implementation
-- **Backend**: New `/api/slides/*` endpoints for manipulation
-- **Frontend**: @dnd-kit for drag-and-drop, Monaco for editing
+- **Backend**: 
+  - New `/api/slides/*` endpoints for manipulation (GET, PUT, PATCH, POST, DELETE)
+  - Raw HTML storage in `ChatService` for debugging
+  - Enhanced `ChatResponse` model with `raw_html` field
+- **Frontend**: 
+  - `@dnd-kit` for smooth drag-and-drop interactions
+  - `@monaco-editor/react` for VS Code-like HTML editing
+  - Try-catch wrapper in `SlideTile` for defensive script execution
+  - Three view modes: Tiles, Raw HTML (Rendered), Raw HTML (Text)
 - **State Management**: Optimistic updates with error rollback
-- **Validation**: HTML validation before saving edits
+- **Validation**: Regex-based validation with word boundaries for multi-class support
+- **AI Prompt Engineering**: Defensive JavaScript patterns for Chart.js initialization
+
+**Debugging Tools:**
+- `test_parser_interactive.py`: Interactive script for testing HTML parsing
+  - Load HTML from files or generate via agent
+  - Compare original vs. parsed HTML
+  - Inspect CSS, scripts, and individual slides
+  - Save parsed components for analysis
 
 **Note**: Still single-session only. Multi-session support coming in Phase 4.
 
@@ -383,6 +409,40 @@ slide_html = deck.render_slide(3)  # Render individual slide
 
 See [SLIDE_PARSER_DESIGN.md](SLIDE_PARSER_DESIGN.md) for detailed design and API documentation.
 
+### Debugging Tools
+
+**Interactive Parser Test Script:**
+
+When you encounter rendering issues or want to debug HTML parsing:
+
+```bash
+# Activate virtual environment
+source .venv/bin/activate
+
+# Run interactive parser test
+python test_parser_interactive.py
+```
+
+The script provides:
+1. **Load from file**: Test parsing of existing HTML files
+2. **Generate via agent**: Create new slides and test immediately
+3. **Detailed analysis**: Compare original vs. parsed HTML
+4. **Component inspection**: View CSS, scripts, and individual slides
+5. **Save outputs**: Export parsed components for manual review
+
+**Raw HTML Debugging Views (Web UI):**
+
+In the slide panel, switch between view modes:
+- **Tiles**: Normal slide view with manipulation controls
+- **Raw HTML (Rendered)**: Full HTML output from AI in an iframe
+- **Raw HTML (Text)**: Plain text view of AI-generated HTML
+
+Use these views to:
+- Verify the AI generated correct HTML
+- Distinguish between AI generation issues vs. parsing issues
+- Debug chart rendering problems
+- Inspect CSS and JavaScript
+
 ## Development
 
 ### Install dev dependencies:
@@ -474,12 +534,14 @@ ai-slide-generator/
 ├── logs/                 # Application logs (gitignored)
 │   ├── backend.log
 │   └── frontend.log
-├── start_app.sh          # Start both backend and frontend (✅ NEW)
-├── stop_app.sh           # Stop both services gracefully (✅ NEW)
+├── start_app.sh          # Start both backend and frontend
+├── stop_app.sh           # Stop both services gracefully
+├── test_parser_interactive.py  # Interactive HTML parser debugging tool (✅ Phase 2)
 ├── pyproject.toml        # Python project configuration
 ├── PROJECT_PLAN.md       # Detailed project plan
-├── PHASE_1_MVP.md        # Phase 1 MVP implementation guide (✅ NEW)
-├── README_PHASE1.md      # Phase 1 user documentation (✅ NEW)
+├── PHASE_1_MVP.md        # Phase 1 MVP implementation guide
+├── PHASE_2_ENHANCED_UI.md # Phase 2 Enhanced UI implementation guide (✅ NEW)
+├── README_PHASE1.md      # Phase 1 user documentation
 ├── SLIDE_PARSER_DESIGN.md # Slide parser design
 └── README.md             # This file
 ```
@@ -532,6 +594,20 @@ ai-slide-generator/
 - ✅ Helper scripts (`start_app.sh`, `stop_app.sh`) for easy deployment
 - ✅ Automated health checks and logging
 
+**Phase 5 - Enhanced UI (Phase 2)**: ✅ Complete
+- ✅ Drag-and-drop slide reordering with `@dnd-kit`
+- ✅ HTML editor modal with Monaco editor
+- ✅ Intelligent HTML validation (multi-class support)
+- ✅ Slide duplication and deletion with confirmations
+- ✅ Optimistic UI updates with error rollback
+- ✅ Amusing loading messages at bottom of chat
+- ✅ Raw HTML debugging views (rendered and text)
+- ✅ Defensive chart rendering (try-catch wrapper + AI prompt)
+- ✅ Interactive parser testing script
+- ✅ Backend raw HTML storage for debugging
+- ✅ New `/api/slides/*` endpoints for slide manipulation
+- ✅ TypeScript `erasableSyntaxOnly` compatibility
+
 **Slide Rendering Notes:**
 - Slides are generated at fixed 1280x720 dimensions for consistency
 - Frontend dynamically scales slides to fit the container width
@@ -542,20 +618,27 @@ ai-slide-generator/
   - Change `const MAX_SCALE = 1.5;` to `const MAX_SCALE = 1.0;`
   - This prevents upscaling beyond native 1280x720 size
 
-**Phase 1 MVP Limitations (by design):**
+**Current Limitations:**
 - Single session only (no multi-user support)
 - No session persistence (state lost on restart)
 - No authentication
-- No drag-and-drop slide reordering
-- No HTML editing
-- View-only slide display
+- No undo/redo functionality
+- No slide export (PDF, PowerPoint, etc.)
+
+**What's Working:**
+- ✅ Drag-and-drop slide reordering
+- ✅ HTML editing with validation
+- ✅ Slide duplication and deletion
+- ✅ Real-time chart rendering with defensive error handling
+- ✅ Raw HTML debugging views
+- ✅ Responsive design (mobile to 4K)
 
 **Next Phases**: 
-- Phase 2: Enhanced UI (drag-and-drop, editing, responsive design)
-- Phase 3: Databricks deployment
-- Phase 4: Multi-session support with persistence
+- Phase 3: Databricks deployment (Apps, Unity Catalog integration)
+- Phase 4: Multi-session support with persistence (SQLite/Postgres)
+- Future: Export to PDF/PPTX, undo/redo, collaborative editing
 
-See [PHASE_1_MVP.md](PHASE_1_MVP.md) and [README_PHASE1.md](README_PHASE1.md) for detailed Phase 1 documentation.
+See [PHASE_1_MVP.md](PHASE_1_MVP.md), [PHASE_2_ENHANCED_UI.md](PHASE_2_ENHANCED_UI.md), and [README_PHASE1.md](README_PHASE1.md) for detailed documentation.
 
 ## Contributing
 
