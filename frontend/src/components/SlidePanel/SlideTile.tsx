@@ -105,7 +105,7 @@ export const SlideTile: React.FC<SlideTileProps> = ({
         className="bg-white rounded-lg shadow-md overflow-hidden"
       >
         {/* Slide Header with Actions */}
-        <div className="px-4 py-2 bg-gray-100 border-b flex items-center justify-between">
+      <div className="px-4 py-2 bg-gray-100 border-b flex items-center justify-between">
           <div className="flex items-center space-x-2">
             {/* Drag Handle */}
             <button
@@ -117,9 +117,9 @@ export const SlideTile: React.FC<SlideTileProps> = ({
               <FiMove size={18} />
             </button>
             
-            <span className="text-sm font-medium text-gray-700">
-              Slide {index + 1}
-            </span>
+        <span className="text-sm font-medium text-gray-700">
+          Slide {index + 1}
+        </span>
           </div>
 
           {/* Action Buttons */}
@@ -148,28 +148,28 @@ export const SlideTile: React.FC<SlideTileProps> = ({
               <FiTrash2 size={16} />
             </button>
           </div>
-        </div>
-
-        {/* Slide Preview */}
-        <div 
-          ref={containerRef}
-          className="relative bg-gray-200 overflow-hidden"
-          style={{ height: `${scaledHeight}px` }}
-        >
-          <iframe
-            srcDoc={slideHTML}
-            title={`Slide ${index + 1}`}
-            className="absolute top-0 left-0 border-0"
-            sandbox="allow-scripts"
-            style={{
-              width: `${SLIDE_WIDTH}px`,
-              height: `${SLIDE_HEIGHT}px`,
-              transform: `scale(${scale})`,
-              transformOrigin: 'top left',
-            }}
-          />
-        </div>
       </div>
+
+      {/* Slide Preview */}
+      <div 
+        ref={containerRef}
+        className="relative bg-gray-200 overflow-hidden"
+        style={{ height: `${scaledHeight}px` }}
+      >
+        <iframe
+          srcDoc={slideHTML}
+          title={`Slide ${index + 1}`}
+          className="absolute top-0 left-0 border-0"
+          sandbox="allow-scripts"
+          style={{
+            width: `${SLIDE_WIDTH}px`,
+            height: `${SLIDE_HEIGHT}px`,
+            transform: `scale(${scale})`,
+            transformOrigin: 'top left',
+          }}
+        />
+      </div>
+    </div>
 
       {/* HTML Editor Modal */}
       {isEditing && (

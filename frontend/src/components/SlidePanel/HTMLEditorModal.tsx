@@ -17,9 +17,21 @@ export const HTMLEditorModal: React.FC<HTMLEditorModalProps> = ({
   const [error, setError] = useState<string | null>(null);
 
   const validateHTML = (html: string): string | null => {
-    // Check for required slide wrapper
-    if (!html.includes('<div class="slide"')) {
-      return 'HTML must contain <div class="slide"> wrapper';
+    // Simple check: does any div have "slide" as a complete word in its class attribute?
+    // \b ensures word boundary, so "slide" matches but "slide-content" doesn't
+    const hasSlideClass = /<div[^>]*class=["'][^"']*\bslide\b[^"']*["']/i.test(html);
+    
+    if (!hasSlideClass) {
+      return `HTML must contain a <div> with "slide" as one of the classes.
+
+Valid examples:
+  • <div class="slide">
+  • <div class="slide title">
+  • <div class="title slide">
+
+Invalid examples:
+  • <div class="title"> (missing "slide")
+  • <div class="title-slide"> ("title-slide" is one class, not "slide")`;
     }
 
     // Basic HTML validation (check for balanced tags)
@@ -96,7 +108,7 @@ export const HTMLEditorModal: React.FC<HTMLEditorModalProps> = ({
         {/* Footer */}
         <div className="px-6 py-4 border-t flex items-center justify-between">
           <div className="text-sm text-gray-500">
-            Make sure to keep the <code>&lt;div class="slide"&gt;</code> wrapper
+            Div must include "slide" as one of its classes (e.g., <code>class="slide"</code> or <code>class="slide title"</code>)
           </div>
           
           <div className="flex space-x-3">

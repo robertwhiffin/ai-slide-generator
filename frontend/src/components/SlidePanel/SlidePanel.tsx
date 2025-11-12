@@ -124,13 +124,13 @@ export const SlidePanel: React.FC<SlidePanelProps> = ({ slideDeck, rawHtml, onSl
       {/* Header with Tabs */}
       <div className="bg-white border-b">
         <div className="p-4">
-          <h2 className="text-lg font-semibold">{slideDeck.title}</h2>
-          <p className="text-sm text-gray-500">
-            {slideDeck.slide_count} slide{slideDeck.slide_count !== 1 ? 's' : ''}
+        <h2 className="text-lg font-semibold">{slideDeck.title}</h2>
+        <p className="text-sm text-gray-500">
+          {slideDeck.slide_count} slide{slideDeck.slide_count !== 1 ? 's' : ''}
             {isReordering && ' • Reordering...'}
-          </p>
-        </div>
-        
+        </p>
+      </div>
+
         {/* Tab Navigation */}
         <div className="flex border-t">
           <button
@@ -173,7 +173,7 @@ export const SlidePanel: React.FC<SlidePanelProps> = ({ slideDeck, rawHtml, onSl
         {viewMode === 'tiles' && (
           <div className="h-full overflow-y-auto">
             {/* Slide Tiles with Drag-and-Drop */}
-            <div className="p-4 space-y-4">
+      <div className="p-4 space-y-4">
               <DndContext
                 sensors={sensors}
                 collisionDetection={closestCenter}
@@ -183,17 +183,17 @@ export const SlidePanel: React.FC<SlidePanelProps> = ({ slideDeck, rawHtml, onSl
                   items={slideDeck.slides.map(s => s.slide_id)}
                   strategy={verticalListSortingStrategy}
                 >
-                  {slideDeck.slides.map((slide, index) => (
-                    <SlideTile
-                      key={slide.slide_id}
-                      slide={slide}
-                      slideDeck={slideDeck}
-                      index={index}
+        {slideDeck.slides.map((slide, index) => (
+          <SlideTile
+            key={slide.slide_id}
+            slide={slide}
+            slideDeck={slideDeck}
+            index={index}
                       onDelete={() => handleDeleteSlide(index)}
                       onDuplicate={() => handleDuplicateSlide(index)}
                       onUpdate={(html) => handleUpdateSlide(index, html)}
-                    />
-                  ))}
+          />
+        ))}
                 </SortableContext>
               </DndContext>
             </div>

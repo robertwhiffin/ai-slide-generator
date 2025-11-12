@@ -72,8 +72,8 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({ onSlidesGenerated }) => {
     return () => {
       if (intervalRef.current) {
         clearInterval(intervalRef.current);
-      }
-    };
+    }
+  };
   }, []);
 
   return (
