@@ -1,4 +1,5 @@
 import type { ChatResponse } from '../types/message';
+import type { SlideDeck, Slide } from '../types/slide';
 
 const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
 
@@ -49,6 +50,101 @@ export const api = {
     if (!response.ok) {
       throw new ApiError(response.status, 'Health check failed');
     }
+    return response.json();
+  },
+
+  /**
+   * Get current slide deck
+   * Phase 4: Add sessionId parameter
+   */
+  async getSlides(/* sessionId?: string */): Promise<SlideDeck> {
+    const response = await fetch(`${API_BASE_URL}/api/slides`);
+    
+    if (!response.ok) {
+      throw new ApiError(response.status, 'Failed to fetch slides');
+    }
+    
+    return response.json();
+  },
+
+  /**
+   * Reorder slides
+   * Phase 4: Add sessionId parameter
+   */
+  async reorderSlides(
+    newOrder: number[]
+    /* sessionId?: string */
+  ): Promise<SlideDeck> {
+    const response = await fetch(`${API_BASE_URL}/api/slides/reorder`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ new_order: newOrder }),
+    });
+
+    if (!response.ok) {
+      throw new ApiError(response.status, 'Failed to reorder slides');
+    }
+
+    return response.json();
+  },
+
+  /**
+   * Update a single slide
+   * Phase 4: Add sessionId parameter
+   */
+  async updateSlide(
+    index: number,
+    html: string
+    /* sessionId?: string */
+  ): Promise<Slide> {
+    const response = await fetch(`${API_BASE_URL}/api/slides/${index}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ html }),
+    });
+
+    if (!response.ok) {
+      throw new ApiError(response.status, 'Failed to update slide');
+    }
+
+    return response.json();
+  },
+
+  /**
+   * Duplicate a slide
+   * Phase 4: Add sessionId parameter
+   */
+  async duplicateSlide(
+    index: number
+    /* sessionId?: string */
+  ): Promise<SlideDeck> {
+    const response = await fetch(`${API_BASE_URL}/api/slides/${index}/duplicate`, {
+      method: 'POST',
+    });
+
+    if (!response.ok) {
+      throw new ApiError(response.status, 'Failed to duplicate slide');
+    }
+
+    return response.json();
+  },
+
+  /**
+   * Delete a slide
+   * Phase 4: Add sessionId parameter
+   */
+  async deleteSlide(
+    index: number
+    /* sessionId?: string */
+  ): Promise<SlideDeck> {
+    const response = await fetch(`${API_BASE_URL}/api/slides/${index}`, {
+      method: 'DELETE',
+    });
+
+    if (!response.ok) {
+      throw new ApiError(response.status, 'Failed to delete slide');
+    }
+
     return response.json();
   },
 };

@@ -10,7 +10,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from src.api.routes import chat
+from src.api.routes import chat, slides
 
 logger = logging.getLogger(__name__)
 
@@ -29,7 +29,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="AI Slide Generator API",
     description="Generate presentation slides from natural language using AI",
-    version="0.1.0 (Phase 1 MVP)",
+    version="0.2.0 (Phase 2 - Enhanced UI)",
     lifespan=lifespan,
 )
 
@@ -49,6 +49,7 @@ app.add_middleware(
 
 # Include routers
 app.include_router(chat.router)
+app.include_router(slides.router)
 
 
 @app.get("/")
@@ -56,8 +57,8 @@ async def root():
     """Root endpoint with API information."""
     return {
         "name": "AI Slide Generator API",
-        "version": "0.1.0",
-        "phase": "Phase 1 MVP - Single Session",
+        "version": "0.2.0",
+        "phase": "Phase 2 - Enhanced UI (Drag-and-Drop, Editing)",
         "status": "operational",
     }
 

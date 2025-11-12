@@ -5,9 +5,10 @@ Phase 4: Support multiple sessions with session_id parameter.
 """
 
 import logging
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from src.models.slide_deck import SlideDeck
+from src.models.slide import Slide
 from src.services.agent import create_agent
 
 logger = logging.getLogger(__name__)
@@ -122,6 +123,166 @@ class ChatService:
         except Exception as e:
             logger.error(f"Failed to process message: {e}", exc_info=True)
             raise
+    
+    def get_slides(self) -> Optional[Dict[str, Any]]:
+        """Get current slide deck.
+        
+        Phase 4: Add session_id parameter
+        
+        Returns:
+            Slide deck dictionary or None if no slides exist
+        """
+        if not self.slide_deck:
+            return None
+        return self.slide_deck.to_dict()
+    
+    def reorder_slides(self, new_order: List[int]) -> Dict[str, Any]:
+        """Reorder slides based on new index order.
+        
+        Args:
+            new_order: List of indices in new order (e.g. [2, 0, 1])
+            # session_id: Optional[str] = None  # For Phase 4
+        
+        Returns:
+            Updated slide deck
+        
+        Raises:
+            ValueError: If no slide deck exists or invalid reorder
+        """
+        if not self.slide_deck:
+            raise ValueError("No slide deck available")
+        
+        # Validate indices
+        if len(new_order) != len(self.slide_deck.slides):
+            raise ValueError("Invalid reorder: wrong number of indices")
+        
+        if set(new_order) != set(range(len(self.slide_deck.slides))):
+            raise ValueError("Invalid reorder: invalid indices")
+        
+        # Reorder slides
+        new_slides = [self.slide_deck.slides[i] for i in new_order]
+        self.slide_deck.slides = new_slides
+        
+        # Update indices
+        for idx, slide in enumerate(self.slide_deck.slides):
+            slide.slide_id = f"slide_{idx}"
+        
+        logger.info(
+            "Reordered slides",
+            extra={"new_order": new_order, "session_id": self.session_id},
+        )
+        
+        return self.slide_deck.to_dict()
+    
+    def update_slide(self, index: int, html: str) -> Dict[str, Any]:
+        """Update a single slide's HTML.
+        
+        Args:
+            index: Slide index to update
+            html: New HTML content (must include <div class="slide">)
+            # session_id: Optional[str] = None  # For Phase 4
+        
+        Returns:
+            Updated slide information
+        
+        Raises:
+            ValueError: If no slide deck exists, invalid index, or invalid HTML
+        """
+        if not self.slide_deck:
+            raise ValueError("No slide deck available")
+        
+        if index < 0 or index >= len(self.slide_deck.slides):
+            raise ValueError(f"Invalid slide index: {index}")
+        
+        # Validate HTML has slide wrapper
+        if '<div class="slide"' not in html:
+            raise ValueError("HTML must contain <div class='slide'> wrapper")
+        
+        # Update slide
+        self.slide_deck.slides[index] = Slide(html=html, slide_id=f"slide_{index}")
+        
+        logger.info(
+            "Updated slide",
+            extra={"index": index, "session_id": self.session_id},
+        )
+        
+        return {
+            "index": index,
+            "slide_id": f"slide_{index}",
+            "html": html
+        }
+    
+    def duplicate_slide(self, index: int) -> Dict[str, Any]:
+        """Duplicate a slide.
+        
+        Args:
+            index: Slide index to duplicate
+            # session_id: Optional[str] = None  # For Phase 4
+        
+        Returns:
+            Updated slide deck
+        
+        Raises:
+            ValueError: If no slide deck exists or invalid index
+        """
+        if not self.slide_deck:
+            raise ValueError("No slide deck available")
+        
+        if index < 0 or index >= len(self.slide_deck.slides):
+            raise ValueError(f"Invalid slide index: {index}")
+        
+        # Clone slide
+        cloned = self.slide_deck.slides[index].clone()
+        
+        # Insert after original
+        self.slide_deck.insert_slide(cloned, index + 1)
+        
+        # Update slide IDs
+        for idx, slide in enumerate(self.slide_deck.slides):
+            slide.slide_id = f"slide_{idx}"
+        
+        logger.info(
+            "Duplicated slide",
+            extra={"index": index, "new_count": len(self.slide_deck.slides), "session_id": self.session_id},
+        )
+        
+        return self.slide_deck.to_dict()
+    
+    def delete_slide(self, index: int) -> Dict[str, Any]:
+        """Delete a slide.
+        
+        Args:
+            index: Slide index to delete
+            # session_id: Optional[str] = None  # For Phase 4
+        
+        Returns:
+            Updated slide deck
+        
+        Raises:
+            ValueError: If no slide deck exists, invalid index, or deleting last slide
+        """
+        if not self.slide_deck:
+            raise ValueError("No slide deck available")
+        
+        if index < 0 or index >= len(self.slide_deck.slides):
+            raise ValueError(f"Invalid slide index: {index}")
+        
+        if len(self.slide_deck.slides) <= 1:
+            raise ValueError("Cannot delete last slide")
+        
+        # Remove slide
+        self.slide_deck.remove_slide(index)
+        
+        # Update slide IDs
+        for idx, slide in enumerate(self.slide_deck.slides):
+            slide.slide_id = f"slide_{idx}"
+        
+        logger.info(
+            "Deleted slide",
+            extra={"index": index, "new_count": len(self.slide_deck.slides), "session_id": self.session_id},
+        )
+        
+        return self.slide_deck.to_dict()
 
 
 # Phase 1: Create global service instance

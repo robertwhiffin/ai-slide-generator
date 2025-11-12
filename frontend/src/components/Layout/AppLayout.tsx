@@ -11,7 +11,9 @@ export const AppLayout: React.FC = () => {
       {/* Header */}
       <header className="bg-blue-600 text-white px-6 py-4 shadow-md">
         <h1 className="text-xl font-bold">AI Slide Generator</h1>
-        <p className="text-sm text-blue-100">Phase 1 MVP - Single Session</p>
+        <p className="text-sm text-blue-100">
+          Phase 2 - Drag & Drop, Edit • Single Session
+        </p>
       </header>
 
       {/* Main Content: Two Panel Layout */}
@@ -23,7 +25,10 @@ export const AppLayout: React.FC = () => {
 
         {/* Slide Panel - Right 70% */}
         <div className="flex-1">
-          <SlidePanel slideDeck={slideDeck} />
+          <SlidePanel 
+            slideDeck={slideDeck} 
+            onSlideChange={setSlideDeck}
+          />
         </div>
       </div>
     </div>

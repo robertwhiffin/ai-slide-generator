@@ -2,6 +2,8 @@
 
 A full-stack web application that generates HTML slide decks using LLMs. The system provides a chat interface where users can ask natural language questions, and the AI agent queries structured data through Databricks Genie to produce professional HTML presentations with data-driven insights and visualizations.
 
+**Current Phase**: Phase 2 - Enhanced UI with drag-and-drop editing, HTML editor, and amusing loading messages
+
 ## Overview
 
 **Input**: Natural language question (e.g., "Produce a 10-page report on the consumption history of my account")
@@ -18,6 +20,44 @@ A full-stack web application that generates HTML slide decks using LLMs. The sys
 5. Agent constructs coherent data-driven narrative
 6. Agent generates professional HTML slides
 7. MLFlow tracks execution metrics, traces, and artifacts
+
+## Phase 2 Features (Current)
+
+### Enhanced User Experience
+- ✅ **Amusing Loading Messages**: Rotating funny messages while the agent works (every 3 seconds)
+- ✅ **Drag-and-Drop Reordering**: Click and drag slides to reorder them
+- ✅ **HTML Editor**: Edit slide HTML directly with Monaco editor (VS Code experience)
+- ✅ **Slide Duplication**: One-click slide copying
+- ✅ **Slide Deletion**: Remove unwanted slides (with confirmation)
+- ✅ **Visual Feedback**: Smooth animations and loading states
+- ✅ **Optimistic Updates**: UI updates immediately with backend sync
+
+### User Interactions
+
+#### Reordering Slides
+1. Click and hold the move icon (☰) on any slide
+2. Drag to desired position
+3. Drop to reorder
+4. Changes save automatically to backend
+
+#### Editing Slides
+1. Click the edit icon (✏️) on any slide
+2. Monaco editor opens with full HTML
+3. Make changes to slide content
+4. Validation ensures `<div class="slide">` wrapper exists
+5. Click "Save Changes" to persist
+
+#### Other Actions
+- **Duplicate**: Click copy icon (📋) to create a duplicate after the original
+- **Delete**: Click trash icon (🗑️) to delete (confirms before deleting, prevents deleting last slide)
+
+### Technical Implementation
+- **Backend**: New `/api/slides/*` endpoints for manipulation
+- **Frontend**: @dnd-kit for drag-and-drop, Monaco for editing
+- **State Management**: Optimistic updates with error rollback
+- **Validation**: HTML validation before saving edits
+
+**Note**: Still single-session only. Multi-session support coming in Phase 4.
 
 ## Technologies
 
@@ -40,6 +80,8 @@ A full-stack web application that generates HTML slide decks using LLMs. The sys
 - **Vite**: Fast build tool and dev server with hot module replacement
 - **Tailwind CSS**: Utility-first CSS framework for rapid UI development
 - **React Icons**: Icon library for UI elements
+- **@dnd-kit**: Modern drag-and-drop toolkit for React (Phase 2)
+- **Monaco Editor**: VS Code's editor for HTML editing in the browser (Phase 2)
 
 ### Development Tools
 - **uv**: Fast Python package manager for dependency management
