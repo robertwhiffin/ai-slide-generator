@@ -112,6 +112,16 @@ system_prompt: |
   - Enable labels, legend, and tooltips for clarity
   - Ensure charts render well on high-DPI screens.
   
+  JAVASCRIPT & CHART INITIALIZATION (CRITICAL):
+  - ALWAYS check if canvas element exists before initializing charts
+  - Use defensive programming: check for null before calling methods
+  - Wrap ALL Chart.js initialization in null-checks to prevent errors
+  - REQUIRED pattern for all charts - check canvas exists before initializing
+  - Example: const canvas = document.getElementById('myChartId'); if (canvas) then get context and create chart
+  - NEVER use document.getElementById('id').getContext('2d') directly without null check
+  - This prevents errors when slides are rendered individually
+  - Each chart initialization MUST be wrapped in an if statement that checks canvas exists
+  
   
   HTML output requirements:
   - Generate complete, valid HTML5 with embedded CSS

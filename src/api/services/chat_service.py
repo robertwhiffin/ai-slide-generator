@@ -24,6 +24,7 @@ class ChatService:
         agent: SlideGeneratorAgent instance
         session_id: Current session ID (Phase 1: single session)
         slide_deck: Current parsed slide deck
+        raw_html: Raw HTML from AI (for debugging)
     """
     
     def __init__(self):
@@ -37,8 +38,9 @@ class ChatService:
         self.session_id = self.agent.create_session()
         logger.info("Created single session", extra={"session_id": self.session_id})
         
-        # Store current slide deck
+        # Store current slide deck and raw HTML
         self.slide_deck: Optional[SlideDeck] = None
+        self.raw_html: Optional[str] = None
         
         logger.info("ChatService initialized successfully")
     
@@ -86,6 +88,9 @@ class ChatService:
             # Parse HTML into SlideDeck if present
             html_output = result.get("html")
             if html_output and html_output.strip():
+                # Store raw HTML for debugging
+                self.raw_html = html_output
+                
                 try:
                     self.slide_deck = SlideDeck.from_html_string(html_output)
                     logger.info(
@@ -102,11 +107,14 @@ class ChatService:
                     )
                     # Continue without parsed slide deck
                     self.slide_deck = None
+            else:
+                self.raw_html = None
             
             # Build response
             response = {
                 "messages": result["messages"],
                 "slide_deck": self.slide_deck.to_dict() if self.slide_deck else None,
+                "raw_html": self.raw_html,  # Include raw HTML for debugging
                 "metadata": result["metadata"],
             }
             

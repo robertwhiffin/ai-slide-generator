@@ -18,6 +18,7 @@ export interface Message {
 export interface ChatResponse {
   messages: Message[];
   slide_deck: SlideDeck | null;
+  raw_html: string | null;
   metadata: {
     latency_seconds: number;
     tool_calls: number;

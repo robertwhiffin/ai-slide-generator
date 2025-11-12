@@ -73,7 +73,16 @@ export const SlideTile: React.FC<SlideTileProps> = ({
 </head>
 <body>
   ${slide.html}
-  <script>${slideDeck.scripts}</script>
+  <script>
+    // Wrap scripts in try-catch to handle multi-slide chart initialization
+    // Each slide contains all scripts but only has its own canvas elements
+    try {
+      ${slideDeck.scripts}
+    } catch (error) {
+      // Silently catch expected errors from missing canvas elements
+      console.debug('Chart initialization skipped for missing canvas:', error.message);
+    }
+  </script>
 </body>
 </html>
     `.trim();

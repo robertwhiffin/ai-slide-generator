@@ -5,6 +5,7 @@ import { SlidePanel } from '../SlidePanel/SlidePanel';
 
 export const AppLayout: React.FC = () => {
   const [slideDeck, setSlideDeck] = useState<SlideDeck | null>(null);
+  const [rawHtml, setRawHtml] = useState<string | null>(null);
 
   return (
     <div className="h-screen flex flex-col">
@@ -20,13 +21,19 @@ export const AppLayout: React.FC = () => {
       <div className="flex-1 flex overflow-hidden">
         {/* Chat Panel - Left 30% */}
         <div className="w-[30%] border-r">
-          <ChatPanel onSlidesGenerated={setSlideDeck} />
+          <ChatPanel 
+            onSlidesGenerated={(deck, raw) => {
+              setSlideDeck(deck);
+              setRawHtml(raw);
+            }}
+          />
         </div>
 
         {/* Slide Panel - Right 70% */}
         <div className="flex-1">
           <SlidePanel 
-            slideDeck={slideDeck} 
+            slideDeck={slideDeck}
+            rawHtml={rawHtml}
             onSlideChange={setSlideDeck}
           />
         </div>

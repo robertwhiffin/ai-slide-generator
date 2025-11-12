@@ -48,6 +48,7 @@ class ChatResponse(BaseModel):
     Attributes:
         messages: List of all messages in the conversation
         slide_deck: Parsed slide deck structure (if generated)
+        raw_html: Raw HTML as returned by AI (for debugging)
         metadata: Execution metadata (latency, tool_calls, etc.)
     """
     
@@ -58,6 +59,10 @@ class ChatResponse(BaseModel):
     slide_deck: Optional[Dict[str, Any]] = Field(
         default=None,
         description="Parsed slide deck structure",
+    )
+    raw_html: Optional[str] = Field(
+        default=None,
+        description="Raw HTML as returned by AI agent (before parsing)",
     )
     metadata: Dict[str, Any] = Field(
         ...,

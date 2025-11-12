@@ -7,7 +7,7 @@ import { api } from '../../services/api';
 import { getRotatingLoadingMessage } from '../../utils/loadingMessages';
 
 interface ChatPanelProps {
-  onSlidesGenerated: (slideDeck: SlideDeck) => void;
+  onSlidesGenerated: (slideDeck: SlideDeck, rawHtml: string | null) => void;
 }
 
 export const ChatPanel: React.FC<ChatPanelProps> = ({ onSlidesGenerated }) => {
@@ -51,9 +51,9 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({ onSlidesGenerated }) => {
       const newMessages = response.messages.filter(m => m.role !== 'user');
       setMessages(prev => [...prev, ...newMessages]);
       
-      // 6. Update slides
+      // 6. Update slides and raw HTML
       if (response.slide_deck) {
-        onSlidesGenerated(response.slide_deck);
+        onSlidesGenerated(response.slide_deck, response.raw_html);
       }
     } catch (err) {
       console.error('Failed to send message:', err);
@@ -81,9 +81,6 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({ onSlidesGenerated }) => {
       {/* Header */}
       <div className="p-4 border-b bg-white">
         <h2 className="text-lg font-semibold">Chat</h2>
-        {loadingMessage && (
-          <p className="text-xs text-gray-600 mt-1 italic">{loadingMessage}</p>
-        )}
       </div>
 
       {/* Messages */}
@@ -95,6 +92,20 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({ onSlidesGenerated }) => {
       {error && (
         <div className="p-4 bg-red-50 border-t border-red-200">
           <p className="text-sm text-red-600">{error}</p>
+        </div>
+      )}
+
+      {/* Loading Message - Amusing messages while AI works */}
+      {loadingMessage && (
+        <div className="px-4 py-3 bg-blue-50 border-t border-blue-200">
+          <div className="flex items-center space-x-2">
+            <div className="flex space-x-1">
+              <div className="w-2 h-2 bg-blue-600 rounded-full animate-bounce" style={{ animationDelay: '0ms' }}></div>
+              <div className="w-2 h-2 bg-blue-600 rounded-full animate-bounce" style={{ animationDelay: '150ms' }}></div>
+              <div className="w-2 h-2 bg-blue-600 rounded-full animate-bounce" style={{ animationDelay: '300ms' }}></div>
+            </div>
+            <p className="text-sm text-blue-800 italic">{loadingMessage}</p>
+          </div>
         </div>
       )}
 
