@@ -2,6 +2,7 @@
 databricks-sdk>=0.20.0
 fastapi>=0.104.0
 uvicorn[standard]>=0.24.0
+python-multipart>=0.0.6
 pydantic>=2.4.0
 pydantic-settings>=2.0.0
 httpx>=0.25.0
@@ -15,6 +16,7 @@ pandas>=2.0.0
 databricks-langchain>=0.1.0
 langchain>=0.3.0
 langchain-core>=0.3.0
+langchain-community>=0.3.0
 
 # HTML parsing dependencies
 beautifulsoup4>=4.12.0

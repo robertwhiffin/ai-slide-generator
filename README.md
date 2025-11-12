@@ -1,6 +1,8 @@
 # AI Slide Generator
 
-An API-driven system that generates HTML slide decks using LLMs. The system takes natural language questions, queries structured data through Databricks Genie, and produces professional HTML presentations with data-driven insights.
+A full-stack web application that generates HTML slide decks using LLMs. The system provides a chat interface where users can ask natural language questions, and the AI agent queries structured data through Databricks Genie to produce professional HTML presentations with data-driven insights and visualizations.
+
+**Current Phase**: Phase 2 - Enhanced UI with drag-and-drop editing, HTML editor, and amusing loading messages
 
 ## Overview
 
@@ -19,23 +21,76 @@ An API-driven system that generates HTML slide decks using LLMs. The system take
 6. Agent generates professional HTML slides
 7. MLFlow tracks execution metrics, traces, and artifacts
 
+## Phase 2 Features (Current)
+
+### Enhanced User Experience
+- ✅ **Amusing Loading Messages**: Rotating funny messages while the agent works (every 3 seconds)
+- ✅ **Drag-and-Drop Reordering**: Click and drag slides to reorder them
+- ✅ **HTML Editor**: Edit slide HTML directly with Monaco editor (VS Code experience)
+- ✅ **Slide Duplication**: One-click slide copying
+- ✅ **Slide Deletion**: Remove unwanted slides (with confirmation)
+- ✅ **Visual Feedback**: Smooth animations and loading states
+- ✅ **Optimistic Updates**: UI updates immediately with backend sync
+
+### User Interactions
+
+#### Reordering Slides
+1. Click and hold the move icon (☰) on any slide
+2. Drag to desired position
+3. Drop to reorder
+4. Changes save automatically to backend
+
+#### Editing Slides
+1. Click the edit icon (✏️) on any slide
+2. Monaco editor opens with full HTML
+3. Make changes to slide content
+4. Validation ensures `<div class="slide">` wrapper exists
+5. Click "Save Changes" to persist
+
+#### Other Actions
+- **Duplicate**: Click copy icon (📋) to create a duplicate after the original
+- **Delete**: Click trash icon (🗑️) to delete (confirms before deleting, prevents deleting last slide)
+
+### Technical Implementation
+- **Backend**: New `/api/slides/*` endpoints for manipulation
+- **Frontend**: @dnd-kit for drag-and-drop, Monaco for editing
+- **State Management**: Optimistic updates with error rollback
+- **Validation**: HTML validation before saving edits
+
+**Note**: Still single-session only. Multi-session support coming in Phase 4.
+
 ## Technologies
 
+### Backend
 - **Python 3.10+**: Core language for robust type support and modern features
 - **LangChain**: Agent framework for tool-calling and multi-step workflows
 - **databricks-langchain**: Official Databricks LangChain integration for ChatDatabricks
 - **Databricks SDK**: Integration with Databricks LLM serving and Genie APIs
 - **Databricks Genie**: SQL-based structured data retrieval with natural language interface
 - **MLflow 3.0+**: Experiment tracking, metrics logging, and distributed tracing
-- **FastAPI**: Lightweight, high-performance API framework for endpoints
+- **FastAPI**: Lightweight, high-performance API framework with auto-generated docs
 - **Pydantic**: Data validation and settings management for type safety
 - **BeautifulSoup4**: HTML parsing for slide deck manipulation
 - **lxml**: Fast HTML parser backend for BeautifulSoup
+- **uvicorn**: ASGI server for FastAPI applications
+
+### Frontend
+- **React 18**: Modern UI library with hooks and concurrent features
+- **TypeScript**: Type-safe JavaScript for robust frontend development
+- **Vite**: Fast build tool and dev server with hot module replacement
+- **Tailwind CSS**: Utility-first CSS framework for rapid UI development
+- **React Icons**: Icon library for UI elements
+- **@dnd-kit**: Modern drag-and-drop toolkit for React (Phase 2)
+- **Monaco Editor**: VS Code's editor for HTML editing in the browser (Phase 2)
+
+### Development Tools
 - **uv**: Fast Python package manager for dependency management
 - **pytest**: Testing framework for comprehensive test coverage
 - **ruff**: Fast linting and formatting for code quality
 
 ### Why These Technologies?
+
+**Backend:**
 - **LangChain + ChatDatabricks**: Official agent framework with native Databricks support for tool-calling
 - **Databricks LLM + Genie**: Native integration provides seamless data access and AI capabilities
 - **Agent Architecture**: Modern LLM pattern with tool-calling for flexible, extensible design
@@ -44,6 +99,14 @@ An API-driven system that generates HTML slide decks using LLMs. The system take
 - **Pydantic**: Strong typing ensures data validation and reduces runtime errors
 - **BeautifulSoup4**: Robust HTML parsing that handles AI-generated slides with varying structure
 - **PyYAML**: Flexible configuration management for prompts and settings
+
+**Frontend:**
+- **React + TypeScript**: Type-safe component development with modern hooks
+- **Vite**: Lightning-fast HMR and optimized production builds
+- **Tailwind CSS**: Rapid UI development without context switching
+- **Two-Panel Layout**: Clear separation of chat and slide viewing
+
+**Development:**
 - **uv**: Significantly faster than pip for dependency resolution
 
 ## Architecture Highlights
@@ -207,19 +270,74 @@ tools:
 
 ### Running the Application
 
+**Quick Start (Recommended):**
+
+The easiest way to run both backend and frontend:
+
 ```bash
-uvicorn src.main:app --reload
+# Start both services
+./start_app.sh
+
+# Stop both services
+./stop_app.sh
 ```
 
-API will be available at `http://localhost:8000`
+This will:
+- Create virtual environment if needed
+- Install all dependencies
+- Start backend on port 8000
+- Start frontend on port 3000
+- Perform health checks
 
-### Making Requests
+**Access the application:**
+- **Web UI**: http://localhost:3000
+- **API**: http://localhost:8000
+- **API Docs**: http://localhost:8000/docs
+
+**Manual Start (Alternative):**
+
+If you prefer to run services separately:
+
+**Backend:**
+```bash
+source .venv/bin/activate
+uvicorn src.api.main:app --reload --port 8000
+```
+
+**Frontend:**
+```bash
+cd frontend
+npm install  # First time only
+npm run dev
+```
+
+**View Logs:**
+```bash
+# Backend logs
+tail -f logs/backend.log
+
+# Frontend logs
+tail -f logs/frontend.log
+```
+
+### Using the Web Interface
+
+1. Open http://localhost:3000 in your browser
+2. Type a message in the chat input (e.g., "Create slides about Q3 sales performance")
+3. Set max slides (default: 10)
+4. Press Enter or click Send
+5. Watch slides appear in real-time on the right panel
+6. Tool calls are collapsible in the chat for detailed inspection
+
+### Making API Requests
+
+You can also interact directly with the API:
 
 ```bash
-curl -X POST http://localhost:8000/generate-slides \
+curl -X POST http://localhost:8000/api/chat \
   -H "Content-Type: application/json" \
   -d '{
-    "question": "Produce a 10-page report on consumption history",
+    "message": "Create slides about Q3 sales performance",
     "max_slides": 10
   }'
 ```
@@ -299,38 +417,70 @@ mypy src/
 ```
 ai-slide-generator/
 ├── src/
+│   ├── api/              # FastAPI application (✅ Phase 1 MVP)
+│   │   ├── main.py       # FastAPI app initialization with CORS
+│   │   ├── models/       # Pydantic request/response models
+│   │   │   ├── requests.py
+│   │   │   └── responses.py
+│   │   ├── routes/       # API endpoints
+│   │   │   └── chat.py   # Chat endpoint
+│   │   └── services/     # API business logic
+│   │       └── chat_service.py  # Chat service wrapper
 │   ├── config/           # Configuration and settings management
 │   │   ├── client.py     # Singleton Databricks client
 │   │   ├── settings.py   # Pydantic settings with YAML/env loading
 │   │   └── loader.py     # YAML configuration loaders
 │   ├── models/           # Data models
-│   │   ├── slide.py      # Slide class for individual slides (✅ NEW)
-│   │   └── slide_deck.py # SlideDeck class for parsing/knitting HTML (✅ NEW)
+│   │   ├── slide.py      # Slide class for individual slides
+│   │   └── slide_deck.py # SlideDeck class for parsing/knitting HTML
 │   └── services/         # Core business logic
 │       ├── agent.py      # SlideGeneratorAgent with LangChain
 │       └── tools.py      # Genie tool for data queries
+├── frontend/             # React + TypeScript frontend (✅ Phase 1 MVP)
+│   ├── src/
+│   │   ├── components/   # React components
+│   │   │   ├── ChatPanel/     # Chat interface
+│   │   │   ├── SlidePanel/    # Slide display
+│   │   │   └── Layout/        # App layout
+│   │   ├── services/     # API client
+│   │   │   └── api.ts
+│   │   ├── types/        # TypeScript type definitions
+│   │   │   ├── message.ts
+│   │   │   └── slide.ts
+│   │   ├── App.tsx       # Main app component
+│   │   └── main.tsx      # Entry point
+│   ├── package.json      # Frontend dependencies
+│   ├── vite.config.ts    # Vite configuration
+│   └── tailwind.config.js # Tailwind CSS configuration
 ├── config/
 │   ├── config.yaml       # Application configuration
 │   ├── mlflow.yaml       # MLflow tracking and serving config
 │   └── prompts.yaml      # System prompts and templates
 ├── tests/
 │   ├── fixtures/
-│   │   └── sample_slides.html  # Sample HTML for testing (✅ NEW)
+│   │   └── sample_slides.html  # Sample HTML for testing
 │   ├── unit/             # Unit tests
-│   │   ├── test_agent.py       # Agent unit tests
-│   │   ├── test_slide.py       # Slide class tests (✅ NEW)
-│   │   ├── test_slide_deck.py  # SlideDeck class tests (✅ NEW)
-│   │   └── test_tools.py       # Tool unit tests
+│   │   ├── test_agent.py
+│   │   ├── test_slide.py
+│   │   ├── test_slide_deck.py
+│   │   └── test_tools.py
 │   └── integration/      # Integration tests
-│       ├── test_agent_integration.py      # Agent integration tests
-│       ├── test_genie_integration.py      # Genie integration tests
-│       └── test_slide_deck_integration.py # Slide deck integration tests (✅ NEW)
+│       ├── test_agent_integration.py
+│       ├── test_genie_integration.py
+│       └── test_slide_deck_integration.py
 ├── docs/                 # Documentation
-│   ├── AGENT_IMPLEMENTATION_PLAN.md  # Agent implementation specs
-│   └── IMPLEMENTATION_SUMMARY.md     # Phase 2 summary
-├── pyproject.toml        # Project configuration
+│   ├── AGENT_IMPLEMENTATION_PLAN.md
+│   └── IMPLEMENTATION_SUMMARY.md
+├── logs/                 # Application logs (gitignored)
+│   ├── backend.log
+│   └── frontend.log
+├── start_app.sh          # Start both backend and frontend (✅ NEW)
+├── stop_app.sh           # Stop both services gracefully (✅ NEW)
+├── pyproject.toml        # Python project configuration
 ├── PROJECT_PLAN.md       # Detailed project plan
-├── SLIDE_PARSER_DESIGN.md # Slide parser design (✅ NEW)
+├── PHASE_1_MVP.md        # Phase 1 MVP implementation guide (✅ NEW)
+├── README_PHASE1.md      # Phase 1 user documentation (✅ NEW)
+├── SLIDE_PARSER_DESIGN.md # Slide parser design
 └── README.md             # This file
 ```
 
@@ -367,7 +517,45 @@ ai-slide-generator/
 - ✅ 64 comprehensive tests (all passing)
 - ✅ Integration with existing output directory
 
-**Next Phase**: FastAPI Integration and Frontend - see [PROJECT_PLAN.md](PROJECT_PLAN.md) for details
+**Phase 4 - Web Application (Phase 1 MVP)**: ✅ Complete
+- ✅ FastAPI backend with chat endpoint and CORS middleware
+- ✅ Pydantic request/response models for API
+- ✅ ChatService wrapper with single session support
+- ✅ Health check endpoint for monitoring
+- ✅ React + TypeScript frontend with Vite
+- ✅ Tailwind CSS for styling
+- ✅ Two-panel layout (Chat 30% | Slides 70%)
+- ✅ Real-time message display with role-based styling
+- ✅ Collapsible tool call messages for debugging
+- ✅ Iframe-based slide rendering with isolated CSS/JS
+- ✅ Responsive slide scaling (0.5x-1.5x) for all screen sizes
+- ✅ Helper scripts (`start_app.sh`, `stop_app.sh`) for easy deployment
+- ✅ Automated health checks and logging
+
+**Slide Rendering Notes:**
+- Slides are generated at fixed 1280x720 dimensions for consistency
+- Frontend dynamically scales slides to fit the container width
+- Maximum upscale: 1.5x (1920x1080) for large monitors
+- Minimum downscale: No limit (adapts to small screens)
+- **If slides look too large on bigger monitors**, you can reduce the max scale:
+  - Edit `frontend/src/components/SlidePanel/SlideTile.tsx`
+  - Change `const MAX_SCALE = 1.5;` to `const MAX_SCALE = 1.0;`
+  - This prevents upscaling beyond native 1280x720 size
+
+**Phase 1 MVP Limitations (by design):**
+- Single session only (no multi-user support)
+- No session persistence (state lost on restart)
+- No authentication
+- No drag-and-drop slide reordering
+- No HTML editing
+- View-only slide display
+
+**Next Phases**: 
+- Phase 2: Enhanced UI (drag-and-drop, editing, responsive design)
+- Phase 3: Databricks deployment
+- Phase 4: Multi-session support with persistence
+
+See [PHASE_1_MVP.md](PHASE_1_MVP.md) and [README_PHASE1.md](README_PHASE1.md) for detailed Phase 1 documentation.
 
 ## Contributing
 

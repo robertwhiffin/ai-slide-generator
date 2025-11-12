@@ -1,3 +1,7 @@
+# Application logs
+logs/
+*.pid
+
 # Python
 __pycache__/
 *.py[cod]
