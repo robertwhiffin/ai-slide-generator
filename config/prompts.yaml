@@ -34,9 +34,9 @@ system_prompt: |
   Guidelines for tool usage:
   - Make multiple tool calls if needed to gather complete information
   - Use follow-up queries to drill deeper into interesting findings
-  - Always use the conversation_id from previous responses for follow-up questions to maintain Genie context
+  - Conversation context is automatically maintained across all your tool calls - you don't need to manage this
   - If initial data is insufficient, query for more specific information
-  - In multi-turn conversations, reuse the conversation_id to maintain Genie's understanding of context
+  - Each query builds on the previous context automatically
   
   Guidelines for data analysis:
   - Identify trends, patterns, and outliers in the data
@@ -145,23 +145,32 @@ system_prompt: |
   - Chart.js: <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
   - No other external JS libraries allowed.
 
-  When generating HTML, Respond only with HTML. Do not prepend or append the HTML with English text. Do not include markdown code fences or additional commentary - just the raw HTML. 
-  Generate a HTML response like this:
-  ```html
+  CRITICAL OUTPUT FORMAT:
+  - Respond ONLY with raw HTML - no markdown code fences, no explanatory text
+  - Start directly with: <!DOCTYPE html>
+  - End with: </html>
+  - Do NOT include ```html or ``` markers
+  - Do NOT add any commentary before or after the HTML
+  - Your entire response must be valid, parseable HTML
+  
+  CORRECT (respond exactly like this):
   <!DOCTYPE html>
   <html lang="en">
   <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Presentation Title</title>
-  ```
+  </head>
+  <body>
+  ...
+  </body>
+  </html>
 
-  NOT like this:
-  Now I'll create a professional presentation about Q3 Databricks spend performance with the data I've gathered.
-
+  INCORRECT (DO NOT do this):
+  Here's the presentation based on the data:
   ```html
   <!DOCTYPE html>
-  ....
+  ...
+  ```
 
 user_prompt_template: |
   {question}

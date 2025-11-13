@@ -4,8 +4,9 @@ Live end-to-end test for the SlideGeneratorAgent.
 
 This script tests the agent with real Databricks connections (no mocks):
 - Real LLM calls to the configured endpoint
-- Real Genie queries to the configured space
+- Real Genie queries to the configured space (with automatic conversation management)
 - Real MLflow tracing
+- Session-based conversation state
 
 Usage:
     python test_agent_live.py
@@ -105,6 +106,9 @@ def test_agent_live(
     """
     Run a live test of the agent with real LLM and Genie calls.
     
+    This test demonstrates the new session-based approach where Genie
+    conversation IDs are managed automatically, eliminating LLM hallucination risk.
+    
     Args:
         question: Question to ask the agent
         max_slides: Maximum number of slides to generate
@@ -112,7 +116,7 @@ def test_agent_live(
         save_output: Save HTML to file
         
     Returns:
-        Result dictionary from agent
+        Result dictionary from agent including session_id and genie_conversation_id
         
     Raises:
         AgentError: If agent execution fails
@@ -132,8 +136,23 @@ def test_agent_live(
         print(f"❌ Failed to create agent: {e}")
         raise
     
-    # Step 2: Generate slides
-    print_section(f"Step 2: Generating Slides (max {max_slides})")
+    # Step 2: Create session (initializes Genie conversation)
+    print_section("Step 2: Creating Session")
+    print("Initializing Genie conversation...")
+    try:
+        session_id = agent.create_session()
+        print("✅ Session created successfully")
+        print_result("Session ID", session_id)
+        
+        # Get session to show Genie conversation ID
+        session = agent.get_session(session_id)
+        print_result("Genie Conversation ID", session["genie_conversation_id"])
+    except Exception as e:
+        print(f"❌ Failed to create session: {e}")
+        raise
+    
+    # Step 3: Generate slides
+    print_section(f"Step 3: Generating Slides (max {max_slides})")
     print(f"Question: {question}")
     print("\nCalling LLM and Genie (this may take 30-60 seconds)...")
     
@@ -141,6 +160,7 @@ def test_agent_live(
     try:
         result = agent.generate_slides(
             question=question,
+            session_id=session_id,
             max_slides=max_slides
         )
         end_time = datetime.now()
@@ -152,20 +172,24 @@ def test_agent_live(
         print(f"❌ Failed to generate slides: {e}")
         raise
     
-    # Step 3: Analyze results
-    print_section("Step 3: Results Summary")
+    # Step 4: Analyze results
+    print_section("Step 4: Results Summary")
     
     html = result.get("html", "")
     messages = result.get("messages", [])
     metadata = result.get("metadata", {})
+    session_id = result.get("session_id", "unknown")
+    genie_conversation_id = result.get("genie_conversation_id", "unknown")
     
+    print_result("Session ID", session_id)
+    print_result("Genie Conversation ID", genie_conversation_id)
     print_result("HTML Length", f"{len(html):,} characters")
     print_result("Total Messages", len(messages))
     print_result("Tool Calls", metadata.get("tool_calls", 0))
     print_result("Latency", f"{metadata.get('latency_seconds', 0):.2f} seconds")
     
-    # Step 4: Show message flow
-    print_section("Step 4: Conversation Flow")
+    # Step 5: Show message flow
+    print_section("Step 5: Conversation Flow")
     
     for i, msg in enumerate(messages, 1):
         role = msg.get("role", "unknown")
@@ -198,8 +222,8 @@ def test_agent_live(
             if verbose:
                 print(f"\n   Full response:\n{content}\n")
     
-    # Step 5: HTML preview
-    print_section("Step 5: HTML Preview")
+    # Step 6: HTML preview
+    print_section("Step 6: HTML Preview")
     
     if html.startswith("<!DOCTYPE") or html.startswith("<html"):
         print("✅ Valid HTML detected")
@@ -226,9 +250,9 @@ def test_agent_live(
         print("First 200 chars:")
         print(html[:200])
     
-    # Step 6: Save output
+    # Step 7: Save output
     if save_output:
-        print_section("Step 6: Saving Output")
+        print_section("Step 7: Saving Output")
         try:
             output_file = save_html_output(html)
             print(f"✅ HTML saved to: {output_file}")
@@ -260,16 +284,7 @@ def main():
     parser.add_argument(
         "--question",
         "-q",
-        default="""
-        Produce a consumption review of KPMG UK, starting from November 2024. This review needs to look at how:
-        - their consumption as a whole has changed over time.
-        - how individual lines of business usage of Databricks has changed. 
-        - How they are performing against their commit.
-        - Highlight top 10 consuming workspaces in the unknown LOB.
-        - Show the forecast details for the next three years per line of business.
-        This presentation is aimed at execs and decision-makers. It needs to be high-level and not too technical.
-        Include in the appendix data tables for the customer to review.
-        Keep the number of slides concise.
+        default=""""create a 10 slide report about KPMG UK's databricks usage, historic and forward looking"
         """,
         help="Question to ask the agent"
     )

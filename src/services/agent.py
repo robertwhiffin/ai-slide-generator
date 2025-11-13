@@ -21,7 +21,7 @@ from pydantic import BaseModel, Field
 
 from src.config.client import get_databricks_client
 from src.config.settings import get_settings
-from src.services.tools import query_genie_space
+from src.services.tools import initialize_genie_conversation, query_genie_space
 
 logger = logging.getLogger(__name__)
 
@@ -48,10 +48,6 @@ class GenieQueryInput(BaseModel):
     """Input schema for Genie query tool."""
 
     query: str = Field(description="Natural language question")
-    conversation_id: str | None = Field(
-        default=None,
-        description="Optional conversation ID to continue existing conversation",
-    )
 
 
 class SlideGeneratorAgent:
@@ -98,6 +94,9 @@ class SlideGeneratorAgent:
         # Session storage for multi-turn conversations
         # Structure: {session_id: {chat_history, genie_conversation_id, metadata}}
         self.sessions: dict[str, dict[str, Any]] = {}
+        
+        # Track current session for tool access to conversation_id
+        self.current_session_id: str | None = None
 
         logger.info("SlideGeneratorAgent initialized successfully")
 
@@ -160,16 +159,30 @@ class SlideGeneratorAgent:
     def _create_tools(self) -> list[StructuredTool]:
         """Create LangChain tools from tools.py functions."""
 
-        def _query_genie_wrapper(query: str, conversation_id: str | None = None) -> str:
-            """Wrapper that returns formatted string for LLM consumption."""
+        def _query_genie_wrapper(query: str) -> str:
+            """
+            Wrapper that auto-injects conversation_id from current session.
+            
+            This eliminates the need for the LLM to track and pass conversation IDs,
+            preventing hallucination errors.
+            """
+            # Get conversation_id from current session
+            if self.current_session_id is None:
+                raise ToolExecutionError("No active session - current_session_id not set")
+            
+            session = self.sessions.get(self.current_session_id)
+            if session is None:
+                raise ToolExecutionError(f"Session not found: {self.current_session_id}")
+            
+            conversation_id = session["genie_conversation_id"]
+            if conversation_id is None:
+                raise ToolExecutionError("Genie conversation not initialized for session")
+            
+            # Query Genie with automatic conversation_id
             result = query_genie_space(query, conversation_id)
-            # Return formatted string for LLM
-            return (
-                f"Data retrieved successfully:\n\n"
-                f"{result['data']}\n\n"
-                f"Conversation ID: {result['conversation_id']}\n\n"
-                f"Use this conversation_id for follow-up queries to maintain context."
-            )
+            
+            # Return formatted string for LLM (no conversation_id exposed)
+            return f"Data retrieved successfully:\n\n{result['data']}"
 
         genie_tool = StructuredTool.from_function(
             func=_query_genie_wrapper,
@@ -179,8 +192,8 @@ class SlideGeneratorAgent:
                 "Genie can understand natural language questions and convert them to SQL. "
                 "Use this tool to retrieve data needed for the presentation. "
                 "You can make multiple queries to gather comprehensive data. "
-                "Use the conversation_id from previous responses for follow-up questions."
-                f" Below is a description of the data available within the Genie space:\n\n {self.settings.genie.description}"
+                "The conversation context is automatically maintained across queries."
+                f"\n\nData available in the Genie space:\n{self.settings.genie.description}"
             ),
             args_schema=GenieQueryInput,
         )
@@ -248,10 +261,29 @@ class SlideGeneratorAgent:
 
         Each session maintains its own:
         - Chat message history
-        - Genie conversation_id for context continuity
+        - Genie conversation_id (initialized immediately)
         - Session metadata
+        
+        Note: Genie conversation is initialized upfront to eliminate
+        the need for the LLM to track conversation IDs.
         """
         session_id = str(uuid.uuid4())
+        
+        logger.info("Creating new session", extra={"session_id": session_id})
+        
+        # Initialize Genie conversation upfront
+        try:
+            genie_conversation_id = initialize_genie_conversation()
+            logger.info(
+                "Genie conversation initialized for session",
+                extra={
+                    "session_id": session_id,
+                    "genie_conversation_id": genie_conversation_id,
+                },
+            )
+        except Exception as e:
+            logger.error(f"Failed to initialize Genie conversation: {e}")
+            raise AgentError(f"Failed to initialize Genie conversation: {e}") from e
         
         # Create chat history for this session
         chat_history = ChatMessageHistory()
@@ -259,12 +291,12 @@ class SlideGeneratorAgent:
         # Initialize session data
         self.sessions[session_id] = {
             "chat_history": chat_history,
-            "genie_conversation_id": None,
+            "genie_conversation_id": genie_conversation_id,  # Set immediately
             "created_at": datetime.utcnow().isoformat(),
             "message_count": 0,
         }
         
-        logger.info("Created new session", extra={"session_id": session_id})
+        logger.info("Session created successfully", extra={"session_id": session_id})
         return session_id
 
     def get_session(self, session_id: str) -> dict[str, Any]:
@@ -403,6 +435,9 @@ class SlideGeneratorAgent:
         """
         start_time = datetime.utcnow()
         
+        # Set current session for tool access
+        self.current_session_id = session_id
+        
         # Get session data
         session = self.get_session(session_id)
         chat_history = session["chat_history"]
@@ -441,10 +476,8 @@ class SlideGeneratorAgent:
                 html_output = result["output"]
                 intermediate_steps = result.get("intermediate_steps", [])
 
-                # Extract Genie conversation_id from tool responses
-                genie_conversation_id = self._extract_genie_conversation_id(intermediate_steps)
-                if genie_conversation_id:
-                    session["genie_conversation_id"] = genie_conversation_id
+                # Note: genie_conversation_id already stored in session during create_session()
+                # No need to extract from tool responses anymore
 
                 # Update chat history with this interaction
                 chat_history.add_message(HumanMessage(content=question))
@@ -477,8 +510,7 @@ class SlideGeneratorAgent:
                 span.set_attribute("tool_calls", len(intermediate_steps))
                 span.set_attribute("latency_seconds", latency)
                 span.set_attribute("status", "success")
-                if genie_conversation_id:
-                    span.set_attribute("genie_conversation_id", genie_conversation_id)
+                span.set_attribute("genie_conversation_id", session["genie_conversation_id"])
 
                 logger.info(
                     "Slide generation completed",
@@ -505,30 +537,9 @@ class SlideGeneratorAgent:
         except Exception as e:
             logger.error(f"Slide generation failed: {e}", exc_info=True)
             raise AgentError(f"Slide generation failed: {e}") from e
-
-    def _extract_genie_conversation_id(self, intermediate_steps: list[tuple]) -> str | None:
-        """
-        Extract Genie conversation_id from tool responses.
-
-        Args:
-            intermediate_steps: List of (AgentAction, observation) tuples
-
-        Returns:
-            Conversation ID if found, None otherwise
-        """
-        for action, observation in intermediate_steps:
-            if action.tool == "query_genie_space":
-                # Parse the observation string to extract conversation_id
-                observation_str = str(observation)
-                if "Conversation ID:" in observation_str:
-                    # Extract the ID from the formatted string
-                    lines = observation_str.split("\n")
-                    for line in lines:
-                        if line.startswith("Conversation ID:"):
-                            conv_id = line.replace("Conversation ID:", "").strip()
-                            if conv_id:
-                                return conv_id
-        return None
+        finally:
+            # Clear current session after execution
+            self.current_session_id = None
 
 
 def create_agent() -> SlideGeneratorAgent:

@@ -4,6 +4,7 @@ Tools for the slide generator agent.
 This module implements tools that the agent can use to gather data and perform tasks.
 """
 
+import logging
 from typing import Any, Optional
 
 import pandas as pd
@@ -12,11 +13,60 @@ from databricks.sdk import WorkspaceClient
 from src.config.client import get_databricks_client
 from src.config.settings import get_settings
 
+logger = logging.getLogger(__name__)
+
 
 class GenieToolError(Exception):
     """Raised when Genie tool execution fails."""
 
     pass
+
+
+def initialize_genie_conversation(
+    placeholder_message: str = "This is a system message to start a conversation.",
+) -> str:
+    """
+    Initialize a Genie conversation with a placeholder message.
+
+    This function creates a new Genie conversation that can be reused
+    across multiple queries within a session, eliminating the need for
+    the LLM to track conversation IDs.
+
+    Args:
+        placeholder_message: Initial message to start the conversation
+
+    Returns:
+        Genie conversation ID string
+
+    Raises:
+        GenieToolError: If conversation initialization fails
+
+    Example:
+        >>> conv_id = initialize_genie_conversation()
+        >>> result = query_genie_space("show me data", conv_id)
+    """
+    client = get_databricks_client()
+    settings = get_settings()
+    space_id = settings.genie.space_id
+
+    try:
+        response = client.genie.start_conversation_and_wait(
+            space_id=space_id, content=placeholder_message
+        )
+        conversation_id = response.conversation_id
+        
+        logger.info(
+            "Initialized Genie conversation",
+            extra={
+                "conversation_id": conversation_id,
+                "space_id": space_id,
+            },
+        )
+        
+        return conversation_id
+
+    except Exception as e:
+        raise GenieToolError(f"Failed to initialize Genie conversation: {e}") from e
 
 
 

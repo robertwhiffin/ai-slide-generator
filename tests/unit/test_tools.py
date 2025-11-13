@@ -9,6 +9,7 @@ import pytest
 
 from src.services.tools import (
     GenieToolError,
+    initialize_genie_conversation,
     query_genie_space,
 )
 
@@ -161,4 +162,60 @@ def test_query_genie_space_error(mock_databricks_client, mock_settings):
         query_genie_space(query="Test query")
 
     assert "Failed to query Genie space" in str(exc_info.value)
+
+
+def test_initialize_genie_conversation_success(mock_databricks_client, mock_settings):
+    """Test successful Genie conversation initialization."""
+    # Setup mock conversation response
+    conversation_response = Mock()
+    conversation_response.conversation_id = "conv-init-123"
+    conversation_response.message_id = "msg-init-456"
+    
+    mock_databricks_client.genie.start_conversation_and_wait.return_value = conversation_response
+
+    # Initialize conversation
+    conversation_id = initialize_genie_conversation()
+
+    # Verify conversation_id returned
+    assert conversation_id == "conv-init-123"
+
+    # Verify client called with correct parameters
+    mock_databricks_client.genie.start_conversation_and_wait.assert_called_once_with(
+        space_id="test-space-id",
+        content="This is a system message to start a conversation."
+    )
+
+
+def test_initialize_genie_conversation_custom_message(mock_databricks_client, mock_settings):
+    """Test Genie conversation initialization with custom message."""
+    # Setup mock conversation response
+    conversation_response = Mock()
+    conversation_response.conversation_id = "conv-custom-123"
+    
+    mock_databricks_client.genie.start_conversation_and_wait.return_value = conversation_response
+
+    # Initialize conversation with custom message
+    custom_message = "Custom initialization message"
+    conversation_id = initialize_genie_conversation(placeholder_message=custom_message)
+
+    # Verify conversation_id returned
+    assert conversation_id == "conv-custom-123"
+
+    # Verify client called with custom message
+    mock_databricks_client.genie.start_conversation_and_wait.assert_called_once_with(
+        space_id="test-space-id",
+        content=custom_message
+    )
+
+
+def test_initialize_genie_conversation_error(mock_databricks_client, mock_settings):
+    """Test Genie conversation initialization with error."""
+    # Setup mock to raise exception
+    mock_databricks_client.genie.start_conversation_and_wait.side_effect = Exception("Init error")
+
+    # Execute and expect error
+    with pytest.raises(GenieToolError) as exc_info:
+        initialize_genie_conversation()
+
+    assert "Failed to initialize Genie conversation" in str(exc_info.value)
 
