@@ -284,7 +284,7 @@ def main():
     parser.add_argument(
         "--question",
         "-q",
-        default=""""create a 10 slide report about KPMG UK's databricks usage, historic and forward looking"
+        default=""""create a 5 slide report about KPMG UK's databricks usage, historic and forward looking"
         """,
         help="Question to ask the agent"
     )
