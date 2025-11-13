@@ -161,6 +161,7 @@ def test_agent_live(
         result = agent.generate_slides(
             question=question,
             session_id=session_id,
+            session_id=session_id,
             max_slides=max_slides
         )
         end_time = datetime.now()
@@ -172,6 +173,8 @@ def test_agent_live(
         print(f"❌ Failed to generate slides: {e}")
         raise
     
+    # Step 4: Analyze results
+    print_section("Step 4: Results Summary")
     # Step 4: Analyze results
     print_section("Step 4: Results Summary")
     
@@ -188,6 +191,8 @@ def test_agent_live(
     print_result("Tool Calls", metadata.get("tool_calls", 0))
     print_result("Latency", f"{metadata.get('latency_seconds', 0):.2f} seconds")
     
+    # Step 5: Show message flow
+    print_section("Step 5: Conversation Flow")
     # Step 5: Show message flow
     print_section("Step 5: Conversation Flow")
     
@@ -224,6 +229,8 @@ def test_agent_live(
     
     # Step 6: HTML preview
     print_section("Step 6: HTML Preview")
+    # Step 6: HTML preview
+    print_section("Step 6: HTML Preview")
     
     if html.startswith("<!DOCTYPE") or html.startswith("<html"):
         print("✅ Valid HTML detected")
@@ -251,7 +258,9 @@ def test_agent_live(
         print(html[:200])
     
     # Step 7: Save output
+    # Step 7: Save output
     if save_output:
+        print_section("Step 7: Saving Output")
         print_section("Step 7: Saving Output")
         try:
             output_file = save_html_output(html)
