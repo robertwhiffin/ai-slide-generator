@@ -161,7 +161,6 @@ def test_agent_live(
         result = agent.generate_slides(
             question=question,
             session_id=session_id,
-            session_id=session_id,
             max_slides=max_slides
         )
         end_time = datetime.now()
