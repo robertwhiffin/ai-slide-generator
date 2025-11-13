@@ -2,13 +2,13 @@
 Unit tests for tools module with MLFlow tracing.
 """
 
+import json
 from unittest.mock import MagicMock, Mock, patch
 
 import pytest
 
 from src.services.tools import (
     GenieToolError,
-    get_tool_schema,
     query_genie_space,
 )
 
@@ -33,24 +33,7 @@ def mock_settings():
         yield settings
 
 
-@pytest.fixture
-def mock_mlflow():
-    """Mock MLFlow functions for testing."""
-    with patch("src.services.tools.mlflow") as mock_mlflow:
-        # Mock tracing decorator
-        def trace_decorator(*args, **kwargs):
-            def wrapper(func):
-                return func
-
-            return wrapper
-
-        mock_mlflow.trace = trace_decorator
-        mock_mlflow.set_span_attribute = Mock()
-        mock_mlflow.log_metrics = Mock()
-        yield mock_mlflow
-
-
-def test_query_genie_space_success(mock_databricks_client, mock_settings, mock_mlflow):
+def test_query_genie_space_success(mock_databricks_client, mock_settings):
     """Test successful Genie query."""
     # Setup mock conversation response
     conversation_response = Mock()
@@ -93,9 +76,12 @@ def test_query_genie_space_success(mock_databricks_client, mock_settings, mock_m
     # Verify response
     assert response["conversation_id"] == "conv-123"
     assert "data" in response
-    assert len(response["data"]) == 2
-    assert response["data"][0]["region"] == "APAC"
-    assert response["data"][0]["sales"] == 1000000
+    
+    # Parse JSON data
+    data = json.loads(response["data"])
+    assert len(data) == 2
+    assert data[0]["region"] == "APAC"
+    assert data[0]["sales"] == 1000000
 
     # Verify client calls
     mock_databricks_client.genie.start_conversation_and_wait.assert_called_once()
@@ -103,7 +89,7 @@ def test_query_genie_space_success(mock_databricks_client, mock_settings, mock_m
 
 
 def test_query_genie_space_no_attachments(
-    mock_databricks_client, mock_settings, mock_mlflow
+    mock_databricks_client, mock_settings
 ):
     """Test Genie query with no attachments (error case)."""
     # Setup mock conversation response with no attachments
@@ -121,7 +107,7 @@ def test_query_genie_space_no_attachments(
     assert "No attachments in response" in str(exc_info.value)
 
 
-def test_query_genie_space_no_data(mock_databricks_client, mock_settings, mock_mlflow):
+def test_query_genie_space_no_data(mock_databricks_client, mock_settings):
     """Test Genie query returning no data."""
     # Setup mock conversation response
     conversation_response = Mock()
@@ -158,11 +144,14 @@ def test_query_genie_space_no_data(mock_databricks_client, mock_settings, mock_m
 
     # Verify response
     assert "data" in response
-    assert len(response["data"]) == 0
     assert response["conversation_id"] == "conv-empty"
+    
+    # Parse JSON data
+    data = json.loads(response["data"])
+    assert len(data) == 0
 
 
-def test_query_genie_space_error(mock_databricks_client, mock_settings, mock_mlflow):
+def test_query_genie_space_error(mock_databricks_client, mock_settings):
     """Test Genie query with error."""
     # Setup mock to raise exception
     mock_databricks_client.genie.start_conversation_and_wait.side_effect = Exception("Connection error")
@@ -172,20 +161,4 @@ def test_query_genie_space_error(mock_databricks_client, mock_settings, mock_mlf
         query_genie_space(query="Test query")
 
     assert "Failed to query Genie space" in str(exc_info.value)
-
-
-def test_get_tool_schema():
-    """Test tool schema generation."""
-    schema = get_tool_schema()
-
-    assert schema["type"] == "function"
-    assert schema["function"]["name"] == "query_genie_space"
-    assert "description" in schema["function"]
-    assert "parameters" in schema["function"]
-
-    params = schema["function"]["parameters"]
-    assert params["type"] == "object"
-    assert "query" in params["properties"]
-    assert "conversation_id" in params["properties"]
-    assert params["required"] == ["query"]
 
