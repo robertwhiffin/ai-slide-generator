@@ -1,9 +1,16 @@
 """Unit tests for slide replacement parsing and validation."""
 
+from pathlib import Path
+
 import pytest
 
 from src.api.models.requests import SlideContext
+from src.api.services.chat_service import validate_canvas_scripts
 from src.services.agent import AgentError, SlideGeneratorAgent
+
+DEBUG_OUTPUT_DIR = Path("output/debug")
+DEBUG_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+DEBUG_HTML_FILE = DEBUG_OUTPUT_DIR / "sample_llm_response.html"
 
 
 @pytest.fixture
@@ -59,6 +66,59 @@ class TestSlideReplacementParsing:
         with pytest.raises(AgentError, match="No slide divs"):
             agent_stub._parse_slide_replacements("<div>Not a slide</div>", [0])
 
+    def test_parse_extracts_scripts_and_canvas_ids(
+        self,
+        agent_stub: SlideGeneratorAgent,
+    ) -> None:
+        """Parser should collect canvas ids and associated scripts."""
+        html_response = """
+        <div class="slide">
+            <canvas id="chartA"></canvas>
+        </div>
+        <script data-slide-scripts>
+        const canvas = document.getElementById('chartA');
+        if (canvas) {
+            const ctx = canvas.getContext('2d');
+            new Chart(ctx, {type: 'bar', data: { labels: [], datasets: [] }});
+        }
+        </script>
+        """
+
+        DEBUG_HTML_FILE.write_text(html_response, encoding="utf-8")
+
+        result = agent_stub._parse_slide_replacements(html_response, [0])
+
+        assert result["canvas_ids"] == ["chartA"]
+        assert "chartA" in result["replacement_scripts"]
+        assert result["script_canvas_ids"] == ["chartA"]
+
+    def test_validate_canvas_scripts_full_html_success(
+        self,
+        agent_stub: SlideGeneratorAgent,
+    ) -> None:
+        """Full deck validation passes when scripts exist."""
+        html = """
+        <html>
+            <body>
+                <canvas id="chart1"></canvas>
+                <script>
+                const c = document.getElementById('chart1');
+                if (c) { const ctx = c.getContext('2d'); new Chart(ctx, {}); }
+                </script>
+            </body>
+        </html>
+        """
+        agent_stub._validate_canvas_scripts_in_html(html)
+
+    def test_validate_canvas_scripts_full_html_failure(
+        self,
+        agent_stub: SlideGeneratorAgent,
+    ) -> None:
+        """Full deck validation raises error when script missing."""
+        html = "<canvas id='chartMissing'></canvas><script>console.log('noop');</script>"
+        with pytest.raises(AgentError, match="canvas elements"):
+            agent_stub._validate_canvas_scripts_in_html(html)
+
 
 class TestSlideContextValidation:
     """Test slide context validation rules."""
@@ -92,5 +152,26 @@ class TestSlideContextValidation:
             SlideContext(
                 indices=[1, 2],
                 slide_htmls=['<div class="slide">Only one</div>'],
+            )
+
+
+class TestCanvasScriptValidation:
+    """Validate helper that enforces chart script parity."""
+
+    def test_validation_passes_when_scripts_present(self) -> None:
+        """No error when every canvas id has script coverage."""
+        validate_canvas_scripts(
+            canvas_ids=["chart1"],
+            script_text="document.getElementById('chart1')",
+            existing_scripts="",
+        )
+
+    def test_validation_fails_when_scripts_missing(self) -> None:
+        """Raise ValueError when a canvas lacks initialization."""
+        with pytest.raises(ValueError, match="Missing Chart.js initialization"):
+            validate_canvas_scripts(
+                canvas_ids=["chart2"],
+                script_text="document.getElementById('chart1')",
+                existing_scripts="",
             )
 

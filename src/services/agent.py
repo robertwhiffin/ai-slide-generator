@@ -6,6 +6,7 @@ capabilities with MLflow tracing integration.
 """
 
 import logging
+import re
 import uuid
 from datetime import datetime
 from typing import Any
@@ -390,6 +391,7 @@ class SlideGeneratorAgent:
 
         soup = BeautifulSoup(llm_response, "html.parser")
         slide_divs = soup.find_all("div", class_="slide")
+        script_blocks, script_canvas_ids = self._extract_script_blocks(soup)
 
         if not slide_divs:
             raise AgentError(
@@ -398,6 +400,7 @@ class SlideGeneratorAgent:
             )
 
         replacement_slides = [str(slide) for slide in slide_divs]
+        canvas_ids = self._extract_canvas_ids(slide_divs)
 
         for idx, slide_html in enumerate(replacement_slides):
             if not slide_html.strip():
@@ -420,6 +423,7 @@ class SlideGeneratorAgent:
 
         return {
             "replacement_slides": replacement_slides,
+            "replacement_scripts": "\n".join(script_blocks) if script_blocks else "",
             "original_indices": original_indices,
             "start_index": start_index,
             "original_count": original_count,
@@ -428,7 +432,90 @@ class SlideGeneratorAgent:
             "success": True,
             "error": None,
             "operation": "edit",
+            "canvas_ids": canvas_ids,
+            "script_canvas_ids": script_canvas_ids,
         }
+
+    @staticmethod
+    def _extract_canvas_ids(slide_divs: list[Any]) -> list[str]:
+        """Collect canvas ids from the replacement slides."""
+        ids: list[str] = []
+        for slide in slide_divs:
+            for canvas in slide.find_all("canvas"):
+                canvas_id = canvas.get("id")
+                if canvas_id:
+                    ids.append(canvas_id)
+        return ids
+
+    def _extract_script_blocks(self, soup: BeautifulSoup) -> tuple[list[str], list[str]]:
+        """
+        Extract script blocks marked for slide replacements and collect canvas ids referenced.
+        """
+        script_blocks: list[str] = []
+        script_canvas_ids: list[str] = []
+
+        script_tags = soup.find_all("script")
+        tagged_scripts = [tag for tag in script_tags if tag.get("data-slide-scripts") is not None]
+
+        # Fallback: if no scripts were tagged, use trailing scripts after the slide blocks
+        candidate_scripts = tagged_scripts
+        if not candidate_scripts:
+            candidate_scripts = script_tags
+
+        for tag in candidate_scripts:
+            script_text = tag.get_text() or ""
+            script_canvas_ids.extend(self._extract_canvas_ids_from_script(script_text))
+
+            if script_text.strip():
+                script_blocks.append(script_text.strip())
+
+        return script_blocks, script_canvas_ids
+
+    @staticmethod
+    def _extract_canvas_ids_from_script(script_text: str) -> list[str]:
+        """Find canvas ids referenced via document.getElementById."""
+        if not script_text:
+            return []
+        pattern = r"getElementById\(['\"]([\w-]+)['\"]\)"
+        return re.findall(pattern, script_text)
+
+    def _validate_canvas_scripts_in_html(self, html_content: str) -> None:
+        """
+        Ensure each canvas in a generated deck has Chart.js initialization.
+
+        Args:
+            html_content: Complete HTML returned by the LLM
+
+        Raises:
+            AgentError: If a canvas lacks a corresponding script
+        """
+        if not html_content:
+            return
+
+        soup = BeautifulSoup(html_content, "html.parser")
+        canvases = soup.find_all("canvas")
+        canvas_ids = [
+            canvas.get("id")
+            for canvas in canvases
+            if canvas.get("id")
+        ]
+
+        if not canvas_ids:
+            return
+
+        script_text = "\n".join(
+            script_tag.get_text() or ""
+            for script_tag in soup.find_all("script")
+        )
+
+        referenced_ids = set(self._extract_canvas_ids_from_script(script_text))
+        missing = [cid for cid in canvas_ids if cid not in referenced_ids]
+
+        if missing:
+            raise AgentError(
+                "Generated deck includes canvas elements without Chart.js scripts. "
+                f"Add document.getElementById('<id>') initializers for: {', '.join(missing)}"
+            )
 
     def _format_messages_for_chat(
         self,
@@ -613,6 +700,7 @@ class SlideGeneratorAgent:
                     )
                     parsed_output = replacement_info
                 else:
+                    self._validate_canvas_scripts_in_html(html_output)
                     parsed_output = {"html": html_output, "type": "full_deck"}
 
                 metadata = {

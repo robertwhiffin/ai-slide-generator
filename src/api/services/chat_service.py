@@ -7,11 +7,42 @@ Phase 4: Support multiple sessions with session_id parameter.
 import logging
 from typing import Any, Dict, List, Optional
 
-from src.models.slide_deck import SlideDeck
 from src.models.slide import Slide
+from src.models.slide_deck import SlideDeck
 from src.services.agent import create_agent
 
 logger = logging.getLogger(__name__)
+
+
+def validate_canvas_scripts(
+    canvas_ids: List[str],
+    script_text: str,
+    existing_scripts: str,
+) -> None:
+    """
+    
+    Ensure every canvas id has a corresponding initialization script.
+
+    Raises:
+        ValueError: If any canvas lacks an associated script.
+    """
+    if not canvas_ids:
+        return
+
+    missing: list[str] = []
+    for canvas_id in canvas_ids:
+        if canvas_id in existing_scripts:
+            continue
+        if script_text and canvas_id in script_text:
+            continue
+        missing.append(canvas_id)
+
+    if missing:
+        raise ValueError(
+            "Missing Chart.js initialization for canvas ids: "
+            f"{', '.join(missing)}. Include a <script data-slide-scripts> block "
+            "with document.getElementById('<id>') for each canvas."
+        )
 
 
 class ChatService:
@@ -159,7 +190,8 @@ class ChatService:
         start_idx = replacement_info["start_index"]
         original_count = replacement_info["original_count"]
         replacement_slides = replacement_info["replacement_slides"]
-
+        replacement_scripts = replacement_info.get("replacement_scripts", "")
+        canvas_ids = replacement_info.get("canvas_ids", [])
 
         # Check that the start index for replacement is within the valid range of the slide deck
         if start_idx < 0 or start_idx >= len(self.current_deck.slides):
@@ -167,6 +199,12 @@ class ChatService:
         # Ensure that the range of slides to be replaced does not exceed the available slides in the deck
         if start_idx + original_count > len(self.current_deck.slides):
             raise ValueError("Replacement range exceeds deck size")
+
+        validate_canvas_scripts(
+            canvas_ids=canvas_ids,
+            script_text=replacement_scripts,
+            existing_scripts=self.current_deck.scripts or "",
+        )
 
         for _ in range(original_count):
             self.current_deck.remove_slide(start_idx)
@@ -192,7 +230,22 @@ class ChatService:
             },
         )
 
+        self._append_replacement_scripts(replacement_scripts)
+
         return self.current_deck.to_dict()
+
+    def _append_replacement_scripts(self, script_text: str) -> None:
+        """Append validated replacement scripts to the deck."""
+        if not script_text or not script_text.strip():
+            return
+
+        cleaned = script_text.strip()
+        if self.current_deck.scripts:
+            self.current_deck.scripts = (
+                f"{self.current_deck.scripts.rstrip()}\n\n{cleaned}\n"
+            )
+        else:
+            self.current_deck.scripts = f"{cleaned}\n"
     
     def get_slides(self) -> Optional[Dict[str, Any]]:
         """Get current slide deck.

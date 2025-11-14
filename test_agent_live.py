@@ -292,7 +292,7 @@ def main():
     parser.add_argument(
         "--question",
         "-q",
-        default=""""You are operating in DEV mode. DO NOT USE TOOLS. Return 5 slides on on the benefit of AI
+        default=""""You are operating in DEV mode. DO NOT USE TOOLS. Return 5 slides on on the benefit of AI. Include at least one interactive chart with dummy data.
         """,
         help="Question to ask the agent"
     )

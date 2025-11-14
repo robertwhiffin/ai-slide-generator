@@ -13,6 +13,7 @@ This script demonstrates the complete editing flow:
 from __future__ import annotations
 
 import logging
+from datetime import datetime
 from pathlib import Path
 from typing import Iterable
 
@@ -24,6 +25,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 OUTPUT_DIR = Path("output/slide_editing_test")
+DEBUG_DIR = OUTPUT_DIR / "debug"
 BASE_PROMPT = (
     "YOU ARE IN DEV MODE. DO NOT USE TOOLS. Create 6 slides that cover: "
     "title page, business context, current metrics, risks, opportunities, "
@@ -58,6 +60,16 @@ def _save_deck(deck: SlideDeck, path: Path) -> None:
     logger.info("Saved deck", extra={"path": str(path)})
 
 
+def _save_raw_html(content: str, filename: str) -> None:
+    """Write raw LLM HTML for debugging."""
+    if not content:
+        return
+    DEBUG_DIR.mkdir(parents=True, exist_ok=True)
+    debug_path = DEBUG_DIR / filename
+    debug_path.write_text(content, encoding="utf-8")
+    logger.info("Saved raw HTML", extra={"path": str(debug_path)})
+
+
 def _apply_replacements(deck: SlideDeck, replacement_info: dict) -> None:
     start = replacement_info["start_index"]
     original_count = replacement_info["original_count"]
@@ -68,6 +80,14 @@ def _apply_replacements(deck: SlideDeck, replacement_info: dict) -> None:
     for idx, slide_html in enumerate(replacement_info["replacement_slides"]):
         new_slide = Slide(html=slide_html, slide_id=f"slide_{start + idx}")
         deck.insert_slide(new_slide, start + idx)
+
+    replacement_scripts = replacement_info.get("replacement_scripts", "")
+    if replacement_scripts and replacement_scripts.strip():
+        cleaned = replacement_scripts.strip()
+        if deck.scripts:
+            deck.scripts = f"{deck.scripts.rstrip()}\n\n{cleaned}\n"
+        else:
+            deck.scripts = f"{cleaned}\n"
 
 
 def _run_edit(
@@ -88,6 +108,10 @@ def _run_edit(
         max_slides=max_slides,
         slide_context=slide_context,
     )
+
+    timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+    indices_slug = "-".join(str(idx) for idx in selected_indices)
+    _save_raw_html(result.get("html", ""), f"edit_raw_{indices_slug}_{timestamp}.html")
 
     replacement_info = result["replacement_info"]
 
@@ -113,6 +137,7 @@ def _prepare_base_deck(agent) -> str:
     )
 
     base_html = result["html"]
+    _save_raw_html(base_html, "base_deck_raw.html")
     base_deck = SlideDeck.from_html_string(base_html)
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)

@@ -108,6 +108,9 @@ system_prompt: |
     const canvas = document.getElementById('chartId');
     if (canvas)  const ctx = canvas.getContext('2d'); new Chart(ctx, ...); 
   - Set maintainAspectRatio:false, max-height:200px
+  - Every <canvas id="..."> MUST have a matching Chart.js script in the SAME response.
+    Append a <script data-slide-scripts>...</script> block after your slide divs that calls
+    document.getElementById('<canvasId>') for each canvas you introduce.
   
   
   Technical Requirements:
@@ -167,6 +170,7 @@ slide_editing_instructions: |
      - Each slide should be a complete, self-contained <div class="slide">...</div>
      - Maintain 1280x720 dimensions per slide
      - Do NOT wrap slides in <slide-replacement> tags - just return the raw slide divs
+     - If you introduce or modify charts, append a <script data-slide-scripts>...</script> block after the slide divs that contains the Chart.js initialization code for every new canvas ID
   
   3. FOLLOW THESE RULES:
      - Return ONLY the replacement slide HTML, not the entire deck
@@ -175,6 +179,7 @@ slide_editing_instructions: |
      - Maintain brand colors, typography, and styling guidelines
      - If you need data, use query_genie_space tool first
      - You have creative freedom on how many slides to return
+     - Every <canvas id="..."> you add MUST have a corresponding Chart.js script in the <script data-slide-scripts> block that calls document.getElementById('<id>')
   
   4. EXAMPLE FLOW:
      User provides:

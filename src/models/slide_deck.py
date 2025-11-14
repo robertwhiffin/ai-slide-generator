@@ -116,8 +116,9 @@ class SlideDeck:
         # Extract inline scripts
         script_parts = []
         for script_tag in soup.find_all('script', src=False):
-            if script_tag.string:
-                script_parts.append(script_tag.string)
+            script_content = script_tag.string or script_tag.get_text()
+            if script_content:
+                script_parts.append(script_content)
         scripts = '\n'.join(script_parts)
         
         # Phase 2: Extract Slides
