@@ -8,9 +8,6 @@ from src.api.models.requests import SlideContext
 from src.api.services.chat_service import validate_canvas_scripts
 from src.services.agent import AgentError, SlideGeneratorAgent
 
-DEBUG_OUTPUT_DIR = Path("output/debug")
-DEBUG_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-DEBUG_HTML_FILE = DEBUG_OUTPUT_DIR / "sample_llm_response.html"
 
 
 @pytest.fixture
@@ -71,26 +68,27 @@ class TestSlideReplacementParsing:
         agent_stub: SlideGeneratorAgent,
     ) -> None:
         """Parser should collect canvas ids and associated scripts."""
-        html_response = """
-        <div class="slide">
-            <canvas id="chartA"></canvas>
-        </div>
-        <script data-slide-scripts>
-        const canvas = document.getElementById('chartA');
-        if (canvas) {
-            const ctx = canvas.getContext('2d');
-            new Chart(ctx, {type: 'bar', data: { labels: [], datasets: [] }});
-        }
-        </script>
-        """
 
-        DEBUG_HTML_FILE.write_text(html_response, encoding="utf-8")
+        for script_tag in ("<script data-slide-scripts>", "<script>"):
+            html_response = f"""
+            <div class="slide">
+                <canvas id="chartA"></canvas>
+            </div>
+            {script_tag}
+            const canvas = document.getElementById('chartA');
+            if (canvas) {{
+                const ctx = canvas.getContext('2d');
+                new Chart(ctx, {{type: 'bar', data: {{ labels: [], datasets: [] }}}});
+            }}
+            </script>
+            """
 
-        result = agent_stub._parse_slide_replacements(html_response, [0])
+            result = agent_stub._parse_slide_replacements(html_response, [0])
 
-        assert result["canvas_ids"] == ["chartA"]
-        assert "chartA" in result["replacement_scripts"]
-        assert result["script_canvas_ids"] == ["chartA"]
+            assert result["canvas_ids"] == ["chartA"]
+            assert "chartA" in result["replacement_scripts"]
+            assert "<script" not in result["replacement_scripts"]
+            assert result["script_canvas_ids"] == ["chartA"]
 
     def test_validate_canvas_scripts_full_html_success(
         self,
