@@ -21,6 +21,8 @@ class SlideDeck:
         head_meta: Other metadata from HTML head (charset, viewport, etc.)
     """
     
+    CHART_JS_URL = "https://cdn.jsdelivr.net/npm/chart.js"
+
     def __init__(
         self,
         title: Optional[str] = None,
@@ -46,6 +48,12 @@ class SlideDeck:
         self.scripts = scripts
         self.slides = slides or []
         self.head_meta = head_meta or {}
+        self._ensure_default_external_scripts()
+
+    def _ensure_default_external_scripts(self) -> None:
+        """Ensure required third-party scripts are included when knitting."""
+        if self.CHART_JS_URL not in self.external_scripts:
+            self.external_scripts.append(self.CHART_JS_URL)
     
     @classmethod
     def from_html(cls, html_path: str) -> 'SlideDeck':
@@ -208,6 +216,7 @@ class SlideDeck:
         Returns:
             Complete HTML document as a string
         """
+        self._ensure_default_external_scripts()
         # Build external script tags
         external_script_tags = '\n    '.join(
             f'<script src="{src}"></script>' 
@@ -291,6 +300,7 @@ class SlideDeck:
             IndexError: If index is out of range
         """
         slide = self.get_slide(index)
+        self._ensure_default_external_scripts()
         
         # Build external script tags
         external_script_tags = '\n    '.join(
