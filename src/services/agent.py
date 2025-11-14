@@ -11,6 +11,7 @@ from datetime import datetime
 from typing import Any
 
 import mlflow
+from bs4 import BeautifulSoup
 from databricks_langchain import ChatDatabricks
 from langchain_classic.agents import AgentExecutor, create_tool_calling_agent
 from langchain_community.chat_message_histories import ChatMessageHistory
@@ -204,9 +205,13 @@ class SlideGeneratorAgent:
     def _create_prompt(self) -> ChatPromptTemplate:
         """Create prompt template with system prompt from config and chat history."""
         system_prompt = self.settings.prompts.get("system_prompt", "")
+        editing_prompt = self.settings.prompts.get("slide_editing_instructions", "")
         
         if not system_prompt:
             raise AgentError("System prompt not found in configuration")
+        
+        if editing_prompt:
+            system_prompt = f"{system_prompt.rstrip()}\n\n{editing_prompt.strip()}"
 
         prompt = ChatPromptTemplate.from_messages(
             [
@@ -342,6 +347,89 @@ class SlideGeneratorAgent:
         """
         return list(self.sessions.keys())
 
+    def _format_slide_context(self, slide_context: dict[str, Any]) -> str:
+        """
+        Format slide context for injection into the user message.
+
+        Args:
+            slide_context: Dict with 'indices' and 'slide_htmls' keys
+
+        Returns:
+            Formatted string wrapped with slide-context markers
+        """
+        context_parts = ["<slide-context>"]
+        for html in slide_context.get("slide_htmls", []):
+            context_parts.append(html)
+        context_parts.append("</slide-context>")
+        return "\n\n".join(context_parts)
+
+    def _parse_slide_replacements(
+        self,
+        llm_response: str,
+        original_indices: list[int],
+    ) -> dict[str, Any]:
+        """
+        Parse LLM response to extract slide replacements.
+
+        The LLM can return any number of slides. This method extracts all
+        <div class="slide"> elements and returns them as replacements for the
+        original contiguous block.
+
+        Args:
+            llm_response: Raw HTML response from LLM
+            original_indices: List of original indices provided as context
+
+        Returns:
+            Dict with replacement details
+
+        Raises:
+            AgentError: If parsing fails or no slides found
+        """
+        if not llm_response or not llm_response.strip():
+            raise AgentError("LLM response is empty; expected slide HTML output")
+
+        soup = BeautifulSoup(llm_response, "html.parser")
+        slide_divs = soup.find_all("div", class_="slide")
+
+        if not slide_divs:
+            raise AgentError(
+                "No slide divs found in LLM response. Expected at least one "
+                "<div class='slide'>...</div> block."
+            )
+
+        replacement_slides = [str(slide) for slide in slide_divs]
+
+        for idx, slide_html in enumerate(replacement_slides):
+            if not slide_html.strip():
+                raise AgentError(f"Slide {idx} is empty")
+            if 'class="slide"' not in slide_html:
+                raise AgentError(f"Slide {idx} missing class='slide' wrapper")
+
+        original_count = len(original_indices)
+        replacement_count = len(replacement_slides)
+        start_index = original_indices[0] if original_indices else 0
+
+        logger.info(
+            "Parsed slide replacements",
+            extra={
+                "original_count": original_count,
+                "replacement_count": replacement_count,
+                "start_index": start_index,
+            },
+        )
+
+        return {
+            "replacement_slides": replacement_slides,
+            "original_indices": original_indices,
+            "start_index": start_index,
+            "original_count": original_count,
+            "replacement_count": replacement_count,
+            "net_change": replacement_count - original_count,
+            "success": True,
+            "error": None,
+            "operation": "edit",
+        }
+
     def _format_messages_for_chat(
         self,
         question: str,
@@ -411,7 +499,7 @@ class SlideGeneratorAgent:
         question: str,
         session_id: str,
         max_slides: int = 10,
-        genie_space_id: str | None = None,
+        slide_context: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """
         Generate HTML slides from a natural language question (multi-turn support).
@@ -442,15 +530,30 @@ class SlideGeneratorAgent:
         session = self.get_session(session_id)
         chat_history = session["chat_history"]
         
-        logger.info(
-            "Starting slide generation",
-            extra={
-                "question": question,
-                "session_id": session_id,
-                "max_slides": max_slides,
-                "message_count": session["message_count"],
-            },
-        )
+        editing_mode = slide_context is not None
+
+        if slide_context:
+            context_str = self._format_slide_context(slide_context)
+            full_question = f"{context_str}\n\n{question}"
+            logger.info(
+                "Slide editing mode",
+                extra={
+                    "session_id": session_id,
+                    "selected_indices": slide_context.get("indices", []),
+                    "slide_count": len(slide_context.get("indices", [])),
+                },
+            )
+        else:
+            full_question = question
+            logger.info(
+                "Slide generation mode",
+                extra={
+                    "question": question,
+                    "session_id": session_id,
+                    "max_slides": max_slides,
+                    "message_count": session["message_count"],
+                },
+            )
 
         try:
             # Use mlflow.start_span for manual tracing
@@ -461,10 +564,11 @@ class SlideGeneratorAgent:
                 span.set_attribute("max_slides", max_slides)
                 span.set_attribute("model_endpoint", self.settings.llm.endpoint)
                 span.set_attribute("message_count", session["message_count"])
+                span.set_attribute("mode", "edit" if editing_mode else "generate")
 
                 # Format input for agent with chat history
                 agent_input = {
-                    "input": question,
+                    "input": full_question,
                     "max_slides": max_slides,
                     "chat_history": chat_history.messages,  # Pass chat history messages
                 }
@@ -480,7 +584,7 @@ class SlideGeneratorAgent:
                 # No need to extract from tool responses anymore
 
                 # Update chat history with this interaction
-                chat_history.add_message(HumanMessage(content=question))
+                chat_history.add_message(HumanMessage(content=full_question))
                 chat_history.add_message(AIMessage(content=html_output))
 
                 # Format messages for chat interface
@@ -498,11 +602,25 @@ class SlideGeneratorAgent:
                 end_time = datetime.utcnow()
                 latency = (end_time - start_time).total_seconds()
 
+                replacement_info: dict[str, Any] | None = None
+                parsed_output: dict[str, Any]
+
+                if editing_mode:
+                    assert slide_context is not None
+                    replacement_info = self._parse_slide_replacements(
+                        llm_response=html_output,
+                        original_indices=slide_context.get("indices", []),
+                    )
+                    parsed_output = replacement_info
+                else:
+                    parsed_output = {"html": html_output, "type": "full_deck"}
+
                 metadata = {
                     "latency_seconds": latency,
                     "tool_calls": len(intermediate_steps),
                     "timestamp": end_time.isoformat(),
                     "message_count": session["message_count"],
+                    "mode": "edit" if editing_mode else "generate",
                 }
 
                 # Set span attributes
@@ -511,6 +629,8 @@ class SlideGeneratorAgent:
                 span.set_attribute("latency_seconds", latency)
                 span.set_attribute("status", "success")
                 span.set_attribute("genie_conversation_id", session["genie_conversation_id"])
+                if replacement_info:
+                    span.set_attribute("replacement_count", replacement_info["replacement_count"])
 
                 logger.info(
                     "Slide generation completed",
@@ -529,6 +649,8 @@ class SlideGeneratorAgent:
                     "metadata": metadata,
                     "session_id": session_id,
                     "genie_conversation_id": session["genie_conversation_id"],
+                    "replacement_info": replacement_info,
+                    "parsed_output": parsed_output,
                 }
 
         except TimeoutError as e:

@@ -49,6 +49,7 @@ async def send_message(request: ChatRequest) -> ChatResponse:
         result = chat_service.send_message(
             message=request.message,
             max_slides=request.max_slides,
+            slide_context=request.slide_context.model_dump() if request.slide_context else None,
         )
         
         # Return response

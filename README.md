@@ -83,6 +83,15 @@ A full-stack web application that generates HTML slide decks using LLMs. The sys
 - ✅ New `/api/slides/*` endpoints for slide manipulation
 - ✅ TypeScript `erasableSyntaxOnly` compatibility
 
+**Phase 6 - Slide Editing Backend**: ✅ Complete
+- ✅ `SlideContext` request model with contiguous validation
+- ✅ Agent editing mode with slide context injection
+- ✅ Replacement parser with metadata and validation
+- ✅ ChatService support for variable-length replacements
+- ✅ `replacement_info` surfaced through API responses
+- ✅ Interactive regression script `test_slide_editing_interactive.py`
+- ✅ Unit tests for parser + context validation
+
 **Slide Rendering:**
 - Slides are generated at fixed 1280x720 dimensions for consistency
 - Frontend dynamically scales slides to fit the container width (up to 1x native size)
@@ -169,6 +178,10 @@ A full-stack web application that generates HTML slide decks using LLMs. The sys
   - Compare original vs. parsed HTML
   - Inspect CSS, scripts, and individual slides
   - Save parsed components for analysis
+- `test_slide_editing_interactive.py`: Step-by-step backend harness for slide editing
+  - Demonstrates 1:1 edits, expansion, condensation, and manual interactive mode
+  - Saves before/after HTML decks under `output/slide_editing_test/`
+  - Useful for validating replacement metadata and parser behavior
 
 **Note**: Still single-session only. Multi-session support coming in Phase 4.
 

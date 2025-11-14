@@ -68,6 +68,10 @@ class ChatResponse(BaseModel):
         ...,
         description="Execution metadata",
     )
+    replacement_info: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="Information about slide replacements performed during editing",
+    )
     
     class Config:
         """Pydantic model configuration."""
@@ -98,6 +102,13 @@ class ChatResponse(BaseModel):
                 "metadata": {
                     "latency_seconds": 2.5,
                     "tool_calls": 1,
+                },
+                "replacement_info": {
+                    "start_index": 2,
+                    "original_count": 2,
+                    "replacement_count": 3,
+                    "net_change": 1,
+                    "operation": "edit",
                 },
             }
         }

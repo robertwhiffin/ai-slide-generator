@@ -292,7 +292,7 @@ def main():
     parser.add_argument(
         "--question",
         "-q",
-        default=""""create a 5 slide report about KPMG UK's databricks usage, historic and forward looking"
+        default=""""You are operating in DEV mode. DO NOT USE TOOLS. Return 5 slides on on the benefit of AI
         """,
         help="Question to ask the agent"
     )

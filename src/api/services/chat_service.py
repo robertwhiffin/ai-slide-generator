@@ -23,7 +23,7 @@ class ChatService:
     Attributes:
         agent: SlideGeneratorAgent instance
         session_id: Current session ID (Phase 1: single session)
-        slide_deck: Current parsed slide deck
+        current_deck: Current parsed slide deck
         raw_html: Raw HTML from AI (for debugging)
     """
     
@@ -39,7 +39,7 @@ class ChatService:
         logger.info("Created single session", extra={"session_id": self.session_id})
         
         # Store current slide deck and raw HTML
-        self.slide_deck: Optional[SlideDeck] = None
+        self.current_deck: Optional[SlideDeck] = None
         self.raw_html: Optional[str] = None
         
         logger.info("ChatService initialized successfully")
@@ -48,6 +48,7 @@ class ChatService:
         self,
         message: str,
         max_slides: int = 10,
+        slide_context: Optional[Dict[str, Any]] = None,
         # session_id: Optional[str] = None,  # For Phase 4
     ) -> Dict[str, Any]:
         """Send a message to the agent and get response.
@@ -72,6 +73,7 @@ class ChatService:
                 "message_length": len(message),
                 "max_slides": max_slides,
                 "session_id": self.session_id,
+                "has_slide_context": slide_context is not None,
             },
         )
         
@@ -83,21 +85,28 @@ class ChatService:
                 question=message,
                 session_id=self.session_id,
                 max_slides=max_slides,
+                slide_context=slide_context,
             )
             
-            # Parse HTML into SlideDeck if present
             html_output = result.get("html")
-            if html_output and html_output.strip():
-                # Store raw HTML for debugging
+            replacement_info = result.get("replacement_info")
+
+            if slide_context and replacement_info:
+                slide_deck_dict = self._apply_slide_replacements(result["parsed_output"])
+                # Store knitted HTML for debugging
+                if self.current_deck:
+                    self.raw_html = self.current_deck.knit()
+            elif html_output and html_output.strip():
                 self.raw_html = html_output
                 
                 try:
-                    self.slide_deck = SlideDeck.from_html_string(html_output)
+                    self.current_deck = SlideDeck.from_html_string(html_output)
+                    slide_deck_dict = self.current_deck.to_dict()
                     logger.info(
                         "Parsed slide deck",
                         extra={
-                            "slide_count": len(self.slide_deck.slides),
-                            "title": self.slide_deck.title,
+                            "slide_count": len(self.current_deck.slides),
+                            "title": self.current_deck.title,
                         },
                     )
                 except Exception as e:
@@ -105,17 +114,19 @@ class ChatService:
                         f"Failed to parse HTML into SlideDeck: {e}",
                         exc_info=True,
                     )
-                    # Continue without parsed slide deck
-                    self.slide_deck = None
+                    self.current_deck = None
+                    slide_deck_dict = None
             else:
                 self.raw_html = None
+                slide_deck_dict = None
             
             # Build response
             response = {
                 "messages": result["messages"],
-                "slide_deck": self.slide_deck.to_dict() if self.slide_deck else None,
+                "slide_deck": slide_deck_dict,
                 "raw_html": self.raw_html,  # Include raw HTML for debugging
                 "metadata": result["metadata"],
+                "replacement_info": replacement_info,
             }
             
             logger.info(
@@ -131,6 +142,57 @@ class ChatService:
         except Exception as e:
             logger.error(f"Failed to process message: {e}", exc_info=True)
             raise
+
+    def _apply_slide_replacements(
+        self,
+        replacement_info: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """
+        Apply slide replacements to the current slide deck.
+
+        Handles variable-length replacements by removing the original block
+        and inserting the new slides at the same start index.
+        """
+        if self.current_deck is None:
+            raise ValueError("No current deck to apply replacements to")
+
+        start_idx = replacement_info["start_index"]
+        original_count = replacement_info["original_count"]
+        replacement_slides = replacement_info["replacement_slides"]
+
+
+        # Check that the start index for replacement is within the valid range of the slide deck
+        if start_idx < 0 or start_idx >= len(self.current_deck.slides):
+            raise ValueError(f"Start index {start_idx} out of range")
+        # Ensure that the range of slides to be replaced does not exceed the available slides in the deck
+        if start_idx + original_count > len(self.current_deck.slides):
+            raise ValueError("Replacement range exceeds deck size")
+
+        for _ in range(original_count):
+            self.current_deck.remove_slide(start_idx)
+
+        logger.info(
+            "Removed slides for replacement",
+            extra={"count": original_count, "start_index": start_idx},
+        )
+
+        for idx, slide_html in enumerate(replacement_slides):
+            new_slide = Slide(
+                html=slide_html,
+                slide_id=f"slide_{start_idx + idx}",
+            )
+            self.current_deck.insert_slide(new_slide, start_idx + idx)
+
+        logger.info(
+            "Inserted replacement slides",
+            extra={
+                "replacement_count": len(replacement_slides),
+                "net_change": len(replacement_slides) - original_count,
+                "start_index": start_idx,
+            },
+        )
+
+        return self.current_deck.to_dict()
     
     def get_slides(self) -> Optional[Dict[str, Any]]:
         """Get current slide deck.
@@ -140,9 +202,9 @@ class ChatService:
         Returns:
             Slide deck dictionary or None if no slides exist
         """
-        if not self.slide_deck:
+        if not self.current_deck:
             return None
-        return self.slide_deck.to_dict()
+        return self.current_deck.to_dict()
     
     def reorder_slides(self, new_order: List[int]) -> Dict[str, Any]:
         """Reorder slides based on new index order.
@@ -157,22 +219,22 @@ class ChatService:
         Raises:
             ValueError: If no slide deck exists or invalid reorder
         """
-        if not self.slide_deck:
+        if not self.current_deck:
             raise ValueError("No slide deck available")
         
         # Validate indices
-        if len(new_order) != len(self.slide_deck.slides):
+        if len(new_order) != len(self.current_deck.slides):
             raise ValueError("Invalid reorder: wrong number of indices")
         
-        if set(new_order) != set(range(len(self.slide_deck.slides))):
+        if set(new_order) != set(range(len(self.current_deck.slides))):
             raise ValueError("Invalid reorder: invalid indices")
         
         # Reorder slides
-        new_slides = [self.slide_deck.slides[i] for i in new_order]
-        self.slide_deck.slides = new_slides
+        new_slides = [self.current_deck.slides[i] for i in new_order]
+        self.current_deck.slides = new_slides
         
         # Update indices
-        for idx, slide in enumerate(self.slide_deck.slides):
+        for idx, slide in enumerate(self.current_deck.slides):
             slide.slide_id = f"slide_{idx}"
         
         logger.info(
@@ -180,7 +242,7 @@ class ChatService:
             extra={"new_order": new_order, "session_id": self.session_id},
         )
         
-        return self.slide_deck.to_dict()
+        return self.current_deck.to_dict()
     
     def update_slide(self, index: int, html: str) -> Dict[str, Any]:
         """Update a single slide's HTML.
@@ -196,10 +258,10 @@ class ChatService:
         Raises:
             ValueError: If no slide deck exists, invalid index, or invalid HTML
         """
-        if not self.slide_deck:
+        if not self.current_deck:
             raise ValueError("No slide deck available")
         
-        if index < 0 or index >= len(self.slide_deck.slides):
+        if index < 0 or index >= len(self.current_deck.slides):
             raise ValueError(f"Invalid slide index: {index}")
         
         # Validate HTML has slide wrapper
@@ -207,7 +269,7 @@ class ChatService:
             raise ValueError("HTML must contain <div class='slide'> wrapper")
         
         # Update slide
-        self.slide_deck.slides[index] = Slide(html=html, slide_id=f"slide_{index}")
+        self.current_deck.slides[index] = Slide(html=html, slide_id=f"slide_{index}")
         
         logger.info(
             "Updated slide",
@@ -233,28 +295,28 @@ class ChatService:
         Raises:
             ValueError: If no slide deck exists or invalid index
         """
-        if not self.slide_deck:
+        if not self.current_deck:
             raise ValueError("No slide deck available")
         
-        if index < 0 or index >= len(self.slide_deck.slides):
+        if index < 0 or index >= len(self.current_deck.slides):
             raise ValueError(f"Invalid slide index: {index}")
         
         # Clone slide
-        cloned = self.slide_deck.slides[index].clone()
+        cloned = self.current_deck.slides[index].clone()
         
         # Insert after original
-        self.slide_deck.insert_slide(cloned, index + 1)
+        self.current_deck.insert_slide(cloned, index + 1)
         
         # Update slide IDs
-        for idx, slide in enumerate(self.slide_deck.slides):
+        for idx, slide in enumerate(self.current_deck.slides):
             slide.slide_id = f"slide_{idx}"
         
         logger.info(
             "Duplicated slide",
-            extra={"index": index, "new_count": len(self.slide_deck.slides), "session_id": self.session_id},
+            extra={"index": index, "new_count": len(self.current_deck.slides), "session_id": self.session_id},
         )
         
-        return self.slide_deck.to_dict()
+        return self.current_deck.to_dict()
     
     def delete_slide(self, index: int) -> Dict[str, Any]:
         """Delete a slide.
@@ -269,28 +331,28 @@ class ChatService:
         Raises:
             ValueError: If no slide deck exists, invalid index, or deleting last slide
         """
-        if not self.slide_deck:
+        if not self.current_deck:
             raise ValueError("No slide deck available")
         
-        if index < 0 or index >= len(self.slide_deck.slides):
+        if index < 0 or index >= len(self.current_deck.slides):
             raise ValueError(f"Invalid slide index: {index}")
         
-        if len(self.slide_deck.slides) <= 1:
+        if len(self.current_deck.slides) <= 1:
             raise ValueError("Cannot delete last slide")
         
         # Remove slide
-        self.slide_deck.remove_slide(index)
+        self.current_deck.remove_slide(index)
         
         # Update slide IDs
-        for idx, slide in enumerate(self.slide_deck.slides):
+        for idx, slide in enumerate(self.current_deck.slides):
             slide.slide_id = f"slide_{idx}"
         
         logger.info(
             "Deleted slide",
-            extra={"index": index, "new_count": len(self.slide_deck.slides), "session_id": self.session_id},
+            extra={"index": index, "new_count": len(self.current_deck.slides), "session_id": self.session_id},
         )
         
-        return self.slide_deck.to_dict()
+        return self.current_deck.to_dict()
 
 
 # Phase 1: Create global service instance
