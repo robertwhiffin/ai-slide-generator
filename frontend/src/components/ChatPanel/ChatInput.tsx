@@ -3,9 +3,16 @@ import React, { useState } from 'react';
 interface ChatInputProps {
   onSend: (message: string, maxSlides: number) => void;
   disabled: boolean;
+  placeholder?: string;
+  badge?: React.ReactNode;
 }
 
-export const ChatInput: React.FC<ChatInputProps> = ({ onSend, disabled }) => {
+export const ChatInput: React.FC<ChatInputProps> = ({
+  onSend,
+  disabled,
+  placeholder,
+  badge,
+}) => {
   const [message, setMessage] = useState('');
   const [maxSlides, setMaxSlides] = useState(10);
 
@@ -21,6 +28,7 @@ export const ChatInput: React.FC<ChatInputProps> = ({ onSend, disabled }) => {
     <form onSubmit={handleSubmit} className="p-4 bg-white border-t">
       <div className="flex items-end space-x-2">
         <div className="flex-1">
+          {badge && <div className="mb-2">{badge}</div>}
           <textarea
             value={message}
             onChange={(e) => setMessage(e.target.value)}
@@ -30,7 +38,7 @@ export const ChatInput: React.FC<ChatInputProps> = ({ onSend, disabled }) => {
                 handleSubmit(e);
               }
             }}
-            placeholder="Ask me to create slides..."
+            placeholder={placeholder ?? 'Ask me to create slides...'}
             disabled={disabled}
             className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 resize-none"
             rows={3}

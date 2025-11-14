@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   DndContext,
   closestCenter,
@@ -14,9 +14,10 @@ import {
   sortableKeyboardCoordinates,
   verticalListSortingStrategy,
 } from '@dnd-kit/sortable';
-import type { SlideDeck } from '../../types/slide';
+import type { Slide, SlideDeck } from '../../types/slide';
 import { SlideTile } from './SlideTile';
 import { api } from '../../services/api';
+import { useSelection } from '../../contexts/SelectionContext';
 
 interface SlidePanelProps {
   slideDeck: SlideDeck | null;
@@ -29,6 +30,7 @@ type ViewMode = 'tiles' | 'rawhtml' | 'rawtext';
 export const SlidePanel: React.FC<SlidePanelProps> = ({ slideDeck, rawHtml, onSlideChange }) => {
   const [isReordering, setIsReordering] = useState(false);
   const [viewMode, setViewMode] = useState<ViewMode>('tiles');
+  const { selectedIndices, setSelection, clearSelection } = useSelection();
   
   const sensors = useSensors(
     useSensor(PointerSensor),
@@ -58,6 +60,7 @@ export const SlidePanel: React.FC<SlidePanelProps> = ({ slideDeck, rawHtml, onSl
         );
         const updatedDeck = await api.reorderSlides(newOrder);
         onSlideChange(updatedDeck);
+        clearSelection();
       } catch (error) {
         console.error('Failed to reorder:', error);
         // Revert on error
@@ -77,6 +80,7 @@ export const SlidePanel: React.FC<SlidePanelProps> = ({ slideDeck, rawHtml, onSl
     try {
       const updatedDeck = await api.deleteSlide(index);
       onSlideChange(updatedDeck);
+      clearSelection();
     } catch (error) {
       console.error('Failed to delete:', error);
       alert('Failed to delete slide');
@@ -89,6 +93,7 @@ export const SlidePanel: React.FC<SlidePanelProps> = ({ slideDeck, rawHtml, onSl
     try {
       const updatedDeck = await api.duplicateSlide(index);
       onSlideChange(updatedDeck);
+      clearSelection();
     } catch (error) {
       console.error('Failed to duplicate:', error);
       alert('Failed to duplicate slide');
@@ -103,11 +108,30 @@ export const SlidePanel: React.FC<SlidePanelProps> = ({ slideDeck, rawHtml, onSl
       // Fetch updated deck
       const updatedDeck = await api.getSlides();
       onSlideChange(updatedDeck);
+      clearSelection();
     } catch (error) {
       console.error('Failed to update:', error);
       throw error; // Re-throw for editor to handle
     }
   };
+
+  useEffect(() => {
+    if (!slideDeck) {
+      clearSelection();
+      return;
+    }
+
+    const validIndices = selectedIndices.filter(
+      index => index >= 0 && index < slideDeck.slides.length,
+    );
+
+    if (validIndices.length !== selectedIndices.length) {
+      const slides: Slide[] = validIndices
+        .map(index => slideDeck.slides[index])
+        .filter((slide): slide is Slide => Boolean(slide));
+      setSelection(validIndices, slides);
+    }
+  }, [slideDeck, selectedIndices, clearSelection, setSelection]);
   if (!slideDeck) {
     return (
       <div className="flex items-center justify-center h-full bg-gray-50">
@@ -172,8 +196,7 @@ export const SlidePanel: React.FC<SlidePanelProps> = ({ slideDeck, rawHtml, onSl
       <div className="flex-1 overflow-hidden">
         {viewMode === 'tiles' && (
           <div className="h-full overflow-y-auto">
-            {/* Slide Tiles with Drag-and-Drop */}
-      <div className="p-4 space-y-4">
+            <div className="p-4 space-y-4">
               <DndContext
                 sensors={sensors}
                 collisionDetection={closestCenter}

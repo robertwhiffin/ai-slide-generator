@@ -1,5 +1,5 @@
 import type { ChatResponse } from '../types/message';
-import type { SlideDeck, Slide } from '../types/slide';
+import type { SlideDeck, Slide, SlideContext } from '../types/slide';
 
 const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
 
@@ -13,6 +13,12 @@ export class ApiError extends Error {
   }
 }
 
+interface SendMessageParams {
+  message: string;
+  maxSlides?: number;
+  slideContext?: SlideContext;
+}
+
 export const api = {
   /**
    * Send a message to the chat API
@@ -20,11 +26,11 @@ export const api = {
    * Phase 1: No session_id parameter
    * Phase 4: Add session_id parameter
    */
-  async sendMessage(
-    message: string, 
-    maxSlides: number = 10
-    // sessionId?: string  // For Phase 4
-  ): Promise<ChatResponse> {
+  async sendMessage({
+    message,
+    maxSlides = 10,
+    slideContext,
+  }: SendMessageParams): Promise<ChatResponse> {
     const response = await fetch(`${API_BASE_URL}/api/chat`, {
       method: 'POST',
       headers: {
@@ -33,6 +39,7 @@ export const api = {
       body: JSON.stringify({
         message,
         max_slides: maxSlides,
+        slide_context: slideContext,
         // session_id: sessionId  // For Phase 4
       }),
     });

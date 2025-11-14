@@ -2,7 +2,7 @@
 
 A full-stack web application that generates HTML slide decks using LLMs. The system provides a chat interface where users can ask natural language questions, and the AI agent queries structured data through Databricks Genie to produce professional HTML presentations with data-driven insights and visualizations.
 
-**Current Phase**: Phase 2 Complete - Enhanced UI with drag-and-drop editing, HTML editor, debugging tools, and defensive chart rendering
+**Current Phase**: Phase 7 In Progress - Slide-specific editing UI integrated with backend replacements
 
 ## Overview
 
@@ -91,6 +91,13 @@ A full-stack web application that generates HTML slide decks using LLMs. The sys
 - ✅ `replacement_info` surfaced through API responses
 - ✅ Interactive regression script `test_slide_editing_interactive.py`
 - ✅ Unit tests for parser + context validation
+
+**Phase 7 - Slide Editing UI**: ✅ Complete
+- ✅ Selection context with contiguous multi-slide selection logic
+- ✅ Visual slide picker with keyboard shortcuts and badges inside chat
+- ✅ Chat input integrates slide context and shows replacement feedback
+- ✅ Frontend replacement utility mirrors backend logic for seamless updates
+- ✅ Error, loading, and success states tailored for editing workflows
 
 **Slide Rendering:**
 - Slides are generated at fixed 1280x720 dimensions for consistency

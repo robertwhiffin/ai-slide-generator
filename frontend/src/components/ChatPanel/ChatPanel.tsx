@@ -1,116 +1,191 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import type { Message } from '../../types/message';
-import type { SlideDeck } from '../../types/slide';
+import type { ReplacementInfo, SlideDeck } from '../../types/slide';
 import { MessageList } from './MessageList';
 import { ChatInput } from './ChatInput';
 import { api } from '../../services/api';
 import { getRotatingLoadingMessage } from '../../utils/loadingMessages';
+import { SelectionBadge } from './SelectionBadge';
+import { ReplacementFeedback } from './ReplacementFeedback';
+import { ErrorDisplay } from './ErrorDisplay';
+import { LoadingIndicator } from './LoadingIndicator';
+import { useSelection } from '../../contexts/SelectionContext';
+import { useKeyboardShortcuts } from '../../hooks/useKeyboardShortcuts';
+import { applyReplacements } from '../../utils/slideReplacements';
 
 interface ChatPanelProps {
+  slideDeck: SlideDeck | null;
+  rawHtml: string | null;
   onSlidesGenerated: (slideDeck: SlideDeck, rawHtml: string | null) => void;
 }
 
-export const ChatPanel: React.FC<ChatPanelProps> = ({ onSlidesGenerated }) => {
+export const ChatPanel: React.FC<ChatPanelProps> = ({
+  slideDeck,
+  rawHtml,
+  onSlidesGenerated,
+}) => {
   const [messages, setMessages] = useState<Message[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [loadingMessage, setLoadingMessage] = useState<string>('');
   const [error, setError] = useState<string | null>(null);
+  const [lastReplacement, setLastReplacement] = useState<ReplacementInfo | null>(
+    null,
+  );
   const messageIndexRef = useRef(0);
-  const intervalRef = useRef<NodeJS.Timeout | null>(null);
+  const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const {
+    selectedIndices,
+    selectedSlides,
+    hasSelection,
+    clearSelection,
+  } = useSelection();
+
+  useKeyboardShortcuts();
+
+  const stopLoadingMessages = () => {
+    if (intervalRef.current) {
+      clearInterval(intervalRef.current);
+      intervalRef.current = null;
+    }
+    setLoadingMessage('');
+  };
 
   const handleSendMessage = async (content: string, maxSlides: number) => {
+    const trimmedContent = content.trim();
+    if (!trimmedContent) {
+      return;
+    }
+
     setIsLoading(true);
     setError(null);
+    setLastReplacement(null);
 
-    // 1. Show user message immediately
-    setMessages(prev => [...prev, {
-      role: 'user',
-      content: content,
-      timestamp: new Date().toISOString(),
-    }]);
+    setMessages(prev => [
+      ...prev,
+      {
+        role: 'user',
+        content: trimmedContent,
+        timestamp: new Date().toISOString(),
+      },
+    ]);
 
-    // 2. Start rotating through funny messages
     messageIndexRef.current = 0;
     setLoadingMessage(getRotatingLoadingMessage(0));
-    
     intervalRef.current = setInterval(() => {
       messageIndexRef.current += 1;
       setLoadingMessage(getRotatingLoadingMessage(messageIndexRef.current));
-    }, 3000); // Change message every 3 seconds
+    }, 3000);
+
+    const slideContext =
+      hasSelection && selectedIndices.length > 0
+        ? {
+            indices: selectedIndices,
+            slide_htmls: selectedSlides.map(slide => slide.html),
+          }
+        : undefined;
 
     try {
-      // 3. Call API (blocking, but user sees funny messages)
-      const response = await api.sendMessage(content, maxSlides);
-      
-      // 4. Stop rotating messages
-      if (intervalRef.current) {
-        clearInterval(intervalRef.current);
-      }
-      
-      // 5. Add real messages (skip user message as we already showed it)
+      const response = await api.sendMessage({
+        message: trimmedContent,
+        maxSlides,
+        slideContext,
+      });
+
+      stopLoadingMessages();
+
       const newMessages = response.messages.filter(m => m.role !== 'user');
       setMessages(prev => [...prev, ...newMessages]);
-      
-      // 6. Update slides and raw HTML
-      if (response.slide_deck) {
-        onSlidesGenerated(response.slide_deck, response.raw_html);
+
+      const nextRawHtml = response.raw_html ?? rawHtml ?? null;
+
+      if (response.replacement_info && slideContext) {
+        if (slideDeck) {
+          try {
+            const updatedDeck = applyReplacements(
+              slideDeck,
+              response.replacement_info,
+            );
+            onSlidesGenerated(updatedDeck, nextRawHtml);
+          } catch (applyError) {
+            console.warn('Failed to apply replacements locally, using API deck', applyError);
+            if (response.slide_deck) {
+              onSlidesGenerated(response.slide_deck, nextRawHtml);
+            } else {
+              throw applyError;
+            }
+          }
+        } else if (response.slide_deck) {
+          onSlidesGenerated(response.slide_deck, nextRawHtml);
+        }
+
+        setLastReplacement(response.replacement_info);
+        clearSelection();
+      } else if (response.slide_deck) {
+        onSlidesGenerated(response.slide_deck, nextRawHtml);
+        clearSelection();
       }
     } catch (err) {
       console.error('Failed to send message:', err);
       setError(err instanceof Error ? err.message : 'Failed to send message');
     } finally {
-      if (intervalRef.current) {
-        clearInterval(intervalRef.current);
-      }
+      stopLoadingMessages();
       setIsLoading(false);
-      setLoadingMessage('');
     }
   };
 
-  // Cleanup interval on unmount
   useEffect(() => {
     return () => {
       if (intervalRef.current) {
         clearInterval(intervalRef.current);
-    }
-  };
+      }
+    };
   }, []);
 
   return (
     <div className="flex flex-col h-full bg-gray-50">
-      {/* Header */}
-      <div className="p-4 border-b bg-white">
+      <div className="p-4 border-b bg-white flex items-center justify-between">
         <h2 className="text-lg font-semibold">Chat</h2>
+        {hasSelection && (
+          <span className="text-sm text-blue-600 font-medium">
+            {selectedIndices.length} slide
+            {selectedIndices.length === 1 ? '' : 's'} selected
+          </span>
+        )}
       </div>
 
-      {/* Messages */}
       <div className="flex-1 overflow-y-auto">
         <MessageList messages={messages} isLoading={isLoading} />
       </div>
 
-      {/* Error Display */}
       {error && (
-        <div className="p-4 bg-red-50 border-t border-red-200">
-          <p className="text-sm text-red-600">{error}</p>
-        </div>
+        <ErrorDisplay error={error} onDismiss={() => setError(null)} />
       )}
 
-      {/* Loading Message - Amusing messages while AI works */}
-      {loadingMessage && (
-        <div className="px-4 py-3 bg-blue-50 border-t border-blue-200">
-          <div className="flex items-center space-x-2">
-            <div className="flex space-x-1">
-              <div className="w-2 h-2 bg-blue-600 rounded-full animate-bounce" style={{ animationDelay: '0ms' }}></div>
-              <div className="w-2 h-2 bg-blue-600 rounded-full animate-bounce" style={{ animationDelay: '150ms' }}></div>
-              <div className="w-2 h-2 bg-blue-600 rounded-full animate-bounce" style={{ animationDelay: '300ms' }}></div>
-            </div>
-            <p className="text-sm text-blue-800 italic">{loadingMessage}</p>
-          </div>
+      {loadingMessage && <LoadingIndicator message={loadingMessage} />}
+
+      <ChatInput
+        onSend={handleSendMessage}
+        disabled={isLoading}
+        placeholder={
+          hasSelection
+            ? 'Describe changes to selected slides...'
+            : 'Ask to generate or modify slides...'
+        }
+        badge={
+          hasSelection ? (
+            <SelectionBadge
+              selectedIndices={selectedIndices}
+              onClear={clearSelection}
+            />
+          ) : undefined
+        }
+      />
+
+      {lastReplacement && (
+        <div className="px-4 pb-4">
+          <ReplacementFeedback replacementInfo={lastReplacement} />
         </div>
       )}
-
-      {/* Input */}
-      <ChatInput onSend={handleSendMessage} disabled={isLoading} />
     </div>
   );
 };

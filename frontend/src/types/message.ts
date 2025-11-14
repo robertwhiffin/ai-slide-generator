@@ -1,4 +1,4 @@
-import type { SlideDeck } from './slide';
+import type { SlideDeck, ReplacementInfo } from './slide';
 
 export type MessageRole = 'user' | 'assistant' | 'tool';
 
@@ -15,12 +15,19 @@ export interface Message {
   tool_call_id?: string;
 }
 
+export interface ChatMetadata {
+  latency_seconds: number;
+  tool_calls: number;
+  message_count?: number;
+  mode?: string;
+  timestamp?: string;
+  [key: string]: unknown;
+}
+
 export interface ChatResponse {
   messages: Message[];
   slide_deck: SlideDeck | null;
   raw_html: string | null;
-  metadata: {
-    latency_seconds: number;
-    tool_calls: number;
-  };
+  metadata: ChatMetadata;
+  replacement_info?: ReplacementInfo;
 }

@@ -1,9 +1,10 @@
 import React, { useMemo, useRef, useState, useEffect } from 'react';
 import { useSortable } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
-import { FiEdit, FiCopy, FiTrash2, FiMove } from 'react-icons/fi';
+import { FiEdit, FiCopy, FiTrash2, FiMove, FiMessageSquare } from 'react-icons/fi';
 import type { Slide, SlideDeck } from '../../types/slide';
 import { HTMLEditorModal } from './HTMLEditorModal';
+import { useSelection } from '../../contexts/SelectionContext';
 
 interface SlideTileProps {
   slide: Slide;
@@ -29,6 +30,7 @@ export const SlideTile: React.FC<SlideTileProps> = ({
   const [isEditing, setIsEditing] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
   const [scale, setScale] = useState(1);
+  const { selectedIndices, setSelection } = useSelection();
 
   const {
     attributes,
@@ -97,12 +99,17 @@ export const SlideTile: React.FC<SlideTileProps> = ({
     opacity: isDragging ? 0.5 : 1,
   };
 
+  const isSelected = selectedIndices.includes(index);
+  const containerClassName = `bg-white rounded-lg shadow-md overflow-hidden ${
+    isSelected ? 'ring-2 ring-blue-500' : ''
+  }`;
+
   return (
     <>
       <div
         ref={setNodeRef}
         style={style}
-        className="bg-white rounded-lg shadow-md overflow-hidden"
+        className={containerClassName}
       >
         {/* Slide Header with Actions */}
       <div className="px-4 py-2 bg-gray-100 border-b flex items-center justify-between">
@@ -124,6 +131,18 @@ export const SlideTile: React.FC<SlideTileProps> = ({
 
           {/* Action Buttons */}
           <div className="flex items-center space-x-1">
+            <button
+              onClick={() => setSelection([index], [slide])}
+              className={`p-1 rounded ${
+                isSelected
+                  ? 'text-blue-700 bg-blue-50'
+                  : 'text-indigo-600 hover:bg-indigo-50'
+              }`}
+              aria-pressed={isSelected}
+              title={isSelected ? 'Selected for editing' : 'Add to chat context'}
+            >
+              <FiMessageSquare size={16} />
+            </button>
             <button
               onClick={() => setIsEditing(true)}
               className="p-1 text-blue-600 hover:bg-blue-50 rounded"

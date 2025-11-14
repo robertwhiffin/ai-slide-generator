@@ -1,0 +1,20 @@
+.replacement-feedback {
+  padding: 0.75rem 1rem;
+  border-radius: 6px;
+  margin-top: 0.5rem;
+  font-size: 0.875rem;
+  font-weight: 500;
+}
+
+.replacement-feedback.success {
+  background: #f0fdf4;
+  border: 1px solid #22c55e;
+  color: #166534;
+}
+
+.replacement-feedback.error {
+  background: #fef2f2;
+  border: 1px solid #ef4444;
+  color: #991b1b;
+}
+

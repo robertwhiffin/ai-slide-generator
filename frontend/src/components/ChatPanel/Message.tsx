@@ -8,7 +8,6 @@ interface MessageProps {
 export const Message: React.FC<MessageProps> = ({ message }) => {
   const [isExpanded, setIsExpanded] = useState(false);
 
-  // Style based on role
   const getMessageStyle = () => {
     switch (message.role) {
       case 'user':
@@ -35,32 +34,54 @@ export const Message: React.FC<MessageProps> = ({ message }) => {
     }
   };
 
-  // For tool messages, make them collapsible
+  const renderCollapsibleContent = (
+    label: string,
+    preview: string,
+    content: React.ReactNode,
+  ) => (
+    <div className={`max-w-3xl rounded-lg p-3 ${getMessageStyle()}`}>
+      <button
+        onClick={() => setIsExpanded(prev => !prev)}
+        className="flex items-center space-x-2 text-sm font-medium text-gray-600 hover:text-gray-800"
+        type="button"
+      >
+        <span>{isExpanded ? '▼' : '▶'}</span>
+        <span>{label}</span>
+        <span className="text-xs text-gray-500">{preview}</span>
+      </button>
+
+      {isExpanded && (
+        <div className="mt-2 text-sm text-gray-700 font-mono bg-gray-50 border border-gray-200 rounded p-3 overflow-auto max-h-96">
+          {content}
+        </div>
+      )}
+    </div>
+  );
+
   if (message.role === 'tool') {
-    return (
-      <div className={`max-w-3xl rounded-lg p-3 ${getMessageStyle()}`}>
-        <button
-          onClick={() => setIsExpanded(!isExpanded)}
-          className="flex items-center space-x-2 text-sm font-medium text-gray-600 hover:text-gray-800"
-        >
-          <span>{isExpanded ? '▼' : '▶'}</span>
-          <span>{getMessageLabel()}</span>
-        </button>
-        
-        {isExpanded && (
-          <div className="mt-2 text-sm text-gray-600 font-mono whitespace-pre-wrap">
-            {message.content}
-          </div>
-        )}
-      </div>
+    return renderCollapsibleContent(
+      getMessageLabel(),
+      'Tool output',
+      <pre className="whitespace-pre-wrap">{message.content}</pre>,
     );
   }
 
-  // For assistant messages that are HTML (very long), truncate display
-  const isHtmlContent = message.content.includes('<!DOCTYPE html>');
-  const displayContent = isHtmlContent 
-    ? 'Generated slide deck HTML (view in Slides panel →)'
-    : message.content;
+  const trimmedContent = message.content.trimStart();
+  const isHtmlContent =
+    message.role === 'assistant' &&
+    (trimmedContent.startsWith('<!DOCTYPE html') ||
+      trimmedContent.startsWith('<div class="slide"') ||
+      trimmedContent.startsWith("<div class='slide'"));
+
+  if (isHtmlContent) {
+    return renderCollapsibleContent(
+      `${getMessageLabel()} (HTML)`,
+      'Generated slide HTML',
+      <pre className="whitespace-pre-wrap text-xs">
+        {message.content}
+      </pre>,
+    );
+  }
 
   return (
     <div className={`max-w-3xl rounded-lg p-4 ${getMessageStyle()}`}>
@@ -68,7 +89,7 @@ export const Message: React.FC<MessageProps> = ({ message }) => {
         {getMessageLabel()}
       </div>
       <div className="text-sm text-gray-800 whitespace-pre-wrap">
-        {displayContent}
+        {message.content}
       </div>
       {message.tool_call && (
         <div className="mt-2 text-xs text-gray-500">

@@ -2,7 +2,7 @@
 
 ## Overview
 
-Implement frontend UI and interaction patterns to enable users to select specific slides, send edit requests with context, and apply variable-length replacements to the slide deck. This builds on the backend implementation and provides an intuitive Cursor-style `@` mention experience.
+Implement frontend UI and interaction patterns to enable users to select specific slides, send edit requests with context, and apply variable-length replacements to the slide deck. 
 
 **Prerequisites**: Backend slide editing functionality (Phases 1-5) must be complete and tested via the interactive test script.
 
@@ -15,6 +15,10 @@ Implement frontend UI and interaction patterns to enable users to select specifi
 3. **Context Badge**: Show selected slides like Cursor's file mentions
 4. **Seamless Updates**: Apply replacements without full page reload
 5. **Error Resilience**: Graceful handling of backend errors
+
+Update the UI by
+- Keeping the exising "parsed sldies" tab and adding to it
+- Adding a new icon alongside the edit/copy/delete icons for "add to chat". This icon shoud go on the on left side of the panel next ot the chat window. 
 
 ## Implementation Phases
 
