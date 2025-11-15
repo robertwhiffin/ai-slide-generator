@@ -1,0 +1,547 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Napoleon Bonaparte: Emperor and Military Genius</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+    
+    body {
+      font-family: 'Inter', 'SF Pro Display', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      background: #F9FAFB;
+      overflow-x: hidden;
+    }
+    
+    .slide {
+      width: 1280px;
+      height: 720px;
+      background: white;
+      margin: 0 auto 20px;
+      padding: 60px 80px;
+      display: flex;
+      flex-direction: column;
+      box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+    }
+    
+    h1 {
+      font-size: 48px;
+      font-weight: 700;
+      color: #102025;
+      margin-bottom: 16px;
+      line-height: 1.2;
+    }
+    
+    h2 {
+      font-size: 32px;
+      font-weight: 600;
+      color: #2B3940;
+      margin-bottom: 12px;
+    }
+    
+    .subtitle {
+      font-size: 22px;
+      color: #5D6D71;
+      margin-bottom: 40px;
+      line-height: 1.4;
+    }
+    
+    p {
+      font-size: 18px;
+      color: #5D6D71;
+      line-height: 1.6;
+      margin-bottom: 16px;
+    }
+    
+    .content-grid {
+      display: flex;
+      gap: 24px;
+      flex: 1;
+      align-items: center;
+    }
+    
+    .chart-container {
+      flex: 1;
+      background: #F9FAFB;
+      padding: 24px;
+      border-radius: 12px;
+      box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+    }
+    
+    canvas {
+      max-height: 350px;
+    }
+    
+    .stat-box {
+      background: linear-gradient(135deg, #EB4A34 0%, #C93D2A 100%);
+      color: white;
+      padding: 24px;
+      border-radius: 12px;
+      text-align: center;
+      box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+    }
+    
+    .stat-number {
+      font-size: 56px;
+      font-weight: 700;
+      margin-bottom: 8px;
+    }
+    
+    .stat-label {
+      font-size: 18px;
+      opacity: 0.95;
+    }
+    
+    .info-card {
+      background: #F9FAFB;
+      padding: 20px;
+      border-radius: 10px;
+      border-left: 4px solid #EB4A34;
+      margin-bottom: 16px;
+    }
+    
+    .timeline-item {
+      display: flex;
+      gap: 20px;
+      margin-bottom: 20px;
+      align-items: flex-start;
+    }
+    
+    .timeline-year {
+      font-size: 24px;
+      font-weight: 700;
+      color: #EB4A34;
+      min-width: 80px;
+    }
+    
+    .timeline-content {
+      flex: 1;
+    }
+    
+    .timeline-title {
+      font-size: 20px;
+      font-weight: 600;
+      color: #102025;
+      margin-bottom: 4px;
+    }
+    
+    .timeline-desc {
+      font-size: 16px;
+      color: #5D6D71;
+    }
+  
+    </style>
+</head>
+<body>
+
+<div class="slide">
+<div style="display: flex; flex-direction: column; justify-content: center; align-items: center; height: 100%; text-align: center;">
+<h1 style="font-size: 64px; margin-bottom: 24px;">Napoleon Bonaparte</h1>
+<p class="subtitle" style="font-size: 28px; margin-bottom: 60px;">Emperor, Military Genius, and Revolutionary Leader</p>
+<div style="display: flex; gap: 40px; margin-top: 40px;">
+<div class="stat-box" style="min-width: 200px;">
+<div class="stat-number">1769-1821</div>
+<div class="stat-label">Lifespan</div>
+</div>
+<div class="stat-box" style="min-width: 200px; background: linear-gradient(135deg, #3C71AF 0%, #2A5A8F 100%);">
+<div class="stat-number">60+</div>
+<div class="stat-label">Major Battles</div>
+</div>
+<div class="stat-box" style="min-width: 200px; background: linear-gradient(135deg, #4BA676 0%, #3A8A5F 100%);">
+<div class="stat-number">15 Years</div>
+<div class="stat-label">As Emperor</div>
+</div>
+</div>
+</div>
+</div>
+
+<div class="slide">
+<h1>From Corsican Artillery Officer to Emperor of France</h1>
+<p class="subtitle">Napoleon's meteoric rise transformed European politics forever</p>
+<div class="content-grid">
+<div style="flex: 1;">
+<div class="timeline-item">
+<div class="timeline-year">1769</div>
+<div class="timeline-content">
+<div class="timeline-title">Born in Corsica</div>
+<div class="timeline-desc">Born to minor Italian nobility in Ajaccio</div>
+</div>
+</div>
+<div class="timeline-item">
+<div class="timeline-year">1796</div>
+<div class="timeline-content">
+<div class="timeline-title">Italian Campaign</div>
+<div class="timeline-desc">Brilliant victories establish military reputation</div>
+</div>
+</div>
+<div class="timeline-item">
+<div class="timeline-year">1799</div>
+<div class="timeline-content">
+<div class="timeline-title">Coup d'État</div>
+<div class="timeline-desc">Overthrows Directory, becomes First Consul</div>
+</div>
+</div>
+<div class="timeline-item">
+<div class="timeline-year">1804</div>
+<div class="timeline-content">
+<div class="timeline-title">Crowned Emperor</div>
+<div class="timeline-desc">Crowns himself Emperor of the French at Notre-Dame</div>
+</div>
+</div>
+<div class="timeline-item">
+<div class="timeline-year">1812</div>
+<div class="timeline-content">
+<div class="timeline-title">Russian Campaign</div>
+<div class="timeline-desc">Disastrous invasion marks beginning of decline</div>
+</div>
+</div>
+</div>
+<div style="flex: 1;">
+<div class="chart-container">
+<canvas id="riseChart"></canvas>
+</div>
+</div>
+</div>
+</div>
+
+<div class="slide">
+<h1>An Unparalleled Military Record Across Europe</h1>
+<p class="subtitle">Napoleon won approximately 85% of his battles, facing multiple coalitions</p>
+<div class="content-grid">
+<div class="chart-container" style="flex: 1.2;">
+<canvas id="battlesChart"></canvas>
+</div>
+<div style="flex: 0.8; display: flex; flex-direction: column; gap: 16px;">
+<div class="info-card">
+<h2 style="font-size: 24px; margin-bottom: 8px;">Austerlitz (1805)</h2>
+<p style="margin: 0;">The "Battle of Three Emperors" - Napoleon's greatest tactical masterpiece against Austria and Russia</p>
+</div>
+<div class="info-card">
+<h2 style="font-size: 24px; margin-bottom: 8px;">Jena-Auerstedt (1806)</h2>
+<p style="margin: 0;">Decisive victory over Prussia, demonstrating superior strategy and speed</p>
+</div>
+<div class="info-card">
+<h2 style="font-size: 24px; margin-bottom: 8px;">Waterloo (1815)</h2>
+<p style="margin: 0;">Final defeat against Wellington and Blücher, ending the Napoleonic era</p>
+</div>
+</div>
+</div>
+</div>
+
+<div class="slide">
+<h1>Western Europe Fell Under Direct French Control</h1>
+<p class="subtitle">Spain, Italy, and the Low Countries were integrated into Napoleon's empire</p>
+<div class="content-grid">
+<div style="flex: 1; display: flex; flex-direction: column; gap: 16px;">
+<div class="stat-box" style="background: linear-gradient(135deg, #EB4A34 0%, #C93D2A 100%);">
+<div class="stat-number">28 Million</div>
+<div class="stat-label">Population Under Direct Rule</div>
+</div>
+<div class="stat-box" style="background: linear-gradient(135deg, #3C71AF 0%, #2A5A8F 100%);">
+<div class="stat-number">450,000 km²</div>
+<div class="stat-label">Western Territory</div>
+</div>
+<div class="info-card" style="margin-top: 10px;">
+<h2 style="font-size: 20px; margin-bottom: 8px; color: #EB4A34;">Key Territories</h2>
+<p style="margin: 0; font-size: 16px;"><strong>Kingdom of Italy:</strong> Napoleon crowned himself King in 1805</p>
+<p style="margin: 8px 0 0 0; font-size: 16px;"><strong>Kingdom of Spain:</strong> Brother Joseph installed as King in 1808</p>
+<p style="margin: 8px 0 0 0; font-size: 16px;"><strong>Netherlands:</strong> Brother Louis ruled until 1810, then annexed</p>
+</div>
+</div>
+<div class="chart-container" style="flex: 1.5;">
+<canvas id="westEuropeChart"></canvas>
+</div>
+</div>
+</div>
+
+<div class="slide">
+<h1>Eastern Europe Resisted Through Strategic Alliances</h1>
+<p class="subtitle">The Confederation of the Rhine and puppet states extended French influence eastward</p>
+<div class="content-grid">
+<div class="chart-container" style="flex: 1.5;">
+<canvas id="eastEuropeChart"></canvas>
+</div>
+<div style="flex: 1; display: flex; flex-direction: column; gap: 16px;">
+<div class="stat-box" style="background: linear-gradient(135deg, #4BA676 0%, #3A8A5F 100%);">
+<div class="stat-number">16 Million</div>
+<div class="stat-label">Population in Allied States</div>
+</div>
+<div class="stat-box" style="background: linear-gradient(135deg, #F2AE3D 0%, #D89A35 100%);">
+<div class="stat-number">300,000 km²</div>
+<div class="stat-label">Eastern Sphere of Influence</div>
+</div>
+<div class="info-card" style="margin-top: 10px;">
+<h2 style="font-size: 20px; margin-bottom: 8px; color: #3C71AF;">Strategic Relationships</h2>
+<p style="margin: 0; font-size: 16px;"><strong>Confederation of Rhine:</strong> 16 German states allied with France</p>
+<p style="margin: 8px 0 0 0; font-size: 16px;"><strong>Grand Duchy of Warsaw:</strong> Polish buffer state created 1807</p>
+<p style="margin: 8px 0 0 0; font-size: 16px;"><strong>Austria &amp; Prussia:</strong> Forced alliances after military defeats</p>
+</div>
+</div>
+</div>
+</div>
+
+<div class="slide">
+<h1>Napoleon's Enduring Legacy Shaped Modern Europe</h1>
+<p class="subtitle">His reforms in law, education, and administration outlasted his empire</p>
+<div style="display: flex; gap: 24px; margin-top: 20px;">
+<div style="flex: 1;">
+<div class="info-card" style="margin-bottom: 20px;">
+<h2 style="font-size: 22px; margin-bottom: 12px; color: #EB4A34;">Napoleonic Code</h2>
+<p style="margin: 0;">Civil law code established 1804, still forms basis of legal systems in 70+ countries worldwide</p>
+</div>
+<div class="info-card" style="margin-bottom: 20px;">
+<h2 style="font-size: 22px; margin-bottom: 12px; color: #3C71AF;">Educational Reform</h2>
+<p style="margin: 0;">Created lycées and grandes écoles system, establishing merit-based education in France</p>
+</div>
+<div class="info-card" style="margin-bottom: 20px;">
+<h2 style="font-size: 22px; margin-bottom: 12px; color: #4BA676;">Metric System</h2>
+<p style="margin: 0;">Standardized weights and measures across empire, now global standard</p>
+</div>
+<div class="info-card">
+<h2 style="font-size: 22px; margin-bottom: 12px; color: #F2AE3D;">Nationalism</h2>
+<p style="margin: 0;">Sparked nationalist movements across Europe that reshaped the continent for centuries</p>
+</div>
+</div>
+<div class="chart-container" style="flex: 1;">
+<canvas id="legacyChart"></canvas>
+</div>
+</div>
+</div>
+
+<script>
+
+    // Chart 1: Rise to Power
+    const riseCanvas = document.getElementById('riseChart');
+    if (riseCanvas) {
+      const riseCtx = riseCanvas.getContext('2d');
+      new Chart(riseCtx, {
+        type: 'line',
+        data: {
+          labels: ['1789', '1793', '1796', '1799', '1802', '1804', '1807', '1810', '1812'],
+          datasets: [{
+            label: 'Political Power Index',
+            data: [5, 15, 35, 60, 75, 90, 95, 98, 100],
+            borderColor: '#EB4A34',
+            backgroundColor: 'rgba(235, 74, 52, 0.1)',
+            tension: 0.4,
+            fill: true,
+            borderWidth: 3
+          }]
+        },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          plugins: {
+            legend: { display: false },
+            title: {
+              display: true,
+              text: 'Napoleon\'s Rise to Power (1789-1812)',
+              font: { size: 18, weight: 'bold' },
+              color: '#102025'
+            }
+          },
+          scales: {
+            y: {
+              beginAtZero: true,
+              max: 100,
+              title: { display: true, text: 'Power Index', color: '#5D6D71' }
+            }
+          }
+        }
+      });
+    }
+
+    // Chart 2: Battle Record
+    const battlesCanvas = document.getElementById('battlesChart');
+    if (battlesCanvas) {
+      const battlesCtx = battlesCanvas.getContext('2d');
+      new Chart(battlesCtx, {
+        type: 'bar',
+        data: {
+          labels: ['Victories', 'Defeats', 'Draws'],
+          datasets: [{
+            label: 'Number of Battles',
+            data: [53, 7, 3],
+            backgroundColor: ['#4BA676', '#EB4A34', '#F2AE3D'],
+            borderRadius: 8
+          }]
+        },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          plugins: {
+            legend: { display: false },
+            title: {
+              display: true,
+              text: 'Napoleon\'s Battle Record (63 Major Battles)',
+              font: { size: 18, weight: 'bold' },
+              color: '#102025'
+            }
+          },
+          scales: {
+            y: {
+              beginAtZero: true,
+              title: { display: true, text: 'Number of Battles', color: '#5D6D71' }
+            }
+          }
+        }
+      });
+    }
+
+    // Chart 3: Territory Expansion
+    const territoryCanvas = document.getElementById('territoryChart');
+    if (territoryCanvas) {
+      const territoryCtx = territoryCanvas.getContext('2d');
+      new Chart(territoryCtx, {
+        type: 'line',
+        data: {
+          labels: ['1800', '1802', '1804', '1806', '1808', '1810', '1812', '1814'],
+          datasets: [{
+            label: 'Territory (1000s km²)',
+            data: [550, 580, 600, 650, 700, 730, 750, 550],
+            borderColor: '#3C71AF',
+            backgroundColor: 'rgba(60, 113, 175, 0.2)',
+            tension: 0.3,
+            fill: true,
+            borderWidth: 3
+          }]
+        },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          plugins: {
+            legend: { display: false },
+            title: {
+              display: true,
+              text: 'French Empire Territory Over Time',
+              font: { size: 18, weight: 'bold' },
+              color: '#102025'
+            }
+          },
+          scales: {
+            y: {
+              beginAtZero: false,
+              title: { display: true, text: 'Territory (1000s km²)', color: '#5D6D71' }
+            }
+          }
+        }
+      });
+    }
+
+    // Chart 4: Legacy Impact
+    const legacyCanvas = document.getElementById('legacyChart');
+    if (legacyCanvas) {
+      const legacyCtx = legacyCanvas.getContext('2d');
+      new Chart(legacyCtx, {
+        type: 'doughnut',
+        data: {
+          labels: ['Legal Systems', 'Education', 'Administration', 'Military Doctrine', 'Cultural Impact'],
+          datasets: [{
+            data: [30, 25, 20, 15, 10],
+            backgroundColor: ['#EB4A34', '#3C71AF', '#4BA676', '#F2AE3D', '#2B3940'],
+            borderWidth: 2,
+            borderColor: '#fff'
+          }]
+        },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          plugins: {
+            legend: {
+              position: 'bottom',
+              labels: { color: '#5D6D71', font: { size: 12 } }
+            },
+            title: {
+              display: true,
+              text: 'Areas of Lasting Influence',
+              font: { size: 18, weight: 'bold' },
+              color: '#102025'
+            }
+          }
+        }
+      });
+    }
+
+// Chart: Western Europe Control
+const westCanvas = document.getElementById('westEuropeChart');
+if (westCanvas) {
+  const westCtx = westCanvas.getContext('2d');
+  new Chart(westCtx, {
+    type: 'bar',
+    data: {
+      labels: ['France', 'Kingdom of Italy', 'Spain', 'Netherlands', 'Swiss Confederation', 'German States'],
+      datasets: [{
+        label: 'Population (Millions)',
+        data: [29.5, 6.5, 10.5, 2.0, 1.7, 5.8],
+        backgroundColor: ['#EB4A34', '#C93D2A', '#B33525', '#9D2E20', '#3C71AF', '#2A5A8F'],
+        borderRadius: 6
+      }]
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      indexAxis: 'y',
+      plugins: {
+        legend: { display: false },
+        title: {
+          display: true,
+          text: 'Western European Territories by Population (1812)',
+          font: { size: 16, weight: 'bold' },
+          color: '#102025'
+        }
+      },
+      scales: {
+        x: {
+          beginAtZero: true,
+          title: { display: true, text: 'Population (Millions)', color: '#5D6D71' }
+        }
+      }
+    }
+  });
+}
+
+// Chart: Eastern Europe Influence
+const eastCanvas = document.getElementById('eastEuropeChart');
+if (eastCanvas) {
+  const eastCtx = eastCanvas.getContext('2d');
+  new Chart(eastCtx, {
+    type: 'doughnut',
+    data: {
+      labels: ['Confederation of Rhine', 'Grand Duchy of Warsaw', 'Austrian Empire (Allied)', 'Prussia (Allied)', 'Other Allies'],
+      datasets: [{
+        data: [6.0, 4.3, 3.5, 1.8, 0.4],
+        backgroundColor: ['#4BA676', '#3A8A5F', '#F2AE3D', '#3C71AF', '#2B3940'],
+        borderWidth: 3,
+        borderColor: '#fff'
+      }]
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      plugins: {
+        legend: {
+          position: 'bottom',
+          labels: { color: '#5D6D71', font: { size: 11 }, padding: 8 }
+        },
+        title: {
+          display: true,
+          text: 'Eastern Allied States Population Distribution',
+          font: { size: 16, weight: 'bold' },
+          color: '#102025',
+          padding: { bottom: 15 }
+        }
+      }
+    }
+  });
+}
+
+</script>
+
+</body>
+</html>

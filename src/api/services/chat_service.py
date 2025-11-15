@@ -9,6 +9,7 @@ from typing import Any, Dict, List, Optional
 
 from src.models.slide import Slide
 from src.models.slide_deck import SlideDeck
+from src.utils.html_utils import extract_canvas_ids_from_html
 from src.services.agent import create_agent
 
 logger = logging.getLogger(__name__)
@@ -192,6 +193,7 @@ class ChatService:
         replacement_slides = replacement_info["replacement_slides"]
         replacement_scripts = replacement_info.get("replacement_scripts", "")
         canvas_ids = replacement_info.get("canvas_ids", [])
+        script_canvas_ids = replacement_info.get("script_canvas_ids", [])
 
         # Check that the start index for replacement is within the valid range of the slide deck
         if start_idx < 0 or start_idx >= len(self.current_deck.slides):
@@ -206,6 +208,14 @@ class ChatService:
             existing_scripts=self.current_deck.scripts or "",
         )
 
+        outgoing_canvas_ids: list[str] = []
+        for offset in range(original_count):
+            slide_html = self.current_deck.slides[start_idx + offset].html
+            outgoing_canvas_ids.extend(extract_canvas_ids_from_html(slide_html))
+        
+        if outgoing_canvas_ids:
+            self.current_deck.remove_canvas_scripts(outgoing_canvas_ids)
+        
         for _ in range(original_count):
             self.current_deck.remove_slide(start_idx)
 
@@ -230,22 +240,24 @@ class ChatService:
             },
         )
 
-        self._append_replacement_scripts(replacement_scripts)
+        self._append_replacement_scripts(replacement_scripts, script_canvas_ids)
 
         return self.current_deck.to_dict()
 
-    def _append_replacement_scripts(self, script_text: str) -> None:
-        """Append validated replacement scripts to the deck."""
+    def _append_replacement_scripts(
+        self,
+        script_text: str,
+        script_canvas_ids: Optional[List[str]] = None,
+    ) -> None:
+        """Append or replace validated replacement scripts on the deck."""
+        if not self.current_deck:
+            return
+        
         if not script_text or not script_text.strip():
             return
 
-        cleaned = script_text.strip()
-        if self.current_deck.scripts:
-            self.current_deck.scripts = (
-                f"{self.current_deck.scripts.rstrip()}\n\n{cleaned}\n"
-            )
-        else:
-            self.current_deck.scripts = f"{cleaned}\n"
+        canvas_ids = script_canvas_ids or []
+        self.current_deck.add_script_block(script_text, canvas_ids)
     
     def get_slides(self) -> Optional[Dict[str, Any]]:
         """Get current slide deck.

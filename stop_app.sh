@@ -54,6 +54,52 @@ stop_process() {
     fi
 }
 
+kill_port_processes() {
+    local port=$1
+    local label=$2
+
+    local pids
+    pids=$(lsof -ti:$port 2>/dev/null | tr '\n' ' ')
+
+    if [ -n "$pids" ]; then
+        echo -e "${YELLOW}⚠️  Found process on port $port (PID: $pids), killing...${NC}"
+        echo "$pids" | xargs kill 2>/dev/null || true
+        sleep 1
+
+        local remaining
+        remaining=$(lsof -ti:$port 2>/dev/null | tr '\n' ' ')
+
+        if [ -n "$remaining" ]; then
+            echo -e "${RED}⚠️  Force killing $label on port $port (PID: $remaining)...${NC}"
+            echo "$remaining" | xargs kill -9 2>/dev/null || true
+        else
+            echo -e "${GREEN}✅ $label port $port cleared${NC}"
+        fi
+    fi
+}
+
+kill_pattern_processes() {
+    local pattern=$1
+    local label=$2
+
+    local pids
+    pids=$(pgrep -f "$pattern" 2>/dev/null | tr '\n' ' ')
+
+    if [ -n "$pids" ]; then
+        echo -e "${YELLOW}⚠️  Found $label process (PID: $pids), killing...${NC}"
+        echo "$pids" | xargs kill 2>/dev/null || true
+        sleep 1
+        local remaining
+        remaining=$(pgrep -f "$pattern" 2>/dev/null | tr '\n' ' ')
+        if [ -n "$remaining" ]; then
+            echo -e "${RED}⚠️  Force killing $label (PID: $remaining)...${NC}"
+            echo "$remaining" | xargs kill -9 2>/dev/null || true
+        else
+            echo -e "${GREEN}✅ $label stopped${NC}"
+        fi
+    fi
+}
+
 # Stop backend
 stop_process "Backend" "logs/backend.pid"
 
@@ -64,19 +110,10 @@ stop_process "Frontend" "logs/frontend.pid"
 echo ""
 echo -e "${YELLOW}🔍 Checking for any remaining processes...${NC}"
 
-# Kill any process on port 8000 (backend)
-BACKEND_PORT_PID=$(lsof -ti:8000 2>/dev/null || true)
-if [ ! -z "$BACKEND_PORT_PID" ]; then
-    echo -e "${YELLOW}⚠️  Found process on port 8000 (PID: $BACKEND_PORT_PID), killing...${NC}"
-    kill $BACKEND_PORT_PID 2>/dev/null || true
-fi
-
-# Kill any process on port 3000 (frontend)
-FRONTEND_PORT_PID=$(lsof -ti:3000 2>/dev/null || true)
-if [ ! -z "$FRONTEND_PORT_PID" ]; then
-    echo -e "${YELLOW}⚠️  Found process on port 3000 (PID: $FRONTEND_PORT_PID), killing...${NC}"
-    kill $FRONTEND_PORT_PID 2>/dev/null || true
-fi
+# Kill any stray processes on backend/frontend ports
+kill_port_processes 8000 "Backend"
+kill_pattern_processes "uvicorn.*src.api.main:app" "Backend watcher"
+kill_port_processes 3000 "Frontend"
 
 echo ""
 echo -e "${GREEN}✨ AI Slide Generator stopped${NC}"

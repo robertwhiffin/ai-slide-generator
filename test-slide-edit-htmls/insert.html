@@ -1,0 +1,126 @@
+<div class="slide">
+    <h1>Western Europe Fell Under Direct French Control</h1>
+    <p class="subtitle">Spain, Italy, and the Low Countries were integrated into Napoleon's empire</p>
+    <div class="content-grid">
+    <div style="flex: 1; display: flex; flex-direction: column; gap: 16px;">
+    <div class="stat-box" style="background: linear-gradient(135deg, #EB4A34 0%, #C93D2A 100%);">
+    <div class="stat-number">28 Million</div>
+    <div class="stat-label">Population Under Direct Rule</div>
+    </div>
+    <div class="stat-box" style="background: linear-gradient(135deg, #3C71AF 0%, #2A5A8F 100%);">
+    <div class="stat-number">450,000 km²</div>
+    <div class="stat-label">Western Territory</div>
+    </div>
+    <div class="info-card" style="margin-top: 10px;">
+    <h2 style="font-size: 20px; margin-bottom: 8px; color: #EB4A34;">Key Territories</h2>
+    <p style="margin: 0; font-size: 16px;"><strong>Kingdom of Italy:</strong> Napoleon crowned himself King in 1805</p>
+    <p style="margin: 8px 0 0 0; font-size: 16px;"><strong>Kingdom of Spain:</strong> Brother Joseph installed as King in 1808</p>
+    <p style="margin: 8px 0 0 0; font-size: 16px;"><strong>Netherlands:</strong> Brother Louis ruled until 1810, then annexed</p>
+    </div>
+    </div>
+    <div class="chart-container" style="flex: 1.5;">
+    <canvas id="westEuropeChart"></canvas>
+    </div>
+    </div>
+    </div>
+    
+    <div class="slide">
+    <h1>Eastern Europe Resisted Through Strategic Alliances</h1>
+    <p class="subtitle">The Confederation of the Rhine and puppet states extended French influence eastward</p>
+    <div class="content-grid">
+    <div class="chart-container" style="flex: 1.5;">
+    <canvas id="eastEuropeChart"></canvas>
+    </div>
+    <div style="flex: 1; display: flex; flex-direction: column; gap: 16px;">
+    <div class="stat-box" style="background: linear-gradient(135deg, #4BA676 0%, #3A8A5F 100%);">
+    <div class="stat-number">16 Million</div>
+    <div class="stat-label">Population in Allied States</div>
+    </div>
+    <div class="stat-box" style="background: linear-gradient(135deg, #F2AE3D 0%, #D89A35 100%);">
+    <div class="stat-number">300,000 km²</div>
+    <div class="stat-label">Eastern Sphere of Influence</div>
+    </div>
+    <div class="info-card" style="margin-top: 10px;">
+    <h2 style="font-size: 20px; margin-bottom: 8px; color: #3C71AF;">Strategic Relationships</h2>
+    <p style="margin: 0; font-size: 16px;"><strong>Confederation of Rhine:</strong> 16 German states allied with France</p>
+    <p style="margin: 8px 0 0 0; font-size: 16px;"><strong>Grand Duchy of Warsaw:</strong> Polish buffer state created 1807</p>
+    <p style="margin: 8px 0 0 0; font-size: 16px;"><strong>Austria & Prussia:</strong> Forced alliances after military defeats</p>
+    </div>
+    </div>
+    </div>
+    </div>
+    
+    <script data-slide-scripts>
+    // Chart: Western Europe Control
+    const westCanvas = document.getElementById('westEuropeChart');
+    if (westCanvas) {
+      const westCtx = westCanvas.getContext('2d');
+      new Chart(westCtx, {
+        type: 'bar',
+        data: {
+          labels: ['France', 'Kingdom of Italy', 'Spain', 'Netherlands', 'Swiss Confederation', 'German States'],
+          datasets: [{
+            label: 'Population (Millions)',
+            data: [29.5, 6.5, 10.5, 2.0, 1.7, 5.8],
+            backgroundColor: ['#EB4A34', '#C93D2A', '#B33525', '#9D2E20', '#3C71AF', '#2A5A8F'],
+            borderRadius: 6
+          }]
+        },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          indexAxis: 'y',
+          plugins: {
+            legend: { display: false },
+            title: {
+              display: true,
+              text: 'Western European Territories by Population (1812)',
+              font: { size: 16, weight: 'bold' },
+              color: '#102025'
+            }
+          },
+          scales: {
+            x: {
+              beginAtZero: true,
+              title: { display: true, text: 'Population (Millions)', color: '#5D6D71' }
+            }
+          }
+        }
+      });
+    }
+    
+    // Chart: Eastern Europe Influence
+    const eastCanvas = document.getElementById('eastEuropeChart');
+    if (eastCanvas) {
+      const eastCtx = eastCanvas.getContext('2d');
+      new Chart(eastCtx, {
+        type: 'doughnut',
+        data: {
+          labels: ['Confederation of Rhine', 'Grand Duchy of Warsaw', 'Austrian Empire (Allied)', 'Prussia (Allied)', 'Other Allies'],
+          datasets: [{
+            data: [6.0, 4.3, 3.5, 1.8, 0.4],
+            backgroundColor: ['#4BA676', '#3A8A5F', '#F2AE3D', '#3C71AF', '#2B3940'],
+            borderWidth: 3,
+            borderColor: '#fff'
+          }]
+        },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          plugins: {
+            legend: {
+              position: 'bottom',
+              labels: { color: '#5D6D71', font: { size: 11 }, padding: 8 }
+            },
+            title: {
+              display: true,
+              text: 'Eastern Allied States Population Distribution',
+              font: { size: 16, weight: 'bold' },
+              color: '#102025',
+              padding: { bottom: 15 }
+            }
+          }
+        }
+      });
+    }
+    </script>

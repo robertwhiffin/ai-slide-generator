@@ -55,6 +55,28 @@ def sample_deck():
     )
 
 
+@pytest.fixture
+def canvas_slide_html():
+    """Fixture producing HTML with a canvas and script."""
+    return """<!DOCTYPE html>
+<html lang="en">
+<head><title>Charts</title></head>
+<body>
+<div class="slide">
+    <canvas id="chartA"></canvas>
+</div>
+<script>
+const canvas = document.getElementById('chartA');
+if (canvas) {
+    const ctx = canvas.getContext('2d');
+    new Chart(ctx, { type: 'bar', data: {} });
+}
+</script>
+</body>
+</html>
+"""
+
+
 class TestSlideDeckCreation:
     """Test slide deck creation and initialization."""
     
@@ -64,7 +86,7 @@ class TestSlideDeckCreation:
         
         assert deck.title is None
         assert deck.css == ""
-        assert deck.external_scripts == []
+        assert SlideDeck.CHART_JS_URL in deck.external_scripts
         assert deck.scripts == ""
         assert deck.slides == []
         assert deck.head_meta == {}
@@ -74,7 +96,8 @@ class TestSlideDeckCreation:
         assert sample_deck.title == "Test Deck"
         assert sample_deck.css == "body { margin: 0; }"
         assert len(sample_deck.slides) == 2
-        assert len(sample_deck.external_scripts) == 1
+        assert len(sample_deck.external_scripts) == 2
+        assert SlideDeck.CHART_JS_URL in sample_deck.external_scripts
 
 
 class TestHTMLParsing:
@@ -241,6 +264,34 @@ class TestSlideOperations:
         last_slide = sample_deck[-1]
         
         assert "Slide 2" in last_slide.html
+
+
+class TestScriptManagement:
+    """Test structured script block management."""
+    
+    def test_remove_canvas_scripts(self, canvas_slide_html):
+        """Removing a canvas should drop its script block."""
+        deck = SlideDeck.from_html_string(canvas_slide_html)
+        assert "chartA" in deck.scripts
+        
+        deck.remove_canvas_scripts(["chartA"])
+        
+        assert deck.scripts == ""
+        assert list(deck.script_blocks.keys()) == []
+    
+    def test_add_script_block_replaces_existing(self, canvas_slide_html):
+        """Adding a script block replaces prior versions for same canvas."""
+        deck = SlideDeck.from_html_string(canvas_slide_html)
+        new_script = """
+        const canvas = document.getElementById('chartA');
+        if (canvas) { canvas.getContext('2d'); console.log('updated'); }
+        """
+        
+        deck.add_script_block(new_script, ["chartA"])
+        
+        assert "updated" in deck.scripts
+        assert deck.scripts.count("updated") == 1
+        assert "new Chart" not in deck.scripts
 
 
 class TestKnitting:

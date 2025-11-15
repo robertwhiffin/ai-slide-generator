@@ -1,9 +1,26 @@
 """SlideDeck class for parsing, manipulating, and reconstructing HTML slide decks."""
 
-from typing import List, Optional, Dict, Any
+from __future__ import annotations
+
+from collections import OrderedDict
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Any, Dict, List, Optional
+
 from bs4 import BeautifulSoup
+
+from src.utils.html_utils import extract_canvas_ids_from_script
+
 from .slide import Slide
+
+
+@dataclass
+class ScriptBlock:
+    """Represents a JavaScript block and its associated canvas ids."""
+
+    key: str
+    text: str
+    canvas_ids: set[str]
 
 
 class SlideDeck:
@@ -17,6 +34,7 @@ class SlideDeck:
         css: All CSS extracted from <style> tags
         external_scripts: List of CDN script URLs (Tailwind, Chart.js, etc.)
         scripts: All JavaScript code (Chart.js configurations, etc.)
+        script_blocks: Ordered mapping of script blocks and their canvas ids
         slides: List of Slide objects
         head_meta: Other metadata from HTML head (charset, viewport, etc.)
     """
@@ -30,7 +48,9 @@ class SlideDeck:
         external_scripts: Optional[List[str]] = None,
         scripts: str = "",
         slides: Optional[List[Slide]] = None,
-        head_meta: Optional[Dict[str, str]] = None
+        head_meta: Optional[Dict[str, str]] = None,
+        script_blocks: Optional[OrderedDict[str, ScriptBlock]] = None,
+        canvas_to_script: Optional[Dict[str, str]] = None,
     ):
         """Initialize a SlideDeck.
         
@@ -41,6 +61,8 @@ class SlideDeck:
             scripts: JavaScript content
             slides: List of Slide objects
             head_meta: Metadata from HTML head
+            script_blocks: Optional ordered mapping of script blocks to metadata
+            canvas_to_script: Optional reverse index from canvas id to script key
         """
         self.title = title
         self.css = css
@@ -48,12 +70,102 @@ class SlideDeck:
         self.scripts = scripts
         self.slides = slides or []
         self.head_meta = head_meta or {}
+        self.script_blocks: OrderedDict[str, ScriptBlock] = script_blocks or OrderedDict()
+        self.canvas_to_script: Dict[str, str] = canvas_to_script or {}
         self._ensure_default_external_scripts()
+        
+        if self.script_blocks and not self.canvas_to_script:
+            self._rebuild_canvas_index()
+        
+        if self.script_blocks:
+            self.recompute_scripts()
 
     def _ensure_default_external_scripts(self) -> None:
         """Ensure required third-party scripts are included when knitting."""
         if self.CHART_JS_URL not in self.external_scripts:
             self.external_scripts.append(self.CHART_JS_URL)
+    
+    def _rebuild_canvas_index(self) -> None:
+        """Rebuild mapping of canvas ids to script blocks."""
+        self.canvas_to_script = {}
+        for block in self.script_blocks.values():
+            for canvas_id in block.canvas_ids:
+                self.canvas_to_script[canvas_id] = block.key
+    
+    @staticmethod
+    def _generate_script_key(canvas_ids: List[str], index: int) -> str:
+        """Generate deterministic key for a script block."""
+        if canvas_ids:
+            primary = canvas_ids[0]
+            return f"canvas:{primary}:{index}"
+        return f"script:{index}"
+    
+    def recompute_scripts(self) -> None:
+        """Regenerate aggregated script string from structured blocks."""
+        parts = [
+            block.text.strip()
+            for block in self.script_blocks.values()
+            if block.text.strip()
+        ]
+        self.scripts = "\n\n".join(parts)
+    
+    def remove_canvas_scripts(self, canvas_ids: List[str]) -> None:
+        """Remove script blocks associated with specified canvas ids."""
+        if not canvas_ids:
+            return
+        
+        keys_to_remove: set[str] = set()
+        for canvas_id in canvas_ids:
+            key = self.canvas_to_script.pop(canvas_id, None)
+            if not key:
+                continue
+            block = self.script_blocks.get(key)
+            if not block:
+                continue
+            block.canvas_ids.discard(canvas_id)
+            if not block.canvas_ids:
+                keys_to_remove.add(key)
+        
+        if not keys_to_remove:
+            return
+        
+        for key in keys_to_remove:
+            self.script_blocks.pop(key, None)
+        
+        self.recompute_scripts()
+    
+    def add_script_block(self, script_text: str, canvas_ids: List[str]) -> None:
+        """Add (or replace) a script block for the provided canvas ids."""
+        if not script_text or not script_text.strip():
+            return
+        
+        cleaned = script_text.strip()
+        canvas_ids = [cid for cid in canvas_ids if cid]
+        
+        if canvas_ids:
+            self.remove_canvas_scripts(canvas_ids)
+        
+        else:
+            existing_key = next(
+                (
+                    key
+                    for key, block in self.script_blocks.items()
+                    if block.text == cleaned and not block.canvas_ids
+                ),
+                None,
+            )
+            if existing_key:
+                self.script_blocks[existing_key].text = cleaned
+                self.recompute_scripts()
+                return
+        
+        key = self._generate_script_key(canvas_ids, len(self.script_blocks))
+        block = ScriptBlock(key=key, text=cleaned, canvas_ids=set(canvas_ids))
+        self.script_blocks[key] = block
+        for canvas_id in canvas_ids:
+            self.canvas_to_script[canvas_id] = key
+        
+        self.recompute_scripts()
     
     @classmethod
     def from_html(cls, html_path: str) -> 'SlideDeck':
@@ -114,12 +226,20 @@ class SlideDeck:
             external_scripts.append(script_tag['src'])
         
         # Extract inline scripts
-        script_parts = []
-        for script_tag in soup.find_all('script', src=False):
+        script_blocks: OrderedDict[str, ScriptBlock] = OrderedDict()
+        canvas_to_script: Dict[str, str] = {}
+        inline_scripts = soup.find_all('script', src=False)
+        for idx, script_tag in enumerate(inline_scripts):
             script_content = script_tag.string or script_tag.get_text()
-            if script_content:
-                script_parts.append(script_content)
-        scripts = '\n'.join(script_parts)
+            if not script_content:
+                continue
+            cleaned = script_content.strip()
+            canvas_ids = extract_canvas_ids_from_script(cleaned)
+            key = cls._generate_script_key(canvas_ids, idx)
+            block = ScriptBlock(key=key, text=cleaned, canvas_ids=set(canvas_ids))
+            script_blocks[key] = block
+            for canvas_id in canvas_ids:
+                canvas_to_script[canvas_id] = key
         
         # Phase 2: Extract Slides
         slide_elements = soup.find_all('div', class_='slide')
@@ -134,9 +254,11 @@ class SlideDeck:
             title=title,
             css=css,
             external_scripts=external_scripts,
-            scripts=scripts,
+            scripts="",
             slides=slides,
-            head_meta=head_meta
+            head_meta=head_meta,
+            script_blocks=script_blocks,
+            canvas_to_script=canvas_to_script,
         )
     
     def insert_slide(self, slide: Slide, position: int) -> None:

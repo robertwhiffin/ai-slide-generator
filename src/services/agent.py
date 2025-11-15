@@ -6,7 +6,6 @@ capabilities with MLflow tracing integration.
 """
 
 import logging
-import re
 import uuid
 from datetime import datetime
 from typing import Any
@@ -24,6 +23,7 @@ from pydantic import BaseModel, Field
 from src.config.client import get_databricks_client
 from src.config.settings import get_settings
 from src.services.tools import initialize_genie_conversation, query_genie_space
+from src.utils.html_utils import extract_canvas_ids_from_script
 
 logger = logging.getLogger(__name__)
 
@@ -464,20 +464,12 @@ class SlideGeneratorAgent:
 
         for tag in candidate_scripts:
             script_text = tag.get_text() or ""
-            script_canvas_ids.extend(self._extract_canvas_ids_from_script(script_text))
+            script_canvas_ids.extend(extract_canvas_ids_from_script(script_text))
 
             if script_text.strip():
                 script_blocks.append(script_text.strip())
 
         return script_blocks, script_canvas_ids
-
-    @staticmethod
-    def _extract_canvas_ids_from_script(script_text: str) -> list[str]:
-        """Find canvas ids referenced via document.getElementById."""
-        if not script_text:
-            return []
-        pattern = r"getElementById\(['\"]([\w-]+)['\"]\)"
-        return re.findall(pattern, script_text)
 
     def _validate_canvas_scripts_in_html(self, html_content: str) -> None:
         """
@@ -508,7 +500,7 @@ class SlideGeneratorAgent:
             for script_tag in soup.find_all("script")
         )
 
-        referenced_ids = set(self._extract_canvas_ids_from_script(script_text))
+        referenced_ids = set(extract_canvas_ids_from_script(script_text))
         missing = [cid for cid in canvas_ids if cid not in referenced_ids]
 
         if missing:
