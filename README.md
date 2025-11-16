@@ -312,11 +312,15 @@ tools:
 
 ## Documentation
 
-- **[PROJECT_PLAN.md](PROJECT_PLAN.md)**: Comprehensive project plan with architecture, milestones, and implementation steps
-- **[SLIDE_PARSER_DESIGN.md](SLIDE_PARSER_DESIGN.md)**: Detailed slide parser design and implementation specifications
-- **[docs/AGENT_IMPLEMENTATION_PLAN.md](docs/AGENT_IMPLEMENTATION_PLAN.md)**: Detailed agent implementation specifications
-- **[docs/IMPLEMENTATION_SUMMARY.md](docs/IMPLEMENTATION_SUMMARY.md)**: Summary of Phase 2 implementation with testing guide
-- **[pyproject.toml](pyproject.toml)**: Project configuration and dependencies
+- **Technical overview bundle (recommended starting point for AI coding assistants):**
+  - `docs/technical/frontend-overview.md` – UI layout, state ownership, and how the React app talks to the API.
+  - `docs/technical/backend-overview.md` – FastAPI/LangChain architecture, agent lifecycle, and API contracts.
+  - `docs/technical/slide-parser-and-script-management.md` – End-to-end HTML pipeline, slide parsing, and script reconciliation.
+  These concise references stay current with the codebase and should be consulted (and updated) whenever behavior changes.
+
+- **Historical / planning docs:**
+  - **[PROJECT_PLAN.md](PROJECT_PLAN.md)**: High-level milestones and architecture notes.
+  - **[pyproject.toml](pyproject.toml)**: Project configuration and dependencies.
 
 ## Getting Started
 
