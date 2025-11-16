@@ -9,7 +9,10 @@ from typing import Any, Dict, List, Optional
 
 from src.models.slide import Slide
 from src.models.slide_deck import SlideDeck
-from src.utils.html_utils import extract_canvas_ids_from_html
+from src.utils.html_utils import (
+    extract_canvas_ids_from_html,
+    extract_canvas_ids_from_script,
+)
 from src.services.agent import create_agent
 
 logger = logging.getLogger(__name__)
@@ -193,7 +196,7 @@ class ChatService:
         replacement_slides = replacement_info["replacement_slides"]
         replacement_scripts = replacement_info.get("replacement_scripts", "")
         canvas_ids = replacement_info.get("canvas_ids", [])
-        script_canvas_ids = replacement_info.get("script_canvas_ids", [])
+        script_canvas_ids = replacement_info.get("script_canvas_ids")
 
         # Check that the start index for replacement is within the valid range of the slide deck
         if start_idx < 0 or start_idx >= len(self.current_deck.slides):
@@ -240,7 +243,17 @@ class ChatService:
             },
         )
 
-        self._append_replacement_scripts(replacement_scripts, script_canvas_ids)
+        replacement_script_canvas_ids = script_canvas_ids or extract_canvas_ids_from_script(
+            replacement_scripts
+        )
+
+        if replacement_script_canvas_ids:
+            self.current_deck.remove_canvas_scripts(replacement_script_canvas_ids)
+
+        self._append_replacement_scripts(
+            replacement_scripts,
+            replacement_script_canvas_ids,
+        )
 
         return self.current_deck.to_dict()
 

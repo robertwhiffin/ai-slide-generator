@@ -111,6 +111,8 @@ system_prompt: |
   - Every <canvas id="..."> MUST have a matching Chart.js script in the SAME response.
     Append a <script data-slide-scripts>...</script> block after your slide divs that calls
     document.getElementById('<canvasId>') for each canvas you introduce.
+  - One canvas per script: NEVER initialize more than one canvas inside the same <script data-slide-scripts> block. If you have multiple canvases, emit separate blocks (or functions) so each script only touches a single canvas.
+  - Unique scope per canvas: do not reuse variable names across canvases. Start each script with a comment `// Canvas: <canvasId>` so downstream systems can map scripts to canvases.
   
   
   Technical Requirements:
@@ -171,6 +173,7 @@ slide_editing_instructions: |
      - Maintain 1280x720 dimensions per slide
      - Do NOT wrap slides in <slide-replacement> tags - just return the raw slide divs
      - If you introduce or modify charts, append a <script data-slide-scripts>...</script> block after the slide divs that contains the Chart.js initialization code for every new canvas ID
+     - Do NOT initialize multiple canvases in the same script. Return one <script data-slide-scripts> block per canvas, include `// Canvas: <id>` comment at the top, and use unique variable names inside each block.
   
   3. FOLLOW THESE RULES:
      - Return ONLY the replacement slide HTML, not the entire deck

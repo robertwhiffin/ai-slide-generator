@@ -2,6 +2,7 @@
 
 import pytest
 from pathlib import Path
+from src.api.services.chat_service import ChatService
 from src.models.slide_deck import SlideDeck
 from src.models.slide import Slide
 
@@ -292,6 +293,48 @@ class TestScriptManagement:
         assert "updated" in deck.scripts
         assert deck.scripts.count("updated") == 1
         assert "new Chart" not in deck.scripts
+
+    def test_apply_replacement_removes_existing_canvas_scripts(self):
+        """Replacing slides removes prior scripts even if canvas persists elsewhere."""
+        html = """<!DOCTYPE html>
+<html>
+<body>
+<div class="slide"><canvas id="campaignsChart"></canvas></div>
+<div class="slide"><canvas id="territoryChart"></canvas></div>
+<script>
+const campaignsCanvas = document.getElementById('campaignsChart');
+if (campaignsCanvas) { console.log('old campaigns'); }
+</script>
+</body>
+</html>"""
+
+        deck = SlideDeck.from_html_string(html)
+
+        service = ChatService.__new__(ChatService)
+        service.current_deck = deck
+
+        replacement_script = """
+// Canvas: campaignsChart
+const campaignsCanvas = document.getElementById('campaignsChart');
+if (campaignsCanvas) { console.log('new campaigns'); }
+// Canvas: territoryChart
+const territoryCanvas = document.querySelector('#territoryChart');
+if (territoryCanvas) { console.log('new territory'); }
+"""
+
+        replacement_info = {
+            "start_index": 1,
+            "original_count": 1,
+            "replacement_slides": ['<div class="slide"><canvas id="territoryChart"></canvas></div>'],
+            "replacement_scripts": replacement_script,
+            "canvas_ids": ["territoryChart"],
+        }
+
+        service._apply_slide_replacements(replacement_info)
+
+        assert "new campaigns" in service.current_deck.scripts
+        assert "new territory" in service.current_deck.scripts
+        assert "old campaigns" not in service.current_deck.scripts
 
 
 class TestKnitting:

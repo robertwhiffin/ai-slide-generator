@@ -7,7 +7,9 @@ from typing import Iterable, List
 
 from bs4 import BeautifulSoup
 
-CANVAS_ID_PATTERN = re.compile(r"getElementById\(['\"]([\w-]+)['\"]\)")
+CANVAS_ID_PATTERN = re.compile(r"getElementById\s*\(\s*['\"]([\w\-.:]+)['\"]\s*\)")
+QUERY_SELECTOR_PATTERN = re.compile(r"querySelector\s*\(\s*['\"]#([\w\-.:]+)['\"]\s*\)")
+CANVAS_COMMENT_PATTERN = re.compile(r"//\s*Canvas:\s*([\w\-.:]+)", re.IGNORECASE)
 
 
 def extract_canvas_ids_from_script(script_text: str) -> List[str]:
@@ -17,6 +19,8 @@ def extract_canvas_ids_from_script(script_text: str) -> List[str]:
         return []
 
     matches = CANVAS_ID_PATTERN.findall(script_text)
+    matches.extend(QUERY_SELECTOR_PATTERN.findall(script_text))
+    matches.extend(CANVAS_COMMENT_PATTERN.findall(script_text))
     # Preserve order while removing duplicates
     seen: set[str] = set()
     ordered: list[str] = []
