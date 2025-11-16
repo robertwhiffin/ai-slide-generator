@@ -11,16 +11,13 @@ import { ErrorDisplay } from './ErrorDisplay';
 import { LoadingIndicator } from './LoadingIndicator';
 import { useSelection } from '../../contexts/SelectionContext';
 import { useKeyboardShortcuts } from '../../hooks/useKeyboardShortcuts';
-import { applyReplacements } from '../../utils/slideReplacements';
 
 interface ChatPanelProps {
-  slideDeck: SlideDeck | null;
   rawHtml: string | null;
   onSlidesGenerated: (slideDeck: SlideDeck, rawHtml: string | null) => void;
 }
 
 export const ChatPanel: React.FC<ChatPanelProps> = ({
-  slideDeck,
   rawHtml,
   onSlidesGenerated,
 }) => {
@@ -98,31 +95,16 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
 
       const nextRawHtml = response.raw_html ?? rawHtml ?? null;
 
-      if (response.replacement_info && slideContext) {
-        if (slideDeck) {
-          try {
-            const updatedDeck = applyReplacements(
-              slideDeck,
-              response.replacement_info,
-            );
-            onSlidesGenerated(updatedDeck, nextRawHtml);
-          } catch (applyError) {
-            console.warn('Failed to apply replacements locally, using API deck', applyError);
-            if (response.slide_deck) {
-              onSlidesGenerated(response.slide_deck, nextRawHtml);
-            } else {
-              throw applyError;
-            }
-          }
-        } else if (response.slide_deck) {
-          onSlidesGenerated(response.slide_deck, nextRawHtml);
-        }
-
-        setLastReplacement(response.replacement_info);
-        clearSelection();
-      } else if (response.slide_deck) {
+      if (response.slide_deck) {
         onSlidesGenerated(response.slide_deck, nextRawHtml);
         clearSelection();
+      }
+
+      if (response.replacement_info && slideContext) {
+        if (response.slide_deck === undefined) {
+          console.warn('Replacement info received without slide deck; skipping local merge.');
+        }
+        setLastReplacement(response.replacement_info);
       }
     } catch (err) {
       console.error('Failed to send message:', err);

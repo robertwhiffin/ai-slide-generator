@@ -23,7 +23,6 @@ export const AppLayout: React.FC = () => {
         {/* Chat Panel */}
         <div className="w-[32%] min-w-[260px] border-r">
           <ChatPanel
-            slideDeck={slideDeck}
             rawHtml={rawHtml}
             onSlidesGenerated={(deck, raw) => {
               setSlideDeck(deck);
