@@ -2,6 +2,11 @@
 
 This document explains how agent-generated HTML flows through the system, how script blocks are managed, and how the frontend renders and edits slides. It walks through key files plus code excerpts so new contributors can jump in quickly.
 
+Use this alongside:
+- `frontend-overview.md` for UI layout/state ownership and API usage.
+- `backend-overview.md` for FastAPI/LangChain architecture, session model, and endpoint contracts.
+The pipeline narrative below focuses on the shared HTML/script path that connects those two layers.
+
 ---
 
 ### 1. High-Level Data Flow
@@ -200,9 +205,9 @@ If the prompt is ever violated (e.g., multi-canvas blocks reappear), the backend
 ---
 
 ### 8. Future Enhancements
-- Consider storing per-canvas script hashes so we can detect no-op edits.
+- Consider storing per-canvas script hashes so we can detect no-op edits (would slot into the backend flow documented in `backend-overview.md`).
 - Capture shared helper scripts separately if the LLM needs to reuse functions across canvases.
-- Add automated validation that rejects multi-canvas blocks at the API boundary.
+- Add automated validation that rejects multi-canvas blocks at the API boundary; coordinate any new validation responses with the frontend contract in `frontend-overview.md`.
 
-With these pieces, contributors can trace exactly how HTML is parsed, transformed, and rendered across the stack. For deeper dives, start with `SlideDeck` and `ChatService`, then follow the API responses into `ChatPanel` and `SlidePanel`.
+With these pieces, contributors can trace exactly how HTML is parsed, transformed, and rendered across the stack. For deeper dives, start with `SlideDeck` and `ChatService`, then follow the API responses into `ChatPanel` and `SlidePanel`. See the companion overview docs for broader context on how the UI and API are structured around this pipeline.
 
