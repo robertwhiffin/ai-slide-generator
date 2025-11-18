@@ -14,6 +14,7 @@ __pycache__/
 dist/
 build/
 *.egg
+*.whl
 
 # Virtual environments
 .venv/
@@ -45,6 +46,12 @@ Thumbs.db
 # Project specific
 output/
 *.log
+
+# Deployment configuration (user-specific)
+config/deployment.yaml
+
+# Auto-generated version file (setuptools-scm)
+src/_version.py
 
 # MLflow
 mlruns/

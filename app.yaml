@@ -1,0 +1,31 @@
+# Databricks App Configuration
+# This file defines how the AI Slide Generator runs in Databricks Apps
+
+# App metadata
+name: "ai-slide-generator"
+description: "AI-powered slide deck generator using LLMs and Genie"
+
+# Startup command - install dependencies, wheel, and run app
+command:
+  - "sh"
+  - "-c"
+  - |
+    pip install -r requirements.txt && \
+    pip install --upgrade wheels/*.whl && \
+    uvicorn src.api.main:app --host 0.0.0.0 --port ${PORT:-8000}
+
+# Environment variables
+env:
+  - name: ENVIRONMENT
+    value: "production"
+  - name: DATABRICKS_HOST
+    valueFrom: "system.databricks_host"  # Injected by Databricks
+  - name: DATABRICKS_TOKEN
+    valueFrom: "system.databricks_token"  # App service principal token
+  - name: LOG_LEVEL
+    value: "INFO"
+  - name: MLFLOW_TRACKING_URI
+    value: "databricks"
+
+# Note: compute_size is set programmatically during deployment via the Databricks SDK
+# Valid values configured in deployment.yaml: MEDIUM, LARGE, LIQUID

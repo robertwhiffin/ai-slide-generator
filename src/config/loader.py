@@ -20,6 +20,10 @@ class ConfigurationError(Exception):
 def get_config_path(filename: str) -> Path:
     """
     Get the path to a configuration file.
+    
+    Searches for config files in multiple locations:
+    1. Current working directory (for Databricks Apps deployment)
+    2. Relative to source file (for local development)
 
     Args:
         filename: Name of the config file (e.g., 'config.yaml')
@@ -30,7 +34,12 @@ def get_config_path(filename: str) -> Path:
     Raises:
         ConfigurationError: If config file doesn't exist
     """
-    # Get project root (parent of src directory)
+    # First, try current working directory (Databricks Apps deployment)
+    cwd_config_path = Path.cwd() / "config" / filename
+    if cwd_config_path.exists():
+        return cwd_config_path
+    
+    # Fall back to relative path (local development)
     current_file = Path(__file__)
     project_root = current_file.parent.parent.parent
     config_path = project_root / "config" / filename
@@ -38,6 +47,7 @@ def get_config_path(filename: str) -> Path:
     if not config_path.exists():
         raise ConfigurationError(
             f"Configuration file not found: {config_path}. "
+            f"Searched locations: {cwd_config_path}, {config_path}. "
             f"Please create it from config.example.yaml"
         )
 

@@ -1,7 +1,10 @@
 import type { ChatResponse } from '../types/message';
 import type { SlideDeck, Slide, SlideContext } from '../types/slide';
 
-const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
+// Use relative URLs in production, localhost in development
+const API_BASE_URL = import.meta.env.VITE_API_URL || (
+  import.meta.env.MODE === 'production' ? '' : 'http://localhost:8000'
+);
 
 export class ApiError extends Error {
   status: number;

@@ -9,3 +9,7 @@ ruff>=0.1.0
 mypy>=1.6.0
 types-pyyaml>=6.0.0
 
+# Build tools for deployment
+build>=1.0.0
+setuptools-scm>=8.0.0
+

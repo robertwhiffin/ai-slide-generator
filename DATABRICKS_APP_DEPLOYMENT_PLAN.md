@@ -39,9 +39,10 @@ Single-command deployment script that packages, uploads, and creates/updates the
 
 **Setup Functions:**
 - `setup_deployment_directory()`: Create temporary staging area, copy source files, build frontend assets, exclude unnecessary files (.git, tests, node_modules, .venv)
-- `create_app_archive()`: Package deployment directory as .zip or .tar.gz
-- `upload_to_workspace()`: Upload archive to Databricks workspace path (e.g., `/Workspace/Users/{username}/apps/ai-slide-generator`)
+- `upload_files_to_workspace()`: Upload files directly to Databricks workspace path, maintaining directory structure (e.g., `/Workspace/Users/{username}/apps/ai-slide-generator`)
 - `setup_permissions()`: Configure app permissions (CAN_USE, CAN_MANAGE)
+
+**Note:** Databricks Apps expects files to be uploaded directly (not as an archive) so they can be executed immediately.
 
 **Deployment Functions:**
 - `deploy_app()`: Main orchestrator that calls WorkspaceClient.apps.create() or update()
@@ -113,14 +114,13 @@ print(f"Using Databricks profile: {config.databricks_profile}")
 name: "ai-slide-generator"
 description: "AI-powered slide deck generator using LLMs and Genie"
 
-# Startup command - serves both frontend and backend
+# Startup command - install wheel and run app
 command:
-  - "uvicorn"
-  - "src.api.main:app"
-  - "--host"
-  - "0.0.0.0"
-  - "--port"
-  - "8080"
+  - "sh"
+  - "-c"
+  - |
+    pip install wheels/*.whl && \
+    uvicorn src.api.main:app --host 0.0.0.0 --port 8080
 
 # Environment variables
 env:
@@ -135,20 +135,20 @@ env:
   - name: MLFLOW_TRACKING_URI
     value: "databricks"
 
-# Resource allocation
-resources:
-  cpu: "2"
-  memory: "4Gi"
-
-# Permissions (managed via deployment script)
-# Users/groups granted access in infra/deploy.py
+# Note: compute_size is set programmatically during deployment via the Databricks SDK
+# Valid values configured in deployment.yaml: MEDIUM, LARGE, LIQUID
 ```
 
 ### Key Decisions
 
-**Single Process Model:** Run uvicorn as the only process. Serve React frontend as static files from FastAPI (update `src/api/main.py` to mount StaticFiles on `/` when `ENVIRONMENT=production`).
+**Single Process Model:** Install wheel package then run uvicorn to serve both API and frontend.
 
 **Port 8080:** Standard Databricks Apps port.
+
+**Compute Size:** Set programmatically via SDK using values from `deployment.yaml`:
+- **MEDIUM**: Balanced compute (default for dev/staging)
+- **LARGE**: More resources (recommended for production)
+- **LIQUID**: Auto-scaling compute
 
 **Service Principal Token:** Databricks injects token automatically via `system.databricks_token` - use this for Genie queries and MLflow.
 
@@ -301,16 +301,16 @@ python -m infra.deploy --create --env production --dry-run
 ### What Happens
 
 1. **Load Configuration:** Read `config/deployment.yaml` for specified environment
-2. **Validate Configuration:** Check app.yaml, requirements.txt, deployment.yaml
-3. **Build Frontend:** Run `npm run build` in frontend/
-4. **Create Staging Area:** Copy source files, exclude unnecessary files (per `exclude_patterns`)
-5. **Package:** Create .tar.gz with all deployment artifacts
-6. **Upload to Workspace:** PUT to workspace path from config
-7. **Create/Update App:** Call `w.apps.create()` or `w.apps.update()` with reference to uploaded archive
-8. **Wait for Ready:** Poll until status=RUNNING (uses timeout/poll interval from config)
+2. **Validate Configuration:** Check app.yaml, pyproject.toml, deployment.yaml
+3. **Build Python Wheel:** Create distributable `.whl` package using `python -m build`
+4. **Build Frontend:** Run `npm run build` in frontend/
+5. **Create Staging Area:** Organize wheel, config files, and frontend dist
+6. **Upload to Workspace:** Upload files directly to workspace path maintaining directory structure
+7. **Create/Update App:** Call `w.apps.create()` or `w.apps.update()` with reference to uploaded files
+8. **Wait for Ready:** Poll until status=RUNNING (app installs wheel on startup)
 9. **Configure Permissions:** Grant permissions from config (CAN_USE, CAN_MANAGE)
 10. **Output URL:** Print app URL (e.g., `https://{workspace}.cloud.databricks.com/apps/{app_name}`)
-11. **Cleanup:** Remove staging directory
+11. **Cleanup:** Remove staging directory and build artifacts
 
 ### Configuration Files
 

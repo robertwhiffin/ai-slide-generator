@@ -7,6 +7,15 @@ src/ai_slide_generator.egg-info/dependency_links.txt
 src/ai_slide_generator.egg-info/requires.txt
 src/ai_slide_generator.egg-info/top_level.txt
 src/api/__init__.py
+src/api/main.py
+src/api/models/__init__.py
+src/api/models/requests.py
+src/api/models/responses.py
+src/api/routes/__init__.py
+src/api/routes/chat.py
+src/api/routes/slides.py
+src/api/services/__init__.py
+src/api/services/chat_service.py
 src/config/__init__.py
 src/config/client.py
 src/config/loader.py
@@ -20,4 +29,5 @@ src/services/agent.py
 src/services/tools.py
 src/utils/__init__.py
 src/utils/error_handling.py
+src/utils/html_utils.py
 src/utils/logging_config.py

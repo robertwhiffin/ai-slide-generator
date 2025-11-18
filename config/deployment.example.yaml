@@ -1,0 +1,75 @@
+# Deployment configuration for AI Slide Generator
+# Copy this file to deployment.yaml and customize for your workspace
+
+environments:
+  development:
+    app_name: "ai-slide-generator-dev"
+    description: "AI Slide Generator - Development Environment"
+    workspace_path: "/Workspace/Users/{username}/apps/dev/ai-slide-generator"
+    databricks_profile: "DEFAULT"
+    permissions:
+      - user_name: "{username}"
+        permission_level: "CAN_MANAGE"
+    compute_size: "MEDIUM"  # Options: MEDIUM, LARGE, LIQUID
+    env_vars:
+      ENVIRONMENT: "development"
+      LOG_LEVEL: "DEBUG"
+
+  staging:
+    app_name: "ai-slide-generator-staging"
+    description: "AI Slide Generator - Staging Environment"
+    workspace_path: "/Workspace/Shared/apps/staging/ai-slide-generator"
+    databricks_profile: "staging"
+    permissions:
+      - group_name: "developers"
+        permission_level: "CAN_USE"
+      - user_name: "{username}"
+        permission_level: "CAN_MANAGE"
+    compute_size: "MEDIUM"  # Options: MEDIUM, LARGE, LIQUID
+    env_vars:
+      ENVIRONMENT: "staging"
+      LOG_LEVEL: "INFO"
+
+  production:
+    app_name: "ai-slide-generator"
+    description: "AI Slide Generator - Production"
+    workspace_path: "/Workspace/Shared/apps/production/ai-slide-generator"
+    databricks_profile: "production"
+    permissions:
+      - group_name: "users"
+        permission_level: "CAN_USE"
+      - group_name: "admins"
+        permission_level: "CAN_MANAGE"
+    compute_size: "LARGE"  # Options: MEDIUM, LARGE, LIQUID
+    env_vars:
+      ENVIRONMENT: "production"
+      LOG_LEVEL: "INFO"
+
+# Common settings across all environments
+common:
+  build:
+    exclude_patterns:
+      - "*.pyc"
+      - "__pycache__"
+      - ".git"
+      - ".venv"
+      - "venv"
+      - "node_modules"
+      - "tests"
+      - ".pytest_cache"
+      - "*.log"
+      - ".env"
+      - ".env.*"
+      - "docs"
+      - "examples"
+      - "mlruns"
+      - "logs"
+      - "output"
+      - "*.md"
+      - ".cursor"
+      - ".databricks"
+  
+  deployment:
+    timeout_seconds: 300
+    poll_interval_seconds: 5
+
