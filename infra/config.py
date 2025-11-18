@@ -18,7 +18,6 @@ class DeploymentConfig:
     app_name: str
     description: str
     workspace_path: str
-    databricks_profile: str
     permissions: List[Dict[str, str]]
     compute_size: str  # MEDIUM, LARGE, or LIQUID
     env_vars: Dict[str, str]
@@ -69,7 +68,6 @@ def load_deployment_config(env: str) -> DeploymentConfig:
         app_name=env_config["app_name"],
         description=env_config.get("description", "AI Slide Generator"),
         workspace_path=env_config["workspace_path"],
-        databricks_profile=env_config["databricks_profile"],
         permissions=env_config["permissions"],
         compute_size=env_config.get("compute_size", "MEDIUM"),
         env_vars=env_config["env_vars"],

@@ -49,7 +49,3 @@ features:
   enable_caching: false
   enable_streaming: false
   enable_batch_processing: false
-
-databricks:
-  profile: "logfood"
-

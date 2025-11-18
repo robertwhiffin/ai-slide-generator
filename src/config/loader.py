@@ -200,11 +200,8 @@ def merge_with_env(config: dict[str, Any]) -> dict[str, Any]:
     if environment := os.getenv("ENVIRONMENT"):
         merged["environment"] = environment
 
-    # Get Databricks host and token from environment variables.
-    if databricks_host := os.getenv("DATABRICKS_HOST"):
-        merged["databricks"]["host"] = databricks_host
-    if databricks_token := os.getenv("DATABRICKS_TOKEN"):
-        merged["databricks"]["token"] = databricks_token
+    # Note: DATABRICKS_HOST and DATABRICKS_TOKEN are used directly by WorkspaceClient
+    # and don't need to be stored in config
 
     return merged
 

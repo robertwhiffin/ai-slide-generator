@@ -5,8 +5,8 @@ These tests connect to an actual Databricks workspace and should be run explicit
     pytest tests/integration/test_client_integration.py
 
 Requirements:
-- Valid Databricks profile in ~/.databrickscfg, OR
-- DATABRICKS_HOST and DATABRICKS_TOKEN environment variables set
+- DATABRICKS_HOST and DATABRICKS_TOKEN environment variables set, OR
+- Valid Databricks configuration in ~/.databrickscfg (using default auth chain)
 """
 
 import os
@@ -127,13 +127,12 @@ class TestDatabricksClientAuthenticationMethods:
 class TestDatabricksClientErrorHandling:
     """Test error handling with real client operations."""
 
-    @pytest.mark.skipif(
-        not os.path.exists(os.path.expanduser("~/.databrickscfg")),
-        reason="No ~/.databrickscfg profile file available"
-    )
-    def test_invalid_profile_error(self):
-        """Test that invalid profile name raises appropriate errors."""
-        # Use a profile name that definitely doesn't exist
-        with pytest.raises(DatabricksClientError, match="Failed to"):
-            get_databricks_client(profile_name="nonexistent-profile-12345")
+    def test_connection_verification_with_real_client(self):
+        """Test that connection verification works with real client."""
+        # Verify connection works
+        assert verify_connection() is True
+        
+        # Reset and verify again
+        reset_client()
+        assert verify_connection() is True
 

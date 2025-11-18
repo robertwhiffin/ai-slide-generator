@@ -23,72 +23,19 @@ class TestGetDatabricksClient:
         assert client is not None
         assert client == mock_workspace_client
 
-    def test_get_client_with_profile(self):
-        """Test client creation with profile name."""
-        mock_client = MagicMock()
-        mock_user = Mock()
-        mock_user.user_name = "profile_user@example.com"
-        mock_client.current_user.me.return_value = mock_user
-
-        with patch("src.config.client.WorkspaceClient", return_value=mock_client) as mock_ws:
-            client = get_databricks_client(profile_name="my-profile")
-            
-            # Verify WorkspaceClient was called with profile
-            mock_ws.assert_called_once_with(profile="my-profile")
-            assert client is not None
-
-    def test_get_client_with_host_and_token(self):
-        """Test client creation with host and token."""
-        mock_client = MagicMock()
-        mock_user = Mock()
-        mock_user.user_name = "direct_auth@example.com"
-        mock_client.current_user.me.return_value = mock_user
-
-        test_host = "https://custom.databricks.com"
-        test_token = "custom-token-123"
-
-        with patch("src.config.client.WorkspaceClient", return_value=mock_client) as mock_ws:
-            client = get_databricks_client(
-                databricks_host=test_host,
-                databricks_token=test_token,
-            )
-            
-            # Verify WorkspaceClient was called with host and token
-            mock_ws.assert_called_once_with(host=test_host, token=test_token)
-            assert client is not None
-
-    def test_get_client_with_env_vars_only(self):
-        """Test client creation with environment variables only."""
+    def test_get_client_with_env_vars(self):
+        """Test client creation with environment variables."""
         mock_client = MagicMock()
         mock_user = Mock()
         mock_user.user_name = "env_user@example.com"
         mock_client.current_user.me.return_value = mock_user
 
-        # Mock settings to fail, forcing fallback to env vars
-        with patch("src.config.client.get_settings", side_effect=Exception("No settings")):
-            with patch("src.config.client.WorkspaceClient", return_value=mock_client) as mock_ws:
-                client = get_databricks_client()
-                
-                # Verify WorkspaceClient was called with no args (uses env vars)
-                mock_ws.assert_called_once_with()
-                assert client is not None
-
-    def test_get_client_profile_takes_priority(self):
-        """Test profile takes priority over host/token."""
-        mock_client = MagicMock()
-        mock_user = Mock()
-        mock_user.user_name = "profile@example.com"
-        mock_client.current_user.me.return_value = mock_user
-
         with patch("src.config.client.WorkspaceClient", return_value=mock_client) as mock_ws:
-            client = get_databricks_client(
-                profile_name="my-profile",
-                databricks_host="https://ignored.databricks.com",
-                databricks_token="ignored-token",
-            )
+            client = get_databricks_client()
             
-            # Should use profile, not host/token
-            mock_ws.assert_called_once_with(profile="my-profile")
+            # Verify WorkspaceClient was called with no args (uses Databricks default auth chain)
+            mock_ws.assert_called_once_with()
+            assert client is not None
 
     def test_get_client_singleton_pattern(
         self, mock_workspace_client, mock_config_loader, mock_env_vars

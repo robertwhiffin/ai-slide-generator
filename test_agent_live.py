@@ -58,27 +58,14 @@ def check_databricks_credentials() -> None:
     host = os.getenv("DATABRICKS_HOST")
     token = os.getenv("DATABRICKS_TOKEN")
     
-    # Also check for profile in config
-    try:
-        from src.config.settings import get_settings
-        settings = get_settings()
-        profile = settings.databricks_profile
-    except Exception:
-        profile = None
-    
-    if not host and not token and not profile:
+    if not host or not token:
         print("\n❌ ERROR: Databricks credentials not configured!")
-        print("\nMLflow requires authentication. Please set one of:")
-        print("\n1. Environment variables (recommended for this test):")
+        print("\nMLflow requires authentication. Please set environment variables:")
         print("   export DATABRICKS_HOST='https://your-workspace.cloud.databricks.com'")
         print("   export DATABRICKS_TOKEN='your-token'")
-        print("\n2. Profile in config/config.yaml:")
-        print("   databricks:")
-        print("     profile: 'your-profile-name'")
         print("\nCurrent status:")
         print(f"  DATABRICKS_HOST: {'✅ Set' if host else '❌ Not set'}")
         print(f"  DATABRICKS_TOKEN: {'✅ Set' if token else '❌ Not set'}")
-        print(f"  Config profile: {'✅ ' + profile if profile else '❌ Not set'}")
         sys.exit(1)
     
     # Verify format if host is set

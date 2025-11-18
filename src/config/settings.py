@@ -230,7 +230,6 @@ class AppSettings(BaseSettings):
     # Secrets from environment variables
     databricks_host: str = Field(default="", description="Databricks workspace URL")
     databricks_token: str = Field(default="", description="Databricks access token")
-    databricks_profile: str = Field(default="", description="Databricks CLI profile name")
 
     # Application configuration (from YAML)
     llm: LLMSettings
@@ -343,7 +342,6 @@ def create_settings() -> AppSettings:
             mlflow=mlflow_settings,
             prompts=prompts,
             environment=config.get("environment", "development"),
-            databricks_profile=config.get("databricks", {}).get("profile", ""),
         )
 
         return settings

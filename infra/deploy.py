@@ -421,7 +421,7 @@ def deploy(
         env: Environment name (development, staging, production)
         action: Action to perform (create, update, delete)
         dry_run: If True, only validate without deploying
-        profile: Optional Databricks profile override
+        profile: Optional Databricks profile name from ~/.databrickscfg (for deployment only)
     """
     project_root = Path(__file__).parent.parent
 
@@ -430,14 +430,9 @@ def deploy(
         print(f"📋 Loading configuration for environment: {env}")
         config = load_deployment_config(env)
 
-        # Override profile if specified
-        if profile:
-            config.databricks_profile = profile
-
         print(f"   App name: {config.app_name}")
         print(f"   Description: {config.description}")
         print(f"   Workspace path: {config.workspace_path}")
-        print(f"   Databricks profile: {config.databricks_profile}")
         print(f"   Compute size: {config.compute_size}")
         print()
 
@@ -447,9 +442,14 @@ def deploy(
             return
 
         # Initialize Databricks client
-        print(f"🔑 Connecting to Databricks (profile: {config.databricks_profile})")
-        workspace_client = WorkspaceClient(profile=config.databricks_profile)
+        if profile:
+            print(f"🔑 Connecting to Databricks (using profile: {profile})")
+            workspace_client = WorkspaceClient(profile=profile)
+        else:
+            print("🔑 Connecting to Databricks (using environment variables)")
+            workspace_client = WorkspaceClient()
         print("  ✅ Connected")
+        print("Workspace URL: ", workspace_client.config.host )
         print()
 
         # Handle delete action
@@ -542,7 +542,9 @@ def main() -> None:
     )
 
     parser.add_argument(
-        "--profile", type=str, help="Databricks profile override (from ~/.databrickscfg)"
+        "--profile",
+        type=str,
+        help="Databricks profile name from ~/.databrickscfg (optional, for deployment only)",
     )
 
     parser.add_argument(

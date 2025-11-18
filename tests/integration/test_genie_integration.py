@@ -2,9 +2,7 @@
 Integration tests for Genie tool.
 
 These tests verify that the Genie tool works with a real Databricks Genie space.
-Requires one of:
-- Databricks profile configured in config/config.yaml (preferred)
-- DATABRICKS_HOST and DATABRICKS_TOKEN environment variables
+Requires DATABRICKS_HOST and DATABRICKS_TOKEN environment variables.
 """
 
 import os
@@ -21,47 +19,27 @@ pytestmark = pytest.mark.integration
 @pytest.fixture(scope="module")
 def check_databricks_connection():
     """
-    Check if Databricks credentials are available via profile or environment variables.
+    Check if Databricks credentials are available via environment variables.
     Skip tests if not configured.
     """
-    from src.config.settings import get_settings
-
+    # Check for environment variables
+    host = os.getenv("DATABRICKS_HOST")
+    token = os.getenv("DATABRICKS_TOKEN")
+    
+    if not host or not token:
+        pytest.skip(
+            "Databricks credentials not configured.\n"
+            "Set DATABRICKS_HOST and DATABRICKS_TOKEN environment variables"
+        )
+    
+    # Test connection
     try:
-        settings = get_settings()
-        
-        # Try profile first (preferred)
-        if settings.databricks_profile:
-            try:
-                # Test connection with profile
-                ws = WorkspaceClient(profile=settings.databricks_profile)
-                ws.current_user.me()  # Verify connection works
-                print(f"✅ Using Databricks profile: {settings.databricks_profile}")
-                return {"profile": settings.databricks_profile}
-            except Exception as e:
-                pytest.skip(f"Failed to connect with profile '{settings.databricks_profile}': {e}")
-        
-        # Fall back to environment variables
-        host = os.getenv("DATABRICKS_HOST") or settings.databricks_host
-        token = os.getenv("DATABRICKS_TOKEN") or settings.databricks_token
-        
-        if not host or not token:
-            pytest.skip(
-                "Databricks credentials not configured. Either:\n"
-                "1. Set databricks.profile in config/config.yaml, or\n"
-                "2. Set DATABRICKS_HOST and DATABRICKS_TOKEN environment variables"
-            )
-        
-        # Test connection with host/token
-        try:
-            ws = WorkspaceClient(host=host, token=token)
-            ws.current_user.me()  # Verify connection works
-            print(f"✅ Using Databricks host: {host}")
-            return {"host": host, "token": token}
-        except Exception as e:
-            pytest.skip(f"Failed to connect to Databricks: {e}")
-            
+        ws = WorkspaceClient()
+        ws.current_user.me()  # Verify connection works
+        print(f"✅ Connected to Databricks")
+        return True
     except Exception as e:
-        pytest.skip(f"Failed to load settings: {e}")
+        pytest.skip(f"Failed to connect to Databricks: {e}")
 
 
 @pytest.fixture(scope="module")
