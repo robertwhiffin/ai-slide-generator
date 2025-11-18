@@ -635,8 +635,8 @@ This plan prioritizes automation and simplicity, leveraging Databricks Apps' bui
 4. **Maintainability:** Clear separation of deployment logic from application code
 
 **Configuration Management:**
-- Create `config/deployment.example.yaml` as a template (commit to git)
-- Add `config/deployment.yaml` to `.gitignore` (user-specific)
-- Users customize the example with their workspace URLs, groups, and profiles
-- Consistent with existing pattern: `config.example.yaml` → `config.yaml`
+- Both `config/deployment.yaml` and `config/deployment.example.yaml` are version controlled
+- `deployment.yaml` contains the actual deployment configuration (no secrets)
+- `deployment.example.yaml` serves as documentation and template for new workspaces
+- Users customize deployment.yaml with their workspace paths and permissions
 

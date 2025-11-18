@@ -47,9 +47,6 @@ Thumbs.db
 output/
 *.log
 
-# Deployment configuration (user-specific)
-config/deployment.yaml
-
 # Auto-generated version file (setuptools-scm)
 src/_version.py
 

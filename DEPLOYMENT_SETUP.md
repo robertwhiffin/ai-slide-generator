@@ -16,7 +16,7 @@ The core deployment infrastructure is now in place. Here's what was created:
 
 1. **`requirements.txt`** - Pinned versions for production
 2. **`src/api/main.py`** - Production frontend serving
-3. **`.gitignore`** - Excludes `config/deployment.yaml`
+3. **`config/deployment.yaml`** - Deployment configuration (version controlled)
 
 ## Getting Started
 
@@ -41,19 +41,15 @@ host = https://prod-workspace.cloud.databricks.com
 token = dapi...
 ```
 
-### 2. Create Deployment Configuration
+### 2. Configure Deployment Settings
 
-Copy the example configuration and customize:
-
-```bash
-cp config/deployment.example.yaml config/deployment.yaml
-```
-
-Edit `config/deployment.yaml`:
-- Update workspace paths
+Edit `config/deployment.yaml` to customize for your workspace:
+- Update workspace paths (replace placeholder usernames/paths)
 - Configure permissions (users/groups)
 - Adjust resource allocations
-- Set Databricks profile names
+- Optionally use `--profile` flag instead of environment variables for deployment
+
+**Note**: `config/deployment.yaml` is version controlled and contains no secrets. Use `config/deployment.example.yaml` as a reference for the structure.
 
 **Example customization:**
 

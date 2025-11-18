@@ -42,14 +42,8 @@ def load_deployment_config(env: str) -> DeploymentConfig:
         ValueError: If environment not found in config
         FileNotFoundError: If deployment.yaml not found
     """
-    # Try deployment.yaml first, fall back to example
+    # Load deployment.yaml (version controlled)
     config_path = Path(__file__).parent.parent / "config" / "deployment.yaml"
-    if not config_path.exists():
-        config_path = Path(__file__).parent.parent / "config" / "deployment.example.yaml"
-        print(
-            f"Warning: deployment.yaml not found, using deployment.example.yaml. "
-            f"Copy it to deployment.yaml and customize for your workspace."
-        )
 
     if not config_path.exists():
         raise FileNotFoundError(f"Deployment config not found: {config_path}")
