@@ -250,9 +250,12 @@ class AppSettings(BaseSettings):
     @field_validator("databricks_host")
     @classmethod
     def validate_databricks_host(cls, v: str) -> str:
-        if v and not v.startswith(("https://", "http://")):
-            raise ValueError("databricks_host must start with https:// or http://")
-        return v.rstrip("/") if v else ""
+        if not v:
+            return ""
+        # Automatically add https:// if missing (Databricks env vars don't include protocol)
+        if not v.startswith(("https://", "http://")):
+            v = f"https://{v}"
+        return v.rstrip("/")
 
 
 def create_settings() -> AppSettings:
