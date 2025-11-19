@@ -1,8 +1,7 @@
 """Configuration history model."""
 from datetime import datetime
 
-from sqlalchemy import Column, DateTime, ForeignKey, Index, Integer, String
-from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy import Column, DateTime, ForeignKey, Index, Integer, String, JSON
 from sqlalchemy.orm import relationship
 
 from src.config.database import Base
@@ -18,8 +17,8 @@ class ConfigHistory(Base):
     domain = Column(String(50), nullable=False)  # 'ai_infra', 'genie', 'mlflow', 'prompts', 'profile'
     action = Column(String(50), nullable=False)  # 'create', 'update', 'delete', 'activate'
     changed_by = Column(String(255), nullable=False)
-    changes = Column(JSONB, nullable=False)  # {"field": {"old": "...", "new": "..."}}
-    snapshot = Column(JSONB)  # Full config snapshot at time of change
+    changes = Column(JSON, nullable=False)  # {"field": {"old": "...", "new": "..."}}
+    snapshot = Column(JSON)  # Full config snapshot at time of change
     timestamp = Column(DateTime, default=datetime.utcnow, nullable=False)
     
     # Relationships
@@ -28,7 +27,7 @@ class ConfigHistory(Base):
     # Indexes
     __table_args__ = (
         Index("idx_config_history_profile", "profile_id"),
-        Index("idx_config_history_timestamp", "timestamp", postgresql_ops={"timestamp": "DESC"}),
+        Index("idx_config_history_timestamp", "timestamp"),
         Index("idx_config_history_domain", "domain"),
     )
     

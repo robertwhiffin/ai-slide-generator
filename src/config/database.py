@@ -9,17 +9,26 @@ from sqlalchemy.orm import Session, declarative_base, sessionmaker
 # Database URL from environment
 DATABASE_URL = os.getenv(
     "DATABASE_URL",
-    "postgresql://localhost:5432/ai_slide_generator"
+    "sqlite:///./ai_slide_generator.db"  # Default to SQLite for local development
 )
 
-# Create engine
-engine = create_engine(
-    DATABASE_URL,
-    pool_pre_ping=True,
-    pool_size=10,
-    max_overflow=20,
-    echo=os.getenv("SQL_ECHO", "false").lower() == "true",
-)
+# Engine configuration based on database type
+if DATABASE_URL.startswith("sqlite"):
+    # SQLite-specific configuration
+    engine = create_engine(
+        DATABASE_URL,
+        connect_args={"check_same_thread": False},
+        echo=os.getenv("SQL_ECHO", "false").lower() == "true",
+    )
+else:
+    # PostgreSQL configuration
+    engine = create_engine(
+        DATABASE_URL,
+        pool_pre_ping=True,
+        pool_size=10,
+        max_overflow=20,
+        echo=os.getenv("SQL_ECHO", "false").lower() == "true",
+    )
 
 # Session factory
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)

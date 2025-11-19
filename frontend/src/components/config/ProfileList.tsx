@@ -1,0 +1,386 @@
+/**
+ * Profile management component.
+ * 
+ * Displays all profiles in a list with actions:
+ * - Edit profile metadata
+ * - Delete profile
+ * - Duplicate profile
+ * - Set as default
+ * - Load profile (hot-reload)
+ */
+
+import React, { useState } from 'react';
+import type { Profile, ProfileCreate, ProfileUpdate } from '../../api/config';
+import { useProfiles } from '../../hooks/useProfiles';
+import { ProfileForm } from './ProfileForm';
+import { ConfirmDialog } from './ConfirmDialog';
+import { ProfileDetailView } from './ProfileDetail';
+
+export const ProfileList: React.FC = () => {
+  const {
+    profiles,
+    currentProfile,
+    loading,
+    error,
+    createProfile,
+    updateProfile,
+    deleteProfile,
+    duplicateProfile,
+    setDefaultProfile,
+    loadProfile,
+  } = useProfiles();
+
+  const [formMode, setFormMode] = useState<'create' | 'edit' | null>(null);
+  const [editingProfile, setEditingProfile] = useState<Profile | null>(null);
+  const [confirmDialog, setConfirmDialog] = useState<{
+    isOpen: boolean;
+    title: string;
+    message: string;
+    onConfirm: () => void;
+  }>({
+    isOpen: false,
+    title: '',
+    message: '',
+    onConfirm: () => {},
+  });
+  const [actionLoading, setActionLoading] = useState<number | null>(null);
+  const [duplicateName, setDuplicateName] = useState('');
+  const [showDuplicateInput, setShowDuplicateInput] = useState<number | null>(null);
+  const [viewingProfileId, setViewingProfileId] = useState<number | null>(null);
+
+  // Handle create profile
+  const handleCreate = () => {
+    setEditingProfile(null);
+    setFormMode('create');
+  };
+
+  // Handle edit profile
+  const handleEdit = (profile: Profile) => {
+    setEditingProfile(profile);
+    setFormMode('edit');
+  };
+
+  // Handle form submit
+  const handleFormSubmit = async (data: ProfileCreate | ProfileUpdate) => {
+    if (formMode === 'create') {
+      await createProfile(data as ProfileCreate);
+    } else if (formMode === 'edit' && editingProfile) {
+      await updateProfile(editingProfile.id, data as ProfileUpdate);
+    }
+    setFormMode(null);
+    setEditingProfile(null);
+  };
+
+  // Handle delete with confirmation
+  const handleDelete = (profile: Profile) => {
+    setConfirmDialog({
+      isOpen: true,
+      title: 'Delete Profile',
+      message: `Are you sure you want to delete the profile "${profile.name}"?\n\nThis action cannot be undone and will delete all associated configurations.`,
+      onConfirm: async () => {
+        setActionLoading(profile.id);
+        try {
+          await deleteProfile(profile.id);
+        } finally {
+          setActionLoading(null);
+          setConfirmDialog({ ...confirmDialog, isOpen: false });
+        }
+      },
+    });
+  };
+
+  // Handle set default with confirmation
+  const handleSetDefault = (profile: Profile) => {
+    setConfirmDialog({
+      isOpen: true,
+      title: 'Set Default Profile',
+      message: `Set "${profile.name}" as the default profile?\n\nThe default profile is loaded when the application starts.`,
+      onConfirm: async () => {
+        setActionLoading(profile.id);
+        try {
+          await setDefaultProfile(profile.id);
+        } finally {
+          setActionLoading(null);
+          setConfirmDialog({ ...confirmDialog, isOpen: false });
+        }
+      },
+    });
+  };
+
+  // Handle load profile with confirmation
+  const handleLoadProfile = (profile: Profile) => {
+    setConfirmDialog({
+      isOpen: true,
+      title: 'Load Profile',
+      message: `Load "${profile.name}" and hot-reload the application configuration?\n\nCurrent sessions will be preserved.`,
+      onConfirm: async () => {
+        setActionLoading(profile.id);
+        try {
+          await loadProfile(profile.id);
+        } finally {
+          setActionLoading(null);
+          setConfirmDialog({ ...confirmDialog, isOpen: false });
+        }
+      },
+    });
+  };
+
+  // Handle duplicate
+  const handleDuplicateClick = (profile: Profile) => {
+    setDuplicateName(`${profile.name} (Copy)`);
+    setShowDuplicateInput(profile.id);
+  };
+
+  const handleDuplicateSubmit = async (profileId: number) => {
+    if (!duplicateName.trim()) return;
+    
+    setActionLoading(profileId);
+    try {
+      await duplicateProfile(profileId, duplicateName.trim());
+      setShowDuplicateInput(null);
+      setDuplicateName('');
+    } finally {
+      setActionLoading(null);
+    }
+  };
+
+  if (loading) {
+    return (
+      <div className="flex items-center justify-center h-64">
+        <div className="text-gray-600">Loading profiles...</div>
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <div className="p-4 bg-red-50 border border-red-200 rounded text-red-700">
+        Error: {error}
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-4">
+      {/* Header */}
+      <div className="flex justify-between items-center">
+        <div>
+          <h2 className="text-2xl font-semibold text-gray-900">Configuration Profiles</h2>
+          <p className="text-sm text-gray-600 mt-1">
+            Manage your configuration profiles. Load different profiles to switch settings without restarting.
+          </p>
+        </div>
+        <button
+          onClick={handleCreate}
+          className="px-4 py-2 bg-blue-500 hover:bg-blue-600 text-white rounded transition-colors"
+        >
+          + Create Profile
+        </button>
+      </div>
+
+      {/* Current Profile Badge */}
+      {currentProfile && (
+        <div className="p-3 bg-blue-50 border border-blue-200 rounded">
+          <span className="text-sm text-blue-700">
+            <strong>Currently Loaded:</strong> {currentProfile.name}
+            {currentProfile.is_default && ' (Default)'}
+          </span>
+        </div>
+      )}
+
+      {/* Profiles Table */}
+      <div className="border rounded-lg overflow-hidden">
+        <table className="w-full">
+          <thead className="bg-gray-50 border-b">
+            <tr>
+              <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                Name
+              </th>
+              <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                Description
+              </th>
+              <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                Status
+              </th>
+              <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                Actions
+              </th>
+            </tr>
+          </thead>
+          <tbody className="bg-white divide-y divide-gray-200">
+            {profiles.map((profile) => (
+              <React.Fragment key={profile.id}>
+                <tr className="hover:bg-gray-50">
+                  <td className="px-4 py-3 text-sm font-medium text-gray-900">
+                    {profile.name}
+                  </td>
+                  <td className="px-4 py-3 text-sm text-gray-600">
+                    {profile.description || <span className="italic text-gray-400">No description</span>}
+                  </td>
+                  <td className="px-4 py-3 text-sm">
+                    <div className="flex gap-2">
+                      {profile.is_default && (
+                        <span className="px-2 py-1 bg-blue-100 text-blue-700 text-xs rounded">
+                          Default
+                        </span>
+                      )}
+                      {currentProfile?.id === profile.id && (
+                        <span className="px-2 py-1 bg-green-100 text-green-700 text-xs rounded">
+                          Loaded
+                        </span>
+                      )}
+                    </div>
+                  </td>
+                  <td className="px-4 py-3 text-sm">
+                    <div className="flex gap-2">
+                      {/* View Details Button */}
+                      <button
+                        onClick={() => setViewingProfileId(profile.id)}
+                        disabled={actionLoading === profile.id}
+                        className="px-3 py-1 bg-indigo-500 hover:bg-indigo-600 text-white text-xs rounded transition-colors disabled:bg-gray-300"
+                        title="View details"
+                      >
+                        View
+                      </button>
+
+                      {/* Load Button */}
+                      {currentProfile?.id !== profile.id && (
+                        <button
+                          onClick={() => handleLoadProfile(profile)}
+                          disabled={actionLoading === profile.id}
+                          className="px-3 py-1 bg-green-500 hover:bg-green-600 text-white text-xs rounded transition-colors disabled:bg-gray-300"
+                          title="Load this profile"
+                        >
+                          Load
+                        </button>
+                      )}
+
+                      {/* Edit Button */}
+                      <button
+                        onClick={() => handleEdit(profile)}
+                        disabled={actionLoading === profile.id}
+                        className="px-3 py-1 bg-gray-500 hover:bg-gray-600 text-white text-xs rounded transition-colors disabled:bg-gray-300"
+                        title="Edit profile"
+                      >
+                        Edit
+                      </button>
+
+                      {/* Set Default Button */}
+                      {!profile.is_default && (
+                        <button
+                          onClick={() => handleSetDefault(profile)}
+                          disabled={actionLoading === profile.id}
+                          className="px-3 py-1 bg-blue-500 hover:bg-blue-600 text-white text-xs rounded transition-colors disabled:bg-gray-300"
+                          title="Set as default"
+                        >
+                          Set Default
+                        </button>
+                      )}
+
+                      {/* Duplicate Button */}
+                      <button
+                        onClick={() => handleDuplicateClick(profile)}
+                        disabled={actionLoading === profile.id}
+                        className="px-3 py-1 bg-purple-500 hover:bg-purple-600 text-white text-xs rounded transition-colors disabled:bg-gray-300"
+                        title="Duplicate profile"
+                      >
+                        Duplicate
+                      </button>
+
+                      {/* Delete Button */}
+                      {profiles.length > 1 && (
+                        <button
+                          onClick={() => handleDelete(profile)}
+                          disabled={actionLoading === profile.id}
+                          className="px-3 py-1 bg-red-500 hover:bg-red-600 text-white text-xs rounded transition-colors disabled:bg-gray-300"
+                          title="Delete profile"
+                        >
+                          Delete
+                        </button>
+                      )}
+                    </div>
+                  </td>
+                </tr>
+
+                {/* Duplicate Input Row */}
+                {showDuplicateInput === profile.id && (
+                  <tr>
+                    <td colSpan={4} className="px-4 py-3 bg-gray-50">
+                      <div className="flex items-center gap-3">
+                        <label className="text-sm text-gray-700 font-medium">
+                          New name:
+                        </label>
+                        <input
+                          type="text"
+                          value={duplicateName}
+                          onChange={(e) => setDuplicateName(e.target.value)}
+                          className="flex-1 px-3 py-1 border border-gray-300 rounded text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                          placeholder="Enter new profile name"
+                          maxLength={100}
+                          autoFocus
+                        />
+                        <button
+                          onClick={() => handleDuplicateSubmit(profile.id)}
+                          disabled={!duplicateName.trim() || actionLoading === profile.id}
+                          className="px-3 py-1 bg-green-500 hover:bg-green-600 text-white text-sm rounded transition-colors disabled:bg-gray-300"
+                        >
+                          Create
+                        </button>
+                        <button
+                          onClick={() => {
+                            setShowDuplicateInput(null);
+                            setDuplicateName('');
+                          }}
+                          className="px-3 py-1 bg-gray-300 hover:bg-gray-400 text-gray-800 text-sm rounded transition-colors"
+                        >
+                          Cancel
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                )}
+              </React.Fragment>
+            ))}
+          </tbody>
+        </table>
+
+        {profiles.length === 0 && (
+          <div className="p-8 text-center text-gray-500">
+            No profiles found. Create your first profile to get started.
+          </div>
+        )}
+      </div>
+
+      {/* Profile Form Modal */}
+      <ProfileForm
+        isOpen={formMode !== null}
+        mode={formMode || 'create'}
+        profile={editingProfile || undefined}
+        profiles={profiles}
+        onSubmit={handleFormSubmit}
+        onCancel={() => {
+          setFormMode(null);
+          setEditingProfile(null);
+        }}
+      />
+
+      {/* Confirmation Dialog */}
+      <ConfirmDialog
+        isOpen={confirmDialog.isOpen}
+        title={confirmDialog.title}
+        message={confirmDialog.message}
+        onConfirm={confirmDialog.onConfirm}
+        onCancel={() => setConfirmDialog({ ...confirmDialog, isOpen: false })}
+      />
+
+      {/* Profile Detail View */}
+      {viewingProfileId !== null && (
+        <ProfileDetailView
+          profileId={viewingProfileId}
+          onClose={() => setViewingProfileId(null)}
+        />
+      )}
+    </div>
+  );
+};
+
