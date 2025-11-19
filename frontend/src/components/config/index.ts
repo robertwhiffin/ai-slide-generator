@@ -7,4 +7,9 @@ export { ProfileList } from './ProfileList';
 export { ProfileForm } from './ProfileForm';
 export { ConfirmDialog } from './ConfirmDialog';
 export { ProfileDetailView } from './ProfileDetail';
+export { ConfigTabs } from './ConfigTabs';
+export { AIInfraForm } from './AIInfraForm';
+export { GenieSpacesManager } from './GenieSpacesManager';
+export { MLflowForm } from './MLflowForm';
+export { PromptsEditor } from './PromptsEditor';
 

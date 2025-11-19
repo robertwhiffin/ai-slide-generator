@@ -11,6 +11,9 @@
 import React, { useEffect, useState } from 'react';
 import type { ProfileDetail } from '../../api/config';
 import { configApi, ConfigApiError } from '../../api/config';
+import { ConfigTabs } from './ConfigTabs';
+
+type ViewMode = 'view' | 'edit';
 
 interface ProfileDetailProps {
   profileId: number;
@@ -21,6 +24,7 @@ export const ProfileDetailView: React.FC<ProfileDetailProps> = ({ profileId, onC
   const [profile, setProfile] = useState<ProfileDetail | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [mode, setMode] = useState<ViewMode>('view');
 
   useEffect(() => {
     const loadProfile = async () => {
@@ -86,16 +90,48 @@ export const ProfileDetailView: React.FC<ProfileDetailProps> = ({ profileId, onC
               )}
             </div>
           </div>
-          <button
-            onClick={onClose}
-            className="text-gray-500 hover:text-gray-700 text-2xl"
-          >
-            ✕
-          </button>
+          <div className="flex items-center gap-3">
+            {/* View/Edit Toggle */}
+            <div className="flex gap-1 bg-white rounded border border-gray-300">
+              <button
+                onClick={() => setMode('view')}
+                className={`px-3 py-1 text-sm rounded transition-colors ${
+                  mode === 'view'
+                    ? 'bg-blue-500 text-white'
+                    : 'text-gray-600 hover:text-gray-900'
+                }`}
+              >
+                View
+              </button>
+              <button
+                onClick={() => setMode('edit')}
+                className={`px-3 py-1 text-sm rounded transition-colors ${
+                  mode === 'edit'
+                    ? 'bg-blue-500 text-white'
+                    : 'text-gray-600 hover:text-gray-900'
+                }`}
+              >
+                Edit
+              </button>
+            </div>
+            
+            <button
+              onClick={onClose}
+              className="text-gray-500 hover:text-gray-700 text-2xl"
+            >
+              ✕
+            </button>
+          </div>
         </div>
 
         {/* Content */}
         <div className="px-6 py-4 max-h-[70vh] overflow-y-auto">
+          {mode === 'edit' ? (
+            /* Edit Mode - Show ConfigTabs */
+            <ConfigTabs profileId={profile.id} profileName={profile.name} />
+          ) : (
+            /* View Mode - Show Read-Only Details */
+            <div>
           {/* AI Infrastructure */}
           <div className="mb-6">
             <h3 className="text-lg font-semibold text-gray-900 mb-3 flex items-center gap-2">
@@ -204,6 +240,8 @@ export const ProfileDetailView: React.FC<ProfileDetailProps> = ({ profileId, onC
               </div>
             </div>
           </div>
+          </div>
+          )}
         </div>
 
         {/* Footer */}

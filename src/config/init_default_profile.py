@@ -104,12 +104,14 @@ def init_default_profile() -> None:
             logger.info("Created Genie space config")
             
             # Create MLflow config
-            # Get username for experiment name
+            # Get username from Databricks client singleton
             try:
-                from databricks.sdk import WorkspaceClient
-                w = WorkspaceClient()
-                username = w.current_user.me().user_name
-            except Exception:
+                from src.config.client import get_databricks_client
+                client = get_databricks_client()
+                username = client.current_user.me().user_name
+            except Exception as e:
+                # Fallback to environment variable if Databricks not available
+                logger.warning(f"Could not get Databricks username: {e}")
                 username = os.getenv("USER", "default_user")
             
             experiment_name = "/Users/{username}/slide-generator-experiments"

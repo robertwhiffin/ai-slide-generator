@@ -10,8 +10,9 @@ Usage:
 import argparse
 import sys
 
-from databricks.sdk import WorkspaceClient
 from databricks.sdk.service.serving import ServedEntityInput
+
+from src.config.client import get_databricks_client
 
 
 def rollback_endpoint(
@@ -25,7 +26,7 @@ def rollback_endpoint(
         target_version: Model version to rollback to
         confirm: If True, skip confirmation prompt
     """
-    w = WorkspaceClient()
+    w = get_databricks_client()
 
     print(f"\n{'='*60}")
     print(f"🔄 Rollback Endpoint")

@@ -180,7 +180,7 @@ class MLFlowSettings(BaseSettings):
     model_config = SettingsConfigDict(extra="allow")
 
     # Tracking
-    tracking_uri: str = "databricks-uc"
+    tracking_uri: str = "databricks"
     experiment_name: str
 
     # Tracing
@@ -276,15 +276,15 @@ def create_settings() -> AppSettings:
         # Merge with environment overrides
         config = merge_with_env(config)
 
-        # Get current user from environment for MLFlow experiment name
+        # Get current user from Databricks client singleton for MLFlow experiment name
         import os
-        from databricks.sdk import WorkspaceClient
+        from src.config.client import get_databricks_client
         
         try:
-            w = WorkspaceClient()
-            username = w.current_user.me().user_name
+            client = get_databricks_client()
+            username = client.current_user.me().user_name
         except Exception:
-            # Fallback to environment variable or default
+            # Fallback to environment variable if Databricks not available
             username = os.getenv("USER", "default_user")
 
         # Format experiment name with username

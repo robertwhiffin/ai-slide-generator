@@ -279,10 +279,11 @@ def load_settings_from_database(profile_id: Optional[int] = None) -> AppSettings
 
             # Get username for MLflow experiment name formatting
             try:
-                from databricks.sdk import WorkspaceClient
-                w = WorkspaceClient()
-                username = w.current_user.me().user_name
+                from src.config.client import get_databricks_client
+                client = get_databricks_client()
+                username = client.current_user.me().user_name
             except Exception:
+                # Fallback to environment variable if Databricks not available
                 username = os.getenv("USER", "default_user")
 
             # Format experiment name

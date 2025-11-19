@@ -8,8 +8,8 @@ Requires DATABRICKS_HOST and DATABRICKS_TOKEN environment variables.
 import os
 
 import pytest
-from databricks.sdk import WorkspaceClient
 
+from src.config.client import get_databricks_client
 from src.services.tools import GenieToolError, query_genie_space
 
 # Mark all tests in this module as integration tests
@@ -34,7 +34,7 @@ def check_databricks_connection():
     
     # Test connection
     try:
-        ws = WorkspaceClient()
+        ws = get_databricks_client()
         ws.current_user.me()  # Verify connection works
         print(f"✅ Connected to Databricks")
         return True

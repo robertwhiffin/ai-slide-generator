@@ -58,8 +58,15 @@ def initialize_database():
         db.add(genie_space)
         
         # Create MLflow config
-        # Replace {username} with actual username from environment
-        username = os.getenv("USER", "default_user")
+        # Get username from Databricks client singleton
+        try:
+            from src.config.client import get_databricks_client
+            client = get_databricks_client()
+            username = client.current_user.me().user_name
+        except Exception:
+            # Fallback to environment variable if Databricks not available
+            username = os.getenv("USER", "default_user")
+        
         experiment_name = DEFAULT_CONFIG["mlflow"]["experiment_name"].format(username=username)
         
         mlflow = ConfigMLflow(
