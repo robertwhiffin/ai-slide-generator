@@ -21,9 +21,11 @@ from datetime import timedelta
 from pathlib import Path
 from typing import Optional
 
-from databricks.sdk import WorkspaceClient
+from databricks.sdk import WorkspaceClient  # Keep for profile-specific connections
 from databricks.sdk.core import ApiClient
 from databricks.sdk.service.apps import App, AppDeployment, AppDeploymentMode, ComputeSize
+
+from src.config.client import get_databricks_client
 from databricks.sdk.service.workspace import ImportFormat
 
 from infra.config import load_deployment_config
@@ -447,7 +449,7 @@ def deploy(
             workspace_client = WorkspaceClient(profile=profile)
         else:
             print("🔑 Connecting to Databricks (using environment variables)")
-            workspace_client = WorkspaceClient()
+            workspace_client = get_databricks_client()
         print("  ✅ Connected")
         print("Workspace URL: ", workspace_client.config.host )
         print()

@@ -1,8 +1,9 @@
 """Configuration service for managing config within profiles."""
 from typing import List
 
-from databricks.sdk import WorkspaceClient
 from sqlalchemy.orm import Session
+
+from src.config.client import get_databricks_client
 
 from src.models.config import (
     ConfigAIInfra,
@@ -73,7 +74,7 @@ class ConfigService:
         Returns endpoints sorted with databricks- prefixed first.
         """
         try:
-            client = WorkspaceClient()
+            client = get_databricks_client()
             endpoints = client.serving_endpoints.list()
             names = [endpoint.name for endpoint in endpoints]
             

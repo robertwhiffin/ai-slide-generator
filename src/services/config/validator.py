@@ -2,7 +2,7 @@
 from dataclasses import dataclass
 from typing import Optional
 
-from databricks.sdk import WorkspaceClient
+from src.config.client import get_databricks_client
 
 
 @dataclass
@@ -48,7 +48,7 @@ class ConfigValidator:
         
         # Check if endpoint exists
         try:
-            client = WorkspaceClient()
+            client = get_databricks_client()
             endpoints = [e.name for e in client.serving_endpoints.list()]
             
             if llm_endpoint not in endpoints:

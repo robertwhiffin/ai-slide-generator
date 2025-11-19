@@ -15,10 +15,10 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import mlflow
-from databricks.sdk import WorkspaceClient
 from databricks.sdk.service.serving import EndpointCoreConfigInput, ServedEntityInput
 from mlflow.tracking import MlflowClient
 
+from src.config.client import get_databricks_client
 from src.models.mlflow_wrapper import log_model_to_mlflow
 
 
@@ -34,7 +34,7 @@ def register_and_deploy(environment: str = "dev", auto_approve: bool = False) ->
         Tuple of (run_id, model_version)
     """
     client = MlflowClient()
-    w = WorkspaceClient()
+    w = get_databricks_client()
 
     # Get current user
     username = w.current_user.me().user_name

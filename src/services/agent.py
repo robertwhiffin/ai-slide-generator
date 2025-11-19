@@ -87,6 +87,7 @@ class SlideGeneratorAgent:
 
         # Set up MLflow
         self._setup_mlflow()
+        self.experiment_id=None
 
         # Create LangChain components
         self.model = self._create_model()
@@ -106,7 +107,10 @@ class SlideGeneratorAgent:
     def _setup_mlflow(self) -> None:
         """Configure MLflow tracking and experiment."""
         try:
-            mlflow.set_tracking_uri(self.settings.mlflow.tracking_uri)
+            #mlflow.set_tracking_uri(self.settings.mlflow.tracking_uri)
+            # Use the Databricks workspace for tracking
+            tracking_uri = "databricks"
+            mlflow.set_tracking_uri(tracking_uri)
             experiment = mlflow.get_experiment_by_name(self.settings.mlflow.experiment_name)
             if experiment is None:
                 self.experiment_id = mlflow.create_experiment(self.settings.mlflow.experiment_name).experiment_id
@@ -119,7 +123,8 @@ class SlideGeneratorAgent:
             logger.info(
                 "MLflow configured",
                 extra={
-                    "tracking_uri": self.settings.mlflow.tracking_uri,
+                    #"tracking_uri": self.settings.mlflow.tracking_uri,
+                    "tracking_uri": tracking_uri,
                     "experiment_name": self.settings.mlflow.experiment_name,
                     "experiment_id": self.experiment_id,
                 },
