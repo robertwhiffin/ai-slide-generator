@@ -24,6 +24,9 @@ from src.models.config import (
 
 logger = logging.getLogger(__name__)
 
+# Global variable to track the currently active profile
+_active_profile_id: Optional[int] = None
+
 
 # Reuse existing Pydantic models for backward compatibility
 class LLMSettings(BaseSettings):
@@ -227,7 +230,7 @@ def load_settings_from_database(profile_id: Optional[int] = None) -> AppSettings
     Load settings from database profile.
 
     Args:
-        profile_id: Specific profile ID to load, or None for default
+        profile_id: Specific profile ID to load, or None for default (or active profile)
 
     Returns:
         AppSettings instance with database-backed configuration
@@ -235,14 +238,27 @@ def load_settings_from_database(profile_id: Optional[int] = None) -> AppSettings
     Raises:
         ValueError: If profile not found or required config missing
     """
+    global _active_profile_id
+    
     try:
         with get_db_session() as db:
-            # Get profile (default or specified)
-            if profile_id is None:
+            # Get profile (priority: specified > active > default)
+            if profile_id is None and _active_profile_id is not None:
+                # Use the currently active profile
+                profile = db.query(ConfigProfile).filter_by(id=_active_profile_id).first()
+                if not profile:
+                    # Fallback to default if active profile not found
+                    logger.warning(
+                        f"Active profile {_active_profile_id} not found, falling back to default"
+                    )
+                    profile = db.query(ConfigProfile).filter_by(is_default=True).first()
+            elif profile_id is None:
+                # No profile specified and no active profile - use default
                 profile = db.query(ConfigProfile).filter_by(is_default=True).first()
                 if not profile:
                     raise ValueError("No default profile found in database")
             else:
+                # Specific profile requested
                 profile = db.query(ConfigProfile).filter_by(id=profile_id).first()
                 if not profile:
                     raise ValueError(f"Profile {profile_id} not found")
@@ -372,16 +388,31 @@ def reload_settings(profile_id: Optional[int] = None) -> AppSettings:
         New AppSettings instance
     """
     logger.info("Reloading settings from database", extra={"profile_id": profile_id})
+    
+    # Clear the cache first
     get_settings.cache_clear()
     
-    # If profile_id specified, we need to bypass the cache
-    if profile_id is not None:
-        # Temporarily load specific profile
-        settings = load_settings_from_database(profile_id)
-        # Update the cache with this profile
-        get_settings.cache_clear()
-        get_settings()  # This will cache the default again
-        return settings
+    # Load the settings (either specific profile or default)
+    # This will be cached by the lru_cache decorator on next get_settings() call
+    settings = load_settings_from_database(profile_id)
     
-    return get_settings()
+    # Manually update the cache with the loaded settings
+    # by calling get_settings() which will load and cache the same profile
+    # Since we cleared cache and load_settings_from_database() loads default when profile_id is None,
+    # we need to ensure subsequent calls use the correct profile
+    
+    # Store the active profile ID globally so get_settings() can use it
+    global _active_profile_id
+    _active_profile_id = settings.profile_id
+    
+    logger.info(
+        "Settings reloaded successfully",
+        extra={
+            "profile_id": settings.profile_id,
+            "profile_name": settings.profile_name,
+            "llm_endpoint": settings.llm.endpoint,
+        },
+    )
+    
+    return settings
 
