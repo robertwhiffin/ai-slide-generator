@@ -203,6 +203,9 @@ A full-stack web application that generates HTML slide decks using LLMs. The sys
 - **MLflow 3.0+**: Experiment tracking, metrics logging, and distributed tracing
 - **FastAPI**: Lightweight, high-performance API framework with auto-generated docs
 - **Pydantic**: Data validation and settings management for type safety
+- **PostgreSQL**: Relational database for configuration management
+- **SQLAlchemy 2.0**: ORM for database models and queries
+- **Alembic**: Database migration management
 - **BeautifulSoup4**: HTML parsing for slide deck manipulation
 - **lxml**: Fast HTML parser backend for BeautifulSoup
 - **uvicorn**: ASGI server for FastAPI applications
@@ -316,7 +319,12 @@ tools:
   - `docs/technical/frontend-overview.md` – UI layout, state ownership, and how the React app talks to the API.
   - `docs/technical/backend-overview.md` – FastAPI/LangChain architecture, agent lifecycle, and API contracts.
   - `docs/technical/slide-parser-and-script-management.md` – End-to-end HTML pipeline, slide parsing, and script reconciliation.
+  - `docs/technical/database-configuration.md` – PostgreSQL-backed configuration system with profiles and audit trail.
   These concise references stay current with the codebase and should be consulted (and updated) whenever behavior changes.
+
+- **Database configuration implementation:**
+  - `docs/backend-database-implementation/` – 8-phase implementation plan for database-backed configuration management.
+  - **Phase 1 Complete:** Database setup, SQLAlchemy models, Alembic migrations, and unit tests.
 
 - **Historical / planning docs:**
   - **[PROJECT_PLAN.md](PROJECT_PLAN.md)**: High-level milestones and architecture notes.
@@ -326,6 +334,7 @@ tools:
 
 ### Prerequisites
 - Python 3.10 or higher
+- PostgreSQL 14+ (for database-backed configuration)
 - Databricks workspace with:
   - Model serving endpoint deployed
   - Genie space configured
@@ -369,41 +378,42 @@ tools:
 
 4. **Configure environment:**
    
-   The project uses a two-tier configuration system:
+   The project uses environment variables for secrets and database configuration:
    
-   **a) Secrets (Environment Variables):**
+   **a) Secrets and Database (Environment Variables):**
    ```bash
    cp .env.example .env
-   # Edit .env with your Databricks credentials
+   # Edit .env with your credentials
    ```
    
    Required in `.env`:
    - `DATABRICKS_HOST`: Your Databricks workspace URL
    - `DATABRICKS_TOKEN`: Personal access token
+   - `DATABASE_URL`: PostgreSQL connection string (optional, defaults to localhost)
    
-   **b) Application Settings (YAML):**
+   **b) Database Setup:**
    ```bash
-   cp config/config.example.yaml config/config.yaml
-   # Edit config/config.yaml with your settings
+   # Install PostgreSQL (if not already installed)
+   # macOS: brew install postgresql
+   # Ubuntu: sudo apt-get install postgresql
+   
+   # Create database
+   createdb ai_slide_generator
+   
+   # Run migrations
+   alembic upgrade head
+   
+   # Initialize with default configuration
+   python scripts/init_database.py
    ```
    
-   Configure in `config/config.yaml`:
-   - LLM endpoint name and parameters
-   - Genie space ID
-   - Output formatting options
-   - API settings
+   **c) Legacy YAML Configuration (Optional):**
    
-   **c) Prompts (YAML):**
-   ```bash
-   # Edit config/prompts.yaml with your system prompts
-   ```
-   
-   Customize prompts for:
-   - System prompt (main instructions)
-   - Intent analysis
-   - Data interpretation
-   - Narrative construction
-   - HTML generation
+   YAML files in `config/` are still used for initial setup but will be replaced by database-backed configuration in future phases. The database system provides:
+   - Multiple configuration profiles
+   - Hot-reload without restart
+   - Configuration history and audit trail
+   - Dynamic profile switching
 
 ### Running the Application
 
