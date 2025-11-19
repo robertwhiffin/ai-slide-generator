@@ -21,7 +21,8 @@ from langchain_core.tools import StructuredTool
 from pydantic import BaseModel, Field
 
 from src.config.client import get_databricks_client
-from src.config.settings import get_settings
+# Use database-backed settings (Phase 4)
+from src.config.settings_db import get_settings
 from src.services.tools import initialize_genie_conversation, query_genie_space
 from src.utils.html_utils import extract_canvas_ids_from_script
 

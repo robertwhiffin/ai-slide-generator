@@ -1,10 +1,12 @@
 """Chat service wrapper around the agent.
 
 Phase 1: Single global session, stored in memory.
-Phase 4: Support multiple sessions with session_id parameter.
+Phase 4: Support multiple sessions with session_id parameter and configuration reload.
 """
 
+import copy
 import logging
+import threading
 from typing import Any, Dict, List, Optional
 
 from src.models.slide import Slide
@@ -66,6 +68,9 @@ class ChatService:
         """Initialize the chat service with agent and session."""
         logger.info("Initializing ChatService")
         
+        # Thread lock for safe agent reloading
+        self._reload_lock = threading.Lock()
+        
         # Create agent instance
         self.agent = create_agent()
         
@@ -78,6 +83,89 @@ class ChatService:
         self.raw_html: Optional[str] = None
         
         logger.info("ChatService initialized successfully")
+    
+    def reload_agent(self, profile_id: Optional[int] = None) -> Dict[str, Any]:
+        """
+        Reload agent with new settings from database.
+        
+        This allows hot-reload of configuration without restarting the application.
+        Session state (conversation history and Genie conversations) is preserved.
+        
+        Args:
+            profile_id: Profile ID to load, or None for default profile
+            
+        Returns:
+            Dictionary with reload status and profile information
+            
+        Raises:
+            Exception: If reload fails (agent remains in previous state)
+        """
+        with self._reload_lock:
+            logger.info(
+                "Reloading agent with new configuration",
+                extra={"profile_id": profile_id, "current_session_id": self.session_id},
+            )
+            
+            try:
+                # Save current session state
+                sessions_backup = copy.deepcopy(self.agent.sessions)
+                logger.info(
+                    "Backed up session state",
+                    extra={"session_count": len(sessions_backup)},
+                )
+                
+                # Reload settings from database
+                # This will update the settings cache
+                from src.config.settings_db import reload_settings
+                new_settings = reload_settings(profile_id)
+                logger.info(
+                    "Loaded new settings",
+                    extra={
+                        "profile_id": new_settings.profile_id,
+                        "profile_name": new_settings.profile_name,
+                        "llm_endpoint": new_settings.llm.endpoint,
+                    },
+                )
+                
+                # Create new agent with new settings
+                new_agent = create_agent()
+                logger.info("Created new agent instance")
+                
+                # Restore sessions
+                new_agent.sessions = sessions_backup
+                logger.info(
+                    "Restored session state",
+                    extra={"session_count": len(new_agent.sessions)},
+                )
+                
+                # Atomic swap
+                old_agent = self.agent
+                self.agent = new_agent
+                
+                logger.info(
+                    "Agent reloaded successfully",
+                    extra={
+                        "profile_id": new_settings.profile_id,
+                        "profile_name": new_settings.profile_name,
+                    },
+                )
+                
+                return {
+                    "status": "reloaded",
+                    "profile_id": new_settings.profile_id,
+                    "profile_name": new_settings.profile_name,
+                    "llm_endpoint": new_settings.llm.endpoint,
+                    "sessions_preserved": len(sessions_backup),
+                }
+                
+            except Exception as e:
+                logger.error(
+                    f"Failed to reload agent: {e}",
+                    exc_info=True,
+                    extra={"profile_id": profile_id},
+                )
+                # Agent remains in previous state if reload fails
+                raise Exception(f"Agent reload failed: {e}") from e
     
     def send_message(
         self,
