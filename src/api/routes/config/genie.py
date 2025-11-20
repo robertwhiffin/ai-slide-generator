@@ -43,14 +43,14 @@ def list_available_genie_spaces():
         
         # Collect spaces from first page
         if response.spaces:
-            names_ids = {space.name: space.id for space in response.spaces}
+            names_ids = {space.title: space.space_id for space in response.spaces}
             space_details.update(names_ids)
         
         # Handle pagination
         while response.next_page_token:
             response = client.genie.list_spaces(page_token=response.next_page_token)
             if response.spaces:
-                names_ids = {space.name: space.id for space in response.spaces}
+                names_ids = {space.title: space.space_id for space in response.spaces}
                 space_details.update(names_ids)
         
         logger.info(f"Found {len(space_details)} available Genie spaces")
