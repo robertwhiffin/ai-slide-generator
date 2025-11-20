@@ -6,6 +6,7 @@
 
 import React, { useState, useEffect } from 'react';
 import type { MLflowConfig, MLflowConfigUpdate } from '../../api/config';
+import { configApi } from '../../api/config';
 
 interface MLflowFormProps {
   config: MLflowConfig;
@@ -17,6 +18,8 @@ export const MLflowForm: React.FC<MLflowFormProps> = ({ config, onSave, saving =
   const [experimentName, setExperimentName] = useState(config.experiment_name);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState(false);
+  const [validating, setValidating] = useState(false);
+  const [validationResult, setValidationResult] = useState<{ success: boolean; message: string } | null>(null);
 
   // Update form when config changes
   useEffect(() => {
@@ -60,6 +63,22 @@ export const MLflowForm: React.FC<MLflowFormProps> = ({ config, onSave, saving =
     setExperimentName(config.experiment_name);
     setError(null);
     setSuccess(false);
+    setValidationResult(null);
+  };
+
+  const handleValidate = async () => {
+    setValidating(true);
+    setValidationResult(null);
+    setError(null);
+
+    try {
+      const result = await configApi.validateMLflow(experimentName);
+      setValidationResult(result);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Validation failed');
+    } finally {
+      setValidating(false);
+    }
   };
 
   return (
@@ -73,6 +92,15 @@ export const MLflowForm: React.FC<MLflowFormProps> = ({ config, onSave, saving =
       {success && (
         <div className="p-3 bg-green-50 border border-green-200 rounded text-green-700 text-sm">
           Configuration saved successfully!
+        </div>
+      )}
+      {validationResult && (
+        <div className={`p-3 border rounded text-sm ${
+          validationResult.success 
+            ? 'bg-green-50 border-green-200 text-green-700' 
+            : 'bg-yellow-50 border-yellow-200 text-yellow-700'
+        }`}>
+          <strong>Validation:</strong> {validationResult.message}
         </div>
       )}
 
@@ -104,21 +132,30 @@ export const MLflowForm: React.FC<MLflowFormProps> = ({ config, onSave, saving =
       </div>
 
       {/* Action Buttons */}
-      <div className="flex justify-end gap-3 pt-4 border-t">
+      <div className="flex justify-between pt-4 border-t">
         <button
-          onClick={handleReset}
-          disabled={!isDirty || saving}
-          className="px-4 py-2 bg-gray-200 hover:bg-gray-300 text-gray-800 rounded transition-colors disabled:bg-gray-100 disabled:text-gray-400 disabled:cursor-not-allowed"
+          onClick={handleValidate}
+          disabled={validating || saving || !experimentName.trim()}
+          className="px-4 py-2 bg-purple-500 hover:bg-purple-600 text-white rounded transition-colors disabled:bg-purple-300 disabled:cursor-not-allowed"
         >
-          Reset
+          {validating ? 'Validating...' : 'Test Connection'}
         </button>
-        <button
-          onClick={handleSave}
-          disabled={!isDirty || saving}
-          className="px-4 py-2 bg-blue-500 hover:bg-blue-600 text-white rounded transition-colors disabled:bg-blue-300 disabled:cursor-not-allowed"
-        >
-          {saving ? 'Saving...' : 'Save Changes'}
-        </button>
+        <div className="flex gap-3">
+          <button
+            onClick={handleReset}
+            disabled={!isDirty || saving}
+            className="px-4 py-2 bg-gray-200 hover:bg-gray-300 text-gray-800 rounded transition-colors disabled:bg-gray-100 disabled:text-gray-400 disabled:cursor-not-allowed"
+          >
+            Reset
+          </button>
+          <button
+            onClick={handleSave}
+            disabled={!isDirty || saving}
+            className="px-4 py-2 bg-blue-500 hover:bg-blue-600 text-white rounded transition-colors disabled:bg-blue-300 disabled:cursor-not-allowed"
+          >
+            {saving ? 'Saving...' : 'Save Changes'}
+          </button>
+        </div>
       </div>
     </div>
   );

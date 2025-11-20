@@ -21,26 +21,27 @@ export const GenieForm: React.FC<GenieFormProps> = ({
   saving = false,
 }) => {
   const [currentSpace, setCurrentSpace] = useState<GenieSpace | null>(null);
-  const [availableSpaces, setAvailableSpaces] = useState<Record<string, string>>({});
+  const [availableSpaces, setAvailableSpaces] = useState<{[spaceId: string]: {title: string; description: string}}>({});
+  const [sortedTitles, setSortedTitles] = useState<string[]>([]);
   const [selectedSpaceId, setSelectedSpaceId] = useState('');
   const [description, setDescription] = useState('');
   const [searchTerm, setSearchTerm] = useState('');
   const [loading, setLoading] = useState(true);
+  const [loadingSpaces, setLoadingSpaces] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [saveError, setSaveError] = useState<string | null>(null);
+  const [spacesLoaded, setSpacesLoaded] = useState(false);
+  const [validating, setValidating] = useState(false);
+  const [validationResult, setValidationResult] = useState<{ success: boolean; message: string } | null>(null);
 
-  // Load current and available spaces
+  // Load current space on mount
   useEffect(() => {
-    const loadData = async () => {
+    const loadCurrentSpace = async () => {
       try {
         setLoading(true);
         setError(null);
         
-        // Load current space and available spaces in parallel
-        const [spaces, available] = await Promise.all([
-          configApi.listGenieSpaces(profileId),
-          configApi.getAvailableGenieSpaces(),
-        ]);
+        const spaces = await configApi.listGenieSpaces(profileId);
         
         // Set current space (should only be one)
         if (spaces.length > 0) {
@@ -48,21 +49,55 @@ export const GenieForm: React.FC<GenieFormProps> = ({
           setSelectedSpaceId(spaces[0].space_id);
           setDescription(spaces[0].description || '');
         }
-        
-        setAvailableSpaces(available);
       } catch (err) {
         const message = err instanceof ConfigApiError 
           ? err.message 
-          : 'Failed to load Genie spaces';
+          : 'Failed to load current Genie space';
         setError(message);
-        console.error('Error loading Genie spaces:', err);
+        console.error('Error loading current Genie space:', err);
       } finally {
         setLoading(false);
       }
     };
 
-    loadData();
+    loadCurrentSpace();
   }, [profileId]);
+
+  // Load available spaces only once (cached)
+  const loadAvailableSpaces = async () => {
+    if (spacesLoaded) return; // Already loaded
+    
+    try {
+      setLoadingSpaces(true);
+      const available = await configApi.getAvailableGenieSpaces();
+      setAvailableSpaces(available.spaces);
+      setSortedTitles(available.sorted_titles);
+      setSpacesLoaded(true);
+    } catch (err) {
+      const message = err instanceof ConfigApiError 
+        ? err.message 
+        : 'Failed to load available Genie spaces';
+      setError(message);
+      console.error('Error loading available Genie spaces:', err);
+    } finally {
+      setLoadingSpaces(false);
+    }
+  };
+
+  const handleValidate = async () => {
+    setValidating(true);
+    setValidationResult(null);
+    setSaveError(null);
+
+    try {
+      const result = await configApi.validateGenie(selectedSpaceId);
+      setValidationResult(result);
+    } catch (err) {
+      setSaveError(err instanceof Error ? err.message : 'Validation failed');
+    } finally {
+      setValidating(false);
+    }
+  };
 
   const handleSave = async () => {
     if (!selectedSpaceId) {
@@ -77,17 +112,20 @@ export const GenieForm: React.FC<GenieFormProps> = ({
 
     try {
       setSaveError(null);
+      setValidationResult(null);
       
-      // Find the selected space name
-      const spaceName = Object.keys(availableSpaces).find(
-        name => availableSpaces[name] === selectedSpaceId
-      ) || selectedSpaceId;
+      // Find the selected space name and auto-populate description if empty
+      const spaceDetails = availableSpaces[selectedSpaceId];
+      const spaceName = spaceDetails?.title || selectedSpaceId;
+      
+      // Use user's description if provided, otherwise use the space's default description
+      const finalDescription = description.trim() || spaceDetails?.description || '';
 
       if (currentSpace && currentSpace.space_id === selectedSpaceId) {
         // Same space - just update the name and description
         await configApi.updateGenieSpace(currentSpace.id, {
           space_name: spaceName,
-          description: description.trim() || null,
+          description: finalDescription || null,
         });
       } else if (currentSpace && currentSpace.space_id !== selectedSpaceId) {
         // Different space - create new one first, then delete old one
@@ -95,7 +133,7 @@ export const GenieForm: React.FC<GenieFormProps> = ({
         await configApi.addGenieSpace(profileId, {
           space_id: selectedSpaceId,
           space_name: spaceName,
-          description: description.trim() || null,
+          description: finalDescription || null,
           is_default: true,
         });
         // Now safe to delete the old one
@@ -105,7 +143,7 @@ export const GenieForm: React.FC<GenieFormProps> = ({
         await configApi.addGenieSpace(profileId, {
           space_id: selectedSpaceId,
           space_name: spaceName,
-          description: description.trim() || null,
+          description: finalDescription || null,
           is_default: true,
         });
       }
@@ -126,10 +164,28 @@ export const GenieForm: React.FC<GenieFormProps> = ({
     }
   };
 
-  // Filter spaces by search term
-  const filteredSpaces = Object.entries(availableSpaces).filter(([name]) =>
-    name.toLowerCase().includes(searchTerm.toLowerCase())
+  // Handle space selection change
+  const handleSpaceChange = (spaceId: string) => {
+    setSelectedSpaceId(spaceId);
+    
+    // Auto-populate description from selected space if current description is empty
+    if (!description.trim() && spaceId && availableSpaces[spaceId]) {
+      setDescription(availableSpaces[spaceId].description || '');
+    }
+  };
+
+  // Filter spaces by search term (use sorted titles)
+  const filteredTitles = sortedTitles.filter(title =>
+    title.toLowerCase().includes(searchTerm.toLowerCase())
   );
+  
+  // Get space ID by title
+  const getSpaceIdByTitle = (title: string): string | null => {
+    for (const [id, details] of Object.entries(availableSpaces)) {
+      if (details.title === title) return id;
+    }
+    return null;
+  };
 
   if (loading) {
     return (
@@ -191,31 +247,44 @@ export const GenieForm: React.FC<GenieFormProps> = ({
           placeholder="Search spaces..."
           value={searchTerm}
           onChange={(e) => setSearchTerm(e.target.value)}
+          onFocus={loadAvailableSpaces}
           className="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:ring-blue-500 focus:border-blue-500 mb-2"
+          disabled={loadingSpaces}
         />
 
         {/* Dropdown */}
         <select
           value={selectedSpaceId}
-          onChange={(e) => setSelectedSpaceId(e.target.value)}
+          onChange={(e) => handleSpaceChange(e.target.value)}
+          onFocus={loadAvailableSpaces}
           className="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:ring-blue-500 focus:border-blue-500"
-          disabled={saving}
+          disabled={saving || loadingSpaces}
         >
           <option value="">-- Select a Genie Space --</option>
-          {filteredSpaces.map(([name, id]) => (
-            <option key={id} value={id}>
-              {name}
-            </option>
-          ))}
+          {filteredTitles.map((title) => {
+            const spaceId = getSpaceIdByTitle(title);
+            return spaceId ? (
+              <option key={spaceId} value={spaceId}>
+                {title}
+              </option>
+            ) : null;
+          })}
         </select>
 
-        {filteredSpaces.length === 0 && searchTerm && (
+        {loadingSpaces && (
+          <p className="mt-2 text-sm text-gray-500 flex items-center gap-2">
+            <div className="w-4 h-4 border-2 border-purple-600 border-t-transparent rounded-full animate-spin"></div>
+            Loading available spaces...
+          </p>
+        )}
+
+        {filteredTitles.length === 0 && searchTerm && !loadingSpaces && (
           <p className="mt-2 text-sm text-gray-500">
             No spaces found matching "{searchTerm}"
           </p>
         )}
 
-        {Object.keys(availableSpaces).length === 0 && (
+        {Object.keys(availableSpaces).length === 0 && !loadingSpaces && spacesLoaded && (
           <p className="mt-2 text-sm text-yellow-600">
             No Genie spaces available. Create a Genie space in Databricks first.
           </p>
@@ -249,9 +318,27 @@ export const GenieForm: React.FC<GenieFormProps> = ({
           {saveError}
         </div>
       )}
+      
+      {/* Validation Result */}
+      {validationResult && (
+        <div className={`border rounded-md p-3 text-sm ${
+          validationResult.success 
+            ? 'bg-green-50 border-green-200 text-green-700' 
+            : 'bg-yellow-50 border-yellow-200 text-yellow-700'
+        }`}>
+          <strong>Validation:</strong> {validationResult.message}
+        </div>
+      )}
 
-      {/* Save Button */}
-      <div className="flex justify-end">
+      {/* Action Buttons */}
+      <div className="flex justify-between">
+        <button
+          onClick={handleValidate}
+          disabled={validating || saving || !selectedSpaceId}
+          className="px-4 py-2 bg-purple-500 hover:bg-purple-600 text-white rounded-md transition-colors disabled:bg-purple-300 disabled:cursor-not-allowed"
+        >
+          {validating ? 'Validating...' : 'Test Connection'}
+        </button>
         <button
           onClick={handleSave}
           disabled={saving || !selectedSpaceId || !description.trim()}

@@ -117,8 +117,31 @@ export interface EndpointsList {
   endpoints: string[];
 }
 
+export interface GenieSpaceDetail {
+  title: string;
+  description: string;
+}
+
 export interface AvailableGenieSpaces {
-  [spaceName: string]: string; // Maps space name to space ID
+  spaces: {
+    [spaceId: string]: GenieSpaceDetail;
+  };
+  sorted_titles: string[];
+}
+
+export interface ValidationComponentResult {
+  component: string;
+  success: boolean;
+  message: string;
+  details?: string;
+}
+
+export interface ValidationResponse {
+  success: boolean;
+  profile_id: number;
+  profile_name: string;
+  results: ValidationComponentResult[];
+  error?: string;
 }
 
 export interface ReloadResponse {
@@ -288,6 +311,34 @@ export const configApi = {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(data),
+    }),
+  
+  // Validation
+  
+  validateProfile: (profileId: number): Promise<ValidationResponse> =>
+    fetchJson(`${API_BASE}/validate/${profileId}`, {
+      method: 'POST',
+    }),
+
+  validateLLM: (endpoint: string): Promise<{ success: boolean; message: string; details?: any }> =>
+    fetchJson(`${API_BASE}/validate/llm`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ endpoint }),
+    }),
+
+  validateGenie: (spaceId: string): Promise<{ success: boolean; message: string; details?: any }> =>
+    fetchJson(`${API_BASE}/validate/genie`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ space_id: spaceId }),
+    }),
+
+  validateMLflow: (experimentName: string): Promise<{ success: boolean; message: string; details?: any }> =>
+    fetchJson(`${API_BASE}/validate/mlflow`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ experiment_name: experimentName }),
     }),
 };
 

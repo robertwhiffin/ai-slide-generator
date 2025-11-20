@@ -1,6 +1,6 @@
 """Genie space configuration API endpoints."""
 import logging
-from typing import Dict, List
+from typing import Any, Dict, List
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
@@ -20,41 +20,60 @@ def get_genie_service(db: Session = Depends(get_db)) -> GenieService:
     return GenieService(db)
 
 
-@router.get("/available", response_model=Dict[str, str])
+@router.get("/available", response_model=Dict[str, Any])
 def list_available_genie_spaces():
     """
-    List all available Genie spaces from Databricks.
+    List all available Genie spaces from Databricks with descriptions.
     
     Returns:
-        Dictionary mapping space names to space IDs
+        Dictionary with:
+        - spaces: Dict mapping space IDs to space details (title, description)
+        - sorted_titles: List of space titles sorted alphabetically
         
     Example:
         {
-            "Sales Analytics": "01ef1234-5678-9abc-def0-123456789abc",
-            "Marketing Data": "01ef9876-5432-1abc-def0-987654321abc"
+            "spaces": {
+                "01ef1234...": {
+                    "title": "Sales Analytics",
+                    "description": "Sales data and metrics"
+                }
+            },
+            "sorted_titles": ["Marketing Data", "Sales Analytics"]
         }
     """
     try:
         client = get_databricks_client()
-        space_details = {}
+        spaces_data = {}
         
         # Initial request
         response = client.genie.list_spaces()
         
         # Collect spaces from first page
         if response.spaces:
-            names_ids = {space.title: space.space_id for space in response.spaces}
-            space_details.update(names_ids)
+            for space in response.spaces:
+                spaces_data[space.space_id] = {
+                    "title": space.title,
+                    "description": space.description or "",
+                }
         
         # Handle pagination
         while response.next_page_token:
             response = client.genie.list_spaces(page_token=response.next_page_token)
             if response.spaces:
-                names_ids = {space.title: space.space_id for space in response.spaces}
-                space_details.update(names_ids)
+                for space in response.spaces:
+                    spaces_data[space.space_id] = {
+                        "title": space.title,
+                        "description": space.description or "",
+                    }
         
-        logger.info(f"Found {len(space_details)} available Genie spaces")
-        return space_details
+        # Sort titles alphabetically
+        sorted_titles = sorted([details["title"] for details in spaces_data.values()])
+        
+        logger.info(f"Found {len(spaces_data)} available Genie spaces")
+        return {
+            "spaces": spaces_data,
+            "sorted_titles": sorted_titles,
+        }
         
     except Exception as e:
         logger.error(f"Error listing available Genie spaces: {e}", exc_info=True)
