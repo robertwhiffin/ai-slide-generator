@@ -10,9 +10,13 @@ import { useProfiles } from '../../hooks/useProfiles';
 
 interface ProfileSelectorProps {
   onManageClick?: () => void;
+  onProfileChange?: () => void;
 }
 
-export const ProfileSelector: React.FC<ProfileSelectorProps> = ({ onManageClick }) => {
+export const ProfileSelector: React.FC<ProfileSelectorProps> = ({ 
+  onManageClick,
+  onProfileChange,
+}) => {
   const { profiles, currentProfile, loadProfile } = useProfiles();
   const [isOpen, setIsOpen] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
@@ -37,6 +41,10 @@ export const ProfileSelector: React.FC<ProfileSelectorProps> = ({ onManageClick 
     try {
       await loadProfile(profileId);
       setIsOpen(false);
+      // Notify parent to reset chat state
+      if (onProfileChange) {
+        onProfileChange();
+      }
     } catch (err) {
       console.error('Failed to load profile:', err);
       // Error is already handled by useProfiles hook

@@ -37,7 +37,7 @@ config_profiles (1) ──┬── (1) config_ai_infra
 ```
 
 - One profile has exactly one AI infrastructure config
-- One profile can have multiple Genie spaces (but only one default)
+- One profile has exactly one Genie space
 - One profile has exactly one MLflow config
 - One profile has exactly one prompts config
 - All changes are tracked in history
@@ -46,7 +46,7 @@ config_profiles (1) ──┬── (1) config_ai_infra
 
 1. **Unique Profile Names**: Each profile must have a unique name
 2. **Single Default Profile**: Only one profile can be marked as default (enforced by trigger)
-3. **Single Default Genie Space**: Only one Genie space per profile can be default (enforced by trigger)
+3. **One Genie Space Per Profile**: Each profile can have only one Genie space (enforced by unique constraint)
 4. **Cascade Delete**: Deleting a profile cascades to all related configurations
 5. **Temperature Range**: LLM temperature must be between 0 and 1
 6. **Positive Max Tokens**: LLM max_tokens must be greater than 0
@@ -141,16 +141,15 @@ class ConfigAIInfra(Base):
 
 ### ConfigGenieSpace
 
-Databricks Genie space configuration.
+Databricks Genie space configuration. Each profile has exactly one Genie space.
 
 ```python
 class ConfigGenieSpace(Base):
     id: int
-    profile_id: int              # Foreign key to config_profiles
+    profile_id: int              # Foreign key to config_profiles (unique)
     space_id: str                # Genie space ID
     space_name: str              # Display name
     description: str | None
-    is_default: bool             # Only one per profile can be True
     created_at: datetime
     updated_at: datetime
 ```
@@ -237,7 +236,7 @@ python scripts/init_database.py
 This creates:
 - A "default" profile marked as the default
 - Default AI infrastructure settings
-- Default Genie space configuration
+- Default Genie space configuration (one per profile)
 - Default MLflow experiment name
 - Default system prompts
 

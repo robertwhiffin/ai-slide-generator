@@ -12,7 +12,7 @@ import pandas as pd
 from databricks.sdk import WorkspaceClient
 
 from src.config.client import get_databricks_client
-from src.config.settings import get_settings
+from src.config.settings_db import get_settings
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +49,19 @@ def initialize_genie_conversation(
     client = get_databricks_client()
     settings = get_settings()
     space_id = settings.genie.space_id
+    
+    # Log with safe attribute access
+    extra_info = {
+        "space_id": space_id,
+        "cache_info": str(get_settings.cache_info()),
+    }
+    # Safely add profile info if available
+    if hasattr(settings, 'profile_id'):
+        extra_info['profile_id'] = settings.profile_id
+    if hasattr(settings, 'profile_name'):
+        extra_info['profile_name'] = settings.profile_name
+    
+    logger.info("Initializing Genie conversation", extra=extra_info)
 
     try:
         response = client.genie.start_conversation_and_wait(
@@ -103,6 +116,20 @@ def query_genie_space(
     client = get_databricks_client()
     settings = get_settings()
     space_id = settings.genie.space_id
+    
+    # Log with safe attribute access
+    extra_info = {
+        "space_id": space_id,
+        "query": query[:100],  # First 100 chars
+        "cache_info": str(get_settings.cache_info()),
+    }
+    # Safely add profile info if available
+    if hasattr(settings, 'profile_id'):
+        extra_info['profile_id'] = settings.profile_id
+    if hasattr(settings, 'profile_name'):
+        extra_info['profile_name'] = settings.profile_name
+    
+    logger.info("Querying Genie space", extra=extra_info)
 
     attempt = 0
     last_error = None

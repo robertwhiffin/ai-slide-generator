@@ -273,15 +273,10 @@ def load_settings_from_database(profile_id: Optional[int] = None) -> AppSettings
             if not ai_infra:
                 raise ValueError(f"AI infra config not found for profile {profile.id}")
 
+            # Get the Genie space for this profile (one per profile)
             genie_space = db.query(ConfigGenieSpace).filter_by(
-                profile_id=profile.id,
-                is_default=True,
+                profile_id=profile.id
             ).first()
-            if not genie_space:
-                # Fallback to first space if no default
-                genie_space = db.query(ConfigGenieSpace).filter_by(
-                    profile_id=profile.id
-                ).first()
             if not genie_space:
                 raise ValueError(f"No Genie space found for profile {profile.id}")
 
@@ -389,21 +384,27 @@ def reload_settings(profile_id: Optional[int] = None) -> AppSettings:
     """
     logger.info("Reloading settings from database", extra={"profile_id": profile_id})
     
-    # Clear the cache first
+    # Log cache state before clearing
+    cache_info_before = get_settings.cache_info()
+    logger.info(f"Cache info BEFORE clear: {cache_info_before}")
+    
+    # Store the active profile ID globally BEFORE clearing cache
+    # This ensures get_settings() knows which profile to load
+    if profile_id is not None:
+        global _active_profile_id
+        _active_profile_id = profile_id
+        logger.info(f"Set active profile ID to {profile_id}")
+    
+    # Clear the cache
     get_settings.cache_clear()
+    cache_info_after_clear = get_settings.cache_info()
+    logger.info(f"Cache info AFTER clear: {cache_info_after_clear}")
     
-    # Load the settings (either specific profile or default)
-    # This will be cached by the lru_cache decorator on next get_settings() call
-    settings = load_settings_from_database(profile_id)
-    
-    # Manually update the cache with the loaded settings
-    # by calling get_settings() which will load and cache the same profile
-    # Since we cleared cache and load_settings_from_database() loads default when profile_id is None,
-    # we need to ensure subsequent calls use the correct profile
-    
-    # Store the active profile ID globally so get_settings() can use it
-    global _active_profile_id
-    _active_profile_id = settings.profile_id
+    # Force immediate cache repopulation by calling get_settings()
+    # This ensures the cache contains the correct profile
+    settings = get_settings()
+    cache_info_after_reload = get_settings.cache_info()
+    logger.info(f"Cache info AFTER reload: {cache_info_after_reload}")
     
     logger.info(
         "Settings reloaded successfully",
@@ -411,6 +412,7 @@ def reload_settings(profile_id: Optional[int] = None) -> AppSettings:
             "profile_id": settings.profile_id,
             "profile_name": settings.profile_name,
             "llm_endpoint": settings.llm.endpoint,
+            "genie_space_id": settings.genie.space_id,
         },
     )
     

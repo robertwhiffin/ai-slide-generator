@@ -232,11 +232,15 @@ def test_update_prompts_config(db_session):
 
 
 def test_genie_space_management(db_session):
-    """Test Genie space CRUD."""
+    """Test Genie space CRUD - one space per profile."""
     profile_service = ProfileService(db_session)
     genie_service = GenieService(db_session)
     
     profile = profile_service.create_profile("test", None, None, "test")
+    
+    # Initially no space
+    space = genie_service.get_genie_space(profile.id)
+    assert space is None
     
     # Add space
     space = genie_service.add_genie_space(
@@ -244,21 +248,16 @@ def test_genie_space_management(db_session):
         space_id="space123",
         space_name="Test Space",
         description="Test",
-        is_default=False,
         user="test",
     )
     
     assert space.id is not None
     assert space.space_name == "Test Space"
     
-    # List spaces
-    spaces = genie_service.list_genie_spaces(profile.id)
-    assert len(spaces) == 2  # Default + new one
-    
-    # Set as default
-    genie_service.set_default_genie_space(space.id, "test")
-    db_session.refresh(space)
-    assert space.is_default
+    # Get space
+    retrieved = genie_service.get_genie_space(profile.id)
+    assert retrieved is not None
+    assert retrieved.space_id == "space123"
 
 
 def test_update_genie_space(db_session):
@@ -293,7 +292,7 @@ def test_delete_genie_space(db_session):
     
     profile = profile_service.create_profile("test", None, None, "test")
     
-    # Add a second space (so we can delete one)
+    # Add space
     space = genie_service.add_genie_space(
         profile_id=profile.id,
         space_id="space123",
@@ -304,22 +303,9 @@ def test_delete_genie_space(db_session):
     # Delete it
     genie_service.delete_genie_space(space.id, "test")
     
-    # Should only have default space left
-    spaces = genie_service.list_genie_spaces(profile.id)
-    assert len(spaces) == 1
-
-
-def test_cannot_delete_only_genie_space(db_session):
-    """Test that cannot delete the only Genie space."""
-    profile_service = ProfileService(db_session)
-    genie_service = GenieService(db_session)
-    
-    profile = profile_service.create_profile("test", None, None, "test")
-    default_space = genie_service.get_default_genie_space(profile.id)
-    
-    # Should raise error
-    with pytest.raises(ValueError, match="Cannot delete the only Genie space"):
-        genie_service.delete_genie_space(default_space.id, "test")
+    # No space left
+    space = genie_service.get_genie_space(profile.id)
+    assert space is None
 
 
 def test_validator_ai_infra_valid(db_session, monkeypatch):

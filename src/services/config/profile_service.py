@@ -105,14 +105,15 @@ class ProfileService:
             )
             self.db.add(ai_infra)
             
-            # Copy Genie spaces
-            for space in source_profile.genie_spaces:
+            # Copy Genie space (only one per profile)
+            if source_profile.genie_spaces:
+                # Copy the first (and only) genie space
+                space = source_profile.genie_spaces[0]
                 new_space = ConfigGenieSpace(
                     profile_id=profile.id,
                     space_id=space.space_id,
                     space_name=space.space_name,
                     description=space.description,
-                    is_default=space.is_default,
                 )
                 self.db.add(new_space)
             
@@ -146,7 +147,6 @@ class ProfileService:
                 space_id=DEFAULT_CONFIG["genie"]["space_id"],
                 space_name=DEFAULT_CONFIG["genie"]["space_name"],
                 description=DEFAULT_CONFIG["genie"]["description"],
-                is_default=True,
             )
             self.db.add(genie_space)
             

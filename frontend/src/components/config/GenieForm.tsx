@@ -41,20 +41,24 @@ export const GenieForm: React.FC<GenieFormProps> = ({
         setLoading(true);
         setError(null);
         
-        const spaces = await configApi.listGenieSpaces(profileId);
+        const space = await configApi.getGenieSpace(profileId);
         
-        // Set current space (should only be one)
-        if (spaces.length > 0) {
-          setCurrentSpace(spaces[0]);
-          setSelectedSpaceId(spaces[0].space_id);
-          setDescription(spaces[0].description || '');
-        }
+        // Set current space
+        setCurrentSpace(space);
+        setSelectedSpaceId(space.space_id);
+        setDescription(space.description || '');
       } catch (err) {
-        const message = err instanceof ConfigApiError 
-          ? err.message 
-          : 'Failed to load current Genie space';
-        setError(message);
-        console.error('Error loading current Genie space:', err);
+        // 404 means no space configured yet - this is okay
+        if (err instanceof ConfigApiError && err.message.includes('404')) {
+          // No space configured, leave as null
+          setCurrentSpace(null);
+        } else {
+          const message = err instanceof ConfigApiError 
+            ? err.message 
+            : 'Failed to load current Genie space';
+          setError(message);
+          console.error('Error loading current Genie space:', err);
+        }
       } finally {
         setLoading(false);
       }
@@ -128,33 +132,28 @@ export const GenieForm: React.FC<GenieFormProps> = ({
           description: finalDescription || null,
         });
       } else if (currentSpace && currentSpace.space_id !== selectedSpaceId) {
-        // Different space - create new one first, then delete old one
-        // This ensures we always have at least one space
+        // Different space - delete old one first, then create new one
+        // (unique constraint enforces one space per profile)
+        await configApi.deleteGenieSpace(currentSpace.id);
         await configApi.addGenieSpace(profileId, {
           space_id: selectedSpaceId,
           space_name: spaceName,
           description: finalDescription || null,
-          is_default: true,
         });
-        // Now safe to delete the old one
-        await configApi.deleteGenieSpace(currentSpace.id);
       } else {
         // No current space - create new one
         await configApi.addGenieSpace(profileId, {
           space_id: selectedSpaceId,
           space_name: spaceName,
           description: finalDescription || null,
-          is_default: true,
         });
       }
 
       await onSave();
       
       // Reload data
-      const spaces = await configApi.listGenieSpaces(profileId);
-      if (spaces.length > 0) {
-        setCurrentSpace(spaces[0]);
-      }
+      const space = await configApi.getGenieSpace(profileId);
+      setCurrentSpace(space);
     } catch (err) {
       const message = err instanceof ConfigApiError 
         ? err.message 
@@ -168,8 +167,8 @@ export const GenieForm: React.FC<GenieFormProps> = ({
   const handleSpaceChange = (spaceId: string) => {
     setSelectedSpaceId(spaceId);
     
-    // Auto-populate description from selected space if current description is empty
-    if (!description.trim() && spaceId && availableSpaces[spaceId]) {
+    // Always update description from selected space (or clear if no description)
+    if (spaceId && availableSpaces[spaceId]) {
       setDescription(availableSpaces[spaceId].description || '');
     }
   };

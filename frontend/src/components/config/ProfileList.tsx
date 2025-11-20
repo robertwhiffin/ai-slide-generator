@@ -16,7 +16,11 @@ import { ProfileForm } from './ProfileForm';
 import { ConfirmDialog } from './ConfirmDialog';
 import { ProfileDetailView } from './ProfileDetail';
 
-export const ProfileList: React.FC = () => {
+interface ProfileListProps {
+  onProfileChange?: () => void;
+}
+
+export const ProfileList: React.FC<ProfileListProps> = ({ onProfileChange }) => {
   const {
     profiles,
     currentProfile,
@@ -108,6 +112,10 @@ export const ProfileList: React.FC = () => {
         setActionLoading(profile.id);
         try {
           await loadProfile(profile.id);
+          // Notify parent to reset chat state
+          if (onProfileChange) {
+            onProfileChange();
+          }
         } finally {
           setActionLoading(null);
           setConfirmDialog({ ...confirmDialog, isOpen: false });

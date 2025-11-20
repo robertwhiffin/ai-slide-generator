@@ -35,7 +35,11 @@ class AIInfraConfig(BaseModel):
 
 
 class GenieSpace(BaseModel):
-    """Genie space configuration."""
+    """
+    Genie space configuration.
+    
+    Each profile has exactly one Genie space.
+    """
     
     model_config = ConfigDict(from_attributes=True)
     
@@ -44,7 +48,6 @@ class GenieSpace(BaseModel):
     space_id: str
     space_name: str
     description: Optional[str]
-    is_default: bool
     created_at: datetime
     updated_at: datetime
 

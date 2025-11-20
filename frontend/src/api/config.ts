@@ -62,13 +62,16 @@ export interface AIInfraConfigUpdate {
   llm_max_tokens?: number;
 }
 
+/**
+ * Genie space configuration.
+ * Each profile has exactly one Genie space.
+ */
 export interface GenieSpace {
   id: number;
   profile_id: number;
   space_id: string;
   space_name: string;
   description: string | null;
-  is_default: boolean;
   created_at: string;
   updated_at: string;
 }
@@ -77,7 +80,6 @@ export interface GenieSpaceCreate {
   space_id: string;
   space_name: string;
   description?: string | null;
-  is_default?: boolean;
 }
 
 export interface GenieSpaceUpdate {
@@ -255,15 +257,13 @@ export const configApi = {
     fetchJson(`${API_BASE}/ai-infra/endpoints/available`),
   
   // Genie Spaces
+  // Each profile has exactly one Genie space
   
   getAvailableGenieSpaces: (): Promise<AvailableGenieSpaces> =>
     fetchJson(`${API_BASE}/genie/available`),
   
-  listGenieSpaces: (profileId: number): Promise<GenieSpace[]> =>
+  getGenieSpace: (profileId: number): Promise<GenieSpace> =>
     fetchJson(`${API_BASE}/genie/${profileId}`),
-  
-  getDefaultGenieSpace: (profileId: number): Promise<GenieSpace> =>
-    fetchJson(`${API_BASE}/genie/${profileId}/default`),
   
   addGenieSpace: (profileId: number, data: GenieSpaceCreate): Promise<GenieSpace> =>
     fetchJson(`${API_BASE}/genie/${profileId}`, {
@@ -282,11 +282,6 @@ export const configApi = {
   deleteGenieSpace: (spaceId: number): Promise<void> =>
     fetchJson(`${API_BASE}/genie/space/${spaceId}`, {
       method: 'DELETE',
-    }),
-  
-  setDefaultGenieSpace: (spaceId: number): Promise<GenieSpace> =>
-    fetchJson(`${API_BASE}/genie/space/${spaceId}/set-default`, {
-      method: 'POST',
     }),
   
   // MLflow

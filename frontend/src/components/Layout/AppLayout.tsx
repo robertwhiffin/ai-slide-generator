@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useCallback } from 'react';
 import type { SlideDeck } from '../../types/slide';
 import { ChatPanel } from '../ChatPanel/ChatPanel';
 import { SlidePanel } from '../SlidePanel/SlidePanel';
@@ -12,6 +12,15 @@ export const AppLayout: React.FC = () => {
   const [slideDeck, setSlideDeck] = useState<SlideDeck | null>(null);
   const [rawHtml, setRawHtml] = useState<string | null>(null);
   const [viewMode, setViewMode] = useState<ViewMode>('main');
+  // Key to force remount ChatPanel when profile changes
+  const [chatKey, setChatKey] = useState<number>(0);
+
+  // Reset chat state when profile changes
+  const handleProfileChange = useCallback(() => {
+    setSlideDeck(null);
+    setRawHtml(null);
+    setChatKey(prev => prev + 1);
+  }, []);
 
   return (
     <div className="h-screen flex flex-col">
@@ -51,7 +60,10 @@ export const AppLayout: React.FC = () => {
             </nav>
 
             {/* Profile Selector */}
-            <ProfileSelector onManageClick={() => setViewMode('profiles')} />
+            <ProfileSelector 
+              onManageClick={() => setViewMode('profiles')}
+              onProfileChange={handleProfileChange}
+            />
           </div>
         </div>
       </header>
@@ -62,6 +74,7 @@ export const AppLayout: React.FC = () => {
           {/* Chat Panel */}
           <div className="w-[32%] min-w-[260px] border-r">
             <ChatPanel
+              key={chatKey}
               rawHtml={rawHtml}
               onSlidesGenerated={(deck, raw) => {
                 setSlideDeck(deck);
@@ -85,7 +98,7 @@ export const AppLayout: React.FC = () => {
       ) : (
         <div className="flex-1 overflow-auto bg-gray-50">
           <div className="max-w-7xl mx-auto p-6">
-            <ProfileList />
+            <ProfileList onProfileChange={handleProfileChange} />
           </div>
         </div>
       )}
