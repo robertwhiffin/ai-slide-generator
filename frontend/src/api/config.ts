@@ -117,6 +117,10 @@ export interface EndpointsList {
   endpoints: string[];
 }
 
+export interface AvailableGenieSpaces {
+  [spaceName: string]: string; // Maps space name to space ID
+}
+
 export interface ReloadResponse {
   status: string;
   profile_id: number;
@@ -228,6 +232,9 @@ export const configApi = {
     fetchJson(`${API_BASE}/ai-infra/endpoints/available`),
   
   // Genie Spaces
+  
+  getAvailableGenieSpaces: (): Promise<AvailableGenieSpaces> =>
+    fetchJson(`${API_BASE}/genie/available`),
   
   listGenieSpaces: (profileId: number): Promise<GenieSpace[]> =>
     fetchJson(`${API_BASE}/genie/${profileId}`),

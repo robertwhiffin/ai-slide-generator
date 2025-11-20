@@ -1,11 +1,12 @@
 """Genie space configuration API endpoints."""
 import logging
-from typing import List
+from typing import Dict, List
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
 from src.api.models.config import GenieSpace, GenieSpaceCreate, GenieSpaceUpdate
+from src.config.client import get_databricks_client
 from src.config.database import get_db
 from src.services.config import ConfigValidator, GenieService
 
@@ -17,6 +18,50 @@ router = APIRouter(prefix="/genie", tags=["genie-spaces"])
 def get_genie_service(db: Session = Depends(get_db)) -> GenieService:
     """Dependency to get GenieService."""
     return GenieService(db)
+
+
+@router.get("/available", response_model=Dict[str, str])
+def list_available_genie_spaces():
+    """
+    List all available Genie spaces from Databricks.
+    
+    Returns:
+        Dictionary mapping space names to space IDs
+        
+    Example:
+        {
+            "Sales Analytics": "01ef1234-5678-9abc-def0-123456789abc",
+            "Marketing Data": "01ef9876-5432-1abc-def0-987654321abc"
+        }
+    """
+    try:
+        client = get_databricks_client()
+        space_details = {}
+        
+        # Initial request
+        response = client.genie.list_spaces()
+        
+        # Collect spaces from first page
+        if response.spaces:
+            names_ids = {space.name: space.id for space in response.spaces}
+            space_details.update(names_ids)
+        
+        # Handle pagination
+        while response.next_page_token:
+            response = client.genie.list_spaces(page_token=response.next_page_token)
+            if response.spaces:
+                names_ids = {space.name: space.id for space in response.spaces}
+                space_details.update(names_ids)
+        
+        logger.info(f"Found {len(space_details)} available Genie spaces")
+        return space_details
+        
+    except Exception as e:
+        logger.error(f"Error listing available Genie spaces: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to list available Genie spaces: {str(e)}",
+        )
 
 
 @router.get("/{profile_id}", response_model=List[GenieSpace])
