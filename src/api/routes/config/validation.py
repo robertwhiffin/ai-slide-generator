@@ -28,67 +28,8 @@ class MLflowValidateRequest(BaseModel):
     experiment_name: str
 
 
-@router.post("/{profile_id}", response_model=Dict[str, Any])
-def validate_profile(profile_id: int):
-    """
-    Validate all components of a profile configuration.
-    
-    This endpoint tests:
-    1. LLM endpoint connectivity with a test message
-    2. Genie space query execution
-    3. MLflow experiment creation/write permissions
-    
-    Args:
-        profile_id: Profile ID to validate
-        
-    Returns:
-        Dictionary with validation results for each component
-        
-    Example response:
-        {
-            "success": true,
-            "profile_id": 1,
-            "profile_name": "default",
-            "results": [
-                {
-                    "component": "LLM",
-                    "success": true,
-                    "message": "Successfully connected to LLM endpoint: databricks-claude-sonnet-4-5",
-                    "details": "Response received: Hello! How can I help you today?..."
-                },
-                {
-                    "component": "Genie",
-                    "success": true,
-                    "message": "Successfully connected to Genie space: 01abc123...",
-                    "details": "Query executed and returned data"
-                },
-                {
-                    "component": "MLflow",
-                    "success": true,
-                    "message": "Successfully accessed MLflow experiment: /Workspace/Users/...",
-                    "details": "Experiment ID: 12345"
-                }
-            ]
-        }
-    """
-    try:
-        logger.info(f"Starting validation for profile {profile_id}")
-        result = validate_profile_configuration(profile_id)
-        
-        if result.get("success"):
-            logger.info(f"Profile {profile_id} validation successful")
-            return result
-        else:
-            logger.warning(f"Profile {profile_id} validation failed")
-            return result
-            
-    except Exception as e:
-        logger.error(f"Error validating profile {profile_id}: {e}", exc_info=True)
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to validate profile: {str(e)}",
-        )
-
+# IMPORTANT: Specific routes must come BEFORE parameterized routes
+# Otherwise /{profile_id} will match /llm, /genie, etc.
 
 @router.post("/llm", response_model=Dict[str, Any])
 def validate_llm(request: LLMValidateRequest):
@@ -177,5 +118,67 @@ def validate_mlflow(request: MLflowValidateRequest):
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to validate MLflow experiment: {str(e)}",
+        )
+
+
+@router.post("/{profile_id}", response_model=Dict[str, Any])
+def validate_profile(profile_id: int):
+    """
+    Validate all components of a profile configuration.
+    
+    This endpoint tests:
+    1. LLM endpoint connectivity with a test message
+    2. Genie space query execution
+    3. MLflow experiment creation/write permissions
+    
+    Args:
+        profile_id: Profile ID to validate
+        
+    Returns:
+        Dictionary with validation results for each component
+        
+    Example response:
+        {
+            "success": true,
+            "profile_id": 1,
+            "profile_name": "default",
+            "results": [
+                {
+                    "component": "LLM",
+                    "success": true,
+                    "message": "Successfully connected to LLM endpoint: databricks-claude-sonnet-4-5",
+                    "details": "Response received: Hello! How can I help you today?..."
+                },
+                {
+                    "component": "Genie",
+                    "success": true,
+                    "message": "Successfully connected to Genie space: 01abc123...",
+                    "details": "Query executed and returned data"
+                },
+                {
+                    "component": "MLflow",
+                    "success": true,
+                    "message": "Successfully accessed MLflow experiment: /Workspace/Users/...",
+                    "details": "Experiment ID: 12345"
+                }
+            ]
+        }
+    """
+    try:
+        logger.info(f"Starting validation for profile {profile_id}")
+        result = validate_profile_configuration(profile_id)
+        
+        if result.get("success"):
+            logger.info(f"Profile {profile_id} validation successful")
+            return result
+        else:
+            logger.warning(f"Profile {profile_id} validation failed")
+            return result
+            
+    except Exception as e:
+        logger.error(f"Error validating profile {profile_id}: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to validate profile: {str(e)}",
         )
 
