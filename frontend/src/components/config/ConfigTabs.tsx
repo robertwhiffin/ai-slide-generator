@@ -11,7 +11,7 @@
 import React, { useState } from 'react';
 import { useConfig } from '../../hooks/useConfig';
 import { AIInfraForm } from './AIInfraForm';
-import { GenieSpacesManager } from './GenieSpacesManager';
+import { GenieForm } from './GenieForm';
 import { MLflowForm } from './MLflowForm';
 import { PromptsEditor } from './PromptsEditor';
 
@@ -44,12 +44,9 @@ export const ConfigTabs: React.FC<ConfigTabsProps> = ({ profileId, profileName }
     error,
     saving,
     updateAIInfra,
-    addGenieSpace,
-    updateGenieSpace,
-    deleteGenieSpace,
-    setDefaultGenieSpace,
     updateMLflow,
     updatePrompts,
+    reload,
   } = useConfig(profileId);
 
   if (loading) {
@@ -109,12 +106,9 @@ export const ConfigTabs: React.FC<ConfigTabsProps> = ({ profileId, profileName }
         )}
 
         {activeTab === 'genie' && (
-          <GenieSpacesManager
-            spaces={config.genie_spaces}
-            onAdd={addGenieSpace}
-            onUpdate={updateGenieSpace}
-            onDelete={deleteGenieSpace}
-            onSetDefault={setDefaultGenieSpace}
+          <GenieForm
+            profileId={profileId}
+            onSave={reload}
             saving={saving}
           />
         )}
