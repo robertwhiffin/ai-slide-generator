@@ -2,7 +2,7 @@
  * Profile management component.
  * 
  * Displays all profiles in a list with actions:
- * - Edit profile metadata
+ * - View and edit profile configuration
  * - Delete profile
  * - Duplicate profile
  * - Set as default
@@ -23,7 +23,6 @@ export const ProfileList: React.FC = () => {
     loading,
     error,
     createProfile,
-    updateProfile,
     deleteProfile,
     duplicateProfile,
     setDefaultProfile,
@@ -54,18 +53,10 @@ export const ProfileList: React.FC = () => {
     setFormMode('create');
   };
 
-  // Handle edit profile
-  const handleEdit = (profile: Profile) => {
-    setEditingProfile(profile);
-    setFormMode('edit');
-  };
-
-  // Handle form submit
+  // Handle form submit (create only)
   const handleFormSubmit = async (data: ProfileCreate | ProfileUpdate) => {
     if (formMode === 'create') {
       await createProfile(data as ProfileCreate);
-    } else if (formMode === 'edit' && editingProfile) {
-      await updateProfile(editingProfile.id, data as ProfileUpdate);
     }
     setFormMode(null);
     setEditingProfile(null);
@@ -233,14 +224,14 @@ export const ProfileList: React.FC = () => {
                   </td>
                   <td className="px-4 py-3 text-sm">
                     <div className="flex gap-2">
-                      {/* View Details Button */}
+                      {/* View and Edit Button */}
                       <button
                         onClick={() => setViewingProfileId(profile.id)}
                         disabled={actionLoading === profile.id}
                         className="px-3 py-1 bg-indigo-500 hover:bg-indigo-600 text-white text-xs rounded transition-colors disabled:bg-gray-300"
-                        title="View details"
+                        title="View and edit configuration"
                       >
-                        View
+                        View and Edit
                       </button>
 
                       {/* Load Button */}
@@ -254,16 +245,6 @@ export const ProfileList: React.FC = () => {
                           Load
                         </button>
                       )}
-
-                      {/* Edit Button */}
-                      <button
-                        onClick={() => handleEdit(profile)}
-                        disabled={actionLoading === profile.id}
-                        className="px-3 py-1 bg-gray-500 hover:bg-gray-600 text-white text-xs rounded transition-colors disabled:bg-gray-300"
-                        title="Edit profile"
-                      >
-                        Edit
-                      </button>
 
                       {/* Set Default Button */}
                       {!profile.is_default && (
