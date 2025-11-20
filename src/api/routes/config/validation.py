@@ -6,7 +6,7 @@ from fastapi import APIRouter, HTTPException, status
 from pydantic import BaseModel
 
 from src.services.config import validate_profile_configuration
-from src.services.config.config_validator import ConfigValidator
+from src.services.config.config_validator import ConfigurationValidator
 
 logger = logging.getLogger(__name__)
 
@@ -103,12 +103,12 @@ def validate_llm(request: LLMValidateRequest):
     """
     try:
         logger.info(f"Validating LLM endpoint: {request.endpoint}")
-        validator = ConfigValidator()
+        validator = ConfigurationValidator(profile_id=None)
         result = validator.validate_llm_endpoint(request.endpoint)
         
         return {
-            "success": result.valid,
-            "message": result.message if result.valid else result.error,
+            "success": result.success,
+            "message": result.message,
             "details": result.details,
         }
         
@@ -133,12 +133,12 @@ def validate_genie(request: GenieValidateRequest):
     """
     try:
         logger.info(f"Validating Genie space: {request.space_id}")
-        validator = ConfigValidator()
+        validator = ConfigurationValidator(profile_id=None)
         result = validator.validate_genie_space(request.space_id)
         
         return {
-            "success": result.valid,
-            "message": result.message if result.valid else result.error,
+            "success": result.success,
+            "message": result.message,
             "details": result.details,
         }
         
@@ -163,12 +163,12 @@ def validate_mlflow(request: MLflowValidateRequest):
     """
     try:
         logger.info(f"Validating MLflow experiment: {request.experiment_name}")
-        validator = ConfigValidator()
+        validator = ConfigurationValidator(profile_id=None)
         result = validator.validate_mlflow_experiment(request.experiment_name)
         
         return {
-            "success": result.valid,
-            "message": result.message if result.valid else result.error,
+            "success": result.success,
+            "message": result.message,
             "details": result.details,
         }
         
