@@ -21,6 +21,7 @@ from src.api.routes.config import (
     mlflow_router,
     profiles_router,
     prompts_router,
+    validation_router,
 )
 
 logger = logging.getLogger(__name__)
@@ -76,6 +77,7 @@ app.include_router(ai_infra_router, prefix="/api/config", tags=["config"])
 app.include_router(genie_router, prefix="/api/config", tags=["config"])
 app.include_router(mlflow_router, prefix="/api/config", tags=["config"])
 app.include_router(prompts_router, prefix="/api/config", tags=["config"])
+app.include_router(validation_router, prefix="/api/config", tags=["config"])
 
 
 @app.get("/api/health")
