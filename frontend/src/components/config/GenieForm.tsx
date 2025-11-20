@@ -23,6 +23,7 @@ export const GenieForm: React.FC<GenieFormProps> = ({
   const [currentSpace, setCurrentSpace] = useState<GenieSpace | null>(null);
   const [availableSpaces, setAvailableSpaces] = useState<Record<string, string>>({});
   const [selectedSpaceId, setSelectedSpaceId] = useState('');
+  const [description, setDescription] = useState('');
   const [searchTerm, setSearchTerm] = useState('');
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -45,6 +46,7 @@ export const GenieForm: React.FC<GenieFormProps> = ({
         if (spaces.length > 0) {
           setCurrentSpace(spaces[0]);
           setSelectedSpaceId(spaces[0].space_id);
+          setDescription(spaces[0].description || '');
         }
         
         setAvailableSpaces(available);
@@ -68,6 +70,11 @@ export const GenieForm: React.FC<GenieFormProps> = ({
       return;
     }
 
+    if (!description.trim()) {
+      setSaveError('Please provide a description of the data available in this space');
+      return;
+    }
+
     try {
       setSaveError(null);
       
@@ -76,31 +83,29 @@ export const GenieForm: React.FC<GenieFormProps> = ({
         name => availableSpaces[name] === selectedSpaceId
       ) || selectedSpaceId;
 
-      if (currentSpace) {
-        // Update existing space
+      if (currentSpace && currentSpace.space_id === selectedSpaceId) {
+        // Same space - just update the name and description
         await configApi.updateGenieSpace(currentSpace.id, {
           space_name: spaceName,
-          description: `Genie Space: ${spaceName}`,
+          description: description.trim() || null,
         });
-        
-        // Also update the space_id if it changed
-        // Note: This might require a different API endpoint
-        // For now, we'll delete and re-create if the ID changed
-        if (currentSpace.space_id !== selectedSpaceId) {
-          await configApi.deleteGenieSpace(currentSpace.id);
-          await configApi.addGenieSpace(profileId, {
-            space_id: selectedSpaceId,
-            space_name: spaceName,
-            description: `Genie Space: ${spaceName}`,
-            is_default: true,
-          });
-        }
-      } else {
-        // Create new space
+      } else if (currentSpace && currentSpace.space_id !== selectedSpaceId) {
+        // Different space - create new one first, then delete old one
+        // This ensures we always have at least one space
         await configApi.addGenieSpace(profileId, {
           space_id: selectedSpaceId,
           space_name: spaceName,
-          description: `Genie Space: ${spaceName}`,
+          description: description.trim() || null,
+          is_default: true,
+        });
+        // Now safe to delete the old one
+        await configApi.deleteGenieSpace(currentSpace.id);
+      } else {
+        // No current space - create new one
+        await configApi.addGenieSpace(profileId, {
+          space_id: selectedSpaceId,
+          space_name: spaceName,
+          description: description.trim() || null,
           is_default: true,
         });
       }
@@ -128,8 +133,16 @@ export const GenieForm: React.FC<GenieFormProps> = ({
 
   if (loading) {
     return (
-      <div className="p-4 text-center text-gray-600">
-        Loading Genie spaces...
+      <div className="p-8 flex flex-col items-center justify-center space-y-4">
+        {/* Spinner */}
+        <div className="relative w-16 h-16">
+          <div className="absolute inset-0 border-4 border-purple-200 rounded-full"></div>
+          <div className="absolute inset-0 border-4 border-purple-600 rounded-full border-t-transparent animate-spin"></div>
+        </div>
+        <div className="text-center">
+          <p className="text-gray-700 font-medium">Loading Genie spaces...</p>
+          <p className="text-sm text-gray-500 mt-1">This may take a moment</p>
+        </div>
       </div>
     );
   }
@@ -156,10 +169,13 @@ export const GenieForm: React.FC<GenieFormProps> = ({
 
       {/* Current Space Display */}
       {currentSpace && (
-        <div className="bg-gray-50 border border-gray-200 rounded-lg p-4">
-          <div className="text-sm text-gray-600 mb-1">Current Genie Space</div>
+        <div className="bg-purple-50 border border-purple-200 rounded-lg p-4">
+          <div className="text-sm text-purple-600 font-medium mb-1">Current Genie Space</div>
           <div className="font-medium text-gray-900">{currentSpace.space_name}</div>
           <div className="text-sm text-gray-500 mt-1">ID: {currentSpace.space_id}</div>
+          {currentSpace.description && (
+            <div className="text-sm text-gray-600 mt-2 italic">{currentSpace.description}</div>
+          )}
         </div>
       )}
 
@@ -206,6 +222,27 @@ export const GenieForm: React.FC<GenieFormProps> = ({
         )}
       </div>
 
+      {/* Description for AI Agent */}
+      <div>
+        <label className="block text-sm font-medium text-gray-700 mb-2">
+          Data Description (for AI Agent)
+          <span className="text-red-500 ml-1">*</span>
+        </label>
+        <textarea
+          value={description}
+          onChange={(e) => setDescription(e.target.value)}
+          placeholder="Describe what data is available in this Genie space. The AI agent will use this to understand what queries it can make. E.g., 'Customer orders, product catalog, sales metrics by region and time period'"
+          className="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:ring-blue-500 focus:border-blue-500 font-mono text-sm"
+          rows={4}
+          disabled={saving}
+        />
+        <p className="mt-2 text-xs text-gray-500">
+          Provide a clear description of the data available in this Genie space. 
+          The AI agent will use this to understand what information it can query.
+          Be specific about tables, metrics, dimensions, and time ranges available.
+        </p>
+      </div>
+
       {/* Error Message */}
       {saveError && (
         <div className="bg-red-50 border border-red-200 rounded-md p-3 text-sm text-red-700">
@@ -217,7 +254,7 @@ export const GenieForm: React.FC<GenieFormProps> = ({
       <div className="flex justify-end">
         <button
           onClick={handleSave}
-          disabled={saving || !selectedSpaceId}
+          disabled={saving || !selectedSpaceId || !description.trim()}
           className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-md transition-colors disabled:bg-gray-400 disabled:cursor-not-allowed"
         >
           {saving ? 'Saving...' : 'Save Genie Configuration'}
