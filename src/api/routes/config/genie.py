@@ -8,7 +8,8 @@ from sqlalchemy.orm import Session
 from src.api.models.config import GenieSpace, GenieSpaceCreate, GenieSpaceUpdate
 from src.config.client import get_databricks_client
 from src.config.database import get_db
-from src.services.config import ConfigValidator, GenieService
+from src.services.config import GenieService
+from src.services.config.config_validator import ConfigurationValidator
 
 logger = logging.getLogger(__name__)
 
@@ -166,12 +167,12 @@ def add_genie_space(
     """
     try:
         # Validate
-        validator = ConfigValidator()
+        validator = ConfigurationValidator(profile_id=None)
         result = validator.validate_genie_space(request.space_id)
-        if not result.valid:
+        if not result.success:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail=result.error,
+                detail=result.message,
             )
         
         # TODO: Get actual user from authentication
