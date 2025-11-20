@@ -173,6 +173,8 @@ class SlideGeneratorAgent:
             
             This eliminates the need for the LLM to track and pass conversation IDs,
             preventing hallucination errors.
+            
+            If no conversation exists (e.g., after profile reload), initializes a new one.
             """
             # Get conversation_id from current session
             if self.current_session_id is None:
@@ -184,7 +186,24 @@ class SlideGeneratorAgent:
             
             conversation_id = session["genie_conversation_id"]
             if conversation_id is None:
-                raise ToolExecutionError("Genie conversation not initialized for session")
+                # Initialize new Genie conversation (happens after profile reload)
+                logger.info(
+                    "Initializing new Genie conversation for session",
+                    extra={"session_id": self.current_session_id},
+                )
+                try:
+                    conversation_id = initialize_genie_conversation()
+                    session["genie_conversation_id"] = conversation_id
+                    logger.info(
+                        "New Genie conversation initialized",
+                        extra={
+                            "session_id": self.current_session_id,
+                            "genie_conversation_id": conversation_id,
+                        },
+                    )
+                except Exception as e:
+                    logger.error(f"Failed to initialize Genie conversation: {e}")
+                    raise ToolExecutionError(f"Failed to initialize Genie conversation: {e}") from e
             
             # Query Genie with automatic conversation_id
             result = query_genie_space(query, conversation_id)

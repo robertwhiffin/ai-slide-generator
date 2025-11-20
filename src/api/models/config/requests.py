@@ -58,12 +58,15 @@ class AIInfraConfigUpdate(BaseModel):
 
 
 class GenieSpaceCreate(BaseModel):
-    """Request to create a Genie space."""
+    """
+    Request to create a Genie space.
+    
+    Each profile can have exactly one Genie space.
+    """
     
     space_id: str = Field(..., min_length=1, description="Genie space ID")
     space_name: str = Field(..., min_length=1, max_length=255, description="Space display name")
     description: Optional[str] = Field(None, description="Space description")
-    is_default: bool = Field(False, description="Set as default space")
     
     @field_validator("space_id", "space_name")
     @classmethod

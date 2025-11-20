@@ -281,39 +281,56 @@ def test_get_available_endpoints(client, monkeypatch):
 
 
 # Genie Space Tests
+# Each profile has exactly one Genie space
 
-def test_list_genie_spaces_valid(client, default_profile):
-    """Test listing Genie spaces."""
-    response = client.get(f"/api/config/genie/{default_profile['id']}")
-    assert response.status_code == 200
-    data = response.json()
-    assert isinstance(data, list)
-    assert len(data) >= 1  # Should have default space
+def test_get_genie_space_404_when_none(client, db_session):
+    """Test getting Genie space when none exists."""
+    # Create profile without genie space
+    from src.services.config import ProfileService
+    service = ProfileService(db_session)
+    profile = service.create_profile("test_no_genie", None, None, "test")
+    
+    response = client.get(f"/api/config/genie/{profile.id}")
+    assert response.status_code == 404
 
 
-def test_add_genie_space_valid(client, default_profile):
-    """Test adding a Genie space."""
+def test_add_genie_space_valid(client, db_session):
+    """Test adding a Genie space to a profile."""
+    # Create profile without genie space
+    from src.services.config import ProfileService
+    service = ProfileService(db_session)
+    profile = service.create_profile("test_add_genie", None, None, "test")
+    
     response = client.post(
-        f"/api/config/genie/{default_profile['id']}",
+        f"/api/config/genie/{profile.id}",
         json={
             "space_id": "new-space-id",
             "space_name": "New Space",
             "description": "Test space",
-            "is_default": False,
         }
     )
     assert response.status_code == 201
     data = response.json()
     assert data["space_id"] == "new-space-id"
     assert data["space_name"] == "New Space"
+    assert "is_default" not in data  # Field removed
+
+
+def test_get_genie_space_valid(client, default_profile):
+    """Test getting the Genie space for a profile."""
+    response = client.get(f"/api/config/genie/{default_profile['id']}")
+    assert response.status_code == 200
+    data = response.json()
+    assert isinstance(data, dict)  # Single space, not list
+    assert "space_id" in data
 
 
 def test_update_genie_space_valid(client, default_profile):
-    """Test updating a Genie space."""
+    """Test updating the Genie space."""
     # Get existing space
     response = client.get(f"/api/config/genie/{default_profile['id']}")
-    spaces = response.json()
-    space_id = spaces[0]["id"]
+    space = response.json()
+    space_id = space["id"]
     
     # Update it
     response = client.put(
@@ -329,43 +346,19 @@ def test_update_genie_space_valid(client, default_profile):
 
 
 def test_delete_genie_space_valid(client, default_profile):
-    """Test deleting a non-default Genie space."""
-    # Add a new space
-    response = client.post(
-        f"/api/config/genie/{default_profile['id']}",
-        json={
-            "space_id": "to-delete",
-            "space_name": "To Delete",
-            "description": None,
-            "is_default": False,
-        }
-    )
-    space_id = response.json()["id"]
+    """Test deleting the Genie space."""
+    # Get existing space
+    response = client.get(f"/api/config/genie/{default_profile['id']}")
+    space = response.json()
+    space_id = space["id"]
     
     # Delete it
     response = client.delete(f"/api/config/genie/space/{space_id}")
     assert response.status_code == 204
-
-
-def test_set_default_genie_space_valid(client, default_profile):
-    """Test setting a Genie space as default."""
-    # Add a new space
-    response = client.post(
-        f"/api/config/genie/{default_profile['id']}",
-        json={
-            "space_id": "new-default",
-            "space_name": "New Default",
-            "description": None,
-            "is_default": False,
-        }
-    )
-    space_id = response.json()["id"]
     
-    # Set as default
-    response = client.post(f"/api/config/genie/space/{space_id}/set-default")
-    assert response.status_code == 200
-    data = response.json()
-    assert data["is_default"] is True
+    # Verify it's gone
+    response = client.get(f"/api/config/genie/{default_profile['id']}")
+    assert response.status_code == 404
 
 
 # MLflow Tests

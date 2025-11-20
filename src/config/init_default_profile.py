@@ -92,13 +92,12 @@ def init_default_profile() -> None:
             db.add(ai_infra)
             logger.info("Created AI infrastructure config")
             
-            # Create Genie space config
+            # Create Genie space config (one per profile)
             genie_space = ConfigGenieSpace(
                 profile_id=profile.id,
                 space_id=config["genie"]["default_space_id"],
                 space_name=config["genie"].get("space_name", "Default Genie Space"),
                 description=config["genie"].get("description", "Default Genie data space"),
-                is_default=True,
             )
             db.add(genie_space)
             logger.info("Created Genie space config")

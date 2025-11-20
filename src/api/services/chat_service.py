@@ -124,17 +124,31 @@ class ChatService:
                         "profile_id": new_settings.profile_id,
                         "profile_name": new_settings.profile_name,
                         "llm_endpoint": new_settings.llm.endpoint,
+                        "genie_space_id": new_settings.genie.space_id,
                     },
                 )
+                
+                # Clear Genie conversation IDs from sessions (they're tied to the old space)
+                # This forces creation of new conversations in the new Genie space
+                for session_id, session in sessions_backup.items():
+                    if "genie_conversation_id" in session:
+                        logger.info(
+                            "Clearing Genie conversation ID for session",
+                            extra={
+                                "session_id": session_id,
+                                "old_conversation_id": session["genie_conversation_id"],
+                            },
+                        )
+                        session["genie_conversation_id"] = None
                 
                 # Create new agent with new settings
                 new_agent = create_agent()
                 logger.info("Created new agent instance")
                 
-                # Restore sessions
+                # Restore sessions (with cleared Genie conversation IDs)
                 new_agent.sessions = sessions_backup
                 logger.info(
-                    "Restored session state",
+                    "Restored session state with cleared Genie conversations",
                     extra={"session_count": len(new_agent.sessions)},
                 )
                 

@@ -2,6 +2,7 @@
  * Hook for managing configuration for a specific profile.
  * 
  * Handles loading, updating, and dirty state tracking for all config domains.
+ * Each profile has exactly one Genie space.
  */
 
 import { useState, useEffect, useCallback } from 'react';
@@ -20,7 +21,7 @@ import { configApi, ConfigApiError } from '../api/config';
 
 interface ConfigState {
   ai_infra: AIInfraConfig | null;
-  genie_spaces: GenieSpace[];
+  genie_space: GenieSpace | null;
   mlflow: MLflowConfig | null;
   prompts: PromptsConfig | null;
 }
@@ -36,7 +37,6 @@ interface UseConfigReturn {
   addGenieSpace: (data: GenieSpaceCreate) => Promise<void>;
   updateGenieSpace: (spaceId: number, data: GenieSpaceUpdate) => Promise<void>;
   deleteGenieSpace: (spaceId: number) => Promise<void>;
-  setDefaultGenieSpace: (spaceId: number) => Promise<void>;
   updateMLflow: (data: MLflowConfigUpdate) => Promise<void>;
   updatePrompts: (data: PromptsConfigUpdate) => Promise<void>;
 }
@@ -44,7 +44,7 @@ interface UseConfigReturn {
 export const useConfig = (profileId: number): UseConfigReturn => {
   const [config, setConfig] = useState<ConfigState>({
     ai_infra: null,
-    genie_spaces: [],
+    genie_space: null,
     mlflow: null,
     prompts: null,
   });
@@ -62,18 +62,18 @@ export const useConfig = (profileId: number): UseConfigReturn => {
       setError(null);
 
       // Load all configs in parallel
-      const [aiInfra, genieSpaces, mlflow, prompts] = await Promise.all([
+      const results = await Promise.allSettled([
         configApi.getAIInfraConfig(profileId),
-        configApi.listGenieSpaces(profileId),
+        configApi.getGenieSpace(profileId),
         configApi.getMLflowConfig(profileId),
         configApi.getPromptsConfig(profileId),
       ]);
 
       setConfig({
-        ai_infra: aiInfra,
-        genie_spaces: genieSpaces,
-        mlflow: mlflow,
-        prompts: prompts,
+        ai_infra: results[0].status === 'fulfilled' ? results[0].value : null,
+        genie_space: results[1].status === 'fulfilled' ? results[1].value : null,
+        mlflow: results[2].status === 'fulfilled' ? results[2].value : null,
+        prompts: results[3].status === 'fulfilled' ? results[3].value : null,
       });
       setDirty(false);
     } catch (err) {
@@ -116,7 +116,8 @@ export const useConfig = (profileId: number): UseConfigReturn => {
   }, [profileId]);
 
   /**
-   * Add a new Genie space
+   * Add a Genie space to the profile.
+   * Each profile can have exactly one Genie space.
    */
   const addGenieSpace = useCallback(async (data: GenieSpaceCreate) => {
     try {
@@ -125,7 +126,7 @@ export const useConfig = (profileId: number): UseConfigReturn => {
       const newSpace = await configApi.addGenieSpace(profileId, data);
       setConfig(prev => ({
         ...prev,
-        genie_spaces: [...prev.genie_spaces, newSpace],
+        genie_space: newSpace,
       }));
       setDirty(false);
     } catch (err) {
@@ -140,7 +141,7 @@ export const useConfig = (profileId: number): UseConfigReturn => {
   }, [profileId]);
 
   /**
-   * Update a Genie space
+   * Update the Genie space for the profile
    */
   const updateGenieSpace = useCallback(async (spaceId: number, data: GenieSpaceUpdate) => {
     try {
@@ -149,9 +150,7 @@ export const useConfig = (profileId: number): UseConfigReturn => {
       const updated = await configApi.updateGenieSpace(spaceId, data);
       setConfig(prev => ({
         ...prev,
-        genie_spaces: prev.genie_spaces.map(space =>
-          space.id === spaceId ? updated : space
-        ),
+        genie_space: updated,
       }));
       setDirty(false);
     } catch (err) {
@@ -166,7 +165,7 @@ export const useConfig = (profileId: number): UseConfigReturn => {
   }, []);
 
   /**
-   * Delete a Genie space
+   * Delete the Genie space for the profile
    */
   const deleteGenieSpace = useCallback(async (spaceId: number) => {
     try {
@@ -175,41 +174,13 @@ export const useConfig = (profileId: number): UseConfigReturn => {
       await configApi.deleteGenieSpace(spaceId);
       setConfig(prev => ({
         ...prev,
-        genie_spaces: prev.genie_spaces.filter(space => space.id !== spaceId),
+        genie_space: null,
       }));
       setDirty(false);
     } catch (err) {
       const message = err instanceof ConfigApiError 
         ? err.message 
         : 'Failed to delete Genie space';
-      setError(message);
-      throw err;
-    } finally {
-      setSaving(false);
-    }
-  }, []);
-
-  /**
-   * Set a Genie space as default
-   */
-  const setDefaultGenieSpace = useCallback(async (spaceId: number) => {
-    try {
-      setSaving(true);
-      setError(null);
-      const updated = await configApi.setDefaultGenieSpace(spaceId);
-      // Update all spaces: set new default and unset old default
-      setConfig(prev => ({
-        ...prev,
-        genie_spaces: prev.genie_spaces.map(space => ({
-          ...space,
-          is_default: space.id === spaceId,
-        })),
-      }));
-      setDirty(false);
-    } catch (err) {
-      const message = err instanceof ConfigApiError 
-        ? err.message 
-        : 'Failed to set default Genie space';
       setError(message);
       throw err;
     } finally {
@@ -270,7 +241,6 @@ export const useConfig = (profileId: number): UseConfigReturn => {
     addGenieSpace,
     updateGenieSpace,
     deleteGenieSpace,
-    setDefaultGenieSpace,
     updateMLflow,
     updatePrompts,
   };

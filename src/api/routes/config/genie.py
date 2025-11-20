@@ -1,6 +1,10 @@
-"""Genie space configuration API endpoints."""
+"""
+Genie space configuration API endpoints.
+
+Each profile has exactly one Genie space.
+"""
 import logging
-from typing import Any, Dict, List
+from typing import Any, Dict
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
@@ -84,65 +88,40 @@ def list_available_genie_spaces():
         )
 
 
-@router.get("/{profile_id}", response_model=List[GenieSpace])
-def list_genie_spaces(
+@router.get("/{profile_id}", response_model=GenieSpace)
+def get_genie_space(
     profile_id: int,
     service: GenieService = Depends(get_genie_service),
 ):
     """
-    List all Genie spaces for a profile.
+    Get the Genie space for a profile.
     
-    Spaces are sorted with default space first, then alphabetically.
+    Each profile has exactly one Genie space.
     
     Args:
         profile_id: Profile ID
         
     Returns:
-        List of Genie spaces
-    """
-    try:
-        spaces = service.list_genie_spaces(profile_id)
-        return spaces
-    except Exception as e:
-        logger.error(f"Error listing Genie spaces for profile {profile_id}: {e}", exc_info=True)
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to list Genie spaces",
-        )
-
-
-@router.get("/{profile_id}/default", response_model=GenieSpace)
-def get_default_genie_space(
-    profile_id: int,
-    service: GenieService = Depends(get_genie_service),
-):
-    """
-    Get default Genie space for a profile.
-    
-    Args:
-        profile_id: Profile ID
-        
-    Returns:
-        Default Genie space
+        Genie space for the profile
         
     Raises:
-        404: No default space found
+        404: No Genie space found for profile
     """
     try:
-        space = service.get_default_genie_space(profile_id)
+        space = service.get_genie_space(profile_id)
         if not space:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"No default Genie space found for profile {profile_id}",
+                detail=f"No Genie space found for profile {profile_id}",
             )
         return space
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error getting default Genie space for profile {profile_id}: {e}", exc_info=True)
+        logger.error(f"Error getting Genie space for profile {profile_id}: {e}", exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to get default Genie space",
+            detail="Failed to get Genie space",
         )
 
 
@@ -153,7 +132,10 @@ def add_genie_space(
     service: GenieService = Depends(get_genie_service),
 ):
     """
-    Add a new Genie space to a profile.
+    Add a Genie space to a profile.
+    
+    Each profile can have exactly one Genie space. If a space already exists,
+    this will fail with a 400 error.
     
     Args:
         profile_id: Profile ID
@@ -163,7 +145,7 @@ def add_genie_space(
         Created Genie space
         
     Raises:
-        400: Validation failed
+        400: Validation failed or profile already has a Genie space
     """
     try:
         # Validate
@@ -183,13 +165,18 @@ def add_genie_space(
             space_id=request.space_id,
             space_name=request.space_name,
             description=request.description,
-            is_default=request.is_default,
             user=user,
         )
         return space
     except HTTPException:
         raise
     except Exception as e:
+        error_msg = str(e).lower()
+        if "unique constraint" in error_msg or "already exists" in error_msg:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Profile {profile_id} already has a Genie space",
+            )
         logger.error(f"Error adding Genie space to profile {profile_id}: {e}", exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -253,7 +240,6 @@ def delete_genie_space(
         
     Raises:
         404: Space not found
-        403: Cannot delete the only Genie space
     """
     try:
         # TODO: Get actual user from authentication
@@ -261,62 +247,13 @@ def delete_genie_space(
         
         service.delete_genie_space(space_id=space_id, user=user)
     except ValueError as e:
-        error_msg = str(e).lower()
-        if "not found" in error_msg:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=str(e),
-            )
-        elif "cannot delete" in error_msg or "only" in error_msg:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail=str(e),
-            )
-        else:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=str(e),
-            )
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(e),
+        )
     except Exception as e:
         logger.error(f"Error deleting Genie space {space_id}: {e}", exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to delete Genie space",
         )
-
-
-@router.post("/space/{space_id}/set-default", response_model=GenieSpace)
-def set_default_genie_space(
-    space_id: int,
-    service: GenieService = Depends(get_genie_service),
-):
-    """
-    Set a Genie space as the default for its profile.
-    
-    Args:
-        space_id: Genie space ID (internal database ID)
-        
-    Returns:
-        Updated Genie space
-        
-    Raises:
-        404: Space not found
-    """
-    try:
-        # TODO: Get actual user from authentication
-        user = "system"
-        
-        space = service.set_default_genie_space(space_id=space_id, user=user)
-        return space
-    except ValueError as e:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=str(e),
-        )
-    except Exception as e:
-        logger.error(f"Error setting default Genie space {space_id}: {e}", exc_info=True)
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to set default Genie space",
-        )
-
