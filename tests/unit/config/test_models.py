@@ -118,30 +118,22 @@ def test_ai_infra_relationships(db_session):
 
 
 def test_genie_space_creation(db_session):
-    """Test creating Genie spaces."""
+    """Test creating Genie space (one per profile)."""
     profile = ConfigProfile(name="test", created_by="test")
     db_session.add(profile)
     db_session.flush()
     
-    space1 = ConfigGenieSpace(
+    # Each profile has exactly one Genie space
+    space = ConfigGenieSpace(
         profile_id=profile.id,
         space_id="space1",
         space_name="Space 1",
-        is_default=True,
     )
-    db_session.add(space1)
-    
-    space2 = ConfigGenieSpace(
-        profile_id=profile.id,
-        space_id="space2",
-        space_name="Space 2",
-        is_default=False,
-    )
-    db_session.add(space2)
+    db_session.add(space)
     db_session.commit()
     
     # Test relationships
-    assert len(profile.genie_spaces) == 2
+    assert len(profile.genie_spaces) == 1
     assert profile.genie_spaces[0].space_name == "Space 1"
 
 
@@ -238,13 +230,12 @@ def test_complete_profile_with_all_configs(db_session):
     )
     db_session.add(ai_infra)
     
-    # Add Genie space
+    # Add Genie space (one per profile)
     genie_space = ConfigGenieSpace(
         profile_id=profile.id,
         space_id="space123",
         space_name="Test Space",
         description="Test Genie space",
-        is_default=True,
     )
     db_session.add(genie_space)
     

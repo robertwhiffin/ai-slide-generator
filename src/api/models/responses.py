@@ -18,7 +18,7 @@ class MessageResponse(BaseModel):
         tool_call: Optional tool call information
         tool_call_id: Optional tool call identifier
     """
-    
+
     role: str = Field(
         ...,
         description="Message role",
@@ -51,7 +51,7 @@ class ChatResponse(BaseModel):
         raw_html: Raw HTML as returned by AI (for debugging)
         metadata: Execution metadata (latency, tool_calls, etc.)
     """
-    
+
     messages: List[MessageResponse] = Field(
         ...,
         description="All messages from the conversation turn",
@@ -72,10 +72,10 @@ class ChatResponse(BaseModel):
         default=None,
         description="Information about slide replacements performed during editing",
     )
-    
+
     class Config:
         """Pydantic model configuration."""
-        
+
         json_schema_extra = {
             "example": {
                 "messages": [

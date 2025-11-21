@@ -96,13 +96,12 @@ def test_profile(test_db):
     )
     test_db.add(ai_infra)
     
-    # Add Genie space
+    # Add Genie space (one per profile)
     genie_space = ConfigGenieSpace(
         profile_id=profile.id,
         space_id="test-space-id",
         space_name="Test Space",
         description="Test data space",
-        is_default=True,
     )
     test_db.add(genie_space)
     

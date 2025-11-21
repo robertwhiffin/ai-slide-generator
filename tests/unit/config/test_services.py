@@ -238,11 +238,18 @@ def test_genie_space_management(db_session):
     
     profile = profile_service.create_profile("test", None, None, "test")
     
-    # Initially no space
+    # Profile is created with a default Genie space
+    space = genie_service.get_genie_space(profile.id)
+    assert space is not None  # Default space exists
+    
+    # Delete the default space
+    genie_service.delete_genie_space(space.id, "test")
+    
+    # Now no space
     space = genie_service.get_genie_space(profile.id)
     assert space is None
     
-    # Add space
+    # Add new space
     space = genie_service.add_genie_space(
         profile_id=profile.id,
         space_id="space123",
@@ -266,14 +273,12 @@ def test_update_genie_space(db_session):
     genie_service = GenieService(db_session)
     
     profile = profile_service.create_profile("test", None, None, "test")
-    space = genie_service.add_genie_space(
-        profile_id=profile.id,
-        space_id="space123",
-        space_name="Original Name",
-        user="test",
-    )
     
-    # Update space
+    # Profile already has a default Genie space
+    space = genie_service.get_genie_space(profile.id)
+    assert space is not None
+    
+    # Update the existing space
     updated = genie_service.update_genie_space(
         space_id=space.id,
         space_name="Updated Name",
@@ -292,13 +297,9 @@ def test_delete_genie_space(db_session):
     
     profile = profile_service.create_profile("test", None, None, "test")
     
-    # Add space
-    space = genie_service.add_genie_space(
-        profile_id=profile.id,
-        space_id="space123",
-        space_name="To Delete",
-        user="test",
-    )
+    # Profile has default Genie space
+    space = genie_service.get_genie_space(profile.id)
+    assert space is not None
     
     # Delete it
     genie_service.delete_genie_space(space.id, "test")

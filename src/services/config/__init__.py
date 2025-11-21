@@ -1,6 +1,5 @@
 """Configuration services."""
 from src.services.config.config_service import ConfigService
-from src.services.config.config_validator import validate_profile_configuration
 from src.services.config.genie_service import GenieService
 from src.services.config.profile_service import ProfileService
 from src.services.config.validator import ConfigValidator, ValidationResult
@@ -11,6 +10,5 @@ __all__ = [
     "GenieService",
     "ConfigValidator",
     "ValidationResult",
-    "validate_profile_configuration",
 ]
 

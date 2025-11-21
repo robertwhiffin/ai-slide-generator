@@ -239,7 +239,7 @@ def load_settings_from_database(profile_id: Optional[int] = None) -> AppSettings
         ValueError: If profile not found or required config missing
     """
     global _active_profile_id
-    
+
     try:
         with get_db_session() as db:
             # Get profile (priority: specified > active > default)
@@ -383,29 +383,29 @@ def reload_settings(profile_id: Optional[int] = None) -> AppSettings:
         New AppSettings instance
     """
     logger.info("Reloading settings from database", extra={"profile_id": profile_id})
-    
+
     # Log cache state before clearing
     cache_info_before = get_settings.cache_info()
     logger.info(f"Cache info BEFORE clear: {cache_info_before}")
-    
+
     # Store the active profile ID globally BEFORE clearing cache
     # This ensures get_settings() knows which profile to load
     if profile_id is not None:
         global _active_profile_id
         _active_profile_id = profile_id
         logger.info(f"Set active profile ID to {profile_id}")
-    
+
     # Clear the cache
     get_settings.cache_clear()
     cache_info_after_clear = get_settings.cache_info()
     logger.info(f"Cache info AFTER clear: {cache_info_after_clear}")
-    
+
     # Force immediate cache repopulation by calling get_settings()
     # This ensures the cache contains the correct profile
     settings = get_settings()
     cache_info_after_reload = get_settings.cache_info()
     logger.info(f"Cache info AFTER reload: {cache_info_after_reload}")
-    
+
     logger.info(
         "Settings reloaded successfully",
         extra={
@@ -415,6 +415,6 @@ def reload_settings(profile_id: Optional[int] = None) -> AppSettings:
             "genie_space_id": settings.genie.space_id,
         },
     )
-    
+
     return settings
 

@@ -5,7 +5,7 @@ Tests all components of a configuration profile to ensure they are working corre
 """
 
 import logging
-from typing import Dict, Any, List
+from typing import Any, Dict, List
 
 import mlflow
 from databricks_langchain import ChatDatabricks
@@ -20,13 +20,13 @@ logger = logging.getLogger(__name__)
 
 class ValidationResult:
     """Result of a validation check."""
-    
+
     def __init__(self, component: str, success: bool, message: str, details: str = None):
         self.component = component
         self.success = success
         self.message = message
         self.details = details
-    
+
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for API response."""
         result = {
@@ -41,7 +41,7 @@ class ValidationResult:
 
 class ConfigurationValidator:
     """Validates configuration by testing each component."""
-    
+
     def __init__(self, profile_id: int):
         """
         Initialize validator for a specific profile.
@@ -52,7 +52,7 @@ class ConfigurationValidator:
         self.profile_id = profile_id
         self.settings = None
         self.results: List[ValidationResult] = []
-    
+
     def validate_all(self) -> Dict[str, Any]:
         """
         Validate all components of the configuration.
@@ -61,7 +61,7 @@ class ConfigurationValidator:
             Dictionary with validation results and overall status
         """
         logger.info(f"Starting validation for profile {self.profile_id}")
-        
+
         # Load settings for this profile
         try:
             self.settings = load_settings_from_database(self.profile_id)
@@ -74,26 +74,26 @@ class ConfigurationValidator:
                 "error": f"Failed to load profile settings: {str(e)}",
                 "results": [],
             }
-        
+
         # Run validation tests
         self._validate_llm()
         self._validate_genie()
         self._validate_mlflow()
-        
+
         # Compile results
         all_success = all(r.success for r in self.results)
-        
+
         return {
             "success": all_success,
             "profile_id": self.profile_id,
             "profile_name": self.settings.profile_name,
             "results": [r.to_dict() for r in self.results],
         }
-    
+
     def _validate_llm(self) -> None:
         """Test LLM endpoint with a simple message."""
         logger.info("Validating LLM endpoint")
-        
+
         try:
             # Create ChatDatabricks instance
             model = ChatDatabricks(
@@ -102,11 +102,11 @@ class ConfigurationValidator:
                 max_tokens=100,  # Small for test
                 top_p=self.settings.llm.top_p,
             )
-            
+
             # Send test message
             message = HumanMessage(content="hello")
             response = model.invoke([message])
-            
+
             # Check response
             if response and response.content:
                 self.results.append(ValidationResult(
@@ -124,7 +124,7 @@ class ConfigurationValidator:
                     details=f"Endpoint: {self.settings.llm.endpoint}"
                 ))
                 logger.warning("LLM validation failed: empty response")
-                
+
         except Exception as e:
             error_msg = str(e)
             self.results.append(ValidationResult(
@@ -134,32 +134,32 @@ class ConfigurationValidator:
                 details=f"Endpoint: {self.settings.llm.endpoint}"
             ))
             logger.error(f"LLM validation failed: {e}", exc_info=True)
-    
+
     def _validate_genie(self) -> None:
         """Test Genie with a query."""
         logger.info("Validating Genie space")
-        
+
         conversation_id = None
         try:
             # Initialize conversation
             conversation_id = initialize_genie_conversation(
                 placeholder_message="System: Testing configuration"
             )
-            
+
             # Query Genie
             result = query_genie_space(
                 query="Return a table of how many rows you have per table",
                 conversation_id=conversation_id,
                 max_retries=1,
             )
-            
+
             # Check result
             if result and result.get("data"):
                 self.results.append(ValidationResult(
                     component="Genie",
                     success=True,
                     message=f"Successfully connected to Genie space: {self.settings.genie.space_id}",
-                    details=f"Query executed and returned data"
+                    details="Query executed and returned data"
                 ))
                 logger.info("Genie validation successful")
             else:
@@ -170,7 +170,7 @@ class ConfigurationValidator:
                     details=f"Space ID: {self.settings.genie.space_id}"
                 ))
                 logger.warning("Genie validation failed: no data")
-                
+
         except Exception as e:
             error_msg = str(e)
             self.results.append(ValidationResult(
@@ -192,19 +192,19 @@ class ConfigurationValidator:
                     logger.info(f"Cleaned up test conversation: {conversation_id}")
                 except Exception as e:
                     logger.warning(f"Failed to clean up test conversation: {e}")
-    
+
     def _validate_mlflow(self) -> None:
         """Test MLflow experiment creation/write permissions."""
         logger.info("Validating MLflow experiment")
-        
+
         try:
             # Set tracking URI
             mlflow.set_tracking_uri("databricks")
-            
+
             # Try to get or create experiment
             experiment_name = self.settings.mlflow.experiment_name
             experiment = mlflow.get_experiment_by_name(experiment_name)
-            
+
             if experiment is None:
                 # Try to create experiment
                 experiment_id = mlflow.create_experiment(experiment_name)
@@ -225,7 +225,7 @@ class ConfigurationValidator:
                     details=f"Experiment ID: {experiment.experiment_id}"
                 ))
                 logger.info(f"MLflow validation successful: accessed experiment {experiment.experiment_id}")
-                
+
         except Exception as e:
             error_msg = str(e)
             self.results.append(ValidationResult(
@@ -235,7 +235,7 @@ class ConfigurationValidator:
                 details=f"Experiment name: {self.settings.mlflow.experiment_name}"
             ))
             logger.error(f"MLflow validation failed: {e}", exc_info=True)
-    
+
     def validate_llm_endpoint(self, endpoint: str) -> ValidationResult:
         """
         Validate a specific LLM endpoint.
@@ -247,7 +247,7 @@ class ConfigurationValidator:
             ValidationResult with success status and details
         """
         logger.info(f"Validating LLM endpoint: {endpoint}")
-        
+
         try:
             # Create ChatDatabricks instance
             model = ChatDatabricks(
@@ -255,11 +255,11 @@ class ConfigurationValidator:
                 temperature=0.1,
                 max_tokens=100,  # Small for test
             )
-            
+
             # Send test message
             message = HumanMessage(content="hello")
             response = model.invoke([message])
-            
+
             # Check response
             if response and response.content:
                 logger.info(f"LLM endpoint {endpoint} validation successful")
@@ -277,7 +277,7 @@ class ConfigurationValidator:
                     message="Failed to call LLM: Empty response received",
                     details=f"Endpoint: {endpoint}"
                 )
-                
+
         except Exception as e:
             error_msg = str(e)
             logger.error(f"LLM endpoint {endpoint} validation failed: {e}", exc_info=True)
@@ -287,7 +287,7 @@ class ConfigurationValidator:
                 message=f"Failed to call LLM: {error_msg}",
                 details=f"Endpoint: {endpoint}"
             )
-    
+
     def validate_genie_space(self, space_id: str) -> ValidationResult:
         """
         Validate a specific Genie space.
@@ -299,22 +299,22 @@ class ConfigurationValidator:
             ValidationResult with success status and details
         """
         logger.info(f"Validating Genie space: {space_id}")
-        
+
         try:
             # Check if space exists
             client = get_databricks_client()
             spaces = client.genie.list_spaces()
-            
+
             space_exists = False
             if spaces.spaces:
                 space_exists = any(s.space_id == space_id for s in spaces.spaces)
-            
+
             # Check pagination
             while not space_exists and spaces.next_page_token:
                 spaces = client.genie.list_spaces(page_token=spaces.next_page_token)
                 if spaces.spaces:
                     space_exists = any(s.space_id == space_id for s in spaces.spaces)
-            
+
             if space_exists:
                 logger.info(f"Genie space {space_id} validation successful")
                 return ValidationResult(
@@ -331,7 +331,7 @@ class ConfigurationValidator:
                     message=f"Genie space not found: {space_id}",
                     details="Space does not exist or is not accessible"
                 )
-                
+
         except Exception as e:
             error_msg = str(e)
             logger.error(f"Genie space {space_id} validation failed: {e}", exc_info=True)
@@ -341,7 +341,7 @@ class ConfigurationValidator:
                 message=f"Failed to validate Genie space: {error_msg}",
                 details=f"Space ID: {space_id}"
             )
-    
+
     def validate_mlflow_experiment(self, experiment_name: str) -> ValidationResult:
         """
         Validate a specific MLflow experiment.
@@ -353,14 +353,14 @@ class ConfigurationValidator:
             ValidationResult with success status and details
         """
         logger.info(f"Validating MLflow experiment: {experiment_name}")
-        
+
         try:
             # Set tracking URI
             mlflow.set_tracking_uri("databricks")
-            
+
             # Try to get or create experiment
             experiment = mlflow.get_experiment_by_name(experiment_name)
-            
+
             if experiment:
                 logger.info(f"MLflow experiment {experiment_name} found")
                 return ValidationResult(
@@ -388,7 +388,7 @@ class ConfigurationValidator:
                         message=f"Failed to access or create experiment: {str(create_error)}",
                         details=f"Experiment: {experiment_name}"
                     )
-                
+
         except Exception as e:
             error_msg = str(e)
             logger.error(f"MLflow experiment {experiment_name} validation failed: {e}", exc_info=True)

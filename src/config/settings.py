@@ -1,8 +1,14 @@
 """
-Application settings management using Pydantic.
+LEGACY: Application settings management using Pydantic and YAML.
 
-This module combines YAML configuration with environment variables to create
-a unified settings object.
+⚠️ DEPRECATED: This module is LEGACY and should not be used in production code.
+Use src.config.settings_db instead, which provides database-backed configuration.
+
+This module is kept only for:
+- Backward compatibility during migration
+- Initializing default profile values (via init_default_profile.py)
+
+New code should use: from src.config.settings_db import get_settings
 """
 
 from functools import lru_cache
@@ -18,7 +24,6 @@ from src.config.loader import (
     load_prompts,
     merge_with_env,
 )
-
 
 # Pydantic models for configuration sections
 
@@ -278,8 +283,9 @@ def create_settings() -> AppSettings:
 
         # Get current user from Databricks client singleton for MLFlow experiment name
         import os
+
         from src.config.client import get_databricks_client
-        
+
         try:
             client = get_databricks_client()
             username = client.current_user.me().user_name

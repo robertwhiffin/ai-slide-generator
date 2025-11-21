@@ -21,6 +21,7 @@ from langchain_core.tools import StructuredTool
 from pydantic import BaseModel, Field
 
 from src.config.client import get_databricks_client
+
 # Use database-backed settings (Phase 4)
 from src.config.settings_db import get_settings
 from src.services.tools import initialize_genie_conversation, query_genie_space
@@ -81,7 +82,7 @@ class SlideGeneratorAgent:
     def __init__(self):
         """Initialize agent with LangChain model and tools."""
         logger.info("Initializing SlideGeneratorAgent")
-        
+
         self.settings = get_settings()
         self.client = get_databricks_client()
 
@@ -98,7 +99,7 @@ class SlideGeneratorAgent:
         # Session storage for multi-turn conversations
         # Structure: {session_id: {chat_history, genie_conversation_id, metadata}}
         self.sessions: dict[str, dict[str, Any]] = {}
-        
+
         # Track current session for tool access to conversation_id
         self.current_session_id: str | None = None
 
@@ -119,7 +120,7 @@ class SlideGeneratorAgent:
                 self.experiment_id = experiment.experiment_id
                 logger.info("MLflow experiment already exists", extra={"experiment_name": self.settings.mlflow.experiment_name, "experiment_id": self.experiment_id})
             mlflow.set_experiment(experiment_id=self.experiment_id)
-            
+
             logger.info(
                 "MLflow configured",
                 extra={
@@ -150,7 +151,7 @@ class SlideGeneratorAgent:
                 max_tokens=self.settings.llm.max_tokens,
                 top_p=self.settings.llm.top_p,
             )
-            
+
             logger.info(
                 "ChatDatabricks model created",
                 extra={
@@ -159,7 +160,7 @@ class SlideGeneratorAgent:
                     "max_tokens": self.settings.llm.max_tokens,
                 },
             )
-            
+
             return model
         except Exception as e:
             raise AgentError(f"Failed to create ChatDatabricks model: {e}") from e
@@ -179,11 +180,11 @@ class SlideGeneratorAgent:
             # Get conversation_id from current session
             if self.current_session_id is None:
                 raise ToolExecutionError("No active session - current_session_id not set")
-            
+
             session = self.sessions.get(self.current_session_id)
             if session is None:
                 raise ToolExecutionError(f"Session not found: {self.current_session_id}")
-            
+
             conversation_id = session["genie_conversation_id"]
             if conversation_id is None:
                 # Initialize new Genie conversation (happens after profile reload)
@@ -204,10 +205,10 @@ class SlideGeneratorAgent:
                 except Exception as e:
                     logger.error(f"Failed to initialize Genie conversation: {e}")
                     raise ToolExecutionError(f"Failed to initialize Genie conversation: {e}") from e
-            
+
             # Query Genie with automatic conversation_id
             result = query_genie_space(query, conversation_id)
-            
+
             # Return formatted string for LLM (no conversation_id exposed)
             return f"Data retrieved successfully:\n\n{result['data']}"
 
@@ -232,10 +233,10 @@ class SlideGeneratorAgent:
         """Create prompt template with system prompt from config and chat history."""
         system_prompt = self.settings.prompts.get("system_prompt", "")
         editing_prompt = self.settings.prompts.get("slide_editing_instructions", "")
-        
+
         if not system_prompt:
             raise AgentError("System prompt not found in configuration")
-        
+
         if editing_prompt:
             system_prompt = f"{system_prompt.rstrip()}\n\n{editing_prompt.strip()}"
 
@@ -299,9 +300,9 @@ class SlideGeneratorAgent:
         the need for the LLM to track conversation IDs.
         """
         session_id = str(uuid.uuid4())
-        
+
         logger.info("Creating new session", extra={"session_id": session_id})
-        
+
         # Initialize Genie conversation upfront
         try:
             genie_conversation_id = initialize_genie_conversation()
@@ -315,10 +316,10 @@ class SlideGeneratorAgent:
         except Exception as e:
             logger.error(f"Failed to initialize Genie conversation: {e}")
             raise AgentError(f"Failed to initialize Genie conversation: {e}") from e
-        
+
         # Create chat history for this session
         chat_history = ChatMessageHistory()
-        
+
         # Initialize session data
         self.sessions[session_id] = {
             "chat_history": chat_history,
@@ -326,7 +327,7 @@ class SlideGeneratorAgent:
             "created_at": datetime.utcnow().isoformat(),
             "message_count": 0,
         }
-        
+
         logger.info("Session created successfully", extra={"session_id": session_id})
         return session_id
 
@@ -345,7 +346,7 @@ class SlideGeneratorAgent:
         """
         if session_id not in self.sessions:
             raise AgentError(f"Session not found: {session_id}")
-        
+
         return self.sessions[session_id]
 
     def clear_session(self, session_id: str) -> None:
@@ -360,7 +361,7 @@ class SlideGeneratorAgent:
         """
         if session_id not in self.sessions:
             raise AgentError(f"Session not found: {session_id}")
-        
+
         del self.sessions[session_id]
         logger.info("Cleared session", extra={"session_id": session_id})
 
@@ -626,14 +627,14 @@ class SlideGeneratorAgent:
             AgentError: If generation fails or session not found
         """
         start_time = datetime.utcnow()
-        
+
         # Set current session for tool access
         self.current_session_id = session_id
-        
+
         # Get session data
         session = self.get_session(session_id)
         chat_history = session["chat_history"]
-        
+
         editing_mode = slide_context is not None
 
         if slide_context:

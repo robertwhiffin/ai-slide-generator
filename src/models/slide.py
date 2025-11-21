@@ -1,7 +1,7 @@
 """Slide class for representing individual slides as raw HTML."""
 
-from typing import Optional
 import copy
+from typing import Optional
 
 
 class Slide:
@@ -14,7 +14,7 @@ class Slide:
         html: The complete HTML for this slide
         slide_id: Optional unique identifier for this slide
     """
-    
+
     def __init__(self, html: str, slide_id: Optional[str] = None):
         """Initialize a Slide with HTML content.
         
@@ -24,7 +24,7 @@ class Slide:
         """
         self.html = html
         self.slide_id = slide_id
-    
+
     def to_html(self) -> str:
         """Return the HTML string for this slide.
         
@@ -32,7 +32,7 @@ class Slide:
             The complete HTML content of the slide
         """
         return self.html
-    
+
     def clone(self) -> 'Slide':
         """Create a deep copy of this slide.
         
@@ -43,7 +43,7 @@ class Slide:
             html=copy.deepcopy(self.html),
             slide_id=self.slide_id
         )
-    
+
     def __str__(self) -> str:
         """String representation showing slide preview.
         
@@ -54,10 +54,10 @@ class Slide:
         preview = self.html[:preview_length]
         if len(self.html) > preview_length:
             preview += "..."
-        
+
         id_str = f" (id: {self.slide_id})" if self.slide_id else ""
         return f"Slide{id_str}: {preview}"
-    
+
     def __repr__(self) -> str:
         """Developer-friendly representation of the Slide.
         

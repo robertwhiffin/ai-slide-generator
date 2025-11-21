@@ -186,9 +186,9 @@ export const ProfileProvider: React.FC<React.PropsWithChildren> = ({ children })
       setError(null);
       
       // Call load profile endpoint (triggers hot-reload on backend)
-      const response = await configApi.loadProfile(id);
+      await configApi.loadProfile(id);
       
-      console.log('Profile loaded:', response);
+      // Profile loaded successfully
       
       // Track this as the loaded profile
       setLoadedProfileId(id);

@@ -12,10 +12,10 @@ class GenieService:
     
     Each profile has exactly one Genie space.
     """
-    
+
     def __init__(self, db: Session):
         self.db = db
-    
+
     def get_genie_space(self, profile_id: int) -> Optional[ConfigGenieSpace]:
         """
         Get the Genie space for a profile.
@@ -31,7 +31,7 @@ class GenieService:
             .filter(ConfigGenieSpace.profile_id == profile_id)
             .first()
         )
-    
+
     def add_genie_space(
         self,
         profile_id: int,
@@ -63,7 +63,7 @@ class GenieService:
             description=description,
         )
         self.db.add(space)
-        
+
         # Log creation
         history = ConfigHistory(
             profile_id=profile_id,
@@ -76,12 +76,12 @@ class GenieService:
             },
         )
         self.db.add(history)
-        
+
         self.db.commit()
         self.db.refresh(space)
-        
+
         return space
-    
+
     def update_genie_space(
         self,
         space_id: int,
@@ -93,17 +93,17 @@ class GenieService:
         space = self.db.query(ConfigGenieSpace).filter_by(id=space_id).first()
         if not space:
             raise ValueError(f"Genie space {space_id} not found")
-        
+
         changes = {}
-        
+
         if space_name is not None and space_name != space.space_name:
             changes["space_name"] = {"old": space.space_name, "new": space_name}
             space.space_name = space_name
-        
+
         if description is not None and description != space.description:
             changes["description"] = {"old": space.description, "new": description}
             space.description = description
-        
+
         if changes:
             history = ConfigHistory(
                 profile_id=space.profile_id,
@@ -113,12 +113,12 @@ class GenieService:
                 changes=changes,
             )
             self.db.add(history)
-        
+
         self.db.commit()
         self.db.refresh(space)
-        
+
         return space
-    
+
     def delete_genie_space(self, space_id: int, user: str) -> None:
         """
         Remove Genie space from profile.
@@ -133,7 +133,7 @@ class GenieService:
         space = self.db.query(ConfigGenieSpace).filter_by(id=space_id).first()
         if not space:
             raise ValueError(f"Genie space {space_id} not found")
-        
+
         # Log deletion
         history = ConfigHistory(
             profile_id=space.profile_id,
@@ -144,8 +144,8 @@ class GenieService:
         )
         self.db.add(history)
         self.db.flush()
-        
+
         self.db.delete(space)
         self.db.commit()
-    
+
 

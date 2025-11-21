@@ -42,13 +42,13 @@ async def get_slides():
     try:
         chat_service = get_chat_service()
         result = chat_service.get_slides()
-        
+
         if not result:
             raise HTTPException(status_code=404, detail="No slides available")
-        
+
         logger.info("Retrieved slides", extra={"slide_count": result.get("slide_count", 0)})
         return result
-        
+
     except HTTPException:
         raise
     except Exception as e:
@@ -74,13 +74,13 @@ async def reorder_slides(request: ReorderRequest):
     try:
         chat_service = get_chat_service()
         result = chat_service.reorder_slides(request.new_order)
-        
+
         logger.info(
             "Reordered slides",
             extra={"new_order": request.new_order}
         )
         return result
-        
+
     except ValueError as e:
         logger.warning(f"Validation error in reorder_slides: {e}")
         raise HTTPException(status_code=400, detail=str(e))
@@ -108,10 +108,10 @@ async def update_slide(index: int, request: UpdateSlideRequest):
     try:
         chat_service = get_chat_service()
         result = chat_service.update_slide(index, request.html)
-        
+
         logger.info("Updated slide", extra={"index": index})
         return result
-        
+
     except ValueError as e:
         logger.warning(f"Validation error in update_slide: {e}")
         raise HTTPException(status_code=400, detail=str(e))
@@ -138,10 +138,10 @@ async def duplicate_slide(index: int):
     try:
         chat_service = get_chat_service()
         result = chat_service.duplicate_slide(index)
-        
+
         logger.info("Duplicated slide", extra={"index": index})
         return result
-        
+
     except ValueError as e:
         logger.warning(f"Validation error in duplicate_slide: {e}")
         raise HTTPException(status_code=400, detail=str(e))
@@ -168,10 +168,10 @@ async def delete_slide(index: int):
     try:
         chat_service = get_chat_service()
         result = chat_service.delete_slide(index)
-        
+
         logger.info("Deleted slide", extra={"index": index})
         return result
-        
+
     except ValueError as e:
         logger.warning(f"Validation error in delete_slide: {e}")
         raise HTTPException(status_code=400, detail=str(e))

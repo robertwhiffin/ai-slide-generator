@@ -38,7 +38,7 @@ class SlideDeck:
         slides: List of Slide objects
         head_meta: Other metadata from HTML head (charset, viewport, etc.)
     """
-    
+
     CHART_JS_URL = "https://cdn.jsdelivr.net/npm/chart.js"
 
     def __init__(
@@ -73,10 +73,10 @@ class SlideDeck:
         self.script_blocks: OrderedDict[str, ScriptBlock] = script_blocks or OrderedDict()
         self.canvas_to_script: Dict[str, str] = canvas_to_script or {}
         self._ensure_default_external_scripts()
-        
+
         if self.script_blocks and not self.canvas_to_script:
             self._rebuild_canvas_index()
-        
+
         if self.script_blocks:
             self.recompute_scripts()
 
@@ -84,14 +84,14 @@ class SlideDeck:
         """Ensure required third-party scripts are included when knitting."""
         if self.CHART_JS_URL not in self.external_scripts:
             self.external_scripts.append(self.CHART_JS_URL)
-    
+
     def _rebuild_canvas_index(self) -> None:
         """Rebuild mapping of canvas ids to script blocks."""
         self.canvas_to_script = {}
         for block in self.script_blocks.values():
             for canvas_id in block.canvas_ids:
                 self.canvas_to_script[canvas_id] = block.key
-    
+
     @staticmethod
     def _generate_script_key(canvas_ids: List[str], index: int) -> str:
         """Generate deterministic key for a script block."""
@@ -99,7 +99,7 @@ class SlideDeck:
             primary = canvas_ids[0]
             return f"canvas:{primary}:{index}"
         return f"script:{index}"
-    
+
     def recompute_scripts(self) -> None:
         """Regenerate aggregated script string from structured blocks."""
         parts = [
@@ -108,12 +108,12 @@ class SlideDeck:
             if block.text.strip()
         ]
         self.scripts = "\n\n".join(parts)
-    
+
     def remove_canvas_scripts(self, canvas_ids: List[str]) -> None:
         """Remove script blocks associated with specified canvas ids."""
         if not canvas_ids:
             return
-        
+
         keys_to_remove: set[str] = set()
         for canvas_id in canvas_ids:
             key = self.canvas_to_script.pop(canvas_id, None)
@@ -125,26 +125,26 @@ class SlideDeck:
             block.canvas_ids.discard(canvas_id)
             if not block.canvas_ids:
                 keys_to_remove.add(key)
-        
+
         if not keys_to_remove:
             return
-        
+
         for key in keys_to_remove:
             self.script_blocks.pop(key, None)
-        
+
         self.recompute_scripts()
-    
+
     def add_script_block(self, script_text: str, canvas_ids: List[str]) -> None:
         """Add (or replace) a script block for the provided canvas ids."""
         if not script_text or not script_text.strip():
             return
-        
+
         cleaned = script_text.strip()
         canvas_ids = [cid for cid in canvas_ids if cid]
-        
+
         if canvas_ids:
             self.remove_canvas_scripts(canvas_ids)
-        
+
         else:
             existing_key = next(
                 (
@@ -158,15 +158,15 @@ class SlideDeck:
                 self.script_blocks[existing_key].text = cleaned
                 self.recompute_scripts()
                 return
-        
+
         key = self._generate_script_key(canvas_ids, len(self.script_blocks))
         block = ScriptBlock(key=key, text=cleaned, canvas_ids=set(canvas_ids))
         self.script_blocks[key] = block
         for canvas_id in canvas_ids:
             self.canvas_to_script[canvas_id] = key
-        
+
         self.recompute_scripts()
-    
+
     @classmethod
     def from_html(cls, html_path: str) -> 'SlideDeck':
         """Parse an HTML file and create a SlideDeck.
@@ -183,10 +183,10 @@ class SlideDeck:
         path = Path(html_path)
         if not path.exists():
             raise FileNotFoundError(f"HTML file not found: {html_path}")
-        
+
         html_content = path.read_text(encoding='utf-8')
         return cls.from_html_string(html_content)
-    
+
     @classmethod
     def from_html_string(cls, html_content: str) -> 'SlideDeck':
         """Parse an HTML string and create a SlideDeck.
@@ -198,13 +198,13 @@ class SlideDeck:
             A new SlideDeck instance
         """
         soup = BeautifulSoup(html_content, 'html.parser')
-        
+
         # Phase 1: Extract Head Components
-        
+
         # Extract title
         title_tag = soup.find('title')
         title = title_tag.get_text() if title_tag else None
-        
+
         # Extract metadata
         head_meta = {}
         for meta in soup.find_all('meta'):
@@ -212,19 +212,19 @@ class SlideDeck:
                 head_meta['charset'] = meta.get('charset')
             elif meta.get('name') and meta.get('content'):
                 head_meta[meta.get('name')] = meta.get('content')
-        
+
         # Extract CSS from <style> tags
         css_parts = []
         for style_tag in soup.find_all('style'):
             if style_tag.string:
                 css_parts.append(style_tag.string)
         css = '\n'.join(css_parts)
-        
+
         # Extract external scripts
         external_scripts = []
         for script_tag in soup.find_all('script', src=True):
             external_scripts.append(script_tag['src'])
-        
+
         # Extract inline scripts
         script_blocks: OrderedDict[str, ScriptBlock] = OrderedDict()
         canvas_to_script: Dict[str, str] = {}
@@ -240,7 +240,7 @@ class SlideDeck:
             script_blocks[key] = block
             for canvas_id in canvas_ids:
                 canvas_to_script[canvas_id] = key
-        
+
         # Phase 2: Extract Slides
         slide_elements = soup.find_all('div', class_='slide')
         slides = []
@@ -249,7 +249,7 @@ class SlideDeck:
             slide_html = str(slide_element)
             slide = Slide(html=slide_html, slide_id=f"slide_{idx}")
             slides.append(slide)
-        
+
         return cls(
             title=title,
             css=css,
@@ -260,7 +260,7 @@ class SlideDeck:
             script_blocks=script_blocks,
             canvas_to_script=canvas_to_script,
         )
-    
+
     def insert_slide(self, slide: Slide, position: int) -> None:
         """Insert slide at the specified position.
         
@@ -279,7 +279,7 @@ class SlideDeck:
             slide: The Slide object to append
         """
         self.slides.append(slide)
-    
+
     def remove_slide(self, index: int) -> Slide:
         """Remove and return slide at index.
         
@@ -293,7 +293,7 @@ class SlideDeck:
             IndexError: If index is out of range
         """
         return self.slides.pop(index)
-    
+
     def get_slide(self, index: int) -> Slide:
         """Retrieve slide by index.
         
@@ -307,7 +307,7 @@ class SlideDeck:
             IndexError: If index is out of range
         """
         return self.slides[index]
-    
+
     def move_slide(self, from_index: int, to_index: int) -> None:
         """Move slide from one position to another.
         
@@ -320,7 +320,7 @@ class SlideDeck:
         """
         slide = self.slides.pop(from_index)
         self.slides.insert(to_index, slide)
-    
+
     def swap_slides(self, index1: int, index2: int) -> None:
         """Swap two slides.
         
@@ -332,7 +332,7 @@ class SlideDeck:
             IndexError: If either index is out of range
         """
         self.slides[index1], self.slides[index2] = self.slides[index2], self.slides[index1]
-    
+
     def knit(self) -> str:
         """Reconstruct complete HTML with all slides.
         
@@ -342,33 +342,33 @@ class SlideDeck:
         self._ensure_default_external_scripts()
         # Build external script tags
         external_script_tags = '\n    '.join(
-            f'<script src="{src}"></script>' 
+            f'<script src="{src}"></script>'
             for src in self.external_scripts
         )
-        
+
         # Build meta tags
         meta_tags = []
         if 'charset' in self.head_meta:
             meta_tags.append(f'<meta charset="{self.head_meta["charset"]}">')
         else:
             meta_tags.append('<meta charset="UTF-8">')
-        
+
         for name, content in self.head_meta.items():
             if name != 'charset':
                 meta_tags.append(f'<meta name="{name}" content="{content}">')
-        
+
         # If no viewport meta, add default
         if 'viewport' not in self.head_meta:
             meta_tags.append('<meta name="viewport" content="width=device-width, initial-scale=1.0">')
-        
+
         meta_tags_html = '\n    '.join(meta_tags)
-        
+
         # Build slide HTML
         slides_html = '\n\n'.join(slide.to_html() for slide in self.slides)
-        
+
         # Build complete HTML
         title_text = self.title or "Slide Deck"
-        
+
         html_parts = [
             '<!DOCTYPE html>',
             '<html lang="en">',
@@ -376,17 +376,17 @@ class SlideDeck:
             f'    {meta_tags_html}',
             f'    <title>{title_text}</title>',
         ]
-        
+
         if external_script_tags:
             html_parts.append(f'    {external_script_tags}')
-        
+
         if self.css:
             html_parts.extend([
                 '    <style>',
                 self.css,
                 '    </style>',
             ])
-        
+
         html_parts.extend([
             '</head>',
             '<body>',
@@ -394,22 +394,22 @@ class SlideDeck:
             slides_html,
             '',
         ])
-        
+
         if self.scripts:
             html_parts.extend([
                 '<script>',
                 self.scripts,
                 '</script>',
             ])
-        
+
         html_parts.extend([
             '',
             '</body>',
             '</html>',
         ])
-        
+
         return '\n'.join(html_parts)
-    
+
     def render_slide(self, index: int) -> str:
         """Render a single slide as complete HTML page.
         
@@ -424,32 +424,32 @@ class SlideDeck:
         """
         slide = self.get_slide(index)
         self._ensure_default_external_scripts()
-        
+
         # Build external script tags
         external_script_tags = '\n    '.join(
-            f'<script src="{src}"></script>' 
+            f'<script src="{src}"></script>'
             for src in self.external_scripts
         )
-        
+
         # Build meta tags
         meta_tags = []
         if 'charset' in self.head_meta:
             meta_tags.append(f'<meta charset="{self.head_meta["charset"]}">')
         else:
             meta_tags.append('<meta charset="UTF-8">')
-        
+
         for name, content in self.head_meta.items():
             if name != 'charset':
                 meta_tags.append(f'<meta name="{name}" content="{content}">')
-        
+
         if 'viewport' not in self.head_meta:
             meta_tags.append('<meta name="viewport" content="width=device-width, initial-scale=1.0">')
-        
+
         meta_tags_html = '\n    '.join(meta_tags)
-        
+
         # Build title with slide number
         title_text = f"{self.title or 'Slide Deck'} - Slide {index + 1}"
-        
+
         html_parts = [
             '<!DOCTYPE html>',
             '<html lang="en">',
@@ -457,17 +457,17 @@ class SlideDeck:
             f'    {meta_tags_html}',
             f'    <title>{title_text}</title>',
         ]
-        
+
         if external_script_tags:
             html_parts.append(f'    {external_script_tags}')
-        
+
         if self.css:
             html_parts.extend([
                 '    <style>',
                 self.css,
                 '    </style>',
             ])
-        
+
         html_parts.extend([
             '</head>',
             '<body>',
@@ -475,22 +475,22 @@ class SlideDeck:
             slide.to_html(),
             '',
         ])
-        
+
         if self.scripts:
             html_parts.extend([
                 '<script>',
                 self.scripts,
                 '</script>',
             ])
-        
+
         html_parts.extend([
             '',
             '</body>',
             '</html>',
         ])
-        
+
         return '\n'.join(html_parts)
-    
+
     def save(self, output_path: str) -> None:
         """Write knitted HTML to file.
         
@@ -501,7 +501,7 @@ class SlideDeck:
         path = Path(output_path)
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(html, encoding='utf-8')
-    
+
     def to_dict(self) -> Dict[str, Any]:
         """Convert to JSON-serializable dictionary for API use.
         
@@ -523,7 +523,7 @@ class SlideDeck:
                 for idx, slide in enumerate(self.slides)
             ]
         }
-    
+
     def __len__(self) -> int:
         """Return number of slides.
         
@@ -531,7 +531,7 @@ class SlideDeck:
             Number of slides in the deck
         """
         return len(self.slides)
-    
+
     def __iter__(self):
         """Allow iteration over slides.
         
@@ -539,7 +539,7 @@ class SlideDeck:
             Iterator over slides
         """
         return iter(self.slides)
-    
+
     def __getitem__(self, index: int) -> Slide:
         """Allow bracket notation: deck[5].
         
@@ -553,7 +553,7 @@ class SlideDeck:
             IndexError: If index is out of range
         """
         return self.slides[index]
-    
+
     def __str__(self) -> str:
         """String representation of the slide deck.
         
@@ -561,7 +561,7 @@ class SlideDeck:
             Summary of the slide deck
         """
         return f"SlideDeck(title={self.title!r}, slides={len(self.slides)})"
-    
+
     def __repr__(self) -> str:
         """Developer-friendly representation of the slide deck.
         

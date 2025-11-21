@@ -38,7 +38,7 @@ def get_config_path(filename: str) -> Path:
     cwd_config_path = Path.cwd() / "config" / filename
     if cwd_config_path.exists():
         return cwd_config_path
-    
+
     # Fall back to relative path (local development)
     current_file = Path(__file__)
     project_root = current_file.parent.parent.parent
