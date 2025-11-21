@@ -83,10 +83,10 @@ def update_prompts_config(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=result.error,
             )
-        
+
         # TODO: Get actual user from authentication
         user = "system"
-        
+
         config = service.update_prompts_config(
             profile_id=profile_id,
             system_prompt=request.system_prompt,

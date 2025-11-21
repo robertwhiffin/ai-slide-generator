@@ -48,14 +48,14 @@ def check_genie_config():
     Check if Genie space is configured.
     Skip tests if not configured properly.
     """
-    from src.config.settings import get_settings
+    from src.config.settings_db import get_settings
 
     try:
         settings = get_settings()
-        space_id = settings.genie.space_id
+        space_id = settings.genie_space_id
 
         if not space_id or space_id == "01234567-89ab-cdef-0123-456789abcdef":
-            pytest.skip("Genie space not configured. Update config/config.yaml with real space_id")
+            pytest.skip("Genie space not configured. Set GENIE_SPACE_ID or create a profile")
 
         return space_id
 

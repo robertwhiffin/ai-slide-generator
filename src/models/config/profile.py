@@ -9,9 +9,9 @@ from src.config.database import Base
 
 class ConfigProfile(Base):
     """Configuration profile."""
-    
+
     __tablename__ = "config_profiles"
-    
+
     id = Column(Integer, primary_key=True)
     name = Column(String(100), nullable=False, unique=True, index=True)
     description = Column(Text)
@@ -20,16 +20,16 @@ class ConfigProfile(Base):
     created_by = Column(String(255))
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
     updated_by = Column(String(255))
-    
+
     # Relationships
     ai_infra = relationship("ConfigAIInfra", back_populates="profile", uselist=False, cascade="all, delete-orphan")
     genie_spaces = relationship("ConfigGenieSpace", back_populates="profile", cascade="all, delete-orphan")
     mlflow = relationship("ConfigMLflow", back_populates="profile", uselist=False, cascade="all, delete-orphan")
     prompts = relationship("ConfigPrompts", back_populates="profile", uselist=False, cascade="all, delete-orphan")
     history = relationship("ConfigHistory", back_populates="profile", cascade="all, delete-orphan")
-    
+
     # Note: single_default_profile constraint handled in migration
-    
+
     def __repr__(self):
         return f"<ConfigProfile(id={self.id}, name='{self.name}', is_default={self.is_default})>"
 

@@ -6,7 +6,6 @@ deployed to Databricks serving endpoints.
 """
 
 import os
-from typing import Any
 
 import mlflow
 import pandas as pd
@@ -261,7 +260,7 @@ def test_model_locally(model_uri: str, test_questions: list[str]) -> None:
 
         try:
             result = model.predict(input_df)
-            print(f"✅ Success!")
+            print("✅ Success!")
             print(f"  Slides: {result['slide_count'].iloc[0]}")
             print(f"  HTML Length: {len(result['html'].iloc[0])} chars")
             print(f"  Trace: {result['trace_url'].iloc[0]}")

@@ -53,7 +53,7 @@ class ChatRequest(BaseModel):
         slide_context: Optional context for slide editing
         # session_id: Optional[str] = None  # For Phase 4
     """
-    
+
     message: str = Field(
         ...,
         description="Natural language message to the AI agent",
@@ -70,10 +70,10 @@ class ChatRequest(BaseModel):
         default=None,
         description="Optional context containing the slides to edit",
     )
-    
+
     class Config:
         """Pydantic model configuration."""
-        
+
         json_schema_extra = {
             "example": {
                 "message": "Create slides about Q3 sales performance",

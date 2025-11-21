@@ -16,14 +16,14 @@ from src.models.config import (
 
 class ProfileService:
     """Manage configuration profiles."""
-    
+
     def __init__(self, db: Session):
         self.db = db
-    
+
     def list_profiles(self) -> List[ConfigProfile]:
         """Get all profiles."""
         return self.db.query(ConfigProfile).order_by(ConfigProfile.name).all()
-    
+
     def get_profile(self, profile_id: int) -> Optional[ConfigProfile]:
         """
         Get profile with all configurations.
@@ -45,7 +45,7 @@ class ProfileService:
             .filter(ConfigProfile.id == profile_id)
             .first()
         )
-    
+
     def get_default_profile(self) -> Optional[ConfigProfile]:
         """Get default profile."""
         return (
@@ -59,7 +59,7 @@ class ProfileService:
             .filter(ConfigProfile.is_default == True)
             .first()
         )
-    
+
     def create_profile(
         self,
         name: str,
@@ -89,13 +89,13 @@ class ProfileService:
         )
         self.db.add(profile)
         self.db.flush()
-        
+
         if copy_from_id:
             # Copy from existing profile
             source_profile = self.get_profile(copy_from_id)
             if not source_profile:
                 raise ValueError(f"Source profile {copy_from_id} not found")
-            
+
             # Copy AI infra
             ai_infra = ConfigAIInfra(
                 profile_id=profile.id,
@@ -104,7 +104,7 @@ class ProfileService:
                 llm_max_tokens=source_profile.ai_infra.llm_max_tokens,
             )
             self.db.add(ai_infra)
-            
+
             # Copy Genie space (only one per profile)
             if source_profile.genie_spaces:
                 # Copy the first (and only) genie space
@@ -116,14 +116,14 @@ class ProfileService:
                     description=space.description,
                 )
                 self.db.add(new_space)
-            
+
             # Copy MLflow
             mlflow = ConfigMLflow(
                 profile_id=profile.id,
                 experiment_name=source_profile.mlflow.experiment_name,
             )
             self.db.add(mlflow)
-            
+
             # Copy prompts
             prompts = ConfigPrompts(
                 profile_id=profile.id,
@@ -141,7 +141,7 @@ class ProfileService:
                 llm_max_tokens=DEFAULT_CONFIG["llm"]["max_tokens"],
             )
             self.db.add(ai_infra)
-            
+
             genie_space = ConfigGenieSpace(
                 profile_id=profile.id,
                 space_id=DEFAULT_CONFIG["genie"]["space_id"],
@@ -149,13 +149,13 @@ class ProfileService:
                 description=DEFAULT_CONFIG["genie"]["description"],
             )
             self.db.add(genie_space)
-            
+
             mlflow = ConfigMLflow(
                 profile_id=profile.id,
                 experiment_name=DEFAULT_CONFIG["mlflow"]["experiment_name"],
             )
             self.db.add(mlflow)
-            
+
             prompts = ConfigPrompts(
                 profile_id=profile.id,
                 system_prompt=DEFAULT_CONFIG["prompts"]["system_prompt"],
@@ -163,7 +163,7 @@ class ProfileService:
                 user_prompt_template=DEFAULT_CONFIG["prompts"]["user_prompt_template"],
             )
             self.db.add(prompts)
-        
+
         # Log creation
         history = ConfigHistory(
             profile_id=profile.id,
@@ -173,12 +173,12 @@ class ProfileService:
             changes={"name": {"old": None, "new": name}},
         )
         self.db.add(history)
-        
+
         self.db.commit()
         self.db.refresh(profile)
-        
+
         return profile
-    
+
     def update_profile(
         self,
         profile_id: int,
@@ -190,20 +190,20 @@ class ProfileService:
         profile = self.get_profile(profile_id)
         if not profile:
             raise ValueError(f"Profile {profile_id} not found")
-        
+
         changes = {}
-        
+
         if name and name != profile.name:
             changes["name"] = {"old": profile.name, "new": name}
             profile.name = name
-        
+
         if description is not None and description != profile.description:
             changes["description"] = {"old": profile.description, "new": description}
             profile.description = description
-        
+
         if changes:
             profile.updated_by = user
-            
+
             history = ConfigHistory(
                 profile_id=profile.id,
                 domain="profile",
@@ -212,12 +212,12 @@ class ProfileService:
                 changes=changes,
             )
             self.db.add(history)
-        
+
         self.db.commit()
         self.db.refresh(profile)
-        
+
         return profile
-    
+
     def delete_profile(self, profile_id: int, user: str) -> None:
         """
         Delete profile.
@@ -232,10 +232,10 @@ class ProfileService:
         profile = self.get_profile(profile_id)
         if not profile:
             raise ValueError(f"Profile {profile_id} not found")
-        
+
         if profile.is_default:
             raise ValueError("Cannot delete default profile")
-        
+
         # Log deletion before deleting
         history = ConfigHistory(
             profile_id=profile.id,
@@ -246,10 +246,10 @@ class ProfileService:
         )
         self.db.add(history)
         self.db.flush()
-        
+
         self.db.delete(profile)
         self.db.commit()
-    
+
     def set_default_profile(self, profile_id: int, user: str) -> ConfigProfile:
         """
         Mark profile as default.
@@ -264,19 +264,19 @@ class ProfileService:
         profile = self.get_profile(profile_id)
         if not profile:
             raise ValueError(f"Profile {profile_id} not found")
-        
+
         if profile.is_default:
             return profile  # Already default
-        
+
         # Unmark other default profiles
         self.db.query(ConfigProfile).filter(
             ConfigProfile.is_default == True
         ).update({"is_default": False})
-        
+
         # Mark this as default
         profile.is_default = True
         profile.updated_by = user
-        
+
         history = ConfigHistory(
             profile_id=profile.id,
             domain="profile",
@@ -285,12 +285,12 @@ class ProfileService:
             changes={"is_default": {"old": False, "new": True}},
         )
         self.db.add(history)
-        
+
         self.db.commit()
         self.db.refresh(profile)
-        
+
         return profile
-    
+
     def duplicate_profile(
         self,
         profile_id: int,

@@ -49,10 +49,10 @@ def list_available_genie_spaces():
     try:
         client = get_databricks_client()
         spaces_data = {}
-        
+
         # Initial request
         response = client.genie.list_spaces()
-        
+
         # Collect spaces from first page
         if response.spaces:
             for space in response.spaces:
@@ -60,7 +60,7 @@ def list_available_genie_spaces():
                     "title": space.title,
                     "description": space.description or "",
                 }
-        
+
         # Handle pagination
         while response.next_page_token:
             response = client.genie.list_spaces(page_token=response.next_page_token)
@@ -70,16 +70,16 @@ def list_available_genie_spaces():
                         "title": space.title,
                         "description": space.description or "",
                     }
-        
+
         # Sort titles alphabetically
         sorted_titles = sorted([details["title"] for details in spaces_data.values()])
-        
+
         logger.info(f"Found {len(spaces_data)} available Genie spaces")
         return {
             "spaces": spaces_data,
             "sorted_titles": sorted_titles,
         }
-        
+
     except Exception as e:
         logger.error(f"Error listing available Genie spaces: {e}", exc_info=True)
         raise HTTPException(
@@ -156,10 +156,10 @@ def add_genie_space(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=result.message,
             )
-        
+
         # TODO: Get actual user from authentication
         user = "system"
-        
+
         space = service.add_genie_space(
             profile_id=profile_id,
             space_id=request.space_id,
@@ -206,7 +206,7 @@ def update_genie_space(
     try:
         # TODO: Get actual user from authentication
         user = "system"
-        
+
         space = service.update_genie_space(
             space_id=space_id,
             space_name=request.space_name,
@@ -244,7 +244,7 @@ def delete_genie_space(
     try:
         # TODO: Get actual user from authentication
         user = "system"
-        
+
         service.delete_genie_space(space_id=space_id, user=user)
     except ValueError as e:
         raise HTTPException(

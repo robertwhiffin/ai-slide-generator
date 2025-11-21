@@ -9,7 +9,6 @@ import time
 from typing import Any, Optional
 
 import pandas as pd
-from databricks.sdk import WorkspaceClient
 
 from src.config.client import get_databricks_client
 from src.config.settings_db import get_settings
@@ -49,7 +48,7 @@ def initialize_genie_conversation(
     client = get_databricks_client()
     settings = get_settings()
     space_id = settings.genie.space_id
-    
+
     # Log with safe attribute access
     extra_info = {
         "space_id": space_id,
@@ -60,7 +59,7 @@ def initialize_genie_conversation(
         extra_info['profile_id'] = settings.profile_id
     if hasattr(settings, 'profile_name'):
         extra_info['profile_name'] = settings.profile_name
-    
+
     logger.info("Initializing Genie conversation", extra=extra_info)
 
     try:
@@ -68,7 +67,7 @@ def initialize_genie_conversation(
             space_id=space_id, content=placeholder_message
         )
         conversation_id = response.conversation_id
-        
+
         logger.info(
             "Initialized Genie conversation",
             extra={
@@ -76,7 +75,7 @@ def initialize_genie_conversation(
                 "space_id": space_id,
             },
         )
-        
+
         return conversation_id
 
     except Exception as e:
@@ -116,7 +115,7 @@ def query_genie_space(
     client = get_databricks_client()
     settings = get_settings()
     space_id = settings.genie.space_id
-    
+
     # Log with safe attribute access
     extra_info = {
         "space_id": space_id,
@@ -128,7 +127,7 @@ def query_genie_space(
         extra_info['profile_id'] = settings.profile_id
     if hasattr(settings, 'profile_name'):
         extra_info['profile_name'] = settings.profile_name
-    
+
     logger.info("Querying Genie space", extra=extra_info)
 
     attempt = 0

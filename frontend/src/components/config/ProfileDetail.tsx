@@ -13,7 +13,6 @@ import React, { useEffect, useState } from 'react';
 import type { ProfileDetail } from '../../api/config';
 import { configApi, ConfigApiError } from '../../api/config';
 import { ConfigTabs } from './ConfigTabs';
-import { ValidationButton } from './ValidationButton';
 
 type ViewMode = 'view' | 'edit';
 
@@ -247,11 +246,6 @@ export const ProfileDetailView: React.FC<ProfileDetailProps> = ({ profileId, onC
                     <div className="flex items-center justify-between mb-2">
                       <div className="flex items-center gap-2">
                         <span className="font-medium text-gray-900">{space.space_name}</span>
-                        {space.is_default && (
-                          <span className="px-2 py-0.5 bg-green-100 text-green-700 text-xs rounded">
-                            Default
-                          </span>
-                        )}
                       </div>
                     </div>
                     <div className="text-sm text-gray-600">
@@ -303,19 +297,6 @@ export const ProfileDetailView: React.FC<ProfileDetailProps> = ({ profileId, onC
                   {profile.prompts.user_prompt_template}
                 </pre>
               </div>
-            </div>
-          </div>
-
-          {/* Validation */}
-          <div className="mb-6">
-            <h3 className="text-lg font-semibold text-gray-900 mb-3 flex items-center gap-2">
-              <span className="text-purple-600">🧪</span> Configuration Validation
-            </h3>
-            <div className="bg-purple-50 rounded p-4">
-              <p className="text-sm text-gray-600 mb-4">
-                Test this profile's configuration to ensure all components are working correctly.
-              </p>
-              <ValidationButton profileId={profile.id} profileName={profile.name} />
             </div>
           </div>
 

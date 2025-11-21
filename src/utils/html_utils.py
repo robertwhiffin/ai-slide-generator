@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from typing import Iterable, List
+from typing import List
 
 from bs4 import BeautifulSoup
 

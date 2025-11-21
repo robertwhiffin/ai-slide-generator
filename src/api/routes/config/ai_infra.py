@@ -76,12 +76,12 @@ def update_ai_infra_config(
         if request.llm_endpoint or request.llm_temperature is not None or request.llm_max_tokens is not None:
             # Get current config for validation
             current = service.get_ai_infra_config(profile_id)
-            
+
             # Use current values if not provided in request
             endpoint = request.llm_endpoint or current.llm_endpoint
             temperature = request.llm_temperature if request.llm_temperature is not None else current.llm_temperature
             max_tokens = request.llm_max_tokens if request.llm_max_tokens is not None else current.llm_max_tokens
-            
+
             # Validate
             validator = ConfigValidator()
             result = validator.validate_ai_infra(endpoint, temperature, max_tokens)
@@ -90,10 +90,10 @@ def update_ai_infra_config(
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail=result.error,
                 )
-        
+
         # TODO: Get actual user from authentication
         user = "system"
-        
+
         config = service.update_ai_infra_config(
             profile_id=profile_id,
             llm_endpoint=request.llm_endpoint,

@@ -80,10 +80,10 @@ def update_mlflow_config(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=result.error,
             )
-        
+
         # TODO: Get actual user from authentication
         user = "system"
-        
+
         config = service.update_mlflow_config(
             profile_id=profile_id,
             experiment_name=request.experiment_name,

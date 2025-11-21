@@ -34,7 +34,7 @@ def clear_settings_cache():
 
     This ensures each test gets fresh settings.
     """
-    from src.config.settings import get_settings
+    from src.config.settings_db import get_settings
 
     get_settings.cache_clear()
     yield

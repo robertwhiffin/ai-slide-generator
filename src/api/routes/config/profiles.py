@@ -12,7 +12,7 @@ from src.api.models.config import (
     ProfileSummary,
     ProfileUpdate,
 )
-from src.api.services.chat_service import get_chat_service, ChatService
+from src.api.services.chat_service import ChatService, get_chat_service
 from src.config.database import get_db
 from src.services.config import ProfileService
 
@@ -130,7 +130,7 @@ def create_profile(
     try:
         # TODO: Get actual user from authentication
         user = "system"
-        
+
         profile = service.create_profile(
             name=request.name,
             description=request.description,
@@ -174,7 +174,7 @@ def update_profile(
     try:
         # TODO: Get actual user from authentication
         user = "system"
-        
+
         profile = service.update_profile(
             profile_id=profile_id,
             name=request.name,
@@ -213,7 +213,7 @@ def delete_profile(
     try:
         # TODO: Get actual user from authentication
         user = "system"
-        
+
         service.delete_profile(profile_id=profile_id, user=user)
     except ValueError as e:
         error_msg = str(e).lower()
@@ -260,7 +260,7 @@ def set_default_profile(
     try:
         # TODO: Get actual user from authentication
         user = "system"
-        
+
         profile = service.set_default_profile(profile_id=profile_id, user=user)
         return profile
     except ValueError as e:
@@ -299,7 +299,7 @@ def duplicate_profile(
     try:
         # TODO: Get actual user from authentication
         user = "system"
-        
+
         profile = service.duplicate_profile(
             profile_id=profile_id,
             new_name=request.new_name,
@@ -350,22 +350,22 @@ def load_profile(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"Profile {profile_id} not found",
             )
-        
+
         logger.info(
             "Loading profile configuration",
             extra={"profile_id": profile_id, "profile_name": profile.name},
         )
-        
+
         # Reload agent with new profile
         result = chat_service.reload_agent(profile_id)
-        
+
         logger.info(
             "Profile loaded successfully",
             extra={"profile_id": profile_id, "profile_name": profile.name},
         )
-        
+
         return result
-        
+
     except HTTPException:
         raise
     except Exception as e:
@@ -404,16 +404,16 @@ def reload_configuration(
             "Reloading configuration",
             extra={"profile_id": profile_id or "default"},
         )
-        
+
         result = chat_service.reload_agent(profile_id)
-        
+
         logger.info(
             "Configuration reloaded successfully",
             extra={"profile_id": result["profile_id"]},
         )
-        
+
         return result
-        
+
     except Exception as e:
         logger.error(f"Error reloading configuration: {e}", exc_info=True)
         raise HTTPException(

@@ -21,7 +21,6 @@ from src.api.routes.config import (
     mlflow_router,
     profiles_router,
     prompts_router,
-    validation_router,
 )
 
 logger = logging.getLogger(__name__)
@@ -72,9 +71,6 @@ app.include_router(chat.router)
 app.include_router(slides.router)
 
 # Configuration management routers
-# Note: validation_router must come before profiles_router to avoid route conflicts
-# (validation routes would otherwise match the /{profile_id} pattern)
-app.include_router(validation_router, prefix="/api/config", tags=["config"])
 app.include_router(profiles_router, prefix="/api/config", tags=["config"])
 app.include_router(ai_infra_router, prefix="/api/config", tags=["config"])
 app.include_router(genie_router, prefix="/api/config", tags=["config"])

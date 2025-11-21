@@ -121,7 +121,7 @@ class TestLoadPrompts:
 
     def test_load_prompts_missing_required_prompts(self):
         """Test error when required prompts are missing."""
-        incomplete_prompts = {"system_prompt": "test"}
+        incomplete_prompts = {"other_key": "test"}  # Missing system_prompt
 
         with patch("src.config.loader.load_yaml_file", return_value=incomplete_prompts):
             with pytest.raises(ConfigurationError, match="Missing required prompts"):
@@ -129,13 +129,8 @@ class TestLoadPrompts:
 
     def test_load_prompts_validates_all_required(self, sample_prompts: dict):
         """Test all required prompts are validated."""
-        required = [
-            "system_prompt",
-            "intent_analysis",
-            "data_interpretation",
-            "narrative_construction",
-            "html_generation",
-        ]
+        # Only system_prompt is required now
+        required = ["system_prompt"]
 
         for prompt_key in required:
             incomplete_prompts = sample_prompts.copy()

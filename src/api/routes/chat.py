@@ -40,21 +40,21 @@ async def send_message(request: ChatRequest) -> ChatResponse:
             "max_slides": request.max_slides,
         },
     )
-    
+
     try:
         # Get service instance (Phase 1: global singleton)
         chat_service = get_chat_service()
-        
+
         # Process message
         result = chat_service.send_message(
             message=request.message,
             max_slides=request.max_slides,
             slide_context=request.slide_context.model_dump() if request.slide_context else None,
         )
-        
+
         # Return response
         return ChatResponse(**result)
-        
+
     except Exception as e:
         logger.error(f"Chat request failed: {e}", exc_info=True)
         raise HTTPException(

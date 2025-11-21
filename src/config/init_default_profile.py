@@ -42,7 +42,7 @@ def init_default_profile() -> None:
         Exception: If profile creation fails
     """
     logger.info("Initializing default profile from YAML configuration")
-    
+
     try:
         # Load YAML configuration
         try:
@@ -57,7 +57,7 @@ def init_default_profile() -> None:
                 "slide_editing_instructions": DEFAULT_CONFIG["prompts"]["slide_editing_instructions"],
                 "user_prompt_template": DEFAULT_CONFIG["prompts"]["user_prompt_template"],
             }
-        
+
         with get_db_session() as db:
             # Check if default profile already exists
             existing = db.query(ConfigProfile).filter_by(name="default").first()
@@ -68,7 +68,7 @@ def init_default_profile() -> None:
                 )
                 print(f"✓ Default profile already exists (ID: {existing.id})")
                 return
-            
+
             # Create default profile
             profile = ConfigProfile(
                 name="default",
@@ -79,9 +79,9 @@ def init_default_profile() -> None:
             )
             db.add(profile)
             db.flush()
-            
+
             logger.info("Created default profile", extra={"profile_id": profile.id})
-            
+
             # Create AI infrastructure config
             ai_infra = ConfigAIInfra(
                 profile_id=profile.id,
@@ -91,7 +91,7 @@ def init_default_profile() -> None:
             )
             db.add(ai_infra)
             logger.info("Created AI infrastructure config")
-            
+
             # Create Genie space config (one per profile)
             genie_space = ConfigGenieSpace(
                 profile_id=profile.id,
@@ -101,7 +101,7 @@ def init_default_profile() -> None:
             )
             db.add(genie_space)
             logger.info("Created Genie space config")
-            
+
             # Create MLflow config
             # Get username from Databricks client singleton
             try:
@@ -112,18 +112,18 @@ def init_default_profile() -> None:
                 # Fallback to environment variable if Databricks not available
                 logger.warning(f"Could not get Databricks username: {e}")
                 username = os.getenv("USER", "default_user")
-            
+
             experiment_name = "/Users/{username}/slide-generator-experiments"
             if "{username}" in experiment_name:
                 experiment_name = experiment_name.format(username=username)
-            
+
             mlflow_config = ConfigMLflow(
                 profile_id=profile.id,
                 experiment_name=experiment_name,
             )
             db.add(mlflow_config)
             logger.info("Created MLflow config")
-            
+
             # Create prompts config
             prompts_config = ConfigPrompts(
                 profile_id=profile.id,
@@ -139,9 +139,9 @@ def init_default_profile() -> None:
             )
             db.add(prompts_config)
             logger.info("Created prompts config")
-            
+
             db.commit()
-            
+
             logger.info(
                 "Default profile initialized successfully",
                 extra={
@@ -150,7 +150,7 @@ def init_default_profile() -> None:
                     "genie_space": genie_space.space_name,
                 },
             )
-            
+
             print("\n✓ Default profile initialized successfully")
             print(f"  Profile ID: {profile.id}")
             print(f"  Profile Name: {profile.name}")
@@ -158,7 +158,7 @@ def init_default_profile() -> None:
             print(f"  Genie Space: {genie_space.space_name}")
             print(f"  MLflow Experiment: {mlflow_config.experiment_name}")
             print("\nYou can now start the application with database-backed configuration.")
-            
+
     except Exception as e:
         logger.error(f"Failed to initialize default profile: {e}", exc_info=True)
         print(f"\n✗ Error: {e}")
@@ -168,7 +168,7 @@ def init_default_profile() -> None:
 if __name__ == "__main__":
     print("Initializing default configuration profile...")
     print("This will create a 'default' profile in the database from YAML files.\n")
-    
+
     # Check database connection
     database_url = os.getenv("DATABASE_URL")
     if not database_url:
@@ -176,8 +176,8 @@ if __name__ == "__main__":
         print("Please set DATABASE_URL to your PostgreSQL connection string:")
         print("  export DATABASE_URL='postgresql://user:pass@localhost:5432/ai_slide_generator'")
         sys.exit(1)
-    
+
     print(f"Database: {database_url.split('@')[1] if '@' in database_url else database_url}")
-    
+
     init_default_profile()
 

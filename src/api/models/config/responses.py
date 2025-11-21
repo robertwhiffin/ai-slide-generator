@@ -7,9 +7,9 @@ from pydantic import BaseModel, ConfigDict
 
 class ProfileSummary(BaseModel):
     """Summary view of a profile."""
-    
+
     model_config = ConfigDict(from_attributes=True)
-    
+
     id: int
     name: str
     description: Optional[str]
@@ -22,9 +22,9 @@ class ProfileSummary(BaseModel):
 
 class AIInfraConfig(BaseModel):
     """AI infrastructure configuration."""
-    
+
     model_config = ConfigDict(from_attributes=True)
-    
+
     id: int
     profile_id: int
     llm_endpoint: str
@@ -40,9 +40,9 @@ class GenieSpace(BaseModel):
     
     Each profile has exactly one Genie space.
     """
-    
+
     model_config = ConfigDict(from_attributes=True)
-    
+
     id: int
     profile_id: int
     space_id: str
@@ -54,9 +54,9 @@ class GenieSpace(BaseModel):
 
 class MLflowConfig(BaseModel):
     """MLflow configuration."""
-    
+
     model_config = ConfigDict(from_attributes=True)
-    
+
     id: int
     profile_id: int
     experiment_name: str
@@ -66,9 +66,9 @@ class MLflowConfig(BaseModel):
 
 class PromptsConfig(BaseModel):
     """Prompts configuration."""
-    
+
     model_config = ConfigDict(from_attributes=True)
-    
+
     id: int
     profile_id: int
     system_prompt: str
@@ -80,9 +80,9 @@ class PromptsConfig(BaseModel):
 
 class ProfileDetail(BaseModel):
     """Detailed view of a profile with all configurations."""
-    
+
     model_config = ConfigDict(from_attributes=True)
-    
+
     id: int
     name: str
     description: Optional[str]
@@ -99,9 +99,9 @@ class ProfileDetail(BaseModel):
 
 class ConfigHistoryEntry(BaseModel):
     """Configuration change history entry."""
-    
+
     model_config = ConfigDict(from_attributes=True)
-    
+
     id: int
     profile_id: int
     domain: str
@@ -113,20 +113,20 @@ class ConfigHistoryEntry(BaseModel):
 
 class EndpointsList(BaseModel):
     """List of available serving endpoints."""
-    
+
     endpoints: List[str]
 
 
 class ErrorResponse(BaseModel):
     """Standard error response."""
-    
+
     detail: str
     error_type: Optional[str] = None
 
 
 class ValidationErrorDetail(BaseModel):
     """Validation error detail."""
-    
+
     loc: List[str]
     msg: str
     type: str
@@ -134,6 +134,6 @@ class ValidationErrorDetail(BaseModel):
 
 class ValidationErrorResponse(BaseModel):
     """Validation error response."""
-    
+
     detail: List[ValidationErrorDetail]
 
