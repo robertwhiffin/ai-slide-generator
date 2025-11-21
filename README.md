@@ -4,6 +4,38 @@ A full-stack web application that generates HTML slide decks using LLMs. The sys
 
 **Current Phase**: Phase 7 In Progress - Slide-specific editing UI integrated with backend replacements
 
+---
+
+## 🚀 New Developer? Start Here!
+
+**Get running in 5 minutes** with our quickstart guide:
+
+### Quick Path
+1. **[Quickstart Guide](quickstart/QUICKSTART.md)** - Complete setup in 5 minutes
+2. **[Prerequisites](quickstart/PREREQUISITES.md)** - Detailed installation instructions
+3. **[Troubleshooting](quickstart/TROUBLESHOOTING.md)** - Solutions to common issues
+
+### One-Command Setup
+```bash
+# 1. Copy environment template
+cp .env.example .env
+
+# 2. Edit with your Databricks credentials
+nano .env
+
+# 3. Run automated database setup
+./quickstart/setup_database.sh
+
+# 4. Start the application
+./start_app.sh
+
+# 5. Open http://localhost:3000 and start generating slides!
+```
+
+**Estimated setup time:** 5 minutes ⏱️
+
+---
+
 ## Overview
 
 **Input**: Natural language question (e.g., "Produce a 10-page report on the consumption history of my account")
@@ -332,15 +364,50 @@ tools:
 
 ## Getting Started
 
+**🚀 New to the project?** See our **[Quick Start Guide](quickstart/QUICKSTART.md)** for automated setup in 5 minutes.
+
 ### Prerequisites
 - Python 3.10 or higher
 - PostgreSQL 14+ (for database-backed configuration)
+- Node.js 18+ and npm (for frontend)
 - Databricks workspace with:
   - Model serving endpoint deployed
   - Genie space configured
   - Appropriate API access permissions
 
-### Installation
+**Detailed installation instructions:** [Prerequisites Guide](quickstart/PREREQUISITES.md)
+
+### Quick Installation (Automated)
+
+```bash
+# 1. Clone repository
+git clone <repository-url>
+cd ai-slide-generator
+
+# 2. Copy and configure environment
+cp .env.example .env
+nano .env  # Add your Databricks credentials
+
+# 3. Set up database (automated)
+./quickstart/setup_database.sh
+
+# 4. Start application
+./start_app.sh
+
+# 5. Open http://localhost:3000
+```
+
+**That's it!** The scripts handle:
+- Virtual environment creation
+- Dependency installation
+- Database creation and migrations
+- Default configuration initialization
+- Service startup with health checks
+
+### Manual Installation (Step-by-Step)
+
+<details>
+<summary>Click to expand manual installation steps</summary>
 
 1. **Clone repository:**
    ```bash
@@ -394,8 +461,12 @@ tools:
    **b) Database Setup:**
    ```bash
    # Install PostgreSQL (if not already installed)
-   # macOS: brew install postgresql
-   # Ubuntu: sudo apt-get install postgresql
+   # macOS: brew install postgresql@14
+   # Ubuntu: sudo apt-get install postgresql postgresql-contrib
+   
+   # Start PostgreSQL
+   # macOS: brew services start postgresql@14
+   # Linux: sudo systemctl start postgresql
    
    # Create database
    createdb ai_slide_generator
@@ -414,6 +485,8 @@ tools:
    - Hot-reload without restart
    - Configuration history and audit trail
    - Dynamic profile switching
+
+</details>
 
 ### Running the Application
 
@@ -563,6 +636,16 @@ Use these views to:
 - Distinguish between AI generation issues vs. parsing issues
 - Debug chart rendering problems
 - Inspect CSS and JavaScript
+
+### Troubleshooting
+
+Having issues? Check our comprehensive **[Troubleshooting Guide](quickstart/TROUBLESHOOTING.md)** which covers:
+- Installation problems
+- Database connection issues
+- Databricks authentication errors
+- Frontend/backend startup issues
+- Performance problems
+- And more with specific solutions for each!
 
 ## Development
 
