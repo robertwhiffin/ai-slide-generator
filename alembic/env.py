@@ -6,6 +6,11 @@ from sqlalchemy import engine_from_config, pool
 
 from alembic import context
 
+# Load environment variables from .env file
+from dotenv import load_dotenv
+load_dotenv()
+
+
 # Import all models
 from src.config.database import Base
 from src.models.config import (
