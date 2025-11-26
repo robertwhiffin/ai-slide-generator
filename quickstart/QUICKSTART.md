@@ -41,6 +41,29 @@ sudo systemctl start postgresql
 sudo systemctl enable postgresql
 ```
 
+## Database Architecture
+
+This application uses **PostgreSQL** for local development with a clear path to **Lakebase** (Unity Catalog) for production:
+
+```
+Development          Production
+───────────         ────────────
+PostgreSQL    →     Lakebase
+     ↑                   ↑
+     └── SQLAlchemy ─────┘
+     (no code changes needed)
+```
+
+**Default Profiles:**
+- Profiles are defined in `config/seed_profiles.yaml`
+- Automatically loaded during setup
+- Easy to customize before first run
+
+**Why PostgreSQL?**
+- Multi-user session support
+- State persistence
+- Direct path to Lakebase (same SQLAlchemy code)
+
 ## Setup Steps
 
 ### Step 1: Clone Repository
@@ -71,10 +94,10 @@ chmod +x quickstart/setup_database.sh
 ```
 
 This script will:
-- ✅ Check PostgreSQL is installed and running
-- ✅ Create `ai_slide_generator` database
-- ✅ Run database migrations
-- ✅ Initialize default configuration
+1. Check PostgreSQL is installed and running
+2. Create `ai_slide_generator` database
+3. Apply database schema via Alembic (creates tables)
+4. Load default profiles from `config/seed_profiles.yaml`
 
 ### Step 4: Start Application
 ```bash

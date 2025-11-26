@@ -80,12 +80,11 @@
   position: absolute;
   top: 0;
   left: 0;
-  width: 100%;
-  height: 100%;
+  width: 1280px;
+  height: 720px;
   border: 0;
   background: #ffffff;
-  transform: scale(1);
+  transform: scale(0.18);
   transform-origin: top left;
-  overflow: hidden;
 }
 

@@ -148,15 +148,16 @@ fi
 
 # Run database migrations
 echo -e "${BLUE}➤ Running database migrations...${NC}"
+export DATABASE_URL="postgresql://localhost:5432/$DB_NAME"
 alembic upgrade head
 echo -e "${GREEN}✓ Migrations completed${NC}"
 
-# Initialize default configuration
-echo -e "${BLUE}➤ Initializing default configuration...${NC}"
+# Initialize database with seed profiles from YAML
+echo -e "${BLUE}➤ Initializing database with seed profiles...${NC}"
 if python scripts/init_database.py; then
-    echo -e "${GREEN}✓ Default configuration initialized${NC}"
+    echo -e "${GREEN}✓ Database initialized${NC}"
 else
-    echo -e "${YELLOW}⚠ Configuration initialization skipped (already initialized or error)${NC}"
+    echo -e "${YELLOW}⚠ Configuration initialization skipped (already initialized)${NC}"
 fi
 
 echo ""
