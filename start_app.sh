@@ -21,9 +21,8 @@ cd "$PROJECT_ROOT"
 # Load environment variables from .env file
 if [ -f .env ]; then
     echo -e "${BLUE}🔧 Loading environment variables from .env...${NC}"
-    set -a  # Automatically export all variables
-    source .env
-    set +a  # Disable automatic export
+    # Export variables safely (handles values with spaces)
+    export $(grep -v '^#' .env | grep -v '^$' | xargs -d '\n')
     echo -e "${GREEN}✅ Environment variables loaded${NC}"
 else
     echo -e "${YELLOW}⚠️  No .env file found. Using system environment variables.${NC}"
