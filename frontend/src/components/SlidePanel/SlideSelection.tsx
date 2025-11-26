@@ -36,8 +36,17 @@ export const SlideSelection: React.FC<SlideSelectionProps> = ({
     const cssBlock = slideDeck?.css ? `<style>${slideDeck.css}</style>` : '';
     const externalScripts =
       slideDeck?.external_scripts
-        ?.map(src => `<link rel="preload" as="script" href="${src}">`)
+        ?.map(src => `<script src="${src}"></script>`)
         .join('\n    ') ?? '';
+
+    const inlineScripts = slideDeck?.scripts ? `
+    <script>
+      try {
+        ${slideDeck.scripts}
+      } catch (error) {
+        console.debug('Chart initialization skipped for missing canvas:', error.message);
+      }
+    </script>` : '';
 
     return (slideHtml: string) => `<!DOCTYPE html>
 <html lang="en">
@@ -52,31 +61,19 @@ export const SlideSelection: React.FC<SlideSelectionProps> = ({
       }
       body {
         margin: 0;
-        background: #0f172a;
-        display: flex;
-        align-items: flex-start;
-        justify-content: flex-start;
-        padding: 0;
-        font-family: 'Inter', 'Segoe UI', system-ui, -apple-system, sans-serif;
-      }
-      .preview-wrapper {
         width: 1280px;
         height: 720px;
-        transform: scale(0.18);
-        transform-origin: top left;
-        border-radius: 8px;
-        overflow: hidden;
         background: #ffffff;
+        font-family: 'Inter', 'Segoe UI', system-ui, -apple-system, sans-serif;
       }
     </style>
   </head>
   <body>
-    <div class="preview-wrapper">
-      ${slideHtml}
-    </div>
+    ${slideHtml}
+    ${inlineScripts}
   </body>
 </html>`;
-  }, [slideDeck?.css, slideDeck?.external_scripts]);
+  }, [slideDeck?.css, slideDeck?.external_scripts, slideDeck?.scripts]);
 
   const handleCardClick = (index: number) => {
     toggleSelection(index);
@@ -121,7 +118,6 @@ export const SlideSelection: React.FC<SlideSelectionProps> = ({
                 title={`Slide ${index + 1} preview`}
                 srcDoc={getPreviewDocument(slide.html)}
                 className="slide-preview-frame"
-                sandbox="allow-same-origin"
                 scrolling="no"
               />
             </div>

@@ -69,9 +69,9 @@ export const Message: React.FC<MessageProps> = ({ message }) => {
   const trimmedContent = message.content.trimStart();
   const isHtmlContent =
     message.role === 'assistant' &&
-    (trimmedContent.startsWith('<!DOCTYPE html') ||
-      trimmedContent.startsWith('<div class="slide"') ||
-      trimmedContent.startsWith("<div class='slide'"));
+    (trimmedContent.includes('<!DOCTYPE html') ||
+      trimmedContent.includes('<div class="slide"') ||
+      trimmedContent.includes("<div class='slide'"));
 
   if (isHtmlContent) {
     return renderCollapsibleContent(

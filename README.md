@@ -224,6 +224,34 @@ nano .env
 
 **Note**: Still single-session only. Multi-session support coming in Phase 4.
 
+## Database Architecture
+
+The system uses **PostgreSQL** for local development with a clear migration path to **Lakebase** for production:
+
+```
+Local Development          Production (Future)
+─────────────────         ──────────────────
+PostgreSQL                →    Lakebase (Unity Catalog)
+      ↑                              ↑
+      └──────── SQLAlchemy ──────────┘
+         (Interface Layer - no code changes needed)
+```
+
+**Why PostgreSQL locally?**
+- ✅ Multi-user session management
+- ✅ State persistence across restarts  
+- ✅ Closest local equivalent to Lakebase
+- ✅ **Seamless swap to Lakebase** via SQLAlchemy interface
+
+**Seed Profiles:**
+Default profiles are defined in `config/seed_profiles.yaml` and automatically loaded during database initialization. This makes it easy to:
+- Version control default configurations
+- Share starter profiles across team
+- Customize profiles without code changes
+
+**Production Migration:**
+When ready for production on Databricks, simply update the `DATABASE_URL` to point to Lakebase. No code changes required - SQLAlchemy handles the abstraction.
+
 ## Technologies
 
 ### Backend
@@ -235,8 +263,8 @@ nano .env
 - **MLflow 3.0+**: Experiment tracking, metrics logging, and distributed tracing
 - **FastAPI**: Lightweight, high-performance API framework with auto-generated docs
 - **Pydantic**: Data validation and settings management for type safety
-- **PostgreSQL**: Relational database for configuration management
-- **SQLAlchemy 2.0**: ORM for database models and queries
+- **PostgreSQL**: Relational database for configuration management (local dev)
+- **SQLAlchemy 2.0**: ORM for database models and queries (Lakebase-ready)
 - **Alembic**: Database migration management
 - **BeautifulSoup4**: HTML parsing for slide deck manipulation
 - **lxml**: Fast HTML parser backend for BeautifulSoup
