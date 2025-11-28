@@ -32,7 +32,7 @@ logging.basicConfig(
 )
 
 # Feature flag for two-stage generator
-USE_TWO_STAGE_GENERATOR = os.getenv("USE_TWO_STAGE_GENERATOR", "false").lower() == "true"
+USE_TWO_STAGE_GENERATOR = os.getenv("USE_TWO_STAGE_GENERATOR", "true").lower() == "true"
 
 # Log the feature flag value immediately
 print(f"[ChatService] USE_TWO_STAGE_GENERATOR = {USE_TWO_STAGE_GENERATOR}", flush=True)
