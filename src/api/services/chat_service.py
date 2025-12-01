@@ -183,9 +183,14 @@ class ChatService:
                         )
                         session["genie_conversation_id"] = None
 
-                # Create new agent with new settings
-                new_agent = create_agent()
-                logger.info("Created new agent instance")
+                # Create new agent with new settings (respecting the flag)
+                if USE_TWO_STAGE_GENERATOR:
+                    from src.services.two_stage_generator import create_two_stage_generator
+                    new_agent = create_two_stage_generator()
+                    logger.info("Created new TWO-STAGE agent instance")
+                else:
+                    new_agent = create_agent()
+                    logger.info("Created new STANDARD agent instance")
 
                 # Restore sessions (with cleared Genie conversation IDs)
                 new_agent.sessions = sessions_backup
