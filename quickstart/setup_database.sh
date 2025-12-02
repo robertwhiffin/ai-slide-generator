@@ -24,6 +24,32 @@ cd "$PROJECT_ROOT"
 # Default database name
 DB_NAME="ai_slide_generator"
 
+# Verify Python environment is ready
+echo -e "${BLUE}➤ Checking Python environment...${NC}"
+if [ ! -d ".venv" ]; then
+    echo -e "${RED}✗ Virtual environment not found${NC}"
+    echo ""
+    echo "Please run Python environment setup first:"
+    echo -e "  ${BLUE}./quickstart/create_python_environment.sh${NC}"
+    echo ""
+    exit 1
+fi
+
+# Activate venv
+source .venv/bin/activate
+echo -e "${GREEN}✓ Virtual environment activated${NC}"
+
+# Verify alembic is available
+if ! command -v alembic &> /dev/null; then
+    echo -e "${RED}✗ alembic not found in virtual environment${NC}"
+    echo ""
+    echo "Please run Python environment setup:"
+    echo -e "  ${BLUE}./quickstart/create_python_environment.sh${NC}"
+    echo ""
+    exit 1
+fi
+echo -e "${GREEN}✓ alembic found${NC}"
+
 # Check if PostgreSQL is installed
 echo -e "${BLUE}➤ Checking PostgreSQL installation...${NC}"
 if ! command -v psql &> /dev/null; then
@@ -127,23 +153,6 @@ if [ -f .env ]; then
     fi
 else
     echo -e "${YELLOW}⚠ No .env file found. Please copy .env.example to .env${NC}"
-fi
-
-# Check if virtual environment exists and activate it
-if [ -d ".venv" ]; then
-    echo -e "${BLUE}➤ Activating virtual environment...${NC}"
-    source .venv/bin/activate
-    echo -e "${GREEN}✓ Virtual environment activated${NC}"
-else
-    echo -e "${YELLOW}⚠ Virtual environment not found${NC}"
-    echo -e "${YELLOW}  Please run: python3 -m venv .venv && source .venv/bin/activate${NC}"
-fi
-
-# Check if alembic is installed
-if ! command -v alembic &> /dev/null; then
-    echo -e "${YELLOW}⚠ Alembic not installed. Installing dependencies...${NC}"
-    pip install -r requirements.txt > /dev/null
-    echo -e "${GREEN}✓ Dependencies installed${NC}"
 fi
 
 # Run database migrations
