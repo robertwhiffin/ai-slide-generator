@@ -21,31 +21,57 @@ cd "$PROJECT_ROOT"
 # Load environment variables from .env file
 if [ -f .env ]; then
     echo -e "${BLUE}🔧 Loading environment variables from .env...${NC}"
-    set -a  # Automatically export all variables
+    # Export variables safely (handles values with spaces) - macOS compatible
+    set -a  # automatically export all variables
     source .env
-    set +a  # Disable automatic export
+    set +a  # disable automatic export
     echo -e "${GREEN}✅ Environment variables loaded${NC}"
 else
-    echo -e "${YELLOW}⚠️  No .env file found. Using system environment variables.${NC}"
+    echo -e "${RED}❌ .env file not found${NC}"
+    echo ""
+    echo "Please create .env file:"
+    echo -e "  ${BLUE}cp .env.example .env${NC}"
+    echo -e "  ${BLUE}nano .env${NC}  # Set DATABRICKS_HOST and DATABRICKS_TOKEN"
+    echo ""
+    exit 1
+fi
+
+# Validate required environment variables
+if [ -z "$DATABRICKS_HOST" ] || [ -z "$DATABRICKS_TOKEN" ]; then
+    echo -e "${RED}❌ Missing required environment variables${NC}"
+    echo ""
+    echo "Please ensure .env file contains:"
+    echo "  - DATABRICKS_HOST=https://your-workspace.cloud.databricks.com"
+    echo "  - DATABRICKS_TOKEN=your-token-here"
+    echo ""
+    exit 1
 fi
 
 # Check if .venv exists
 if [ ! -d ".venv" ]; then
-    echo -e "${YELLOW}⚠️  Virtual environment not found. Creating one...${NC}"
-    python3 -m venv .venv
-    echo -e "${GREEN}✅ Virtual environment created${NC}"
+    echo -e "${RED}❌ Virtual environment not found${NC}"
+    echo ""
+    echo "Please run the setup first:"
+    echo -e "  ${BLUE}./quickstart/setup.sh${NC}         # Full setup"
+    echo "  or"
+    echo -e "  ${BLUE}./quickstart/create_python_environment.sh${NC}  # Just Python env"
+    echo ""
+    exit 1
 fi
 
 # Activate virtual environment
 echo -e "${BLUE}🔧 Activating virtual environment...${NC}"
 source .venv/bin/activate
 
-# Check if requirements are installed
+# Verify critical dependencies are installed
 if ! python -c "import fastapi" 2>/dev/null; then
-    echo -e "${YELLOW}⚠️  Dependencies not installed. Installing...${NC}"
-    pip install -r requirements.txt
-    echo -e "${GREEN}✅ Dependencies installed${NC}"
+    echo -e "${RED}❌ Dependencies not properly installed${NC}"
+    echo ""
+    echo "Please run: ${BLUE}./quickstart/create_python_environment.sh${NC}"
+    echo ""
+    exit 1
 fi
+echo -e "${GREEN}✅ Dependencies verified${NC}"
 
 # Set environment variables for development
 export ENVIRONMENT="development"
