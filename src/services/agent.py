@@ -209,8 +209,19 @@ class SlideGeneratorAgent:
             # Query Genie with automatic conversation_id
             result = query_genie_space(query, conversation_id)
 
-            # Return formatted string for LLM (no conversation_id exposed)
-            return f"Data retrieved successfully:\n\n{result['data']}"
+            # Format response for LLM (no conversation_id exposed)
+            response_parts = []
+            
+            if result.get('message'):
+                response_parts.append(f"Genie response: {result['message']}")
+            
+            if result.get('data'):
+                response_parts.append(f"Data retrieved:\n\n{result['data']}")
+            
+            if not response_parts:
+                return "Query completed but no data or message was returned."
+            
+            return "\n\n".join(response_parts)
 
         genie_tool = StructuredTool.from_function(
             func=_query_genie_wrapper,
