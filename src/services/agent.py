@@ -20,10 +20,10 @@ from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.tools import StructuredTool
 from pydantic import BaseModel, Field
 
-from src.config.client import get_databricks_client
+from src.core.databricks_client import get_databricks_client
 
 # Use database-backed settings (Phase 4)
-from src.config.settings_db import get_settings
+from src.core.settings_db import get_settings
 from src.services.tools import initialize_genie_conversation, query_genie_space
 from src.utils.html_utils import extract_canvas_ids_from_script
 
@@ -241,7 +241,7 @@ class SlideGeneratorAgent:
         return [genie_tool]
 
     def _create_prompt(self) -> ChatPromptTemplate:
-        """Create prompt template with system prompt from config and chat history."""
+        """Create prompt template with system prompt from settings and chat history."""
         system_prompt = self.settings.prompts.get("system_prompt", "")
         editing_prompt = self.settings.prompts.get("slide_editing_instructions", "")
 

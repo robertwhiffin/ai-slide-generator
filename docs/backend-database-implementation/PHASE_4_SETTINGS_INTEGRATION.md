@@ -22,38 +22,41 @@
 Replace YAML loading with database loading:
 
 ```python
-from src.config.database import get_db_session
+from src.core.database import get_db_session
 from src.models.config import ConfigProfile, ConfigAIInfra, ConfigGenieSpace, ConfigMLflow, ConfigPrompts
+
 
 class AppSettings(BaseSettings):
     """Application settings loaded from database."""
-    
+
     # Database connection
     database_url: str
-    
+
     # Profile info
     profile_id: int
     profile_name: str
-    
+
     # AI Infrastructure
     llm_endpoint: str
     llm_temperature: float
     llm_max_tokens: int
-    
+
     # Genie
     genie_space_id: str
     genie_space_name: str
     genie_description: Optional[str]
-    
+
     # MLflow
     mlflow_experiment_name: str
-    
+
     # Prompts
     system_prompt: str
     slide_editing_instructions: str
     user_prompt_template: str
 
+
 _settings_cache: Optional[AppSettings] = None
+
 
 def get_settings() -> AppSettings:
     """Get cached settings."""
@@ -62,11 +65,13 @@ def get_settings() -> AppSettings:
         _settings_cache = load_settings_from_database()
     return _settings_cache
 
+
 def reload_settings(profile_id: Optional[int] = None) -> AppSettings:
     """Reload settings from database."""
     global _settings_cache
     _settings_cache = load_settings_from_database(profile_id)
     return _settings_cache
+
 
 def load_settings_from_database(profile_id: Optional[int] = None) -> AppSettings:
     """Load settings from database profile."""
@@ -76,7 +81,7 @@ def load_settings_from_database(profile_id: Optional[int] = None) -> AppSettings
             profile = db.query(ConfigProfile).filter_by(is_default=True).one()
         else:
             profile = db.query(ConfigProfile).filter_by(id=profile_id).one()
-        
+
         # Load all configs
         ai_infra = db.query(ConfigAIInfra).filter_by(profile_id=profile.id).one()
         genie_space = db.query(ConfigGenieSpace).filter_by(
@@ -85,7 +90,7 @@ def load_settings_from_database(profile_id: Optional[int] = None) -> AppSettings
         ).one()
         mlflow = db.query(ConfigMLflow).filter_by(profile_id=profile.id).one()
         prompts = db.query(ConfigPrompts).filter_by(profile_id=profile.id).one()
-        
+
         return AppSettings(
             database_url=os.getenv("DATABASE_URL"),
             profile_id=profile.id,

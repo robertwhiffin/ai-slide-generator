@@ -1,11 +1,11 @@
-"""Test configuration models."""
+"""Test configuration schemas."""
 import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import sessionmaker
 
-from src.config.database import Base
-from src.models.config import (
+from src.core.database import Base
+from src.database.models import (
     ConfigAIInfra,
     ConfigGenieSpace,
     ConfigMLflow,
@@ -90,7 +90,7 @@ def test_cascade_delete(db_session):
     db_session.add(ai_infra)
     db_session.commit()
     
-    # Verify AI infra exists and is linked to profile
+    # Verify AI db_app_deployment exists and is linked to profile
     saved_infra = db_session.query(ConfigAIInfra).filter_by(profile_id=profile_id).first()
     assert saved_infra is not None
     assert saved_infra.profile_id == profile_id
@@ -239,7 +239,7 @@ def test_complete_profile_with_all_configs(db_session):
     )
     db_session.add(genie_space)
     
-    # Add MLflow config
+    # Add MLflow settings
     mlflow = ConfigMLflow(
         profile_id=profile.id,
         experiment_name="/Users/test/experiment",

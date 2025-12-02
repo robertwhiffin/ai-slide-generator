@@ -110,11 +110,11 @@ from src.api.routes.config import (
     prompts_router,
 )
 
-app.include_router(profiles_router, prefix="/api/config", tags=["config"])
-app.include_router(ai_infra_router, prefix="/api/config", tags=["config"])
-app.include_router(genie_router, prefix="/api/config", tags=["config"])
-app.include_router(mlflow_router, prefix="/api/config", tags=["config"])
-app.include_router(prompts_router, prefix="/api/config", tags=["config"])
+app.include_router(profiles_router, prefix="/api/settings", tags=["settings"])
+app.include_router(ai_infra_router, prefix="/api/settings", tags=["settings"])
+app.include_router(genie_router, prefix="/api/settings", tags=["settings"])
+app.include_router(mlflow_router, prefix="/api/settings", tags=["settings"])
+app.include_router(prompts_router, prefix="/api/settings", tags=["settings"])
 ```
 
 ## Testing
@@ -125,7 +125,7 @@ Create integration tests for all endpoints:
 # tests/integration/test_config_api.py
 
 def test_list_profiles(client):
-    response = client.get("/api/config/profiles")
+    response = client.get("/api/settings/profiles")
     assert response.status_code == 200
     assert isinstance(response.json(), list)
 
@@ -135,7 +135,7 @@ def test_create_profile(client):
         "description": "Test",
         "copy_from_profile_id": null
     }
-    response = client.post("/api/config/profiles", json=data)
+    response = client.post("/api/settings/profiles", json=data)
     assert response.status_code == 201
     assert response.json()["name"] == "test-profile"
 

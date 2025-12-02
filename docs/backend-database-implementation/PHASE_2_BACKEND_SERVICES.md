@@ -48,19 +48,19 @@ from src.models.config import (
     ConfigPrompts,
     ConfigHistory,
 )
-from src.config.defaults import DEFAULT_CONFIG
+from src.core.defaults import DEFAULT_CONFIG
 
 
 class ProfileService:
     """Manage configuration profiles."""
-    
+
     def __init__(self, db: Session):
         self.db = db
-    
+
     def list_profiles(self) -> List[ConfigProfile]:
         """Get all profiles."""
         return self.db.query(ConfigProfile).order_by(ConfigProfile.name).all()
-    
+
     def get_profile(self, profile_id: int) -> Optional[ConfigProfile]:
         """
         Get profile with all configurations.
@@ -82,7 +82,7 @@ class ProfileService:
             .filter(ConfigProfile.id == profile_id)
             .first()
         )
-    
+
     def get_default_profile(self) -> Optional[ConfigProfile]:
         """Get default profile."""
         return (
@@ -96,13 +96,13 @@ class ProfileService:
             .filter(ConfigProfile.is_default == True)
             .first()
         )
-    
+
     def create_profile(
-        self,
-        name: str,
-        description: Optional[str],
-        copy_from_id: Optional[int],
-        user: str,
+            self,
+            name: str,
+            description: Optional[str],
+            copy_from_id: Optional[int],
+            user: str,
     ) -> ConfigProfile:
         """
         Create new profile.
@@ -126,14 +126,14 @@ class ProfileService:
         )
         self.db.add(profile)
         self.db.flush()
-        
+
         if copy_from_id:
             # Copy from existing profile
             source_profile = self.get_profile(copy_from_id)
             if not source_profile:
                 raise ValueError(f"Source profile {copy_from_id} not found")
-            
-            # Copy AI infra
+
+            # Copy AI db_app_deployment
             ai_infra = ConfigAIInfra(
                 profile_id=profile.id,
                 llm_endpoint=source_profile.ai_infra.llm_endpoint,
@@ -141,7 +141,7 @@ class ProfileService:
                 llm_max_tokens=source_profile.ai_infra.llm_max_tokens,
             )
             self.db.add(ai_infra)
-            
+
             # Copy Genie spaces
             for space in source_profile.genie_spaces:
                 new_space = ConfigGenieSpace(
@@ -152,14 +152,14 @@ class ProfileService:
                     is_default=space.is_default,
                 )
                 self.db.add(new_space)
-            
+
             # Copy MLflow
             mlflow = ConfigMLflow(
                 profile_id=profile.id,
                 experiment_name=source_profile.mlflow.experiment_name,
             )
             self.db.add(mlflow)
-            
+
             # Copy prompts
             prompts = ConfigPrompts(
                 profile_id=profile.id,
@@ -177,7 +177,7 @@ class ProfileService:
                 llm_max_tokens=DEFAULT_CONFIG["llm"]["max_tokens"],
             )
             self.db.add(ai_infra)
-            
+
             genie_space = ConfigGenieSpace(
                 profile_id=profile.id,
                 space_id=DEFAULT_CONFIG["genie"]["space_id"],
@@ -186,13 +186,13 @@ class ProfileService:
                 is_default=True,
             )
             self.db.add(genie_space)
-            
+
             mlflow = ConfigMLflow(
                 profile_id=profile.id,
                 experiment_name=DEFAULT_CONFIG["mlflow"]["experiment_name"],
             )
             self.db.add(mlflow)
-            
+
             prompts = ConfigPrompts(
                 profile_id=profile.id,
                 system_prompt=DEFAULT_CONFIG["prompts"]["system_prompt"],
@@ -200,7 +200,7 @@ class ProfileService:
                 user_prompt_template=DEFAULT_CONFIG["prompts"]["user_prompt_template"],
             )
             self.db.add(prompts)
-        
+
         # Log creation
         history = ConfigHistory(
             profile_id=profile.id,
@@ -210,37 +210,37 @@ class ProfileService:
             changes={"name": {"old": None, "new": name}},
         )
         self.db.add(history)
-        
+
         self.db.commit()
         self.db.refresh(profile)
-        
+
         return profile
-    
+
     def update_profile(
-        self,
-        profile_id: int,
-        name: Optional[str],
-        description: Optional[str],
-        user: str,
+            self,
+            profile_id: int,
+            name: Optional[str],
+            description: Optional[str],
+            user: str,
     ) -> ConfigProfile:
         """Update profile metadata."""
         profile = self.get_profile(profile_id)
         if not profile:
             raise ValueError(f"Profile {profile_id} not found")
-        
+
         changes = {}
-        
+
         if name and name != profile.name:
             changes["name"] = {"old": profile.name, "new": name}
             profile.name = name
-        
+
         if description is not None and description != profile.description:
             changes["description"] = {"old": profile.description, "new": description}
             profile.description = description
-        
+
         if changes:
             profile.updated_by = user
-            
+
             history = ConfigHistory(
                 profile_id=profile.id,
                 domain="profile",
@@ -249,12 +249,12 @@ class ProfileService:
                 changes=changes,
             )
             self.db.add(history)
-        
+
         self.db.commit()
         self.db.refresh(profile)
-        
+
         return profile
-    
+
     def delete_profile(self, profile_id: int, user: str) -> None:
         """
         Delete profile.
@@ -269,10 +269,10 @@ class ProfileService:
         profile = self.get_profile(profile_id)
         if not profile:
             raise ValueError(f"Profile {profile_id} not found")
-        
+
         if profile.is_default:
             raise ValueError("Cannot delete default profile")
-        
+
         # Log deletion before deleting
         history = ConfigHistory(
             profile_id=profile.id,
@@ -283,10 +283,10 @@ class ProfileService:
         )
         self.db.add(history)
         self.db.flush()
-        
+
         self.db.delete(profile)
         self.db.commit()
-    
+
     def set_default_profile(self, profile_id: int, user: str) -> ConfigProfile:
         """
         Mark profile as default.
@@ -301,19 +301,19 @@ class ProfileService:
         profile = self.get_profile(profile_id)
         if not profile:
             raise ValueError(f"Profile {profile_id} not found")
-        
+
         if profile.is_default:
             return profile  # Already default
-        
+
         # Unmark other default profiles
         self.db.query(ConfigProfile).filter(
             ConfigProfile.is_default == True
         ).update({"is_default": False})
-        
+
         # Mark this as default
         profile.is_default = True
         profile.updated_by = user
-        
+
         history = ConfigHistory(
             profile_id=profile.id,
             domain="profile",
@@ -322,17 +322,17 @@ class ProfileService:
             changes={"is_default": {"old": False, "new": True}},
         )
         self.db.add(history)
-        
+
         self.db.commit()
         self.db.refresh(profile)
-        
+
         return profile
-    
+
     def duplicate_profile(
-        self,
-        profile_id: int,
-        new_name: str,
-        user: str,
+            self,
+            profile_id: int,
+            new_name: str,
+            user: str,
     ) -> ConfigProfile:
         """
         Duplicate profile with new name.
@@ -360,7 +360,7 @@ class ProfileService:
 **File:** `src/services/config/config_service.py`
 
 ```python
-"""Configuration service for managing config within profiles."""
+"""Configuration service for managing settings within profiles."""
 from typing import List
 
 from databricks.sdk import WorkspaceClient
@@ -383,10 +383,10 @@ class ConfigService:
     # AI Infrastructure
     
     def get_ai_infra_config(self, profile_id: int) -> ConfigAIInfra:
-        """Get AI infra config for specific profile."""
+        """Get AI db_app_deployment settings for specific profile."""
         config = self.db.query(ConfigAIInfra).filter_by(profile_id=profile_id).first()
         if not config:
-            raise ValueError(f"AI infra config not found for profile {profile_id}")
+            raise ValueError(f"AI db_app_deployment settings not found for profile {profile_id}")
         return config
     
     def update_ai_infra_config(
@@ -452,10 +452,10 @@ class ConfigService:
     # MLflow
     
     def get_mlflow_config(self, profile_id: int) -> ConfigMLflow:
-        """Get MLflow config for specific profile."""
+        """Get MLflow settings for specific profile."""
         config = self.db.query(ConfigMLflow).filter_by(profile_id=profile_id).first()
         if not config:
-            raise ValueError(f"MLflow config not found for profile {profile_id}")
+            raise ValueError(f"MLflow settings not found for profile {profile_id}")
         return config
     
     def update_mlflow_config(
@@ -491,10 +491,10 @@ class ConfigService:
     # Prompts
     
     def get_prompts_config(self, profile_id: int) -> ConfigPrompts:
-        """Get prompts config for specific profile."""
+        """Get prompts settings for specific profile."""
         config = self.db.query(ConfigPrompts).filter_by(profile_id=profile_id).first()
         if not config:
-            raise ValueError(f"Prompts config not found for profile {profile_id}")
+            raise ValueError(f"Prompts settings not found for profile {profile_id}")
         return config
     
     def update_prompts_config(
@@ -900,15 +900,15 @@ class ConfigValidator:
 """Configuration services."""
 from src.services.config.config_service import ConfigService
 from src.services.config.genie_service import GenieService
-from src.services.config.profile_service import ProfileService
+from src.services.profile_service import ProfileService
 from src.services.config.validator import ConfigValidator, ValidationResult
 
 __all__ = [
-    "ProfileService",
-    "ConfigService",
-    "GenieService",
-    "ConfigValidator",
-    "ValidationResult",
+   "ProfileService",
+   "ConfigService",
+   "GenieService",
+   "ConfigValidator",
+   "ValidationResult",
 ]
 ```
 
@@ -922,7 +922,7 @@ __all__ = [
 """Test configuration services."""
 import pytest
 
-from src.config.database import Base, engine, SessionLocal
+from src.core.database import Base, engine, SessionLocal
 from src.services.config import ProfileService, ConfigService, GenieService, ConfigValidator
 from src.models.config import ConfigProfile
 
@@ -940,14 +940,14 @@ def db_session():
 def test_create_profile_with_defaults(db_session):
     """Test creating profile with default configs."""
     service = ProfileService(db_session)
-    
+
     profile = service.create_profile(
         name="test-profile",
         description="Test",
         copy_from_id=None,
         user="test_user",
     )
-    
+
     assert profile.id is not None
     assert profile.name == "test-profile"
     assert profile.ai_infra is not None
@@ -959,13 +959,13 @@ def test_create_profile_with_defaults(db_session):
 def test_create_profile_copy(db_session):
     """Test creating profile by copying another."""
     service = ProfileService(db_session)
-    
+
     # Create source profile
     source = service.create_profile("source", None, None, "test")
-    
+
     # Copy it
     copy = service.create_profile("copy", "Copy of source", source.id, "test")
-    
+
     assert copy.id != source.id
     assert copy.ai_infra.llm_endpoint == source.ai_infra.llm_endpoint
     assert len(copy.genie_spaces) == len(source.genie_spaces)
@@ -974,34 +974,34 @@ def test_create_profile_copy(db_session):
 def test_set_default_profile(db_session):
     """Test setting default profile."""
     service = ProfileService(db_session)
-    
+
     profile1 = service.create_profile("profile1", None, None, "test")
     profile1.is_default = True
     db_session.commit()
-    
+
     profile2 = service.create_profile("profile2", None, None, "test")
-    
+
     # Set profile2 as default
     service.set_default_profile(profile2.id, "test")
-    
+
     db_session.refresh(profile1)
     assert not profile1.is_default
     assert profile2.is_default
 
 
 def test_update_ai_infra(db_session):
-    """Test updating AI infra config."""
+    """Test updating AI db_app_deployment settings."""
     profile_service = ProfileService(db_session)
     config_service = ConfigService(db_session)
-    
+
     profile = profile_service.create_profile("test", None, None, "test")
-    
+
     updated = config_service.update_ai_infra_config(
         profile_id=profile.id,
         llm_temperature=0.8,
         user="test",
     )
-    
+
     assert float(updated.llm_temperature) == 0.8
 
 
@@ -1009,9 +1009,9 @@ def test_genie_space_management(db_session):
     """Test Genie space CRUD."""
     profile_service = ProfileService(db_session)
     genie_service = GenieService(db_session)
-    
+
     profile = profile_service.create_profile("test", None, None, "test")
-    
+
     # Add space
     space = genie_service.add_genie_space(
         profile_id=profile.id,
@@ -1021,14 +1021,14 @@ def test_genie_space_management(db_session):
         is_default=False,
         user="test",
     )
-    
+
     assert space.id is not None
     assert space.space_name == "Test Space"
-    
+
     # List spaces
     spaces = genie_service.list_genie_spaces(profile.id)
     assert len(spaces) == 2  # Default + new one
-    
+
     # Set as default
     genie_service.set_default_genie_space(space.id, "test")
     db_session.refresh(space)
@@ -1038,27 +1038,27 @@ def test_genie_space_management(db_session):
 def test_validator(db_session):
     """Test configuration validator."""
     validator = ConfigValidator()
-    
+
     # Valid temperature
     result = validator.validate_ai_infra("test-endpoint", 0.7, 1000)
     assert result.valid
-    
+
     # Invalid temperature
     result = validator.validate_ai_infra("test-endpoint", 1.5, 1000)
     assert not result.valid
     assert "Temperature" in result.error
-    
+
     # Invalid max tokens
     result = validator.validate_ai_infra("test-endpoint", 0.7, -100)
     assert not result.valid
-    
+
     # Valid prompts
     result = validator.validate_prompts(
         system_prompt="Test {max_slides}",
         user_prompt_template="{question}",
     )
     assert result.valid
-    
+
     # Missing placeholder
     result = validator.validate_prompts(
         user_prompt_template="No placeholder here",
@@ -1072,12 +1072,12 @@ def test_validator(db_session):
 
 1. **Run unit tests:**
    ```bash
-   pytest tests/unit/config/test_services.py -v
+   pytest tests/unit/settings/test_services.py -v
    ```
 
 2. **Test profile creation:**
    ```python
-   from src.config.database import get_db_session
+   from src.core.database import get_db_session
    from src.services.config import ProfileService
    
    with get_db_session() as db:
@@ -1088,7 +1088,7 @@ def test_validator(db_session):
 
 3. **Test endpoint listing:**
    ```python
-   from src.config.database import get_db_session
+   from src.core.database import get_db_session
    from src.services.config import ConfigService
    
    with get_db_session() as db:

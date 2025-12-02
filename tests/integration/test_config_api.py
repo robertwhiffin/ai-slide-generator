@@ -6,10 +6,10 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from src.api.main import app
-from src.config.database import Base, get_db
-from src.config.defaults import DEFAULT_CONFIG
-# Import models to register them with Base
-from src.models.config import (  # noqa: F401
+from src.core.database import Base, get_db
+from src.core.defaults import DEFAULT_CONFIG
+# Import schemas to register them with Base
+from src.database.models import (  # noqa: F401
     ConfigAIInfra,
     ConfigGenieSpace,
     ConfigHistory,
@@ -99,7 +99,7 @@ def client(test_db):
 def default_profile(client):
     """Create a default profile for testing."""
     response = client.post(
-        "/api/config/profiles",
+        "/api/settings/profiles",
         json={
             "name": "default",
             "description": "Default profile",
@@ -110,7 +110,7 @@ def default_profile(client):
     profile = response.json()
     
     # Set as default
-    response = client.post(f"/api/config/profiles/{profile['id']}/set-default")
+    response = client.post(f"/api/settings/profiles/{profile['id']}/set-default")
     assert response.status_code == 200
     
     return profile
@@ -120,7 +120,7 @@ def default_profile(client):
 
 def test_list_profiles_empty(client):
     """Test listing profiles when none exist."""
-    response = client.get("/api/config/profiles")
+    response = client.get("/api/settings/profiles")
     assert response.status_code == 200
     assert response.json() == []
 
@@ -128,7 +128,7 @@ def test_list_profiles_empty(client):
 def test_create_profile_valid(client):
     """Test creating a profile with valid data."""
     response = client.post(
-        "/api/config/profiles",
+        "/api/settings/profiles",
         json={
             "name": "test-profile",
             "description": "Test description",
@@ -147,7 +147,7 @@ def test_create_profile_valid(client):
 
 def test_get_profile_valid(client, default_profile):
     """Test getting a profile by ID."""
-    response = client.get(f"/api/config/profiles/{default_profile['id']}")
+    response = client.get(f"/api/settings/profiles/{default_profile['id']}")
     assert response.status_code == 200
     data = response.json()
     assert data["id"] == default_profile["id"]
@@ -156,13 +156,13 @@ def test_get_profile_valid(client, default_profile):
 
 def test_get_profile_not_found(client):
     """Test getting non-existent profile."""
-    response = client.get("/api/config/profiles/9999")
+    response = client.get("/api/settings/profiles/9999")
     assert response.status_code == 404
 
 
 def test_get_default_profile_valid(client, default_profile):
     """Test getting default profile."""
-    response = client.get("/api/config/profiles/default")
+    response = client.get("/api/settings/profiles/default")
     assert response.status_code == 200
     data = response.json()
     assert data["is_default"] is True
@@ -172,7 +172,7 @@ def test_get_default_profile_valid(client, default_profile):
 def test_update_profile_valid(client, default_profile):
     """Test updating profile metadata."""
     response = client.put(
-        f"/api/config/profiles/{default_profile['id']}",
+        f"/api/settings/profiles/{default_profile['id']}",
         json={
             "name": "updated-name",
             "description": "Updated description",
@@ -187,7 +187,7 @@ def test_update_profile_valid(client, default_profile):
 def test_duplicate_profile_valid(client, default_profile):
     """Test duplicating a profile."""
     response = client.post(
-        f"/api/config/profiles/{default_profile['id']}/duplicate",
+        f"/api/settings/profiles/{default_profile['id']}/duplicate",
         json={"new_name": "duplicated-profile"}
     )
     assert response.status_code == 201
@@ -200,28 +200,28 @@ def test_delete_profile_valid(client):
     """Test deleting a non-default profile."""
     # Create profile
     response = client.post(
-        "/api/config/profiles",
+        "/api/settings/profiles",
         json={"name": "to-delete", "description": None, "copy_from_profile_id": None}
     )
     assert response.status_code == 201
     profile_id = response.json()["id"]
     
     # Delete it
-    response = client.delete(f"/api/config/profiles/{profile_id}")
+    response = client.delete(f"/api/settings/profiles/{profile_id}")
     assert response.status_code == 204
 
 
 def test_delete_default_profile_forbidden(client, default_profile):
     """Test that deleting default profile is forbidden."""
-    response = client.delete(f"/api/config/profiles/{default_profile['id']}")
+    response = client.delete(f"/api/settings/profiles/{default_profile['id']}")
     assert response.status_code == 403
 
 
 # AI Infrastructure Tests
 
 def test_get_ai_infra_config_valid(client, default_profile):
-    """Test getting AI infrastructure config."""
-    response = client.get(f"/api/config/ai-infra/{default_profile['id']}")
+    """Test getting AI infrastructure settings."""
+    response = client.get(f"/api/settings/ai-db_app_deployment/{default_profile['id']}")
     assert response.status_code == 200
     data = response.json()
     assert "llm_endpoint" in data
@@ -230,7 +230,7 @@ def test_get_ai_infra_config_valid(client, default_profile):
 
 
 def test_update_ai_infra_config_valid(client, default_profile, monkeypatch):
-    """Test updating AI infrastructure config."""
+    """Test updating AI infrastructure settings."""
     # Mock validator to avoid Databricks connection
     from src.services.config.validator import ConfigValidator, ValidationResult
     
@@ -240,7 +240,7 @@ def test_update_ai_infra_config_valid(client, default_profile, monkeypatch):
     monkeypatch.setattr(ConfigValidator, "validate_ai_infra", mock_validate)
     
     response = client.put(
-        f"/api/config/ai-infra/{default_profile['id']}",
+        f"/api/settings/ai-db_app_deployment/{default_profile['id']}",
         json={
             "llm_endpoint": "new-endpoint",
             "llm_temperature": 0.8,
@@ -257,7 +257,7 @@ def test_update_ai_infra_config_valid(client, default_profile, monkeypatch):
 def test_update_ai_infra_config_invalid_temperature(client, default_profile):
     """Test updating with invalid temperature."""
     response = client.put(
-        f"/api/config/ai-infra/{default_profile['id']}",
+        f"/api/settings/ai-db_app_deployment/{default_profile['id']}",
         json={"llm_temperature": 1.5}  # Invalid: > 1.0
     )
     assert response.status_code == 422  # Pydantic validation error
@@ -273,7 +273,7 @@ def test_get_available_endpoints(client, monkeypatch):
     
     monkeypatch.setattr(ConfigService, "get_available_endpoints", mock_get_endpoints)
     
-    response = client.get("/api/config/ai-infra/endpoints/available")
+    response = client.get("/api/settings/ai-db_app_deployment/endpoints/available")
     assert response.status_code == 200
     data = response.json()
     assert "endpoints" in data
@@ -290,7 +290,7 @@ def test_get_genie_space_404_when_none(client, db_session):
     service = ProfileService(db_session)
     profile = service.create_profile("test_no_genie", None, None, "test")
     
-    response = client.get(f"/api/config/genie/{profile.id}")
+    response = client.get(f"/api/settings/genie/{profile.id}")
     assert response.status_code == 404
 
 
@@ -302,7 +302,7 @@ def test_add_genie_space_valid(client, db_session):
     profile = service.create_profile("test_add_genie", None, None, "test")
     
     response = client.post(
-        f"/api/config/genie/{profile.id}",
+        f"/api/settings/genie/{profile.id}",
         json={
             "space_id": "new-space-id",
             "space_name": "New Space",
@@ -318,7 +318,7 @@ def test_add_genie_space_valid(client, db_session):
 
 def test_get_genie_space_valid(client, default_profile):
     """Test getting the Genie space for a profile."""
-    response = client.get(f"/api/config/genie/{default_profile['id']}")
+    response = client.get(f"/api/settings/genie/{default_profile['id']}")
     assert response.status_code == 200
     data = response.json()
     assert isinstance(data, dict)  # Single space, not list
@@ -328,13 +328,13 @@ def test_get_genie_space_valid(client, default_profile):
 def test_update_genie_space_valid(client, default_profile):
     """Test updating the Genie space."""
     # Get existing space
-    response = client.get(f"/api/config/genie/{default_profile['id']}")
+    response = client.get(f"/api/settings/genie/{default_profile['id']}")
     space = response.json()
     space_id = space["id"]
     
     # Update it
     response = client.put(
-        f"/api/config/genie/space/{space_id}",
+        f"/api/settings/genie/space/{space_id}",
         json={
             "space_name": "Updated Space Name",
             "description": "Updated description",
@@ -348,33 +348,33 @@ def test_update_genie_space_valid(client, default_profile):
 def test_delete_genie_space_valid(client, default_profile):
     """Test deleting the Genie space."""
     # Get existing space
-    response = client.get(f"/api/config/genie/{default_profile['id']}")
+    response = client.get(f"/api/settings/genie/{default_profile['id']}")
     space = response.json()
     space_id = space["id"]
     
     # Delete it
-    response = client.delete(f"/api/config/genie/space/{space_id}")
+    response = client.delete(f"/api/settings/genie/space/{space_id}")
     assert response.status_code == 204
     
     # Verify it's gone
-    response = client.get(f"/api/config/genie/{default_profile['id']}")
+    response = client.get(f"/api/settings/genie/{default_profile['id']}")
     assert response.status_code == 404
 
 
 # MLflow Tests
 
 def test_get_mlflow_config_valid(client, default_profile):
-    """Test getting MLflow config."""
-    response = client.get(f"/api/config/mlflow/{default_profile['id']}")
+    """Test getting MLflow settings."""
+    response = client.get(f"/api/settings/mlflow/{default_profile['id']}")
     assert response.status_code == 200
     data = response.json()
     assert "experiment_name" in data
 
 
 def test_update_mlflow_config_valid(client, default_profile):
-    """Test updating MLflow config."""
+    """Test updating MLflow settings."""
     response = client.put(
-        f"/api/config/mlflow/{default_profile['id']}",
+        f"/api/settings/mlflow/{default_profile['id']}",
         json={"experiment_name": "/new/experiment"}
     )
     assert response.status_code == 200
@@ -383,9 +383,9 @@ def test_update_mlflow_config_valid(client, default_profile):
 
 
 def test_update_mlflow_config_invalid(client, default_profile):
-    """Test updating MLflow config with invalid name."""
+    """Test updating MLflow settings with invalid name."""
     response = client.put(
-        f"/api/config/mlflow/{default_profile['id']}",
+        f"/api/settings/mlflow/{default_profile['id']}",
         json={"experiment_name": "no-leading-slash"}
     )
     assert response.status_code == 422  # Pydantic validation error
@@ -394,8 +394,8 @@ def test_update_mlflow_config_invalid(client, default_profile):
 # Prompts Tests
 
 def test_get_prompts_config_valid(client, default_profile):
-    """Test getting prompts config."""
-    response = client.get(f"/api/config/prompts/{default_profile['id']}")
+    """Test getting prompts settings."""
+    response = client.get(f"/api/settings/prompts/{default_profile['id']}")
     assert response.status_code == 200
     data = response.json()
     assert "system_prompt" in data
@@ -404,9 +404,9 @@ def test_get_prompts_config_valid(client, default_profile):
 
 
 def test_update_prompts_config_valid(client, default_profile):
-    """Test updating prompts config."""
+    """Test updating prompts settings."""
     response = client.put(
-        f"/api/config/prompts/{default_profile['id']}",
+        f"/api/settings/prompts/{default_profile['id']}",
         json={
             "system_prompt": "Updated system prompt with {max_slides}",
             "slide_editing_instructions": "Updated instructions",
@@ -422,7 +422,7 @@ def test_update_prompts_config_valid(client, default_profile):
 def test_update_prompts_config_missing_placeholder(client, default_profile):
     """Test updating prompts with missing required placeholder."""
     response = client.put(
-        f"/api/config/prompts/{default_profile['id']}",
+        f"/api/settings/prompts/{default_profile['id']}",
         json={"user_prompt_template": "No placeholder here"}
     )
     assert response.status_code == 422  # Pydantic validation error

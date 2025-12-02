@@ -157,11 +157,11 @@ Successfully implemented REST API endpoints for all configuration management ope
 
 ```python
 # Configuration management routers
-app.include_router(profiles_router, prefix="/api/config", tags=["config"])
-app.include_router(ai_infra_router, prefix="/api/config", tags=["config"])
-app.include_router(genie_router, prefix="/api/config", tags=["config"])
-app.include_router(mlflow_router, prefix="/api/config", tags=["config"])
-app.include_router(prompts_router, prefix="/api/config", tags=["config"])
+app.include_router(profiles_router, prefix="/api/settings", tags=["settings"])
+app.include_router(ai_infra_router, prefix="/api/settings", tags=["settings"])
+app.include_router(genie_router, prefix="/api/settings", tags=["settings"])
+app.include_router(mlflow_router, prefix="/api/settings", tags=["settings"])
+app.include_router(prompts_router, prefix="/api/settings", tags=["settings"])
 ```
 
 ### OpenAPI Documentation
@@ -183,7 +183,7 @@ All endpoints are automatically documented and available at:
 
 ### Create Profile
 ```bash
-POST /api/config/profiles
+POST /api/settings/profiles
 {
   "name": "production",
   "description": "Production configuration",
@@ -193,7 +193,7 @@ POST /api/config/profiles
 
 ### Update AI Infrastructure
 ```bash
-PUT /api/config/ai-infra/1
+PUT /api/settings/ai-db_app_deployment/1
 {
   "llm_endpoint": "databricks-meta-llama-3-1-70b-instruct",
   "llm_temperature": 0.7,
@@ -203,7 +203,7 @@ PUT /api/config/ai-infra/1
 
 ### Add Genie Space
 ```bash
-POST /api/config/genie/1
+POST /api/settings/genie/1
 {
   "space_id": "01j8vh79hfvq9k0cc55t8fmj7y",
   "space_name": "My Data Space",

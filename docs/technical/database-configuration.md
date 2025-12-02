@@ -67,23 +67,25 @@ Default: `postgresql://localhost:5432/ai_slide_generator`
 ### Connection Pooling
 
 ```python
-from src.config.database import engine, SessionLocal, get_db, get_db_session
+from src.core.database import engine, SessionLocal, get_db, get_db_session
 
 # Engine with connection pooling
 engine = create_engine(
     DATABASE_URL,
-    pool_pre_ping=True,      # Verify connections before use
-    pool_size=10,            # Maintain 10 connections
-    max_overflow=20,         # Allow 20 additional connections
+    pool_pre_ping=True,  # Verify connections before use
+    pool_size=10,  # Maintain 10 connections
+    max_overflow=20,  # Allow 20 additional connections
 )
 ```
 
 ### Session Management
 
 **For FastAPI routes:**
+
 ```python
 from fastapi import Depends
-from src.config.database import get_db
+from src.core.database import get_db
+
 
 @app.get("/profiles")
 def list_profiles(db: Session = Depends(get_db)):
@@ -91,8 +93,9 @@ def list_profiles(db: Session = Depends(get_db)):
 ```
 
 **For standalone scripts:**
+
 ```python
-from src.config.database import get_db_session
+from src.core.database import get_db_session
 
 with get_db_session() as db:
     profile = db.query(ConfigProfile).first()
@@ -194,7 +197,7 @@ class ConfigHistory(Base):
     action: str                  # 'create', 'update', 'delete', 'activate'
     changed_by: str              # User who made the change
     changes: dict                # {"field": {"old": "...", "new": "..."}}
-    snapshot: dict | None        # Full config snapshot at time of change
+    snapshot: dict | None        # Full settings snapshot at time of change
     timestamp: datetime
 ```
 
@@ -207,7 +210,8 @@ class ConfigHistory(Base):
 Tables are automatically created from SQLAlchemy models using:
 
 ```python
-from src.config.database import init_db
+from src.core.database import init_db
+
 init_db()  # Creates all tables from Base.metadata
 ```
 
@@ -283,11 +287,11 @@ DEFAULT_CONFIG = {
 Located in `tests/unit/config/test_models.py`:
 
 ```bash
-# Run all config model tests
-pytest tests/unit/config/test_models.py -v
+# Run all settings model tests
+pytest tests/unit/settings/test_models.py -v
 
 # Run specific test
-pytest tests/unit/config/test_models.py::test_create_profile -v
+pytest tests/unit/settings/test_models.py::test_create_profile -v
 ```
 
 **Test Coverage:**

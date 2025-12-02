@@ -9,7 +9,7 @@ from unittest.mock import patch
 import pytest
 import yaml
 
-from src.config.loader import (
+from src.core.config_loader import (
     ConfigurationError,
     get_config_path,
     load_config,
@@ -23,14 +23,14 @@ class TestGetConfigPath:
     """Tests for get_config_path function."""
 
     def test_get_config_path_success(self):
-        """Test getting config path for existing file."""
-        # This test uses the actual config files in the project
-        result = get_config_path("config.yaml")
-        assert result.name == "config.yaml"
+        """Test getting settings path for existing file."""
+        # This test uses the actual settings files in the project
+        result = get_config_path("settings.yaml")
+        assert result.name == "settings.yaml"
         assert result.exists()
 
     def test_get_config_path_file_not_found(self):
-        """Test error when config file doesn't exist."""
+        """Test error when settings file doesn't exist."""
         with pytest.raises(ConfigurationError, match="Configuration file not found"):
             get_config_path("nonexistent.yaml")
 
@@ -86,8 +86,8 @@ class TestLoadConfig:
     """Tests for load_config function."""
 
     def test_load_config_success(self, sample_config: dict):
-        """Test successful config loading."""
-        with patch("src.config.loader.load_yaml_file", return_value=sample_config):
+        """Test successful settings loading."""
+        with patch("src.settings.loader.load_yaml_file", return_value=sample_config):
             result = load_config()
             assert result == sample_config
 
@@ -95,7 +95,7 @@ class TestLoadConfig:
         """Test error when required keys are missing."""
         incomplete_config = {"llm": {}, "genie": {}}
 
-        with patch("src.config.loader.load_yaml_file", return_value=incomplete_config):
+        with patch("src.settings.loader.load_yaml_file", return_value=incomplete_config):
             with pytest.raises(ConfigurationError, match="Missing required configuration sections"):
                 load_config()
 
@@ -105,7 +105,7 @@ class TestLoadConfig:
             incomplete_config = sample_config.copy()
             del incomplete_config[key]
 
-            with patch("src.config.loader.load_yaml_file", return_value=incomplete_config):
+            with patch("src.settings.loader.load_yaml_file", return_value=incomplete_config):
                 with pytest.raises(ConfigurationError, match=f"Missing required.*{key}"):
                     load_config()
 
@@ -115,7 +115,7 @@ class TestLoadPrompts:
 
     def test_load_prompts_success(self, sample_prompts: dict):
         """Test successful prompts loading."""
-        with patch("src.config.loader.load_yaml_file", return_value=sample_prompts):
+        with patch("src.settings.loader.load_yaml_file", return_value=sample_prompts):
             result = load_prompts()
             assert result == sample_prompts
 
@@ -123,7 +123,7 @@ class TestLoadPrompts:
         """Test error when required prompts are missing."""
         incomplete_prompts = {"other_key": "test"}  # Missing system_prompt
 
-        with patch("src.config.loader.load_yaml_file", return_value=incomplete_prompts):
+        with patch("src.settings.loader.load_yaml_file", return_value=incomplete_prompts):
             with pytest.raises(ConfigurationError, match="Missing required prompts"):
                 load_prompts()
 
@@ -136,7 +136,7 @@ class TestLoadPrompts:
             incomplete_prompts = sample_prompts.copy()
             del incomplete_prompts[prompt_key]
 
-            with patch("src.config.loader.load_yaml_file", return_value=incomplete_prompts):
+            with patch("src.settings.loader.load_yaml_file", return_value=incomplete_prompts):
                 with pytest.raises(ConfigurationError, match=f"Missing required.*{prompt_key}"):
                     load_prompts()
 
@@ -171,13 +171,13 @@ class TestMergeWithEnv:
             assert result["api"]["port"] == original_port
 
     def test_merge_no_overrides(self, sample_config: dict):
-        """Test config unchanged when no env vars set."""
+        """Test settings unchanged when no env vars set."""
         with patch.dict(os.environ, {}, clear=True):
             result = merge_with_env(sample_config)
             assert result == sample_config
 
     def test_merge_doesnt_modify_original(self, sample_config: dict):
-        """Test original config is not modified."""
+        """Test original settings is not modified."""
         original = sample_config.copy()
 
         with patch.dict(os.environ, {"API_PORT": "9000"}):

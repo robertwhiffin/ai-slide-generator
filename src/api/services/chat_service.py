@@ -9,8 +9,8 @@ import logging
 import threading
 from typing import Any, Dict, List, Optional
 
-from src.models.slide import Slide
-from src.models.slide_deck import SlideDeck
+from src.domain.slide import Slide
+from src.domain.slide_deck import SlideDeck
 from src.services.agent import create_agent
 from src.utils.html_utils import (
     extract_canvas_ids_from_html,
@@ -116,7 +116,7 @@ class ChatService:
 
                 # Reload settings from database
                 # This will update the settings cache
-                from src.config.settings_db import reload_settings
+                from src.core.settings_db import reload_settings
                 new_settings = reload_settings(profile_id)
                 logger.info(
                     "Loaded new settings",

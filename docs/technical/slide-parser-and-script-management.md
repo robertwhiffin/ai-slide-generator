@@ -27,7 +27,7 @@ The pipeline narrative below focuses on the shared HTML/script path that connect
 ### 2. Backend Parsing & Script Management
 #### 2.1 SlideDeck Parsing
 ```python
-# src/models/slide_deck.py
+# src/schemas/slide_deck.py
 soup = BeautifulSoup(html_content, 'html.parser')
 script_blocks: OrderedDict[str, ScriptBlock] = OrderedDict()
 inline_scripts = soup.find_all('script', src=False)
@@ -63,7 +63,7 @@ def extract_canvas_ids_from_script(script_text: str) -> List[str]:
 
 #### 2.3 Adding & Removing Script Blocks
 ```python
-# src/models/slide_deck.py
+# src/schemas/slide_deck.py
 def remove_canvas_scripts(self, canvas_ids: List[str]) -> None:
     for canvas_id in canvas_ids:
         key = self.canvas_to_script.pop(canvas_id, None)

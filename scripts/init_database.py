@@ -12,8 +12,8 @@ load_dotenv()
 # Add project root to path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from src.config.database import get_db_session, init_db
-from src.models.config import (
+from src.core.database import get_db_session, init_db
+from src.database.models import (
     ConfigAIInfra,
     ConfigGenieSpace,
     ConfigMLflow,
@@ -24,7 +24,7 @@ from src.models.config import (
 
 def load_seed_profiles():
     """Load seed profiles from YAML file."""
-    seed_file = Path(__file__).parent.parent / "config" / "seed_profiles.yaml"
+    seed_file = Path(__file__).parent.parent / "settings" / "seed_profiles.yaml"
     
     if not seed_file.exists():
         raise FileNotFoundError(f"Seed profiles file not found: {seed_file}")
@@ -54,7 +54,7 @@ def initialize_database():
         
         # Get username for MLflow experiment
         try:
-            from src.config.client import get_databricks_client
+            from src.core.databricks_client import get_databricks_client
             client = get_databricks_client()
             username = client.current_user.me().user_name
         except Exception:
@@ -65,7 +65,7 @@ def initialize_database():
             seed_profiles = load_seed_profiles()
         except FileNotFoundError as e:
             print(f"✗ Error: {e}")
-            print("  Please ensure config/seed_profiles.yaml exists")
+            print("  Please ensure settings/seed_profiles.yaml exists")
             sys.exit(1)
         
         if not seed_profiles:
@@ -96,7 +96,7 @@ def initialize_database():
                     llm_max_tokens=ai_config['llm_max_tokens'],
                 )
                 db.add(ai_infra)
-                print(f"  ✓ AI config: {ai_config['llm_endpoint']}")
+                print(f"  ✓ AI settings: {ai_config['llm_endpoint']}")
             
             # Create Genie space
             genie_config = seed.get('genie_space', {})
@@ -110,7 +110,7 @@ def initialize_database():
                 db.add(genie_space)
                 print(f"  ✓ Genie space: {genie_config['space_name']}")
             
-            # Create MLflow config
+            # Create MLflow settings
             mlflow_config = seed.get('mlflow', {})
             if mlflow_config:
                 experiment_name = mlflow_config['experiment_name'].format(username=username)
@@ -131,7 +131,7 @@ def initialize_database():
                     user_prompt_template=prompts_config['user_prompt_template'],
                 )
                 db.add(prompts)
-                print(f"  ✓ Prompts config")
+                print(f"  ✓ Prompts settings")
         
         db.commit()
         print(f"\n✓ Successfully created {len(seed_profiles)} profiles")

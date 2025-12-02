@@ -1,5 +1,5 @@
 # AI Slide Generator Configuration Example
-# Copy this file to config.yaml and customize for your environment
+# Copy this file to settings.yaml and customize for your environment
 # This file contains application settings (no secrets)
 # Secrets (tokens, credentials) should be in .env file
 

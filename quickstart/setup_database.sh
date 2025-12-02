@@ -144,7 +144,7 @@ else
     echo -e "${YELLOW}⚠ No .env file found. Please copy .env.example to .env${NC}"
 fi
 
-# Create database tables from models
+# Create database tables from schemas
 echo -e "${BLUE}➤ Creating database tables...${NC}"
 export DATABASE_URL="postgresql://localhost:5432/$DB_NAME"
 python -c "from src.config.database import init_db; init_db()"

@@ -12,7 +12,7 @@ from unittest.mock import MagicMock, Mock, patch
 import pytest
 from databricks.sdk import WorkspaceClient
 
-from src.config.client import reset_client
+from src.core.databricks_client import reset_client
 
 
 @pytest.fixture(autouse=True)
@@ -34,7 +34,7 @@ def clear_settings_cache():
 
     This ensures each test gets fresh settings.
     """
-    from src.config.settings_db import get_settings
+    from src.core.settings_db import get_settings
 
     get_settings.cache_clear()
     yield
@@ -62,15 +62,15 @@ def mock_env_vars() -> Generator[dict[str, str], None, None]:
 @pytest.fixture
 def temp_config_dir(tmp_path: Path) -> Path:
     """
-    Create a temporary config directory for testing.
+    Create a temporary settings directory for testing.
 
     Args:
         tmp_path: Pytest-provided temporary directory
 
     Returns:
-        Path to temporary config directory
+        Path to temporary settings directory
     """
-    config_dir = tmp_path / "config"
+    config_dir = tmp_path / "settings"
     config_dir.mkdir()
     return config_dir
 
@@ -169,7 +169,7 @@ def mock_workspace_client() -> Generator[Mock, None, None]:
     mock_user.id = "test-user-id"
     mock_client.current_user.me.return_value = mock_user
 
-    with patch("src.config.client.WorkspaceClient", return_value=mock_client):
+    with patch("src.settings.client.WorkspaceClient", return_value=mock_client):
         yield mock_client
 
 
@@ -190,18 +190,18 @@ def mock_databricks_client(mock_workspace_client: Mock) -> Mock:
 @pytest.fixture
 def write_config_file(temp_config_dir: Path, sample_config: dict) -> Path:
     """
-    Write a sample config.yaml file.
+    Write a sample settings.yaml file.
 
     Args:
-        temp_config_dir: Temporary config directory
+        temp_config_dir: Temporary settings directory
         sample_config: Configuration to write
 
     Returns:
-        Path to written config file
+        Path to written settings file
     """
     import yaml
 
-    config_file = temp_config_dir / "config.yaml"
+    config_file = temp_config_dir / "settings.yaml"
     with open(config_file, "w") as f:
         yaml.dump(sample_config, f)
 
@@ -214,7 +214,7 @@ def write_prompts_file(temp_config_dir: Path, sample_prompts: dict) -> Path:
     Write a sample prompts.yaml file.
 
     Args:
-        temp_config_dir: Temporary config directory
+        temp_config_dir: Temporary settings directory
         sample_prompts: Prompts to write
 
     Returns:
@@ -234,13 +234,13 @@ def mock_config_loader(
     sample_config: dict, sample_prompts: dict
 ) -> Generator[None, None, None]:
     """
-    Mock the config loader to return test data.
+    Mock the settings loader to return test data.
 
     Args:
         sample_config: Configuration to return
         sample_prompts: Prompts to return
     """
-    with patch("src.config.loader.load_config", return_value=sample_config):
-        with patch("src.config.loader.load_prompts", return_value=sample_prompts):
+    with patch("src.settings.loader.load_config", return_value=sample_config):
+        with patch("src.settings.loader.load_prompts", return_value=sample_prompts):
             yield
 

@@ -3,9 +3,9 @@ import pytest
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
 
-from src.config.database import Base
-from src.models.config import ConfigProfile
-from src.services.config import (
+from src.core.database import Base
+from src.database.models import ConfigProfile
+from src.services import (
     ConfigService,
     ConfigValidator,
     GenieService,
@@ -184,7 +184,7 @@ def test_list_profiles(db_session):
 
 
 def test_update_ai_infra(db_session):
-    """Test updating AI infra config."""
+    """Test updating AI db_app_deployment settings."""
     profile_service = ProfileService(db_session)
     config_service = ConfigService(db_session)
     
@@ -200,7 +200,7 @@ def test_update_ai_infra(db_session):
 
 
 def test_update_mlflow_config(db_session):
-    """Test updating MLflow config."""
+    """Test updating MLflow settings."""
     profile_service = ProfileService(db_session)
     config_service = ConfigService(db_session)
     
@@ -216,7 +216,7 @@ def test_update_mlflow_config(db_session):
 
 
 def test_update_prompts_config(db_session):
-    """Test updating prompts config."""
+    """Test updating prompts settings."""
     profile_service = ProfileService(db_session)
     config_service = ConfigService(db_session)
     
@@ -310,7 +310,7 @@ def test_delete_genie_space(db_session):
 
 
 def test_validator_ai_infra_valid(db_session, monkeypatch):
-    """Test AI infra validation with valid values."""
+    """Test AI db_app_deployment validation with valid values."""
     # Mock the endpoint check to avoid Databricks connection
     def mock_validate_ai_infra(self, endpoint, temp, tokens):
         if not (0.0 <= temp <= 1.0):
@@ -327,7 +327,7 @@ def test_validator_ai_infra_valid(db_session, monkeypatch):
 
 
 def test_validator_ai_infra_invalid_temperature(db_session):
-    """Test AI infra validation with invalid temperature."""
+    """Test AI db_app_deployment validation with invalid temperature."""
     validator = ConfigValidator()
     
     result = validator.validate_ai_infra("test-endpoint", 1.5, 1000)
@@ -336,7 +336,7 @@ def test_validator_ai_infra_invalid_temperature(db_session):
 
 
 def test_validator_ai_infra_invalid_max_tokens(db_session):
-    """Test AI infra validation with invalid max tokens."""
+    """Test AI db_app_deployment validation with invalid max tokens."""
     validator = ConfigValidator()
     
     result = validator.validate_ai_infra("test-endpoint", 0.7, -100)

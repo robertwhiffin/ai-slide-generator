@@ -41,7 +41,7 @@ This creates the configuration tables:
 ### 3. Initialize Default Profile
 
 ```bash
-python -m src.config.init_default_profile
+python -m src.settings.init_default_profile
 ```
 
 This script:
@@ -149,7 +149,7 @@ Active conversations are preserved during reload!
 
 Run the initialization script:
 ```bash
-python -m src.config.init_default_profile
+python -m src.settings.init_default_profile
 ```
 
 ### "DATABASE_URL not set"
@@ -181,7 +181,7 @@ If you have an existing deployment using YAML:
 
 1. **Backup current YAML files**
    ```bash
-   cp -r config/ config.backup/
+   cp -r settings/ settings.backup/
    ```
 
 2. **Run migrations**
@@ -191,7 +191,7 @@ If you have an existing deployment using YAML:
 
 3. **Initialize from YAML**
    ```bash
-   python -m src.config.init_default_profile
+   python -m src.settings.init_default_profile
    ```
 
 4. **Restart application**
