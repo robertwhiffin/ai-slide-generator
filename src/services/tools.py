@@ -93,16 +93,17 @@ def query_genie_space(
     Query Databricks Genie space for data using natural language or SQL.
 
     This tool connects to a Databricks Genie space and executes queries to retrieve data.
-    If Genie returns no attachments, the query will be retried automatically.
+    Genie can respond with plain text messages, data attachments, or both.
 
     Args:
         query: Natural language question
         conversation_id: Optional conversation ID (not currently used with start_conversation_and_wait)
-        max_retries: Maximum number of retries if no attachments returned (default: 2)
+        max_retries: Maximum number of retries if query fails (default: 2)
 
     Returns:
         Dictionary containing:
-            - data: JSON string of the data
+            - message: Plain text message from Genie (may be empty string)
+            - data: JSON string of the data (None if no attachment)
             - conversation_id: ID for the conversation
 
     Raises:
@@ -110,6 +111,7 @@ def query_genie_space(
 
     Example:
         >>> result = query_genie_space("show me a sample of data")
+        >>> print(result['message'])
         >>> print(result['data'])
     """
     client = get_databricks_client()
@@ -147,44 +149,33 @@ def query_genie_space(
                 )
 
             message_id = response.message_id
-            attachment_ids = [_.attachment_id for _ in response.attachments]
-
-            # Check if attachments exist
-            if not attachment_ids:
-                attempt += 1
-                if attempt <= max_retries:
-                    logger.warning(
-                        "No attachments in Genie response, retrying",
-                        extra={
-                            "attempt": attempt,
-                            "max_retries": max_retries,
-                            "query": query,
-                            "conversation_id": conversation_id,
-                        },
+            
+            
+            # Extract attachments (data results)
+            attachments = response.attachments
+            for attachment in attachments:
+                if attachment.query:
+                    attachment_response = client.genie.get_message_attachment_query_result(
+                    space_id=space_id,
+                    conversation_id=conversation_id,
+                    message_id=message_id,
+                    attachment_id=attachment.attachment_id,
                     )
-                    time.sleep(1)  # Wait 1 second before retry
-                    continue
+                    # Extract data and columns from response
+                    response_dict = attachment_response.as_dict()["statement_response"]
+                    columns = [_["name"] for _ in response_dict["manifest"]["schema"]["columns"]]
+                    data_array = response_dict["result"]["data_array"]
+
+                    # Create DataFrame and convert to records
+                    df = pd.DataFrame(data_array, columns=columns)
+                    data = df.to_csv(index=False)
                 else:
-                    raise GenieToolError(
-                        f"No attachments in response after {max_retries + 1} attempts"
-                    )
+                    data = ''
+                if attachment.text:
+                    message_content = attachment.text
+                else:
+                    message_content = ''
 
-            # Get query result from first attachment
-            attachment_response = client.genie.get_message_attachment_query_result(
-                space_id=space_id,
-                conversation_id=conversation_id,
-                message_id=message_id,
-                attachment_id=attachment_ids[0],
-            )
-
-            # Extract data and columns from response
-            response_dict = attachment_response.as_dict()["statement_response"]
-            columns = [_["name"] for _ in response_dict["manifest"]["schema"]["columns"]]
-            data_array = response_dict["result"]["data_array"]
-
-            # Create DataFrame and convert to records
-            df = pd.DataFrame(data_array, columns=columns)
-            data = df.to_json(orient="records")
 
             if attempt > 0:
                 logger.info(
@@ -195,14 +186,21 @@ def query_genie_space(
                     },
                 )
 
+            logger.info(
+                "Genie query completed",
+                extra={
+                    "has_message": bool(message_content),
+                    "has_data": bool(data),
+                    "conversation_id": conversation_id,
+                },
+            )
+
             return {
+                "message": message_content,
                 "data": data,
                 "conversation_id": conversation_id
             }
 
-        except GenieToolError:
-            # Re-raise GenieToolError (includes retry exhaustion)
-            raise
         except Exception as e:
             last_error = e
             attempt += 1
