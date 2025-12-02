@@ -21,8 +21,10 @@ cd "$PROJECT_ROOT"
 # Load environment variables from .env file
 if [ -f .env ]; then
     echo -e "${BLUE}🔧 Loading environment variables from .env...${NC}"
-    # Export variables safely (handles values with spaces)
-    export $(grep -v '^#' .env | grep -v '^$' | xargs -d '\n')
+    # Export variables safely (handles values with spaces) - macOS compatible
+    set -a  # automatically export all variables
+    source .env
+    set +a  # disable automatic export
     echo -e "${GREEN}✅ Environment variables loaded${NC}"
 else
     echo -e "${RED}❌ .env file not found${NC}"
