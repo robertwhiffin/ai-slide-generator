@@ -224,6 +224,37 @@ nano .env
 
 **Note**: Still single-session only. Multi-session support coming in Phase 4.
 
+## Database Architecture
+
+The system uses **PostgreSQL** for local development with a clear migration path to **Lakebase** for production:
+
+```
+Local Development          Production (Future)
+─────────────────         ──────────────────
+PostgreSQL                →    Lakebase (Unity Catalog)
+      ↑                              ↑
+      └──────── SQLAlchemy ──────────┘
+         (Interface Layer - no code changes needed)
+```
+
+**Why PostgreSQL locally?**
+- ✅ Multi-user session management
+- ✅ State persistence across restarts  
+- ✅ Closest local equivalent to Lakebase
+- ✅ **Seamless swap to Lakebase** via SQLAlchemy interface
+
+**Seed Profiles:**
+Default profiles are defined in `config/seed_profiles.yaml` and automatically loaded during database initialization. This makes it easy to:
+- Version control default configurations
+- Share starter profiles across team
+- Customize profiles without code changes
+
+**Schema Management (Pre-Release):**
+Tables are automatically created from SQLAlchemy models during setup. Database migrations will be added when the application reaches production and needs to preserve user data.
+
+**Production Migration:**
+When ready for production on Databricks, simply update the `DATABASE_URL` to point to Lakebase. No code changes required - SQLAlchemy handles the abstraction.
+
 ## Technologies
 
 ### Backend
@@ -235,9 +266,8 @@ nano .env
 - **MLflow 3.0+**: Experiment tracking, metrics logging, and distributed tracing
 - **FastAPI**: Lightweight, high-performance API framework with auto-generated docs
 - **Pydantic**: Data validation and settings management for type safety
-- **PostgreSQL**: Relational database for configuration management
-- **SQLAlchemy 2.0**: ORM for database models and queries
-- **Alembic**: Database migration management
+- **PostgreSQL**: Relational database for configuration management (local dev)
+- **SQLAlchemy 2.0**: ORM for database models and queries (Lakebase-ready)
 - **BeautifulSoup4**: HTML parsing for slide deck manipulation
 - **lxml**: Fast HTML parser backend for BeautifulSoup
 - **uvicorn**: ASGI server for FastAPI applications
@@ -356,7 +386,7 @@ tools:
 
 - **Database configuration implementation:**
   - `docs/backend-database-implementation/` – 8-phase implementation plan for database-backed configuration management.
-  - **Phase 1 Complete:** Database setup, SQLAlchemy models, Alembic migrations, and unit tests.
+  - **Phase 1 Complete:** Database setup, SQLAlchemy models, and unit tests.
 
 - **Historical / planning docs:**
   - **[PROJECT_PLAN.md](PROJECT_PLAN.md)**: High-level milestones and architecture notes.
@@ -471,10 +501,7 @@ nano .env  # Add your Databricks credentials
    # Create database
    createdb ai_slide_generator
    
-   # Run migrations
-   alembic upgrade head
-   
-   # Initialize with default configuration
+   # Create tables and initialize with default configuration
    python scripts/init_database.py
    ```
    

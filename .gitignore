@@ -47,6 +47,10 @@ Thumbs.db
 output/
 *.log
 
+# Database files (PostgreSQL via YAML is the source of truth)
+*.db
+*.db.backup*
+
 # Auto-generated version file (setuptools-scm)
 src/_version.py
 

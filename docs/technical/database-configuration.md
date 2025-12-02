@@ -198,30 +198,39 @@ class ConfigHistory(Base):
     timestamp: datetime
 ```
 
-## Migrations
+## Schema Management
 
-### Alembic Setup
+### Pre-Release Approach
 
-Migrations are managed using Alembic:
+**Current Status:** Pre-release - schema is actively evolving.
 
-```bash
-# Initialize database (first time only)
-alembic upgrade head
+Tables are automatically created from SQLAlchemy models using:
 
-# Create new migration
-alembic revision --autogenerate -m "Description of changes"
-
-# Apply migrations
-alembic upgrade head
-
-# Rollback one migration
-alembic downgrade -1
+```python
+from src.config.database import init_db
+init_db()  # Creates all tables from Base.metadata
 ```
 
-### Migration Files
+This is called automatically by:
+- `scripts/init_database.py` - Ensures tables exist before seeding data
+- `quickstart/setup_database.sh` - Creates tables during initial setup
 
-- **Location:** `alembic/versions/`
-- **Initial schema:** `001_initial_schema.py`
+### When to Add Migrations
+
+**Migrations will be added when:**
+- Application reaches production with real user data
+- Schema changes need to preserve existing data
+- Deploying to Databricks Lakebase with established datasets
+
+**For now:** Schema changes are handled by dropping and recreating the database during development.
+
+**Future Migration Setup:**
+When ready for production, [Alembic](https://alembic.sqlalchemy.org/) can be added back:
+1. Install: `pip install alembic`
+2. Initialize: `alembic init alembic`
+3. Configure `alembic.ini` with `DATABASE_URL` from environment
+4. Generate initial migration: `alembic revision --autogenerate -m "initial schema"`
+5. Apply migrations: `alembic upgrade head`
 
 ## Database Initialization
 
@@ -305,7 +314,6 @@ See `docs/backend-database-implementation/PHASE_2_BACKEND_SERVICES.md` for detai
 ## References
 
 - [SQLAlchemy 2.0 Documentation](https://docs.sqlalchemy.org/en/20/)
-- [Alembic Migration Guide](https://alembic.sqlalchemy.org/en/latest/)
 - [PostgreSQL Documentation](https://www.postgresql.org/docs/)
 - [Phase 1 Implementation Plan](../backend-database-implementation/PHASE_1_DATABASE_SETUP.md)
 

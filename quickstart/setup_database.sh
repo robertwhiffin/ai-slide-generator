@@ -24,6 +24,21 @@ cd "$PROJECT_ROOT"
 # Default database name
 DB_NAME="ai_slide_generator"
 
+# Verify Python environment is ready
+echo -e "${BLUE}➤ Checking Python environment...${NC}"
+if [ ! -d ".venv" ]; then
+    echo -e "${RED}✗ Virtual environment not found${NC}"
+    echo ""
+    echo "Please run Python environment setup first:"
+    echo -e "  ${BLUE}./quickstart/create_python_environment.sh${NC}"
+    echo ""
+    exit 1
+fi
+
+# Activate venv
+source .venv/bin/activate
+echo -e "${GREEN}✓ Virtual environment activated${NC}"
+
 # Check if PostgreSQL is installed
 echo -e "${BLUE}➤ Checking PostgreSQL installation...${NC}"
 if ! command -v psql &> /dev/null; then
@@ -129,34 +144,18 @@ else
     echo -e "${YELLOW}⚠ No .env file found. Please copy .env.example to .env${NC}"
 fi
 
-# Check if virtual environment exists and activate it
-if [ -d ".venv" ]; then
-    echo -e "${BLUE}➤ Activating virtual environment...${NC}"
-    source .venv/bin/activate
-    echo -e "${GREEN}✓ Virtual environment activated${NC}"
-else
-    echo -e "${YELLOW}⚠ Virtual environment not found${NC}"
-    echo -e "${YELLOW}  Please run: python3 -m venv .venv && source .venv/bin/activate${NC}"
-fi
+# Create database tables from models
+echo -e "${BLUE}➤ Creating database tables...${NC}"
+export DATABASE_URL="postgresql://localhost:5432/$DB_NAME"
+python -c "from src.config.database import init_db; init_db()"
+echo -e "${GREEN}✓ Tables created${NC}"
 
-# Check if alembic is installed
-if ! command -v alembic &> /dev/null; then
-    echo -e "${YELLOW}⚠ Alembic not installed. Installing dependencies...${NC}"
-    pip install -r requirements.txt > /dev/null
-    echo -e "${GREEN}✓ Dependencies installed${NC}"
-fi
-
-# Run database migrations
-echo -e "${BLUE}➤ Running database migrations...${NC}"
-alembic upgrade head
-echo -e "${GREEN}✓ Migrations completed${NC}"
-
-# Initialize default configuration
-echo -e "${BLUE}➤ Initializing default configuration...${NC}"
+# Initialize database with seed profiles from YAML
+echo -e "${BLUE}➤ Initializing database with seed profiles...${NC}"
 if python scripts/init_database.py; then
-    echo -e "${GREEN}✓ Default configuration initialized${NC}"
+    echo -e "${GREEN}✓ Database initialized${NC}"
 else
-    echo -e "${YELLOW}⚠ Configuration initialization skipped (already initialized or error)${NC}"
+    echo -e "${YELLOW}⚠ Configuration initialization skipped (already initialized)${NC}"
 fi
 
 echo ""

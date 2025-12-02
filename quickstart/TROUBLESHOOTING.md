@@ -42,18 +42,6 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-### "Command not found: alembic"
-
-**Problem:** Dependencies not installed in virtual environment.
-
-**Solution:**
-```bash
-source .venv/bin/activate
-pip install -r requirements.txt
-```
-
----
-
 ## Database Issues
 
 ### "Database connection failed"
@@ -106,28 +94,6 @@ sudo -u postgres createuser -s $(whoami)
 Check `.env` file has correct format:
 ```
 DATABASE_URL=postgresql://localhost:5432/ai_slide_generator
-```
-
-### "Alembic migrations failed"
-
-**Problem:** Database schema migration errors.
-
-**Solution:**
-```bash
-source .venv/bin/activate
-
-# Check current migration state
-alembic current
-
-# See migration history
-alembic history
-
-# Try upgrading again
-alembic upgrade head
-
-# If still fails, reset and retry
-alembic downgrade base
-alembic upgrade head
 ```
 
 ### "Default profile already exists"

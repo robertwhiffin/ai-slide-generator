@@ -1,12 +1,18 @@
-"""Initialize database with default profile."""
+"""Initialize database with profiles from YAML seed file."""
 import os
 import sys
+from pathlib import Path
+
+import yaml
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
 
 # Add project root to path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from src.config.database import get_db_session
-from src.config.defaults import DEFAULT_CONFIG
+from src.config.database import get_db_session, init_db
 from src.models.config import (
     ConfigAIInfra,
     ConfigGenieSpace,
@@ -16,8 +22,26 @@ from src.models.config import (
 )
 
 
+def load_seed_profiles():
+    """Load seed profiles from YAML file."""
+    seed_file = Path(__file__).parent.parent / "config" / "seed_profiles.yaml"
+    
+    if not seed_file.exists():
+        raise FileNotFoundError(f"Seed profiles file not found: {seed_file}")
+    
+    with open(seed_file, 'r') as f:
+        data = yaml.safe_load(f)
+    
+    return data.get('profiles', [])
+
+
 def initialize_database():
-    """Initialize database with default profile on first run."""
+    """Initialize database with seed profiles from YAML."""
+    
+    # Ensure tables exist (safe to call multiple times)
+    print("Ensuring database tables exist...")
+    init_db()
+    print("✓ Tables ready")
     
     with get_db_session() as db:
         # Check if any profiles exist
@@ -26,66 +50,91 @@ def initialize_database():
             print("✓ Database already initialized")
             return
         
-        print("Initializing database with default profile...")
+        print("Initializing database with seed profiles from YAML...")
         
-        # Create default profile
-        profile = ConfigProfile(
-            name="default",
-            description="Default configuration profile",
-            is_default=True,
-            created_by="system",
-        )
-        db.add(profile)
-        db.flush()
-        
-        # Create AI infrastructure config
-        ai_infra = ConfigAIInfra(
-            profile_id=profile.id,
-            llm_endpoint=DEFAULT_CONFIG["llm"]["endpoint"],
-            llm_temperature=DEFAULT_CONFIG["llm"]["temperature"],
-            llm_max_tokens=DEFAULT_CONFIG["llm"]["max_tokens"],
-        )
-        db.add(ai_infra)
-        
-        # Create default Genie space
-        genie_space = ConfigGenieSpace(
-            profile_id=profile.id,
-            space_id=DEFAULT_CONFIG["genie"]["space_id"],
-            space_name=DEFAULT_CONFIG["genie"]["space_name"],
-            description=DEFAULT_CONFIG["genie"]["description"],
-            is_default=True,
-        )
-        db.add(genie_space)
-        
-        # Create MLflow config
-        # Get username from Databricks client singleton
+        # Get username for MLflow experiment
         try:
             from src.config.client import get_databricks_client
             client = get_databricks_client()
             username = client.current_user.me().user_name
         except Exception:
-            # Fallback to environment variable if Databricks not available
             username = os.getenv("USER", "default_user")
         
-        experiment_name = DEFAULT_CONFIG["mlflow"]["experiment_name"].format(username=username)
+        # Load seed profiles
+        try:
+            seed_profiles = load_seed_profiles()
+        except FileNotFoundError as e:
+            print(f"✗ Error: {e}")
+            print("  Please ensure config/seed_profiles.yaml exists")
+            sys.exit(1)
         
-        mlflow = ConfigMLflow(
-            profile_id=profile.id,
-            experiment_name=experiment_name,
-        )
-        db.add(mlflow)
+        if not seed_profiles:
+            print("✗ No profiles found in seed_profiles.yaml")
+            sys.exit(1)
         
-        # Create prompts config
-        prompts = ConfigPrompts(
-            profile_id=profile.id,
-            system_prompt=DEFAULT_CONFIG["prompts"]["system_prompt"],
-            slide_editing_instructions=DEFAULT_CONFIG["prompts"]["slide_editing_instructions"],
-            user_prompt_template=DEFAULT_CONFIG["prompts"]["user_prompt_template"],
-        )
-        db.add(prompts)
+        # Create profiles
+        for seed in seed_profiles:
+            print(f"\n➤ Creating profile: {seed['name']}")
+            
+            # Create profile
+            profile = ConfigProfile(
+                name=seed['name'],
+                description=seed['description'],
+                is_default=seed.get('is_default', False),
+                created_by=seed.get('created_by', 'system'),
+            )
+            db.add(profile)
+            db.flush()  # Get profile ID
+            
+            # Create AI infrastructure
+            ai_config = seed.get('ai_infra', {})
+            if ai_config:
+                ai_infra = ConfigAIInfra(
+                    profile_id=profile.id,
+                    llm_endpoint=ai_config['llm_endpoint'],
+                    llm_temperature=ai_config['llm_temperature'],
+                    llm_max_tokens=ai_config['llm_max_tokens'],
+                )
+                db.add(ai_infra)
+                print(f"  ✓ AI config: {ai_config['llm_endpoint']}")
+            
+            # Create Genie space
+            genie_config = seed.get('genie_space', {})
+            if genie_config:
+                genie_space = ConfigGenieSpace(
+                    profile_id=profile.id,
+                    space_id=genie_config['space_id'],
+                    space_name=genie_config['space_name'],
+                    description=genie_config.get('description', ''),
+                )
+                db.add(genie_space)
+                print(f"  ✓ Genie space: {genie_config['space_name']}")
+            
+            # Create MLflow config
+            mlflow_config = seed.get('mlflow', {})
+            if mlflow_config:
+                experiment_name = mlflow_config['experiment_name'].format(username=username)
+                mlflow = ConfigMLflow(
+                    profile_id=profile.id,
+                    experiment_name=experiment_name,
+                )
+                db.add(mlflow)
+                print(f"  ✓ MLflow: {experiment_name}")
+            
+            # Create prompts
+            prompts_config = seed.get('prompts', {})
+            if prompts_config:
+                prompts = ConfigPrompts(
+                    profile_id=profile.id,
+                    system_prompt=prompts_config['system_prompt'],
+                    slide_editing_instructions=prompts_config['slide_editing_instructions'],
+                    user_prompt_template=prompts_config['user_prompt_template'],
+                )
+                db.add(prompts)
+                print(f"  ✓ Prompts config")
         
         db.commit()
-        print(f"✓ Created default profile: {profile.name}")
+        print(f"\n✓ Successfully created {len(seed_profiles)} profiles")
 
 
 if __name__ == "__main__":
@@ -93,5 +142,6 @@ if __name__ == "__main__":
         initialize_database()
     except Exception as e:
         print(f"✗ Error initializing database: {e}")
+        import traceback
+        traceback.print_exc()
         sys.exit(1)
-
