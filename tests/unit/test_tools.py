@@ -2,7 +2,6 @@
 Unit tests for tools module with MLFlow tracing.
 """
 
-import json
 from unittest.mock import MagicMock, Mock, patch
 
 import pytest
@@ -35,11 +34,12 @@ def mock_settings():
 
 
 def test_query_genie_space_success(mock_databricks_client, mock_settings):
-    """Test successful Genie query."""
+    """Test successful Genie query with both message and data."""
     # Setup mock conversation response
     conversation_response = Mock()
     conversation_response.conversation_id = "conv-123"
     conversation_response.message_id = "msg-456"
+    conversation_response.content = "Here are the Q4 sales results"
     
     # Setup mock attachment
     attachment = Mock()
@@ -74,67 +74,72 @@ def test_query_genie_space_success(mock_databricks_client, mock_settings):
     # Execute query
     response = query_genie_space(query="What were Q4 sales?")
 
-    # Verify response
+    # Verify response has all expected fields
     assert response["conversation_id"] == "conv-123"
+    assert response["message"] == "Here are the Q4 sales results"
     assert "data" in response
+    assert response["data"] is not None
     
-    # Parse JSON data
-    data = json.loads(response["data"])
-    assert len(data) == 2
-    assert data[0]["region"] == "APAC"
-    assert data[0]["sales"] == 1000000
+    # Verify CSV format (should have header + 2 data rows)
+    lines = response["data"].strip().split('\n')
+    assert len(lines) == 3  # header + 2 data rows
+    assert "region" in lines[0]
+    assert "sales" in lines[0]
 
     # Verify client calls
     mock_databricks_client.genie.start_conversation_and_wait.assert_called_once()
     mock_databricks_client.genie.get_message_attachment_query_result.assert_called_once()
 
 
-def test_query_genie_space_no_attachments(
+def test_query_genie_space_message_only(
     mock_databricks_client, mock_settings
 ):
-    """Test Genie query with no attachments retries and fails."""
-    # Setup mock conversation response with no attachments
+    """Test Genie query with message only (no data attachment)."""
+    # Setup mock conversation response with message but no attachments
     conversation_response = Mock()
     conversation_response.conversation_id = "conv-123"
     conversation_response.message_id = "msg-456"
+    conversation_response.content = "I understand your question about the data."
     conversation_response.attachments = []
     
-    # Return empty attachments for all attempts
-    mock_databricks_client.genie.create_message_and_wait.return_value = conversation_response
     mock_databricks_client.genie.start_conversation_and_wait.return_value = conversation_response
 
-    # Execute query and expect error after retries
-    with pytest.raises(GenieToolError) as exc_info:
-        query_genie_space(query="Test query")
+    # Execute query - should succeed with message only
+    response = query_genie_space(query="Test query")
 
-    # Verify error message indicates multiple attempts
-    assert "No attachments in response after 3 attempts" in str(exc_info.value)
+    # Verify response has message but no data
+    assert response["conversation_id"] == "conv-123"
+    assert response["message"] == "I understand your question about the data."
+    assert response["data"] is None
     
-    # Verify retries occurred (1 initial + 2 retries = 3 total calls)
-    assert mock_databricks_client.genie.create_message_and_wait.call_count == 2
+    # Verify no retry occurred (message-only is valid)
+    assert mock_databricks_client.genie.start_conversation_and_wait.call_count == 1
 
 
 def test_query_genie_space_retry_success(
     mock_databricks_client, mock_settings
 ):
-    """Test Genie query succeeds after retry."""
-    # First response: no attachments
-    empty_response = Mock()
-    empty_response.conversation_id = "conv-123"
-    empty_response.message_id = "msg-empty"
-    empty_response.attachments = []
+    """Test Genie query succeeds after retry on error."""
+    # First attempt: raise exception
+    mock_databricks_client.genie.start_conversation_and_wait.side_effect = [
+        Exception("Temporary error"),
+        None  # Second attempt will use the next setup
+    ]
     
-    # Second response: has attachments
+    # Second response: success with data
     success_response = Mock()
     success_response.conversation_id = "conv-123"
     success_response.message_id = "msg-success"
+    success_response.content = "Query successful"
     attachment = Mock()
     attachment.attachment_id = "attach-789"
     success_response.attachments = [attachment]
     
-    # Configure mock to return empty first, then success
-    mock_databricks_client.genie.start_conversation_and_wait.return_value = empty_response
-    mock_databricks_client.genie.create_message_and_wait.return_value = success_response
+    # After first exception, second call succeeds
+    mock_databricks_client.genie.start_conversation_and_wait.side_effect = [
+        Exception("Temporary error"),
+        success_response
+    ]
     
     # Setup mock attachment result for successful attempt
     attachment_result = Mock()
@@ -162,22 +167,25 @@ def test_query_genie_space_retry_success(
     
     # Verify success after retry
     assert response["conversation_id"] == "conv-123"
+    assert response["message"] == "Query successful"
     assert "data" in response
-    data = json.loads(response["data"])
-    assert len(data) == 1
-    assert data[0]["region"] == "APAC"
+    assert response["data"] is not None
     
-    # Verify retry occurred (1 start_conversation + 1 retry with create_message)
-    assert mock_databricks_client.genie.start_conversation_and_wait.call_count == 1
-    assert mock_databricks_client.genie.create_message_and_wait.call_count == 1
+    # Verify CSV format
+    lines = response["data"].strip().split('\n')
+    assert len(lines) == 2  # header + 1 data row
+    
+    # Verify retry occurred (2 calls to start_conversation)
+    assert mock_databricks_client.genie.start_conversation_and_wait.call_count == 2
 
 
-def test_query_genie_space_no_data(mock_databricks_client, mock_settings):
-    """Test Genie query returning no data."""
+def test_query_genie_space_empty_data(mock_databricks_client, mock_settings):
+    """Test Genie query returning empty data array."""
     # Setup mock conversation response
     conversation_response = Mock()
     conversation_response.conversation_id = "conv-empty"
     conversation_response.message_id = "msg-empty"
+    conversation_response.content = "No data found for your query"
     
     attachment = Mock()
     attachment.attachment_id = "attach-empty"
@@ -207,13 +215,15 @@ def test_query_genie_space_no_data(mock_databricks_client, mock_settings):
     # Execute query
     response = query_genie_space(query="Non-existent data")
 
-    # Verify response
-    assert "data" in response
+    # Verify response has message and data (empty CSV with just header)
     assert response["conversation_id"] == "conv-empty"
+    assert response["message"] == "No data found for your query"
+    assert "data" in response
     
-    # Parse JSON data
-    data = json.loads(response["data"])
-    assert len(data) == 0
+    # CSV with empty data should just have header
+    lines = response["data"].strip().split('\n')
+    assert len(lines) == 1  # Only header, no data rows
+    assert "col1" in lines[0]
 
 
 def test_query_genie_space_error(mock_databricks_client, mock_settings):

@@ -83,12 +83,19 @@ def test_genie_conversation_continuation(check_databricks_connection, check_geni
     # Both queries should have the same conversation ID
     assert result2["conversation_id"] == conversation_id
 
-    # Both should have data
-    assert len(result1["data"]) > 0
-    assert len(result2["data"]) > 0
+    # Both should have data or message
+    assert result1.get("data") or result1.get("message")
+    assert result2.get("data") or result2.get("message")
+    
+    if result1.get("data"):
+        assert len(result1["data"]) > 0
+    if result2.get("data"):
+        assert len(result2["data"]) > 0
 
     print(f"✅ Conversation continuation test passed")
     print(f"   Same conversation ID: {result2['conversation_id']}")
+    print(f"   Result 1 has: {'message' if result1.get('message') else ''} {'data' if result1.get('data') else ''}")
+    print(f"   Result 2 has: {'message' if result2.get('message') else ''} {'data' if result2.get('data') else ''}")
 
 
 def test_genie_natural_language_query(check_databricks_connection, check_genie_config):
@@ -101,13 +108,16 @@ def test_genie_natural_language_query(check_databricks_connection, check_genie_c
     try:
         result = query_genie_space(query="Show me a sample of data")
 
-        # Verify we got some result
-        assert "data" in result
+        # Verify we got some result (message and/or data)
         assert "conversation_id" in result
+        assert result.get("data") or result.get("message")
 
         print(f"✅ Natural language query test passed")
         print(f"   Query understood by Genie")
-        print(f"   Rows returned: {len(result['data'])}")
+        if result.get("message"):
+            print(f"   Message: {result['message'][:100]}")
+        if result.get("data"):
+            print(f"   Data returned: {len(result['data'])} characters")
 
     except GenieToolError as e:
         # If Genie can't understand the query or has no data, that's OK for this test

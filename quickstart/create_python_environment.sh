@@ -65,9 +65,9 @@ echo -e "${BLUE}→ Creating virtual environment and installing dependencies...$
 echo "  (This uses uv for 10-100x faster installation)"
 echo ""
 
-if uv sync; then
+if uv sync --all-extras; then
     echo ""
-    echo -e "${GREEN}✓ Dependencies installed${NC}"
+    echo -e "${GREEN}✓ Dependencies installed (including dev tools)${NC}"
 else
     echo ""
     echo -e "${RED}❌ Failed to create Python environment${NC}"
@@ -91,8 +91,8 @@ echo -e "${BLUE}→ Verifying installation...${NC}"
 source .venv/bin/activate
 
 # Test critical imports
-if python -c "import fastapi; import sqlalchemy; import alembic" 2>/dev/null; then
-    echo -e "${GREEN}✓ Critical dependencies verified${NC}"
+if python -c "import fastapi; import sqlalchemy; import pytest" 2>/dev/null; then
+    echo -e "${GREEN}✓ Critical dependencies verified (including dev tools)${NC}"
     echo ""
     echo -e "${GREEN}✅ Python environment ready!${NC}"
     echo ""

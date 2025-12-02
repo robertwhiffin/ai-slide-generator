@@ -153,13 +153,19 @@ class ConfigurationValidator:
                 max_retries=1,
             )
 
-            # Check result
-            if result and result.get("data"):
+            # Check result - Genie can respond with message and/or data
+            if result and (result.get("data") or result.get("message")):
+                response_types = []
+                if result.get("message"):
+                    response_types.append("message")
+                if result.get("data"):
+                    response_types.append("data")
+                
                 self.results.append(ValidationResult(
                     component="Genie",
                     success=True,
                     message=f"Successfully connected to Genie space: {self.settings.genie.space_id}",
-                    details="Query executed and returned data"
+                    details=f"Query executed and returned {', '.join(response_types)}"
                 ))
                 logger.info("Genie validation successful")
             else:
