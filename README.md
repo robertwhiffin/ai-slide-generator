@@ -249,6 +249,9 @@ Default profiles are defined in `config/seed_profiles.yaml` and automatically lo
 - Share starter profiles across team
 - Customize profiles without code changes
 
+**Schema Management (Pre-Release):**
+Tables are automatically created from SQLAlchemy models during setup. Database migrations will be added when the application reaches production and needs to preserve user data.
+
 **Production Migration:**
 When ready for production on Databricks, simply update the `DATABASE_URL` to point to Lakebase. No code changes required - SQLAlchemy handles the abstraction.
 
@@ -265,7 +268,6 @@ When ready for production on Databricks, simply update the `DATABASE_URL` to poi
 - **Pydantic**: Data validation and settings management for type safety
 - **PostgreSQL**: Relational database for configuration management (local dev)
 - **SQLAlchemy 2.0**: ORM for database models and queries (Lakebase-ready)
-- **Alembic**: Database migration management
 - **BeautifulSoup4**: HTML parsing for slide deck manipulation
 - **lxml**: Fast HTML parser backend for BeautifulSoup
 - **uvicorn**: ASGI server for FastAPI applications
@@ -384,7 +386,7 @@ tools:
 
 - **Database configuration implementation:**
   - `docs/backend-database-implementation/` – 8-phase implementation plan for database-backed configuration management.
-  - **Phase 1 Complete:** Database setup, SQLAlchemy models, Alembic migrations, and unit tests.
+  - **Phase 1 Complete:** Database setup, SQLAlchemy models, and unit tests.
 
 - **Historical / planning docs:**
   - **[PROJECT_PLAN.md](PROJECT_PLAN.md)**: High-level milestones and architecture notes.
@@ -499,10 +501,7 @@ nano .env  # Add your Databricks credentials
    # Create database
    createdb ai_slide_generator
    
-   # Run migrations
-   alembic upgrade head
-   
-   # Initialize with default configuration
+   # Create tables and initialize with default configuration
    python scripts/init_database.py
    ```
    

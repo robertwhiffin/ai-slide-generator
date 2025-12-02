@@ -12,7 +12,7 @@ load_dotenv()
 # Add project root to path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from src.config.database import get_db_session
+from src.config.database import get_db_session, init_db
 from src.models.config import (
     ConfigAIInfra,
     ConfigGenieSpace,
@@ -37,6 +37,11 @@ def load_seed_profiles():
 
 def initialize_database():
     """Initialize database with seed profiles from YAML."""
+    
+    # Ensure tables exist (safe to call multiple times)
+    print("Ensuring database tables exist...")
+    init_db()
+    print("✓ Tables ready")
     
     with get_db_session() as db:
         # Check if any profiles exist
