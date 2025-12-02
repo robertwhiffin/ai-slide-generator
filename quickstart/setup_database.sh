@@ -39,17 +39,6 @@ fi
 source .venv/bin/activate
 echo -e "${GREEN}✓ Virtual environment activated${NC}"
 
-# Verify alembic is available
-if ! command -v alembic &> /dev/null; then
-    echo -e "${RED}✗ alembic not found in virtual environment${NC}"
-    echo ""
-    echo "Please run Python environment setup:"
-    echo -e "  ${BLUE}./quickstart/create_python_environment.sh${NC}"
-    echo ""
-    exit 1
-fi
-echo -e "${GREEN}✓ alembic found${NC}"
-
 # Check if PostgreSQL is installed
 echo -e "${BLUE}➤ Checking PostgreSQL installation...${NC}"
 if ! command -v psql &> /dev/null; then
@@ -155,11 +144,11 @@ else
     echo -e "${YELLOW}⚠ No .env file found. Please copy .env.example to .env${NC}"
 fi
 
-# Run database migrations
-echo -e "${BLUE}➤ Running database migrations...${NC}"
+# Create database tables from models
+echo -e "${BLUE}➤ Creating database tables...${NC}"
 export DATABASE_URL="postgresql://localhost:5432/$DB_NAME"
-alembic upgrade head
-echo -e "${GREEN}✓ Migrations completed${NC}"
+python -c "from src.config.database import init_db; init_db()"
+echo -e "${GREEN}✓ Tables created${NC}"
 
 # Initialize database with seed profiles from YAML
 echo -e "${BLUE}➤ Initializing database with seed profiles...${NC}"
