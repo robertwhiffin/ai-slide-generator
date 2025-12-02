@@ -24,6 +24,38 @@ cd "$PROJECT_ROOT"
 # Default database name
 DB_NAME="ai_slide_generator"
 
+# =============================================================================
+# NEW: Verify Python environment is ready (lines 379-408 of plan)
+# =============================================================================
+echo -e "${BLUE}➤ Checking Python environment...${NC}"
+if [ ! -d ".venv" ]; then
+    echo -e "${RED}✗ Virtual environment not found${NC}"
+    echo ""
+    echo "Please run Python environment setup first:"
+    echo -e "  ${BLUE}./quickstart/create_python_environment.sh${NC}"
+    echo ""
+    exit 1
+fi
+
+# Activate venv
+source .venv/bin/activate
+echo -e "${GREEN}✓ Virtual environment activated${NC}"
+
+# Verify alembic is available
+if ! command -v alembic &> /dev/null; then
+    echo -e "${RED}✗ alembic not found in virtual environment${NC}"
+    echo ""
+    echo "Please run Python environment setup:"
+    echo -e "  ${BLUE}./quickstart/create_python_environment.sh${NC}"
+    echo ""
+    exit 1
+fi
+echo -e "${GREEN}✓ alembic found${NC}"
+
+# =============================================================================
+# PostgreSQL checks (unchanged - lines 28-86 of original)
+# =============================================================================
+
 # Check if PostgreSQL is installed
 echo -e "${BLUE}➤ Checking PostgreSQL installation...${NC}"
 if ! command -v psql &> /dev/null; then
@@ -85,6 +117,10 @@ if ! pg_isready &> /dev/null; then
 fi
 echo -e "${GREEN}✓ PostgreSQL is running${NC}"
 
+# =============================================================================
+# Database creation logic (unchanged - lines 88-108 of original)
+# =============================================================================
+
 # Check if database already exists
 echo -e "${BLUE}➤ Checking if database '$DB_NAME' exists...${NC}"
 if psql -lqt | cut -d \| -f 1 | grep -qw "$DB_NAME"; then
@@ -107,6 +143,10 @@ if ! psql -lqt | cut -d \| -f 1 | grep -qw "$DB_NAME"; then
     echo -e "${GREEN}✓ Database created${NC}"
 fi
 
+# =============================================================================
+# Database connection verification (unchanged - lines 110-117 of original)
+# =============================================================================
+
 # Verify database connection
 echo -e "${BLUE}➤ Verifying database connection...${NC}"
 if psql -d "$DB_NAME" -c "SELECT version();" &> /dev/null; then
@@ -115,6 +155,10 @@ else
     echo -e "${RED}✗ Could not connect to database${NC}"
     exit 1
 fi
+
+# =============================================================================
+# .env DATABASE_URL handling (unchanged - lines 119-130 of original)
+# =============================================================================
 
 # Update .env file with database URL if it exists
 if [ -f .env ]; then
@@ -129,28 +173,24 @@ else
     echo -e "${YELLOW}⚠ No .env file found. Please copy .env.example to .env${NC}"
 fi
 
-# Check if virtual environment exists and activate it
-if [ -d ".venv" ]; then
-    echo -e "${BLUE}➤ Activating virtual environment...${NC}"
-    source .venv/bin/activate
-    echo -e "${GREEN}✓ Virtual environment activated${NC}"
-else
-    echo -e "${YELLOW}⚠ Virtual environment not found${NC}"
-    echo -e "${YELLOW}  Please run: python3 -m venv .venv && source .venv/bin/activate${NC}"
-fi
+# =============================================================================
+# NOTE: REMOVED lines 132-147 from original (venv creation and pip install)
+# Python environment is now handled by create_python_environment.sh
+# =============================================================================
 
-# Check if alembic is installed
-if ! command -v alembic &> /dev/null; then
-    echo -e "${YELLOW}⚠ Alembic not installed. Installing dependencies...${NC}"
-    pip install -r requirements.txt > /dev/null
-    echo -e "${GREEN}✓ Dependencies installed${NC}"
-fi
+# =============================================================================
+# Migration execution (unchanged - lines 149-153 of original)
+# =============================================================================
 
 # Run database migrations
 echo -e "${BLUE}➤ Running database migrations...${NC}"
 export DATABASE_URL="postgresql://localhost:5432/$DB_NAME"
 alembic upgrade head
 echo -e "${GREEN}✓ Migrations completed${NC}"
+
+# =============================================================================
+# Seed data loading (unchanged - lines 155-161 of original)
+# =============================================================================
 
 # Initialize database with seed profiles from YAML
 echo -e "${BLUE}➤ Initializing database with seed profiles...${NC}"
@@ -159,6 +199,10 @@ if python scripts/init_database.py; then
 else
     echo -e "${YELLOW}⚠ Configuration initialization skipped (already initialized)${NC}"
 fi
+
+# =============================================================================
+# Success banner (unchanged - lines 163-175 of original)
+# =============================================================================
 
 echo ""
 echo -e "${GREEN}╔════════════════════════════════════════════════════════════╗${NC}"
@@ -172,4 +216,3 @@ echo -e "${YELLOW}Next steps:${NC}"
 echo "  1. Ensure your .env file has DATABRICKS_HOST and DATABRICKS_TOKEN set"
 echo "  2. Run: ./start_app.sh"
 echo ""
-

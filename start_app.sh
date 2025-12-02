@@ -12,45 +12,95 @@ echo ""
 GREEN='\033[0;32m'
 BLUE='\033[0;34m'
 YELLOW='\033[1;33m'
+RED='\033[0;31m'
 NC='\033[0m' # No Color
 
 # Get project root directory
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$PROJECT_ROOT"
 
+# =============================================================================
+# .env validation (lines 496-523 of plan)
+# =============================================================================
+
 # Load environment variables from .env file
 if [ -f .env ]; then
     echo -e "${BLUE}🔧 Loading environment variables from .env...${NC}"
-    # Export variables safely (handles values with spaces)
-    export $(grep -v '^#' .env | grep -v '^$' | xargs -d '\n')
+    # Export variables safely (handles values with spaces on macOS)
+    while IFS='=' read -r key value; do
+        # Skip comments and empty lines
+        [[ "$key" =~ ^#.*$ ]] && continue
+        [[ -z "$key" ]] && continue
+        # Remove leading/trailing whitespace and quotes
+        key=$(echo "$key" | xargs)
+        value=$(echo "$value" | sed -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//")
+        export "$key=$value"
+    done < .env
     echo -e "${GREEN}✅ Environment variables loaded${NC}"
 else
-    echo -e "${YELLOW}⚠️  No .env file found. Using system environment variables.${NC}"
+    echo -e "${RED}❌ .env file not found${NC}"
+    echo ""
+    echo "Please create .env file:"
+    echo -e "  ${BLUE}cp .env.example .env${NC}"
+    echo -e "  ${BLUE}nano .env${NC}  # Set DATABRICKS_HOST and DATABRICKS_TOKEN"
+    echo ""
+    exit 1
 fi
+
+# Validate required environment variables
+if [ -z "$DATABRICKS_HOST" ] || [ -z "$DATABRICKS_TOKEN" ]; then
+    echo -e "${RED}❌ Missing required environment variables${NC}"
+    echo ""
+    echo "Please ensure .env file contains:"
+    echo "  - DATABRICKS_HOST=https://your-workspace.cloud.databricks.com"
+    echo "  - DATABRICKS_TOKEN=your-token-here"
+    echo ""
+    exit 1
+fi
+
+# =============================================================================
+# Virtual environment check (lines 452-477 of plan)
+# =============================================================================
 
 # Check if .venv exists
 if [ ! -d ".venv" ]; then
-    echo -e "${YELLOW}⚠️  Virtual environment not found. Creating one...${NC}"
-    python3 -m venv .venv
-    echo -e "${GREEN}✅ Virtual environment created${NC}"
+    echo -e "${RED}❌ Virtual environment not found${NC}"
+    echo ""
+    echo "Please run the setup first:"
+    echo -e "  ${BLUE}./quickstart/setup.sh${NC}         # Full setup"
+    echo "  or"
+    echo -e "  ${BLUE}./quickstart/create_python_environment.sh${NC}  # Just Python env"
+    echo ""
+    exit 1
 fi
 
 # Activate virtual environment
 echo -e "${BLUE}🔧 Activating virtual environment...${NC}"
 source .venv/bin/activate
 
-# Check if requirements are installed
+# Verify critical dependencies are installed
 if ! python -c "import fastapi" 2>/dev/null; then
-    echo -e "${YELLOW}⚠️  Dependencies not installed. Installing...${NC}"
-    pip install -r requirements.txt
-    echo -e "${GREEN}✅ Dependencies installed${NC}"
+    echo -e "${RED}❌ Dependencies not properly installed${NC}"
+    echo ""
+    echo "Please run: ${BLUE}./quickstart/create_python_environment.sh${NC}"
+    echo ""
+    exit 1
 fi
+echo -e "${GREEN}✅ Dependencies verified${NC}"
+
+# =============================================================================
+# Development environment setup (unchanged)
+# =============================================================================
 
 # Set environment variables for development
 export ENVIRONMENT="development"
 export DEV_USER_ID="dev@local.dev"
 export DEV_USER_EMAIL="dev@local.dev"
 export DEV_USERNAME="Dev User"
+
+# =============================================================================
+# Frontend checks (unchanged - lines 55-71 of original)
+# =============================================================================
 
 # Check if frontend directory exists
 if [ ! -d "frontend" ]; then
@@ -69,6 +119,10 @@ else
         echo -e "${GREEN}✅ Frontend dependencies installed${NC}"
     fi
 fi
+
+# =============================================================================
+# Server startup (unchanged - lines 74-105 of original)
+# =============================================================================
 
 # Create log directory
 mkdir -p logs
@@ -104,6 +158,10 @@ if [ "$SKIP_FRONTEND" = false ]; then
     echo -e "${GREEN}✅ Frontend started (PID: $FRONTEND_PID)${NC}"
 fi
 
+# =============================================================================
+# Success banner (unchanged - lines 107-131 of original)
+# =============================================================================
+
 echo ""
 echo -e "${GREEN}✨ AI Slide Generator is running!${NC}"
 echo ""
@@ -128,4 +186,3 @@ fi
 echo ""
 echo "🛑 To stop: ./stop_app.sh"
 echo ""
-
