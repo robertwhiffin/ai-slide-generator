@@ -58,6 +58,7 @@ from src.services.agent import SlideGeneratorAgent, create_agent
 
 logger = logging.getLogger(__name__)
 
+
 @dataclass
 class WebSession:
     """
@@ -76,12 +77,12 @@ class WebSession:
     def update_activity(self):
         """Update last activity timestamp."""
         self.last_activity = datetime.utcnow()
-    
+
     def is_expired(self, timeout_minutes: int) -> bool:
         """Check if session has expired."""
         age = datetime.utcnow() - self.last_activity
         return age > timedelta(minutes=timeout_minutes)
-    
+
     def to_dict(self) -> dict:
         """Convert to dictionary for API responses."""
         return {
@@ -95,6 +96,7 @@ class WebSession:
             "slide_count": len(self.slide_deck.slides) if self.slide_deck else 0,
         }
 
+
 class SessionManager:
     """
     Manage web sessions with user isolation.
@@ -104,26 +106,26 @@ class SessionManager:
     - Automatic cleanup
     - Session validation
     """
-    
+
     def __init__(
-        self,
-        agent: SlideGeneratorAgent,
-        timeout_minutes: int = 60,
-        max_sessions_per_user: int = 5,
+            self,
+            agent: SlideGeneratorAgent,
+            timeout_minutes: int = 60,
+            max_sessions_per_user: int = 5,
     ):
         self.agent = agent
         self.timeout_minutes = timeout_minutes
         self.max_sessions_per_user = max_sessions_per_user
-        
+
         # Storage: {session_id: WebSession}
         self.sessions: Dict[str, WebSession] = {}
-        
+
         # Thread safety
         self.lock = threading.Lock()
-        
+
         # Start cleanup task
         self._start_cleanup_task()
-        
+
         logger.info(
             "SessionManager initialized",
             extra={
@@ -131,7 +133,7 @@ class SessionManager:
                 "max_sessions_per_user": max_sessions_per_user,
             }
         )
-    
+
     def create_session(self, user_id: str) -> WebSession:
         """
         Create new session for user.
@@ -148,23 +150,23 @@ class SessionManager:
         with self.lock:
             # Check user's session count
             user_sessions = [s for s in self.sessions.values() if s.user_id == user_id]
-            
+
             if len(user_sessions) >= self.max_sessions_per_user:
                 # Clean up expired sessions first
                 for session in user_sessions:
                     if session.is_expired(self.timeout_minutes):
                         self._delete_session_unsafe(session.session_id)
-                
+
                 # Check again
                 user_sessions = [s for s in self.sessions.values() if s.user_id == user_id]
                 if len(user_sessions) >= self.max_sessions_per_user:
                     raise ValueError(
                         f"User has reached maximum sessions ({self.max_sessions_per_user})"
                     )
-            
+
             # Create agent session
             agent_session_id = self.agent.create_session()
-            
+
             # Create web session
             session_id = str(uuid.uuid4())
             session = WebSession(
@@ -172,9 +174,9 @@ class SessionManager:
                 user_id=user_id,
                 agent_session_id=agent_session_id,
             )
-            
+
             self.sessions[session_id] = session
-            
+
             logger.info(
                 "Session created",
                 extra={
@@ -183,9 +185,9 @@ class SessionManager:
                     "agent_session_id": agent_session_id,
                 }
             )
-            
+
             return session
-    
+
     def get_session(self, session_id: str, user_id: str) -> WebSession:
         """
         Get session by ID with user validation.
@@ -202,10 +204,10 @@ class SessionManager:
         """
         with self.lock:
             session = self.sessions.get(session_id)
-            
+
             if not session:
                 raise ValueError(f"Session not found: {session_id}")
-            
+
             if session.user_id != user_id:
                 logger.warning(
                     "Session access denied",
@@ -216,19 +218,19 @@ class SessionManager:
                     }
                 )
                 raise ValueError("Session access denied")
-            
+
             if session.is_expired(self.timeout_minutes):
                 self._delete_session_unsafe(session_id)
                 raise ValueError(f"Session expired: {session_id}")
-            
+
             session.update_activity()
             return session
-    
+
     def update_session(
-        self,
-        session_id: str,
-        user_id: str,
-        slide_deck: Optional[SlideDeck] = None,
+            self,
+            session_id: str,
+            user_id: str,
+            slide_deck: Optional[SlideDeck] = None,
     ) -> WebSession:
         """
         Update session data.
@@ -243,13 +245,13 @@ class SessionManager:
         """
         with self.lock:
             session = self.get_session(session_id, user_id)
-            
+
             if slide_deck is not None:
                 session.slide_deck = slide_deck
-            
+
             session.update_activity()
             return session
-    
+
     def delete_session(self, session_id: str, user_id: str) -> None:
         """
         Delete session with user validation.
@@ -261,7 +263,7 @@ class SessionManager:
         with self.lock:
             session = self.get_session(session_id, user_id)
             self._delete_session_unsafe(session_id)
-    
+
     def _delete_session_unsafe(self, session_id: str) -> None:
         """
         Delete session (must be called with lock held).
@@ -272,16 +274,16 @@ class SessionManager:
         session = self.sessions.get(session_id)
         if not session:
             return
-        
+
         # Clean up agent session
         try:
             self.agent.clear_session(session.agent_session_id)
         except Exception as e:
             logger.warning(f"Failed to clear agent session: {e}")
-        
+
         # Delete web session
         del self.sessions[session_id]
-        
+
         logger.info(
             "Session deleted",
             extra={
@@ -289,7 +291,7 @@ class SessionManager:
                 "user_id": session.user_id,
             }
         )
-    
+
     def list_user_sessions(self, user_id: str) -> List[WebSession]:
         """
         List all sessions for user.
@@ -305,12 +307,12 @@ class SessionManager:
                 s for s in self.sessions.values()
                 if s.user_id == user_id and not s.is_expired(self.timeout_minutes)
             ]
-            
+
             # Sort by last activity (most recent first)
             sessions.sort(key=lambda s: s.last_activity, reverse=True)
-            
+
             return sessions
-    
+
     def cleanup_expired_sessions(self) -> int:
         """
         Remove expired sessions.
@@ -323,35 +325,36 @@ class SessionManager:
                 sid for sid, session in self.sessions.items()
                 if session.is_expired(self.timeout_minutes)
             ]
-            
+
             for session_id in expired:
                 self._delete_session_unsafe(session_id)
-            
+
             if expired:
                 logger.info(
                     "Cleaned up expired sessions",
                     extra={"count": len(expired)}
                 )
-            
+
             return len(expired)
-    
+
     def _start_cleanup_task(self):
         """Start background cleanup task."""
+
         def cleanup_loop():
             while True:
                 try:
                     self.cleanup_expired_sessions()
                 except Exception as e:
                     logger.error(f"Cleanup task error: {e}", exc_info=True)
-                
+
                 # Run every 10 minutes
                 import time
                 time.sleep(600)
-        
+
         thread = threading.Thread(target=cleanup_loop, daemon=True)
         thread.start()
         logger.info("Cleanup task started")
-    
+
     def get_stats(self) -> dict:
         """Get session statistics."""
         with self.lock:
@@ -364,25 +367,27 @@ class SessionManager:
                 },
             }
 
+
 # Global session manager instance
 _session_manager: Optional[SessionManager] = None
+
 
 def get_session_manager() -> SessionManager:
     """Get or create global session manager."""
     global _session_manager
-    
+
     if _session_manager is None:
-        from src.config.settings import get_settings
+        from src.core.settings import get_settings
         settings = get_settings()
-        
+
         agent = create_agent()
-        
+
         _session_manager = SessionManager(
             agent=agent,
             timeout_minutes=getattr(settings, 'session_timeout_minutes', 60),
             max_sessions_per_user=getattr(settings, 'max_sessions_per_user', 5),
         )
-    
+
     return _session_manager
 ```
 

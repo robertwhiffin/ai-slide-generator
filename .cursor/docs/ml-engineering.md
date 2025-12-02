@@ -77,7 +77,7 @@ w.serving_endpoints.create(
     config=EndpointCoreConfigInput(
         served_entities=[
             ServedEntityInput(
-                entity_name="main.ml.models.fraud_detector",
+                entity_name="main.ml.schemas.fraud_detector",
                 entity_version="1",
                 workload_size="Small",
                 scale_to_zero_enabled=True

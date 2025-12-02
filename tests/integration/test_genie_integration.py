@@ -9,7 +9,7 @@ import os
 
 import pytest
 
-from src.config.client import get_databricks_client
+from src.core.databricks_client import get_databricks_client
 from src.services.tools import GenieToolError, query_genie_space
 
 # Mark all tests in this module as integration tests
@@ -48,7 +48,7 @@ def check_genie_config():
     Check if Genie space is configured.
     Skip tests if not configured properly.
     """
-    from src.config.settings_db import get_settings
+    from src.core.settings_db import get_settings
 
     try:
         settings = get_settings()

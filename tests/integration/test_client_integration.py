@@ -13,7 +13,7 @@ import os
 
 import pytest
 
-from src.config.client import (
+from src.core.databricks_client import (
     DatabricksClientError,
     get_databricks_client,
     reset_client,

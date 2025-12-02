@@ -177,7 +177,7 @@ DATABRICKS_HOST=http://your-workspace.cloud.databricks.com
 
 1. **Verify Genie space ID:**
    ```bash
-   # Check config in database
+   # Check settings in database
    psql -d ai_slide_generator -c "SELECT space_id, space_name FROM config_genie_spaces;"
    ```
 
@@ -377,7 +377,7 @@ psql -d ai_slide_generator -c "SELECT pg_size_pretty(pg_database_size('ai_slide_
 # Vacuum database
 psql -d ai_slide_generator -c "VACUUM FULL;"
 
-# Archive old config history
+# Archive old settings history
 psql -d ai_slide_generator -c "DELETE FROM config_history WHERE timestamp < NOW() - INTERVAL '30 days';"
 ```
 
@@ -415,7 +415,7 @@ FROM config_profiles p
 JOIN config_ai_infra ai ON p.id = ai.profile_id
 JOIN config_genie_spaces g ON p.id = g.profile_id;
 
-# View recent config changes
+# View recent settings changes
 SELECT * FROM config_history ORDER BY timestamp DESC LIMIT 10;
 ```
 

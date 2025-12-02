@@ -8,8 +8,8 @@ import logging
 
 from fastapi import APIRouter, HTTPException
 
-from src.api.models.requests import ChatRequest
-from src.api.models.responses import ChatResponse
+from src.api.schemas.requests import ChatRequest
+from src.api.schemas.responses import ChatResponse
 from src.api.services.chat_service import get_chat_service
 
 logger = logging.getLogger(__name__)

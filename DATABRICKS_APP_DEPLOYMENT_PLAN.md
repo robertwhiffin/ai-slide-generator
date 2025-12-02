@@ -55,25 +55,27 @@ Single-command deployment script that packages, uploads, and creates/updates the
 - Dry-run mode for validation
 
 **Usage Example:**
+
 ```python
-# In infra/deploy.py
-from infra.config import load_deployment_config
+# In db_app_deployment/deploy.py
+from db_app_deployment.config import load_deployment_config
 from databricks.sdk import WorkspaceClient
 
+
 def deploy(env: str, action: str, dry_run: bool = False):
-    # Load environment-specific config from YAML
+    # Load environment-specific settings from YAML
     config = load_deployment_config(env)
-    
-    # Initialize Databricks client with profile from config
+
+    # Initialize Databricks client with profile from settings
     w = WorkspaceClient(profile=config.databricks_profile)
-    
-    # Use config values for deployment
+
+    # Use settings values for deployment
     print(f"Deploying {config.app_name} to {config.workspace_path}")
-    
+
     if dry_run:
         print(f"Dry run - would deploy with resources: {config.resources}")
         return
-    
+
     # Actual deployment logic...
 ```
 
@@ -84,17 +86,18 @@ Based on `initialsetup.py` from sql-migration-assistant, implement:
 - Idempotent operations (create if not exists, update otherwise)
 
 **Authentication with YAML Config:**
+
 ```python
 from databricks.sdk import WorkspaceClient
-from infra.config import load_deployment_config
+from db_app_deployment.config import load_deployment_config
 
-# Load environment config from YAML
+# Load environment settings from YAML
 config = load_deployment_config("production")  # or "development", "staging"
 
-# Initialize workspace client with profile from config
+# Initialize workspace client with profile from settings
 w = WorkspaceClient(profile=config.databricks_profile)
 
-# Use config values for deployment
+# Use settings values for deployment
 print(f"Deploying {config.app_name} to {config.workspace_path}")
 print(f"Using Databricks profile: {config.databricks_profile}")
 ```
@@ -270,19 +273,19 @@ VITE_API_URL=/api  # Relative path, same origin
 
 ```bash
 # Initial deployment (uses default profile from ~/.databrickscfg)
-python -m infra.deploy --create --env production
+python -m db_app_deployment.deploy --create --env production
 
 # Update existing app
-python -m infra.deploy --update --env production
+python -m db_app_deployment.deploy --update --env production
 
 # Delete app
-python -m infra.deploy --delete --env production
+python -m db_app_deployment.deploy --delete --env production
 
 # Use specific Databricks profile
-python -m infra.deploy --create --env production --profile my-workspace
+python -m db_app_deployment.deploy --create --env production --profile my-workspace
 
 # Dry run (validation only)
-python -m infra.deploy --create --env production --dry-run
+python -m db_app_deployment.deploy --create --env production --dry-run
 ```
 
 ### Configuration Benefits
@@ -423,13 +426,13 @@ def load_deployment_config(env: str) -> DeploymentConfig:
         DeploymentConfig for the specified environment
     
     Raises:
-        ValueError: If environment not found in config
+        ValueError: If environment not found in settings
         FileNotFoundError: If deployment.yaml not found
     """
-    config_path = Path(__file__).parent.parent / "config" / "deployment.yaml"
+    config_path = Path(__file__).parent.parent / "settings" / "deployment.yaml"
     
     if not config_path.exists():
-        raise FileNotFoundError(f"Deployment config not found: {config_path}")
+        raise FileNotFoundError(f"Deployment settings not found: {config_path}")
     
     with open(config_path, 'r') as f:
         config_data = yaml.safe_load(f)
@@ -598,8 +601,8 @@ uvicorn src.api.main:app --host 0.0.0.0 --port 8080
 
 **Initial Setup:**
 ```bash
-# Create example deployment config
-cp config/deployment.example.yaml config/deployment.yaml
+# Create example deployment settings
+cp settings/deployment.example.yaml settings/deployment.yaml
 # Edit with your workspace details, groups, etc.
 ```
 

@@ -134,7 +134,7 @@ Comprehensive test coverage with 26 tests:
 **All tests passing:** ✅
 
 ```bash
-$ pytest tests/unit/config/test_services.py -v
+$ pytest tests/unit/settings/test_services.py -v
 ============================== 26 passed in 0.59s ===============================
 ```
 
@@ -214,12 +214,12 @@ Profiles loaded with all related configs:
 ### Creating a Profile
 
 ```python
-from src.config.database import get_db_session
+from src.core.database import get_db_session
 from src.services.config import ProfileService
 
 with get_db_session() as db:
     service = ProfileService(db)
-    
+
     # Create with defaults
     profile = service.create_profile(
         name="production",
@@ -274,7 +274,7 @@ from src.services.config import ConfigValidator
 
 validator = ConfigValidator()
 
-# Validate AI infra
+# Validate AI db_app_deployment
 result = validator.validate_ai_infra(
     llm_endpoint="databricks-claude-sonnet-4-5",
     llm_temperature=0.7,
