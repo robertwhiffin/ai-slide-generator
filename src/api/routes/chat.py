@@ -24,7 +24,7 @@ async def send_message(request: ChatRequest) -> ChatResponse:
     Requires a valid session_id. Create sessions via POST /api/sessions first.
 
     Args:
-        request: Chat request with session_id, message, and max_slides
+        request: Chat request with session_id and message
 
     Returns:
         Chat response with messages, slide_deck, and metadata
@@ -36,7 +36,6 @@ async def send_message(request: ChatRequest) -> ChatResponse:
         "Received chat request",
         extra={
             "message_length": len(request.message),
-            "max_slides": request.max_slides,
             "session_id": request.session_id,
         },
     )
@@ -47,7 +46,6 @@ async def send_message(request: ChatRequest) -> ChatResponse:
         result = chat_service.send_message(
             session_id=request.session_id,
             message=request.message,
-            max_slides=request.max_slides,
             slide_context=request.slide_context.model_dump() if request.slide_context else None,
         )
 

@@ -26,7 +26,6 @@ interface Session {
 interface SendMessageParams {
   message: string;
   sessionId: string;
-  maxSlides?: number;
   slideContext?: SlideContext;
 }
 
@@ -120,7 +119,6 @@ export const api = {
   async sendMessage({
     message,
     sessionId,
-    maxSlides = 10,
     slideContext,
   }: SendMessageParams): Promise<ChatResponse> {
     const response = await fetch(`${API_BASE_URL}/api/chat`, {
@@ -131,7 +129,6 @@ export const api = {
       body: JSON.stringify({
         session_id: sessionId,
         message,
-        max_slides: maxSlides,
         slide_context: slideContext,
       }),
     });

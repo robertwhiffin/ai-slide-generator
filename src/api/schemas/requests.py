@@ -50,7 +50,6 @@ class ChatRequest(BaseModel):
     Attributes:
         session_id: Session ID (required, create via POST /api/sessions)
         message: User's natural language message
-        max_slides: Maximum number of slides to generate
         slide_context: Optional context for slide editing
     """
 
@@ -65,12 +64,6 @@ class ChatRequest(BaseModel):
         min_length=1,
         max_length=5000,
     )
-    max_slides: int = Field(
-        default=10,
-        description="Maximum number of slides to generate",
-        ge=1,
-        le=50,
-    )
     slide_context: Optional[SlideContext] = Field(
         default=None,
         description="Optional context containing the slides to edit",
@@ -83,7 +76,6 @@ class ChatRequest(BaseModel):
             "example": {
                 "session_id": "abc123xyz",
                 "message": "Create slides about Q3 sales performance",
-                "max_slides": 5,
                 "slide_context": {
                     "indices": [1, 2],
                     "slide_htmls": [

@@ -81,9 +81,6 @@ class APISettings(BaseSettings):
 class OutputSettings(BaseSettings):
     """Output configuration settings (from environment/defaults)."""
 
-    default_max_slides: int = 10
-    min_slides: int = 3
-    max_slides: int = 20
     html_template: str = "professional"
     include_metadata: bool = True
     include_source_citations: bool = True

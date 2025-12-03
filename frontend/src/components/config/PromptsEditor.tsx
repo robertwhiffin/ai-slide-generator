@@ -48,13 +48,8 @@ export const PromptsEditor: React.FC<PromptsEditorProps> = ({ config, onSave, sa
       newWarnings.push('User Prompt Template: Missing required placeholder {question}');
     }
 
-    // Check for recommended placeholders in system prompt
-    if (!systemPrompt.includes('{max_slides}')) {
-      newWarnings.push('System Prompt: Missing recommended placeholder {max_slides}');
-    }
-
     setWarnings(newWarnings);
-  }, [systemPrompt, slideEditingInstructions, userPromptTemplate]);
+  }, [userPromptTemplate]);
 
   const validate = (): string | null => {
     if (!systemPrompt.trim()) {
@@ -133,9 +128,6 @@ export const PromptsEditor: React.FC<PromptsEditorProps> = ({ config, onSave, sa
           <label className="block text-sm font-medium text-gray-700">
             System Prompt <span className="text-red-500">*</span>
           </label>
-          <span className="text-xs text-gray-500">
-            Available: <code className="px-1 bg-gray-100 rounded">{'{max_slides}'}</code>
-          </span>
         </div>
         <div className="border border-gray-300 rounded overflow-hidden">
           <Editor

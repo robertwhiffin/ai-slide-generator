@@ -45,9 +45,6 @@ api:
 
 # Output Configuration
 output:
-  default_max_slides: 10
-  min_slides: 3
-  max_slides: 20
   html_template: "professional"
   include_metadata: true
   include_source_citations: true

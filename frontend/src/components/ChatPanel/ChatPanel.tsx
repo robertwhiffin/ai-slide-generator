@@ -56,7 +56,7 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
     setLoadingMessage('');
   };
 
-  const handleSendMessage = async (content: string, maxSlides: number) => {
+  const handleSendMessage = async (content: string) => {
     const trimmedContent = content.trim();
     if (!trimmedContent) {
       return;
@@ -99,7 +99,6 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
       const response = await api.sendMessage({
         sessionId,
         message: trimmedContent,
-        maxSlides,
         slideContext,
       });
 
