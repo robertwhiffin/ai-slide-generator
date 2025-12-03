@@ -781,14 +781,28 @@ class SlideGeneratorAgent:
             self.current_session_id = None
 
 
-def create_agent() -> SlideGeneratorAgent:
+def create_agent():
     """
-    Factory function to create a SlideGeneratorAgent instance.
+    Factory function to create a slide generator agent instance.
+    
+    Uses feature flag USE_TWO_STAGE_GENERATOR to switch between:
+    - Original iterative agent (default)
+    - Two-stage generator (optimized token usage)
 
     Returns:
-        Configured SlideGeneratorAgent instance
+        SlideGeneratorAgent or TwoStageGenerator instance
 
     Raises:
         AgentError: If agent creation fails
     """
-    return SlideGeneratorAgent()
+    import os
+    
+    use_two_stage = os.getenv("USE_TWO_STAGE_GENERATOR", "true").lower() == "true"
+    
+    if use_two_stage:
+        logger.info("Creating TwoStageGenerator (USE_TWO_STAGE_GENERATOR=true)")
+        from src.services.two_stage_generator import TwoStageGenerator
+        return TwoStageGenerator()
+    else:
+        logger.info("Creating SlideGeneratorAgent (default)")
+        return SlideGeneratorAgent()
