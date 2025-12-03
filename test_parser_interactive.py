@@ -34,8 +34,8 @@ from typing import Dict, Any
 from dotenv import load_dotenv
 load_dotenv()
 
-from src.models.slide_deck import SlideDeck
-from src.models.slide import Slide
+from src.domain.slide_deck import SlideDeck
+from src.domain.slide import Slide
 
 
 def print_header(text: str) -> None:
