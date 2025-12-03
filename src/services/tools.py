@@ -153,28 +153,25 @@ def query_genie_space(
             
             # Extract attachments (data results)
             attachments = response.attachments
+            data = ''
+            message_content = ''
             for attachment in attachments:
                 if attachment.query:
                     attachment_response = client.genie.get_message_attachment_query_result(
-                    space_id=space_id,
-                    conversation_id=conversation_id,
-                    message_id=message_id,
-                    attachment_id=attachment.attachment_id,
+                        space_id=space_id,
+                        conversation_id=conversation_id,
+                        message_id=message_id,
+                        attachment_id=attachment.attachment_id,
                     )
                     # Extract data and columns from response
                     response_dict = attachment_response.as_dict()["statement_response"]
                     columns = [_["name"] for _ in response_dict["manifest"]["schema"]["columns"]]
                     data_array = response_dict["result"]["data_array"]
-
                     # Create DataFrame and convert to records
                     df = pd.DataFrame(data_array, columns=columns)
                     data = df.to_csv(index=False)
-                else:
-                    data = ''
                 if attachment.text:
                     message_content = attachment.text
-                else:
-                    message_content = ''
 
 
             if attempt > 0:
@@ -218,4 +215,3 @@ def query_genie_space(
                 raise GenieToolError(
                     f"Failed to query Genie space after {max_retries + 1} attempts: {e}"
                 ) from last_error
-
