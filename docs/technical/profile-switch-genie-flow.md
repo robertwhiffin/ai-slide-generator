@@ -134,11 +134,11 @@ def reload_agent(self, profile_id: Optional[int] = None) -> Dict[str, Any]:
     with self._reload_lock:
         # 1. Save current session state
         sessions_backup = copy.deepcopy(self.agent.sessions)
-        
+
         # 2. Reload settings from database
-        from src.config.settings_db import reload_settings
+        from src.core.settings_db import reload_settings
         new_settings = reload_settings(profile_id)  # ← RELOADS SETTINGS CACHE
-        
+
         logger.info(
             "Loaded new settings",
             extra={
@@ -146,21 +146,21 @@ def reload_agent(self, profile_id: Optional[int] = None) -> Dict[str, Any]:
                 "genie_space_id": new_settings.genie.space_id,  # ← NEW SPACE ID
             },
         )
-        
+
         # 3. Clear Genie conversation IDs (tied to old space)
         for session_id, session in sessions_backup.items():
             if "genie_conversation_id" in session:
                 session["genie_conversation_id"] = None  # ← CLEARED
-        
+
         # 4. Create new agent with new settings
         new_agent = create_agent()  # ← CREATES NEW AGENT
-        
+
         # 5. Restore sessions (with cleared Genie conversation IDs)
         new_agent.sessions = sessions_backup
-        
+
         # 6. Atomic swap
         self.agent = new_agent
-        
+
         return {
             "status": "reloaded",
             "profile_id": new_settings.profile_id,

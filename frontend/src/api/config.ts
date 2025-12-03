@@ -9,7 +9,7 @@ const API_BASE_URL = import.meta.env.VITE_API_URL || (
   import.meta.env.MODE === 'production' ? '' : 'http://localhost:8000'
 );
 
-const API_BASE = `${API_BASE_URL}/api/config`;
+const API_BASE = `${API_BASE_URL}/api/settings`;
 
 // Types
 

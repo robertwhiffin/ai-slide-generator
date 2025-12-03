@@ -6,7 +6,7 @@ from pathlib import Path
 # Add parent directory to path to allow imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from src.models import SlideDeck, Slide
+from src.domain import SlideDeck, Slide
 
 
 def main():

@@ -12,7 +12,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from src.config.settings_db import get_settings
+from src.core.settings_db import get_settings
 
 
 class JSONFormatter(logging.Formatter):
@@ -107,7 +107,7 @@ def setup_logging(settings=None) -> None:
     console_handler = logging.StreamHandler(sys.stdout)
     console_handler.setLevel(getattr(logging, log_config.level))
 
-    # Set formatter based on config
+    # Set formatter based on settings
     if log_config.format == "json":
         formatter = JSONFormatter()
     else:

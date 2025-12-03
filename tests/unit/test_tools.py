@@ -39,11 +39,12 @@ def test_query_genie_space_success(mock_databricks_client, mock_settings):
     conversation_response = Mock()
     conversation_response.conversation_id = "conv-123"
     conversation_response.message_id = "msg-456"
-    conversation_response.content = "Here are the Q4 sales results"
     
-    # Setup mock attachment
+    # Setup mock attachment - must have query=True for data path and text for message
     attachment = Mock()
     attachment.attachment_id = "attach-789"
+    attachment.query = True  # Required for data extraction path
+    attachment.text = "Here are the Q4 sales results"  # Message comes from attachment.text
     conversation_response.attachments = [attachment]
     
     mock_databricks_client.genie.start_conversation_and_wait.return_value = conversation_response
@@ -95,22 +96,27 @@ def test_query_genie_space_message_only(
     mock_databricks_client, mock_settings
 ):
     """Test Genie query with message only (no data attachment)."""
-    # Setup mock conversation response with message but no attachments
+    # Setup mock conversation response with attachment but no query data
     conversation_response = Mock()
     conversation_response.conversation_id = "conv-123"
     conversation_response.message_id = "msg-456"
-    conversation_response.content = "I understand your question about the data."
-    conversation_response.attachments = []
+    
+    # Attachment with text message but no query (query=False means no data)
+    attachment = Mock()
+    attachment.attachment_id = "attach-789"
+    attachment.query = False  # No data to extract
+    attachment.text = "I understand your question about the data."
+    conversation_response.attachments = [attachment]
     
     mock_databricks_client.genie.start_conversation_and_wait.return_value = conversation_response
 
     # Execute query - should succeed with message only
     response = query_genie_space(query="Test query")
 
-    # Verify response has message but no data
+    # Verify response has message but empty data
     assert response["conversation_id"] == "conv-123"
     assert response["message"] == "I understand your question about the data."
-    assert response["data"] is None
+    assert response["data"] == ''  # Empty string when no query data
     
     # Verify no retry occurred (message-only is valid)
     assert mock_databricks_client.genie.start_conversation_and_wait.call_count == 1
@@ -120,22 +126,19 @@ def test_query_genie_space_retry_success(
     mock_databricks_client, mock_settings
 ):
     """Test Genie query succeeds after retry on error."""
-    # First attempt: raise exception
-    mock_databricks_client.genie.start_conversation_and_wait.side_effect = [
-        Exception("Temporary error"),
-        None  # Second attempt will use the next setup
-    ]
-    
     # Second response: success with data
     success_response = Mock()
     success_response.conversation_id = "conv-123"
     success_response.message_id = "msg-success"
-    success_response.content = "Query successful"
+    
+    # Setup attachment with proper attributes
     attachment = Mock()
     attachment.attachment_id = "attach-789"
+    attachment.query = True
+    attachment.text = "Query successful"
     success_response.attachments = [attachment]
     
-    # After first exception, second call succeeds
+    # First attempt raises exception, second succeeds
     mock_databricks_client.genie.start_conversation_and_wait.side_effect = [
         Exception("Temporary error"),
         success_response
@@ -185,10 +188,12 @@ def test_query_genie_space_empty_data(mock_databricks_client, mock_settings):
     conversation_response = Mock()
     conversation_response.conversation_id = "conv-empty"
     conversation_response.message_id = "msg-empty"
-    conversation_response.content = "No data found for your query"
     
+    # Setup attachment with proper attributes
     attachment = Mock()
     attachment.attachment_id = "attach-empty"
+    attachment.query = True  # Has query but empty result
+    attachment.text = "No data found for your query"
     conversation_response.attachments = [attachment]
     
     mock_databricks_client.genie.start_conversation_and_wait.return_value = conversation_response

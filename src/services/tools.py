@@ -10,8 +10,8 @@ from typing import Any, Optional
 
 import pandas as pd
 
-from src.config.client import get_databricks_client
-from src.config.settings_db import get_settings
+from src.core.databricks_client import get_databricks_client
+from src.core.settings_db import get_settings
 
 logger = logging.getLogger(__name__)
 

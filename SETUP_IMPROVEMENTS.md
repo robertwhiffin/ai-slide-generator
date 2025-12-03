@@ -36,7 +36,7 @@ nano .env  # Add DATABRICKS_HOST and DATABRICKS_TOKEN
 ./quickstart/setup_database.sh
 # ✓ Creates PostgreSQL database
 # ✓ Runs Alembic migrations (creates tables)
-# ✓ Loads profiles from config/seed_profiles.yaml
+# ✓ Loads profiles from settings/seed_profiles.yaml
 # ✓ Ready to use!
 
 # 4. Start application
@@ -245,7 +245,7 @@ Users create their own via the web UI.
 
 ### Apply Changes
 ```bash
-git commit config/seed_profiles.yaml
+git commit settings/seed_profiles.yaml
 ```
 New setups get your customizations!
 

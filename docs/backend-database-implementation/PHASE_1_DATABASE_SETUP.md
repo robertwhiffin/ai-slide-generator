@@ -74,7 +74,7 @@ engine = create_engine(
 # Session factory
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
-# Base class for models
+# Base class for schemas
 Base = declarative_base()
 
 
@@ -113,16 +113,18 @@ def init_db():
 ```
 
 **Testing:**
+
 ```python
 # Test database connection
-from src.config.database import engine, SessionLocal
+from src.core.database import engine, SessionLocal
+
 
 def test_database_connection():
     # Test connection
     with engine.connect() as conn:
         result = conn.execute("SELECT 1")
         assert result.fetchone()[0] == 1
-    
+
     # Test session creation
     session = SessionLocal()
     session.close()
@@ -141,14 +143,14 @@ from datetime import datetime
 from sqlalchemy import Boolean, CheckConstraint, Column, DateTime, Integer, String, Text
 from sqlalchemy.orm import relationship
 
-from src.config.database import Base
+from src.core.database import Base
 
 
 class ConfigProfile(Base):
     """Configuration profile."""
-    
+
     __tablename__ = "config_profiles"
-    
+
     id = Column(Integer, primary_key=True)
     name = Column(String(100), nullable=False, unique=True, index=True)
     description = Column(Text)
@@ -157,16 +159,16 @@ class ConfigProfile(Base):
     created_by = Column(String(255))
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
     updated_by = Column(String(255))
-    
+
     # Relationships
     ai_infra = relationship("ConfigAIInfra", back_populates="profile", uselist=False, cascade="all, delete-orphan")
     genie_spaces = relationship("ConfigGenieSpace", back_populates="profile", cascade="all, delete-orphan")
     mlflow = relationship("ConfigMLflow", back_populates="profile", uselist=False, cascade="all, delete-orphan")
     prompts = relationship("ConfigPrompts", back_populates="profile", uselist=False, cascade="all, delete-orphan")
     history = relationship("ConfigHistory", back_populates="profile", cascade="all, delete-orphan")
-    
+
     # Note: single_default_profile constraint handled in migration
-    
+
     def __repr__(self):
         return f"<ConfigProfile(id={self.id}, name='{self.name}', is_default={self.is_default})>"
 ```
@@ -180,34 +182,34 @@ from datetime import datetime
 from sqlalchemy import Column, DateTime, DECIMAL, ForeignKey, Integer, String, CheckConstraint
 from sqlalchemy.orm import relationship
 
-from src.config.database import Base
+from src.core.database import Base
 
 
 class ConfigAIInfra(Base):
     """AI Infrastructure configuration."""
-    
+
     __tablename__ = "config_ai_infra"
-    
+
     id = Column(Integer, primary_key=True)
     profile_id = Column(Integer, ForeignKey("config_profiles.id", ondelete="CASCADE"), nullable=False, unique=True)
-    
+
     # LLM settings
     llm_endpoint = Column(String(255), nullable=False)
     llm_temperature = Column(DECIMAL(3, 2), nullable=False)
     llm_max_tokens = Column(Integer, nullable=False)
-    
+
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
-    
+
     # Relationships
     profile = relationship("ConfigProfile", back_populates="ai_infra")
-    
+
     # Constraints
     __table_args__ = (
         CheckConstraint("llm_temperature >= 0 AND llm_temperature <= 1", name="check_temperature_range"),
         CheckConstraint("llm_max_tokens > 0", name="check_max_tokens_positive"),
     )
-    
+
     def __repr__(self):
         return f"<ConfigAIInfra(id={self.id}, profile_id={self.profile_id}, endpoint='{self.llm_endpoint}')>"
 ```
@@ -221,36 +223,36 @@ from datetime import datetime
 from sqlalchemy import Boolean, Column, DateTime, ForeignKey, Integer, String, Text, Index
 from sqlalchemy.orm import relationship
 
-from src.config.database import Base
+from src.core.database import Base
 
 
 class ConfigGenieSpace(Base):
     """Genie space configuration."""
-    
+
     __tablename__ = "config_genie_spaces"
-    
+
     id = Column(Integer, primary_key=True)
     profile_id = Column(Integer, ForeignKey("config_profiles.id", ondelete="CASCADE"), nullable=False)
-    
+
     space_id = Column(String(255), nullable=False)
     space_name = Column(String(255), nullable=False)
     description = Column(Text)
     is_default = Column(Boolean, default=False, nullable=False)
-    
+
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
-    
+
     # Relationships
     profile = relationship("ConfigProfile", back_populates="genie_spaces")
-    
+
     # Indexes
     __table_args__ = (
         Index("idx_config_genie_spaces_profile", "profile_id"),
-        Index("idx_config_genie_spaces_default", "profile_id", "is_default", 
+        Index("idx_config_genie_spaces_default", "profile_id", "is_default",
               postgresql_where=(is_default == True)),
         # Note: single_default_space_per_profile constraint handled in migration
     )
-    
+
     def __repr__(self):
         return f"<ConfigGenieSpace(id={self.id}, space_name='{self.space_name}', is_default={self.is_default})>"
 ```
@@ -264,25 +266,25 @@ from datetime import datetime
 from sqlalchemy import Column, DateTime, ForeignKey, Integer, String
 from sqlalchemy.orm import relationship
 
-from src.config.database import Base
+from src.core.database import Base
 
 
 class ConfigMLflow(Base):
     """MLflow configuration."""
-    
+
     __tablename__ = "config_mlflow"
-    
+
     id = Column(Integer, primary_key=True)
     profile_id = Column(Integer, ForeignKey("config_profiles.id", ondelete="CASCADE"), nullable=False, unique=True)
-    
+
     experiment_name = Column(String(255), nullable=False)
-    
+
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
-    
+
     # Relationships
     profile = relationship("ConfigProfile", back_populates="mlflow")
-    
+
     def __repr__(self):
         return f"<ConfigMLflow(id={self.id}, profile_id={self.profile_id}, experiment='{self.experiment_name}')>"
 ```
@@ -296,27 +298,27 @@ from datetime import datetime
 from sqlalchemy import Column, DateTime, ForeignKey, Integer, Text
 from sqlalchemy.orm import relationship
 
-from src.config.database import Base
+from src.core.database import Base
 
 
 class ConfigPrompts(Base):
     """Prompts configuration."""
-    
+
     __tablename__ = "config_prompts"
-    
+
     id = Column(Integer, primary_key=True)
     profile_id = Column(Integer, ForeignKey("config_profiles.id", ondelete="CASCADE"), nullable=False, unique=True)
-    
+
     system_prompt = Column(Text, nullable=False)
     slide_editing_instructions = Column(Text, nullable=False)
     user_prompt_template = Column(Text, nullable=False)
-    
+
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
-    
+
     # Relationships
     profile = relationship("ConfigProfile", back_populates="prompts")
-    
+
     def __repr__(self):
         return f"<ConfigPrompts(id={self.id}, profile_id={self.profile_id})>"
 ```
@@ -331,33 +333,33 @@ from sqlalchemy import Column, DateTime, ForeignKey, Integer, String, Index
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import relationship
 
-from src.config.database import Base
+from src.core.database import Base
 
 
 class ConfigHistory(Base):
     """Configuration change history."""
-    
+
     __tablename__ = "config_history"
-    
+
     id = Column(Integer, primary_key=True)
     profile_id = Column(Integer, ForeignKey("config_profiles.id", ondelete="CASCADE"), nullable=False)
     domain = Column(String(50), nullable=False)  # 'ai_infra', 'genie', 'mlflow', 'prompts', 'profile'
     action = Column(String(50), nullable=False)  # 'create', 'update', 'delete', 'activate'
     changed_by = Column(String(255), nullable=False)
     changes = Column(JSONB, nullable=False)  # {"field": {"old": "...", "new": "..."}}
-    snapshot = Column(JSONB)  # Full config snapshot at time of change
+    snapshot = Column(JSONB)  # Full settings snapshot at time of change
     timestamp = Column(DateTime, default=datetime.utcnow, nullable=False)
-    
+
     # Relationships
     profile = relationship("ConfigProfile", back_populates="history")
-    
+
     # Indexes
     __table_args__ = (
         Index("idx_config_history_profile", "profile_id"),
         Index("idx_config_history_timestamp", "timestamp", postgresql_ops={"timestamp": "DESC"}),
         Index("idx_config_history_domain", "domain"),
     )
-    
+
     def __repr__(self):
         return f"<ConfigHistory(id={self.id}, domain='{self.domain}', action='{self.action}', timestamp={self.timestamp})>"
 ```
@@ -365,21 +367,21 @@ class ConfigHistory(Base):
 **File:** `src/models/config/__init__.py`
 
 ```python
-"""Configuration models."""
-from src.models.config.ai_infra import ConfigAIInfra
-from src.models.config.genie_space import ConfigGenieSpace
-from src.models.config.history import ConfigHistory
-from src.models.config.mlflow import ConfigMLflow
-from src.models.config.profile import ConfigProfile
-from src.models.config.prompts import ConfigPrompts
+"""Configuration schemas."""
+from src.database.models.ai_infra import ConfigAIInfra
+from src.database.models.genie_space import ConfigGenieSpace
+from src.database.models.history import ConfigHistory
+from src.database.models.mlflow import ConfigMLflow
+from src.database.models.profile import ConfigProfile
+from src.database.models.prompts import ConfigPrompts
 
 __all__ = [
-    "ConfigProfile",
-    "ConfigAIInfra",
-    "ConfigGenieSpace",
-    "ConfigMLflow",
-    "ConfigPrompts",
-    "ConfigHistory",
+   "ConfigProfile",
+   "ConfigAIInfra",
+   "ConfigGenieSpace",
+   "ConfigMLflow",
+   "ConfigPrompts",
+   "ConfigHistory",
 ]
 ```
 
@@ -451,8 +453,8 @@ from sqlalchemy import engine_from_config, pool
 
 from alembic import context
 
-# Import all models
-from src.config.database import Base
+# Import all schemas
+from src.core.database import Base
 from src.models.config import (
     ConfigProfile,
     ConfigAIInfra,
@@ -465,7 +467,7 @@ from src.models.config import (
 # this is the Alembic Config object
 config = context.config
 
-# Interpret the config file for Python logging
+# Interpret the settings file for Python logging
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
@@ -595,8 +597,8 @@ import sys
 # Add project root to path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from src.config.database import get_db_session
-from src.config.defaults import DEFAULT_CONFIG
+from src.core.database import get_db_session
+from src.core.defaults import DEFAULT_CONFIG
 from src.models.config import (
     ConfigProfile,
     ConfigAIInfra,
@@ -608,16 +610,16 @@ from src.models.config import (
 
 def initialize_database():
     """Initialize database with default profile on first run."""
-    
+
     with get_db_session() as db:
         # Check if any profiles exist
         existing = db.query(ConfigProfile).first()
         if existing:
             print("✓ Database already initialized")
             return
-        
+
         print("Initializing database with default profile...")
-        
+
         # Create default profile
         profile = ConfigProfile(
             name="default",
@@ -627,8 +629,8 @@ def initialize_database():
         )
         db.add(profile)
         db.flush()
-        
-        # Create AI infrastructure config
+
+        # Create AI infrastructure settings
         ai_infra = ConfigAIInfra(
             profile_id=profile.id,
             llm_endpoint=DEFAULT_CONFIG["llm"]["endpoint"],
@@ -636,7 +638,7 @@ def initialize_database():
             llm_max_tokens=DEFAULT_CONFIG["llm"]["max_tokens"],
         )
         db.add(ai_infra)
-        
+
         # Create default Genie space
         genie_space = ConfigGenieSpace(
             profile_id=profile.id,
@@ -646,19 +648,19 @@ def initialize_database():
             is_default=True,
         )
         db.add(genie_space)
-        
-        # Create MLflow config
+
+        # Create MLflow settings
         # Replace {username} with actual username from environment
         username = os.getenv("USER", "default_user")
         experiment_name = DEFAULT_CONFIG["mlflow"]["experiment_name"].format(username=username)
-        
+
         mlflow = ConfigMLflow(
             profile_id=profile.id,
             experiment_name=experiment_name,
         )
         db.add(mlflow)
-        
-        # Create prompts config
+
+        # Create prompts settings
         prompts = ConfigPrompts(
             profile_id=profile.id,
             system_prompt=DEFAULT_CONFIG["prompts"]["system_prompt"],
@@ -666,7 +668,7 @@ def initialize_database():
             user_prompt_template=DEFAULT_CONFIG["prompts"]["user_prompt_template"],
         )
         db.add(prompts)
-        
+
         db.commit()
         print(f"✓ Created default profile: {profile.name}")
 
@@ -688,11 +690,11 @@ if __name__ == "__main__":
 **File:** `tests/unit/config/test_models.py`
 
 ```python
-"""Test configuration models."""
+"""Test configuration schemas."""
 import pytest
 from sqlalchemy.exc import IntegrityError
 
-from src.config.database import Base, engine, SessionLocal
+from src.core.database import Base, engine, SessionLocal
 from src.models.config import (
     ConfigProfile,
     ConfigAIInfra,
@@ -707,10 +709,10 @@ def db_session():
     """Create a test database session."""
     # Create tables
     Base.metadata.create_all(bind=engine)
-    
+
     session = SessionLocal()
     yield session
-    
+
     # Cleanup
     session.close()
     Base.metadata.drop_all(bind=engine)
@@ -726,7 +728,7 @@ def test_create_profile(db_session):
     )
     db_session.add(profile)
     db_session.commit()
-    
+
     assert profile.id is not None
     assert profile.name == "test-profile"
 
@@ -736,10 +738,10 @@ def test_unique_profile_name(db_session):
     profile1 = ConfigProfile(name="test", created_by="test")
     db_session.add(profile1)
     db_session.commit()
-    
+
     profile2 = ConfigProfile(name="test", created_by="test")
     db_session.add(profile2)
-    
+
     with pytest.raises(IntegrityError):
         db_session.commit()
 
@@ -749,7 +751,7 @@ def test_cascade_delete(db_session):
     profile = ConfigProfile(name="test", created_by="test")
     db_session.add(profile)
     db_session.flush()
-    
+
     ai_infra = ConfigAIInfra(
         profile_id=profile.id,
         llm_endpoint="test-endpoint",
@@ -758,12 +760,12 @@ def test_cascade_delete(db_session):
     )
     db_session.add(ai_infra)
     db_session.commit()
-    
+
     # Delete profile
     db_session.delete(profile)
     db_session.commit()
-    
-    # AI infra should be deleted
+
+    # AI db_app_deployment should be deleted
     assert db_session.query(ConfigAIInfra).filter_by(profile_id=profile.id).first() is None
 
 
@@ -772,7 +774,7 @@ def test_temperature_constraint(db_session):
     profile = ConfigProfile(name="test", created_by="test")
     db_session.add(profile)
     db_session.flush()
-    
+
     # Invalid temperature
     ai_infra = ConfigAIInfra(
         profile_id=profile.id,
@@ -781,7 +783,7 @@ def test_temperature_constraint(db_session):
         llm_max_tokens=1000,
     )
     db_session.add(ai_infra)
-    
+
     with pytest.raises(IntegrityError):
         db_session.commit()
 
@@ -791,7 +793,7 @@ def test_default_genie_space_constraint(db_session):
     profile = ConfigProfile(name="test", created_by="test")
     db_session.add(profile)
     db_session.flush()
-    
+
     space1 = ConfigGenieSpace(
         profile_id=profile.id,
         space_id="space1",
@@ -800,7 +802,7 @@ def test_default_genie_space_constraint(db_session):
     )
     db_session.add(space1)
     db_session.commit()
-    
+
     # Try to add another default space
     space2 = ConfigGenieSpace(
         profile_id=profile.id,
@@ -809,7 +811,7 @@ def test_default_genie_space_constraint(db_session):
         is_default=True,
     )
     db_session.add(space2)
-    
+
     with pytest.raises(IntegrityError):
         db_session.commit()
 ```
@@ -817,7 +819,7 @@ def test_default_genie_space_constraint(db_session):
 **Run tests:**
 
 ```bash
-pytest tests/unit/config/test_models.py -v
+pytest tests/unit/settings/test_models.py -v
 ```
 
 ---
@@ -848,7 +850,7 @@ pytest tests/unit/config/test_models.py -v
 
 5. **Run Tests:**
    ```bash
-   pytest tests/unit/config/ -v
+   pytest tests/unit/settings/ -v
    ```
 
 ---
