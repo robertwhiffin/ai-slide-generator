@@ -17,8 +17,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Iterable
 
-from src.models.slide import Slide
-from src.models.slide_deck import SlideDeck
+from src.domain.slide import Slide
+from src.domain.slide_deck import SlideDeck
 from src.services.agent import create_agent
 
 logging.basicConfig(level=logging.INFO)

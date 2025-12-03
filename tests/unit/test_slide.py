@@ -1,7 +1,7 @@
 """Unit tests for Slide class."""
 
 import pytest
-from src.models.slide import Slide
+from src.domain.slide import Slide
 
 
 class TestSlideCreation:
