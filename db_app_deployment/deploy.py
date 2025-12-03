@@ -23,9 +23,17 @@ from typing import Optional
 
 from databricks.sdk import WorkspaceClient  # Keep for profile-specific connections
 from databricks.sdk.core import ApiClient
-from databricks.sdk.service.apps import App, AppDeployment, AppDeploymentMode, ComputeSize
+from databricks.sdk.service.apps import (
+    App,
+    AppDeployment,
+    AppDeploymentMode,
+    AppResource,
+    AppResourceDatabase,
+    ComputeSize,
+)
 
 from src.core.databricks_client import get_databricks_client
+from src.core.lakebase import create_lakebase_instance, grant_service_principal_permissions
 from databricks.sdk.service.workspace import ImportFormat
 
 from db_app_deployment.config import load_deployment_config
@@ -285,9 +293,10 @@ def create_app(
     description: str,
     workspace_path: str,
     compute_size: str,
+    database_name: str,
 ) -> None:
     """
-    Create Databricks App.
+    Create Databricks App with Lakebase database.
 
     Args:
         workspace_client: Databricks workspace client
@@ -295,6 +304,7 @@ def create_app(
         description: Description of the app
         workspace_path: Path to app artifacts in workspace
         compute_size: Compute size (MEDIUM, LARGE, or LIQUID)
+        database_name: Lakebase database name to attach as resource
     """
     print(f"🚀 Creating app: {app_name}")
 
@@ -302,12 +312,22 @@ def create_app(
         # Convert compute_size string to enum
         compute_size_enum = ComputeSize(compute_size)
 
+        # Build resources list with Lakebase database
+        print(f"  📊 Attaching Lakebase database: {database_name}")
+        resources = [
+            AppResource(
+                name="app_database",
+                database=AppResourceDatabase(name=database_name),
+            )
+        ]
+
         # Create app - Databricks will read app.yaml from workspace_path
         app = App(
             name=app_name,
             description=description,
             compute_size=compute_size_enum,
             default_source_code_path=workspace_path,
+            resources=resources,
         )
 
         result = workspace_client.apps.create_and_wait(app)
@@ -460,6 +480,17 @@ def deploy(
             print("✅ Deletion complete")
             return
 
+        # Create Lakebase instance
+        print("📊 Setting up Lakebase database...")
+        lakebase_result = create_lakebase_instance(
+            catalog=config.lakebase.catalog,
+            database_name=config.lakebase.database_name,
+            schema=config.lakebase.schema,
+            client=workspace_client,
+        )
+        print(f"  ✅ Lakebase ready: {lakebase_result['full_schema_name']}")
+        print()
+
         # Build Python wheel and frontend
         wheel_path = build_python_wheel(project_root)
         print()
@@ -487,8 +518,24 @@ def deploy(
                     config.description,
                     config.workspace_path,
                     config.compute_size,
+                    database_name=config.lakebase.database_name,
                 )
                 set_permissions(workspace_client, config.app_name, config.permissions)
+
+                # Grant Lakebase permissions to app service principal
+                try:
+                    app = workspace_client.apps.get(name=config.app_name)
+                    if app.service_principal_id:
+                        print("🔐 Granting Lakebase permissions to app service principal...")
+                        grant_service_principal_permissions(
+                            catalog=config.lakebase.catalog,
+                            schema=config.lakebase.schema,
+                            principal_id=str(app.service_principal_id),
+                            client=workspace_client,
+                        )
+                        print("  ✅ Lakebase permissions granted")
+                except Exception as e:
+                    print(f"  ⚠️  Could not grant Lakebase permissions: {e}")
             elif action == "update":
                 update_app(
                     workspace_client,

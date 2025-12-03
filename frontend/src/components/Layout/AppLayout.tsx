@@ -5,6 +5,7 @@ import { SlidePanel } from '../SlidePanel/SlidePanel';
 import { SelectionRibbon } from '../SlidePanel/SelectionRibbon';
 import { ProfileSelector } from '../config/ProfileSelector';
 import { ProfileList } from '../config/ProfileList';
+import { useSession } from '../../contexts/SessionContext';
 
 type ViewMode = 'main' | 'profiles';
 
@@ -14,13 +15,16 @@ export const AppLayout: React.FC = () => {
   const [viewMode, setViewMode] = useState<ViewMode>('main');
   // Key to force remount ChatPanel when profile changes
   const [chatKey, setChatKey] = useState<number>(0);
+  const { createNewSession } = useSession();
 
-  // Reset chat state when profile changes
-  const handleProfileChange = useCallback(() => {
+  // Reset chat state and create new session when profile changes
+  const handleProfileChange = useCallback(async () => {
     setSlideDeck(null);
     setRawHtml(null);
     setChatKey(prev => prev + 1);
-  }, []);
+    // Create new session for the new profile
+    await createNewSession();
+  }, [createNewSession]);
 
   return (
     <div className="h-screen flex flex-col">

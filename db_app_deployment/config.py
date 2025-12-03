@@ -1,14 +1,22 @@
 """Load deployment configuration from YAML.
 
 This module provides utilities to load environment-specific deployment
-configurations from settings/deployment.yaml.
+configurations from config/deployment.yaml and config/lakebase.yaml.
 """
 
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List
 import yaml
-import os
+
+
+@dataclass
+class LakebaseConfig:
+    """Lakebase database configuration."""
+
+    catalog: str
+    database_name: str
+    schema: str = "app_data"
 
 
 @dataclass
@@ -27,6 +35,9 @@ class DeploymentConfig:
     timeout_seconds: int
     poll_interval_seconds: int
 
+    # Lakebase configuration (required)
+    lakebase: LakebaseConfig
+
 
 def load_deployment_config(env: str) -> DeploymentConfig:
     """
@@ -42,13 +53,15 @@ def load_deployment_config(env: str) -> DeploymentConfig:
         ValueError: If environment not found in settings
         FileNotFoundError: If deployment.yaml not found
     """
+    config_dir = Path(__file__).parent.parent / "config"
+
     # Load deployment.yaml (version controlled)
-    config_path = Path(__file__).parent.parent / "settings" / "deployment.yaml"
+    deployment_path = config_dir / "deployment.yaml"
 
-    if not config_path.exists():
-        raise FileNotFoundError(f"Deployment settings not found: {config_path}")
+    if not deployment_path.exists():
+        raise FileNotFoundError(f"Deployment settings not found: {deployment_path}")
 
-    with open(config_path, "r") as f:
+    with open(deployment_path, "r") as f:
         config_data = yaml.safe_load(f)
 
     if env not in config_data["environments"]:
@@ -57,6 +70,9 @@ def load_deployment_config(env: str) -> DeploymentConfig:
 
     env_config = config_data["environments"][env]
     common_config = config_data["common"]
+
+    # Load Lakebase configuration
+    lakebase_config = _load_lakebase_config(config_dir, env)
 
     config = DeploymentConfig(
         app_name=env_config["app_name"],
@@ -68,7 +84,64 @@ def load_deployment_config(env: str) -> DeploymentConfig:
         exclude_patterns=common_config["build"]["exclude_patterns"],
         timeout_seconds=common_config["deployment"]["timeout_seconds"],
         poll_interval_seconds=common_config["deployment"]["poll_interval_seconds"],
+        lakebase=lakebase_config,
     )
 
     return config
+
+
+def _load_lakebase_config(config_dir: Path, env: str) -> LakebaseConfig:
+    """
+    Load Lakebase configuration for the specified environment.
+
+    Args:
+        config_dir: Path to the config directory
+        env: Environment name
+
+    Returns:
+        LakebaseConfig for the environment
+
+    Raises:
+        FileNotFoundError: If lakebase.yaml not found
+        ValueError: If required configuration is missing
+    """
+    lakebase_path = config_dir / "lakebase.yaml"
+
+    if not lakebase_path.exists():
+        raise FileNotFoundError(
+            f"Lakebase configuration not found: {lakebase_path}. "
+            "Lakebase is required for deployment."
+        )
+
+    with open(lakebase_path, "r") as f:
+        lakebase_data = yaml.safe_load(f)
+
+    # Get base configuration
+    base_config = lakebase_data.get("lakebase", {})
+
+    # Check for environment-specific overrides
+    env_overrides = lakebase_data.get("environments", {}).get(env, {})
+
+    # Merge base with environment overrides
+    catalog = env_overrides.get("catalog", base_config.get("catalog"))
+    database_name = env_overrides.get("database_name", base_config.get("database_name"))
+    schema = env_overrides.get("schema", base_config.get("schema", "app_data"))
+
+    if not catalog:
+        raise ValueError(
+            f"Lakebase 'catalog' not configured for environment '{env}'. "
+            "Add catalog to config/lakebase.yaml."
+        )
+
+    if not database_name:
+        raise ValueError(
+            f"Lakebase 'database_name' not configured for environment '{env}'. "
+            "Add database_name to config/lakebase.yaml."
+        )
+
+    return LakebaseConfig(
+        catalog=catalog,
+        database_name=database_name,
+        schema=schema,
+    )
 
