@@ -147,7 +147,7 @@ fi
 # Create database tables from schemas
 echo -e "${BLUE}➤ Creating database tables...${NC}"
 export DATABASE_URL="postgresql://localhost:5432/$DB_NAME"
-python -c "from src.config.database import init_db; init_db()"
+python -c "from src.core.database import init_db; init_db()"
 echo -e "${GREEN}✓ Tables created${NC}"
 
 # Initialize database with seed profiles from YAML
