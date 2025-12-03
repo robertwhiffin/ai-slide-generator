@@ -139,7 +139,7 @@ from pathlib import Path
 # Add project to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from src.config.database import get_db_session
+from src.core.database import get_db_session
 from src.models.config import (
     ConfigProfile,
     ConfigAIInfra,
@@ -152,20 +152,20 @@ from src.models.config import (
 def load_yaml_configs(config_dir: Path):
     """Load all YAML configuration files."""
     configs = {}
-    
-    yaml_files = ['config.yaml', 'mlflow.yaml', 'prompts.yaml']
+
+    yaml_files = ['settings.yaml', 'mlflow.yaml', 'prompts.yaml']
     for yaml_file in yaml_files:
         path = config_dir / yaml_file
         if path.exists():
             with open(path) as f:
                 configs[yaml_file] = yaml.safe_load(f)
-    
+
     return configs
 
 
 def create_profile_from_yaml(db, configs, profile_name="default"):
     """Create database profile from YAML configs."""
-    
+
     # Create profile
     profile = ConfigProfile(
         name=profile_name,
@@ -176,9 +176,9 @@ def create_profile_from_yaml(db, configs, profile_name="default"):
     )
     db.add(profile)
     db.flush()
-    
+
     # Migrate AI infrastructure
-    llm_config = configs['config.yaml'].get('llm', {})
+    llm_config = configs['settings.yaml'].get('llm', {})
     ai_infra = ConfigAIInfra(
         profile_id=profile.id,
         llm_endpoint=llm_config.get('endpoint', 'databricks-claude-sonnet-4-5'),
@@ -186,9 +186,9 @@ def create_profile_from_yaml(db, configs, profile_name="default"):
         llm_max_tokens=llm_config.get('max_tokens', 60000),
     )
     db.add(ai_infra)
-    
+
     # Migrate Genie space
-    genie_config = configs['config.yaml'].get('genie', {})
+    genie_config = configs['settings.yaml'].get('genie', {})
     genie_space = ConfigGenieSpace(
         profile_id=profile.id,
         space_id=genie_config.get('space_id', ''),
@@ -197,7 +197,7 @@ def create_profile_from_yaml(db, configs, profile_name="default"):
         is_default=True,
     )
     db.add(genie_space)
-    
+
     # Migrate MLflow
     mlflow_config = configs['mlflow.yaml'].get('mlflow', {})
     mlflow = ConfigMLflow(
@@ -205,7 +205,7 @@ def create_profile_from_yaml(db, configs, profile_name="default"):
         experiment_name=mlflow_config.get('experiment_name', '/default'),
     )
     db.add(mlflow)
-    
+
     # Migrate prompts
     prompts_config = configs['prompts.yaml'].get('prompts', {})
     prompts = ConfigPrompts(
@@ -215,7 +215,7 @@ def create_profile_from_yaml(db, configs, profile_name="default"):
         user_prompt_template=prompts_config.get('user_prompt_template', '{question}'),
     )
     db.add(prompts)
-    
+
     db.commit()
     return profile
 
@@ -224,11 +224,11 @@ def backup_yaml_files(config_dir: Path):
     """Create backup of YAML files before migration."""
     backup_dir = config_dir / f"backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
     backup_dir.mkdir(exist_ok=True)
-    
+
     for yaml_file in config_dir.glob('*.yaml'):
         import shutil
         shutil.copy2(yaml_file, backup_dir / yaml_file.name)
-    
+
     print(f"✓ Backed up YAML files to {backup_dir}")
 
 
@@ -237,24 +237,24 @@ def main():
     print("=" * 60)
     print("YAML to Database Configuration Migration")
     print("=" * 60)
-    
-    # Locate config directory
+
+    # Locate settings directory
     project_root = Path(__file__).parent.parent
-    config_dir = project_root / "config"
-    
+    config_dir = project_root / "settings"
+
     if not config_dir.exists():
         print("✗ Config directory not found")
         sys.exit(1)
-    
+
     # Load YAML configs
     print("\n1. Loading YAML configurations...")
     configs = load_yaml_configs(config_dir)
     print(f"   Loaded {len(configs)} YAML files")
-    
+
     # Backup YAML files
     print("\n2. Creating backup of YAML files...")
     backup_yaml_files(config_dir)
-    
+
     # Migrate to database
     print("\n3. Migrating to database...")
     with get_db_session() as db:
@@ -266,10 +266,10 @@ def main():
             if response.lower() != 'y':
                 print("   Migration cancelled")
                 return
-        
+
         profile = create_profile_from_yaml(db, configs, profile_name="default")
         print(f"   ✓ Created profile: {profile.name}")
-    
+
     # Validation
     print("\n4. Validating migration...")
     with get_db_session() as db:
@@ -277,21 +277,21 @@ def main():
         if not profile:
             print("   ✗ Validation failed: Profile not found")
             sys.exit(1)
-        
+
         if not profile.ai_infra:
-            print("   ✗ Validation failed: AI infra missing")
+            print("   ✗ Validation failed: AI db_app_deployment missing")
             sys.exit(1)
-        
+
         if not profile.mlflow:
-            print("   ✗ Validation failed: MLflow config missing")
+            print("   ✗ Validation failed: MLflow settings missing")
             sys.exit(1)
-        
+
         if not profile.prompts:
-            print("   ✗ Validation failed: Prompts config missing")
+            print("   ✗ Validation failed: Prompts settings missing")
             sys.exit(1)
-        
+
         print("   ✓ All configurations migrated successfully")
-    
+
     print("\n" + "=" * 60)
     print("Migration Complete!")
     print("=" * 60)
@@ -308,6 +308,7 @@ if __name__ == "__main__":
     except Exception as e:
         print(f"\n✗ Migration failed: {e}")
         import traceback
+
         traceback.print_exc()
         sys.exit(1)
 ```
@@ -326,7 +327,7 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from src.config.database import get_db_session
+from src.core.database import get_db_session
 from src.models.config import ConfigProfile
 
 
@@ -334,12 +335,12 @@ def backup_config(output_file: Path):
     """Export all configuration to JSON."""
     with get_db_session() as db:
         profiles = db.query(ConfigProfile).all()
-        
+
         backup_data = {
             "backup_date": datetime.now().isoformat(),
             "profiles": []
         }
-        
+
         for profile in profiles:
             profile_data = {
                 "name": profile.name,
@@ -369,10 +370,10 @@ def backup_config(output_file: Path):
                 },
             }
             backup_data["profiles"].append(profile_data)
-        
+
         with open(output_file, 'w') as f:
             json.dump(backup_data, f, indent=2)
-        
+
         print(f"✓ Backed up {len(profiles)} profiles to {output_file}")
 
 

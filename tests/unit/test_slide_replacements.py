@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from src.api.models.requests import SlideContext
+from src.api.schemas.requests import SlideContext
 from src.api.services.chat_service import validate_canvas_scripts
 from src.services.agent import AgentError, SlideGeneratorAgent
 

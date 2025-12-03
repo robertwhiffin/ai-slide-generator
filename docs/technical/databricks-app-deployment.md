@@ -176,16 +176,16 @@ common:
 
 ```bash
 # Create new app
-python -m infra.deploy --create --env development [--profile <name>]
+python -m db_app_deployment.deploy --create --env development [--profile <name>]
 
-# Update existing app (code + config changes)
-python -m infra.deploy --update --env production [--profile <name>]
+# Update existing app (code + settings changes)
+python -m db_app_deployment.deploy --update --env production [--profile <name>]
 
 # Delete app (workspace files remain)
-python -m infra.deploy --delete --env staging [--profile <name>]
+python -m db_app_deployment.deploy --delete --env staging [--profile <name>]
 
-# Validate config without deploying
-python -m infra.deploy --create --env production --dry-run
+# Validate settings without deploying
+python -m db_app_deployment.deploy --create --env production --dry-run
 ```
 
 ### Arguments
@@ -219,8 +219,8 @@ python -m infra.deploy --create --env production --dry-run
 
 **Debugging workflow:**
 ```bash
-# 1. Validate config
-python -m infra.deploy --create --env dev --dry-run
+# 1. Validate settings
+python -m db_app_deployment.deploy --create --env dev --dry-run
 
 # 2. Test auth separately
 python -c "from databricks.sdk import WorkspaceClient; print(WorkspaceClient().current_user.me())"
@@ -290,23 +290,23 @@ curl https://<app-url>/api/health
 
 3. **Deploy**:
    ```bash
-   python -m infra.deploy --create --env qa --profile qa-workspace
+   python -m db_app_deployment.deploy --create --env qa --profile qa-workspace
    ```
 
 ### Add Pre-Deployment Validation
 
 ```python
-# infra/deploy.py :: deploy()
+# db_app_deployment/deploy.py :: deploy()
 def validate_before_deploy(config: DeploymentConfig):
     """Run checks before uploading."""
     # Verify builds succeed
     wheel_path = build_python_wheel(project_root)
     assert wheel_path.exists()
-    
-    # Test config validity
-    from src.config.settings import get_settings
+
+    # Test settings validity
+    from src.core.settings import get_settings
     settings = get_settings()
-    
+
     # Check workspace path accessible
     try:
         workspace_client.workspace.get_status(config.workspace_path)
@@ -332,7 +332,7 @@ jobs:
         env:
           DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST_STAGING }}
           DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN_STAGING }}
-        run: python -m infra.deploy --update --env staging
+        run: python -m db_app_deployment.deploy --update --env staging
 ```
 
 **Best practices:**
@@ -364,9 +364,9 @@ env_vars:
 
 **Option 2: Load different runtime configs**
 ```python
-# src/config/loader.py
+# src/settings/config_loader.py
 env = os.getenv("ENVIRONMENT", "development")
-config_path = f"config/config.{env}.yaml"  # config.production.yaml
+config_path = f"settings/settings.{env}.yaml"  # settings.production.yaml
 ```
 
 ---

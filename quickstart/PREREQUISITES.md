@@ -354,7 +354,7 @@ pg_isready
 ```bash
 # Fix npm permissions
 mkdir ~/.npm-global
-npm config set prefix '~/.npm-global'
+npm settings set prefix '~/.npm-global'
 echo 'export PATH=~/.npm-global/bin:$PATH' >> ~/.zshrc
 source ~/.zshrc
 ```

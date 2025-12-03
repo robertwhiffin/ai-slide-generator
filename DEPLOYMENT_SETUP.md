@@ -68,7 +68,7 @@ environments:
 Validate configuration without deploying:
 
 ```bash
-python -m infra.deploy --create --env development --dry-run
+python -m db_app_deployment.deploy --create --env development --dry-run
 ```
 
 ## Deployment Commands
@@ -77,36 +77,36 @@ python -m infra.deploy --create --env development --dry-run
 
 ```bash
 # Deploy to development
-python -m infra.deploy --create --env development
+python -m db_app_deployment.deploy --create --env development
 
 # Deploy to production
-python -m infra.deploy --create --env production
+python -m db_app_deployment.deploy --create --env production
 ```
 
 ### Update Existing App
 
 ```bash
 # Update development app
-python -m infra.deploy --update --env development
+python -m db_app_deployment.deploy --update --env development
 
 # Update production app
-python -m infra.deploy --update --env production
+python -m db_app_deployment.deploy --update --env production
 ```
 
 ### Delete App
 
 ```bash
-python -m infra.deploy --delete --env development
+python -m db_app_deployment.deploy --delete --env development
 ```
 
 ### Advanced Options
 
 ```bash
 # Use specific Databricks profile
-python -m infra.deploy --create --env production --profile my-workspace
+python -m db_app_deployment.deploy --create --env production --profile my-workspace
 
 # Dry run (validation only)
-python -m infra.deploy --create --env production --dry-run
+python -m db_app_deployment.deploy --create --env production --dry-run
 ```
 
 ## What Happens During Deployment
@@ -187,10 +187,10 @@ cd frontend && npm install
 
 ```bash
 # Ensure you copied the example
-ls -la config/deployment.yaml
+ls -la settings/deployment.yaml
 
 # If missing, copy the example
-cp config/deployment.example.yaml config/deployment.yaml
+cp settings/deployment.example.yaml settings/deployment.yaml
 ```
 
 ## Environment Differences

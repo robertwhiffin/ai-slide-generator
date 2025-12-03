@@ -2,8 +2,8 @@
 
 import pytest
 from pathlib import Path
-from src.models.slide_deck import SlideDeck
-from src.models.slide import Slide
+from src.domain.slide_deck import SlideDeck
+from src.domain.slide import Slide
 
 
 @pytest.fixture

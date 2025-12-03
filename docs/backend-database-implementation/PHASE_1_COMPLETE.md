@@ -146,7 +146,7 @@ docs/
 ## Testing Results
 
 ```bash
-$ pytest tests/unit/config/test_models.py -v
+$ pytest tests/unit/settings/test_models.py -v
 ======================== 10 passed, 1 warning in 0.39s ========================
 ```
 
@@ -193,7 +193,7 @@ python scripts/init_database.py
 psql ai_slide_generator -c "SELECT * FROM config_profiles;"
 
 # 6. Run tests
-pytest tests/unit/config/test_models.py -v
+pytest tests/unit/settings/test_models.py -v
 ```
 
 Expected output:

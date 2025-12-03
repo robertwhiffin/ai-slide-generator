@@ -9,7 +9,7 @@ from unittest.mock import patch
 import pytest
 import yaml
 
-from src.config.loader import (
+from src.core.config_loader import (
     ConfigurationError,
     get_config_path,
     load_config,
@@ -22,15 +22,23 @@ from src.config.loader import (
 class TestGetConfigPath:
     """Tests for get_config_path function."""
 
-    def test_get_config_path_success(self):
-        """Test getting config path for existing file."""
-        # This test uses the actual config files in the project
-        result = get_config_path("config.yaml")
-        assert result.name == "config.yaml"
+    def test_get_config_path_success(self, tmp_path: Path, monkeypatch):
+        """Test getting settings path for existing file."""
+        # Create a temporary settings file in cwd path (first search location)
+        settings_dir = tmp_path / "settings"
+        settings_dir.mkdir()
+        settings_file = settings_dir / "settings.yaml"
+        settings_file.write_text("test: value")
+        
+        # Change cwd to tmp_path so get_config_path finds it
+        monkeypatch.chdir(tmp_path)
+        
+        result = get_config_path("settings.yaml")
+        assert result.name == "settings.yaml"
         assert result.exists()
 
     def test_get_config_path_file_not_found(self):
-        """Test error when config file doesn't exist."""
+        """Test error when settings file doesn't exist."""
         with pytest.raises(ConfigurationError, match="Configuration file not found"):
             get_config_path("nonexistent.yaml")
 
@@ -85,60 +93,72 @@ class TestLoadYamlFile:
 class TestLoadConfig:
     """Tests for load_config function."""
 
-    def test_load_config_success(self, sample_config: dict):
-        """Test successful config loading."""
-        with patch("src.config.loader.load_yaml_file", return_value=sample_config):
-            result = load_config()
-            assert result == sample_config
+    def test_load_config_success(self, sample_config: dict, tmp_path: Path):
+        """Test successful settings loading."""
+        mock_path = tmp_path / "settings.yaml"
+        with patch("src.core.config_loader.get_config_path", return_value=mock_path):
+            with patch("src.core.config_loader.load_yaml_file", return_value=sample_config):
+                result = load_config()
+                assert result == sample_config
 
-    def test_load_config_missing_required_keys(self):
+    def test_load_config_missing_required_keys(self, tmp_path: Path):
         """Test error when required keys are missing."""
         incomplete_config = {"llm": {}, "genie": {}}
+        mock_path = tmp_path / "settings.yaml"
 
-        with patch("src.config.loader.load_yaml_file", return_value=incomplete_config):
-            with pytest.raises(ConfigurationError, match="Missing required configuration sections"):
-                load_config()
+        with patch("src.core.config_loader.get_config_path", return_value=mock_path):
+            with patch("src.core.config_loader.load_yaml_file", return_value=incomplete_config):
+                with pytest.raises(ConfigurationError, match="Missing required configuration sections"):
+                    load_config()
 
-    def test_load_config_validates_all_required_keys(self, sample_config: dict):
+    def test_load_config_validates_all_required_keys(self, sample_config: dict, tmp_path: Path):
         """Test all required keys are validated."""
+        mock_path = tmp_path / "settings.yaml"
         for key in ["llm", "genie", "api", "output", "logging"]:
             incomplete_config = sample_config.copy()
             del incomplete_config[key]
 
-            with patch("src.config.loader.load_yaml_file", return_value=incomplete_config):
-                with pytest.raises(ConfigurationError, match=f"Missing required.*{key}"):
-                    load_config()
+            with patch("src.core.config_loader.get_config_path", return_value=mock_path):
+                with patch("src.core.config_loader.load_yaml_file", return_value=incomplete_config):
+                    with pytest.raises(ConfigurationError, match=f"Missing required.*{key}"):
+                        load_config()
 
 
 class TestLoadPrompts:
     """Tests for load_prompts function."""
 
-    def test_load_prompts_success(self, sample_prompts: dict):
+    def test_load_prompts_success(self, sample_prompts: dict, tmp_path: Path):
         """Test successful prompts loading."""
-        with patch("src.config.loader.load_yaml_file", return_value=sample_prompts):
-            result = load_prompts()
-            assert result == sample_prompts
+        mock_path = tmp_path / "prompts.yaml"
+        with patch("src.core.config_loader.get_config_path", return_value=mock_path):
+            with patch("src.core.config_loader.load_yaml_file", return_value=sample_prompts):
+                result = load_prompts()
+                assert result == sample_prompts
 
-    def test_load_prompts_missing_required_prompts(self):
+    def test_load_prompts_missing_required_prompts(self, tmp_path: Path):
         """Test error when required prompts are missing."""
         incomplete_prompts = {"other_key": "test"}  # Missing system_prompt
+        mock_path = tmp_path / "prompts.yaml"
 
-        with patch("src.config.loader.load_yaml_file", return_value=incomplete_prompts):
-            with pytest.raises(ConfigurationError, match="Missing required prompts"):
-                load_prompts()
+        with patch("src.core.config_loader.get_config_path", return_value=mock_path):
+            with patch("src.core.config_loader.load_yaml_file", return_value=incomplete_prompts):
+                with pytest.raises(ConfigurationError, match="Missing required prompts"):
+                    load_prompts()
 
-    def test_load_prompts_validates_all_required(self, sample_prompts: dict):
+    def test_load_prompts_validates_all_required(self, sample_prompts: dict, tmp_path: Path):
         """Test all required prompts are validated."""
         # Only system_prompt is required now
         required = ["system_prompt"]
+        mock_path = tmp_path / "prompts.yaml"
 
         for prompt_key in required:
             incomplete_prompts = sample_prompts.copy()
             del incomplete_prompts[prompt_key]
 
-            with patch("src.config.loader.load_yaml_file", return_value=incomplete_prompts):
-                with pytest.raises(ConfigurationError, match=f"Missing required.*{prompt_key}"):
-                    load_prompts()
+            with patch("src.core.config_loader.get_config_path", return_value=mock_path):
+                with patch("src.core.config_loader.load_yaml_file", return_value=incomplete_prompts):
+                    with pytest.raises(ConfigurationError, match=f"Missing required.*{prompt_key}"):
+                        load_prompts()
 
 
 class TestMergeWithEnv:
@@ -171,13 +191,13 @@ class TestMergeWithEnv:
             assert result["api"]["port"] == original_port
 
     def test_merge_no_overrides(self, sample_config: dict):
-        """Test config unchanged when no env vars set."""
+        """Test settings unchanged when no env vars set."""
         with patch.dict(os.environ, {}, clear=True):
             result = merge_with_env(sample_config)
             assert result == sample_config
 
     def test_merge_doesnt_modify_original(self, sample_config: dict):
-        """Test original config is not modified."""
+        """Test original settings is not modified."""
         original = sample_config.copy()
 
         with patch.dict(os.environ, {"API_PORT": "9000"}):

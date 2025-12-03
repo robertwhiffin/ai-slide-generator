@@ -98,18 +98,19 @@ self.agent = new_agent
 **Usage:**
 ```bash
 export DATABASE_URL='postgresql://localhost:5432/ai_slide_generator'
-python -m src.config.init_default_profile
+python -m src.settings.init_default_profile
 ```
 
 ### 5. Updated Agent Integration (`src/services/agent.py`)
 
 **Changed Import:**
+
 ```python
 # Old (Phase 1-3):
-from src.config.settings import get_settings
+from src.core.settings import get_settings
 
 # New (Phase 4):
-from src.config.settings_db import get_settings
+from src.core.settings_db import get_settings
 ```
 
 Agent now automatically uses database-backed configuration without code changes.
@@ -144,7 +145,7 @@ alembic upgrade head
 **Step 2: Initialize default profile**
 ```bash
 # Loads configuration from existing YAML files
-python -m src.config.init_default_profile
+python -m src.settings.init_default_profile
 ```
 
 **Step 3: Restart application**
@@ -181,20 +182,20 @@ curl -X POST http://localhost:8000/api/config/profiles/reload
 
 ```bash
 # Update configuration through admin UI, then:
-POST /api/config/profiles/reload
+POST /api/settings/profiles/reload
 ```
 
 ### Switch to Different Profile
 
 ```bash
 # Load production profile
-POST /api/config/profiles/2/load
+POST /api/settings/profiles/2/load
 ```
 
 ### Check Current Configuration
 
 ```bash
-GET /api/config/profiles/default
+GET /api/settings/profiles/default
 ```
 
 ## Architecture Changes

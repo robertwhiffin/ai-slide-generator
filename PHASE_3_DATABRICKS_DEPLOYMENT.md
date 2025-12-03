@@ -276,7 +276,7 @@ from pathlib import Path
 from .routes import chat, slides
 from .middleware.auth import UserMiddleware
 from .middleware.logging import LoggingMiddleware, setup_logging
-from src.config.settings import get_settings
+from src.core.settings import get_settings
 
 # Setup logging first
 logger = setup_logging()
@@ -314,19 +314,21 @@ frontend_dist = Path(__file__).parent.parent.parent / "frontend" / "dist"
 
 if frontend_dist.exists() and settings.environment == "production":
     logger.info("Serving frontend from", extra={"path": str(frontend_dist)})
-    
+
     # Mount static assets (JS, CSS, images)
     app.mount("/assets", StaticFiles(directory=str(frontend_dist / "assets")), name="assets")
-    
+
+
     # Serve index.html for all other routes (SPA routing)
     @app.get("/{full_path:path}")
     async def serve_frontend(full_path: str):
         # If path starts with /api, it should have been handled by routers
         if full_path.startswith("api/"):
             return {"error": "Not found"}, 404
-        
+
         # Serve index.html for all other routes
         return FileResponse(str(frontend_dist / "index.html"))
+
 
 @app.get("/api/health")
 async def health_check():
@@ -335,6 +337,7 @@ async def health_check():
         "status": "healthy",
         "environment": settings.environment,
     }
+
 
 logger.info("Application started", extra={"environment": settings.environment})
 ```
@@ -479,7 +482,7 @@ echo "Copying files to deploy..."
 
 # Backend
 cp -r src/ deploy/src/
-cp -r config/ deploy/config/
+cp -r settings/ deploy/settings/
 cp requirements.txt deploy/
 cp app.yaml deploy/
 
@@ -657,7 +660,7 @@ databricks workspace import_dir deploy/ /Users/<your-email>/apps/ai-slide-genera
 # Create app
 databricks apps create \
   --app-name ai-slide-generator \
-  --app-config /Users/<your-email>/apps/ai-slide-generator/app.yaml
+  --app-settings /Users/<your-email>/apps/ai-slide-generator/app.yaml
 ```
 
 #### 5.4 Monitor Deployment

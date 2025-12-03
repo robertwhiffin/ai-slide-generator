@@ -1,2 +1,2 @@
-"""Unit tests for configuration models."""
+"""Unit tests for configuration schemas."""
 

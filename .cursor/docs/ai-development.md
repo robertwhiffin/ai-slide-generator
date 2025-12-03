@@ -1405,7 +1405,7 @@ split_dataset = formatted_dataset.train_test_split(test_size=0.1, seed=42)
 
 # Training arguments
 training_args = TrainingArguments(
-    output_dir="/dbfs/mnt/models/llama2-lora",
+    output_dir="/dbfs/mnt/schemas/llama2-lora",
     num_train_epochs=3,
     per_device_train_batch_size=4,  # Adjust based on GPU memory
     gradient_accumulation_steps=4,  # Effective batch size: 16
@@ -1438,7 +1438,7 @@ with mlflow.start_run(run_name="llama2_lora_finetuning"):
     )
     
     trainer.train()
-    trainer.save_model("/dbfs/mnt/models/llama2-lora-final")
+    trainer.save_model("/dbfs/mnt/schemas/llama2-lora-final")
     
     # Log to Unity Catalog
     mlflow.transformers.log_model(
@@ -1456,7 +1456,7 @@ Best for: 70B models on A100 80GB, 75% memory reduction vs 8-bit.
 ```python
 from transformers import BitsAndBytesConfig
 
-# 4-bit quantization config
+# 4-bit quantization settings
 bnb_config = BitsAndBytesConfig(
     load_in_4bit=True,
     bnb_4bit_quant_type="nf4",  # Normal Float 4-bit
@@ -1547,7 +1547,7 @@ def evaluate_model(model_endpoint: str, test_queries: list) -> dict:
     
     return {"avg_quality": sum(quality_scores) / len(quality_scores), "results": results}
 
-# Compare models
+# Compare schemas
 base_model_eval = evaluate_model("databricks-llama-2-70b-chat", test_queries)
 finetuned_eval = evaluate_model("llama2-company-assistant", test_queries)
 
