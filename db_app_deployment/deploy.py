@@ -16,25 +16,26 @@ import shutil
 import subprocess
 import sys
 import tempfile
-import time
-from datetime import timedelta
 from pathlib import Path
 from typing import Optional
 
-from databricks.sdk import WorkspaceClient  # Keep for profile-specific connections
-from databricks.sdk.core import ApiClient
+from databricks.sdk import WorkspaceClient
 from databricks.sdk.service.apps import (
     App,
     AppDeployment,
-    AppDeploymentMode,
     AppResource,
     AppResourceDatabase,
+    AppResourceDatabaseDatabasePermission,
     ComputeSize,
 )
+from databricks.sdk.service.workspace import ImportFormat
 
 from src.core.databricks_client import get_databricks_client
-from src.core.lakebase import create_lakebase_instance, grant_service_principal_permissions
-from databricks.sdk.service.workspace import ImportFormat
+from src.core.lakebase import (
+    get_or_create_lakebase_instance,
+    setup_lakebase_schema,
+    initialize_lakebase_tables,
+)
 
 from db_app_deployment.config import load_deployment_config
 
@@ -162,13 +163,15 @@ def create_staging_directory(
     wheel_dest.mkdir()
     shutil.copy2(wheel_path, wheel_dest / wheel_path.name)
 
-    # Copy settings files
-    print("  Copying settings files...")
-    shutil.copytree(
-        project_root / "settings",
-        staging_dir / "settings",
-        ignore=shutil.ignore_patterns("deployment.yaml", "deployment.example.yaml"),
-    )
+    # Copy config files
+    print("  Copying config files...")
+    config_src = project_root / "config"
+    if config_src.exists():
+        shutil.copytree(
+            config_src,
+            staging_dir / "config",
+            ignore=shutil.ignore_patterns("deployment.yaml", "deployment.example.yaml"),
+        )
 
     # Copy frontend dist
     print("  Copying frontend build...")
@@ -293,10 +296,11 @@ def create_app(
     description: str,
     workspace_path: str,
     compute_size: str,
+    instance_name: str,
     database_name: str,
-) -> None:
+) -> App:
     """
-    Create Databricks App with Lakebase database.
+    Create Databricks App with Lakebase database resource.
 
     Args:
         workspace_client: Databricks workspace client
@@ -304,7 +308,11 @@ def create_app(
         description: Description of the app
         workspace_path: Path to app artifacts in workspace
         compute_size: Compute size (MEDIUM, LARGE, or LIQUID)
-        database_name: Lakebase database name to attach as resource
+        instance_name: Lakebase instance name
+        database_name: Database name within the instance
+
+    Returns:
+        Created App object
     """
     print(f"🚀 Creating app: {app_name}")
 
@@ -313,11 +321,15 @@ def create_app(
         compute_size_enum = ComputeSize(compute_size)
 
         # Build resources list with Lakebase database
-        print(f"  📊 Attaching Lakebase database: {database_name}")
+        print(f"  📊 Attaching Lakebase instance: {instance_name}, database: {database_name}")
         resources = [
             AppResource(
                 name="app_database",
-                database=AppResourceDatabase(name=database_name),
+                database=AppResourceDatabase(
+                    instance_name=instance_name,
+                    database_name=database_name,
+                    permission=AppResourceDatabaseDatabasePermission.CAN_CONNECT_AND_CREATE,
+                ),
             )
         ]
 
@@ -332,8 +344,21 @@ def create_app(
 
         result = workspace_client.apps.create_and_wait(app)
         print(f"  ✅ App created: {result.name}")
+
+        # Trigger initial deployment with source code
+        print("  ⏳ Deploying source code...")
+        app_deployment = AppDeployment(source_code_path=workspace_path)
+        deployment_result = workspace_client.apps.deploy_and_wait(
+            app_name=app_name,
+            app_deployment=app_deployment,
+        )
+        print(f"  ✅ Deployment completed: {deployment_result.deployment_id}")
+
+        # Refresh app to get URL
+        result = workspace_client.apps.get(name=app_name)
         if hasattr(result, "url") and result.url:
             print(f"  🌐 URL: {result.url}")
+        return result
     except Exception as e:
         raise DeploymentError(f"App creation failed: {e}")
 
@@ -348,7 +373,7 @@ def update_app(
     """
     Deploy new version of existing Databricks App.
 
-    Creates a new app deployment with updated wheel, frontend, and settings files.
+    Creates a new app deployment with updated wheel, frontend, and config files.
     Uses the apps.deploy() API to trigger a new deployment.
 
     Args:
@@ -430,6 +455,71 @@ def set_permissions(
         print(f"  ⚠️  Could not set permissions: {e}")
 
 
+def setup_database_schema_and_tables(
+    workspace_client: WorkspaceClient,
+    app: App,
+    instance_name: str,
+    schema: str,
+) -> None:
+    """
+    Set up database schema and initialize tables after app creation.
+
+    This function:
+    1. Gets the app's service principal client ID
+    2. Creates the schema in Lakebase
+    3. Grants permissions to the app's service principal
+    4. Initializes SQLAlchemy tables
+
+    Args:
+        workspace_client: Databricks workspace client
+        app: Created App object
+        instance_name: Lakebase instance name
+        schema: Schema name for application tables
+    """
+    print("📊 Setting up database schema and tables...")
+
+    # Get the app's service principal client ID
+    # When a database resource is attached, Databricks creates a Postgres role
+    # tied to the app's service principal client ID
+    client_id = None
+    
+    # Try to get client ID from app's service principal
+    if hasattr(app, "service_principal_client_id") and app.service_principal_client_id:
+        client_id = app.service_principal_client_id
+    elif hasattr(app, "service_principal_id") and app.service_principal_id:
+        # Fallback to service_principal_id
+        client_id = str(app.service_principal_id)
+    
+    if not client_id:
+        print("  ⚠️  Could not get app service principal client ID")
+        print("  Schema setup will need to be done manually")
+        return
+
+    print(f"  App client ID: {client_id}")
+
+    try:
+        # Set up schema and grant permissions via SQL
+        setup_lakebase_schema(
+            instance_name=instance_name,
+            schema=schema,
+            client_id=client_id,
+            client=workspace_client,
+        )
+        print(f"  ✅ Schema '{schema}' created with permissions")
+
+        # Initialize SQLAlchemy tables
+        initialize_lakebase_tables(
+            instance_name=instance_name,
+            schema=schema,
+            client=workspace_client,
+        )
+        print("  ✅ Database tables initialized")
+
+    except Exception as e:
+        print(f"  ⚠️  Database setup failed: {e}")
+        print("  You may need to run table initialization manually after app starts")
+
+
 def deploy(
     env: str,
     action: str,
@@ -456,6 +546,7 @@ def deploy(
         print(f"   Description: {config.description}")
         print(f"   Workspace path: {config.workspace_path}")
         print(f"   Compute size: {config.compute_size}")
+        print(f"   Lakebase: {config.lakebase.database_name} (capacity: {config.lakebase.capacity})")
         print()
 
         if dry_run:
@@ -471,7 +562,7 @@ def deploy(
             print("🔑 Connecting to Databricks (using environment variables)")
             workspace_client = get_databricks_client()
         print("  ✅ Connected")
-        print("Workspace URL: ", workspace_client.config.host )
+        print(f"  Workspace URL: {workspace_client.config.host}")
         print()
 
         # Handle delete action
@@ -480,18 +571,17 @@ def deploy(
             print("✅ Deletion complete")
             return
 
-        # Create Lakebase instance
-        print("📊 Setting up Lakebase database...")
-        lakebase_result = create_lakebase_instance(
-            catalog=config.lakebase.catalog,
+        # Step 1: Create Lakebase instance (if not exists)
+        print("📊 Setting up Lakebase database instance...")
+        lakebase_result = get_or_create_lakebase_instance(
             database_name=config.lakebase.database_name,
-            schema=config.lakebase.schema,
+            capacity=config.lakebase.capacity,
             client=workspace_client,
         )
-        print(f"  ✅ Lakebase ready: {lakebase_result['full_schema_name']}")
+        print(f"  ✅ Lakebase instance: {lakebase_result['name']} ({lakebase_result['status']})")
         print()
 
-        # Build Python wheel and frontend
+        # Step 2: Build Python wheel and frontend
         wheel_path = build_python_wheel(project_root)
         print()
         
@@ -504,38 +594,40 @@ def deploy(
         print()
 
         try:
-            # Upload files directly to workspace
+            # Step 3: Upload files to workspace
             upload_files_to_workspace(
                 workspace_client, staging_dir, config.workspace_path
             )
             print()
 
-            # Create or update app
+            # Step 4: Create or update app
             if action == "create":
-                create_app(
+                # Create app with database resource attached
+                app = create_app(
                     workspace_client,
                     config.app_name,
                     config.description,
                     config.workspace_path,
                     config.compute_size,
-                    database_name=config.lakebase.database_name,
+                    instance_name=config.lakebase.database_name,
+                    database_name="databricks_postgres",  # Default Lakebase database
                 )
-                set_permissions(workspace_client, config.app_name, config.permissions)
+                print()
 
-                # Grant Lakebase permissions to app service principal
-                try:
-                    app = workspace_client.apps.get(name=config.app_name)
-                    if app.service_principal_id:
-                        print("🔐 Granting Lakebase permissions to app service principal...")
-                        grant_service_principal_permissions(
-                            catalog=config.lakebase.catalog,
-                            schema=config.lakebase.schema,
-                            principal_id=str(app.service_principal_id),
-                            client=workspace_client,
-                        )
-                        print("  ✅ Lakebase permissions granted")
-                except Exception as e:
-                    print(f"  ⚠️  Could not grant Lakebase permissions: {e}")
+                # Set app permissions
+                set_permissions(workspace_client, config.app_name, config.permissions)
+                print()
+
+                # Step 5: Set up database schema and tables
+                # This must happen after app creation because we need the app's
+                # service principal client ID for Postgres GRANT statements
+                setup_database_schema_and_tables(
+                    workspace_client,
+                    app,
+                    instance_name=config.lakebase.database_name,
+                    schema=config.lakebase.schema,
+                )
+
             elif action == "update":
                 update_app(
                     workspace_client,
@@ -614,4 +706,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
