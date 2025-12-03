@@ -60,7 +60,7 @@ def print_result(key: str, value: Any) -> None:
         print(f"  {key}: {value}")
 
 
-def generate_slides(question: str, max_slides: int = 5) -> str:
+def generate_slides(question: str) -> str:
     """Generate slides using the agent."""
     print_section("🤖 Generating Slides with Agent")
     
@@ -78,11 +78,11 @@ def generate_slides(question: str, max_slides: int = 5) -> str:
     from src.services.agent import create_agent
     
     print(f"Question: {question}")
-    print(f"Max slides: {max_slides}")
     print("\nCalling agent...")
     
     agent = create_agent()
-    result = agent.generate_slides(question=question, max_slides=max_slides)
+    session_id = agent.create_session()
+    result = agent.generate_slides(question=question, session_id=session_id)
     
     html = result.get("html", "")
     print(f"✅ Generated {len(html):,} characters of HTML")
@@ -360,13 +360,6 @@ def main():
     )
     
     parser.add_argument(
-        '--max-slides',
-        type=int,
-        default=5,
-        help='Max slides to generate (with --generate)'
-    )
-    
-    parser.add_argument(
         '--verbose',
         action='store_true',
         help='Verbose output for debugging'
@@ -388,7 +381,7 @@ def main():
     
     # Determine HTML source
     if args.generate:
-        html = generate_slides(args.question, args.max_slides)
+        html = generate_slides(args.question)
         
         # Optionally save generated HTML
         output_dir = Path("output")

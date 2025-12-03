@@ -165,7 +165,6 @@ class ChatService:
         self,
         session_id: str,
         message: str,
-        max_slides: int = 10,
         slide_context: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """Send a message to the agent and get response.
@@ -173,7 +172,6 @@ class ChatService:
         Args:
             session_id: Session ID (required, must exist in database)
             message: User's message
-            max_slides: Maximum number of slides to generate
             slide_context: Optional context for slide editing
 
         Returns:
@@ -191,7 +189,6 @@ class ChatService:
             "Processing message",
             extra={
                 "message_length": len(message),
-                "max_slides": max_slides,
                 "session_id": session_id,
                 "has_slide_context": slide_context is not None,
             },
@@ -210,7 +207,6 @@ class ChatService:
             result = self.agent.generate_slides(
                 question=message,
                 session_id=session_id,
-                max_slides=max_slides,
                 slide_context=slide_context,
             )
 
