@@ -1,7 +1,7 @@
 """Chat service wrapper around the agent.
 
-Phase 1: Single global session, stored in memory.
-Phase 4: Support multiple sessions with session_id parameter and configuration reload.
+All session state is stored in the database (PostgreSQL in dev, Lakebase in prod).
+Sessions must be created via the /api/sessions endpoint before sending messages.
 """
 
 import copy
@@ -9,6 +9,7 @@ import logging
 import threading
 from typing import Any, Dict, List, Optional
 
+from src.api.services.session_manager import get_session_manager, SessionNotFoundError
 from src.domain.slide import Slide
 from src.domain.slide_deck import SlideDeck
 from src.services.agent import create_agent
@@ -26,7 +27,6 @@ def validate_canvas_scripts(
     existing_scripts: str,
 ) -> None:
     """
-    
     Ensure every canvas id has a corresponding initialization script.
 
     Raises:
@@ -53,19 +53,16 @@ def validate_canvas_scripts(
 
 class ChatService:
     """Service for managing chat interactions with the AI agent.
-    
-    Phase 1: Maintains a single session for the application lifetime.
-    Phase 4: Will support multiple sessions with persistence.
-    
+
+    All session state is persisted in the database via SessionManager.
+    This service handles the AI agent lifecycle and message processing.
+
     Attributes:
         agent: SlideGeneratorAgent instance
-        session_id: Current session ID (Phase 1: single session)
-        current_deck: Current parsed slide deck
-        raw_html: Raw HTML from AI (for debugging)
     """
 
     def __init__(self):
-        """Initialize the chat service with agent and session."""
+        """Initialize the chat service with agent."""
         logger.info("Initializing ChatService")
 
         # Thread lock for safe agent reloading
@@ -74,49 +71,38 @@ class ChatService:
         # Create agent instance
         self.agent = create_agent()
 
-        # Phase 1: Create single session on startup
-        self.session_id = self.agent.create_session()
-        logger.info("Created single session", extra={"session_id": self.session_id})
-
-        # Store current slide deck and raw HTML
-        self.current_deck: Optional[SlideDeck] = None
-        self.raw_html: Optional[str] = None
+        # In-memory cache of slide decks (keyed by session_id)
+        # This avoids re-parsing HTML on every request
+        self._deck_cache: Dict[str, SlideDeck] = {}
 
         logger.info("ChatService initialized successfully")
 
     def reload_agent(self, profile_id: Optional[int] = None) -> Dict[str, Any]:
         """
         Reload agent with new settings from database.
-        
+
         This allows hot-reload of configuration without restarting the application.
-        Session state (conversation history and Genie conversations) is preserved.
-        
+        Genie conversation IDs are cleared from all sessions in the database.
+
         Args:
             profile_id: Profile ID to load, or None for default profile
-            
+
         Returns:
             Dictionary with reload status and profile information
-            
+
         Raises:
             Exception: If reload fails (agent remains in previous state)
         """
         with self._reload_lock:
             logger.info(
                 "Reloading agent with new configuration",
-                extra={"profile_id": profile_id, "current_session_id": self.session_id},
+                extra={"profile_id": profile_id},
             )
 
             try:
-                # Save current session state
-                sessions_backup = copy.deepcopy(self.agent.sessions)
-                logger.info(
-                    "Backed up session state",
-                    extra={"session_count": len(sessions_backup)},
-                )
-
                 # Reload settings from database
-                # This will update the settings cache
                 from src.core.settings_db import reload_settings
+
                 new_settings = reload_settings(profile_id)
                 logger.info(
                     "Loaded new settings",
@@ -128,32 +114,28 @@ class ChatService:
                     },
                 )
 
-                # Clear Genie conversation IDs from sessions (they're tied to the old space)
-                # This forces creation of new conversations in the new Genie space
-                for session_id, session in sessions_backup.items():
-                    if "genie_conversation_id" in session:
-                        logger.info(
-                            "Clearing Genie conversation ID for session",
-                            extra={
-                                "session_id": session_id,
-                                "old_conversation_id": session["genie_conversation_id"],
-                            },
-                        )
-                        session["genie_conversation_id"] = None
+                # Clear Genie conversation IDs from all sessions
+                # (they're tied to the old Genie space)
+                session_manager = get_session_manager()
+                sessions = session_manager.list_sessions(limit=1000)
+                for session in sessions:
+                    session_manager.set_genie_conversation_id(
+                        session["session_id"], None
+                    )
+                logger.info(
+                    "Cleared Genie conversation IDs",
+                    extra={"session_count": len(sessions)},
+                )
 
                 # Create new agent with new settings
                 new_agent = create_agent()
                 logger.info("Created new agent instance")
 
-                # Restore sessions (with cleared Genie conversation IDs)
-                new_agent.sessions = sessions_backup
-                logger.info(
-                    "Restored session state with cleared Genie conversations",
-                    extra={"session_count": len(new_agent.sessions)},
-                )
-
                 # Atomic swap
                 self.agent = new_agent
+
+                # Clear deck cache (settings may affect rendering)
+                self._deck_cache.clear()
 
                 logger.info(
                     "Agent reloaded successfully",
@@ -168,7 +150,7 @@ class ChatService:
                     "profile_id": new_settings.profile_id,
                     "profile_name": new_settings.profile_name,
                     "llm_endpoint": new_settings.llm.endpoint,
-                    "sessions_preserved": len(sessions_backup),
+                    "sessions_updated": len(sessions),
                 }
 
             except Exception as e:
@@ -177,30 +159,32 @@ class ChatService:
                     exc_info=True,
                     extra={"profile_id": profile_id},
                 )
-                # Agent remains in previous state if reload fails
                 raise Exception(f"Agent reload failed: {e}") from e
 
     def send_message(
         self,
+        session_id: str,
         message: str,
         max_slides: int = 10,
         slide_context: Optional[Dict[str, Any]] = None,
-        # session_id: Optional[str] = None,  # For Phase 4
     ) -> Dict[str, Any]:
         """Send a message to the agent and get response.
-        
+
         Args:
+            session_id: Session ID (required, must exist in database)
             message: User's message
             max_slides: Maximum number of slides to generate
-            # session_id: Optional session ID (Phase 4)
-        
+            slide_context: Optional context for slide editing
+
         Returns:
             Dictionary containing:
                 - messages: List of message dicts for UI display
                 - slide_deck: Parsed slide deck dict (if generated)
                 - metadata: Execution metadata
-        
+                - session_id: The session ID used
+
         Raises:
+            SessionNotFoundError: If session doesn't exist
             Exception: If agent fails to generate slides
         """
         logger.info(
@@ -208,18 +192,24 @@ class ChatService:
             extra={
                 "message_length": len(message),
                 "max_slides": max_slides,
-                "session_id": self.session_id,
+                "session_id": session_id,
                 "has_slide_context": slide_context is not None,
             },
         )
 
+        # Validate session exists in database
+        session_manager = get_session_manager()
+        db_session = session_manager.get_session(session_id)  # Raises if not found
+
+        # Ensure session is registered with the agent
+        # The agent maintains its own in-memory session store for conversation state
+        self._ensure_agent_session(session_id, db_session.get("genie_conversation_id"))
+
         try:
             # Call agent to generate slides
-            # Phase 1: Use single session_id
-            # Phase 4: Use provided session_id or create new one
             result = self.agent.generate_slides(
                 question=message,
-                session_id=self.session_id,
+                session_id=session_id,
                 max_slides=max_slides,
                 slide_context=slide_context,
             )
@@ -227,22 +217,29 @@ class ChatService:
             html_output = result.get("html")
             replacement_info = result.get("replacement_info")
 
+            # Get cached deck for this session
+            current_deck = self._deck_cache.get(session_id)
+
             if slide_context and replacement_info:
-                slide_deck_dict = self._apply_slide_replacements(result["parsed_output"])
-                # Store knitted HTML for debugging
-                if self.current_deck:
-                    self.raw_html = self.current_deck.knit()
+                slide_deck_dict = self._apply_slide_replacements(
+                    replacement_info=result["parsed_output"],
+                    session_id=session_id,
+                )
+                current_deck = self._deck_cache.get(session_id)
+                raw_html = current_deck.knit() if current_deck else None
             elif html_output and html_output.strip():
-                self.raw_html = html_output
+                raw_html = html_output
 
                 try:
-                    self.current_deck = SlideDeck.from_html_string(html_output)
-                    slide_deck_dict = self.current_deck.to_dict()
+                    current_deck = SlideDeck.from_html_string(html_output)
+                    self._deck_cache[session_id] = current_deck
+                    slide_deck_dict = current_deck.to_dict()
                     logger.info(
                         "Parsed slide deck",
                         extra={
-                            "slide_count": len(self.current_deck.slides),
-                            "title": self.current_deck.title,
+                            "slide_count": len(current_deck.slides),
+                            "title": current_deck.title,
+                            "session_id": session_id,
                         },
                     )
                 except Exception as e:
@@ -250,19 +247,33 @@ class ChatService:
                         f"Failed to parse HTML into SlideDeck: {e}",
                         exc_info=True,
                     )
-                    self.current_deck = None
+                    self._deck_cache.pop(session_id, None)
                     slide_deck_dict = None
             else:
-                self.raw_html = None
+                raw_html = None
                 slide_deck_dict = None
+
+            # Persist slide deck to database
+            if current_deck and slide_deck_dict:
+                session_manager.save_slide_deck(
+                    session_id=session_id,
+                    title=current_deck.title,
+                    html_content=current_deck.knit(),
+                    scripts_content=current_deck.scripts,
+                    slide_count=len(current_deck.slides),
+                )
+
+            # Update session activity
+            session_manager.update_last_activity(session_id)
 
             # Build response
             response = {
                 "messages": result["messages"],
                 "slide_deck": slide_deck_dict,
-                "raw_html": self.raw_html,  # Include raw HTML for debugging
+                "raw_html": raw_html,
                 "metadata": result["metadata"],
                 "replacement_info": replacement_info,
+                "session_id": session_id,
             }
 
             logger.info(
@@ -270,26 +281,112 @@ class ChatService:
                 extra={
                     "message_count": len(response["messages"]),
                     "has_slide_deck": response["slide_deck"] is not None,
+                    "session_id": session_id,
                 },
             )
 
             return response
 
+        except SessionNotFoundError:
+            raise
         except Exception as e:
             logger.error(f"Failed to process message: {e}", exc_info=True)
             raise
 
+    def _ensure_agent_session(
+        self, session_id: str, genie_conversation_id: Optional[str] = None
+    ) -> None:
+        """Ensure the session is registered with the agent.
+
+        The agent maintains its own in-memory session store for conversation
+        state (chat history, Genie conversation). This method ensures the
+        database session is registered with the agent.
+
+        Args:
+            session_id: Session ID from database
+            genie_conversation_id: Optional existing Genie conversation ID
+        """
+        # Check if agent already has this session
+        if session_id in self.agent.sessions:
+            return
+
+        # Register session with agent using its internal method
+        # This creates chat history and initializes Genie conversation
+        logger.info(
+            "Registering session with agent",
+            extra={"session_id": session_id, "genie_conversation_id": genie_conversation_id},
+        )
+
+        # Use agent's create_session but with our session_id
+        # We need to manually initialize since agent.create_session() generates its own ID
+        from langchain_community.chat_message_histories import ChatMessageHistory
+        from datetime import datetime
+        from src.services.tools import initialize_genie_conversation
+
+        try:
+            # Use existing Genie conversation or create new one
+            if genie_conversation_id:
+                genie_conv_id = genie_conversation_id
+            else:
+                genie_conv_id = initialize_genie_conversation()
+                # Save the new Genie conversation ID to database
+                session_manager = get_session_manager()
+                session_manager.set_genie_conversation_id(session_id, genie_conv_id)
+
+            # Initialize agent session data
+            self.agent.sessions[session_id] = {
+                "chat_history": ChatMessageHistory(),
+                "genie_conversation_id": genie_conv_id,
+                "created_at": datetime.utcnow().isoformat(),
+                "message_count": 0,
+            }
+
+            logger.info(
+                "Session registered with agent",
+                extra={"session_id": session_id, "genie_conversation_id": genie_conv_id},
+            )
+
+        except Exception as e:
+            logger.error(f"Failed to register session with agent: {e}", exc_info=True)
+            raise
+
+    def _get_or_load_deck(self, session_id: str) -> Optional[SlideDeck]:
+        """Get deck from cache or load from database."""
+        if session_id in self._deck_cache:
+            return self._deck_cache[session_id]
+
+        # Try to load from database
+        session_manager = get_session_manager()
+        deck_data = session_manager.get_slide_deck(session_id)
+
+        if deck_data and deck_data.get("html_content"):
+            try:
+                deck = SlideDeck.from_html_string(deck_data["html_content"])
+                self._deck_cache[session_id] = deck
+                return deck
+            except Exception as e:
+                logger.warning(f"Failed to load deck from database: {e}")
+
+        return None
+
     def _apply_slide_replacements(
         self,
         replacement_info: Dict[str, Any],
+        session_id: str,
     ) -> Dict[str, Any]:
         """
-        Apply slide replacements to the current slide deck.
+        Apply slide replacements to the session's slide deck.
 
         Handles variable-length replacements by removing the original block
         and inserting the new slides at the same start index.
+
+        Args:
+            replacement_info: Information about the replacement operation
+            session_id: Session ID
         """
-        if self.current_deck is None:
+        current_deck = self._get_or_load_deck(session_id)
+
+        if current_deck is None:
             raise ValueError("No current deck to apply replacements to")
 
         start_idx = replacement_info["start_index"]
@@ -299,29 +396,28 @@ class ChatService:
         canvas_ids = replacement_info.get("canvas_ids", [])
         script_canvas_ids = replacement_info.get("script_canvas_ids")
 
-        # Check that the start index for replacement is within the valid range of the slide deck
-        if start_idx < 0 or start_idx >= len(self.current_deck.slides):
+        # Validate replacement range
+        if start_idx < 0 or start_idx >= len(current_deck.slides):
             raise ValueError(f"Start index {start_idx} out of range")
-        # Ensure that the range of slides to be replaced does not exceed the available slides in the deck
-        if start_idx + original_count > len(self.current_deck.slides):
+        if start_idx + original_count > len(current_deck.slides):
             raise ValueError("Replacement range exceeds deck size")
 
         validate_canvas_scripts(
             canvas_ids=canvas_ids,
             script_text=replacement_scripts,
-            existing_scripts=self.current_deck.scripts or "",
+            existing_scripts=current_deck.scripts or "",
         )
 
         outgoing_canvas_ids: list[str] = []
         for offset in range(original_count):
-            slide_html = self.current_deck.slides[start_idx + offset].html
+            slide_html = current_deck.slides[start_idx + offset].html
             outgoing_canvas_ids.extend(extract_canvas_ids_from_html(slide_html))
 
         if outgoing_canvas_ids:
-            self.current_deck.remove_canvas_scripts(outgoing_canvas_ids)
+            current_deck.remove_canvas_scripts(outgoing_canvas_ids)
 
         for _ in range(original_count):
-            self.current_deck.remove_slide(start_idx)
+            current_deck.remove_slide(start_idx)
 
         logger.info(
             "Removed slides for replacement",
@@ -333,7 +429,7 @@ class ChatService:
                 html=slide_html,
                 slide_id=f"slide_{start_idx + idx}",
             )
-            self.current_deck.insert_slide(new_slide, start_idx + idx)
+            current_deck.insert_slide(new_slide, start_idx + idx)
 
         logger.info(
             "Inserted replacement slides",
@@ -349,98 +445,119 @@ class ChatService:
         )
 
         if replacement_script_canvas_ids:
-            self.current_deck.remove_canvas_scripts(replacement_script_canvas_ids)
+            current_deck.remove_canvas_scripts(replacement_script_canvas_ids)
 
         self._append_replacement_scripts(
-            replacement_scripts,
-            replacement_script_canvas_ids,
+            script_text=replacement_scripts,
+            script_canvas_ids=replacement_script_canvas_ids,
+            session_id=session_id,
         )
 
-        return self.current_deck.to_dict()
+        # Update cache
+        self._deck_cache[session_id] = current_deck
+
+        return current_deck.to_dict()
 
     def _append_replacement_scripts(
         self,
         script_text: str,
         script_canvas_ids: Optional[List[str]] = None,
+        session_id: str = "",
     ) -> None:
         """Append or replace validated replacement scripts on the deck."""
-        if not self.current_deck:
+        current_deck = self._deck_cache.get(session_id)
+
+        if not current_deck:
             return
 
         if not script_text or not script_text.strip():
             return
 
         canvas_ids = script_canvas_ids or []
-        self.current_deck.add_script_block(script_text, canvas_ids)
+        current_deck.add_script_block(script_text, canvas_ids)
 
-    def get_slides(self) -> Optional[Dict[str, Any]]:
-        """Get current slide deck.
-        
-        Phase 4: Add session_id parameter
-        
+    def get_slides(self, session_id: str) -> Optional[Dict[str, Any]]:
+        """Get slide deck for a session.
+
+        Args:
+            session_id: Session ID
+
         Returns:
             Slide deck dictionary or None if no slides exist
         """
-        if not self.current_deck:
+        deck = self._get_or_load_deck(session_id)
+        if not deck:
             return None
-        return self.current_deck.to_dict()
+        return deck.to_dict()
 
-    def reorder_slides(self, new_order: List[int]) -> Dict[str, Any]:
+    def reorder_slides(self, session_id: str, new_order: List[int]) -> Dict[str, Any]:
         """Reorder slides based on new index order.
-        
+
         Args:
+            session_id: Session ID
             new_order: List of indices in new order (e.g. [2, 0, 1])
-            # session_id: Optional[str] = None  # For Phase 4
-        
+
         Returns:
             Updated slide deck
-        
+
         Raises:
             ValueError: If no slide deck exists or invalid reorder
         """
-        if not self.current_deck:
+        current_deck = self._get_or_load_deck(session_id)
+        if not current_deck:
             raise ValueError("No slide deck available")
 
         # Validate indices
-        if len(new_order) != len(self.current_deck.slides):
+        if len(new_order) != len(current_deck.slides):
             raise ValueError("Invalid reorder: wrong number of indices")
 
-        if set(new_order) != set(range(len(self.current_deck.slides))):
+        if set(new_order) != set(range(len(current_deck.slides))):
             raise ValueError("Invalid reorder: invalid indices")
 
         # Reorder slides
-        new_slides = [self.current_deck.slides[i] for i in new_order]
-        self.current_deck.slides = new_slides
+        new_slides = [current_deck.slides[i] for i in new_order]
+        current_deck.slides = new_slides
 
         # Update indices
-        for idx, slide in enumerate(self.current_deck.slides):
+        for idx, slide in enumerate(current_deck.slides):
             slide.slide_id = f"slide_{idx}"
+
+        # Persist to database
+        session_manager = get_session_manager()
+        session_manager.save_slide_deck(
+            session_id=session_id,
+            title=current_deck.title,
+            html_content=current_deck.knit(),
+            scripts_content=current_deck.scripts,
+            slide_count=len(current_deck.slides),
+        )
 
         logger.info(
             "Reordered slides",
-            extra={"new_order": new_order, "session_id": self.session_id},
+            extra={"new_order": new_order, "session_id": session_id},
         )
 
-        return self.current_deck.to_dict()
+        return current_deck.to_dict()
 
-    def update_slide(self, index: int, html: str) -> Dict[str, Any]:
+    def update_slide(self, session_id: str, index: int, html: str) -> Dict[str, Any]:
         """Update a single slide's HTML.
-        
+
         Args:
+            session_id: Session ID
             index: Slide index to update
             html: New HTML content (must include <div class="slide">)
-            # session_id: Optional[str] = None  # For Phase 4
-        
+
         Returns:
             Updated slide information
-        
+
         Raises:
             ValueError: If no slide deck exists, invalid index, or invalid HTML
         """
-        if not self.current_deck:
+        current_deck = self._get_or_load_deck(session_id)
+        if not current_deck:
             raise ValueError("No slide deck available")
 
-        if index < 0 or index >= len(self.current_deck.slides):
+        if index < 0 or index >= len(current_deck.slides):
             raise ValueError(f"Invalid slide index: {index}")
 
         # Validate HTML has slide wrapper
@@ -448,103 +565,135 @@ class ChatService:
             raise ValueError("HTML must contain <div class='slide'> wrapper")
 
         # Update slide
-        self.current_deck.slides[index] = Slide(html=html, slide_id=f"slide_{index}")
+        current_deck.slides[index] = Slide(html=html, slide_id=f"slide_{index}")
+
+        # Persist to database
+        session_manager = get_session_manager()
+        session_manager.save_slide_deck(
+            session_id=session_id,
+            title=current_deck.title,
+            html_content=current_deck.knit(),
+            scripts_content=current_deck.scripts,
+            slide_count=len(current_deck.slides),
+        )
 
         logger.info(
             "Updated slide",
-            extra={"index": index, "session_id": self.session_id},
+            extra={"index": index, "session_id": session_id},
         )
 
-        return {
-            "index": index,
-            "slide_id": f"slide_{index}",
-            "html": html
-        }
+        return {"index": index, "slide_id": f"slide_{index}", "html": html}
 
-    def duplicate_slide(self, index: int) -> Dict[str, Any]:
+    def duplicate_slide(self, session_id: str, index: int) -> Dict[str, Any]:
         """Duplicate a slide.
-        
+
         Args:
+            session_id: Session ID
             index: Slide index to duplicate
-            # session_id: Optional[str] = None  # For Phase 4
-        
+
         Returns:
             Updated slide deck
-        
+
         Raises:
             ValueError: If no slide deck exists or invalid index
         """
-        if not self.current_deck:
+        current_deck = self._get_or_load_deck(session_id)
+        if not current_deck:
             raise ValueError("No slide deck available")
 
-        if index < 0 or index >= len(self.current_deck.slides):
+        if index < 0 or index >= len(current_deck.slides):
             raise ValueError(f"Invalid slide index: {index}")
 
         # Clone slide
-        cloned = self.current_deck.slides[index].clone()
+        cloned = current_deck.slides[index].clone()
 
         # Insert after original
-        self.current_deck.insert_slide(cloned, index + 1)
+        current_deck.insert_slide(cloned, index + 1)
 
         # Update slide IDs
-        for idx, slide in enumerate(self.current_deck.slides):
+        for idx, slide in enumerate(current_deck.slides):
             slide.slide_id = f"slide_{idx}"
+
+        # Persist to database
+        session_manager = get_session_manager()
+        session_manager.save_slide_deck(
+            session_id=session_id,
+            title=current_deck.title,
+            html_content=current_deck.knit(),
+            scripts_content=current_deck.scripts,
+            slide_count=len(current_deck.slides),
+        )
 
         logger.info(
             "Duplicated slide",
-            extra={"index": index, "new_count": len(self.current_deck.slides), "session_id": self.session_id},
+            extra={
+                "index": index,
+                "new_count": len(current_deck.slides),
+                "session_id": session_id,
+            },
         )
 
-        return self.current_deck.to_dict()
+        return current_deck.to_dict()
 
-    def delete_slide(self, index: int) -> Dict[str, Any]:
+    def delete_slide(self, session_id: str, index: int) -> Dict[str, Any]:
         """Delete a slide.
-        
+
         Args:
+            session_id: Session ID
             index: Slide index to delete
-            # session_id: Optional[str] = None  # For Phase 4
-        
+
         Returns:
             Updated slide deck
-        
+
         Raises:
             ValueError: If no slide deck exists, invalid index, or deleting last slide
         """
-        if not self.current_deck:
+        current_deck = self._get_or_load_deck(session_id)
+        if not current_deck:
             raise ValueError("No slide deck available")
 
-        if index < 0 or index >= len(self.current_deck.slides):
+        if index < 0 or index >= len(current_deck.slides):
             raise ValueError(f"Invalid slide index: {index}")
 
-        if len(self.current_deck.slides) <= 1:
+        if len(current_deck.slides) <= 1:
             raise ValueError("Cannot delete last slide")
 
         # Remove slide
-        self.current_deck.remove_slide(index)
+        current_deck.remove_slide(index)
 
         # Update slide IDs
-        for idx, slide in enumerate(self.current_deck.slides):
+        for idx, slide in enumerate(current_deck.slides):
             slide.slide_id = f"slide_{idx}"
+
+        # Persist to database
+        session_manager = get_session_manager()
+        session_manager.save_slide_deck(
+            session_id=session_id,
+            title=current_deck.title,
+            html_content=current_deck.knit(),
+            scripts_content=current_deck.scripts,
+            slide_count=len(current_deck.slides),
+        )
 
         logger.info(
             "Deleted slide",
-            extra={"index": index, "new_count": len(self.current_deck.slides), "session_id": self.session_id},
+            extra={
+                "index": index,
+                "new_count": len(current_deck.slides),
+                "session_id": session_id,
+            },
         )
 
-        return self.current_deck.to_dict()
+        return current_deck.to_dict()
 
 
-# Phase 1: Create global service instance
-# Phase 4: Move to dependency injection with session management
+# Global service instance
 _chat_service_instance: Optional[ChatService] = None
 
 
 def get_chat_service() -> ChatService:
-    """Get the global ChatService instance (Phase 1).
-    
-    Phase 1: Single global instance created on first call.
-    Phase 4: Replace with proper dependency injection.
-    
+    """Get the global ChatService instance.
+
     Returns:
         ChatService instance
     """
@@ -554,4 +703,3 @@ def get_chat_service() -> ChatService:
         _chat_service_instance = ChatService()
 
     return _chat_service_instance
-

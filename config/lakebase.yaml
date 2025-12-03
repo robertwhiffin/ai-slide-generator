@@ -1,0 +1,28 @@
+# Lakebase Configuration for AI Slide Generator
+# Databricks Lakebase is used for persistent storage in production deployments
+
+lakebase:
+  # Unity Catalog catalog name for the Lakebase instance
+  catalog: "ai_slide_generator_catalog"
+  
+  # Database name within the catalog
+  database_name: "ai_slide_generator_db"
+  
+  # Schema for application data tables
+  schema: "app_data"
+
+# Environment-specific overrides (optional)
+# These can be set in deployment.yaml env_vars to override defaults
+environments:
+  development:
+    catalog: "ai_slide_generator_dev_catalog"
+    database_name: "ai_slide_generator_dev_db"
+  
+  staging:
+    catalog: "ai_slide_generator_staging_catalog"
+    database_name: "ai_slide_generator_staging_db"
+  
+  production:
+    catalog: "ai_slide_generator_catalog"
+    database_name: "ai_slide_generator_db"
+

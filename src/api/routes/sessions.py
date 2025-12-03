@@ -1,0 +1,225 @@
+"""Session management endpoints.
+
+Provides CRUD operations for managing user sessions with persistent storage.
+"""
+
+import logging
+from typing import List, Optional
+
+from fastapi import APIRouter, HTTPException, Query
+
+from src.api.schemas.requests import CreateSessionRequest
+from src.api.services.session_manager import (
+    SessionNotFoundError,
+    get_session_manager,
+)
+
+logger = logging.getLogger(__name__)
+
+router = APIRouter(prefix="/api/sessions", tags=["sessions"])
+
+
+@router.post("")
+async def create_session(request: CreateSessionRequest = None):
+    """Create a new session.
+
+    Args:
+        request: Optional session creation parameters
+
+    Returns:
+        Created session info with session_id
+    """
+    request = request or CreateSessionRequest()
+
+    try:
+        session_manager = get_session_manager()
+        result = session_manager.create_session(
+            user_id=request.user_id,
+            title=request.title,
+        )
+
+        logger.info(
+            "Session created via API",
+            extra={"session_id": result["session_id"]},
+        )
+
+        return result
+
+    except Exception as e:
+        logger.error(f"Failed to create session: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to create session: {str(e)}",
+        ) from e
+
+
+@router.get("")
+async def list_sessions(
+    user_id: Optional[str] = Query(None, description="Filter by user ID"),
+    limit: int = Query(50, ge=1, le=100, description="Maximum sessions to return"),
+):
+    """List sessions.
+
+    Args:
+        user_id: Optional user filter
+        limit: Maximum number of sessions to return
+
+    Returns:
+        List of session summaries
+    """
+    try:
+        session_manager = get_session_manager()
+        sessions = session_manager.list_sessions(user_id=user_id, limit=limit)
+
+        return {"sessions": sessions, "count": len(sessions)}
+
+    except Exception as e:
+        logger.error(f"Failed to list sessions: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to list sessions: {str(e)}",
+        ) from e
+
+
+@router.get("/{session_id}")
+async def get_session(session_id: str):
+    """Get session details.
+
+    Args:
+        session_id: Session identifier
+
+    Returns:
+        Session information
+    """
+    try:
+        session_manager = get_session_manager()
+        return session_manager.get_session(session_id)
+
+    except SessionNotFoundError:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Session not found: {session_id}",
+        )
+    except Exception as e:
+        logger.error(f"Failed to get session: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to get session: {str(e)}",
+        ) from e
+
+
+@router.delete("/{session_id}")
+async def delete_session(session_id: str):
+    """Delete a session.
+
+    Args:
+        session_id: Session to delete
+
+    Returns:
+        Deletion confirmation
+    """
+    try:
+        session_manager = get_session_manager()
+        session_manager.delete_session(session_id)
+
+        logger.info("Session deleted via API", extra={"session_id": session_id})
+
+        return {"status": "deleted", "session_id": session_id}
+
+    except SessionNotFoundError:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Session not found: {session_id}",
+        )
+    except Exception as e:
+        logger.error(f"Failed to delete session: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to delete session: {str(e)}",
+        ) from e
+
+
+@router.get("/{session_id}/messages")
+async def get_session_messages(
+    session_id: str,
+    limit: Optional[int] = Query(None, ge=1, le=1000, description="Limit messages returned"),
+):
+    """Get messages for a session.
+
+    Args:
+        session_id: Session identifier
+        limit: Optional limit on messages
+
+    Returns:
+        List of messages
+    """
+    try:
+        session_manager = get_session_manager()
+        messages = session_manager.get_messages(session_id, limit=limit)
+
+        return {"session_id": session_id, "messages": messages, "count": len(messages)}
+
+    except SessionNotFoundError:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Session not found: {session_id}",
+        )
+    except Exception as e:
+        logger.error(f"Failed to get session messages: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to get messages: {str(e)}",
+        ) from e
+
+
+@router.get("/{session_id}/slides")
+async def get_session_slides(session_id: str):
+    """Get slide deck for a session.
+
+    Args:
+        session_id: Session identifier
+
+    Returns:
+        Slide deck info or null if no deck
+    """
+    try:
+        session_manager = get_session_manager()
+        deck = session_manager.get_slide_deck(session_id)
+
+        return {"session_id": session_id, "slide_deck": deck}
+
+    except SessionNotFoundError:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Session not found: {session_id}",
+        )
+    except Exception as e:
+        logger.error(f"Failed to get session slides: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to get slides: {str(e)}",
+        ) from e
+
+
+@router.post("/cleanup")
+async def cleanup_expired_sessions():
+    """Clean up expired sessions.
+
+    Returns:
+        Number of sessions deleted
+    """
+    try:
+        session_manager = get_session_manager()
+        count = session_manager.cleanup_expired_sessions()
+
+        logger.info("Session cleanup completed", extra={"deleted_count": count})
+
+        return {"status": "completed", "deleted_count": count}
+
+    except Exception as e:
+        logger.error(f"Failed to cleanup sessions: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Cleanup failed: {str(e)}",
+        ) from e
+

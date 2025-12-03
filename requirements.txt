@@ -30,6 +30,7 @@ lxml==6.0.2
 # Database
 sqlalchemy==2.0.36
 psycopg2-binary==2.9.10
+databricks-sql-connector>=3.0.0  # For Lakebase connections
 
 # Utilities
 httpx==0.28.1

@@ -18,6 +18,7 @@ import type { Slide, SlideDeck } from '../../types/slide';
 import { SlideTile } from './SlideTile';
 import { api } from '../../services/api';
 import { useSelection } from '../../contexts/SelectionContext';
+import { useSession } from '../../contexts/SessionContext';
 
 interface SlidePanelProps {
   slideDeck: SlideDeck | null;
@@ -31,6 +32,7 @@ export const SlidePanel: React.FC<SlidePanelProps> = ({ slideDeck, rawHtml, onSl
   const [isReordering, setIsReordering] = useState(false);
   const [viewMode, setViewMode] = useState<ViewMode>('tiles');
   const { selectedIndices, setSelection, clearSelection } = useSelection();
+  const { sessionId } = useSession();
   
   const sensors = useSensors(
     useSensor(PointerSensor),
@@ -53,12 +55,18 @@ export const SlidePanel: React.FC<SlidePanelProps> = ({ slideDeck, rawHtml, onSl
       onSlideChange({ ...slideDeck, slides: newSlides });
 
       // Persist to backend
+      if (!sessionId) {
+        alert('Session not initialized');
+        onSlideChange(slideDeck);
+        return;
+      }
+
       setIsReordering(true);
       try {
         const newOrder = newSlides.map((_, idx) => 
           slideDeck.slides.findIndex(s => s.slide_id === newSlides[idx].slide_id)
         );
-        const updatedDeck = await api.reorderSlides(newOrder);
+        const updatedDeck = await api.reorderSlides(newOrder, sessionId);
         onSlideChange(updatedDeck);
         clearSelection();
       } catch (error) {
@@ -73,12 +81,12 @@ export const SlidePanel: React.FC<SlidePanelProps> = ({ slideDeck, rawHtml, onSl
   };
 
   const handleDeleteSlide = async (index: number) => {
-    if (!slideDeck) return;
+    if (!slideDeck || !sessionId) return;
     
     if (!confirm(`Delete slide ${index + 1}?`)) return;
 
     try {
-      const updatedDeck = await api.deleteSlide(index);
+      const updatedDeck = await api.deleteSlide(index, sessionId);
       onSlideChange(updatedDeck);
       clearSelection();
     } catch (error) {
@@ -88,10 +96,10 @@ export const SlidePanel: React.FC<SlidePanelProps> = ({ slideDeck, rawHtml, onSl
   };
 
   const handleDuplicateSlide = async (index: number) => {
-    if (!slideDeck) return;
+    if (!slideDeck || !sessionId) return;
 
     try {
-      const updatedDeck = await api.duplicateSlide(index);
+      const updatedDeck = await api.duplicateSlide(index, sessionId);
       onSlideChange(updatedDeck);
       clearSelection();
     } catch (error) {
@@ -101,13 +109,15 @@ export const SlidePanel: React.FC<SlidePanelProps> = ({ slideDeck, rawHtml, onSl
   };
 
   const handleUpdateSlide = async (index: number, html: string) => {
-    if (!slideDeck) return;
+    if (!slideDeck || !sessionId) return;
 
     try {
-      await api.updateSlide(index, html);
+      await api.updateSlide(index, html, sessionId);
       // Fetch updated deck
-      const updatedDeck = await api.getSlides();
-      onSlideChange(updatedDeck);
+      const result = await api.getSlides(sessionId);
+      if (result.slide_deck) {
+        onSlideChange(result.slide_deck);
+      }
       clearSelection();
     } catch (error) {
       console.error('Failed to update:', error);
