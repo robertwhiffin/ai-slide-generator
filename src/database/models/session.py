@@ -114,9 +114,12 @@ class SessionSlideDeck(Base):
 
     # Slide deck content
     title = Column(String(255))
-    html_content = Column(Text)  # Full knitted HTML
+    html_content = Column(Text)  # Full knitted HTML (legacy, for raw HTML view)
     scripts_content = Column(Text)  # JavaScript for charts, etc.
     slide_count = Column(Integer, default=0)
+    
+    # Full SlideDeck structure as JSON (for restoration)
+    deck_json = Column(Text)  # JSON with slides array, css, external_scripts, scripts
 
     # Timestamps
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)

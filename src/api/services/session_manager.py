@@ -162,6 +162,35 @@ class SessionManager:
             logger.info("Deleted session", extra={"session_id": session_id})
             return True
 
+    def rename_session(self, session_id: str, title: str) -> Dict[str, Any]:
+        """Rename a session.
+
+        Args:
+            session_id: Session to rename
+            title: New title for the session
+
+        Returns:
+            Updated session info
+
+        Raises:
+            SessionNotFoundError: If session doesn't exist
+        """
+        with get_db_session() as db:
+            session = self._get_session_or_raise(db, session_id)
+            session.title = title
+            session.last_activity = datetime.utcnow()
+
+            logger.info(
+                "Renamed session",
+                extra={"session_id": session_id, "new_title": title},
+            )
+
+            return {
+                "session_id": session.session_id,
+                "title": session.title,
+                "updated_at": session.last_activity.isoformat(),
+            }
+
     def update_last_activity(self, session_id: str) -> None:
         """Update session's last activity timestamp.
 
@@ -277,21 +306,26 @@ class SessionManager:
         html_content: str,
         scripts_content: Optional[str] = None,
         slide_count: int = 0,
+        deck_dict: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """Save or update slide deck for a session.
 
         Args:
             session_id: Session to save deck for
             title: Deck title
-            html_content: Full HTML content
+            html_content: Full HTML content (knitted)
             scripts_content: JavaScript content
             slide_count: Number of slides
+            deck_dict: Full SlideDeck structure for restoration
 
         Returns:
             Slide deck info dictionary
         """
         with get_db_session() as db:
             session = self._get_session_or_raise(db, session_id)
+
+            # Serialize deck structure to JSON
+            deck_json = json.dumps(deck_dict) if deck_dict else None
 
             if session.slide_deck:
                 # Update existing
@@ -300,6 +334,7 @@ class SessionManager:
                 deck.html_content = html_content
                 deck.scripts_content = scripts_content
                 deck.slide_count = slide_count
+                deck.deck_json = deck_json
             else:
                 # Create new
                 deck = SessionSlideDeck(
@@ -308,6 +343,7 @@ class SessionManager:
                     html_content=html_content,
                     scripts_content=scripts_content,
                     slide_count=slide_count,
+                    deck_json=deck_json,
                 )
                 db.add(deck)
                 db.flush()
@@ -334,7 +370,7 @@ class SessionManager:
             session_id: Session to get deck for
 
         Returns:
-            Slide deck dictionary or None if no deck exists
+            Full SlideDeck dictionary (with slides array) or None if no deck exists
         """
         with get_db_session() as db:
             session = self._get_session_or_raise(db, session_id)
@@ -343,6 +379,16 @@ class SessionManager:
                 return None
 
             deck = session.slide_deck
+            
+            # Return full deck structure if available
+            if deck.deck_json:
+                deck_dict = json.loads(deck.deck_json)
+                # Ensure it has required fields
+                deck_dict.setdefault("title", deck.title)
+                deck_dict.setdefault("slide_count", deck.slide_count)
+                return deck_dict
+            
+            # Legacy: return basic info without slides array
             return {
                 "title": deck.title,
                 "html_content": deck.html_content,

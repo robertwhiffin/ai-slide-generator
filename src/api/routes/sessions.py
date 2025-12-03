@@ -108,6 +108,41 @@ async def get_session(session_id: str):
         ) from e
 
 
+@router.patch("/{session_id}")
+async def update_session(session_id: str, title: str = None):
+    """Update session (rename).
+
+    Args:
+        session_id: Session to update
+        title: New session title
+
+    Returns:
+        Updated session info
+    """
+    try:
+        session_manager = get_session_manager()
+        result = session_manager.rename_session(session_id, title)
+
+        logger.info(
+            "Session renamed via API",
+            extra={"session_id": session_id, "new_title": title},
+        )
+
+        return result
+
+    except SessionNotFoundError:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Session not found: {session_id}",
+        )
+    except Exception as e:
+        logger.error(f"Failed to update session: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to update session: {str(e)}",
+        ) from e
+
+
 @router.delete("/{session_id}")
 async def delete_session(session_id: str):
     """Delete a session.
