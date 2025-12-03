@@ -79,6 +79,12 @@ def test_db(test_db_engine):
 
 
 @pytest.fixture(scope="function")
+def db_session(test_db):
+    """Alias for test_db fixture for consistency with other test files."""
+    return test_db
+
+
+@pytest.fixture(scope="function")
 def client(test_db):
     """Create test client with dependency override."""
     def override_get_db():
@@ -232,12 +238,17 @@ def test_get_ai_infra_config_valid(client, default_profile):
 def test_update_ai_infra_config_valid(client, default_profile, monkeypatch):
     """Test updating AI infrastructure settings."""
     # Mock validator to avoid Databricks connection
-    from src.services.config.validator import ConfigValidator, ValidationResult
+    # Note: ai_infra uses ConfigValidator from src.services.validator (different from ConfigurationValidator)
+    from src.services.validator import ValidationResult
     
     def mock_validate(self, endpoint, temp, tokens):
         return ValidationResult(valid=True)
     
-    monkeypatch.setattr(ConfigValidator, "validate_ai_infra", mock_validate)
+    # Patch the method at the module where it's used
+    monkeypatch.setattr(
+        "src.api.routes.settings.ai_infra.ConfigValidator.validate_ai_infra", 
+        mock_validate
+    )
     
     response = client.put(
         f"/api/settings/ai-db_app_deployment/{default_profile['id']}",
@@ -266,7 +277,7 @@ def test_update_ai_infra_config_invalid_temperature(client, default_profile):
 def test_get_available_endpoints(client, monkeypatch):
     """Test getting available endpoints."""
     # Mock the service method
-    from src.services.config import ConfigService
+    from src.services.config_service import ConfigService
     
     def mock_get_endpoints(self):
         return ["databricks-meta-llama", "custom-endpoint"]
@@ -282,38 +293,37 @@ def test_get_available_endpoints(client, monkeypatch):
 
 # Genie Space Tests
 # Each profile has exactly one Genie space
+# Note: Creating a profile always creates default configs including a genie space
 
-def test_get_genie_space_404_when_none(client, db_session):
-    """Test getting Genie space when none exists."""
-    # Create profile without genie space
-    from src.services.config import ProfileService
-    service = ProfileService(db_session)
-    profile = service.create_profile("test_no_genie", None, None, "test")
-    
-    response = client.get(f"/api/settings/genie/{profile.id}")
+def test_get_genie_space_404_for_nonexistent_profile(client, test_db):
+    """Test getting Genie space for non-existent profile returns 404."""
+    response = client.get("/api/settings/genie/9999")
     assert response.status_code == 404
 
 
-def test_add_genie_space_valid(client, db_session):
-    """Test adding a Genie space to a profile."""
-    # Create profile without genie space
-    from src.services.config import ProfileService
-    service = ProfileService(db_session)
-    profile = service.create_profile("test_add_genie", None, None, "test")
-    
+def test_profile_has_default_genie_space(client, test_db):
+    """Test that creating a profile includes a default genie space."""
+    # Create profile via API
     response = client.post(
-        f"/api/settings/genie/{profile.id}",
+        "/api/settings/profiles",
         json={
-            "space_id": "new-space-id",
-            "space_name": "New Space",
-            "description": "Test space",
+            "name": "test_default_genie",
+            "description": "Profile should have default genie space",
+            "copy_from_profile_id": None,
         }
     )
     assert response.status_code == 201
+    profile = response.json()
+    
+    # Profile should have genie space by default
+    assert "genie_spaces" in profile
+    assert len(profile["genie_spaces"]) == 1
+    
+    # Also verify via genie endpoint
+    response = client.get(f"/api/settings/genie/{profile['id']}")
+    assert response.status_code == 200
     data = response.json()
-    assert data["space_id"] == "new-space-id"
-    assert data["space_name"] == "New Space"
-    assert "is_default" not in data  # Field removed
+    assert "space_id" in data
 
 
 def test_get_genie_space_valid(client, default_profile):

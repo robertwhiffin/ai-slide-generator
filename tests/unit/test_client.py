@@ -30,7 +30,7 @@ class TestGetDatabricksClient:
         mock_user.user_name = "env_user@example.com"
         mock_client.current_user.me.return_value = mock_user
 
-        with patch("src.settings.client.WorkspaceClient", return_value=mock_client) as mock_ws:
+        with patch("src.core.databricks_client.WorkspaceClient", return_value=mock_client) as mock_ws:
             client = get_databricks_client()
             
             # Verify WorkspaceClient was called with no args (uses Databricks default auth chain)
@@ -71,7 +71,7 @@ class TestGetDatabricksClient:
         mock_user.user_name = "test@example.com"
         mock_client.current_user.me.return_value = mock_user
 
-        with patch("src.settings.client.WorkspaceClient", return_value=mock_client):
+        with patch("src.core.databricks_client.WorkspaceClient", return_value=mock_client):
             client = get_databricks_client()
             # Verify that current_user.me() was called
             mock_client.current_user.me.assert_called_once()
@@ -83,7 +83,7 @@ class TestGetDatabricksClient:
         mock_client = MagicMock()
         mock_client.current_user.me.side_effect = Exception("Auth failed")
 
-        with patch("src.settings.client.WorkspaceClient", return_value=mock_client):
+        with patch("src.core.databricks_client.WorkspaceClient", return_value=mock_client):
             with pytest.raises(DatabricksClientError, match="Failed to verify"):
                 get_databricks_client()
 
@@ -92,7 +92,7 @@ class TestGetDatabricksClient:
     ):
         """Test error handling when client initialization fails."""
         with patch(
-            "src.settings.client.WorkspaceClient",
+            "src.core.databricks_client.WorkspaceClient",
             side_effect=Exception("Network error"),
         ):
             with pytest.raises(DatabricksClientError, match="Failed to initialize"):
@@ -158,7 +158,7 @@ class TestVerifyConnection:
         mock_client = MagicMock()
         mock_client.current_user.me.side_effect = Exception("Connection failed")
 
-        with patch("src.settings.client.WorkspaceClient", return_value=mock_client):
+        with patch("src.core.databricks_client.WorkspaceClient", return_value=mock_client):
             # Initial call will fail, but that's expected
             try:
                 get_databricks_client()
@@ -168,7 +168,7 @@ class TestVerifyConnection:
             # Reset and create a client that will fail on verification
             reset_client()
             with patch(
-                "src.settings.client.get_databricks_client",
+                "src.core.databricks_client.get_databricks_client",
                 side_effect=Exception("Connection error"),
             ):
                 result = verify_connection()
