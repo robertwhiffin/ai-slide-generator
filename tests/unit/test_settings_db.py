@@ -138,7 +138,7 @@ def test_load_settings_from_database(test_db, test_profile, monkeypatch):
                 pass
         return MockContextManager()
     
-    monkeypatch.setattr("src.settings.settings_db.get_db_session", mock_get_db_session)
+    monkeypatch.setattr("src.core.settings_db.get_db_session", mock_get_db_session)
     
     # Load settings
     settings = load_settings_from_database()
@@ -165,7 +165,7 @@ def test_load_settings_specific_profile(test_db, test_profile, monkeypatch):
                 pass
         return MockContextManager()
     
-    monkeypatch.setattr("src.settings.settings_db.get_db_session", mock_get_db_session)
+    monkeypatch.setattr("src.core.settings_db.get_db_session", mock_get_db_session)
     
     # Load specific profile
     settings = load_settings_from_database(profile_id=test_profile.id)
@@ -185,7 +185,7 @@ def test_load_settings_no_default_profile(test_db, monkeypatch):
                 pass
         return MockContextManager()
     
-    monkeypatch.setattr("src.settings.settings_db.get_db_session", mock_get_db_session)
+    monkeypatch.setattr("src.core.settings_db.get_db_session", mock_get_db_session)
     
     # Should raise ValueError
     with pytest.raises(ValueError, match="No default profile found"):
@@ -203,7 +203,7 @@ def test_load_settings_profile_not_found(test_db, monkeypatch):
                 pass
         return MockContextManager()
     
-    monkeypatch.setattr("src.settings.settings_db.get_db_session", mock_get_db_session)
+    monkeypatch.setattr("src.core.settings_db.get_db_session", mock_get_db_session)
     
     # Should raise ValueError
     with pytest.raises(ValueError, match="Profile 9999 not found"):
@@ -221,7 +221,7 @@ def test_settings_validation(test_db, test_profile, monkeypatch):
                 pass
         return MockContextManager()
     
-    monkeypatch.setattr("src.settings.settings_db.get_db_session", mock_get_db_session)
+    monkeypatch.setattr("src.core.settings_db.get_db_session", mock_get_db_session)
     
     settings = load_settings_from_database()
     

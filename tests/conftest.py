@@ -169,7 +169,7 @@ def mock_workspace_client() -> Generator[Mock, None, None]:
     mock_user.id = "test-user-id"
     mock_client.current_user.me.return_value = mock_user
 
-    with patch("src.settings.client.WorkspaceClient", return_value=mock_client):
+    with patch("src.core.databricks_client.WorkspaceClient", return_value=mock_client):
         yield mock_client
 
 
@@ -240,7 +240,7 @@ def mock_config_loader(
         sample_config: Configuration to return
         sample_prompts: Prompts to return
     """
-    with patch("src.settings.loader.load_config", return_value=sample_config):
-        with patch("src.settings.loader.load_prompts", return_value=sample_prompts):
+    with patch("src.core.config_loader.load_config", return_value=sample_config):
+        with patch("src.core.config_loader.load_prompts", return_value=sample_prompts):
             yield
 
