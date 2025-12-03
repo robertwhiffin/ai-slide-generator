@@ -16,11 +16,14 @@ export class ApiError extends Error {
   }
 }
 
-interface Session {
+export interface Session {
   session_id: string;
   user_id: string | null;
   title: string;
   created_at: string;
+  last_activity?: string;
+  message_count?: number;
+  has_slide_deck?: boolean;
 }
 
 interface SendMessageParams {
@@ -91,6 +94,34 @@ export const api = {
 
     if (!response.ok) {
       throw new ApiError(response.status, 'Failed to list sessions');
+    }
+
+    return response.json();
+  },
+
+  /**
+   * Get a specific session
+   */
+  async getSession(sessionId: string): Promise<Session> {
+    const response = await fetch(`${API_BASE_URL}/api/sessions/${sessionId}`);
+
+    if (!response.ok) {
+      throw new ApiError(response.status, 'Failed to get session');
+    }
+
+    return response.json();
+  },
+
+  /**
+   * Rename a session
+   */
+  async renameSession(sessionId: string, title: string): Promise<Session> {
+    const response = await fetch(`${API_BASE_URL}/api/sessions/${sessionId}?title=${encodeURIComponent(title)}`, {
+      method: 'PATCH',
+    });
+
+    if (!response.ok) {
+      throw new ApiError(response.status, 'Failed to rename session');
     }
 
     return response.json();

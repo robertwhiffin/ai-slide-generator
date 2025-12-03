@@ -257,6 +257,7 @@ class ChatService:
                     html_content=current_deck.knit(),
                     scripts_content=current_deck.scripts,
                     slide_count=len(current_deck.slides),
+                    deck_dict=slide_deck_dict,
                 )
 
             # Update session activity
@@ -519,6 +520,7 @@ class ChatService:
             slide.slide_id = f"slide_{idx}"
 
         # Persist to database
+        deck_dict = current_deck.to_dict()
         session_manager = get_session_manager()
         session_manager.save_slide_deck(
             session_id=session_id,
@@ -526,6 +528,7 @@ class ChatService:
             html_content=current_deck.knit(),
             scripts_content=current_deck.scripts,
             slide_count=len(current_deck.slides),
+            deck_dict=deck_dict,
         )
 
         logger.info(
@@ -533,7 +536,7 @@ class ChatService:
             extra={"new_order": new_order, "session_id": session_id},
         )
 
-        return current_deck.to_dict()
+        return deck_dict
 
     def update_slide(self, session_id: str, index: int, html: str) -> Dict[str, Any]:
         """Update a single slide's HTML.
@@ -564,6 +567,7 @@ class ChatService:
         current_deck.slides[index] = Slide(html=html, slide_id=f"slide_{index}")
 
         # Persist to database
+        deck_dict = current_deck.to_dict()
         session_manager = get_session_manager()
         session_manager.save_slide_deck(
             session_id=session_id,
@@ -571,6 +575,7 @@ class ChatService:
             html_content=current_deck.knit(),
             scripts_content=current_deck.scripts,
             slide_count=len(current_deck.slides),
+            deck_dict=deck_dict,
         )
 
         logger.info(
@@ -611,6 +616,7 @@ class ChatService:
             slide.slide_id = f"slide_{idx}"
 
         # Persist to database
+        deck_dict = current_deck.to_dict()
         session_manager = get_session_manager()
         session_manager.save_slide_deck(
             session_id=session_id,
@@ -618,6 +624,7 @@ class ChatService:
             html_content=current_deck.knit(),
             scripts_content=current_deck.scripts,
             slide_count=len(current_deck.slides),
+            deck_dict=deck_dict,
         )
 
         logger.info(
@@ -629,7 +636,7 @@ class ChatService:
             },
         )
 
-        return current_deck.to_dict()
+        return deck_dict
 
     def delete_slide(self, session_id: str, index: int) -> Dict[str, Any]:
         """Delete a slide.
@@ -662,6 +669,7 @@ class ChatService:
             slide.slide_id = f"slide_{idx}"
 
         # Persist to database
+        deck_dict = current_deck.to_dict()
         session_manager = get_session_manager()
         session_manager.save_slide_deck(
             session_id=session_id,
@@ -669,6 +677,7 @@ class ChatService:
             html_content=current_deck.knit(),
             scripts_content=current_deck.scripts,
             slide_count=len(current_deck.slides),
+            deck_dict=deck_dict,
         )
 
         logger.info(
@@ -680,7 +689,7 @@ class ChatService:
             },
         )
 
-        return current_deck.to_dict()
+        return deck_dict
 
 
 # Global service instance
