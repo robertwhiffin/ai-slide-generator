@@ -49,11 +49,16 @@ def list_available_genie_spaces():
     try:
         client = get_databricks_client()
         spaces_data = {}
+        page_num = 1
 
-        # Initial request
-        response = client.genie.list_spaces()
+        # Initial request with explicit page_size
+        logger.info("Fetching Genie spaces from Databricks (page_size=100)")
+        response = client.genie.list_spaces(page_size=100)
 
         # Collect spaces from first page
+        first_page_count = len(response.spaces) if response.spaces else 0
+        logger.info(f"Page {page_num}: received {first_page_count} spaces, has_next_page={bool(response.next_page_token)}")
+        
         if response.spaces:
             for space in response.spaces:
                 spaces_data[space.space_id] = {
@@ -63,7 +68,12 @@ def list_available_genie_spaces():
 
         # Handle pagination
         while response.next_page_token:
-            response = client.genie.list_spaces(page_token=response.next_page_token)
+            page_num += 1
+            logger.info(f"Fetching page {page_num} with token: {response.next_page_token[:20]}...")
+            response = client.genie.list_spaces(page_token=response.next_page_token, page_size=100)
+            page_count = len(response.spaces) if response.spaces else 0
+            logger.info(f"Page {page_num}: received {page_count} spaces, has_next_page={bool(response.next_page_token)}")
+            
             if response.spaces:
                 for space in response.spaces:
                     spaces_data[space.space_id] = {
@@ -74,7 +84,7 @@ def list_available_genie_spaces():
         # Sort titles alphabetically
         sorted_titles = sorted([details["title"] for details in spaces_data.values()])
 
-        logger.info(f"Found {len(spaces_data)} available Genie spaces")
+        logger.info(f"Found {len(spaces_data)} total Genie spaces across {page_num} page(s)")
         return {
             "spaces": spaces_data,
             "sorted_titles": sorted_titles,
