@@ -3,7 +3,6 @@
 from src.core.config_loader import (
     ConfigurationError,
     load_config,
-    load_mlflow_config,
     load_prompts,
     reload_config,
 )
@@ -20,7 +19,6 @@ __all__ = [
     # Config loader
     "ConfigurationError",
     "load_config",
-    "load_mlflow_config",
     "load_prompts",
     "reload_config",
     # Database
