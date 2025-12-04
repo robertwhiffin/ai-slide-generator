@@ -86,7 +86,6 @@ def save_html_output(html: str, output_dir: Path = Path("output")) -> Path:
 
 def test_agent_live(
     question: str,
-    max_slides: int = 5,
     verbose: bool = False,
     save_output: bool = True
 ) -> dict:
@@ -98,7 +97,6 @@ def test_agent_live(
     
     Args:
         question: Question to ask the agent
-        max_slides: Maximum number of slides to generate
         verbose: Print detailed output
         save_output: Save HTML to file
         
@@ -139,7 +137,7 @@ def test_agent_live(
         raise
     
     # Step 3: Generate slides
-    print_section(f"Step 3: Generating Slides (max {max_slides})")
+    print_section("Step 3: Generating Slides")
     print(f"Question: {question}")
     print("\nCalling LLM and Genie (this may take 30-60 seconds)...")
     
@@ -148,7 +146,6 @@ def test_agent_live(
         result = agent.generate_slides(
             question=question,
             session_id=session_id,
-            max_slides=max_slides
         )
         end_time = datetime.now()
         elapsed = (end_time - start_time).total_seconds()
@@ -284,13 +281,6 @@ def main():
         help="Question to ask the agent"
     )
     parser.add_argument(
-        "--max-slides",
-        "-m",
-        type=int,
-        default=50,
-        help="Maximum number of slides to generate (default: 5)"
-    )
-    parser.add_argument(
         "--verbose",
         "-v",
         action="store_true",
@@ -307,7 +297,6 @@ def main():
     try:
         result = test_agent_live(
             question=args.question,
-            max_slides=args.max_slides,
             verbose=args.verbose,
             save_output=not args.no_save
         )

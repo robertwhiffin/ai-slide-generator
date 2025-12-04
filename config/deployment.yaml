@@ -13,6 +13,12 @@ environments:
     env_vars:
       ENVIRONMENT: "development"
       LOG_LEVEL: "DEBUG"
+      LAKEBASE_INSTANCE: "ai-slide-generator-dev-db"
+      LAKEBASE_SCHEMA: "app_data"
+    lakebase:
+      database_name: "ai-slide-generator-dev-db"
+      schema: "app_data"
+      capacity: "CU_1"  # Options: CU_1, CU_2, CU_4, CU_8
 
   staging:
     app_name: "ai-slide-generator-staging"
@@ -27,6 +33,12 @@ environments:
     env_vars:
       ENVIRONMENT: "staging"
       LOG_LEVEL: "INFO"
+      LAKEBASE_INSTANCE: "ai-slide-generator-staging-db"
+      LAKEBASE_SCHEMA: "app_data"
+    lakebase:
+      database_name: "ai-slide-generator-staging-db"
+      schema: "app_data"
+      capacity: "CU_1"  # Options: CU_1, CU_2, CU_4, CU_8
 
   production:
     app_name: "ai-slide-generator"
@@ -41,6 +53,12 @@ environments:
     env_vars:
       ENVIRONMENT: "production"
       LOG_LEVEL: "INFO"
+      LAKEBASE_INSTANCE: "ai-slide-generator-db"
+      LAKEBASE_SCHEMA: "app_data"
+    lakebase:
+      database_name: "ai-slide-generator-db"
+      schema: "app_data"
+      capacity: "CU_1"  # Options: CU_1, CU_2, CU_4, CU_8
 
 # Common settings across all environments
 common:

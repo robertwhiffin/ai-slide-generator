@@ -26,6 +26,10 @@ env:
     value: "INFO"
   - name: MLFLOW_TRACKING_URI
     value: "databricks"
+  # Lakebase schema configuration
+  # PGHOST and PGUSER are auto-set when database resource is attached
+  - name: LAKEBASE_SCHEMA
+    value: "app_data"
 
 # Note: compute_size is set programmatically during deployment via the Databricks SDK
 # Valid values configured in deployment.yaml: MEDIUM, LARGE, LIQUID

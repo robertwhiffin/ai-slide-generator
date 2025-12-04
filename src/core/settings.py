@@ -84,9 +84,6 @@ class APISettings(BaseSettings):
 class OutputSettings(BaseSettings):
     """Output configuration settings."""
 
-    default_max_slides: int = 10
-    min_slides: int = 3
-    max_slides: int = 20
     html_template: str = "professional"
     include_metadata: bool = True
     include_source_citations: bool = True
@@ -97,13 +94,6 @@ class OutputSettings(BaseSettings):
         valid_templates = ["professional", "minimal", "colorful"]
         if v not in valid_templates:
             raise ValueError(f"Template must be one of: {', '.join(valid_templates)}")
-        return v
-
-    @field_validator("min_slides", "max_slides", "default_max_slides")
-    @classmethod
-    def validate_slide_count(cls, v: int) -> int:
-        if v < 1 or v > 50:
-            raise ValueError("Slide count must be between 1 and 50")
         return v
 
 
