@@ -22,7 +22,6 @@ from pydantic import BaseModel, Field
 
 from src.core.databricks_client import get_databricks_client
 
-# Use database-backed settings (Phase 4)
 from src.core.settings_db import get_settings
 from src.services.tools import initialize_genie_conversation, query_genie_space
 from src.utils.html_utils import extract_canvas_ids_from_script

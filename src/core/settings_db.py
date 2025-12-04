@@ -1,8 +1,9 @@
 """
 Database-backed application settings.
 
-This module provides settings loaded from the database configuration system,
-replacing the YAML-based configuration in settings.py with database-backed profiles.
+This module provides settings loaded from the database configuration system.
+Configuration profiles are stored in PostgreSQL/Lakebase and managed via the
+settings API endpoints.
 """
 
 import logging

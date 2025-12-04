@@ -123,8 +123,8 @@ common:
 | `config/deployment.yaml` | Environment definitions | N/A (data file) |
 | `config/deployment.example.yaml` | Template/documentation | N/A (reference) |
 | `app.yaml` | Databricks Apps manifest | Defines entrypoint, compute |
-| `src/config/client.py` | Runtime auth (env vars) | `get_databricks_client()` |
-| `src/config/settings.py` | Merge YAML + env overrides | `get_settings()`, `AppSettings` |
+| `src/core/databricks_client.py` | Runtime auth (env vars) | `get_databricks_client()` |
+| `src/core/settings_db.py` | Load settings from database | `get_settings()`, `AppSettings` |
 
 ---
 
@@ -161,10 +161,10 @@ common:
 1. Databricks Apps runs `sh run_app.sh` (defined in `app.yaml`)
 2. Script installs wheel: `pip install wheels/*.whl`
 3. Starts FastAPI: `uvicorn src.api.main:app --host 0.0.0.0 --port 8080`
-4. `src/config/settings.py` loads config:
-   - Read YAML files (`config.yaml`, `mlflow.yaml`, `prompts.yaml`)
-   - Merge env var overrides (`LOG_LEVEL`, `ENVIRONMENT`)
-5. `src/config/client.py` creates `WorkspaceClient()` using env vars:
+4. `src/core/settings_db.py` loads config from database:
+   - Reads profile settings from PostgreSQL/Lakebase
+   - Merges env var overrides (`LOG_LEVEL`, `ENVIRONMENT`)
+5. `src/core/databricks_client.py` creates `WorkspaceClient()` using env vars:
    - `DATABRICKS_HOST` and `DATABRICKS_TOKEN` auto-injected by platform
 6. Application serves on port 8080 (Databricks Apps standard)
 
@@ -304,7 +304,7 @@ def validate_before_deploy(config: DeploymentConfig):
     assert wheel_path.exists()
 
     # Test settings validity
-    from src.core.settings import get_settings
+    from src.core.settings_db import get_settings
     settings = get_settings()
 
     # Check workspace path accessible
@@ -384,7 +384,8 @@ config_path = f"settings/settings.{env}.yaml"  # settings.production.yaml
 
 **Runtime requirements:**
 - `DATABRICKS_HOST` and `DATABRICKS_TOKEN` must be set (platform provides)
-- Config files (`config.yaml`, `mlflow.yaml`, `prompts.yaml`) must exist in workspace
+- `DATABASE_URL` must point to valid PostgreSQL/Lakebase database
+- Database must have at least one configuration profile
 - Port 8080 must be available (Databricks Apps standard)
 
 ---
@@ -398,8 +399,8 @@ config_path = f"settings/settings.{env}.yaml"  # settings.production.yaml
 | `config/deployment.yaml` | Environment definitions | Add environments, change paths/compute |
 | `config/deployment.example.yaml` | Template/docs | Schema changes |
 | `app.yaml` | App entrypoint | Change startup command (rare) |
-| `src/config/client.py` | Runtime auth | Modify auth strategy (discouraged) |
-| `src/config/settings.py` | Settings loader | Add config sections, env overrides |
+| `src/core/databricks_client.py` | Runtime auth | Modify auth strategy (discouraged) |
+| `src/core/settings_db.py` | Database settings loader | Add config sections, profile handling |
 
 ---
 
@@ -415,13 +416,13 @@ config_path = f"settings/settings.{env}.yaml"  # settings.production.yaml
 ### Backend Runtime
 
 - **Entry**: `src/api/main.py` (FastAPI app)
-- **Config**: Loads from `config/*.yaml` + env vars
+- **Config**: Loads from database via `settings_db.py`
 - **Auth**: `get_databricks_client()` uses platform credentials
 - **See**: `docs/technical/backend-overview.md` for API/agent architecture
 
 ### MLflow Integration
 
-- **Config**: `config/mlflow.yaml` defines experiment tracking
+- **Config**: Experiment name stored in database (per profile)
 - **Runtime**: Agent automatically logs traces to Databricks MLflow
 - **Observability**: View traces in workspace MLflow UI
 - **See**: `backend-overview.md` → "MLflow traces" section

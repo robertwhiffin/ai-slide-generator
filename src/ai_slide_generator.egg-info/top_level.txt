@@ -1,6 +1,0 @@
-__init__
-api
-config
-models
-services
-utils
