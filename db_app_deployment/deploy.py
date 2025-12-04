@@ -141,7 +141,11 @@ def build_frontend(project_root: Path) -> None:
 
 
 def create_staging_directory(
-    project_root: Path, wheel_path: Path, exclude_patterns: list[str]
+    project_root: Path,
+    wheel_path: Path,
+    exclude_patterns: list[str],
+    lakebase_instance: str,
+    lakebase_schema: str,
 ) -> Path:
     """
     Create staging directory with deployment artifacts.
@@ -150,6 +154,8 @@ def create_staging_directory(
         project_root: Root directory of the project
         wheel_path: Path to the built Python wheel
         exclude_patterns: List of patterns to exclude
+        lakebase_instance: Lakebase instance name to inject into app.yaml
+        lakebase_schema: Lakebase schema name to inject into app.yaml
 
     Returns:
         Path to staging directory
@@ -177,9 +183,48 @@ def create_staging_directory(
     print("  Copying frontend build...")
     shutil.copytree(project_root / "frontend" / "dist", staging_dir / "frontend" / "dist")
 
-    # Copy essential files
-    print("  Copying essential files...")
-    for file in ["app.yaml", "requirements.txt"]:
+    # Copy and modify app.yaml with environment-specific values
+    print("  Copying and configuring app.yaml...")
+    app_yaml_src = project_root / "app.yaml"
+    app_yaml_dest = staging_dir / "app.yaml"
+    if app_yaml_src.exists():
+        # Read original app.yaml
+        with open(app_yaml_src, "r") as f:
+            app_yaml_content = f.read()
+
+        # Inject LAKEBASE_INSTANCE env var
+        # Find the env section and add the instance
+        env_addition = f"""  - name: LAKEBASE_INSTANCE
+    value: "{lakebase_instance}"
+  - name: LAKEBASE_SCHEMA
+    value: "{lakebase_schema}"
+"""
+        # Replace the placeholder LAKEBASE_SCHEMA line with both vars
+        if "LAKEBASE_SCHEMA" in app_yaml_content:
+            # Replace existing LAKEBASE_SCHEMA block
+            import re
+            app_yaml_content = re.sub(
+                r'  - name: LAKEBASE_SCHEMA\n    value: "[^"]*"',
+                env_addition.rstrip(),
+                app_yaml_content
+            )
+        else:
+            # Add before the last comment or at end of env section
+            app_yaml_content = app_yaml_content.replace(
+                "# Note: compute_size",
+                f"{env_addition}\n# Note: compute_size"
+            )
+
+        # Write modified app.yaml
+        with open(app_yaml_dest, "w") as f:
+            f.write(app_yaml_content)
+        print(f"    Injected LAKEBASE_INSTANCE={lakebase_instance}")
+    else:
+        print("  ⚠️  Warning: app.yaml not found")
+
+    # Copy other essential files
+    print("  Copying other essential files...")
+    for file in ["requirements.txt"]:
         src_file = project_root / file
         if src_file.exists():
             shutil.copy2(src_file, staging_dir / file)
@@ -589,7 +634,11 @@ def deploy(
         print()
 
         staging_dir = create_staging_directory(
-            project_root, wheel_path, config.exclude_patterns
+            project_root,
+            wheel_path,
+            config.exclude_patterns,
+            lakebase_instance=config.lakebase.database_name,
+            lakebase_schema=config.lakebase.schema,
         )
         print()
 

@@ -26,9 +26,10 @@ env:
     value: "INFO"
   - name: MLFLOW_TRACKING_URI
     value: "databricks"
-  # Database configuration - Lakebase connection injected via app resources
-  - name: DATABASE_URL
-    valueFrom: "resources.app_database.jdbc_url"  # Lakebase JDBC URL
+  # Lakebase schema configuration
+  # PGHOST and PGUSER are auto-set when database resource is attached
+  - name: LAKEBASE_SCHEMA
+    value: "app_data"
 
 # Note: compute_size is set programmatically during deployment via the Databricks SDK
 # Valid values configured in deployment.yaml: MEDIUM, LARGE, LIQUID

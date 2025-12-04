@@ -2,12 +2,13 @@
 
 Supports multiple database backends:
 - PostgreSQL: Local development and staging
-- Databricks Lakebase: Production on Databricks Apps
+- Databricks Lakebase: Production on Databricks Apps (detected via PGHOST env var)
 """
 import logging
 import os
 from contextlib import contextmanager
 from typing import Generator
+from urllib.parse import quote_plus
 
 from dotenv import load_dotenv
 from sqlalchemy import create_engine
@@ -19,13 +20,43 @@ logger = logging.getLogger(__name__)
 load_dotenv()
 
 
+def _get_lakebase_token() -> str:
+    """Get OAuth token for Lakebase authentication using Databricks SDK."""
+    try:
+        from databricks.sdk import WorkspaceClient
+        import uuid
+
+        ws = WorkspaceClient()
+
+        # Get instance name from env or try to derive it
+        instance_name = os.getenv("LAKEBASE_INSTANCE")
+
+        if instance_name:
+            # Generate credential for specific instance
+            cred = ws.database.generate_database_credential(
+                request_id=str(uuid.uuid4()),
+                instance_names=[instance_name],
+            )
+            return cred.token
+        else:
+            # Fallback: use workspace authentication token
+            # This works when the app has database resource attached
+            token = ws.config.authenticate()
+            if hasattr(token, "token"):
+                return token.token
+            return str(token)
+    except Exception as e:
+        logger.error(f"Failed to get Lakebase token: {e}")
+        raise
+
+
 def _get_database_url() -> str:
     """
     Determine database URL based on environment.
 
     Priority:
     1. DATABASE_URL environment variable (explicit override)
-    2. LAKEBASE_INSTANCE (Lakebase on Databricks Apps)
+    2. PGHOST (Lakebase on Databricks Apps - auto-set when database resource attached)
     3. Default local PostgreSQL
 
     Returns:
@@ -33,26 +64,32 @@ def _get_database_url() -> str:
     """
     # Check for explicit DATABASE_URL first
     explicit_url = os.getenv("DATABASE_URL")
-    if explicit_url:
+    if explicit_url and not explicit_url.startswith("jdbc:"):
         return explicit_url
 
-    # Check for Lakebase environment
-    lakebase_instance = os.getenv("LAKEBASE_INSTANCE")
+    # Check for Lakebase environment (PGHOST auto-set by Databricks Apps)
+    pg_host = os.getenv("PGHOST")
+    pg_user = os.getenv("PGUSER")
 
-    if lakebase_instance:
+    if pg_host and pg_user:
         # Running on Databricks Apps with Lakebase
-        logger.info(f"Detected Lakebase environment (instance: {lakebase_instance})")
-        # Import here to avoid circular dependency
-        from src.core.lakebase import get_lakebase_connection_url
+        logger.info(f"Detected Lakebase environment (PGHOST: {pg_host})")
 
+        # Get OAuth token for authentication
+        token = _get_lakebase_token()
+        encoded_token = quote_plus(token)
+
+        # Build PostgreSQL connection URL
+        database = "databricks_postgres"
         schema = os.getenv("LAKEBASE_SCHEMA", "app_data")
-        user = os.getenv("PGUSER")  # May be set by Databricks Apps
 
-        return get_lakebase_connection_url(
-            instance_name=lakebase_instance,
-            user=user,
-            schema=schema,
-        )
+        url = f"postgresql://{pg_user}:{encoded_token}@{pg_host}:5432/{database}?sslmode=require"
+
+        # Add schema to search path
+        if schema:
+            url += f"&options=-csearch_path%3D{schema}"
+
+        return url
 
     # Default to local PostgreSQL for development
     return "postgresql://localhost/ai_slide_generator"
