@@ -598,6 +598,24 @@ def deploy(
             return
 
         # Initialize Databricks client
+        # Clear environment variables that would override profile settings.
+        # The SDK loads env vars BEFORE the profile file, and if host is set,
+        # it skips profile loading entirely (see config.py _known_file_config_loader)
+        env_vars_to_clear = [
+            "DATABRICKS_HOST",
+            "DATABRICKS_TOKEN",
+            "DATABRICKS_CONFIG_PROFILE",
+            "DATABRICKS_CLIENT_ID",
+            "DATABRICKS_CLIENT_SECRET",
+        ]
+        cleared = []
+        for var in env_vars_to_clear:
+            if var in os.environ:
+                del os.environ[var]
+                cleared.append(var)
+        if cleared:
+            print(f"  Cleared env vars to use profile: {', '.join(cleared)}")
+
         print(f"🔑 Connecting to Databricks (using profile: {profile})")
         workspace_client = WorkspaceClient(profile=profile)
         print("  ✅ Connected")
