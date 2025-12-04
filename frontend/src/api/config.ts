@@ -319,10 +319,8 @@ export const configApi = {
     }),
 
   validateLLM: (endpoint: string): Promise<{ success: boolean; message: string; details?: any }> =>
-    fetchJson(`${API_BASE}/validate/llm`, {
+    fetchJson(`${API_BASE}/ai-infra/validate?endpoint=${encodeURIComponent(endpoint)}`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ endpoint }),
     }),
 
   validateGenie: (spaceId: string): Promise<{ success: boolean; message: string; details?: any }> =>
@@ -331,10 +329,8 @@ export const configApi = {
     }),
 
   validateMLflow: (experimentName: string): Promise<{ success: boolean; message: string; details?: any }> =>
-    fetchJson(`${API_BASE}/validate/mlflow`, {
+    fetchJson(`${API_BASE}/mlflow/validate?experiment_name=${encodeURIComponent(experimentName)}`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ experiment_name: experimentName }),
     }),
 };
 

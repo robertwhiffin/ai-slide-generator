@@ -1,5 +1,6 @@
 """MLflow configuration API endpoints."""
 import logging
+from typing import Any, Dict
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
@@ -7,10 +8,41 @@ from sqlalchemy.orm import Session
 from src.api.schemas.settings import MLflowConfig, MLflowConfigUpdate
 from src.core.database import get_db
 from src.services import ConfigService, ConfigValidator
+from src.services.config_validator import ConfigurationValidator
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/mlflow", tags=["mlflow"])
+
+
+@router.post("/validate", response_model=Dict[str, Any])
+def validate_mlflow_experiment(experiment_name: str):
+    """
+    Validate that an MLflow experiment is accessible and writable.
+    
+    Args:
+        experiment_name: The MLflow experiment name/path to validate
+        
+    Returns:
+        Dictionary with validation result:
+        - success: Whether the experiment is valid and accessible
+        - message: Description of the validation result
+    """
+    try:
+        validator = ConfigurationValidator(profile_id=None)
+        result = validator.validate_mlflow_experiment(experiment_name)
+        
+        return {
+            "success": result.success,
+            "message": result.message,
+        }
+        
+    except Exception as e:
+        logger.error(f"Error validating MLflow experiment {experiment_name}: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to validate MLflow experiment: {str(e)}",
+        )
 
 
 def get_config_service(db: Session = Depends(get_db)) -> ConfigService:
