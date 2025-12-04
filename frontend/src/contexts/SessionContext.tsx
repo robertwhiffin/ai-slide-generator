@@ -1,15 +1,21 @@
-import React, { createContext, useContext, useEffect, useState, useCallback } from 'react';
+import React, { createContext, useContext, useState, useCallback } from 'react';
 import { api } from '../services/api';
 import type { SlideDeck } from '../types/slide';
 
-const STORAGE_KEY = 'ai-slide-generator-session-id';
+/**
+ * Generate a local UUID for ephemeral sessions.
+ * Sessions are only persisted to the database on first message.
+ */
+function generateLocalSessionId(): string {
+  return crypto.randomUUID();
+}
 
 interface SessionContextType {
   sessionId: string | null;
   sessionTitle: string | null;
   isInitializing: boolean;
   error: string | null;
-  createNewSession: () => Promise<void>;
+  createNewSession: () => void;
   switchSession: (sessionId: string) => Promise<SlideDeck | null>;
   renameSession: (title: string) => Promise<void>;
 }
@@ -17,53 +23,34 @@ interface SessionContextType {
 const SessionContext = createContext<SessionContextType | undefined>(undefined);
 
 export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  const [sessionId, setSessionId] = useState<string | null>(null);
+  // Generate local session ID immediately - no API call needed
+  const [sessionId, setSessionId] = useState<string | null>(() => generateLocalSessionId());
   const [sessionTitle, setSessionTitle] = useState<string | null>(null);
-  const [isInitializing, setIsInitializing] = useState(true);
+  const [isInitializing, setIsInitializing] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const saveToStorage = (id: string) => {
-    try {
-      localStorage.setItem(STORAGE_KEY, id);
-    } catch (err) {
-      console.warn('Failed to save session to localStorage:', err);
-    }
-  };
-
-  const loadFromStorage = (): string | null => {
-    try {
-      return localStorage.getItem(STORAGE_KEY);
-    } catch (err) {
-      console.warn('Failed to load session from localStorage:', err);
-      return null;
-    }
-  };
-
-  const clearStorage = () => {
-    try {
-      localStorage.removeItem(STORAGE_KEY);
-    } catch (err) {
-      console.warn('Failed to clear session from localStorage:', err);
-    }
-  };
-
-  const createNewSession = useCallback(async () => {
-    setIsInitializing(true);
-    setError(null);
-    try {
-      const session = await api.createSession();
-      setSessionId(session.session_id);
-      setSessionTitle(session.title);
-      api.setCurrentSessionId(session.session_id);
-      saveToStorage(session.session_id);
-    } catch (err) {
-      console.error('Failed to create session:', err);
-      setError('Failed to initialize session. Please refresh the page.');
-    } finally {
-      setIsInitializing(false);
+  // Set the session ID in the API service on initial render
+  React.useEffect(() => {
+    if (sessionId) {
+      api.setCurrentSessionId(sessionId);
     }
   }, []);
 
+  /**
+   * Create a new ephemeral session (local UUID only, no API call).
+   * The session will be persisted to DB on first message.
+   */
+  const createNewSession = useCallback(() => {
+    const newSessionId = generateLocalSessionId();
+    setSessionId(newSessionId);
+    setSessionTitle(null);
+    setError(null);
+    api.setCurrentSessionId(newSessionId);
+  }, []);
+
+  /**
+   * Switch to an existing (persisted) session from history.
+   */
   const switchSession = useCallback(async (newSessionId: string): Promise<SlideDeck | null> => {
     setIsInitializing(true);
     setError(null);
@@ -82,20 +69,23 @@ export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ child
       setSessionId(newSessionId);
       setSessionTitle(sessionInfo.title);
       api.setCurrentSessionId(newSessionId);
-      saveToStorage(newSessionId);
 
       return slideDeck;
     } catch (err) {
       console.error('Failed to switch session:', err);
       setError('Failed to restore session. Starting new session.');
-      // Fall back to creating new session
-      await createNewSession();
+      // Fall back to creating new local session
+      createNewSession();
       return null;
     } finally {
       setIsInitializing(false);
     }
   }, [createNewSession]);
 
+  /**
+   * Rename the current session.
+   * Note: This only works for sessions that have been persisted (have sent at least one message).
+   */
   const renameSession = useCallback(async (title: string) => {
     if (!sessionId) return;
 
@@ -107,34 +97,6 @@ export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ child
       throw err;
     }
   }, [sessionId]);
-
-  // Initialize session on mount - try to restore from localStorage first
-  useEffect(() => {
-    const initSession = async () => {
-      const storedSessionId = loadFromStorage();
-
-      if (storedSessionId) {
-        try {
-          // Try to restore existing session
-          const sessionInfo = await api.getSession(storedSessionId);
-          setSessionId(storedSessionId);
-          setSessionTitle(sessionInfo.title);
-          api.setCurrentSessionId(storedSessionId);
-          setIsInitializing(false);
-          return;
-        } catch (err) {
-          // Session no longer exists, clear storage and create new
-          console.log('Stored session no longer valid, creating new session');
-          clearStorage();
-        }
-      }
-
-      // Create new session
-      await createNewSession();
-    };
-
-    initSession();
-  }, [createNewSession]);
 
   return (
     <SessionContext.Provider

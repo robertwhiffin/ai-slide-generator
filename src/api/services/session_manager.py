@@ -45,17 +45,20 @@ class SessionManager:
         self,
         user_id: Optional[str] = None,
         title: Optional[str] = None,
+        session_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Create a new session.
 
         Args:
             user_id: Optional user identifier for session isolation
             title: Optional session title
+            session_id: Optional session ID (if not provided, one is generated)
 
         Returns:
             Dictionary with session info including session_id
         """
-        session_id = secrets.token_urlsafe(32)
+        if session_id is None:
+            session_id = secrets.token_urlsafe(32)
 
         with get_db_session() as db:
             session = UserSession(

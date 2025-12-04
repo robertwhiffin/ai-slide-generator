@@ -21,12 +21,12 @@ export const AppLayout: React.FC = () => {
   const { sessionTitle, createNewSession, switchSession, renameSession } = useSession();
 
   // Reset chat state and create new session when profile changes
-  const handleProfileChange = useCallback(async () => {
+  const handleProfileChange = useCallback(() => {
     setSlideDeck(null);
     setRawHtml(null);
     setChatKey(prev => prev + 1);
     // Create new session for the new profile
-    await createNewSession();
+    createNewSession();
   }, [createNewSession]);
 
   // Handle restoring a session from history
@@ -54,11 +54,11 @@ export const AppLayout: React.FC = () => {
   }, [renameSession]);
 
   // Start a new session
-  const handleNewSession = useCallback(async () => {
+  const handleNewSession = useCallback(() => {
     setSlideDeck(null);
     setRawHtml(null);
     setChatKey(prev => prev + 1);
-    await createNewSession();
+    createNewSession();
   }, [createNewSession]);
 
   return (

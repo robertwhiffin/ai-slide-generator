@@ -263,3 +263,4 @@ python scripts/init_database.py
 - [Databricks SDK - Database API](https://databricks-sdk-py.readthedocs.io/en/stable/workspace/database/database.html)
 - [Databricks Blog: Lakebase for Apps](https://www.databricks.com/blog/how-use-lakebase-transactional-data-layer-databricks-apps)
 
+
