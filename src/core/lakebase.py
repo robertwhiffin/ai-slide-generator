@@ -316,10 +316,21 @@ def setup_lakebase_schema(
                 f'GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA "{schema}" TO "{client_id}"'
             )
 
+            # Grant permissions on all sequences in schema (for auto-increment columns)
+            cur.execute(
+                f'GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA "{schema}" TO "{client_id}"'
+            )
+
             # Set default privileges for future tables
             cur.execute(
                 f'ALTER DEFAULT PRIVILEGES IN SCHEMA "{schema}" '
                 f'GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO "{client_id}"'
+            )
+
+            # Set default privileges for future sequences
+            cur.execute(
+                f'ALTER DEFAULT PRIVILEGES IN SCHEMA "{schema}" '
+                f'GRANT USAGE, SELECT ON SEQUENCES TO "{client_id}"'
             )
 
             logger.info(f"Permissions granted to {client_id} on schema {schema}")
