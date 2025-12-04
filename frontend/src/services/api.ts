@@ -16,22 +16,140 @@ export class ApiError extends Error {
   }
 }
 
+export interface Session {
+  session_id: string;
+  user_id: string | null;
+  title: string;
+  created_at: string;
+  last_activity?: string;
+  message_count?: number;
+  has_slide_deck?: boolean;
+}
+
 interface SendMessageParams {
   message: string;
-  maxSlides?: number;
+  sessionId: string;
   slideContext?: SlideContext;
 }
 
+// Session management
+let currentSessionId: string | null = null;
+
 export const api = {
   /**
+   * Create a new session
+   */
+  async createSession(title?: string): Promise<Session> {
+    const response = await fetch(`${API_BASE_URL}/api/sessions`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ title }),
+    });
+
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({}));
+      throw new ApiError(
+        response.status,
+        error.detail || 'Failed to create session'
+      );
+    }
+
+    const session = await response.json();
+    currentSessionId = session.session_id;
+    return session;
+  },
+
+  /**
+   * Get or create the current session
+   */
+  async getOrCreateSession(): Promise<string> {
+    if (currentSessionId) {
+      return currentSessionId;
+    }
+    const session = await this.createSession();
+    return session.session_id;
+  },
+
+  /**
+   * Get current session ID (may be null if not initialized)
+   */
+  getCurrentSessionId(): string | null {
+    return currentSessionId;
+  },
+
+  /**
+   * Set the current session ID (for restoring sessions)
+   */
+  setCurrentSessionId(sessionId: string | null): void {
+    currentSessionId = sessionId;
+  },
+
+  /**
+   * List all sessions
+   */
+  async listSessions(limit = 50): Promise<{ sessions: Session[]; count: number }> {
+    const response = await fetch(`${API_BASE_URL}/api/sessions?limit=${limit}`);
+
+    if (!response.ok) {
+      throw new ApiError(response.status, 'Failed to list sessions');
+    }
+
+    return response.json();
+  },
+
+  /**
+   * Get a specific session
+   */
+  async getSession(sessionId: string): Promise<Session> {
+    const response = await fetch(`${API_BASE_URL}/api/sessions/${sessionId}`);
+
+    if (!response.ok) {
+      throw new ApiError(response.status, 'Failed to get session');
+    }
+
+    return response.json();
+  },
+
+  /**
+   * Rename a session
+   */
+  async renameSession(sessionId: string, title: string): Promise<Session> {
+    const response = await fetch(`${API_BASE_URL}/api/sessions/${sessionId}?title=${encodeURIComponent(title)}`, {
+      method: 'PATCH',
+    });
+
+    if (!response.ok) {
+      throw new ApiError(response.status, 'Failed to rename session');
+    }
+
+    return response.json();
+  },
+
+  /**
+   * Delete a session
+   */
+  async deleteSession(sessionId: string): Promise<void> {
+    const response = await fetch(`${API_BASE_URL}/api/sessions/${sessionId}`, {
+      method: 'DELETE',
+    });
+
+    if (!response.ok) {
+      throw new ApiError(response.status, 'Failed to delete session');
+    }
+
+    if (currentSessionId === sessionId) {
+      currentSessionId = null;
+    }
+  },
+
+  /**
    * Send a message to the chat API
-   * 
-   * Phase 1: No session_id parameter
-   * Phase 4: Add session_id parameter
    */
   async sendMessage({
     message,
-    maxSlides = 10,
+    sessionId,
     slideContext,
   }: SendMessageParams): Promise<ChatResponse> {
     const response = await fetch(`${API_BASE_URL}/api/chat`, {
@@ -40,10 +158,9 @@ export const api = {
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
+        session_id: sessionId,
         message,
-        max_slides: maxSlides,
         slide_context: slideContext,
-        // session_id: sessionId  // For Phase 4
       }),
     });
 
@@ -67,11 +184,10 @@ export const api = {
   },
 
   /**
-   * Get current slide deck
-   * Phase 4: Add sessionId parameter
+   * Get slide deck for a session
    */
-  async getSlides(/* sessionId?: string */): Promise<SlideDeck> {
-    const response = await fetch(`${API_BASE_URL}/api/slides`);
+  async getSlides(sessionId: string): Promise<{ session_id: string; slide_deck: SlideDeck | null }> {
+    const response = await fetch(`${API_BASE_URL}/api/sessions/${sessionId}/slides`);
     
     if (!response.ok) {
       throw new ApiError(response.status, 'Failed to fetch slides');
@@ -82,16 +198,15 @@ export const api = {
 
   /**
    * Reorder slides
-   * Phase 4: Add sessionId parameter
    */
   async reorderSlides(
-    newOrder: number[]
-    /* sessionId?: string */
+    newOrder: number[],
+    sessionId: string
   ): Promise<SlideDeck> {
     const response = await fetch(`${API_BASE_URL}/api/slides/reorder`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ new_order: newOrder }),
+      body: JSON.stringify({ new_order: newOrder, session_id: sessionId }),
     });
 
     if (!response.ok) {
@@ -103,17 +218,16 @@ export const api = {
 
   /**
    * Update a single slide
-   * Phase 4: Add sessionId parameter
    */
   async updateSlide(
     index: number,
-    html: string
-    /* sessionId?: string */
+    html: string,
+    sessionId: string
   ): Promise<Slide> {
     const response = await fetch(`${API_BASE_URL}/api/slides/${index}`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ html }),
+      body: JSON.stringify({ html, session_id: sessionId }),
     });
 
     if (!response.ok) {
@@ -125,14 +239,15 @@ export const api = {
 
   /**
    * Duplicate a slide
-   * Phase 4: Add sessionId parameter
    */
   async duplicateSlide(
-    index: number
-    /* sessionId?: string */
+    index: number,
+    sessionId: string
   ): Promise<SlideDeck> {
     const response = await fetch(`${API_BASE_URL}/api/slides/${index}/duplicate`, {
       method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ session_id: sessionId }),
     });
 
     if (!response.ok) {
@@ -144,13 +259,12 @@ export const api = {
 
   /**
    * Delete a slide
-   * Phase 4: Add sessionId parameter
    */
   async deleteSlide(
-    index: number
-    /* sessionId?: string */
+    index: number,
+    sessionId: string
   ): Promise<SlideDeck> {
-    const response = await fetch(`${API_BASE_URL}/api/slides/${index}`, {
+    const response = await fetch(`${API_BASE_URL}/api/slides/${index}?session_id=${sessionId}`, {
       method: 'DELETE',
     });
 

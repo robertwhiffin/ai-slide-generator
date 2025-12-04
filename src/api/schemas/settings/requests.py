@@ -126,8 +126,7 @@ class PromptsConfigUpdate(BaseModel):
     @field_validator("system_prompt")
     @classmethod
     def validate_system_prompt(cls, v: Optional[str]) -> Optional[str]:
-        """Validate system prompt has required placeholder."""
-        if v is not None and "{max_slides}" not in v:
-            raise ValueError("System prompt should reference {max_slides} placeholder")
+        """Validate system prompt format."""
+        # No required placeholders for system prompt
         return v
 

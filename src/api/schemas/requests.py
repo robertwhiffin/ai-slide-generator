@@ -46,25 +46,23 @@ class SlideContext(BaseModel):
 
 class ChatRequest(BaseModel):
     """Request model for chat endpoint.
-    
+
     Attributes:
+        session_id: Session ID (required, create via POST /api/sessions)
         message: User's natural language message
-        max_slides: Maximum number of slides to generate
         slide_context: Optional context for slide editing
-        # session_id: Optional[str] = None  # For Phase 4
     """
 
+    session_id: str = Field(
+        ...,
+        description="Session ID (required, create via POST /api/sessions first)",
+        min_length=1,
+    )
     message: str = Field(
         ...,
         description="Natural language message to the AI agent",
         min_length=1,
         max_length=5000,
-    )
-    max_slides: int = Field(
-        default=10,
-        description="Maximum number of slides to generate",
-        ge=1,
-        le=50,
     )
     slide_context: Optional[SlideContext] = Field(
         default=None,
@@ -76,8 +74,8 @@ class ChatRequest(BaseModel):
 
         json_schema_extra = {
             "example": {
+                "session_id": "abc123xyz",
                 "message": "Create slides about Q3 sales performance",
-                "max_slides": 5,
                 "slide_context": {
                     "indices": [1, 2],
                     "slide_htmls": [
@@ -87,3 +85,17 @@ class ChatRequest(BaseModel):
                 },
             }
         }
+
+
+class CreateSessionRequest(BaseModel):
+    """Request model for creating a new session."""
+
+    user_id: Optional[str] = Field(
+        default=None,
+        description="Optional user identifier for session isolation",
+    )
+    title: Optional[str] = Field(
+        default=None,
+        description="Optional session title",
+        max_length=255,
+    )

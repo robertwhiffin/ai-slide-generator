@@ -418,7 +418,7 @@ def test_update_prompts_config_valid(client, default_profile):
     response = client.put(
         f"/api/settings/prompts/{default_profile['id']}",
         json={
-            "system_prompt": "Updated system prompt with {max_slides}",
+            "system_prompt": "Updated system prompt",
             "slide_editing_instructions": "Updated instructions",
             "user_prompt_template": "Updated template with {question}",
         }

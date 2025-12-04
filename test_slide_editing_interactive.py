@@ -96,7 +96,6 @@ def _run_edit(
     deck: SlideDeck,
     indices: Iterable[int],
     instruction: str,
-    max_slides: int = 10,
 ) -> dict:
     selected_indices = list(indices)
     selected_htmls = [deck.slides[i].to_html() for i in selected_indices]
@@ -105,7 +104,6 @@ def _run_edit(
     result = agent.generate_slides(
         question=instruction,
         session_id=session_id,
-        max_slides=max_slides,
         slide_context=slide_context,
     )
 
@@ -133,7 +131,6 @@ def _prepare_base_deck(agent) -> str:
     result = agent.generate_slides(
         question=BASE_PROMPT,
         session_id=session_id,
-        max_slides=6,
     )
 
     base_html = result["html"]
@@ -176,7 +173,6 @@ def test_1to1_replacement(agent, base_html: str) -> None:
         deck,
         indices=[2, 3],
         instruction="Change these slides to use a blue color scheme (#1E40AF for headers)",
-        max_slides=5,
     )
 
     print("\n✓ Applied replacements")
@@ -206,7 +202,6 @@ def test_expansion(agent, base_html: str) -> None:
         deck,
         indices=[1, 2],
         instruction="Expand these 2 slides into 4 more detailed slides with quarterly breakdowns. DO NOT USE TOLS. Create a small synthetic dataset",
-        max_slides=10,
     )
 
     print(f"\n✓ Deck now has {len(deck)} slides (was 4)")
@@ -236,7 +231,6 @@ def test_condensation(agent, base_html: str) -> None:
         deck,
         indices=[2, 3, 4],
         instruction="Condense these 3 feature slides into 1 comprehensive summary slide",
-        max_slides=6,
     )
 
     print(f"\n✓ Deck now has {len(deck)} slides (was 6)")
@@ -302,7 +296,6 @@ def test_interactive_mode(agent, base_html: str) -> None:
             deck,
             indices=selected_indices,
             instruction=edit_instruction,
-            max_slides=10,
         )
 
         print(f"✓ Replaced {replacement_info['original_count']} slides with {replacement_info['replacement_count']} slides")

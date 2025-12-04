@@ -26,6 +26,7 @@ dependencies = [
     "langchain-core>=0.3.0",
     "sqlalchemy>=2.0.0",
     "psycopg2-binary>=2.9.0",
+    "databricks-sql-connector>=3.0.0",
     "beautifulsoup4>=4.12.0",
     "lxml>=4.9.0",
     "python-multipart>=0.0.6",
@@ -44,6 +45,9 @@ dev = [
     "ruff>=0.1.0",
     "mypy>=1.6.0",
     "types-pyyaml>=6.0.0",
+    # Build tools for deployment
+    "build>=1.0.0",
+    "setuptools-scm>=8.0.0",
 ]
 
 [tool.ruff]

@@ -614,7 +614,6 @@ class SlideGeneratorAgent:
         self,
         question: str,
         session_id: str,
-        max_slides: int = 10,
         slide_context: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """
@@ -623,8 +622,7 @@ class SlideGeneratorAgent:
         Args:
             question: Natural language question about data
             session_id: Session identifier for multi-turn conversation
-            max_slides: Maximum number of slides to generate
-            genie_space_id: Optional Genie space ID (uses default if None)
+            slide_context: Optional context for editing existing slides
 
         Returns:
             Dictionary containing:
@@ -666,7 +664,6 @@ class SlideGeneratorAgent:
                 extra={
                     "question": question,
                     "session_id": session_id,
-                    "max_slides": max_slides,
                     "message_count": session["message_count"],
                 },
             )
@@ -677,7 +674,6 @@ class SlideGeneratorAgent:
                 # Set custom attributes
                 span.set_attribute("question", question)
                 span.set_attribute("session_id", session_id)
-                span.set_attribute("max_slides", max_slides)
                 span.set_attribute("model_endpoint", self.settings.llm.endpoint)
                 span.set_attribute("message_count", session["message_count"])
                 span.set_attribute("mode", "edit" if editing_mode else "generate")
@@ -685,7 +681,6 @@ class SlideGeneratorAgent:
                 # Format input for agent with chat history
                 agent_input = {
                     "input": full_question,
-                    "max_slides": max_slides,
                     "chat_history": chat_history.messages,  # Pass chat history messages
                 }
 

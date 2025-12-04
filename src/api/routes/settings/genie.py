@@ -49,11 +49,16 @@ def list_available_genie_spaces():
     try:
         client = get_databricks_client()
         spaces_data = {}
+        page_num = 1
 
-        # Initial request
-        response = client.genie.list_spaces()
+        # Initial request with explicit page_size
+        logger.info("Fetching Genie spaces from Databricks (page_size=100)")
+        response = client.genie.list_spaces(page_size=100)
 
         # Collect spaces from first page
+        first_page_count = len(response.spaces) if response.spaces else 0
+        logger.info(f"Page {page_num}: received {first_page_count} spaces, has_next_page={bool(response.next_page_token)}")
+        
         if response.spaces:
             for space in response.spaces:
                 spaces_data[space.space_id] = {
@@ -63,7 +68,12 @@ def list_available_genie_spaces():
 
         # Handle pagination
         while response.next_page_token:
-            response = client.genie.list_spaces(page_token=response.next_page_token)
+            page_num += 1
+            logger.info(f"Fetching page {page_num} with token: {response.next_page_token[:20]}...")
+            response = client.genie.list_spaces(page_token=response.next_page_token, page_size=100)
+            page_count = len(response.spaces) if response.spaces else 0
+            logger.info(f"Page {page_num}: received {page_count} spaces, has_next_page={bool(response.next_page_token)}")
+            
             if response.spaces:
                 for space in response.spaces:
                     spaces_data[space.space_id] = {
@@ -74,7 +84,7 @@ def list_available_genie_spaces():
         # Sort titles alphabetically
         sorted_titles = sorted([details["title"] for details in spaces_data.values()])
 
-        logger.info(f"Found {len(spaces_data)} available Genie spaces")
+        logger.info(f"Found {len(spaces_data)} total Genie spaces across {page_num} page(s)")
         return {
             "spaces": spaces_data,
             "sorted_titles": sorted_titles,
@@ -85,6 +95,86 @@ def list_available_genie_spaces():
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to list available Genie spaces: {str(e)}",
+        )
+
+
+@router.get("/lookup/{space_id}", response_model=Dict[str, Any])
+def lookup_genie_space(space_id: str):
+    """
+    Look up a single Genie space by its Databricks space ID.
+    
+    Use this to get details for a space when you know the ID but it may not
+    appear in the available spaces list (e.g., due to pagination issues).
+    
+    Args:
+        space_id: The Databricks Genie space ID
+        
+    Returns:
+        Dictionary with space details:
+        - space_id: The space ID
+        - title: Space title/name
+        - description: Space description
+        
+    Raises:
+        404: Space not found
+        500: Failed to look up space
+    """
+    try:
+        client = get_databricks_client()
+        logger.info(f"Looking up Genie space: {space_id}")
+        
+        # Use the get_space method to fetch details for a specific space
+        space = client.genie.get_space(space_id)
+        
+        logger.info(f"Found Genie space: {space.title}")
+        return {
+            "space_id": space.space_id,
+            "title": space.title,
+            "description": space.description or "",
+        }
+        
+    except Exception as e:
+        error_str = str(e).lower()
+        if "not found" in error_str or "does not exist" in error_str or "404" in error_str:
+            logger.warning(f"Genie space not found: {space_id}")
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Genie space not found: {space_id}",
+            )
+        logger.error(f"Error looking up Genie space {space_id}: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to look up Genie space: {str(e)}",
+        )
+
+
+@router.post("/validate", response_model=Dict[str, Any])
+def validate_genie_space_connection(space_id: str):
+    """
+    Validate that a Genie space exists and is accessible.
+    
+    Args:
+        space_id: The Databricks Genie space ID to validate
+        
+    Returns:
+        Dictionary with validation result:
+        - success: Whether the space is valid and accessible
+        - message: Description of the validation result
+    """
+    try:
+        validator = ConfigurationValidator(profile_id=None)
+        result = validator.validate_genie_space(space_id)
+        
+        return {
+            "success": result.success,
+            "message": result.message,
+        }
+        
+    except Exception as e:
+        logger.error(f"Error validating Genie space {space_id}: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to validate Genie space: {str(e)}",
         )
 
 
