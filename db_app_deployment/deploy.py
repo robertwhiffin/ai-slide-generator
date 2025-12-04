@@ -4,10 +4,10 @@ This script automates the deployment of the AI Slide Generator to Databricks App
 It handles building, packaging, uploading, and deploying the application.
 
 Usage:
-    python -m db_app_deployment.deploy --create --env production
-    python -m db_app_deployment.deploy --update --env development
-    python -m db_app_deployment.deploy --delete --env staging
-    python -m db_app_deployment.deploy --create --env production --dry-run
+    python -m db_app_deployment.deploy --create --env production --profile my-profile
+    python -m db_app_deployment.deploy --update --env development --profile my-profile
+    python -m db_app_deployment.deploy --delete --env staging --profile my-profile
+    python -m db_app_deployment.deploy --create --env production --profile my-profile --dry-run
 """
 
 import argparse
@@ -17,7 +17,6 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
-from typing import Optional
 
 from databricks.sdk import WorkspaceClient
 from databricks.sdk.service.apps import (
@@ -30,7 +29,6 @@ from databricks.sdk.service.apps import (
 )
 from databricks.sdk.service.workspace import ImportFormat
 
-from src.core.databricks_client import get_databricks_client
 from src.core.lakebase import (
     get_or_create_lakebase_instance,
     setup_lakebase_schema,
@@ -568,8 +566,8 @@ def setup_database_schema_and_tables(
 def deploy(
     env: str,
     action: str,
+    profile: str,
     dry_run: bool = False,
-    profile: Optional[str] = None,
 ) -> None:
     """
     Main deployment function.
@@ -577,8 +575,8 @@ def deploy(
     Args:
         env: Environment name (development, staging, production)
         action: Action to perform (create, update, delete)
+        profile: Databricks profile name from ~/.databrickscfg
         dry_run: If True, only validate without deploying
-        profile: Optional Databricks profile name from ~/.databrickscfg (for deployment only)
     """
     project_root = Path(__file__).parent.parent
 
@@ -600,12 +598,8 @@ def deploy(
             return
 
         # Initialize Databricks client
-        if profile:
-            print(f"🔑 Connecting to Databricks (using profile: {profile})")
-            workspace_client = WorkspaceClient(profile=profile)
-        else:
-            print("🔑 Connecting to Databricks (using environment variables)")
-            workspace_client = get_databricks_client()
+        print(f"🔑 Connecting to Databricks (using profile: {profile})")
+        workspace_client = WorkspaceClient(profile=profile)
         print("  ✅ Connected")
         print(f"  Workspace URL: {workspace_client.config.host}")
         print()
@@ -734,7 +728,8 @@ def main() -> None:
     parser.add_argument(
         "--profile",
         type=str,
-        help="Databricks profile name from ~/.databrickscfg (optional, for deployment only)",
+        required=True,
+        help="Databricks profile name from ~/.databrickscfg",
     )
 
     parser.add_argument(
