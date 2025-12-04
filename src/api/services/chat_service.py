@@ -1,7 +1,7 @@
 """Chat service wrapper around the agent.
 
 All session state is stored in the database (PostgreSQL in dev, Lakebase in prod).
-Sessions must be created via the /api/sessions endpoint before sending messages.
+Sessions are auto-created on first message if they don't exist.
 """
 
 import copy
@@ -170,7 +170,7 @@ class ChatService:
         """Send a message to the agent and get response.
 
         Args:
-            session_id: Session ID (required, must exist in database)
+            session_id: Session ID (auto-created if doesn't exist)
             message: User's message
             slide_context: Optional context for slide editing
 
@@ -182,7 +182,6 @@ class ChatService:
                 - session_id: The session ID used
 
         Raises:
-            SessionNotFoundError: If session doesn't exist
             Exception: If agent fails to generate slides
         """
         logger.info(
@@ -194,9 +193,17 @@ class ChatService:
             },
         )
 
-        # Validate session exists in database
+        # Get or create session in database (auto-create on first message)
         session_manager = get_session_manager()
-        db_session = session_manager.get_session(session_id)  # Raises if not found
+        try:
+            db_session = session_manager.get_session(session_id)
+        except SessionNotFoundError:
+            # Auto-create session on first message
+            db_session = session_manager.create_session(session_id=session_id)
+            logger.info(
+                "Auto-created session on first message",
+                extra={"session_id": session_id},
+            )
 
         # Ensure session is registered with the agent
         # The agent maintains its own in-memory session store for conversation state
@@ -284,8 +291,6 @@ class ChatService:
 
             return response
 
-        except SessionNotFoundError:
-            raise
         except Exception as e:
             logger.error(f"Failed to process message: {e}", exc_info=True)
             raise
