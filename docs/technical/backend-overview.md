@@ -134,11 +134,11 @@ If the agent’s HTML lacks `.slide` wrappers, has out-of-range indices, or refe
 
 ## Configuration, Secrets & Clients
 
-- **Settings loading** (`src/config/settings.py`):
-  - YAML files in `/config` define defaults (LLM endpoint, Genie metadata, API options, logging settings, MLflow experiments).
-  - Environment variables override secrets (`DATABRICKS_HOST`, `DATABRICKS_TOKEN`, `.env` file).
-  - `get_settings()` caches the merged `AppSettings`. Use `reload_settings()` during local development or tests.
-- **Databricks client** (`src/config/client.py`):
+- **Settings loading** (`src/core/settings_db.py`):
+  - Configuration stored in database (profiles with LLM, Genie, MLflow, prompts settings).
+  - Environment variables for secrets (`DATABRICKS_HOST`, `DATABRICKS_TOKEN`, `DATABASE_URL`).
+  - `get_settings()` caches the merged `AppSettings`. Use `reload_settings()` to refresh from database.
+- **Databricks client** (`src/core/databricks_client.py`):
   - Thread-safe singleton `WorkspaceClient` that prefers configured profile → explicit host/token → environment fallback.
   - `initialize_genie_conversation()` and `query_genie_space()` both consume this singleton to avoid reconnecting per request.
 

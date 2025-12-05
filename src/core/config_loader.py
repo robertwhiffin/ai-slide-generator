@@ -139,31 +139,6 @@ def load_prompts() -> dict[str, Any]:
     return prompts
 
 
-def load_mlflow_config() -> dict[str, Any]:
-    """
-    Load the MLFlow configuration file (mlflow.yaml).
-
-    Returns:
-        MLFlow configuration dictionary
-
-    Raises:
-        ConfigurationError: If MLFlow settings cannot be loaded
-    """
-    mlflow_path = get_config_path("mlflow.yaml")
-    mlflow_config = load_yaml_file(mlflow_path)
-
-    # Validate required top-level keys
-    required_keys = ["tracking", "tracing", "registry", "serving"]
-    missing_keys = [key for key in required_keys if key not in mlflow_config]
-
-    if missing_keys:
-        raise ConfigurationError(
-            f"Missing required MLFlow configuration sections: {', '.join(missing_keys)}"
-        )
-
-    return mlflow_config
-
-
 def merge_with_env(config: dict[str, Any]) -> dict[str, Any]:
     """
     Merge configuration with environment variable overrides.
