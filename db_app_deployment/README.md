@@ -4,19 +4,33 @@ CLI tool for deploying the AI Slide Generator to Databricks Apps.
 
 ## Usage
 
+Use the `deploy.sh` wrapper script from the project root (activates venv automatically):
+
 ```bash
 # Create new app
-python -m db_app_deployment.deploy --create --env development --profile <profile>
+./deploy.sh create --env development --profile <profile>
 
 # Update existing app
-python -m db_app_deployment.deploy --update --env production --profile <profile>
+./deploy.sh update --env production --profile <profile>
 
 # Delete app
-python -m db_app_deployment.deploy --delete --env staging --profile <profile>
+./deploy.sh delete --env staging --profile <profile>
 
 # Validate without deploying
-python -m db_app_deployment.deploy --create --env production --profile <profile> --dry-run
+./deploy.sh create --env production --profile <profile> --dry-run
 ```
+
+<details>
+<summary>Alternative: Direct Python invocation</summary>
+
+If you need to run the Python module directly (requires venv activation):
+
+```bash
+source .venv/bin/activate
+python -m db_app_deployment.deploy --create --env development --profile <profile>
+```
+
+</details>
 
 ---
 
