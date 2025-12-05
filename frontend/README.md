@@ -52,7 +52,8 @@ src/
 │   ├── ChatPanel/          # Chat UI components
 │   ├── SlidePanel/         # Slide viewing and manipulation
 │   ├── config/             # Profile and settings forms
-│   └── History/            # Session history UI
+│   ├── History/            # Session history UI
+│   └── Help/               # Help page (default view on app open)
 └── utils/
     ├── loadingMessages.ts  # Rotating "please wait" messages
     └── slideReplacements.ts # Contiguity checks, replacement logic
