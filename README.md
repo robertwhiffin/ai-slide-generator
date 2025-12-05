@@ -93,10 +93,13 @@ cp config/deployment.example.yaml config/deployment.yaml
 #    - Set appropriate permissions
 
 # 4. Deploy to development environment
-python -m db_app_deployment.deploy --create --env development
+./deploy.sh create --env development --profile my-profile
 
 # Or update an existing deployment
-python -m db_app_deployment.deploy --update --env development
+./deploy.sh update --env development --profile my-profile
+
+# Validate config without deploying
+./deploy.sh create --env staging --profile my-profile --dry-run
 ```
 
 ### Deployment Environments
