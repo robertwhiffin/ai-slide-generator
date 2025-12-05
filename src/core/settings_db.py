@@ -39,7 +39,7 @@ class LLMSettings(BaseSettings):
     temperature: float = 0.7
     max_tokens: int = 4096
     top_p: float = 0.95
-    timeout: int = 120
+    timeout: int = 600
 
     @field_validator("temperature")
     @classmethod
@@ -306,7 +306,7 @@ def load_settings_from_database(profile_id: Optional[int] = None) -> AppSettings
                 temperature=float(ai_infra.llm_temperature),
                 max_tokens=ai_infra.llm_max_tokens,
                 top_p=0.95,  # Default value
-                timeout=120,  # Default value
+                timeout=600,  # Default value
             )
 
             genie_settings = GenieSettings(
