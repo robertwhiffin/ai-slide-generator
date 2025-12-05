@@ -7,14 +7,15 @@ import { ProfileSelector } from '../config/ProfileSelector';
 import { ProfileList } from '../config/ProfileList';
 import { SessionHistory } from '../History/SessionHistory';
 import { SaveAsDialog } from '../History/SaveAsDialog';
+import { HelpPage } from '../Help';
 import { useSession } from '../../contexts/SessionContext';
 
-type ViewMode = 'main' | 'profiles' | 'history';
+type ViewMode = 'main' | 'profiles' | 'history' | 'help';
 
 export const AppLayout: React.FC = () => {
   const [slideDeck, setSlideDeck] = useState<SlideDeck | null>(null);
   const [rawHtml, setRawHtml] = useState<string | null>(null);
-  const [viewMode, setViewMode] = useState<ViewMode>('main');
+  const [viewMode, setViewMode] = useState<ViewMode>('help');
   const [showSaveDialog, setShowSaveDialog] = useState(false);
   // Key to force remount ChatPanel when profile/session changes
   const [chatKey, setChatKey] = useState<number>(0);
@@ -134,6 +135,16 @@ export const AppLayout: React.FC = () => {
               >
                 Settings
               </button>
+              <button
+                onClick={() => setViewMode('help')}
+                className={`px-3 py-1.5 rounded text-sm transition-colors ${
+                  viewMode === 'help'
+                    ? 'bg-blue-700 text-white'
+                    : 'bg-blue-500 hover:bg-blue-700 text-blue-100'
+                }`}
+              >
+                Help
+              </button>
             </nav>
 
             {/* Profile Selector */}
@@ -189,6 +200,14 @@ export const AppLayout: React.FC = () => {
         <div className="flex-1 overflow-auto bg-gray-50">
           <div className="max-w-7xl mx-auto p-6">
             <ProfileList onProfileChange={handleProfileChange} />
+          </div>
+        </div>
+      )}
+
+      {viewMode === 'help' && (
+        <div className="flex-1 overflow-auto bg-gray-50">
+          <div className="p-6">
+            <HelpPage onBack={() => setViewMode('main')} />
           </div>
         </div>
       )}
