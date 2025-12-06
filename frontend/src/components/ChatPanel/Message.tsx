@@ -86,16 +86,34 @@ export const Message: React.FC<MessageProps> = ({ message }) => {
   // Tool call messages - show as collapsible accordion
   if (message.tool_call) {
     const toolArgs = message.tool_call.arguments;
-    const argsPreview = toolArgs?.query 
-      ? `"${toolArgs.query.slice(0, 50)}${toolArgs.query.length > 50 ? '...' : ''}"`
+    // Extract query - handle both direct string and nested object
+    let queryText = '';
+    if (typeof toolArgs?.query === 'string') {
+      queryText = toolArgs.query;
+    } else if (typeof toolArgs === 'object') {
+      // Try to find a query-like field
+      queryText = toolArgs.query || toolArgs.input || JSON.stringify(toolArgs);
+    }
+    
+    const argsPreview = queryText 
+      ? `"${queryText.slice(0, 60)}${queryText.length > 60 ? '...' : ''}"`
       : '';
     
     return renderCollapsibleContent(
       `Tool call: ${message.tool_call.name}`,
       argsPreview,
-      <pre className="whitespace-pre-wrap text-xs">
-        {JSON.stringify(message.tool_call.arguments, null, 2)}
-      </pre>,
+      <div className="text-xs">
+        {queryText ? (
+          <div>
+            <span className="text-gray-500">Query: </span>
+            <span className="text-gray-800">{queryText}</span>
+          </div>
+        ) : (
+          <pre className="whitespace-pre-wrap">
+            {JSON.stringify(message.tool_call.arguments, null, 2)}
+          </pre>
+        )}
+      </div>,
     );
   }
 
