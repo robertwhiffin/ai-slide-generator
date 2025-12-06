@@ -8,8 +8,9 @@ This callback handler:
 import json
 import logging
 import queue
-from typing import Any, Dict, List, Optional, TYPE_CHECKING
+from typing import Any, Dict, List, Optional, TYPE_CHECKING, Union
 
+from langchain_core.agents import AgentAction, AgentFinish
 from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.outputs import LLMResult
 
@@ -100,6 +101,50 @@ class StreamingCallbackHandler(BaseCallbackHandler):
             extra={"content_length": len(text), "message_id": message_id},
         )
 
+    def on_agent_action(
+        self,
+        action: AgentAction,
+        **kwargs: Any,
+    ) -> None:
+        """Handle agent action - captures LLM reasoning before tool calls.
+
+        Args:
+            action: AgentAction with tool, tool_input, and log (reasoning)
+            **kwargs: Additional arguments from LangChain
+        """
+        # Extract the LLM's reasoning from the log
+        # The log contains text like "I'll gather data about...\n\nInvoking: `tool` with..."
+        log_text = action.log or ""
+        
+        # Split to get the reasoning part (before "Invoking:")
+        if "Invoking:" in log_text:
+            reasoning = log_text.split("Invoking:")[0].strip()
+        else:
+            reasoning = log_text.strip()
+        
+        # Emit the reasoning as an assistant message if it exists
+        if reasoning:
+            logger.info("on_agent_action reasoning", extra={"reasoning_length": len(reasoning)})
+            
+            try:
+                msg = self.session_manager.add_message(
+                    session_id=self.session_id,
+                    role="assistant",
+                    content=reasoning,
+                    message_type="reasoning",
+                )
+                message_id = msg.get("id")
+            except Exception as e:
+                logger.error(f"Failed to persist reasoning: {e}")
+                message_id = None
+
+            event = StreamEvent(
+                type=StreamEventType.ASSISTANT,
+                content=reasoning,
+                message_id=message_id,
+            )
+            self.event_queue.put(event)
+
     def on_tool_start(
         self,
         serialized: Dict[str, Any],
@@ -115,13 +160,30 @@ class StreamingCallbackHandler(BaseCallbackHandler):
         """
         tool_name = serialized.get("name", "unknown")
         self._current_tool_name = tool_name
-        logger.info("on_tool_start called", extra={"tool_name": tool_name})
+        logger.info("on_tool_start called", extra={"tool_name": tool_name, "input_str": input_str[:100] if input_str else ""})
 
-        # Parse tool input if it's JSON
-        try:
-            tool_input = json.loads(input_str) if input_str else {}
-        except json.JSONDecodeError:
-            tool_input = {"query": input_str}
+        # Parse tool input - handle JSON, Python dict strings, and plain strings
+        tool_input: Dict[str, Any] = {}
+        if input_str:
+            try:
+                # First try JSON
+                parsed = json.loads(input_str)
+                if isinstance(parsed, dict):
+                    tool_input = parsed
+                else:
+                    tool_input = {"query": str(parsed)}
+            except json.JSONDecodeError:
+                # Try Python literal eval for dict-like strings (e.g., "{'query': '...'}")
+                try:
+                    import ast
+                    parsed = ast.literal_eval(input_str)
+                    if isinstance(parsed, dict):
+                        tool_input = parsed
+                    else:
+                        tool_input = {"query": str(parsed)}
+                except (ValueError, SyntaxError):
+                    # Plain string, use as query
+                    tool_input = {"query": input_str}
 
         # Persist to database
         try:
