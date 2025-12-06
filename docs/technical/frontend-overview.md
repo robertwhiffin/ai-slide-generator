@@ -7,7 +7,7 @@ How the React/Vite frontend is structured, how it communicates with backend APIs
 ## Stack & Entry Points
 
 - **Tooling:** Vite + React + TypeScript, Tailwind utility classes, `@dnd-kit` for drag/drop, `@monaco-editor/react` for HTML editing, standard Fetch for API calls.
-- **Entrypoint:** `src/main.tsx` injects `<App />` into `#root`. `src/App.tsx` wraps the tree in `SelectionProvider` and renders `AppLayout`.
+- **Entrypoint:** `src/main.tsx` injects `<App />` into `#root`. `src/App.tsx` wraps the tree in `ProfileProvider`, `SessionProvider`, `GenerationProvider`, `SelectionProvider` and renders `AppLayout`.
 - **Env configuration:** `src/services/api.ts` reads `import.meta.env.VITE_API_URL` (defaults to `http://localhost:8000` in dev, relative URLs in production).
 
 ---
@@ -71,12 +71,18 @@ Slides are HTML snippets embedded in iframes for preview.
 - Enforces contiguous selections via `utils/slideReplacements.ts::isContiguous`
 - Shared by Chat + Slide panels so the assistant receives focused context
 
-### 4. Chat Responses (`src/types/message.ts`)
+### 4. Generation Context (`src/contexts/GenerationContext.tsx`)
+
+- Tracks `isGenerating` boolean for navigation locking
+- Set by `ChatPanel` during streaming, consumed by `AppLayout`
+- Disables navigation buttons, profile selector, and session actions during generation
+
+### 5. Chat Responses (`src/types/message.ts`)
 
 - `ChatResponse` includes messages, `slide_deck`, `raw_html`, and optional `replacement_info`
 - `ReplacementInfo` rendered via `ReplacementFeedback` to show slide changes
 
-### 5. View Modes
+### 6. View Modes
 
 Parsed tiles, rendered raw HTML (`iframe`), and raw HTML text (`<pre>`). Users can compare parser output vs. model output.
 
@@ -86,7 +92,7 @@ Parsed tiles, rendered raw HTML (`iframe`), and raw HTML text (`<pre>`). Users c
 
 | Path | Responsibility | Backend Touchpoints |
 |------|----------------|---------------------|
-| `src/components/ChatPanel/ChatPanel.tsx` | Sends prompts, shows loading UX, records messages, handles replacement summaries | `api.sendMessage` |
+| `src/components/ChatPanel/ChatPanel.tsx` | Sends prompts via SSE, displays real-time events, loads persisted messages | `api.streamChat`, `api.getSession` |
 | `src/components/ChatPanel/ChatInput.tsx` | Textarea with selection badge when context exists | None (props only) |
 | `src/components/ChatPanel/MessageList.tsx` & `Message.tsx` | Renders conversation, collapses HTML/tool outputs | None |
 | `src/components/SlidePanel/SlidePanel.tsx` | Hosts drag/drop, tabs, per-slide CRUD | `api.getSlides`, `api.reorderSlides`, `api.updateSlide`, `api.duplicateSlide`, `api.deleteSlide` |
@@ -165,6 +171,7 @@ Parsed tiles, rendered raw HTML (`iframe`), and raw HTML text (`<pre>`). Users c
 | Method | HTTP | Path | Request | Returns |
 |--------|------|------|---------|---------|
 | `sendMessage` | POST | `/api/chat` | `{ session_id, message, slide_context? }` | `ChatResponse` |
+| `streamChat` | POST | `/api/chat/stream` | `{ session_id, message, slide_context? }` | SSE stream |
 | `healthCheck` | GET | `/api/health` | – | `{ status }` |
 | `getSlides` | GET | `/api/sessions/{id}/slides` | – | `{ session_id, slide_deck }` |
 | `reorderSlides` | PUT | `/api/slides/reorder` | `{ session_id, new_order }` | `SlideDeck` |
@@ -215,5 +222,6 @@ Errors bubble up as `ApiError` (status + message). Common statuses:
 ## Cross-References
 
 - [Backend Overview](backend-overview.md) – FastAPI routes and agent lifecycle
+- [Real-Time Streaming](real-time-streaming.md) – SSE events and conversation persistence
 - [Multi-User Concurrency](multi-user-concurrency.md) – session locking and async handling
 - [Slide Parser & Script Management](slide-parser-and-script-management.md) – HTML parsing and Chart.js reconciliation
