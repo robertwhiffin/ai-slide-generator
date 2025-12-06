@@ -412,10 +412,22 @@ class SessionManager:
             timeout_seconds: Max time a lock can be held before considered stale
 
         Returns:
-            True if lock acquired, False if session is already locked
+            True if lock acquired (or session doesn't exist yet), False if session is already locked
         """
         with get_db_session() as db:
-            session = self._get_session_or_raise(db, session_id)
+            session = (
+                db.query(UserSession)
+                .filter(UserSession.session_id == session_id)
+                .first()
+            )
+
+            # If session doesn't exist yet, allow proceeding (will be auto-created)
+            if not session:
+                logger.info(
+                    "Session not found for locking, allowing auto-creation",
+                    extra={"session_id": session_id},
+                )
+                return True
 
             if session.is_processing:
                 # Check if lock is stale (held too long)
@@ -441,7 +453,16 @@ class SessionManager:
             session_id: Session to unlock
         """
         with get_db_session() as db:
-            session = self._get_session_or_raise(db, session_id)
+            session = (
+                db.query(UserSession)
+                .filter(UserSession.session_id == session_id)
+                .first()
+            )
+
+            # If session doesn't exist, nothing to unlock
+            if not session:
+                return
+
             session.is_processing = False
             session.processing_started_at = None
 
