@@ -198,6 +198,7 @@ Fresh deployments create these columns automatically via SQLAlchemy model defini
 ## Cross-References
 
 - [Backend Overview](backend-overview.md) – request lifecycle and agent architecture
+- [Real-Time Streaming](real-time-streaming.md) – SSE events and message persistence
 - [Database Configuration](database-configuration.md) – session schema details
 - [Frontend Overview](frontend-overview.md) – how the UI passes session IDs
 

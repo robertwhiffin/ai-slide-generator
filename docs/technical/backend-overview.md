@@ -54,7 +54,8 @@ Frontend fetch -> FastAPI router ->   │ ChatService (singleton)│
 
 | Method | Path | Purpose | Backend handler |
 | --- | --- | --- | --- |
-| `POST` | `/api/chat` | Generate/edit slides (requires `session_id`) | `routes/chat.send_message` |
+| `POST` | `/api/chat` | Generate/edit slides (synchronous) | `routes/chat.send_message` |
+| `POST` | `/api/chat/stream` | Generate/edit with SSE streaming | `routes/chat.send_message_streaming` |
 | `GET` | `/api/health` | Lightweight readiness probe | `routes/chat.health_check` |
 | `GET` | `/api/slides` | Get slides (requires `session_id` query param) | `routes/slides.get_slides` |
 | `PUT` | `/api/slides/reorder` | Reorder (requires `session_id` in body) | `routes/slides.reorder_slides` |
@@ -104,12 +105,13 @@ Mutation endpoints return **409 Conflict** if the session is already processing 
 | Module | Responsibility | Key Details |
 | --- | --- | --- |
 | `src/api/main.py` | App assembly | Registers routers, CORS, health root. |
-| `src/api/routes/chat.py` | `/api/chat`, `/api/health` handlers | Session locking, `asyncio.to_thread()`, translates exceptions. |
-| `src/api/routes/sessions.py` | Session CRUD endpoints | Create, list, get, rename, delete sessions. |
+| `src/api/routes/chat.py` | `/api/chat`, `/api/chat/stream`, `/api/health` | Session locking, SSE streaming, `asyncio.to_thread()`. |
+| `src/api/routes/sessions.py` | Session CRUD endpoints | Create, list, get (with messages), rename, delete. |
 | `src/api/routes/slides.py` | Slide CRUD endpoints | Session-scoped operations with locking. |
-| `src/api/services/chat_service.py` | Stateful orchestration | Thread-safe deck cache, agent lifecycle, replacement application. |
-| `src/api/services/session_manager.py` | Session persistence | Database CRUD, session locking (`is_processing`). |
-| `src/services/agent.py` | LangChain agent | Per-request tool creation, MLflow spans, BeautifulSoup parsing. |
+| `src/api/services/chat_service.py` | Stateful orchestration | Deck cache, streaming generator, history hydration. |
+| `src/api/services/session_manager.py` | Session persistence | Database CRUD, message storage, session locking. |
+| `src/services/agent.py` | LangChain agent | Per-request tools, streaming callbacks, MLflow spans. |
+| `src/services/streaming_callback.py` | SSE event emission | Emits events to queue AND persists to database. |
 | `src/services/tools.py` | Genie wrappers | Starts conversations, retries, converts tabular responses. |
 | `src/models/slide*.py` | Deck primitives | Parsing, reordering, cloning, script bookkeeping, serialization. |
 | `src/core/settings_db.py` | Settings from database | Profile-based configuration with hot-reload. |
@@ -194,6 +196,7 @@ Keep this doc synchronized whenever you add new modules, features (e.g., streami
 ## Cross-References
 
 - [Frontend Overview](frontend-overview.md) – UI/state patterns and backend touchpoints
+- [Real-Time Streaming](real-time-streaming.md) – SSE events and conversation persistence
 - [Multi-User Concurrency](multi-user-concurrency.md) – session locking and async handling
 - [Slide Parser & Script Management](slide-parser-and-script-management.md) – HTML parsing flow
 
