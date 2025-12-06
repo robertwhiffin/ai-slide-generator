@@ -264,3 +264,4 @@ Parent window logs:
 | SlideDeck type | `frontend/src/types/slide.ts` |
 | Backend slide model | `src/domain/slide_deck.py` |
 
+
