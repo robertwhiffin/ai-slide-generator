@@ -4,15 +4,21 @@ All session state is stored in the database (PostgreSQL in dev, Lakebase in prod
 Sessions are auto-created on first message if they don't exist.
 """
 
-import copy
 import logging
+import queue
 import threading
-from typing import Any, Dict, List, Optional
+from datetime import datetime
+from typing import Any, Dict, Generator, List, Optional
 
+from langchain_community.chat_message_histories import ChatMessageHistory
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+
+from src.api.schemas.streaming import StreamEvent, StreamEventType
 from src.api.services.session_manager import get_session_manager, SessionNotFoundError
 from src.domain.slide import Slide
 from src.domain.slide_deck import SlideDeck
 from src.services.agent import create_agent
+from src.services.streaming_callback import StreamingCallbackHandler
 from src.utils.html_utils import (
     extract_canvas_ids_from_html,
     extract_canvas_ids_from_script,
@@ -303,6 +309,172 @@ class ChatService:
             logger.error(f"Failed to process message: {e}", exc_info=True)
             raise
 
+    def send_message_streaming(
+        self,
+        session_id: str,
+        message: str,
+        slide_context: Optional[Dict[str, Any]] = None,
+    ) -> Generator[StreamEvent, None, None]:
+        """Send a message and yield streaming events.
+
+        This method:
+        1. Persists the user message to database
+        2. Yields streaming events as the agent executes
+        3. Processes the final result and yields a complete event
+
+        Args:
+            session_id: Session ID (auto-created if doesn't exist)
+            message: User's message
+            slide_context: Optional context for slide editing
+
+        Yields:
+            StreamEvent objects for real-time display
+
+        Raises:
+            Exception: If agent fails to generate slides
+        """
+        logger.info(
+            "Processing streaming message",
+            extra={
+                "message_length": len(message),
+                "session_id": session_id,
+                "has_slide_context": slide_context is not None,
+            },
+        )
+
+        # Get or create session in database
+        session_manager = get_session_manager()
+        try:
+            db_session = session_manager.get_session(session_id)
+        except SessionNotFoundError:
+            db_session = session_manager.create_session(session_id=session_id)
+            logger.info(
+                "Auto-created session on first streaming message",
+                extra={"session_id": session_id},
+            )
+
+        # Persist user message to database FIRST
+        user_msg = session_manager.add_message(
+            session_id=session_id,
+            role="user",
+            content=message,
+            message_type="user_input",
+        )
+        logger.info(
+            "Persisted user message",
+            extra={"session_id": session_id, "message_id": user_msg.get("id")},
+        )
+
+        # Ensure session is registered with the agent (hydrates history)
+        self._ensure_agent_session(session_id, db_session.get("genie_conversation_id"))
+
+        # Create event queue and callback handler
+        event_queue: queue.Queue[StreamEvent] = queue.Queue()
+        callback_handler = StreamingCallbackHandler(event_queue, session_id)
+
+        # Run agent in thread and yield events
+        result_container: Dict[str, Any] = {}
+        error_container: Dict[str, Exception] = {}
+
+        def run_agent():
+            try:
+                result = self.agent.generate_slides_streaming(
+                    question=message,
+                    session_id=session_id,
+                    callback_handler=callback_handler,
+                    slide_context=slide_context,
+                )
+                result_container["result"] = result
+            except Exception as e:
+                error_container["error"] = e
+                callback_handler.event_queue.put(
+                    StreamEvent(type=StreamEventType.ERROR, error=str(e))
+                )
+            finally:
+                # Signal completion by putting None
+                event_queue.put(None)
+
+        # Start agent thread
+        agent_thread = threading.Thread(target=run_agent, daemon=True)
+        agent_thread.start()
+
+        # Yield events as they arrive
+        while True:
+            event = event_queue.get()
+            if event is None:
+                break
+            yield event
+
+        # Check for errors
+        if "error" in error_container:
+            raise error_container["error"]
+
+        # Process final result
+        result = result_container.get("result")
+        if not result:
+            return
+
+        html_output = result.get("html")
+        replacement_info = result.get("replacement_info")
+
+        # Get cached deck for this session (thread-safe)
+        with self._cache_lock:
+            current_deck = self._deck_cache.get(session_id)
+
+        slide_deck_dict = None
+        raw_html = None
+
+        if slide_context and replacement_info:
+            slide_deck_dict = self._apply_slide_replacements(
+                replacement_info=replacement_info,
+                session_id=session_id,
+            )
+            with self._cache_lock:
+                current_deck = self._deck_cache.get(session_id)
+            raw_html = current_deck.knit() if current_deck else None
+        elif html_output and html_output.strip():
+            raw_html = html_output
+            try:
+                current_deck = SlideDeck.from_html_string(html_output)
+                with self._cache_lock:
+                    self._deck_cache[session_id] = current_deck
+                slide_deck_dict = current_deck.to_dict()
+            except Exception as e:
+                logger.warning(f"Failed to parse HTML into SlideDeck: {e}")
+                with self._cache_lock:
+                    self._deck_cache.pop(session_id, None)
+
+        # Persist slide deck to database
+        if current_deck and slide_deck_dict:
+            session_manager.save_slide_deck(
+                session_id=session_id,
+                title=current_deck.title,
+                html_content=current_deck.knit(),
+                scripts_content=current_deck.scripts,
+                slide_count=len(current_deck.slides),
+                deck_dict=slide_deck_dict,
+            )
+
+        # Update session activity
+        session_manager.update_last_activity(session_id)
+
+        # Yield final complete event
+        yield StreamEvent(
+            type=StreamEventType.COMPLETE,
+            slides=slide_deck_dict,
+            raw_html=raw_html,
+            replacement_info=replacement_info,
+            metadata=result.get("metadata"),
+        )
+
+        logger.info(
+            "Streaming message completed",
+            extra={
+                "session_id": session_id,
+                "has_slide_deck": slide_deck_dict is not None,
+            },
+        )
+
     def _ensure_agent_session(
         self, session_id: str, genie_conversation_id: Optional[str] = None
     ) -> None:
@@ -310,7 +482,8 @@ class ChatService:
 
         The agent maintains its own in-memory session store for conversation
         state (chat history, Genie conversation). This method ensures the
-        database session is registered with the agent.
+        database session is registered with the agent and hydrates the
+        chat history from persisted messages.
 
         Args:
             session_id: Session ID from database
@@ -320,17 +493,11 @@ class ChatService:
         if session_id in self.agent.sessions:
             return
 
-        # Register session with agent using its internal method
-        # This creates chat history and initializes Genie conversation
         logger.info(
             "Registering session with agent",
             extra={"session_id": session_id, "genie_conversation_id": genie_conversation_id},
         )
 
-        # Use agent's create_session but with our session_id
-        # We need to manually initialize since agent.create_session() generates its own ID
-        from langchain_community.chat_message_histories import ChatMessageHistory
-        from datetime import datetime
         from src.services.tools import initialize_genie_conversation
 
         try:
@@ -343,22 +510,79 @@ class ChatService:
                 session_manager = get_session_manager()
                 session_manager.set_genie_conversation_id(session_id, genie_conv_id)
 
+            # Create chat history and hydrate from database
+            chat_history = ChatMessageHistory()
+            message_count = self._hydrate_chat_history(session_id, chat_history)
+
             # Initialize agent session data
             self.agent.sessions[session_id] = {
-                "chat_history": ChatMessageHistory(),
+                "chat_history": chat_history,
                 "genie_conversation_id": genie_conv_id,
                 "created_at": datetime.utcnow().isoformat(),
-                "message_count": 0,
+                "message_count": message_count,
             }
 
             logger.info(
                 "Session registered with agent",
-                extra={"session_id": session_id, "genie_conversation_id": genie_conv_id},
+                extra={
+                    "session_id": session_id,
+                    "genie_conversation_id": genie_conv_id,
+                    "hydrated_messages": message_count,
+                },
             )
 
         except Exception as e:
             logger.error(f"Failed to register session with agent: {e}", exc_info=True)
             raise
+
+    def _hydrate_chat_history(
+        self, session_id: str, chat_history: ChatMessageHistory
+    ) -> int:
+        """Load messages from database into ChatHistory for agent context.
+
+        This restores the conversation state when resuming a session,
+        allowing the agent to maintain context across page reloads.
+
+        Args:
+            session_id: Session ID to load messages for
+            chat_history: ChatMessageHistory instance to populate
+
+        Returns:
+            Number of messages hydrated
+        """
+        session_manager = get_session_manager()
+
+        try:
+            db_messages = session_manager.get_messages(session_id)
+        except SessionNotFoundError:
+            # Session doesn't exist yet (first message), no history to load
+            return 0
+
+        if not db_messages:
+            return 0
+
+        count = 0
+        for msg in db_messages:
+            role = msg.get("role", "")
+            content = msg.get("content", "")
+
+            if not content:
+                continue
+
+            if role == "user":
+                chat_history.add_message(HumanMessage(content=content))
+                count += 1
+            elif role == "assistant":
+                chat_history.add_message(AIMessage(content=content))
+                count += 1
+            # Skip tool messages for history (they're included via intermediate steps)
+
+        logger.info(
+            "Hydrated chat history from database",
+            extra={"session_id": session_id, "message_count": count},
+        )
+
+        return count
 
     def _get_or_load_deck(self, session_id: str) -> Optional[SlideDeck]:
         """Get deck from cache or load from database.

@@ -6,15 +6,17 @@ capabilities with MLflow tracing integration.
 """
 
 import logging
+import queue
 import uuid
 from datetime import datetime
-from typing import Any
+from typing import Any, Optional
 
 import mlflow
 from bs4 import BeautifulSoup
 from databricks_langchain import ChatDatabricks
 from langchain_classic.agents import AgentExecutor, create_tool_calling_agent
 from langchain_community.chat_message_histories import ChatMessageHistory
+from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.tools import StructuredTool
@@ -777,6 +779,189 @@ class SlideGeneratorAgent:
         except Exception as e:
             logger.error(f"Slide generation failed: {e}", exc_info=True)
             raise AgentError(f"Slide generation failed: {e}") from e
+
+    def generate_slides_streaming(
+        self,
+        question: str,
+        session_id: str,
+        callback_handler: BaseCallbackHandler,
+        slide_context: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """
+        Generate HTML slides with streaming callback support.
+
+        Same as generate_slides() but accepts a callback handler for
+        real-time event emission during execution.
+
+        Args:
+            question: Natural language question about data
+            session_id: Session identifier for multi-turn conversation
+            callback_handler: Callback handler for streaming events
+            slide_context: Optional context for editing existing slides
+
+        Returns:
+            Dictionary containing generation results
+
+        Raises:
+            AgentError: If generation fails or session not found
+        """
+        start_time = datetime.utcnow()
+
+        # Get session data
+        session = self.get_session(session_id)
+        chat_history = session["chat_history"]
+
+        # Create tools with session_id bound via closure (thread-safe)
+        tools = self._create_tools_for_session(session_id)
+
+        # Create agent executor with callback handler
+        agent_executor = self._create_agent_executor_with_callbacks(
+            tools, [callback_handler]
+        )
+
+        editing_mode = slide_context is not None
+
+        if slide_context:
+            context_str = self._format_slide_context(slide_context)
+            full_question = f"{context_str}\n\n{question}"
+            logger.info(
+                "Slide editing mode (streaming)",
+                extra={
+                    "session_id": session_id,
+                    "selected_indices": slide_context.get("indices", []),
+                    "slide_count": len(slide_context.get("indices", [])),
+                },
+            )
+        else:
+            full_question = question
+            logger.info(
+                "Slide generation mode (streaming)",
+                extra={
+                    "question": question,
+                    "session_id": session_id,
+                    "message_count": session["message_count"],
+                },
+            )
+
+        try:
+            with mlflow.start_span(name="generate_slides_streaming") as span:
+                span.set_attribute("question", question)
+                span.set_attribute("session_id", session_id)
+                span.set_attribute("model_endpoint", self.settings.llm.endpoint)
+                span.set_attribute("message_count", session["message_count"])
+                span.set_attribute("mode", "edit" if editing_mode else "generate")
+                span.set_attribute("streaming", True)
+
+                agent_input = {
+                    "input": full_question,
+                    "chat_history": chat_history.messages,
+                }
+
+                # Invoke agent with callback handler passed via config
+                result = agent_executor.invoke(
+                    agent_input,
+                    config={"callbacks": [callback_handler]},
+                )
+
+                html_output = result["output"]
+                intermediate_steps = result.get("intermediate_steps", [])
+
+                # Update chat history
+                chat_history.add_message(HumanMessage(content=full_question))
+                chat_history.add_message(AIMessage(content=html_output))
+
+                # Update session metadata
+                session["message_count"] += 1
+                session["last_interaction"] = datetime.utcnow().isoformat()
+
+                # Calculate metadata
+                end_time = datetime.utcnow()
+                latency = (end_time - start_time).total_seconds()
+
+                replacement_info: dict[str, Any] | None = None
+
+                if editing_mode:
+                    assert slide_context is not None
+                    replacement_info = self._parse_slide_replacements(
+                        llm_response=html_output,
+                        original_indices=slide_context.get("indices", []),
+                    )
+                else:
+                    self._validate_canvas_scripts_in_html(html_output)
+
+                metadata = {
+                    "latency_seconds": latency,
+                    "tool_calls": len(intermediate_steps),
+                    "timestamp": end_time.isoformat(),
+                    "message_count": session["message_count"],
+                    "mode": "edit" if editing_mode else "generate",
+                    "streaming": True,
+                }
+
+                span.set_attribute("output_length", len(html_output))
+                span.set_attribute("tool_calls", len(intermediate_steps))
+                span.set_attribute("latency_seconds", latency)
+                span.set_attribute("status", "success")
+                span.set_attribute("genie_conversation_id", session["genie_conversation_id"])
+
+                logger.info(
+                    "Streaming slide generation completed",
+                    extra={
+                        "session_id": session_id,
+                        "latency_seconds": latency,
+                        "tool_calls": len(intermediate_steps),
+                        "output_length": len(html_output),
+                    },
+                )
+
+                return {
+                    "html": html_output,
+                    "metadata": metadata,
+                    "session_id": session_id,
+                    "genie_conversation_id": session["genie_conversation_id"],
+                    "replacement_info": replacement_info,
+                }
+
+        except TimeoutError as e:
+            logger.error(f"LLM request timed out (streaming): {e}")
+            raise LLMInvocationError(f"LLM request timed out: {e}") from e
+        except Exception as e:
+            logger.error(f"Streaming slide generation failed: {e}", exc_info=True)
+            raise AgentError(f"Slide generation failed: {e}") from e
+
+    def _create_agent_executor_with_callbacks(
+        self,
+        tools: list[StructuredTool],
+        callbacks: list[BaseCallbackHandler],
+    ) -> AgentExecutor:
+        """
+        Create agent executor with callback handlers for streaming.
+
+        Args:
+            tools: List of tools to bind to this executor
+            callbacks: List of callback handlers for event streaming
+
+        Returns:
+            Configured AgentExecutor with callbacks
+        """
+        try:
+            agent = create_tool_calling_agent(self.model, tools, self.prompt)
+
+            agent_executor = AgentExecutor(
+                agent=agent,
+                tools=tools,
+                callbacks=callbacks,
+                return_intermediate_steps=True,
+                verbose=True,
+                max_iterations=1000,
+                max_execution_time=self.settings.llm.timeout,
+            )
+
+            logger.info("Agent executor created with streaming callbacks")
+            return agent_executor
+
+        except Exception as e:
+            raise AgentError(f"Failed to create agent executor: {e}") from e
 
 
 def create_agent() -> SlideGeneratorAgent:

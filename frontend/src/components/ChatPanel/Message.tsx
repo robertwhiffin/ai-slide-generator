@@ -83,6 +83,22 @@ export const Message: React.FC<MessageProps> = ({ message }) => {
     );
   }
 
+  // Tool call messages - show as collapsible accordion
+  if (message.tool_call) {
+    const toolArgs = message.tool_call.arguments;
+    const argsPreview = toolArgs?.query 
+      ? `"${toolArgs.query.slice(0, 50)}${toolArgs.query.length > 50 ? '...' : ''}"`
+      : '';
+    
+    return renderCollapsibleContent(
+      `Tool call: ${message.tool_call.name}`,
+      argsPreview,
+      <pre className="whitespace-pre-wrap text-xs">
+        {JSON.stringify(message.tool_call.arguments, null, 2)}
+      </pre>,
+    );
+  }
+
   return (
     <div className={`max-w-3xl rounded-lg p-4 ${getMessageStyle()}`}>
       <div className="text-xs font-semibold text-gray-500 mb-1">
@@ -91,11 +107,6 @@ export const Message: React.FC<MessageProps> = ({ message }) => {
       <div className="text-sm text-gray-800 whitespace-pre-wrap">
         {message.content}
       </div>
-      {message.tool_call && (
-        <div className="mt-2 text-xs text-gray-500">
-          Tool: {message.tool_call.name}
-        </div>
-      )}
     </div>
   );
 };
