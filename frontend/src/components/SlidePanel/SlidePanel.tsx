@@ -14,11 +14,18 @@ import {
   sortableKeyboardCoordinates,
   verticalListSortingStrategy,
 } from '@dnd-kit/sortable';
+import { FiPlay, FiDownload } from 'react-icons/fi';
 import type { Slide, SlideDeck } from '../../types/slide';
 import { SlideTile } from './SlideTile';
+import { PresentationMode } from '../PresentationMode';
 import { api } from '../../services/api';
 import { useSelection } from '../../contexts/SelectionContext';
 import { useSession } from '../../contexts/SessionContext';
+
+const isDebugMode = (): boolean => {
+  const urlParams = new URLSearchParams(window.location.search);
+  return urlParams.get('debug') === 'true' || localStorage.getItem('debug') === 'true';
+};
 
 interface SlidePanelProps {
   slideDeck: SlideDeck | null;
@@ -31,6 +38,7 @@ type ViewMode = 'tiles' | 'rawhtml' | 'rawtext';
 export const SlidePanel: React.FC<SlidePanelProps> = ({ slideDeck, rawHtml, onSlideChange }) => {
   const [isReordering, setIsReordering] = useState(false);
   const [viewMode, setViewMode] = useState<ViewMode>('tiles');
+  const [isPresentationMode, setIsPresentationMode] = useState(false);
   const { selectedIndices, setSelection, clearSelection } = useSelection();
   const { sessionId } = useSession();
   
@@ -142,6 +150,128 @@ export const SlidePanel: React.FC<SlidePanelProps> = ({ slideDeck, rawHtml, onSl
       setSelection(validIndices, slides);
     }
   }, [slideDeck, selectedIndices, clearSelection, setSelection]);
+
+  const handleDownload = () => {
+    if (!slideDeck) return;
+
+    const slidesHtml = slideDeck.slides
+      .map((slide) => `<section>${slide.html}</section>`)
+      .join('\n');
+
+    const externalScriptsHtml = slideDeck.external_scripts
+      .map((src) => `<script src="${src}"></script>`)
+      .join('\n');
+
+    const html = `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>${slideDeck.title || 'Presentation'}</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/reveal.js@5/dist/reveal.css">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/reveal.js@5/dist/theme/white.css">
+  ${externalScriptsHtml}
+  <style>
+    html, body {
+      margin: 0;
+      padding: 0;
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      background: #000;
+    }
+    .reveal-viewport {
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      width: 100%;
+      height: 100%;
+    }
+    .reveal {
+      width: 100%;
+      height: 100%;
+    }
+    .reveal .slides {
+      text-align: left;
+    }
+    .reveal .slides section {
+      height: 100%;
+      width: 100%;
+      padding: 0;
+      box-sizing: border-box;
+    }
+    .reveal .slides section .slide {
+      width: 100% !important;
+      height: 100% !important;
+      min-height: 100% !important;
+      max-height: 100% !important;
+      position: relative;
+      box-sizing: border-box;
+    }
+    .reveal canvas {
+      max-width: 100%;
+    }
+    ${slideDeck.css}
+  </style>
+</head>
+<body>
+  <div class="reveal-viewport">
+    <div class="reveal">
+      <div class="slides">
+        ${slidesHtml}
+      </div>
+    </div>
+  </div>
+  <script src="https://cdn.jsdelivr.net/npm/reveal.js@5/dist/reveal.js"></script>
+  <script>
+    function waitForChartJs(callback, maxAttempts = 50) {
+      let attempts = 0;
+      const check = () => {
+        attempts++;
+        if (typeof Chart !== 'undefined') {
+          callback();
+        } else if (attempts < maxAttempts) {
+          setTimeout(check, 100);
+        }
+      };
+      check();
+    }
+
+    function initializeCharts() {
+      ${slideDeck.scripts}
+    }
+
+    Reveal.initialize({
+      hash: true,
+      controls: true,
+      progress: true,
+      slideNumber: true,
+      overview: true,
+      width: 1280,
+      height: 720,
+      margin: 0,
+      minScale: 0.1,
+      maxScale: 2.0,
+      center: true,
+      transition: 'slide',
+      display: 'flex'
+    }).then(() => {
+      waitForChartJs(initializeCharts);
+    });
+  </script>
+</body>
+</html>`;
+
+    const blob = new Blob([html], { type: 'text/html' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `${(slideDeck.title || 'presentation').replace(/[^a-z0-9]/gi, '-').toLowerCase()}.html`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  };
   if (!slideDeck) {
     return (
       <div className="flex items-center justify-center h-full bg-gray-50">
@@ -157,13 +287,31 @@ export const SlidePanel: React.FC<SlidePanelProps> = ({ slideDeck, rawHtml, onSl
     <div className="h-full flex flex-col bg-gray-50">
       {/* Header with Tabs */}
       <div className="bg-white border-b">
-        <div className="p-4">
-        <h2 className="text-lg font-semibold">{slideDeck.title}</h2>
-        <p className="text-sm text-gray-500">
-          {slideDeck.slide_count} slide{slideDeck.slide_count !== 1 ? 's' : ''}
-            {isReordering && ' • Reordering...'}
-        </p>
-      </div>
+        <div className="p-4 flex items-center justify-between">
+          <div>
+            <h2 className="text-lg font-semibold">{slideDeck.title}</h2>
+            <p className="text-sm text-gray-500">
+              {slideDeck.slide_count} slide{slideDeck.slide_count !== 1 ? 's' : ''}
+              {isReordering && ' • Reordering...'}
+            </p>
+          </div>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={handleDownload}
+              className="flex items-center gap-2 px-4 py-2 bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200 transition-colors"
+            >
+              <FiDownload size={16} />
+              Download
+            </button>
+            <button
+              onClick={() => setIsPresentationMode(true)}
+              className="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors"
+            >
+              <FiPlay size={16} />
+              Present
+            </button>
+          </div>
+        </div>
 
         {/* Tab Navigation */}
         <div className="flex border-t">
@@ -175,30 +323,34 @@ export const SlidePanel: React.FC<SlidePanelProps> = ({ slideDeck, rawHtml, onSl
                 : 'border-transparent text-gray-600 hover:text-gray-800 hover:border-gray-300'
             }`}
           >
-            Parsed Slides
+            Generated Slides
           </button>
-          <button
-            onClick={() => setViewMode('rawhtml')}
-            className={`px-6 py-3 text-sm font-medium border-b-2 transition-colors ${
-              viewMode === 'rawhtml'
-                ? 'border-blue-600 text-blue-600'
-                : 'border-transparent text-gray-600 hover:text-gray-800 hover:border-gray-300'
-            }`}
-            disabled={!rawHtml}
-          >
-            Raw HTML (Rendered)
-          </button>
-          <button
-            onClick={() => setViewMode('rawtext')}
-            className={`px-6 py-3 text-sm font-medium border-b-2 transition-colors ${
-              viewMode === 'rawtext'
-                ? 'border-blue-600 text-blue-600'
-                : 'border-transparent text-gray-600 hover:text-gray-800 hover:border-gray-300'
-            }`}
-            disabled={!rawHtml}
-          >
-            Raw HTML (Text)
-          </button>
+          {isDebugMode() && (
+            <>
+              <button
+                onClick={() => setViewMode('rawhtml')}
+                className={`px-6 py-3 text-sm font-medium border-b-2 transition-colors ${
+                  viewMode === 'rawhtml'
+                    ? 'border-blue-600 text-blue-600'
+                    : 'border-transparent text-gray-600 hover:text-gray-800 hover:border-gray-300'
+                }`}
+                disabled={!rawHtml}
+              >
+                Raw HTML (Rendered)
+              </button>
+              <button
+                onClick={() => setViewMode('rawtext')}
+                className={`px-6 py-3 text-sm font-medium border-b-2 transition-colors ${
+                  viewMode === 'rawtext'
+                    ? 'border-blue-600 text-blue-600'
+                    : 'border-transparent text-gray-600 hover:text-gray-800 hover:border-gray-300'
+                }`}
+                disabled={!rawHtml}
+              >
+                Raw HTML (Text)
+              </button>
+            </>
+          )}
         </div>
       </div>
 
@@ -268,6 +420,14 @@ export const SlidePanel: React.FC<SlidePanelProps> = ({ slideDeck, rawHtml, onSl
           </div>
         )}
       </div>
+
+      {isPresentationMode && (
+        <PresentationMode
+          slideDeck={slideDeck}
+          onExit={() => setIsPresentationMode(false)}
+          startIndex={0}
+        />
+      )}
     </div>
   );
 };
