@@ -90,17 +90,31 @@ async def list_sessions(
 
 @router.get("/{session_id}")
 async def get_session(session_id: str):
-    """Get session details.
+    """Get session details including messages and slides.
 
     Args:
         session_id: Session identifier
 
     Returns:
-        Session information
+        Session information with messages and slide_deck
     """
     try:
         session_manager = get_session_manager()
-        return await asyncio.to_thread(session_manager.get_session, session_id)
+
+        # Get session info
+        session = await asyncio.to_thread(session_manager.get_session, session_id)
+
+        # Get messages for conversation restoration
+        messages = await asyncio.to_thread(session_manager.get_messages, session_id)
+
+        # Get slide deck if it exists
+        slide_deck = await asyncio.to_thread(session_manager.get_slide_deck, session_id)
+
+        return {
+            **session,
+            "messages": messages,
+            "slide_deck": slide_deck,
+        }
 
     except SessionNotFoundError:
         raise HTTPException(

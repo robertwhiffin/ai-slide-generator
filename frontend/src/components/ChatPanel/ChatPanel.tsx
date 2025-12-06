@@ -3,7 +3,7 @@ import type { Message } from '../../types/message';
 import type { ReplacementInfo, SlideDeck } from '../../types/slide';
 import { MessageList } from './MessageList';
 import { ChatInput } from './ChatInput';
-import { api } from '../../services/api';
+import { api, type StreamEvent } from '../../services/api';
 import { getRotatingLoadingMessage } from '../../utils/loadingMessages';
 import { SelectionBadge } from './SelectionBadge';
 import { ReplacementFeedback } from './ReplacementFeedback';
@@ -11,6 +11,7 @@ import { ErrorDisplay } from './ErrorDisplay';
 import { LoadingIndicator } from './LoadingIndicator';
 import { useSelection } from '../../contexts/SelectionContext';
 import { useSession } from '../../contexts/SessionContext';
+import { useGeneration } from '../../contexts/GenerationContext';
 import { useKeyboardShortcuts } from '../../hooks/useKeyboardShortcuts';
 
 interface ChatPanelProps {
@@ -31,6 +32,7 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
   );
   const messageIndexRef = useRef(0);
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const cancelStreamRef = useRef<(() => void) | null>(null);
   const {
     selectedIndices,
     selectedSlides,
@@ -38,6 +40,7 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
     clearSelection,
   } = useSelection();
   const { sessionId, isInitializing, error: sessionError } = useSession();
+  const { setIsGenerating } = useGeneration();
 
   useKeyboardShortcuts();
 
@@ -47,6 +50,41 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
       setError(sessionError);
     }
   }, [sessionError]);
+
+  // Load messages when session changes (for restored sessions)
+  useEffect(() => {
+    if (!sessionId) return;
+
+    const loadSessionMessages = async () => {
+      try {
+        const session = await api.getSession(sessionId);
+        if (session.messages && session.messages.length > 0) {
+          // Convert database messages to UI Message format
+          const uiMessages: Message[] = session.messages.map(msg => ({
+            role: msg.role as 'user' | 'assistant' | 'tool',
+            content: msg.content,
+            timestamp: msg.created_at,
+            tool_call: msg.metadata?.tool_name ? {
+              name: msg.metadata.tool_name,
+              arguments: msg.metadata.tool_input || {},
+            } : undefined,
+          }));
+          setMessages(uiMessages);
+        } else {
+          setMessages([]);
+        }
+      } catch (err: any) {
+        // Session might not exist yet (new session with local UUID), which is fine
+        // 404 is expected for new sessions that haven't sent their first message
+        if (err?.status !== 404) {
+          console.warn('Could not load session messages:', err);
+        }
+        setMessages([]);
+      }
+    };
+
+    loadSessionMessages();
+  }, [sessionId]);
 
   const stopLoadingMessages = () => {
     if (intervalRef.current) {
@@ -68,9 +106,11 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
     }
 
     setIsLoading(true);
+    setIsGenerating(true);
     setError(null);
     setLastReplacement(null);
 
+    // Add user message immediately
     setMessages(prev => [
       ...prev,
       {
@@ -95,47 +135,111 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
           }
         : undefined;
 
-    try {
-      const response = await api.sendMessage({
-        sessionId,
-        message: trimmedContent,
-        slideContext,
-      });
+    // Handle streaming events
+    const handleStreamEvent = (event: StreamEvent) => {
+      switch (event.type) {
+        case 'assistant':
+          if (event.content) {
+            setMessages(prev => [
+              ...prev,
+              {
+                role: 'assistant',
+                content: event.content!,
+                timestamp: new Date().toISOString(),
+              },
+            ]);
+          }
+          break;
 
-      stopLoadingMessages();
+        case 'tool_call':
+          if (event.tool_name) {
+            setMessages(prev => [
+              ...prev,
+              {
+                role: 'assistant',
+                content: `Using tool: ${event.tool_name}`,
+                timestamp: new Date().toISOString(),
+                tool_call: {
+                  name: event.tool_name!,
+                  arguments: event.tool_input || {},
+                },
+              },
+            ]);
+            // Update loading message to show tool being used
+            setLoadingMessage(`Querying ${event.tool_name}...`);
+          }
+          break;
 
-      const newMessages = response.messages.filter(m => m.role !== 'user');
-      setMessages(prev => [...prev, ...newMessages]);
+        case 'tool_result':
+          if (event.tool_output) {
+            setMessages(prev => [
+              ...prev,
+              {
+                role: 'tool',
+                content: event.tool_output!,
+                timestamp: new Date().toISOString(),
+                tool_call_id: event.tool_name,
+              },
+            ]);
+          }
+          break;
 
-      const nextRawHtml = response.raw_html ?? rawHtml ?? null;
+        case 'error':
+          setError(event.error || 'An error occurred');
+          stopLoadingMessages();
+          setIsLoading(false);
+          setIsGenerating(false);
+          break;
 
-      if (response.slide_deck) {
-        onSlidesGenerated(response.slide_deck, nextRawHtml);
-        clearSelection();
+        case 'complete':
+          stopLoadingMessages();
+          setIsLoading(false);
+          setIsGenerating(false);
+
+          const nextRawHtml = event.raw_html ?? rawHtml ?? null;
+
+          if (event.slides) {
+            onSlidesGenerated(event.slides, nextRawHtml);
+            clearSelection();
+          }
+
+          if (event.replacement_info && slideContext) {
+            setLastReplacement(event.replacement_info);
+          }
+          break;
       }
+    };
 
-      if (response.replacement_info && slideContext) {
-        if (response.slide_deck === undefined) {
-          console.warn('Replacement info received without slide deck; skipping local merge.');
-        }
-        setLastReplacement(response.replacement_info);
+    // Start streaming
+    cancelStreamRef.current = api.streamChat(
+      sessionId,
+      trimmedContent,
+      slideContext,
+      handleStreamEvent,
+      (err) => {
+        console.error('Stream error:', err);
+        setError(err.message || 'Failed to send message');
+        stopLoadingMessages();
+        setIsLoading(false);
+        setIsGenerating(false);
       }
-    } catch (err) {
-      console.error('Failed to send message:', err);
-      setError(err instanceof Error ? err.message : 'Failed to send message');
-    } finally {
-      stopLoadingMessages();
-      setIsLoading(false);
-    }
+    );
   };
 
+  // Cleanup on unmount
   useEffect(() => {
     return () => {
       if (intervalRef.current) {
         clearInterval(intervalRef.current);
       }
+      // Cancel any in-flight stream
+      if (cancelStreamRef.current) {
+        cancelStreamRef.current();
+      }
+      // Reset generation state on unmount
+      setIsGenerating(false);
     };
-  }, []);
+  }, [setIsGenerating]);
 
   return (
     <div className="flex flex-col h-full bg-gray-50">
