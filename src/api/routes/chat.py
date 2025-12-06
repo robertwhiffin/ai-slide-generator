@@ -53,7 +53,7 @@ async def send_message(request: ChatRequest) -> ChatResponse:
         raise HTTPException(
             status_code=409,
             detail="Session is currently processing another request. Please wait.",
-        )
+    )
 
     try:
         chat_service = get_chat_service()
