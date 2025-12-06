@@ -6,13 +6,14 @@ name: "ai-slide-generator"
 description: "AI-powered slide deck generator using LLMs and Genie"
 
 # Startup command - install dependencies, wheel, and run app
+# Multiple workers enabled for multi-user concurrency
 command:
   - "sh"
   - "-c"
   - |
     pip install -r requirements.txt && \
     pip install --upgrade wheels/*.whl && \
-    uvicorn src.api.main:app --host 0.0.0.0 --port ${PORT:-8000}
+    uvicorn src.api.main:app --host 0.0.0.0 --port ${PORT:-8000} --workers 4
 
 # Environment variables
 env:

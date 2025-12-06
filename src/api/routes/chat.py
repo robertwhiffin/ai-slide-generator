@@ -3,6 +3,7 @@
 Requires a valid session_id. Create sessions via POST /api/sessions.
 """
 
+import asyncio
 import logging
 
 from fastapi import APIRouter, HTTPException
@@ -10,7 +11,7 @@ from fastapi import APIRouter, HTTPException
 from src.api.schemas.requests import ChatRequest
 from src.api.schemas.responses import ChatResponse
 from src.api.services.chat_service import get_chat_service
-from src.api.services.session_manager import SessionNotFoundError
+from src.api.services.session_manager import SessionNotFoundError, get_session_manager
 
 logger = logging.getLogger(__name__)
 
@@ -22,6 +23,7 @@ async def send_message(request: ChatRequest) -> ChatResponse:
     """Send a message to the AI agent and receive response with slides.
 
     Requires a valid session_id. Create sessions via POST /api/sessions first.
+    Uses asyncio.to_thread to avoid blocking the event loop during LLM calls.
 
     Args:
         request: Chat request with session_id and message
@@ -30,7 +32,7 @@ async def send_message(request: ChatRequest) -> ChatResponse:
         Chat response with messages, slide_deck, and metadata
 
     Raises:
-        HTTPException: 404 if session not found, 500 if agent fails
+        HTTPException: 404 if session not found, 409 if session busy, 500 if agent fails
     """
     logger.info(
         "Received chat request",
@@ -40,13 +42,28 @@ async def send_message(request: ChatRequest) -> ChatResponse:
         },
     )
 
+    session_manager = get_session_manager()
+
+    # Acquire session lock to prevent concurrent modifications
+    locked = await asyncio.to_thread(
+        session_manager.acquire_session_lock,
+        request.session_id,
+    )
+    if not locked:
+        raise HTTPException(
+            status_code=409,
+            detail="Session is currently processing another request. Please wait.",
+        )
+
     try:
         chat_service = get_chat_service()
 
-        result = chat_service.send_message(
-            session_id=request.session_id,
-            message=request.message,
-            slide_context=request.slide_context.model_dump() if request.slide_context else None,
+        # Run blocking LLM call in thread pool
+        result = await asyncio.to_thread(
+            chat_service.send_message,
+            request.session_id,
+            request.message,
+            request.slide_context.model_dump() if request.slide_context else None,
         )
 
         return ChatResponse(**result)
@@ -62,6 +79,12 @@ async def send_message(request: ChatRequest) -> ChatResponse:
             status_code=500,
             detail=f"Failed to process message: {str(e)}",
         ) from e
+    finally:
+        # Always release the lock
+        await asyncio.to_thread(
+            session_manager.release_session_lock,
+            request.session_id,
+        )
 
 
 @router.get("/health")
