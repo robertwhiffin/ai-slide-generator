@@ -89,18 +89,13 @@ class SlideGeneratorAgent:
         self._setup_mlflow()
         self.experiment_id=None
 
-        # Create LangChain components
+        # Create LangChain components (tools created per-request to bind session_id)
         self.model = self._create_model()
-        self.tools = self._create_tools()
         self.prompt = self._create_prompt()
-        self.agent_executor = self._create_agent_executor()
 
         # Session storage for multi-turn conversations
         # Structure: {session_id: {chat_history, genie_conversation_id, metadata}}
         self.sessions: dict[str, dict[str, Any]] = {}
-
-        # Track current session for tool access to conversation_id
-        self.current_session_id: str | None = None
 
         logger.info("SlideGeneratorAgent initialized successfully")
 
@@ -164,40 +159,45 @@ class SlideGeneratorAgent:
         except Exception as e:
             raise AgentError(f"Failed to create ChatDatabricks model: {e}") from e
 
-    def _create_tools(self) -> list[StructuredTool]:
-        """Create LangChain tools from tools.py functions."""
+    def _create_tools_for_session(self, session_id: str) -> list[StructuredTool]:
+        """Create LangChain tools with session_id bound via closure.
+
+        This eliminates the race condition from using self.current_session_id
+        by binding the session_id at tool creation time.
+
+        Args:
+            session_id: Session identifier to bind to the tool
+
+        Returns:
+            List of StructuredTool instances for this session
+        """
+        # Get session reference for use in closure
+        session = self.sessions.get(session_id)
+        if session is None:
+            raise ToolExecutionError(f"Session not found: {session_id}")
 
         def _query_genie_wrapper(query: str) -> str:
             """
-            Wrapper that auto-injects conversation_id from current session.
-            
-            This eliminates the need for the LLM to track and pass conversation IDs,
-            preventing hallucination errors.
-            
-            If no conversation exists (e.g., after profile reload), initializes a new one.
+            Wrapper that auto-injects conversation_id from bound session.
+
+            The session_id is captured via closure at tool creation time,
+            eliminating race conditions from concurrent requests.
             """
-            # Get conversation_id from current session
-            if self.current_session_id is None:
-                raise ToolExecutionError("No active session - current_session_id not set")
-
-            session = self.sessions.get(self.current_session_id)
-            if session is None:
-                raise ToolExecutionError(f"Session not found: {self.current_session_id}")
-
             conversation_id = session["genie_conversation_id"]
             if conversation_id is None:
                 # Initialize new Genie conversation (happens after profile reload)
                 logger.info(
                     "Initializing new Genie conversation for session",
-                    extra={"session_id": self.current_session_id},
+                    extra={"session_id": session_id},
                 )
                 try:
-                    conversation_id = initialize_genie_conversation()
-                    session["genie_conversation_id"] = conversation_id
+                    new_conv_id = initialize_genie_conversation()
+                    session["genie_conversation_id"] = new_conv_id
+                    conversation_id = new_conv_id
                     logger.info(
                         "New Genie conversation initialized",
                         extra={
-                            "session_id": self.current_session_id,
+                            "session_id": session_id,
                             "genie_conversation_id": conversation_id,
                         },
                     )
@@ -210,16 +210,16 @@ class SlideGeneratorAgent:
 
             # Format response for LLM (no conversation_id exposed)
             response_parts = []
-            
+
             if result.get('message'):
                 response_parts.append(f"Genie response: {result['message']}")
-            
+
             if result.get('data'):
                 response_parts.append(f"Data retrieved:\n\n{result['data']}")
-            
+
             if not response_parts:
                 return "Query completed but no data or message was returned."
-            
+
             return "\n\n".join(response_parts)
 
         genie_tool = StructuredTool.from_function(
@@ -236,7 +236,7 @@ class SlideGeneratorAgent:
             args_schema=GenieQueryInput,
         )
 
-        logger.info("Tools created", extra={"tool_count": 1})
+        logger.info("Tools created for session", extra={"session_id": session_id})
         return [genie_tool]
 
     def _create_prompt(self) -> ChatPromptTemplate:
@@ -262,9 +262,12 @@ class SlideGeneratorAgent:
         logger.info("Prompt template created with chat history support")
         return prompt
 
-    def _create_agent_executor(self) -> AgentExecutor:
+    def _create_agent_executor(self, tools: list[StructuredTool]) -> AgentExecutor:
         """
         Create agent executor with model, tools, and prompt.
+
+        Args:
+            tools: List of tools to bind to this executor
 
         Returns:
             Configured AgentExecutor
@@ -275,13 +278,13 @@ class SlideGeneratorAgent:
         Note: Chat history is managed per-session and passed via agent_input.
         """
         try:
-            # Create agent
-            agent = create_tool_calling_agent(self.model, self.tools, self.prompt)
+            # Create agent with session-specific tools
+            agent = create_tool_calling_agent(self.model, tools, self.prompt)
 
             # Create executor with intermediate steps enabled
             agent_executor = AgentExecutor(
                 agent=agent,
-                tools=self.tools,
+                tools=tools,
                 return_intermediate_steps=True,
                 verbose=True,
                 max_iterations=1000,
@@ -618,6 +621,9 @@ class SlideGeneratorAgent:
         """
         Generate HTML slides from a natural language question (multi-turn support).
 
+        Creates tools and agent executor per-request with session_id bound via closure
+        to eliminate race conditions in concurrent multi-user scenarios.
+
         Args:
             question: Natural language question about data
             session_id: Session identifier for multi-turn conversation
@@ -636,12 +642,13 @@ class SlideGeneratorAgent:
         """
         start_time = datetime.utcnow()
 
-        # Set current session for tool access
-        self.current_session_id = session_id
-
         # Get session data
         session = self.get_session(session_id)
         chat_history = session["chat_history"]
+
+        # Create tools with session_id bound via closure (thread-safe)
+        tools = self._create_tools_for_session(session_id)
+        agent_executor = self._create_agent_executor(tools)
 
         editing_mode = slide_context is not None
 
@@ -683,8 +690,8 @@ class SlideGeneratorAgent:
                     "chat_history": chat_history.messages,  # Pass chat history messages
                 }
 
-                # Invoke agent
-                result = self.agent_executor.invoke(agent_input)
+                # Invoke agent with session-specific executor
+                result = agent_executor.invoke(agent_input)
 
                 # Extract results
                 html_output = result["output"]
@@ -770,9 +777,6 @@ class SlideGeneratorAgent:
         except Exception as e:
             logger.error(f"Slide generation failed: {e}", exc_info=True)
             raise AgentError(f"Slide generation failed: {e}") from e
-        finally:
-            # Clear current session after execution
-            self.current_session_id = None
 
 
 def create_agent() -> SlideGeneratorAgent:

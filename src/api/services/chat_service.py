@@ -68,6 +68,9 @@ class ChatService:
         # Thread lock for safe agent reloading
         self._reload_lock = threading.Lock()
 
+        # Thread lock for safe deck cache access
+        self._cache_lock = threading.Lock()
+
         # Create agent instance
         self.agent = create_agent()
 
@@ -135,7 +138,8 @@ class ChatService:
                 self.agent = new_agent
 
                 # Clear deck cache (settings may affect rendering)
-                self._deck_cache.clear()
+                with self._cache_lock:
+                    self._deck_cache.clear()
 
                 logger.info(
                     "Agent reloaded successfully",
@@ -220,22 +224,25 @@ class ChatService:
             html_output = result.get("html")
             replacement_info = result.get("replacement_info")
 
-            # Get cached deck for this session
-            current_deck = self._deck_cache.get(session_id)
+            # Get cached deck for this session (thread-safe)
+            with self._cache_lock:
+                current_deck = self._deck_cache.get(session_id)
 
             if slide_context and replacement_info:
                 slide_deck_dict = self._apply_slide_replacements(
                     replacement_info=result["parsed_output"],
                     session_id=session_id,
                 )
-                current_deck = self._deck_cache.get(session_id)
+                with self._cache_lock:
+                    current_deck = self._deck_cache.get(session_id)
                 raw_html = current_deck.knit() if current_deck else None
             elif html_output and html_output.strip():
                 raw_html = html_output
 
                 try:
                     current_deck = SlideDeck.from_html_string(html_output)
-                    self._deck_cache[session_id] = current_deck
+                    with self._cache_lock:
+                        self._deck_cache[session_id] = current_deck
                     slide_deck_dict = current_deck.to_dict()
                     logger.info(
                         "Parsed slide deck",
@@ -250,7 +257,8 @@ class ChatService:
                         f"Failed to parse HTML into SlideDeck: {e}",
                         exc_info=True,
                     )
-                    self._deck_cache.pop(session_id, None)
+                    with self._cache_lock:
+                        self._deck_cache.pop(session_id, None)
                     slide_deck_dict = None
             else:
                 raw_html = None
@@ -353,18 +361,25 @@ class ChatService:
             raise
 
     def _get_or_load_deck(self, session_id: str) -> Optional[SlideDeck]:
-        """Get deck from cache or load from database."""
-        if session_id in self._deck_cache:
-            return self._deck_cache[session_id]
+        """Get deck from cache or load from database.
 
-        # Try to load from database
+        Thread-safe access to deck cache using _cache_lock.
+        """
+        # Check cache first (with lock)
+        with self._cache_lock:
+            if session_id in self._deck_cache:
+                return self._deck_cache[session_id]
+
+        # Try to load from database (outside lock to avoid blocking)
         session_manager = get_session_manager()
         deck_data = session_manager.get_slide_deck(session_id)
 
         if deck_data and deck_data.get("html_content"):
             try:
                 deck = SlideDeck.from_html_string(deck_data["html_content"])
-                self._deck_cache[session_id] = deck
+                # Store in cache (with lock)
+                with self._cache_lock:
+                    self._deck_cache[session_id] = deck
                 return deck
             except Exception as e:
                 logger.warning(f"Failed to load deck from database: {e}")
@@ -455,8 +470,9 @@ class ChatService:
             session_id=session_id,
         )
 
-        # Update cache
-        self._deck_cache[session_id] = current_deck
+        # Update cache (thread-safe)
+        with self._cache_lock:
+            self._deck_cache[session_id] = current_deck
 
         return current_deck.to_dict()
 
@@ -467,7 +483,8 @@ class ChatService:
         session_id: str = "",
     ) -> None:
         """Append or replace validated replacement scripts on the deck."""
-        current_deck = self._deck_cache.get(session_id)
+        with self._cache_lock:
+            current_deck = self._deck_cache.get(session_id)
 
         if not current_deck:
             return

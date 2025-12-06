@@ -7,6 +7,7 @@ from datetime import datetime
 from typing import Optional
 
 from sqlalchemy import (
+    Boolean,
     Column,
     DateTime,
     ForeignKey,
@@ -40,6 +41,10 @@ class UserSession(Base):
 
     # Genie conversation tracking (cleared on profile switch)
     genie_conversation_id = Column(String(255), nullable=True)
+
+    # Processing lock for concurrent request handling
+    is_processing = Column(Boolean, default=False, nullable=False)
+    processing_started_at = Column(DateTime, nullable=True)
 
     # Relationships
     messages = relationship(

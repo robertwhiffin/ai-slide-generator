@@ -401,6 +401,55 @@ class SessionManager:
                 "updated_at": deck.updated_at.isoformat(),
             }
 
+    # Session locking for concurrent request handling
+    def acquire_session_lock(self, session_id: str, timeout_seconds: int = 300) -> bool:
+        """Try to acquire processing lock for a session.
+
+        Uses database-level locking to work across multiple uvicorn workers.
+
+        Args:
+            session_id: Session to lock
+            timeout_seconds: Max time a lock can be held before considered stale
+
+        Returns:
+            True if lock acquired, False if session is already locked
+        """
+        with get_db_session() as db:
+            session = self._get_session_or_raise(db, session_id)
+
+            if session.is_processing:
+                # Check if lock is stale (held too long)
+                if session.processing_started_at:
+                    age = (datetime.utcnow() - session.processing_started_at).total_seconds()
+                    if age < timeout_seconds:
+                        return False  # Legitimately locked
+                # Stale lock - proceed to acquire
+
+            session.is_processing = True
+            session.processing_started_at = datetime.utcnow()
+
+            logger.info(
+                "Acquired session lock",
+                extra={"session_id": session_id},
+            )
+            return True
+
+    def release_session_lock(self, session_id: str) -> None:
+        """Release processing lock for a session.
+
+        Args:
+            session_id: Session to unlock
+        """
+        with get_db_session() as db:
+            session = self._get_session_or_raise(db, session_id)
+            session.is_processing = False
+            session.processing_started_at = None
+
+            logger.info(
+                "Released session lock",
+                extra={"session_id": session_id},
+            )
+
     # Cleanup operations
     def cleanup_expired_sessions(self) -> int:
         """Delete sessions that have exceeded TTL.
