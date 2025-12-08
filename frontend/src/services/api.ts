@@ -278,16 +278,18 @@ export const api = {
   /**
    * Export slide deck to PPTX format
    * 
+   * @param sessionId - Session ID to get slides from
    * @param useScreenshot - Whether to use screenshots for charts (default: true)
    * @returns Blob containing the PPTX file
    */
-  async exportToPPTX(useScreenshot: boolean = true): Promise<Blob> {
+  async exportToPPTX(sessionId: string, useScreenshot: boolean = true): Promise<Blob> {
     const response = await fetch(`${API_BASE_URL}/api/export/pptx`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
+        session_id: sessionId,
         use_screenshot: useScreenshot,
       }),
     });
