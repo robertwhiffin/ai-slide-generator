@@ -12,7 +12,12 @@ from typing import Any, Dict, List, Optional
 from sqlalchemy.orm import Session
 
 from src.core.database import get_db_session
-from src.database.models.session import SessionMessage, SessionSlideDeck, UserSession
+from src.database.models.session import (
+    ChatRequest,
+    SessionMessage,
+    SessionSlideDeck,
+    UserSession,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -232,6 +237,7 @@ class SessionManager:
         content: str,
         message_type: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None,
+        request_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Add a message to a session.
 
@@ -241,6 +247,7 @@ class SessionManager:
             content: Message content
             message_type: Optional message type classification
             metadata: Optional additional metadata
+            request_id: Optional chat request ID for async polling
 
         Returns:
             Message info dictionary
@@ -254,6 +261,7 @@ class SessionManager:
                 content=content,
                 message_type=message_type,
                 metadata_json=json.dumps(metadata) if metadata else None,
+                request_id=request_id,
             )
             db.add(message)
             db.flush()
@@ -400,6 +408,337 @@ class SessionManager:
                 "created_at": deck.created_at.isoformat(),
                 "updated_at": deck.updated_at.isoformat(),
             }
+
+    # Session locking for concurrent request handling
+    def acquire_session_lock(self, session_id: str, timeout_seconds: int = 300) -> bool:
+        """Try to acquire processing lock for a session.
+
+        Uses database-level locking to work across multiple uvicorn workers.
+
+        Args:
+            session_id: Session to lock
+            timeout_seconds: Max time a lock can be held before considered stale
+
+        Returns:
+            True if lock acquired (or session doesn't exist yet), False if session is already locked
+        """
+        with get_db_session() as db:
+            session = (
+                db.query(UserSession)
+                .filter(UserSession.session_id == session_id)
+                .first()
+            )
+
+            # If session doesn't exist yet, allow proceeding (will be auto-created)
+            if not session:
+                logger.info(
+                    "Session not found for locking, allowing auto-creation",
+                    extra={"session_id": session_id},
+                )
+                return True
+
+            if session.is_processing:
+                # Check if lock is stale (held too long)
+                if session.processing_started_at:
+                    age = (datetime.utcnow() - session.processing_started_at).total_seconds()
+                    if age < timeout_seconds:
+                        return False  # Legitimately locked
+                # Stale lock - proceed to acquire
+
+            session.is_processing = True
+            session.processing_started_at = datetime.utcnow()
+
+            logger.info(
+                "Acquired session lock",
+                extra={"session_id": session_id},
+            )
+            return True
+
+    def release_session_lock(self, session_id: str) -> None:
+        """Release processing lock for a session.
+
+        Args:
+            session_id: Session to unlock
+        """
+        with get_db_session() as db:
+            session = (
+                db.query(UserSession)
+                .filter(UserSession.session_id == session_id)
+                .first()
+            )
+
+            # If session doesn't exist, nothing to unlock
+            if not session:
+                return
+
+            session.is_processing = False
+            session.processing_started_at = None
+
+            logger.info(
+                "Released session lock",
+                extra={"session_id": session_id},
+            )
+
+    # Chat request operations (for polling-based streaming)
+    def create_chat_request(self, session_id: str) -> str:
+        """Create a new chat request, return request_id.
+
+        Auto-creates the session if it doesn't exist.
+
+        Args:
+            session_id: Session to create request for
+
+        Returns:
+            Generated request_id
+        """
+        request_id = secrets.token_urlsafe(24)
+
+        with get_db_session() as db:
+            # Get or create session
+            session = (
+                db.query(UserSession)
+                .filter(UserSession.session_id == session_id)
+                .first()
+            )
+
+            if not session:
+                # Auto-create session on first request
+                session = UserSession(
+                    session_id=session_id,
+                    title=f"Session {datetime.utcnow().strftime('%Y-%m-%d %H:%M')}",
+                )
+                db.add(session)
+                db.flush()
+                logger.info(
+                    "Auto-created session for chat request",
+                    extra={"session_id": session_id},
+                )
+
+            chat_request = ChatRequest(
+                request_id=request_id,
+                session_id=session.id,
+                status="pending",
+            )
+            db.add(chat_request)
+            db.flush()
+
+            logger.info(
+                "Created chat request",
+                extra={"request_id": request_id, "session_id": session_id},
+            )
+
+            return request_id
+
+    def update_chat_request_status(
+        self,
+        request_id: str,
+        status: str,
+        error: Optional[str] = None,
+    ) -> None:
+        """Update request status (pending/running/completed/error).
+
+        Args:
+            request_id: Request ID to update
+            status: New status
+            error: Optional error message
+        """
+        with get_db_session() as db:
+            chat_request = (
+                db.query(ChatRequest)
+                .filter(ChatRequest.request_id == request_id)
+                .first()
+            )
+
+            if not chat_request:
+                logger.warning(f"ChatRequest not found: {request_id}")
+                return
+
+            chat_request.status = status
+            if error:
+                chat_request.error_message = error
+            if status in ("completed", "error"):
+                chat_request.completed_at = datetime.utcnow()
+
+    def set_chat_request_result(
+        self, request_id: str, result: Optional[dict]
+    ) -> None:
+        """Store final result (slides, raw_html, etc).
+
+        Args:
+            request_id: Request ID to update
+            result: Result dictionary to store as JSON
+        """
+        with get_db_session() as db:
+            chat_request = (
+                db.query(ChatRequest)
+                .filter(ChatRequest.request_id == request_id)
+                .first()
+            )
+
+            if not chat_request:
+                return
+
+            chat_request.result_json = json.dumps(result) if result else None
+
+    def get_chat_request(self, request_id: str) -> Optional[Dict[str, Any]]:
+        """Get request status and result.
+
+        Args:
+            request_id: Request ID to look up
+
+        Returns:
+            Request info dictionary or None if not found
+        """
+        with get_db_session() as db:
+            chat_request = (
+                db.query(ChatRequest)
+                .filter(ChatRequest.request_id == request_id)
+                .first()
+            )
+
+            if not chat_request:
+                return None
+
+            return {
+                "request_id": chat_request.request_id,
+                "session_id": chat_request.session_id,
+                "status": chat_request.status,
+                "error_message": chat_request.error_message,
+                "created_at": chat_request.created_at.isoformat(),
+                "completed_at": (
+                    chat_request.completed_at.isoformat()
+                    if chat_request.completed_at
+                    else None
+                ),
+                "result": (
+                    json.loads(chat_request.result_json)
+                    if chat_request.result_json
+                    else None
+                ),
+            }
+
+    def get_session_id_for_request(self, request_id: str) -> Optional[str]:
+        """Get the session_id (string) for a chat request.
+
+        Args:
+            request_id: Request ID to look up
+
+        Returns:
+            Session ID string or None if not found
+        """
+        with get_db_session() as db:
+            chat_request = (
+                db.query(ChatRequest)
+                .filter(ChatRequest.request_id == request_id)
+                .first()
+            )
+
+            if not chat_request:
+                return None
+
+            # Get the UserSession to get the string session_id
+            session = (
+                db.query(UserSession)
+                .filter(UserSession.id == chat_request.session_id)
+                .first()
+            )
+
+            return session.session_id if session else None
+
+    def get_messages_for_request(
+        self,
+        request_id: str,
+        after_id: int = 0,
+    ) -> List[Dict[str, Any]]:
+        """Get messages with request_id, optionally after a given message ID.
+
+        Args:
+            request_id: Request ID to filter by
+            after_id: Return messages with ID greater than this
+
+        Returns:
+            List of message dictionaries
+        """
+        with get_db_session() as db:
+            query = db.query(SessionMessage).filter(
+                SessionMessage.request_id == request_id
+            )
+
+            if after_id > 0:
+                query = query.filter(SessionMessage.id > after_id)
+
+            messages = query.order_by(SessionMessage.created_at).all()
+
+            return [
+                {
+                    "id": m.id,
+                    "role": m.role,
+                    "content": m.content,
+                    "message_type": m.message_type,
+                    "created_at": m.created_at.isoformat(),
+                    "metadata": (
+                        json.loads(m.metadata_json) if m.metadata_json else None
+                    ),
+                }
+                for m in messages
+            ]
+
+    def msg_to_stream_event(self, msg: dict) -> dict:
+        """Convert database message to StreamEvent-like dict for polling response.
+
+        Args:
+            msg: Message dictionary from get_messages_for_request
+
+        Returns:
+            StreamEvent-compatible dictionary
+        """
+        event_type = "assistant"  # default
+
+        if msg["message_type"] == "tool_call":
+            event_type = "tool_call"
+        elif msg["message_type"] == "tool_result":
+            event_type = "tool_result"
+        elif msg["role"] == "user":
+            event_type = "assistant"  # User messages use assistant type for display
+
+        metadata = msg.get("metadata") or {}
+
+        return {
+            "type": event_type,
+            "content": msg["content"],
+            "tool_name": metadata.get("tool_name"),
+            "tool_input": metadata.get("tool_input"),
+            "tool_output": msg["content"] if event_type == "tool_result" else None,
+            "message_id": msg["id"],
+        }
+
+    def cleanup_stale_requests(self, max_age_hours: int = 24) -> int:
+        """Clean up old/stuck chat requests.
+
+        Args:
+            max_age_hours: Delete requests older than this
+
+        Returns:
+            Number of requests deleted
+        """
+        cutoff = datetime.utcnow() - timedelta(hours=max_age_hours)
+
+        with get_db_session() as db:
+            stale = (
+                db.query(ChatRequest).filter(ChatRequest.created_at < cutoff).all()
+            )
+
+            count = len(stale)
+            for req in stale:
+                db.delete(req)
+
+            if count > 0:
+                logger.info(
+                    "Cleaned up stale chat requests",
+                    extra={"count": count},
+                )
+
+            return count
 
     # Cleanup operations
     def cleanup_expired_sessions(self) -> int:

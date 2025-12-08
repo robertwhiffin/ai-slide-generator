@@ -11,11 +11,13 @@ import { useProfiles } from '../../hooks/useProfiles';
 interface ProfileSelectorProps {
   onManageClick?: () => void;
   onProfileChange?: () => void;
+  disabled?: boolean;
 }
 
 export const ProfileSelector: React.FC<ProfileSelectorProps> = ({ 
   onManageClick,
   onProfileChange,
+  disabled = false,
 }) => {
   const { profiles, currentProfile, loadProfile } = useProfiles();
   const [isOpen, setIsOpen] = useState(false);
@@ -58,8 +60,11 @@ export const ProfileSelector: React.FC<ProfileSelectorProps> = ({
       {/* Selector Button */}
       <button
         onClick={() => setIsOpen(!isOpen)}
-        className="flex items-center gap-2 px-3 py-2 bg-white border border-gray-300 rounded hover:bg-gray-50 transition-colors text-sm"
-        disabled={isLoading}
+        className={`flex items-center gap-2 px-3 py-2 bg-white border border-gray-300 rounded transition-colors text-sm ${
+          disabled ? 'opacity-50 cursor-not-allowed' : 'hover:bg-gray-50'
+        }`}
+        disabled={isLoading || disabled}
+        title={disabled ? 'Profile switching disabled during generation' : undefined}
       >
         <span className="text-gray-700">
           Profile: <strong>{currentProfile?.name || 'Loading...'}</strong>

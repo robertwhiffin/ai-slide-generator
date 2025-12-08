@@ -4,6 +4,7 @@ This module initializes the FastAPI app with CORS middleware and routes.
 In production, also serves the React frontend as static files.
 """
 
+import asyncio
 import logging
 import os
 from contextlib import asynccontextmanager
@@ -22,6 +23,7 @@ from src.api.routes.settings import (
     profiles_router,
     prompts_router,
 )
+from src.api.services.job_queue import recover_stuck_requests, start_worker
 
 logger = logging.getLogger(__name__)
 
@@ -29,17 +31,45 @@ logger = logging.getLogger(__name__)
 ENVIRONMENT = os.getenv("ENVIRONMENT", "development")
 IS_PRODUCTION = ENVIRONMENT == "production"
 
+# Worker task reference for cleanup
+_worker_task = None
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Lifespan context manager for startup/shutdown events."""
+    global _worker_task
+
     # Startup
     logger.info(f"Starting AI Slide Generator API (environment: {ENVIRONMENT})")
     if IS_PRODUCTION:
         logger.info("Production mode: serving frontend from static files")
+
+    # Start the job queue worker for async chat processing
+    _worker_task = await start_worker()
+    logger.info("Job queue worker started")
+
+    # Recover any stuck requests from previous crashes
+    try:
+        recovered = await recover_stuck_requests()
+        if recovered > 0:
+            logger.info(f"Recovered {recovered} stuck chat requests")
+    except Exception as e:
+        logger.warning(f"Failed to recover stuck requests: {e}")
+
     yield
+
     # Shutdown
     logger.info("Shutting down AI Slide Generator API")
+
+    # Cancel the worker task
+    if _worker_task:
+        _worker_task.cancel()
+        try:
+            await _worker_task
+        except asyncio.CancelledError:
+            pass
+        logger.info("Job queue worker stopped")
 
 
 # Initialize FastAPI app

@@ -70,6 +70,8 @@ class ProfileService:
         """
         Create new profile.
         
+        If no default profile exists, the new profile will be set as default.
+        
         Args:
             name: Profile name
             description: Profile description
@@ -79,11 +81,19 @@ class ProfileService:
         Returns:
             Created profile
         """
-        # Create profile
+        # Check if a default profile already exists
+        has_default = (
+            self.db.query(ConfigProfile)
+            .filter(ConfigProfile.is_default == True)
+            .first()
+            is not None
+        )
+
+        # Create profile - make it default if no default exists
         profile = ConfigProfile(
             name=name,
             description=description,
-            is_default=False,
+            is_default=not has_default,  # First profile becomes default
             created_by=user,
             updated_by=user,
         )
