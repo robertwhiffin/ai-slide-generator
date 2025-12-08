@@ -68,7 +68,6 @@ profiles:
         - Quantify insights with specific numbers and percentages
         
         Guidelines for presentation creation:
-        - Generate a maximum of {max_slides} slides
         - Create a title slide with the presentation topic
         - Include an agenda/overview slide if appropriate
         - Use one key insight per slide for clarity
@@ -148,7 +147,7 @@ profiles:
         - Maintain consistent formatting across all slides
         - Ensure smooth integration with surrounding slides
 
-      user_prompt_template: "Generate {max_slides} slides about: {user_message}"
+      user_prompt_template: "{question}"
 
   # Profile 2: Use Cases Analysis
   - name: "use cases"
@@ -180,5 +179,5 @@ profiles:
       slide_editing_instructions: |
         When editing slides, maintain consistency with the existing presentation style and structure.
 
-      user_prompt_template: "Generate {max_slides} slides about: {user_message}"
+      user_prompt_template: "{question}"
 

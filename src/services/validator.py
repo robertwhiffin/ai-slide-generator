@@ -131,13 +131,5 @@ class ConfigValidator:
                     error="User prompt template must contain {question} placeholder",
                 )
 
-        # Check system prompt mentions max_slides
-        if system_prompt is not None:
-            if "{max_slides}" not in system_prompt:
-                return ValidationResult(
-                    valid=False,
-                    error="System prompt should reference {max_slides} placeholder",
-                )
-
         return ValidationResult(valid=True)
 

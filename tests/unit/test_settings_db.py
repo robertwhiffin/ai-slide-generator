@@ -151,7 +151,7 @@ def test_load_settings_from_database(test_db, test_profile, monkeypatch):
     assert settings.llm.max_tokens == 4096
     assert settings.genie.space_id == "test-space-id"
     assert settings.mlflow.experiment_name == "/test/experiment"
-    assert "{max_slides}" in settings.prompts["system_prompt"]
+    assert "system_prompt" in settings.prompts
 
 
 def test_load_settings_specific_profile(test_db, test_profile, monkeypatch):

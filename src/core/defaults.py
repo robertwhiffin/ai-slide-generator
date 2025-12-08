@@ -55,7 +55,6 @@ Guidelines for data analysis:
 - Quantify insights with specific numbers and percentages
 
 Guidelines for presentation creation:
-- Generate a maximum of {max_slides} slides
 - Create a title slide with the presentation topic
 - Include an agenda/overview slide if appropriate
 - Use one key insight per slide for clarity

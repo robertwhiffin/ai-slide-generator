@@ -79,6 +79,10 @@ export const SlideSelection: React.FC<SlideSelectionProps> = ({
     toggleSelection(index);
   };
 
+  if (!slides || slides.length === 0) {
+    return <div className="text-sm text-gray-500">No slides available</div>;
+  }
+
   return (
     <div className="slide-selection">
       {slides.map((slide, index) => {

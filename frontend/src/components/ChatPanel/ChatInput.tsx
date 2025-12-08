@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 
 interface ChatInputProps {
-  onSend: (message: string, maxSlides: number) => void;
+  onSend: (message: string) => void;
   disabled: boolean;
   placeholder?: string;
   badge?: React.ReactNode;
@@ -14,12 +14,11 @@ export const ChatInput: React.FC<ChatInputProps> = ({
   badge,
 }) => {
   const [message, setMessage] = useState('');
-  const [maxSlides, setMaxSlides] = useState(10);
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     if (message.trim() && !disabled) {
-      onSend(message.trim(), maxSlides);
+      onSend(message.trim());
       setMessage('');
     }
   };
@@ -45,26 +44,13 @@ export const ChatInput: React.FC<ChatInputProps> = ({
           />
         </div>
         
-        <div className="flex flex-col space-y-2">
-          <input
-            type="number"
-            value={maxSlides}
-            onChange={(e) => setMaxSlides(parseInt(e.target.value) || 10)}
-            min="1"
-            max="50"
-            disabled={disabled}
-            className="w-20 px-2 py-1 text-sm border border-gray-300 rounded"
-            title="Max slides"
-          />
-          
-          <button
-            type="submit"
-            disabled={disabled || !message.trim()}
-            className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:bg-gray-300 disabled:cursor-not-allowed"
-          >
-            Send
-          </button>
-        </div>
+        <button
+          type="submit"
+          disabled={disabled || !message.trim()}
+          className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:bg-gray-300 disabled:cursor-not-allowed"
+        >
+          Send
+        </button>
       </div>
       
       <div className="mt-1 text-xs text-gray-500">

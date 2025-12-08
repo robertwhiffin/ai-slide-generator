@@ -1,8 +1,9 @@
 """
 Database-backed application settings.
 
-This module provides settings loaded from the database configuration system,
-replacing the YAML-based configuration in settings.py with database-backed profiles.
+This module provides settings loaded from the database configuration system.
+Configuration profiles are stored in PostgreSQL/Lakebase and managed via the
+settings API endpoints.
 """
 
 import logging
@@ -38,7 +39,7 @@ class LLMSettings(BaseSettings):
     temperature: float = 0.7
     max_tokens: int = 4096
     top_p: float = 0.95
-    timeout: int = 120
+    timeout: int = 600
 
     @field_validator("temperature")
     @classmethod
@@ -81,9 +82,6 @@ class APISettings(BaseSettings):
 class OutputSettings(BaseSettings):
     """Output configuration settings (from environment/defaults)."""
 
-    default_max_slides: int = 10
-    min_slides: int = 3
-    max_slides: int = 20
     html_template: str = "professional"
     include_metadata: bool = True
     include_source_citations: bool = True
@@ -308,7 +306,7 @@ def load_settings_from_database(profile_id: Optional[int] = None) -> AppSettings
                 temperature=float(ai_infra.llm_temperature),
                 max_tokens=ai_infra.llm_max_tokens,
                 top_p=0.95,  # Default value
-                timeout=120,  # Default value
+                timeout=600,  # Default value
             )
 
             genie_settings = GenieSettings(

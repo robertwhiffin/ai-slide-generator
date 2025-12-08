@@ -123,8 +123,8 @@ common:
 | `config/deployment.yaml` | Environment definitions | N/A (data file) |
 | `config/deployment.example.yaml` | Template/documentation | N/A (reference) |
 | `app.yaml` | Databricks Apps manifest | Defines entrypoint, compute |
-| `src/config/client.py` | Runtime auth (env vars) | `get_databricks_client()` |
-| `src/config/settings.py` | Merge YAML + env overrides | `get_settings()`, `AppSettings` |
+| `src/core/databricks_client.py` | Runtime auth (env vars) | `get_databricks_client()` |
+| `src/core/settings_db.py` | Load settings from database | `get_settings()`, `AppSettings` |
 
 ---
 
@@ -161,10 +161,10 @@ common:
 1. Databricks Apps runs `sh run_app.sh` (defined in `app.yaml`)
 2. Script installs wheel: `pip install wheels/*.whl`
 3. Starts FastAPI: `uvicorn src.api.main:app --host 0.0.0.0 --port 8080`
-4. `src/config/settings.py` loads config:
-   - Read YAML files (`config.yaml`, `mlflow.yaml`, `prompts.yaml`)
-   - Merge env var overrides (`LOG_LEVEL`, `ENVIRONMENT`)
-5. `src/config/client.py` creates `WorkspaceClient()` using env vars:
+4. `src/core/settings_db.py` loads config from database:
+   - Reads profile settings from PostgreSQL/Lakebase
+   - Merges env var overrides (`LOG_LEVEL`, `ENVIRONMENT`)
+5. `src/core/databricks_client.py` creates `WorkspaceClient()` using env vars:
    - `DATABRICKS_HOST` and `DATABRICKS_TOKEN` auto-injected by platform
 6. Application serves on port 8080 (Databricks Apps standard)
 
@@ -174,19 +174,31 @@ common:
 
 ### Commands
 
+Use the `deploy.sh` wrapper script from the project root (activates venv automatically):
+
 ```bash
 # Create new app
-python -m db_app_deployment.deploy --create --env development [--profile <name>]
+./deploy.sh create --env development --profile <name>
 
 # Update existing app (code + settings changes)
-python -m db_app_deployment.deploy --update --env production [--profile <name>]
+./deploy.sh update --env production --profile <name>
 
 # Delete app (workspace files remain)
-python -m db_app_deployment.deploy --delete --env staging [--profile <name>]
+./deploy.sh delete --env staging --profile <name>
 
 # Validate settings without deploying
-python -m db_app_deployment.deploy --create --env production --dry-run
+./deploy.sh create --env production --profile <name> --dry-run
 ```
+
+<details>
+<summary>Alternative: Direct Python invocation (requires activated venv)</summary>
+
+```bash
+source .venv/bin/activate
+python -m db_app_deployment.deploy --create --env development --profile <name>
+```
+
+</details>
 
 ### Arguments
 
@@ -220,9 +232,10 @@ python -m db_app_deployment.deploy --create --env production --dry-run
 **Debugging workflow:**
 ```bash
 # 1. Validate settings
-python -m db_app_deployment.deploy --create --env dev --dry-run
+./deploy.sh create --env development --profile <name> --dry-run
 
 # 2. Test auth separately
+source .venv/bin/activate
 python -c "from databricks.sdk import WorkspaceClient; print(WorkspaceClient().current_user.me())"
 
 # 3. Check app status in Databricks UI
@@ -290,7 +303,7 @@ curl https://<app-url>/api/health
 
 3. **Deploy**:
    ```bash
-   python -m db_app_deployment.deploy --create --env qa --profile qa-workspace
+   ./deploy.sh create --env qa --profile qa-workspace
    ```
 
 ### Add Pre-Deployment Validation
@@ -304,7 +317,7 @@ def validate_before_deploy(config: DeploymentConfig):
     assert wheel_path.exists()
 
     # Test settings validity
-    from src.core.settings import get_settings
+    from src.core.settings_db import get_settings
     settings = get_settings()
 
     # Check workspace path accessible
@@ -328,11 +341,19 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v3
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
       - name: Deploy to staging
         env:
           DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST_STAGING }}
           DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN_STAGING }}
-        run: python -m db_app_deployment.deploy --update --env staging
+        run: |
+          python -m venv .venv
+          source .venv/bin/activate
+          pip install -e ".[dev]"
+          ./deploy.sh update --env staging --profile staging
 ```
 
 **Best practices:**
@@ -384,7 +405,8 @@ config_path = f"settings/settings.{env}.yaml"  # settings.production.yaml
 
 **Runtime requirements:**
 - `DATABRICKS_HOST` and `DATABRICKS_TOKEN` must be set (platform provides)
-- Config files (`config.yaml`, `mlflow.yaml`, `prompts.yaml`) must exist in workspace
+- `DATABASE_URL` must point to valid PostgreSQL/Lakebase database
+- Database must have at least one configuration profile
 - Port 8080 must be available (Databricks Apps standard)
 
 ---
@@ -398,8 +420,8 @@ config_path = f"settings/settings.{env}.yaml"  # settings.production.yaml
 | `config/deployment.yaml` | Environment definitions | Add environments, change paths/compute |
 | `config/deployment.example.yaml` | Template/docs | Schema changes |
 | `app.yaml` | App entrypoint | Change startup command (rare) |
-| `src/config/client.py` | Runtime auth | Modify auth strategy (discouraged) |
-| `src/config/settings.py` | Settings loader | Add config sections, env overrides |
+| `src/core/databricks_client.py` | Runtime auth | Modify auth strategy (discouraged) |
+| `src/core/settings_db.py` | Database settings loader | Add config sections, profile handling |
 
 ---
 
@@ -415,13 +437,13 @@ config_path = f"settings/settings.{env}.yaml"  # settings.production.yaml
 ### Backend Runtime
 
 - **Entry**: `src/api/main.py` (FastAPI app)
-- **Config**: Loads from `config/*.yaml` + env vars
+- **Config**: Loads from database via `settings_db.py`
 - **Auth**: `get_databricks_client()` uses platform credentials
 - **See**: `docs/technical/backend-overview.md` for API/agent architecture
 
 ### MLflow Integration
 
-- **Config**: `config/mlflow.yaml` defines experiment tracking
+- **Config**: Experiment name stored in database (per profile)
 - **Runtime**: Agent automatically logs traces to Databricks MLflow
 - **Observability**: View traces in workspace MLflow UI
 - **See**: `backend-overview.md` → "MLflow traces" section
@@ -460,7 +482,7 @@ config_path = f"settings/settings.{env}.yaml"  # settings.production.yaml
 - [ ] MLflow traces appear in experiment
 
 **If deployment fails:**
-1. Run `--dry-run` to validate config
+1. Run `./deploy.sh <action> --env <env> --profile <name> --dry-run` to validate config
 2. Test auth: `databricks workspace list /`
 3. Check workspace path is accessible
 4. Review deployment script output for errors

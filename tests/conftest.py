@@ -107,9 +107,6 @@ def sample_config() -> dict[str, Any]:
             "max_concurrent_requests": 10,
         },
         "output": {
-            "default_max_slides": 10,
-            "min_slides": 3,
-            "max_slides": 20,
             "html_template": "professional",
             "include_metadata": True,
             "include_source_citations": True,

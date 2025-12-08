@@ -24,7 +24,7 @@ from src.database.models import (
 
 def load_seed_profiles():
     """Load seed profiles from YAML file."""
-    seed_file = Path(__file__).parent.parent / "settings" / "seed_profiles.yaml"
+    seed_file = Path(__file__).parent.parent / "config" / "seed_profiles.yaml"
     
     if not seed_file.exists():
         raise FileNotFoundError(f"Seed profiles file not found: {seed_file}")
@@ -65,7 +65,7 @@ def initialize_database():
             seed_profiles = load_seed_profiles()
         except FileNotFoundError as e:
             print(f"✗ Error: {e}")
-            print("  Please ensure settings/seed_profiles.yaml exists")
+            print("  Please ensure config/seed_profiles.yaml exists")
             sys.exit(1)
         
         if not seed_profiles:
