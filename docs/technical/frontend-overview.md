@@ -92,7 +92,7 @@ Parsed tiles, rendered raw HTML (`iframe`), and raw HTML text (`<pre>`). Users c
 
 | Path | Responsibility | Backend Touchpoints |
 |------|----------------|---------------------|
-| `src/components/ChatPanel/ChatPanel.tsx` | Sends prompts via SSE, displays real-time events, loads persisted messages | `api.streamChat`, `api.getSession` |
+| `src/components/ChatPanel/ChatPanel.tsx` | Sends prompts via SSE or polling, displays real-time events, loads persisted messages | `api.sendChatMessage`, `api.getSession` |
 | `src/components/ChatPanel/ChatInput.tsx` | Textarea with selection badge when context exists | None (props only) |
 | `src/components/ChatPanel/MessageList.tsx` & `Message.tsx` | Renders conversation, collapses HTML/tool outputs | None |
 | `src/components/SlidePanel/SlidePanel.tsx` | Hosts drag/drop, tabs, per-slide CRUD | `api.getSlides`, `api.reorderSlides`, `api.updateSlide`, `api.duplicateSlide`, `api.deleteSlide` |
@@ -172,6 +172,9 @@ Parsed tiles, rendered raw HTML (`iframe`), and raw HTML text (`<pre>`). Users c
 |--------|------|------|---------|---------|
 | `sendMessage` | POST | `/api/chat` | `{ session_id, message, slide_context? }` | `ChatResponse` |
 | `streamChat` | POST | `/api/chat/stream` | `{ session_id, message, slide_context? }` | SSE stream |
+| `submitChatAsync` | POST | `/api/chat/async` | `{ session_id, message, slide_context? }` | `{ request_id }` |
+| `pollChat` | GET | `/api/chat/poll/{id}` | query: `after_message_id` | `PollResponse` |
+| `sendChatMessage` | – | – | Auto-selects SSE or polling | Cancel function |
 | `healthCheck` | GET | `/api/health` | – | `{ status }` |
 | `getSlides` | GET | `/api/sessions/{id}/slides` | – | `{ session_id, slide_deck }` |
 | `reorderSlides` | PUT | `/api/slides/reorder` | `{ session_id, new_order }` | `SlideDeck` |

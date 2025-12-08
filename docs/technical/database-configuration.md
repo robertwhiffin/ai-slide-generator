@@ -1,7 +1,7 @@
 # Database Configuration System
 
-**Status:** Phase 1 Complete - Database Setup & Models  
-**Last Updated:** November 19, 2025
+**Status:** Complete - Configuration & Session Models  
+**Last Updated:** December 8, 2025
 
 ## Overview
 
@@ -17,8 +17,9 @@ The AI Slide Generator uses a PostgreSQL database to manage configuration profil
 
 ### Database Schema
 
-The database consists of 6 main tables:
+The database consists of configuration and session tables:
 
+**Configuration Tables:**
 1. **`config_profiles`** - Configuration profiles (e.g., "production", "development")
 2. **`config_ai_infra`** - AI/LLM settings (endpoint, temperature, max tokens)
 3. **`config_genie_spaces`** - Databricks Genie space configurations
@@ -26,14 +27,28 @@ The database consists of 6 main tables:
 5. **`config_prompts`** - System prompts and templates
 6. **`config_history`** - Audit trail of all configuration changes
 
+**Session Tables:**
+7. **`user_sessions`** - User conversation sessions with processing locks
+8. **`session_messages`** - Chat messages with request_id for polling
+9. **`session_slide_decks`** - Slide deck state per session
+10. **`chat_requests`** - Async chat request tracking for polling mode
+
 ### Entity Relationships
 
+**Configuration Tables:**
 ```
 config_profiles (1) ──┬── (1) config_ai_infra
-                      ├── (n) config_genie_spaces
+                      ├── (1) config_genie_spaces
                       ├── (1) config_mlflow
                       ├── (1) config_prompts
                       └── (n) config_history
+```
+
+**Session Tables:**
+```
+user_sessions (1) ──┬── (n) session_messages
+                    ├── (1) session_slide_decks
+                    └── (n) chat_requests
 ```
 
 - One profile has exactly one AI infrastructure config
@@ -199,6 +214,57 @@ class ConfigHistory(Base):
     changes: dict                # {"field": {"old": "...", "new": "..."}}
     snapshot: dict | None        # Full settings snapshot at time of change
     timestamp: datetime
+```
+
+## Session Models
+
+### UserSession
+
+User conversation sessions with processing lock support.
+
+```python
+class UserSession(Base):
+    id: int
+    session_id: str              # Unique session identifier
+    user_id: str | None          # Optional user identification
+    title: str                   # Session title
+    created_at: datetime
+    last_activity: datetime
+    genie_conversation_id: str | None  # Genie conversation tracking
+    is_processing: bool          # Lock flag for concurrent requests
+    processing_started_at: datetime | None
+```
+
+### SessionMessage
+
+Chat messages within a session.
+
+```python
+class SessionMessage(Base):
+    id: int
+    session_id: int              # Foreign key to user_sessions
+    role: str                    # 'user', 'assistant', 'tool'
+    content: str                 # Message content
+    message_type: str | None     # 'user_input', 'reasoning', 'tool_call', etc.
+    metadata_json: str | None    # JSON with tool_name, tool_input
+    request_id: str | None       # Links to chat_requests for polling
+    created_at: datetime
+```
+
+### ChatRequest
+
+Tracks async chat requests for polling-based streaming.
+
+```python
+class ChatRequest(Base):
+    id: int
+    request_id: str              # Unique request identifier
+    session_id: int              # Foreign key to user_sessions
+    status: str                  # 'pending', 'running', 'completed', 'error'
+    error_message: str | None    # Error details if status=error
+    result_json: str | None      # JSON with slides, raw_html, replacement_info
+    created_at: datetime
+    completed_at: datetime | None
 ```
 
 ## Schema Management

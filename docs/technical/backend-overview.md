@@ -9,7 +9,7 @@ This guide explains how the FastAPI/LangChain backend works, how it serves the f
 - **Runtime:** Python 3.11+, FastAPI (ASGI) with Uvicorn/Gunicorn, packaged under `src/`.
 - **Core libs:** LangChain (tool-calling agent), Databricks `WorkspaceClient`, MLflow for tracing, BeautifulSoup for HTML parsing.
 - **Entry:** `src/api/main.py` instantiates FastAPI, wires CORS, and registers `chat` + `slides` routers under `/api`.
-- **Process lifecycle:** `lifespan` context logs startup/shutdown; there is no background scheduler yet.
+- **Process lifecycle:** `lifespan` context starts the job queue worker for async chat processing and recovers stuck requests on startup.
 
 ---
 
@@ -56,6 +56,8 @@ Frontend fetch -> FastAPI router ->   │ ChatService (singleton)│
 | --- | --- | --- | --- |
 | `POST` | `/api/chat` | Generate/edit slides (synchronous) | `routes/chat.send_message` |
 | `POST` | `/api/chat/stream` | Generate/edit with SSE streaming | `routes/chat.send_message_streaming` |
+| `POST` | `/api/chat/async` | Submit for async processing (polling) | `routes/chat.submit_chat_async` |
+| `GET` | `/api/chat/poll/{request_id}` | Poll for async request status | `routes/chat.poll_chat` |
 | `GET` | `/api/health` | Lightweight readiness probe | `routes/chat.health_check` |
 | `GET` | `/api/slides` | Get slides (requires `session_id` query param) | `routes/slides.get_slides` |
 | `PUT` | `/api/slides/reorder` | Reorder (requires `session_id` in body) | `routes/slides.reorder_slides` |
@@ -105,7 +107,8 @@ Mutation endpoints return **409 Conflict** if the session is already processing 
 | Module | Responsibility | Key Details |
 | --- | --- | --- |
 | `src/api/main.py` | App assembly | Registers routers, CORS, health root. |
-| `src/api/routes/chat.py` | `/api/chat`, `/api/chat/stream`, `/api/health` | Session locking, SSE streaming, `asyncio.to_thread()`. |
+| `src/api/routes/chat.py` | `/api/chat`, `/api/chat/stream`, `/api/chat/async`, `/api/chat/poll` | Session locking, SSE streaming, polling endpoints. |
+| `src/api/services/job_queue.py` | Async chat processing | In-memory job queue with background worker for polling mode. |
 | `src/api/routes/sessions.py` | Session CRUD endpoints | Create, list, get (with messages), rename, delete. |
 | `src/api/routes/slides.py` | Slide CRUD endpoints | Session-scoped operations with locking. |
 | `src/api/services/chat_service.py` | Stateful orchestration | Deck cache, streaming generator, history hydration. |

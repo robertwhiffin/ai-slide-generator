@@ -64,8 +64,9 @@ Frontend                    Backend
 
 **Key Components:**
 - **ChatRequest** – Database model tracking request status (`pending`/`running`/`completed`/`error`)
-- **Job Queue** – In-memory asyncio queue with background worker
+- **Job Queue** – In-memory asyncio queue with background worker (`src/api/services/job_queue.py`)
 - **request_id** – Links messages to specific chat requests for efficient polling
+- **Auto-creation** – Sessions are auto-created on first async request if they don't exist
 
 ---
 
@@ -116,21 +117,22 @@ LangChain callback that intercepts agent events and:
 
 ```python
 class StreamingCallbackHandler(BaseCallbackHandler):
-    def __init__(self, event_queue: queue.Queue, session_id: str):
+    def __init__(self, event_queue: queue.Queue, session_id: str, request_id: str = None):
         self.event_queue = event_queue
         self.session_id = session_id
+        self.request_id = request_id  # Links messages to async requests
     
     def on_agent_action(self, action: AgentAction, **kwargs):
         # Extract LLM reasoning before tool call
         reasoning = action.log.split("Invoking:")[0].strip()
         if reasoning:
-            self.session_manager.add_message(...)
+            self.session_manager.add_message(..., request_id=self.request_id)
             self.event_queue.put(StreamEvent(type=ASSISTANT, content=reasoning))
     
     def on_tool_start(self, serialized, input_str, **kwargs):
         # Parse tool input (handles JSON and Python dict strings)
         tool_input = self._parse_tool_input(input_str)
-        self.session_manager.add_message(...)
+        self.session_manager.add_message(..., request_id=self.request_id)
         self.event_queue.put(StreamEvent(type=TOOL_CALL, ...))
 ```
 
@@ -322,12 +324,17 @@ const isPollingMode = (): boolean => {
   // Explicit override via env var
   if (import.meta.env.VITE_USE_POLLING === 'true') return true;
   
-  // Auto-detect Databricks Apps
+  // Production mode always uses polling (Databricks Apps has proxy timeouts)
+  if (import.meta.env.MODE === 'production') return true;
+  
+  // Auto-detect Databricks Apps (for dev builds deployed to Databricks)
   const hostname = window.location.hostname;
   return hostname.includes('.databricks.com') ||
          hostname.includes('.azuredatabricks.net');
 };
 ```
+
+**Key behavior:** Production builds always use polling to avoid SSE timeout issues.
 
 **SSE Mode** – Uses `streamChat()` with `ReadableStream`:
 ```typescript
@@ -516,7 +523,8 @@ To force polling mode locally for testing: set `VITE_USE_POLLING=true` in fronte
 
 ## Cross-References
 
-- [Backend Overview](backend-overview.md) – request lifecycle and agent architecture
-- [Frontend Overview](frontend-overview.md) – component structure and state management
-- [Multi-User Concurrency](multi-user-concurrency.md) – session locking details
+- [Backend Overview](backend-overview.md) – request lifecycle, agent architecture, and polling endpoints
+- [Frontend Overview](frontend-overview.md) – component structure, state management, and `sendChatMessage`
+- [Multi-User Concurrency](multi-user-concurrency.md) – session locking and ChatRequest tracking
+- [Database Configuration](database-configuration.md) – session and chat_requests schema
 
