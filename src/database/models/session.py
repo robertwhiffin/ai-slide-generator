@@ -21,6 +21,39 @@ from sqlalchemy.orm import relationship
 from src.core.database import Base
 
 
+class ChatRequest(Base):
+    """Tracks async chat requests for polling.
+
+    Used by the polling-based streaming implementation to track request
+    status and results when SSE is not available (e.g., Databricks Apps).
+    """
+
+    __tablename__ = "chat_requests"
+
+    id = Column(Integer, primary_key=True)
+    request_id = Column(String(64), unique=True, nullable=False, index=True)
+    session_id = Column(
+        Integer,
+        ForeignKey("user_sessions.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    status = Column(String(20), default="pending")  # pending/running/completed/error
+    error_message = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    completed_at = Column(DateTime, nullable=True)
+
+    # Final result data (JSON) - slides, raw_html, replacement_info
+    result_json = Column(Text, nullable=True)
+
+    # Relationship
+    session = relationship("UserSession")
+
+    __table_args__ = (Index("ix_chat_requests_session_id", "session_id"),)
+
+    def __repr__(self):
+        return f"<ChatRequest(request_id='{self.request_id}', status='{self.status}')>"
+
+
 class UserSession(Base):
     """User session for tracking conversation state.
 
@@ -93,6 +126,9 @@ class SessionMessage(Base):
     # Optional metadata
     message_type = Column(String(50))  # 'chat', 'slide_update', 'error', etc.
     metadata_json = Column(Text)  # JSON string for additional metadata
+
+    # Async polling support - links messages to specific chat requests
+    request_id = Column(String(64), nullable=True, index=True)
 
     # Relationship
     session = relationship("UserSession", back_populates="messages")

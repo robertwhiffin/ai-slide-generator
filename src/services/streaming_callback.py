@@ -32,18 +32,26 @@ class StreamingCallbackHandler(BaseCallbackHandler):
     Attributes:
         event_queue: Queue to push events for SSE streaming
         session_id: Session identifier for database persistence
+        request_id: Optional request ID for async polling support
     """
 
-    def __init__(self, event_queue: queue.Queue, session_id: str):
+    def __init__(
+        self,
+        event_queue: queue.Queue,
+        session_id: str,
+        request_id: Optional[str] = None,
+    ):
         """Initialize the streaming callback handler.
 
         Args:
             event_queue: Queue to push StreamEvent objects
             session_id: Session ID for database persistence
+            request_id: Optional request ID for linking messages to async requests
         """
         super().__init__()
         self.event_queue = event_queue
         self.session_id = session_id
+        self.request_id = request_id
         self._session_manager = None
         self._current_tool_name: Optional[str] = None
 
@@ -82,6 +90,7 @@ class StreamingCallbackHandler(BaseCallbackHandler):
                 role="assistant",
                 content=text,
                 message_type="llm_response",
+                request_id=self.request_id,
             )
             message_id = msg.get("id")
         except Exception as e:
@@ -132,6 +141,7 @@ class StreamingCallbackHandler(BaseCallbackHandler):
                     role="assistant",
                     content=reasoning,
                     message_type="reasoning",
+                    request_id=self.request_id,
                 )
                 message_id = msg.get("id")
             except Exception as e:
@@ -193,6 +203,7 @@ class StreamingCallbackHandler(BaseCallbackHandler):
                 content=f"Calling {tool_name}",
                 message_type="tool_call",
                 metadata={"tool_name": tool_name, "tool_input": tool_input},
+                request_id=self.request_id,
             )
             message_id = msg.get("id")
         except Exception as e:
@@ -231,6 +242,7 @@ class StreamingCallbackHandler(BaseCallbackHandler):
                 content=preview,
                 message_type="tool_result",
                 metadata={"tool_name": self._current_tool_name, "full_length": len(output)},
+                request_id=self.request_id,
             )
             message_id = msg.get("id")
         except Exception as e:

@@ -2,22 +2,25 @@
 
 Requires a valid session_id. Create sessions via POST /api/sessions.
 
-Supports both:
+Supports:
 - POST /api/chat - Synchronous response
 - POST /api/chat/stream - Server-Sent Events for real-time updates
+- POST /api/chat/async - Submit for async processing (polling-based)
+- GET /api/chat/poll/{request_id} - Poll for async request status
 """
 
 import asyncio
 import logging
 from typing import AsyncGenerator
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import StreamingResponse
 
 from src.api.schemas.requests import ChatRequest
 from src.api.schemas.responses import ChatResponse
 from src.api.schemas.streaming import StreamEvent, StreamEventType
 from src.api.services.chat_service import get_chat_service
+from src.api.services.job_queue import enqueue_job
 from src.api.services.session_manager import SessionNotFoundError, get_session_manager
 
 logger = logging.getLogger(__name__)
@@ -217,4 +220,127 @@ async def health_check():
     return {
         "status": "healthy",
         "service": "AI Slide Generator",
+    }
+
+
+@router.post("/chat/async")
+async def submit_chat_async(request: ChatRequest):
+    """Submit a chat request for async processing (polling-based).
+
+    Use this endpoint when SSE streaming is not available (e.g., Databricks Apps
+    behind a reverse proxy with connection timeouts).
+
+    Flow:
+    1. POST /api/chat/async -> returns request_id
+    2. Poll GET /api/chat/poll/{request_id} until status is completed/error
+
+    Args:
+        request: Chat request with session_id and message
+
+    Returns:
+        Dictionary with request_id and initial status
+
+    Raises:
+        HTTPException: 409 if session busy
+    """
+    logger.info(
+        "Received async chat request",
+        extra={
+            "message_length": len(request.message),
+            "session_id": request.session_id,
+        },
+    )
+
+    session_manager = get_session_manager()
+
+    # Check session lock first
+    locked = await asyncio.to_thread(
+        session_manager.acquire_session_lock, request.session_id
+    )
+    if not locked:
+        raise HTTPException(
+            status_code=409,
+            detail="Session is already processing a request",
+        )
+
+    try:
+        # Create request record
+        request_id = await asyncio.to_thread(
+            session_manager.create_chat_request, request.session_id
+        )
+
+        # Persist user message
+        await asyncio.to_thread(
+            session_manager.add_message,
+            session_id=request.session_id,
+            role="user",
+            content=request.message,
+            message_type="user_query",
+            request_id=request_id,
+        )
+
+        # Queue for processing
+        await enqueue_job(
+            request_id,
+            {
+                "session_id": request.session_id,
+                "message": request.message,
+                "slide_context": (
+                    request.slide_context.model_dump() if request.slide_context else None
+                ),
+            },
+        )
+
+        return {"request_id": request_id, "status": "pending"}
+
+    except Exception as e:
+        # Release lock on failure
+        await asyncio.to_thread(
+            session_manager.release_session_lock, request.session_id
+        )
+        logger.error(f"Failed to submit async chat: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/chat/poll/{request_id}")
+async def poll_chat(
+    request_id: str,
+    after_message_id: int = Query(default=0, description="Return messages after this ID"),
+):
+    """Poll for chat request status and new messages.
+
+    Returns the current request status and any new messages since
+    the last poll (based on after_message_id).
+
+    Args:
+        request_id: Request ID from submit_chat_async
+        after_message_id: Return messages with ID greater than this
+
+    Returns:
+        Dictionary with status, events, last_message_id, and result
+
+    Raises:
+        HTTPException: 404 if request not found
+    """
+    session_manager = get_session_manager()
+
+    chat_request = await asyncio.to_thread(
+        session_manager.get_chat_request, request_id
+    )
+
+    if not chat_request:
+        raise HTTPException(status_code=404, detail="Request not found")
+
+    messages = await asyncio.to_thread(
+        session_manager.get_messages_for_request, request_id, after_message_id
+    )
+
+    events = [session_manager.msg_to_stream_event(m) for m in messages]
+
+    return {
+        "status": chat_request["status"],
+        "events": events,
+        "last_message_id": messages[-1]["id"] if messages else after_message_id,
+        "result": chat_request.get("result") if chat_request["status"] == "completed" else None,
+        "error": chat_request.get("error_message") if chat_request["status"] == "error" else None,
     }

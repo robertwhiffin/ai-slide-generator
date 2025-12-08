@@ -210,14 +210,14 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
       }
     };
 
-    // Start streaming
-    cancelStreamRef.current = api.streamChat(
+    // Start streaming (automatically uses SSE or polling based on environment)
+    cancelStreamRef.current = api.sendChatMessage(
       sessionId,
       trimmedContent,
       slideContext,
       handleStreamEvent,
       (err) => {
-        console.error('Stream error:', err);
+        console.error('Chat error:', err);
         setError(err.message || 'Failed to send message');
         stopLoadingMessages();
         setIsLoading(false);
