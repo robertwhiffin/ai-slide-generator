@@ -406,7 +406,8 @@ config_path = f"settings/settings.{env}.yaml"  # settings.production.yaml
 **Runtime requirements:**
 - `DATABRICKS_HOST` and `DATABRICKS_TOKEN` must be set (platform provides)
 - `DATABASE_URL` must point to valid PostgreSQL/Lakebase database
-- Database must have at least one configuration profile
+- Database must have at least one default configuration profile (`is_default=true`)
+- Database must have polling support tables (see `scripts/migrate_polling_support.sql`)
 - Port 8080 must be available (Databricks Apps standard)
 
 ---
@@ -488,6 +489,12 @@ config_path = f"settings/settings.{env}.yaml"  # settings.production.yaml
 4. Review deployment script output for errors
 5. Inspect app logs in Databricks UI
 
+**If app starts but chat fails:**
+1. Check database has a default profile: `SELECT * FROM config_profiles WHERE is_default = true;`
+2. Run polling migration: `scripts/migrate_polling_support.sql`
+3. Check `chat_requests` table exists
+4. Verify `session_messages.request_id` column exists
+
 ---
 
 ## Best Practices
@@ -522,9 +529,9 @@ config_path = f"settings/settings.{env}.yaml"  # settings.production.yaml
 Related documentation:
 - `docs/technical/backend-overview.md` – FastAPI architecture, ChatService, agent lifecycle
 - `docs/technical/frontend-overview.md` – React components, API client, state management
+- `docs/technical/real-time-streaming.md` – SSE vs polling modes (60s proxy timeout workaround)
 - `docs/technical/slide-parser-and-script-management.md` – HTML parsing, script handling
 - `DEPLOYMENT_SETUP.md` – Quick-start deployment guide
-- `DATABRICKS_APP_DEPLOYMENT_PLAN.md` – Original design (historical)
 
 This document covers deployment mechanics. For runtime behavior (how the app processes requests, generates slides, manages sessions), see the backend and frontend overviews.
 

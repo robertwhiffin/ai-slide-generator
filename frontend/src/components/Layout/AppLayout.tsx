@@ -9,6 +9,7 @@ import { SessionHistory } from '../History/SessionHistory';
 import { SaveAsDialog } from '../History/SaveAsDialog';
 import { HelpPage } from '../Help';
 import { useSession } from '../../contexts/SessionContext';
+import { useGeneration } from '../../contexts/GenerationContext';
 
 type ViewMode = 'main' | 'profiles' | 'history' | 'help';
 
@@ -20,6 +21,7 @@ export const AppLayout: React.FC = () => {
   // Key to force remount ChatPanel when profile/session changes
   const [chatKey, setChatKey] = useState<number>(0);
   const { sessionTitle, createNewSession, switchSession, renameSession } = useSession();
+  const { isGenerating } = useGeneration();
 
   // Reset chat state and create new session when profile changes
   const handleProfileChange = useCallback(() => {
@@ -88,15 +90,25 @@ export const AppLayout: React.FC = () => {
               <div className="flex items-center gap-2">
                 <button
                   onClick={() => setShowSaveDialog(true)}
-                  className="px-3 py-1.5 rounded text-sm bg-blue-500 hover:bg-blue-700 text-blue-100 transition-colors"
-                  title="Save session with a custom name"
+                  disabled={isGenerating}
+                  className={`px-3 py-1.5 rounded text-sm transition-colors ${
+                    isGenerating
+                      ? 'bg-blue-400 text-blue-200 cursor-not-allowed opacity-50'
+                      : 'bg-blue-500 hover:bg-blue-700 text-blue-100'
+                  }`}
+                  title={isGenerating ? 'Disabled during generation' : 'Save session with a custom name'}
                 >
                   Save As
                 </button>
                 <button
                   onClick={handleNewSession}
-                  className="px-3 py-1.5 rounded text-sm bg-blue-500 hover:bg-blue-700 text-blue-100 transition-colors"
-                  title="Start a new session"
+                  disabled={isGenerating}
+                  className={`px-3 py-1.5 rounded text-sm transition-colors ${
+                    isGenerating
+                      ? 'bg-blue-400 text-blue-200 cursor-not-allowed opacity-50'
+                      : 'bg-blue-500 hover:bg-blue-700 text-blue-100'
+                  }`}
+                  title={isGenerating ? 'Disabled during generation' : 'Start a new session'}
                 >
                   New
                 </button>
@@ -117,40 +129,58 @@ export const AppLayout: React.FC = () => {
               </button>
               <button
                 onClick={() => setViewMode('history')}
+                disabled={isGenerating}
                 className={`px-3 py-1.5 rounded text-sm transition-colors ${
                   viewMode === 'history'
                     ? 'bg-blue-700 text-white'
+                    : isGenerating
+                    ? 'bg-blue-400 text-blue-200 cursor-not-allowed opacity-50'
                     : 'bg-blue-500 hover:bg-blue-700 text-blue-100'
                 }`}
+                title={isGenerating ? 'Navigation disabled during generation' : undefined}
               >
                 History
               </button>
               <button
                 onClick={() => setViewMode('profiles')}
+                disabled={isGenerating}
                 className={`px-3 py-1.5 rounded text-sm transition-colors ${
                   viewMode === 'profiles'
                     ? 'bg-blue-700 text-white'
+                    : isGenerating
+                    ? 'bg-blue-400 text-blue-200 cursor-not-allowed opacity-50'
                     : 'bg-blue-500 hover:bg-blue-700 text-blue-100'
                 }`}
+                title={isGenerating ? 'Navigation disabled during generation' : undefined}
               >
                 Settings
               </button>
               <button
                 onClick={() => setViewMode('help')}
+                disabled={isGenerating}
                 className={`px-3 py-1.5 rounded text-sm transition-colors ${
                   viewMode === 'help'
                     ? 'bg-blue-700 text-white'
+                    : isGenerating
+                    ? 'bg-blue-400 text-blue-200 cursor-not-allowed opacity-50'
                     : 'bg-blue-500 hover:bg-blue-700 text-blue-100'
                 }`}
+                title={isGenerating ? 'Navigation disabled during generation' : undefined}
               >
                 Help
               </button>
+              {isGenerating && (
+                <span className="px-2 py-1.5 text-xs text-yellow-200 bg-yellow-600 rounded animate-pulse">
+                  Generating...
+                </span>
+              )}
             </nav>
 
             {/* Profile Selector */}
             <ProfileSelector 
               onManageClick={() => setViewMode('profiles')}
               onProfileChange={handleProfileChange}
+              disabled={isGenerating}
             />
           </div>
         </div>
