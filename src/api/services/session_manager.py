@@ -483,6 +483,8 @@ class SessionManager:
     def create_chat_request(self, session_id: str) -> str:
         """Create a new chat request, return request_id.
 
+        Auto-creates the session if it doesn't exist.
+
         Args:
             session_id: Session to create request for
 
@@ -492,7 +494,25 @@ class SessionManager:
         request_id = secrets.token_urlsafe(24)
 
         with get_db_session() as db:
-            session = self._get_session_or_raise(db, session_id)
+            # Get or create session
+            session = (
+                db.query(UserSession)
+                .filter(UserSession.session_id == session_id)
+                .first()
+            )
+
+            if not session:
+                # Auto-create session on first request
+                session = UserSession(
+                    session_id=session_id,
+                    title=f"Session {datetime.utcnow().strftime('%Y-%m-%d %H:%M')}",
+                )
+                db.add(session)
+                db.flush()
+                logger.info(
+                    "Auto-created session for chat request",
+                    extra={"session_id": session_id},
+                )
 
             chat_request = ChatRequest(
                 request_id=request_id,
