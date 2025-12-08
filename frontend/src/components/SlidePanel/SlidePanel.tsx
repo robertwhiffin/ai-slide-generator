@@ -18,6 +18,8 @@ import type { Slide, SlideDeck } from '../../types/slide';
 import { SlideTile } from './SlideTile';
 import { api } from '../../services/api';
 import { useSelection } from '../../contexts/SelectionContext';
+import { exportSlideDeckToPDF } from '../../services/pdf_client';
+import { FiDownload } from 'react-icons/fi';
 
 interface SlidePanelProps {
   slideDeck: SlideDeck | null;
@@ -30,6 +32,7 @@ type ViewMode = 'tiles' | 'rawhtml' | 'rawtext';
 export const SlidePanel: React.FC<SlidePanelProps> = ({ slideDeck, rawHtml, onSlideChange }) => {
   const [isReordering, setIsReordering] = useState(false);
   const [viewMode, setViewMode] = useState<ViewMode>('tiles');
+  const [isExportingPDF, setIsExportingPDF] = useState(false);
   const { selectedIndices, setSelection, clearSelection } = useSelection();
   
   const sensors = useSensors(
@@ -115,6 +118,32 @@ export const SlidePanel: React.FC<SlidePanelProps> = ({ slideDeck, rawHtml, onSl
     }
   };
 
+  const handleExportPDF = async () => {
+    if (!slideDeck || isExportingPDF) return;
+
+    setIsExportingPDF(true);
+    try {
+      const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, -5);
+      const filename = `${slideDeck.title || 'slides'}_${timestamp}.pdf`;
+      
+      await exportSlideDeckToPDF(slideDeck, filename, {
+        format: 'a4',
+        orientation: 'landscape',
+        scale: 1.2, // Optimized for file size vs quality
+        waitForCharts: 2000,
+        imageQuality: 0.85, // JPEG quality (good balance)
+      });
+    } catch (error) {
+      console.error('PDF export failed:', error);
+      const message = error instanceof Error 
+        ? error.message 
+        : 'Failed to export PDF. Please try again.';
+      alert(message);
+    } finally {
+      setIsExportingPDF(false);
+    }
+  };
+
   useEffect(() => {
     if (!slideDeck) {
       clearSelection();
@@ -147,13 +176,42 @@ export const SlidePanel: React.FC<SlidePanelProps> = ({ slideDeck, rawHtml, onSl
     <div className="h-full flex flex-col bg-gray-50">
       {/* Header with Tabs */}
       <div className="bg-white border-b">
-        <div className="p-4">
-        <h2 className="text-lg font-semibold">{slideDeck.title}</h2>
-        <p className="text-sm text-gray-500">
-          {slideDeck.slide_count} slide{slideDeck.slide_count !== 1 ? 's' : ''}
-            {isReordering && ' • Reordering...'}
-        </p>
-      </div>
+        <div className="p-4 flex items-center justify-between">
+          <div>
+            <h2 className="text-lg font-semibold">{slideDeck.title}</h2>
+            <p className="text-sm text-gray-500">
+              {slideDeck.slide_count} slide{slideDeck.slide_count !== 1 ? 's' : ''}
+              {isReordering && ' • Reordering...'}
+              {isExportingPDF && ' • Exporting PDF...'}
+            </p>
+          </div>
+          
+          {/* Export PDF Button */}
+          <button
+            onClick={handleExportPDF}
+            disabled={!slideDeck || isExportingPDF}
+            className={`
+              flex items-center space-x-2 px-4 py-2 rounded-lg transition-colors
+              ${!slideDeck || isExportingPDF
+                ? 'bg-gray-100 text-gray-400 cursor-not-allowed'
+                : 'bg-blue-600 text-white hover:bg-blue-700'
+              }
+            `}
+            title="Export slides as PDF"
+          >
+            {isExportingPDF ? (
+              <>
+                <div className="animate-spin rounded-full h-4 w-4 border-2 border-white border-t-transparent"></div>
+                <span>Exporting...</span>
+              </>
+            ) : (
+              <>
+                <FiDownload size={18} />
+                <span>Export PDF</span>
+              </>
+            )}
+          </button>
+        </div>
 
         {/* Tab Navigation */}
         <div className="flex border-t">
