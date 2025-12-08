@@ -1,13 +1,14 @@
 # Real-Time Streaming & Conversation Persistence
 
-Server-Sent Events (SSE) for real-time progress display and database-backed message persistence for conversation restoration.
+Dual-mode streaming with SSE (for local development) and polling (for Databricks Apps), plus database-backed message persistence for conversation restoration.
 
 ---
 
 ## Overview
 
 The streaming system provides:
-- **Real-time updates** – Tool calls, responses, and results appear as they happen via SSE
+- **Dual-mode delivery** – SSE for local dev, polling for Databricks Apps (60s proxy timeout)
+- **Real-time updates** – Tool calls, responses, and results appear as they happen
 - **Message persistence** – All conversation messages stored in database for history
 - **Session restoration** – Chat history rehydrated from database when resuming sessions
 - **Navigation lock** – UI prevents navigation during active generation
@@ -15,6 +16,8 @@ The streaming system provides:
 ---
 
 ## Architecture
+
+### SSE Mode (Local Development)
 
 ```
 Frontend                         Backend SSE Endpoint              Agent Thread
@@ -35,6 +38,34 @@ Frontend                         Backend SSE Endpoint              Agent Thread
     │◄──────────────────────────────────│                               │
     │  [Navigation re-enabled]          │                               │
 ```
+
+### Polling Mode (Databricks Apps)
+
+Databricks Apps runs behind a reverse proxy with a 60-second connection timeout, which breaks SSE for long-running agent requests. Polling mode works around this:
+
+```
+Frontend                    Backend
+   │                           │
+   │  POST /chat/async         │
+   │──────────────────────────>│  -> Check session lock
+   │  { request_id }           │  -> Create ChatRequest in DB
+   │<──────────────────────────│  -> Queue job (in-memory)
+   │                           │  -> Return immediately
+   │                           │
+   │  GET /poll/{request_id}   │     Worker processes job:
+   │──────────────────────────>│     - StreamingCallbackHandler
+   │  { events, status }       │       persists messages with request_id
+   │<──────────────────────────│
+   │  (repeat every 2s)        │
+   │                           │
+   │  status: complete         │
+   │<──────────────────────────│
+```
+
+**Key Components:**
+- **ChatRequest** – Database model tracking request status (`pending`/`running`/`completed`/`error`)
+- **Job Queue** – In-memory asyncio queue with background worker
+- **request_id** – Links messages to specific chat requests for efficient polling
 
 ---
 
@@ -177,7 +208,7 @@ def _hydrate_chat_history(self, session_id, chat_history):
 
 ## API Endpoints
 
-### Streaming Endpoint
+### Streaming Endpoint (SSE)
 
 | Method | Path | Purpose |
 |--------|------|---------|
@@ -197,6 +228,44 @@ def _hydrate_chat_history(self, session_id, chat_history):
 Cache-Control: no-cache
 Connection: keep-alive
 X-Accel-Buffering: no
+```
+
+### Polling Endpoints
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| `POST` | `/api/chat/async` | Submit for async processing |
+| `GET` | `/api/chat/poll/{request_id}` | Poll for status and events |
+
+**Submit Request:**
+```json
+// POST /api/chat/async
+{
+  "session_id": "abc123",
+  "message": "Create slides about...",
+  "slide_context": { ... }
+}
+
+// Response
+{
+  "request_id": "xYz123...",
+  "status": "pending"
+}
+```
+
+**Poll Response:**
+```json
+// GET /api/chat/poll/{request_id}?after_message_id=0
+{
+  "status": "running",  // pending | running | completed | error
+  "events": [
+    { "type": "assistant", "content": "I'll analyze...", "message_id": 42 },
+    { "type": "tool_call", "tool_name": "query_genie", "tool_input": {...} }
+  ],
+  "last_message_id": 45,
+  "result": null,  // Populated when status=completed
+  "error": null    // Populated when status=error
+}
 ```
 
 ### Updated Session Endpoint
@@ -232,10 +301,13 @@ interface GenerationContextType {
 
 Used by `ChatPanel` to set state, consumed by `AppLayout` for navigation locking.
 
-### Streaming API (`src/services/api.ts`)
+### Unified Chat API (`src/services/api.ts`)
+
+The frontend automatically detects the environment and uses the appropriate method:
 
 ```typescript
-streamChat(
+// Auto-detect: uses SSE locally, polling on Databricks Apps
+sendChatMessage(
   sessionId: string,
   message: string,
   slideContext: SlideContext | undefined,
@@ -244,8 +316,20 @@ streamChat(
 ): () => void  // Returns cancel function
 ```
 
-Parses SSE events from the stream and calls `onEvent` for each:
+**Environment Detection:**
+```typescript
+const isPollingMode = (): boolean => {
+  // Explicit override via env var
+  if (import.meta.env.VITE_USE_POLLING === 'true') return true;
+  
+  // Auto-detect Databricks Apps
+  const hostname = window.location.hostname;
+  return hostname.includes('.databricks.com') ||
+         hostname.includes('.azuredatabricks.net');
+};
+```
 
+**SSE Mode** – Uses `streamChat()` with `ReadableStream`:
 ```typescript
 const reader = response.body.getReader();
 while (true) {
@@ -254,6 +338,23 @@ while (true) {
   const event = JSON.parse(data) as StreamEvent;
   onEvent(event);
 }
+```
+
+**Polling Mode** – Uses `startPolling()` with setInterval:
+```typescript
+const { request_id } = await api.submitChatAsync(sessionId, message, slideContext);
+let lastMessageId = 0;
+
+const pollInterval = setInterval(async () => {
+  const response = await api.pollChat(request_id, lastMessageId);
+  for (const event of response.events) onEvent(event);
+  lastMessageId = response.last_message_id;
+  
+  if (response.status === 'completed' || response.status === 'error') {
+    clearInterval(pollInterval);
+    // Emit final complete/error event
+  }
+}, 2000);
 ```
 
 ### ChatPanel Event Handling
@@ -351,7 +452,7 @@ if (message.tool_call) {
 
 ## Database Schema
 
-Messages stored in `session_messages` table:
+### session_messages Table
 
 | Column | Type | Purpose |
 |--------|------|---------|
@@ -361,9 +462,23 @@ Messages stored in `session_messages` table:
 | `content` | TEXT | Message content |
 | `message_type` | VARCHAR | `user_input`, `reasoning`, `tool_call`, `tool_result`, `llm_response` |
 | `metadata_json` | TEXT | JSON with `tool_name`, `tool_input` |
+| `request_id` | VARCHAR(64) | Links to async chat request (for polling) |
 | `created_at` | TIMESTAMP | Message timestamp |
 
-No schema changes required – uses existing `SessionMessage` model.
+### chat_requests Table (Polling Support)
+
+| Column | Type | Purpose |
+|--------|------|---------|
+| `id` | INTEGER | Primary key |
+| `request_id` | VARCHAR(64) | Unique request identifier |
+| `session_id` | INTEGER | FK to user_sessions |
+| `status` | VARCHAR(20) | `pending`, `running`, `completed`, `error` |
+| `error_message` | TEXT | Error details if status=error |
+| `result_json` | TEXT | JSON with slides, raw_html, replacement_info |
+| `created_at` | TIMESTAMP | Request creation time |
+| `completed_at` | TIMESTAMP | Request completion time |
+
+**Migration SQL:** See `scripts/migrate_polling_support.sql`
 
 ---
 
@@ -380,12 +495,22 @@ No schema changes required – uses existing `SessionMessage` model.
 
 ## Testing Checklist
 
+### Both Modes
 1. **Navigation lock** – Start generation, verify nav buttons disabled
 2. **Real-time events** – Tool calls appear before results
 3. **Message persistence** – Messages survive page reload
 4. **Session restore** – Load session from History, verify messages + slides
 5. **Continue conversation** – After restore, agent has context from history
 6. **Error recovery** – Errors re-enable navigation
+
+### Polling Mode (Databricks Apps)
+7. **Async submission** – POST /api/chat/async returns request_id
+8. **Poll updates** – Events arrive via polling every 2 seconds
+9. **Completion detection** – Polling stops when status=completed
+10. **Error handling** – Errors propagate correctly
+11. **Environment detection** – Polling used automatically on *.databricks.com
+
+To force polling mode locally for testing: set `VITE_USE_POLLING=true` in frontend env.
 
 ---
 

@@ -6,6 +6,9 @@ const API_BASE_URL = import.meta.env.VITE_API_URL || (
   import.meta.env.MODE === 'production' ? '' : 'http://localhost:8000'
 );
 
+// Polling interval in milliseconds
+const POLL_INTERVAL_MS = 2000;
+
 export class ApiError extends Error {
   status: number;
   
@@ -15,6 +18,41 @@ export class ApiError extends Error {
     this.name = 'ApiError';
   }
 }
+
+/**
+ * Detect if we should use polling instead of SSE streaming.
+ * 
+ * Databricks Apps runs behind a reverse proxy with a 60-second
+ * connection timeout, which breaks SSE for long-running requests.
+ * 
+ * In production mode, we always use polling to be safe.
+ * In development, we use SSE for faster feedback.
+ */
+const isPollingMode = (): boolean => {
+  // Explicit override via environment variable
+  if (import.meta.env.VITE_USE_POLLING === 'true') {
+    return true;
+  }
+  
+  // In production mode, always use polling (Databricks Apps has proxy timeouts)
+  if (import.meta.env.MODE === 'production') {
+    return true;
+  }
+  
+  // Auto-detect Databricks Apps environment (for dev builds deployed to Databricks)
+  if (typeof window !== 'undefined') {
+    const hostname = window.location.hostname;
+    if (
+      hostname.includes('.cloud.databricks.com') ||
+      hostname.includes('.databricks.com') ||
+      hostname.includes('.azuredatabricks.net')
+    ) {
+      return true;
+    }
+  }
+  
+  return false;
+};
 
 // Streaming event types matching backend StreamEventType
 export type StreamEventType = 'assistant' | 'tool_call' | 'tool_result' | 'error' | 'complete';
@@ -58,6 +96,21 @@ interface SendMessageParams {
   message: string;
   sessionId: string;
   slideContext?: SlideContext;
+}
+
+/**
+ * Response from the poll endpoint
+ */
+interface PollResponse {
+  status: 'pending' | 'running' | 'completed' | 'error';
+  events: StreamEvent[];
+  last_message_id: number;
+  result?: {
+    slides?: SlideDeck;
+    raw_html?: string;
+    replacement_info?: ReplacementInfo;
+  };
+  error?: string;
 }
 
 // Session management
@@ -393,5 +446,159 @@ export const api = {
     return () => {
       controller.abort();
     };
+  },
+
+  /**
+   * Submit a chat request for async processing (polling-based)
+   * 
+   * @param sessionId - Session ID
+   * @param message - User message
+   * @param slideContext - Optional slide context for editing
+   * @returns Promise with request_id
+   */
+  async submitChatAsync(
+    sessionId: string,
+    message: string,
+    slideContext?: SlideContext,
+  ): Promise<{ request_id: string }> {
+    const response = await fetch(`${API_BASE_URL}/api/chat/async`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        session_id: sessionId,
+        message,
+        slide_context: slideContext,
+      }),
+    });
+
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({}));
+      throw new ApiError(response.status, error.detail || 'Failed to submit chat');
+    }
+
+    return response.json();
+  },
+
+  /**
+   * Poll for chat request status and new messages
+   * 
+   * @param requestId - Request ID from submitChatAsync
+   * @param afterMessageId - Return messages after this ID
+   * @returns Promise with poll response
+   */
+  async pollChat(requestId: string, afterMessageId: number = 0): Promise<PollResponse> {
+    const response = await fetch(
+      `${API_BASE_URL}/api/chat/poll/${requestId}?after_message_id=${afterMessageId}`,
+    );
+
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({}));
+      throw new ApiError(response.status, error.detail || 'Failed to poll chat');
+    }
+
+    return response.json();
+  },
+
+  /**
+   * Start polling for chat messages
+   * 
+   * @param sessionId - Session ID
+   * @param message - User message
+   * @param slideContext - Optional slide context
+   * @param onEvent - Callback for each event
+   * @param onError - Callback for errors
+   * @returns Function to cancel polling
+   */
+  startPolling(
+    sessionId: string,
+    message: string,
+    slideContext: SlideContext | undefined,
+    onEvent: (event: StreamEvent) => void,
+    onError: (error: Error) => void,
+  ): () => void {
+    let cancelled = false;
+    let pollInterval: ReturnType<typeof setInterval> | null = null;
+
+    (async () => {
+      try {
+        const { request_id } = await this.submitChatAsync(sessionId, message, slideContext);
+
+        let lastMessageId = 0;
+
+        pollInterval = setInterval(async () => {
+          if (cancelled) {
+            if (pollInterval) clearInterval(pollInterval);
+            return;
+          }
+
+          try {
+            const response = await this.pollChat(request_id, lastMessageId);
+
+            // Process new events
+            for (const event of response.events) {
+              onEvent(event);
+            }
+            lastMessageId = response.last_message_id;
+
+            // Stop polling on completion
+            if (response.status === 'completed' || response.status === 'error') {
+              if (pollInterval) clearInterval(pollInterval);
+
+              if (response.status === 'error') {
+                onError(new Error(response.error || 'Request failed'));
+              } else if (response.result) {
+                // Emit complete event
+                onEvent({
+                  type: 'complete',
+                  slides: response.result.slides,
+                  raw_html: response.result.raw_html,
+                  replacement_info: response.result.replacement_info,
+                });
+              }
+            }
+          } catch (err) {
+            console.error('Poll error:', err);
+            // Don't stop polling on transient errors
+          }
+        }, POLL_INTERVAL_MS);
+
+      } catch (err) {
+        onError(err instanceof Error ? err : new Error('Failed to start chat'));
+      }
+    })();
+
+    // Return cancel function
+    return () => {
+      cancelled = true;
+      if (pollInterval) clearInterval(pollInterval);
+    };
+  },
+
+  /**
+   * Send a chat message using the appropriate method (SSE or polling)
+   * 
+   * Automatically detects the environment and uses:
+   * - SSE streaming for local development
+   * - Polling for Databricks Apps (due to 60s proxy timeout)
+   * 
+   * @param sessionId - Session ID
+   * @param message - User message
+   * @param slideContext - Optional slide context
+   * @param onEvent - Callback for each event
+   * @param onError - Callback for errors
+   * @returns Function to cancel the request
+   */
+  sendChatMessage(
+    sessionId: string,
+    message: string,
+    slideContext: SlideContext | undefined,
+    onEvent: (event: StreamEvent) => void,
+    onError: (error: Error) => void,
+  ): () => void {
+    if (isPollingMode()) {
+      return this.startPolling(sessionId, message, slideContext, onEvent, onError);
+    } else {
+      return this.streamChat(sessionId, message, slideContext, onEvent, onError);
+    }
   },
 };

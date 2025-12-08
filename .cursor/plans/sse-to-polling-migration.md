@@ -4,52 +4,52 @@ overview: Replace Server-Sent Events streaming with a polling-based approach to 
 todos:
   - id: db-model
     content: Add ChatRequest model and request_id column to SessionMessage
-    status: pending
+    status: completed
 
   - id: db-migration
     content: Create ALTER TABLE migration SQL for Lakebase
-    status: pending
+    status: completed
     dependencies:
       - db-model
 
   - id: session-manager
     content: Add chat request tracking + msg_to_stream_event methods
-    status: pending
+    status: completed
     dependencies:
       - db-model
 
   - id: job-queue
     content: Add job queue, worker, and recovery logic
-    status: pending
+    status: completed
 
   - id: callback-handler
     content: Update StreamingCallbackHandler to accept request_id parameter
-    status: pending
+    status: completed
     dependencies:
       - session-manager
 
   - id: chat-service
     content: Update send_message_streaming to pass request_id to callback
-    status: pending
+    status: completed
     dependencies:
       - callback-handler
 
   - id: backend-endpoints
     content: Add POST /api/chat/async and GET /api/chat/poll/{request_id}
-    status: pending
+    status: completed
     dependencies:
       - job-queue
       - chat-service
 
   - id: frontend-polling
     content: Add polling API, environment detection, update ChatPanel
-    status: pending
+    status: completed
     dependencies:
       - backend-endpoints
 
   - id: cleanup
     content: Add stale request cleanup and worker crash recovery
-    status: pending
+    status: completed
     dependencies:
       - backend-endpoints
 ---

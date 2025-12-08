@@ -314,6 +314,7 @@ class ChatService:
         session_id: str,
         message: str,
         slide_context: Optional[Dict[str, Any]] = None,
+        request_id: Optional[str] = None,
     ) -> Generator[StreamEvent, None, None]:
         """Send a message and yield streaming events.
 
@@ -326,6 +327,7 @@ class ChatService:
             session_id: Session ID (auto-created if doesn't exist)
             message: User's message
             slide_context: Optional context for slide editing
+            request_id: Optional request ID for async polling support
 
         Yields:
             StreamEvent objects for real-time display
@@ -339,6 +341,7 @@ class ChatService:
                 "message_length": len(message),
                 "session_id": session_id,
                 "has_slide_context": slide_context is not None,
+                "request_id": request_id,
             },
         )
 
@@ -353,24 +356,27 @@ class ChatService:
                 extra={"session_id": session_id},
             )
 
-        # Persist user message to database FIRST
-        user_msg = session_manager.add_message(
-            session_id=session_id,
-            role="user",
-            content=message,
-            message_type="user_input",
-        )
-        logger.info(
-            "Persisted user message",
-            extra={"session_id": session_id, "message_id": user_msg.get("id")},
-        )
+        # Persist user message to database FIRST (only if not already done by async endpoint)
+        if not request_id:
+            user_msg = session_manager.add_message(
+                session_id=session_id,
+                role="user",
+                content=message,
+                message_type="user_input",
+            )
+            logger.info(
+                "Persisted user message",
+                extra={"session_id": session_id, "message_id": user_msg.get("id")},
+            )
 
         # Ensure session is registered with the agent (hydrates history)
         self._ensure_agent_session(session_id, db_session.get("genie_conversation_id"))
 
         # Create event queue and callback handler
         event_queue: queue.Queue[StreamEvent] = queue.Queue()
-        callback_handler = StreamingCallbackHandler(event_queue, session_id)
+        callback_handler = StreamingCallbackHandler(
+            event_queue, session_id, request_id=request_id
+        )
 
         # Run agent in thread and yield events
         result_container: Dict[str, Any] = {}
