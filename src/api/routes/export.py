@@ -19,6 +19,7 @@ router = APIRouter(prefix="/api/export", tags=["export"])
 
 class ExportPPTXRequest(BaseModel):
     """Request to export slides to PPTX."""
+    session_id: str  # Session ID to get slides from
     use_screenshot: bool = True  # Whether to use screenshot for charts
 
 
@@ -92,7 +93,7 @@ async def export_to_pptx(request: ExportPPTXRequest):
     try:
         # Get current slide deck
         chat_service = get_chat_service()
-        slide_deck = chat_service.get_slides()
+        slide_deck = chat_service.get_slides(request.session_id)
         
         if not slide_deck or not slide_deck.get("slides"):
             raise HTTPException(status_code=404, detail="No slides available")
