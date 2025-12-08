@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useRef } from 'react';
 import {
   DndContext,
   closestCenter,
@@ -19,7 +19,7 @@ import { SlideTile } from './SlideTile';
 import { api } from '../../services/api';
 import { useSelection } from '../../contexts/SelectionContext';
 import { exportSlideDeckToPDF } from '../../services/pdf_client';
-import { FiDownload } from 'react-icons/fi';
+import { FiDownload, FiFile, FiFileText } from 'react-icons/fi';
 
 interface SlidePanelProps {
   slideDeck: SlideDeck | null;
@@ -33,6 +33,9 @@ export const SlidePanel: React.FC<SlidePanelProps> = ({ slideDeck, rawHtml, onSl
   const [isReordering, setIsReordering] = useState(false);
   const [viewMode, setViewMode] = useState<ViewMode>('tiles');
   const [isExportingPDF, setIsExportingPDF] = useState(false);
+  const [isExportingPPTX, setIsExportingPPTX] = useState(false);
+  const [showExportMenu, setShowExportMenu] = useState(false);
+  const exportMenuRef = useRef<HTMLDivElement>(null);
   const { selectedIndices, setSelection, clearSelection } = useSelection();
   
   const sensors = useSensors(
@@ -122,6 +125,7 @@ export const SlidePanel: React.FC<SlidePanelProps> = ({ slideDeck, rawHtml, onSl
     if (!slideDeck || isExportingPDF) return;
 
     setIsExportingPDF(true);
+    setShowExportMenu(false);
     try {
       const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, -5);
       const filename = `${slideDeck.title || 'slides'}_${timestamp}.pdf`;
@@ -144,6 +148,36 @@ export const SlidePanel: React.FC<SlidePanelProps> = ({ slideDeck, rawHtml, onSl
     }
   };
 
+  const handleExportPPTX = async () => {
+    if (!slideDeck || isExportingPPTX) return;
+    
+    setIsExportingPPTX(true);
+    setShowExportMenu(false);
+    
+    try {
+      const blob = await api.exportToPPTX(true);
+      
+      // Create download link
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      const timestamp = new Date().toISOString().slice(0, 10);
+      a.download = `${slideDeck.title || 'slides'}_${timestamp}.pptx`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      window.URL.revokeObjectURL(url);
+    } catch (error) {
+      console.error('PPTX export failed:', error);
+      const message = error instanceof Error 
+        ? error.message 
+        : 'Failed to export PPTX. Please try again.';
+      alert(message);
+    } finally {
+      setIsExportingPPTX(false);
+    }
+  };
+
   useEffect(() => {
     if (!slideDeck) {
       clearSelection();
@@ -161,6 +195,20 @@ export const SlidePanel: React.FC<SlidePanelProps> = ({ slideDeck, rawHtml, onSl
       setSelection(validIndices, slides);
     }
   }, [slideDeck, selectedIndices, clearSelection, setSelection]);
+
+  // Close export menu when clicking outside
+  useEffect(() => {
+    const handleClickOutside = (event: MouseEvent) => {
+      if (exportMenuRef.current && !exportMenuRef.current.contains(event.target as Node)) {
+        setShowExportMenu(false);
+      }
+    };
+    
+    if (showExportMenu) {
+      document.addEventListener('mousedown', handleClickOutside);
+      return () => document.removeEventListener('mousedown', handleClickOutside);
+    }
+  }, [showExportMenu]);
   if (!slideDeck) {
     return (
       <div className="flex items-center justify-center h-full bg-gray-50">
@@ -183,34 +231,56 @@ export const SlidePanel: React.FC<SlidePanelProps> = ({ slideDeck, rawHtml, onSl
               {slideDeck.slide_count} slide{slideDeck.slide_count !== 1 ? 's' : ''}
               {isReordering && ' • Reordering...'}
               {isExportingPDF && ' • Exporting PDF...'}
+              {isExportingPPTX && ' • Exporting PowerPoint...'}
             </p>
           </div>
           
-          {/* Export PDF Button */}
-          <button
-            onClick={handleExportPDF}
-            disabled={!slideDeck || isExportingPDF}
-            className={`
-              flex items-center space-x-2 px-4 py-2 rounded-lg transition-colors
-              ${!slideDeck || isExportingPDF
-                ? 'bg-gray-100 text-gray-400 cursor-not-allowed'
-                : 'bg-blue-600 text-white hover:bg-blue-700'
-              }
-            `}
-            title="Export slides as PDF"
-          >
-            {isExportingPDF ? (
-              <>
-                <div className="animate-spin rounded-full h-4 w-4 border-2 border-white border-t-transparent"></div>
-                <span>Exporting...</span>
-              </>
-            ) : (
-              <>
-                <FiDownload size={18} />
-                <span>Export PDF</span>
-              </>
+          {/* Export Dropdown Menu */}
+          <div className="relative" ref={exportMenuRef}>
+            <button
+              onClick={() => setShowExportMenu(!showExportMenu)}
+              disabled={!slideDeck || isExportingPDF || isExportingPPTX}
+              className={`
+                flex items-center space-x-2 px-4 py-2 rounded-lg transition-colors
+                ${!slideDeck || isExportingPDF || isExportingPPTX
+                  ? 'bg-gray-100 text-gray-400 cursor-not-allowed'
+                  : 'bg-blue-600 text-white hover:bg-blue-700'
+                }
+              `}
+              title="Export slides"
+            >
+              {(isExportingPDF || isExportingPPTX) ? (
+                <>
+                  <div className="animate-spin rounded-full h-4 w-4 border-2 border-white border-t-transparent"></div>
+                  <span>Exporting...</span>
+                </>
+              ) : (
+                <>
+                  <FiDownload size={18} />
+                  <span>Export</span>
+                </>
+              )}
+            </button>
+            
+            {showExportMenu && !isExportingPDF && !isExportingPPTX && (
+              <div className="absolute right-0 mt-2 w-48 bg-white rounded-lg shadow-lg border border-blue-200 py-1 z-50">
+                <button
+                  onClick={handleExportPDF}
+                  className="w-full text-left px-4 py-2 hover:bg-blue-50 flex items-center space-x-2 text-gray-700 hover:text-blue-700 transition-colors"
+                >
+                  <FiFileText size={18} className="text-blue-600" />
+                  <span>Export as PDF</span>
+                </button>
+                <button
+                  onClick={handleExportPPTX}
+                  className="w-full text-left px-4 py-2 hover:bg-blue-50 flex items-center space-x-2 text-gray-700 hover:text-blue-700 transition-colors"
+                >
+                  <FiFile size={18} className="text-blue-600" />
+                  <span>Export as PowerPoint</span>
+                </button>
+              </div>
             )}
-          </button>
+          </div>
         </div>
 
         {/* Tab Navigation */}
