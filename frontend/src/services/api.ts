@@ -601,4 +601,34 @@ export const api = {
       return this.streamChat(sessionId, message, slideContext, onEvent, onError);
     }
   },
+
+  /**
+   * Export slides to PowerPoint format
+   * 
+   * @param sessionId - Session ID
+   * @param useScreenshot - Whether to use screenshots for chart rendering
+   * @returns Promise with PPTX file as Blob
+   */
+  async exportToPPTX(sessionId: string, useScreenshot: boolean = true): Promise<Blob> {
+    const response = await fetch(`${API_BASE_URL}/api/export/pptx`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        session_id: sessionId,
+        use_screenshot: useScreenshot,
+      }),
+    });
+
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({}));
+      throw new ApiError(
+        response.status,
+        error.detail || 'Failed to export PPTX'
+      );
+    }
+
+    return response.blob();
+  },
 };
