@@ -160,4 +160,33 @@ export const api = {
 
     return response.json();
   },
+
+  /**
+   * Export slide deck to PPTX format
+   * 
+   * @param useScreenshot - Whether to use screenshots for charts (default: true)
+   * @returns Blob containing the PPTX file
+   */
+  async exportToPPTX(useScreenshot: boolean = true): Promise<Blob> {
+    const response = await fetch(`${API_BASE_URL}/api/export/pptx`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        use_screenshot: useScreenshot,
+      }),
+    });
+
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({}));
+      throw new ApiError(
+        response.status,
+        error.detail || 'Failed to export PPTX'
+      );
+    }
+
+    // Return blob for download
+    return response.blob();
+  },
 };
