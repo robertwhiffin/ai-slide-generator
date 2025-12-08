@@ -37,9 +37,10 @@ if __name__ == "__main__":
     print(f"✅ Agent ready (endpoint: {agent.settings.llm.endpoint})")
     
     print("\n📊 Generating slides...")
+    session_id = agent.create_session()
     result = agent.generate_slides(
         question="I want a 5 slide consumption review of KPMG UK, starting from November 2024.",
-        max_slides=5
+        session_id=session_id
     )
     
     print(f"✅ Done!")

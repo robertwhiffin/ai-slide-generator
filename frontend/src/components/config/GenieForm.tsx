@@ -33,6 +33,9 @@ export const GenieForm: React.FC<GenieFormProps> = ({
   const [spacesLoaded, setSpacesLoaded] = useState(false);
   const [validating, setValidating] = useState(false);
   const [validationResult, setValidationResult] = useState<{ success: boolean; message: string } | null>(null);
+  const [manualSpaceId, setManualSpaceId] = useState('');
+  const [lookingUp, setLookingUp] = useState(false);
+  const [lookupError, setLookupError] = useState<string | null>(null);
 
   // Load current space on mount
   useEffect(() => {
@@ -166,10 +169,53 @@ export const GenieForm: React.FC<GenieFormProps> = ({
   // Handle space selection change
   const handleSpaceChange = (spaceId: string) => {
     setSelectedSpaceId(spaceId);
+    setManualSpaceId(''); // Clear manual input when selecting from dropdown
+    setLookupError(null);
     
     // Always update description from selected space (or clear if no description)
     if (spaceId && availableSpaces[spaceId]) {
       setDescription(availableSpaces[spaceId].description || '');
+    }
+  };
+
+  // Handle manual space ID lookup
+  const handleLookupSpace = async () => {
+    if (!manualSpaceId.trim()) {
+      setLookupError('Please enter a space ID');
+      return;
+    }
+
+    setLookingUp(true);
+    setLookupError(null);
+    setSaveError(null);
+    setValidationResult(null);
+
+    try {
+      const spaceDetails = await configApi.lookupGenieSpace(manualSpaceId.trim());
+      
+      // Set the selected space ID and description
+      setSelectedSpaceId(spaceDetails.space_id);
+      setDescription(spaceDetails.description || '');
+      
+      // Add to available spaces cache for display
+      setAvailableSpaces(prev => ({
+        ...prev,
+        [spaceDetails.space_id]: {
+          title: spaceDetails.title,
+          description: spaceDetails.description,
+        }
+      }));
+      
+      // Clear manual input on success
+      setManualSpaceId('');
+    } catch (err) {
+      const message = err instanceof ConfigApiError 
+        ? err.message 
+        : 'Failed to look up Genie space';
+      setLookupError(message);
+      console.error('Error looking up Genie space:', err);
+    } finally {
+      setLookingUp(false);
     }
   };
 
@@ -287,6 +333,40 @@ export const GenieForm: React.FC<GenieFormProps> = ({
           <p className="mt-2 text-sm text-yellow-600">
             No Genie spaces available. Create a Genie space in Databricks first.
           </p>
+        )}
+      </div>
+
+      {/* Manual Space ID Entry */}
+      <div className="bg-gray-50 border border-gray-200 rounded-lg p-4">
+        <label className="block text-sm font-medium text-gray-700 mb-2">
+          Or Enter Space ID Directly
+        </label>
+        <p className="text-xs text-gray-500 mb-3">
+          If your space doesn't appear in the dropdown, enter the Genie space ID directly.
+          You can find this in the URL when viewing the space in Databricks.
+        </p>
+        <div className="flex gap-2">
+          <input
+            type="text"
+            placeholder="e.g., 01ef1234-5678-9abc-def0-123456789abc"
+            value={manualSpaceId}
+            onChange={(e) => {
+              setManualSpaceId(e.target.value);
+              setLookupError(null);
+            }}
+            className="flex-1 px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:ring-purple-500 focus:border-purple-500 font-mono text-sm"
+            disabled={lookingUp || saving}
+          />
+          <button
+            onClick={handleLookupSpace}
+            disabled={lookingUp || saving || !manualSpaceId.trim()}
+            className="px-4 py-2 bg-purple-500 hover:bg-purple-600 text-white rounded-md transition-colors disabled:bg-purple-300 disabled:cursor-not-allowed whitespace-nowrap"
+          >
+            {lookingUp ? 'Looking up...' : 'Lookup Space'}
+          </button>
+        </div>
+        {lookupError && (
+          <p className="mt-2 text-sm text-red-600">{lookupError}</p>
         )}
       </div>
 

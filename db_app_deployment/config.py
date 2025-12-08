@@ -1,14 +1,28 @@
 """Load deployment configuration from YAML.
 
 This module provides utilities to load environment-specific deployment
-configurations from settings/deployment.yaml.
+configurations from config/deployment.yaml.
 """
 
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List
 import yaml
-import os
+
+
+@dataclass
+class LakebaseConfig:
+    """Lakebase OLTP database configuration.
+
+    Attributes:
+        database_name: Name of the Lakebase instance
+        schema: PostgreSQL schema for application tables
+        capacity: Instance capacity units (CU_1, CU_2, CU_4, CU_8)
+    """
+
+    database_name: str
+    schema: str = "app_data"
+    capacity: str = "CU_1"
 
 
 @dataclass
@@ -27,10 +41,12 @@ class DeploymentConfig:
     timeout_seconds: int
     poll_interval_seconds: int
 
+    # Lakebase configuration (required)
+    lakebase: LakebaseConfig
+
 
 def load_deployment_config(env: str) -> DeploymentConfig:
-    """
-    Load deployment configuration for specified environment.
+    """Load deployment configuration for specified environment.
 
     Args:
         env: Environment name (development, staging, production)
@@ -39,11 +55,10 @@ def load_deployment_config(env: str) -> DeploymentConfig:
         DeploymentConfig for the specified environment
 
     Raises:
-        ValueError: If environment not found in settings
+        ValueError: If environment not found or required config missing
         FileNotFoundError: If deployment.yaml not found
     """
-    # Load deployment.yaml (version controlled)
-    config_path = Path(__file__).parent.parent / "settings" / "deployment.yaml"
+    config_path = Path(__file__).parent.parent / "config" / "deployment.yaml"
 
     if not config_path.exists():
         raise FileNotFoundError(f"Deployment settings not found: {config_path}")
@@ -56,19 +71,26 @@ def load_deployment_config(env: str) -> DeploymentConfig:
         raise ValueError(f"Unknown environment: {env}. Available: {available}")
 
     env_config = config_data["environments"][env]
-    common_config = config_data["common"]
+    common = config_data["common"]
 
-    config = DeploymentConfig(
+    # Validate lakebase config
+    lakebase = env_config.get("lakebase", {})
+    if not lakebase.get("database_name"):
+        raise ValueError(f"Lakebase 'database_name' not configured for '{env}'")
+
+    return DeploymentConfig(
         app_name=env_config["app_name"],
         description=env_config.get("description", "AI Slide Generator"),
         workspace_path=env_config["workspace_path"],
         permissions=env_config["permissions"],
         compute_size=env_config.get("compute_size", "MEDIUM"),
         env_vars=env_config["env_vars"],
-        exclude_patterns=common_config["build"]["exclude_patterns"],
-        timeout_seconds=common_config["deployment"]["timeout_seconds"],
-        poll_interval_seconds=common_config["deployment"]["poll_interval_seconds"],
+        exclude_patterns=common["build"]["exclude_patterns"],
+        timeout_seconds=common["deployment"]["timeout_seconds"],
+        poll_interval_seconds=common["deployment"]["poll_interval_seconds"],
+        lakebase=LakebaseConfig(
+            database_name=lakebase["database_name"],
+            schema=lakebase.get("schema", "app_data"),
+            capacity=lakebase.get("capacity", "SMALL"),
+        ),
     )
-
-    return config
-

@@ -44,7 +44,7 @@ export const SelectionRibbon: React.FC<SelectionRibbonProps> = ({
   };
 
   const renderBody = () => {
-    if (!slideDeck) {
+    if (!slideDeck || !slideDeck.slides || slideDeck.slides.length === 0) {
       return (
         <div className="p-4 text-sm text-gray-500">
           Generate slides to enable selection.

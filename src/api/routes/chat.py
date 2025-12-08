@@ -1,7 +1,6 @@
 """Chat endpoint for sending messages to the AI agent.
 
-Phase 1: Single session endpoint.
-Phase 4: Add session management with session_id parameter.
+Requires a valid session_id. Create sessions via POST /api/sessions.
 """
 
 import logging
@@ -11,6 +10,7 @@ from fastapi import APIRouter, HTTPException
 from src.api.schemas.requests import ChatRequest
 from src.api.schemas.responses import ChatResponse
 from src.api.services.chat_service import get_chat_service
+from src.api.services.session_manager import SessionNotFoundError
 
 logger = logging.getLogger(__name__)
 
@@ -20,41 +20,42 @@ router = APIRouter(prefix="/api", tags=["chat"])
 @router.post("/chat", response_model=ChatResponse)
 async def send_message(request: ChatRequest) -> ChatResponse:
     """Send a message to the AI agent and receive response with slides.
-    
-    Phase 1: Uses single global session.
-    Phase 4: Will accept session_id in request body.
-    
+
+    Requires a valid session_id. Create sessions via POST /api/sessions first.
+
     Args:
-        request: Chat request with message and max_slides
-    
+        request: Chat request with session_id and message
+
     Returns:
         Chat response with messages, slide_deck, and metadata
-    
+
     Raises:
-        HTTPException: 500 if agent fails to generate slides
+        HTTPException: 404 if session not found, 500 if agent fails
     """
     logger.info(
         "Received chat request",
         extra={
             "message_length": len(request.message),
-            "max_slides": request.max_slides,
+            "session_id": request.session_id,
         },
     )
 
     try:
-        # Get service instance (Phase 1: global singleton)
         chat_service = get_chat_service()
 
-        # Process message
         result = chat_service.send_message(
+            session_id=request.session_id,
             message=request.message,
-            max_slides=request.max_slides,
             slide_context=request.slide_context.model_dump() if request.slide_context else None,
         )
 
-        # Return response
         return ChatResponse(**result)
 
+    except SessionNotFoundError:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Session not found: {request.session_id}. Create a session first via POST /api/sessions",
+        )
     except Exception as e:
         logger.error(f"Chat request failed: {e}", exc_info=True)
         raise HTTPException(
@@ -66,13 +67,11 @@ async def send_message(request: ChatRequest) -> ChatResponse:
 @router.get("/health")
 async def health_check():
     """Health check endpoint.
-    
+
     Returns:
         Status information
     """
     return {
         "status": "healthy",
         "service": "AI Slide Generator",
-        "phase": "Phase 1 MVP",
     }
-

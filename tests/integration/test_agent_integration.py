@@ -185,7 +185,6 @@ class TestAgentEndToEnd:
         result = agent_with_mocked_responses.generate_slides(
             question="What were Q4 2023 sales by region?",
             session_id="test-session-1",
-            max_slides=5,
         )
 
         # Verify result structure
@@ -222,7 +221,6 @@ class TestAgentEndToEnd:
         result = agent_with_mocked_responses.generate_slides(
             question="Analyze sales trends and growth rates",
             session_id="test-session-2",
-            max_slides=10,
         )
 
         # Verify multiple tool calls captured in messages
@@ -248,7 +246,6 @@ class TestAgentEndToEnd:
         result = agent_with_mocked_responses.generate_slides(
             question="Test question",
             session_id="test-session-3",
-            max_slides=3,
         )
 
         messages = result["messages"]
@@ -286,7 +283,6 @@ class TestAgentEndToEnd:
         result = agent_with_mocked_responses.generate_slides(
             question="Create a sales presentation",
             session_id="test-session-4",
-            max_slides=5,
         )
 
         html = result["html"]
@@ -349,7 +345,6 @@ class TestAgentWithMLflowTracing:
             result = agent_with_mocked_responses.generate_slides(
                 question="Test MLflow tracing",
                 session_id="test-session-mlflow",
-                max_slides=7,
             )
 
             # Verify span created
@@ -357,7 +352,6 @@ class TestAgentWithMLflowTracing:
 
             # Verify attributes set
             span.set_attribute.assert_any_call("question", "Test MLflow tracing")
-            span.set_attribute.assert_any_call("max_slides", 7)
             span.set_attribute.assert_any_call("status", "success")
 
 

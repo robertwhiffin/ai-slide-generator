@@ -10,6 +10,7 @@ import { ReplacementFeedback } from './ReplacementFeedback';
 import { ErrorDisplay } from './ErrorDisplay';
 import { LoadingIndicator } from './LoadingIndicator';
 import { useSelection } from '../../contexts/SelectionContext';
+import { useSession } from '../../contexts/SessionContext';
 import { useKeyboardShortcuts } from '../../hooks/useKeyboardShortcuts';
 
 interface ChatPanelProps {
@@ -36,8 +37,16 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
     hasSelection,
     clearSelection,
   } = useSelection();
+  const { sessionId, isInitializing, error: sessionError } = useSession();
 
   useKeyboardShortcuts();
+
+  // Show session error
+  useEffect(() => {
+    if (sessionError) {
+      setError(sessionError);
+    }
+  }, [sessionError]);
 
   const stopLoadingMessages = () => {
     if (intervalRef.current) {
@@ -47,9 +56,14 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
     setLoadingMessage('');
   };
 
-  const handleSendMessage = async (content: string, maxSlides: number) => {
+  const handleSendMessage = async (content: string) => {
     const trimmedContent = content.trim();
     if (!trimmedContent) {
+      return;
+    }
+
+    if (!sessionId) {
+      setError('Session not initialized. Please refresh the page.');
       return;
     }
 
@@ -83,8 +97,8 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
 
     try {
       const response = await api.sendMessage({
+        sessionId,
         message: trimmedContent,
-        maxSlides,
         slideContext,
       });
 
@@ -147,9 +161,11 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
 
       <ChatInput
         onSend={handleSendMessage}
-        disabled={isLoading}
+        disabled={isLoading || isInitializing || !sessionId}
         placeholder={
-          hasSelection
+          isInitializing
+            ? 'Initializing session...'
+            : hasSelection
             ? 'Describe changes to selected slides...'
             : 'Ask to generate or modify slides...'
         }

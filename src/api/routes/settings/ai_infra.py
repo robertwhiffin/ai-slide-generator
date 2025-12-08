@@ -1,5 +1,6 @@
 """AI infrastructure configuration API endpoints."""
 import logging
+from typing import Any, Dict
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
@@ -7,10 +8,41 @@ from sqlalchemy.orm import Session
 from src.api.schemas.settings import AIInfraConfig, AIInfraConfigUpdate, EndpointsList
 from src.core.database import get_db
 from src.services import ConfigService, ConfigValidator
+from src.services.config_validator import ConfigurationValidator
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/ai-db_app_deployment", tags=["ai-infrastructure"])
+router = APIRouter(prefix="/ai-infra", tags=["ai-infrastructure"])
+
+
+@router.post("/validate", response_model=Dict[str, Any])
+def validate_llm_endpoint(endpoint: str):
+    """
+    Validate that an LLM endpoint is accessible and working.
+    
+    Args:
+        endpoint: The Databricks serving endpoint name to validate
+        
+    Returns:
+        Dictionary with validation result:
+        - success: Whether the endpoint is valid and accessible
+        - message: Description of the validation result
+    """
+    try:
+        validator = ConfigurationValidator(profile_id=None)
+        result = validator.validate_llm_endpoint(endpoint)
+        
+        return {
+            "success": result.success,
+            "message": result.message,
+        }
+        
+    except Exception as e:
+        logger.error(f"Error validating LLM endpoint {endpoint}: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to validate LLM endpoint: {str(e)}",
+        )
 
 
 def get_config_service(db: Session = Depends(get_db)) -> ConfigService:

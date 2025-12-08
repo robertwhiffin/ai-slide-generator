@@ -173,7 +173,6 @@ def display_session_state(agent, session_id: str) -> None:
 def interactive_loop(
     agent,
     session_id: str,
-    max_slides: int = 5,
     verbose: bool = False,
     save_output: bool = True
 ) -> None:
@@ -183,7 +182,6 @@ def interactive_loop(
     Args:
         agent: SlideGeneratorAgent instance
         session_id: Session ID for this conversation
-        max_slides: Maximum slides per generation
         verbose: Show detailed output
         save_output: Save HTML files
     """
@@ -238,7 +236,6 @@ def interactive_loop(
             result = agent.generate_slides(
                 question=user_input,
                 session_id=session_id,
-                max_slides=max_slides
             )
             end_time = datetime.now()
             elapsed = (end_time - start_time).total_seconds()
@@ -271,7 +268,6 @@ def interactive_loop(
 
 def test_multi_turn_live(
     initial_question: str,
-    max_slides: int = 5,
     verbose: bool = False,
     save_output: bool = True,
     interactive: bool = True
@@ -281,7 +277,6 @@ def test_multi_turn_live(
     
     Args:
         initial_question: Initial question to start conversation
-        max_slides: Maximum number of slides to generate
         verbose: Print detailed output
         save_output: Save HTML to file
         interactive: Enable interactive mode for follow-ups
@@ -318,7 +313,7 @@ def test_multi_turn_live(
         raise
     
     # Step 3: Initial turn
-    print_section(f"Step 3: Turn 1 - Initial Request (max {max_slides} slides)")
+    print_section("Step 3: Turn 1 - Initial Request")
     print_colored(f"Question: {initial_question}", "cyan")
     print_colored("\n🤖 Generating slides (this may take 30-60 seconds)...", "blue")
     
@@ -327,7 +322,6 @@ def test_multi_turn_live(
         result = agent.generate_slides(
             question=initial_question,
             session_id=session_id,
-            max_slides=max_slides
         )
         end_time = datetime.now()
         elapsed = (end_time - start_time).total_seconds()
@@ -360,7 +354,6 @@ def test_multi_turn_live(
         interactive_loop(
             agent=agent,
             session_id=session_id,
-            max_slides=max_slides,
             verbose=verbose,
             save_output=save_output
         )
@@ -397,12 +390,6 @@ def main():
         help="Initial question to start the conversation"
     )
     parser.add_argument(
-        "--max-slides",
-        "-m",
-        type=int,
-        default=10,
-        help="Maximum number of slides to generate (default: 10)"
-    )
     parser.add_argument(
         "--verbose",
         "-v",
@@ -426,7 +413,6 @@ def main():
     try:
         result = test_multi_turn_live(
             initial_question=args.question,
-            max_slides=args.max_slides,
             verbose=args.verbose,
             save_output=not args.no_save,
             interactive=not args.auto

@@ -309,9 +309,10 @@ if (campaignsCanvas) { console.log('old campaigns'); }
 </html>"""
 
         deck = SlideDeck.from_html_string(html)
+        session_id = "test-session"
 
         service = ChatService.__new__(ChatService)
-        service.current_deck = deck
+        service._deck_cache = {session_id: deck}
 
         replacement_script = """
 // Canvas: campaignsChart
@@ -330,11 +331,12 @@ if (territoryCanvas) { console.log('new territory'); }
             "canvas_ids": ["territoryChart"],
         }
 
-        service._apply_slide_replacements(replacement_info)
+        service._apply_slide_replacements(replacement_info, session_id=session_id)
 
-        assert "new campaigns" in service.current_deck.scripts
-        assert "new territory" in service.current_deck.scripts
-        assert "old campaigns" not in service.current_deck.scripts
+        updated_deck = service._deck_cache[session_id]
+        assert "new campaigns" in updated_deck.scripts
+        assert "new territory" in updated_deck.scripts
+        assert "old campaigns" not in updated_deck.scripts
 
 
 class TestKnitting:

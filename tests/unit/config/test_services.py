@@ -383,7 +383,7 @@ def test_validator_prompts_valid(db_session):
     validator = ConfigValidator()
     
     result = validator.validate_prompts(
-        system_prompt="Test {max_slides}",
+        system_prompt="Test system prompt",
         user_prompt_template="{question}",
     )
     assert result.valid
@@ -398,17 +398,6 @@ def test_validator_prompts_missing_question(db_session):
     )
     assert not result.valid
     assert "question" in result.error
-
-
-def test_validator_prompts_missing_max_slides(db_session):
-    """Test prompts validation with missing max_slides placeholder."""
-    validator = ConfigValidator()
-    
-    result = validator.validate_prompts(
-        system_prompt="No max slides placeholder",
-    )
-    assert not result.valid
-    assert "max_slides" in result.error
 
 
 def test_get_default_profile(db_session):
