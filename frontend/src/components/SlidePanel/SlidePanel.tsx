@@ -25,7 +25,7 @@ import { useSession } from '../../contexts/SessionContext';
 
 const isDebugMode = (): boolean => {
   const urlParams = new URLSearchParams(window.location.search);
-  return urlParams.get('debug') === 'true' || localStorage.getItem('debug') === 'true';
+  return urlParams.get('debug')?.toLowerCase() === 'true' || localStorage.getItem('debug')?.toLowerCase() === 'true';
 };
 
 interface SlidePanelProps {
