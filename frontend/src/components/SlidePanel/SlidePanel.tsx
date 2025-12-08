@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useRef } from 'react';
 import {
   DndContext,
   closestCenter,
@@ -14,12 +14,13 @@ import {
   sortableKeyboardCoordinates,
   verticalListSortingStrategy,
 } from '@dnd-kit/sortable';
-import { FiPlay, FiDownload } from 'react-icons/fi';
+import { FiPlay, FiDownload, FiFile, FiFileText, FiCode } from 'react-icons/fi';
 import type { Slide, SlideDeck } from '../../types/slide';
 import { SlideTile } from './SlideTile';
 import { PresentationMode } from '../PresentationMode';
 import { api } from '../../services/api';
 import { useSelection } from '../../contexts/SelectionContext';
+import { exportSlideDeckToPDF } from '../../services/pdf_client';
 import { useSession } from '../../contexts/SessionContext';
 
 const isDebugMode = (): boolean => {
@@ -38,6 +39,10 @@ type ViewMode = 'tiles' | 'rawhtml' | 'rawtext';
 export const SlidePanel: React.FC<SlidePanelProps> = ({ slideDeck, rawHtml, onSlideChange }) => {
   const [isReordering, setIsReordering] = useState(false);
   const [viewMode, setViewMode] = useState<ViewMode>('tiles');
+  const [isExportingPDF, setIsExportingPDF] = useState(false);
+  const [isExportingPPTX, setIsExportingPPTX] = useState(false);
+  const [showExportMenu, setShowExportMenu] = useState(false);
+  const exportMenuRef = useRef<HTMLDivElement>(null);
   const [isPresentationMode, setIsPresentationMode] = useState(false);
   const { selectedIndices, setSelection, clearSelection } = useSelection();
   const { sessionId } = useSession();
@@ -133,6 +138,63 @@ export const SlidePanel: React.FC<SlidePanelProps> = ({ slideDeck, rawHtml, onSl
     }
   };
 
+  const handleExportPDF = async () => {
+    if (!slideDeck || isExportingPDF) return;
+
+    setIsExportingPDF(true);
+    setShowExportMenu(false);
+    try {
+      const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, -5);
+      const filename = `${slideDeck.title || 'slides'}_${timestamp}.pdf`;
+      
+      await exportSlideDeckToPDF(slideDeck, filename, {
+        format: 'a4',
+        orientation: 'landscape',
+        scale: 1.2, // Optimized for file size vs quality
+        waitForCharts: 2000,
+        imageQuality: 0.85, // JPEG quality (good balance)
+      });
+    } catch (error) {
+      console.error('PDF export failed:', error);
+      const message = error instanceof Error 
+        ? error.message 
+        : 'Failed to export PDF. Please try again.';
+      alert(message);
+    } finally {
+      setIsExportingPDF(false);
+    }
+  };
+
+  const handleExportPPTX = async () => {
+    if (!slideDeck || !sessionId || isExportingPPTX) return;
+    
+    setIsExportingPPTX(true);
+    setShowExportMenu(false);
+    
+    try {
+      const blob = await api.exportToPPTX(sessionId, true);
+      
+      // Create download link
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      const timestamp = new Date().toISOString().slice(0, 10);
+      a.download = `${slideDeck.title || 'slides'}_${timestamp}.pptx`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      window.URL.revokeObjectURL(url);
+    } catch (error) {
+      console.error('PPTX export failed:', error);
+      const message = error instanceof Error 
+        ? error.message 
+        : 'Failed to export PPTX. Please try again.';
+      alert(message);
+    } finally {
+      setIsExportingPPTX(false);
+    }
+  };
+
   useEffect(() => {
     if (!slideDeck) {
       clearSelection();
@@ -151,7 +213,20 @@ export const SlidePanel: React.FC<SlidePanelProps> = ({ slideDeck, rawHtml, onSl
     }
   }, [slideDeck, selectedIndices, clearSelection, setSelection]);
 
-  const handleDownload = () => {
+  // Close export menu when clicking outside
+  useEffect(() => {
+    const handleClickOutside = (event: MouseEvent) => {
+      if (exportMenuRef.current && !exportMenuRef.current.contains(event.target as Node)) {
+        setShowExportMenu(false);
+      }
+    };
+    
+    if (showExportMenu) {
+      document.addEventListener('mousedown', handleClickOutside);
+      return () => document.removeEventListener('mousedown', handleClickOutside);
+    }
+  }, [showExportMenu]);
+  const handleSaveAsHTML = () => {
     if (!slideDeck) return;
 
     const slidesHtml = slideDeck.slides
@@ -271,6 +346,9 @@ export const SlidePanel: React.FC<SlidePanelProps> = ({ slideDeck, rawHtml, onSl
     a.click();
     document.body.removeChild(a);
     URL.revokeObjectURL(url);
+    
+    // Close the dropdown menu
+    setShowExportMenu(false);
   };
   if (!slideDeck) {
     return (
@@ -293,19 +371,68 @@ export const SlidePanel: React.FC<SlidePanelProps> = ({ slideDeck, rawHtml, onSl
             <p className="text-sm text-gray-500">
               {slideDeck.slide_count} slide{slideDeck.slide_count !== 1 ? 's' : ''}
               {isReordering && ' • Reordering...'}
+              {isExportingPDF && ' • Exporting PDF...'}
+              {isExportingPPTX && ' • Exporting PowerPoint...'}
             </p>
           </div>
-          <div className="flex items-center gap-2">
-            <button
-              onClick={handleDownload}
-              className="flex items-center gap-2 px-4 py-2 bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200 transition-colors"
-            >
-              <FiDownload size={16} />
-              Download
-            </button>
+          
+          {/* Export Dropdown Menu and Present Button */}
+          <div className="flex items-center">
+            <div className="relative" ref={exportMenuRef}>
+              <button
+                onClick={() => setShowExportMenu(!showExportMenu)}
+                disabled={!slideDeck || isExportingPDF || isExportingPPTX}
+                className={`
+                  flex items-center space-x-2 px-4 py-2 rounded-l-lg transition-colors
+                  ${!slideDeck || isExportingPDF || isExportingPPTX
+                    ? 'bg-gray-100 text-gray-400 cursor-not-allowed'
+                    : 'bg-blue-600 text-white hover:bg-blue-700'
+                  }
+                `}
+                title="Export slides"
+              >
+                {(isExportingPDF || isExportingPPTX) ? (
+                  <>
+                    <div className="animate-spin rounded-full h-4 w-4 border-2 border-white border-t-transparent"></div>
+                    <span>Exporting...</span>
+                  </>
+                ) : (
+                  <>
+                    <FiDownload size={18} />
+                    <span>Export</span>
+                  </>
+                )}
+              </button>
+              
+              {showExportMenu && !isExportingPDF && !isExportingPPTX && (
+                <div className="absolute right-0 mt-2 w-48 bg-white rounded-lg shadow-lg border border-blue-200 py-1 z-50">
+                  <button
+                    onClick={handleExportPDF}
+                    className="w-full text-left px-4 py-2 hover:bg-blue-50 flex items-center space-x-2 text-gray-700 hover:text-blue-700 transition-colors"
+                  >
+                    <FiFileText size={18} className="text-blue-600" />
+                    <span>Export as PDF</span>
+                  </button>
+                  <button
+                    onClick={handleExportPPTX}
+                    className="w-full text-left px-4 py-2 hover:bg-blue-50 flex items-center space-x-2 text-gray-700 hover:text-blue-700 transition-colors"
+                  >
+                    <FiFile size={18} className="text-blue-600" />
+                    <span>Export as PowerPoint</span>
+                  </button>
+                  <button
+                    onClick={handleSaveAsHTML}
+                    className="w-full text-left px-4 py-2 hover:bg-blue-50 flex items-center space-x-2 text-gray-700 hover:text-blue-700 transition-colors"
+                  >
+                    <FiCode size={18} className="text-blue-600" />
+                    <span>Save as HTML</span>
+                  </button>
+                </div>
+              )}
+            </div>
             <button
               onClick={() => setIsPresentationMode(true)}
-              className="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors"
+              className="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-r-lg hover:bg-blue-700 transition-colors border-l border-blue-500"
             >
               <FiPlay size={16} />
               Present
@@ -421,7 +548,7 @@ export const SlidePanel: React.FC<SlidePanelProps> = ({ slideDeck, rawHtml, onSl
         )}
       </div>
 
-      {isPresentationMode && (
+      {isPresentationMode && slideDeck && (
         <PresentationMode
           slideDeck={slideDeck}
           onExit={() => setIsPresentationMode(false)}
