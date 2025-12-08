@@ -296,6 +296,8 @@ class TestScriptManagement:
 
     def test_apply_replacement_removes_existing_canvas_scripts(self):
         """Replacing slides removes prior scripts even if canvas persists elsewhere."""
+        import threading
+        
         html = """<!DOCTYPE html>
 <html>
 <body>
@@ -312,6 +314,7 @@ if (campaignsCanvas) { console.log('old campaigns'); }
         session_id = "test-session"
 
         service = ChatService.__new__(ChatService)
+        service._cache_lock = threading.Lock()  # Required for thread-safe cache access
         service._deck_cache = {session_id: deck}
 
         replacement_script = """

@@ -1,10 +1,13 @@
 import type { ChatResponse } from '../types/message';
-import type { SlideDeck, Slide, SlideContext } from '../types/slide';
+import type { SlideDeck, Slide, SlideContext, ReplacementInfo } from '../types/slide';
 
 // Use relative URLs in production, localhost in development
 const API_BASE_URL = import.meta.env.VITE_API_URL || (
   import.meta.env.MODE === 'production' ? '' : 'http://localhost:8000'
 );
+
+// Polling interval in milliseconds
+const POLL_INTERVAL_MS = 2000;
 
 export class ApiError extends Error {
   status: number;
@@ -16,6 +19,67 @@ export class ApiError extends Error {
   }
 }
 
+/**
+ * Detect if we should use polling instead of SSE streaming.
+ * 
+ * Databricks Apps runs behind a reverse proxy with a 60-second
+ * connection timeout, which breaks SSE for long-running requests.
+ * 
+ * In production mode, we always use polling to be safe.
+ * In development, we use SSE for faster feedback.
+ */
+const isPollingMode = (): boolean => {
+  // Explicit override via environment variable
+  if (import.meta.env.VITE_USE_POLLING === 'true') {
+    return true;
+  }
+  
+  // In production mode, always use polling (Databricks Apps has proxy timeouts)
+  if (import.meta.env.MODE === 'production') {
+    return true;
+  }
+  
+  // Auto-detect Databricks Apps environment (for dev builds deployed to Databricks)
+  if (typeof window !== 'undefined') {
+    const hostname = window.location.hostname;
+    if (
+      hostname.includes('.cloud.databricks.com') ||
+      hostname.includes('.databricks.com') ||
+      hostname.includes('.azuredatabricks.net')
+    ) {
+      return true;
+    }
+  }
+  
+  return false;
+};
+
+// Streaming event types matching backend StreamEventType
+export type StreamEventType = 'assistant' | 'tool_call' | 'tool_result' | 'error' | 'complete';
+
+export interface StreamEvent {
+  type: StreamEventType;
+  content?: string;
+  tool_name?: string;
+  tool_input?: Record<string, any>;
+  tool_output?: string;
+  slides?: SlideDeck;
+  error?: string;
+  message_id?: number;
+  raw_html?: string;
+  replacement_info?: ReplacementInfo;
+  metadata?: Record<string, any>;
+}
+
+export interface SessionMessage {
+  id: number;
+  role: 'user' | 'assistant' | 'tool';
+  content: string;
+  message_type?: string;
+  created_at: string;
+  metadata?: Record<string, any>;
+}
+
 export interface Session {
   session_id: string;
   user_id: string | null;
@@ -24,12 +88,29 @@ export interface Session {
   last_activity?: string;
   message_count?: number;
   has_slide_deck?: boolean;
+  messages?: SessionMessage[];
+  slide_deck?: SlideDeck | null;
 }
 
 interface SendMessageParams {
   message: string;
   sessionId: string;
   slideContext?: SlideContext;
+}
+
+/**
+ * Response from the poll endpoint
+ */
+interface PollResponse {
+  status: 'pending' | 'running' | 'completed' | 'error';
+  events: StreamEvent[];
+  last_message_id: number;
+  result?: {
+    slides?: SlideDeck;
+    raw_html?: string;
+    replacement_info?: ReplacementInfo;
+  };
+  error?: string;
 }
 
 // Session management
@@ -273,36 +354,5 @@ export const api = {
     }
 
     return response.json();
-  },
-
-  /**
-   * Export slide deck to PPTX format
-   * 
-   * @param sessionId - Session ID to get slides from
-   * @param useScreenshot - Whether to use screenshots for charts (default: true)
-   * @returns Blob containing the PPTX file
-   */
-  async exportToPPTX(sessionId: string, useScreenshot: boolean = true): Promise<Blob> {
-    const response = await fetch(`${API_BASE_URL}/api/export/pptx`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        session_id: sessionId,
-        use_screenshot: useScreenshot,
-      }),
-    });
-
-    if (!response.ok) {
-      const error = await response.json().catch(() => ({}));
-      throw new ApiError(
-        response.status,
-        error.detail || 'Failed to export PPTX'
-      );
-    }
-
-    // Return blob for download
-    return response.blob();
   },
 };

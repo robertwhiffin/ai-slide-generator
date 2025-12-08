@@ -364,7 +364,6 @@ def create_app(
         compute_size_enum = ComputeSize(compute_size)
 
         # Build resources list with Lakebase database
-        print(f"  📊 Attaching Lakebase instance: {instance_name}, database: {database_name}")
         resources = [
             AppResource(
                 name="app_database",
@@ -377,6 +376,7 @@ def create_app(
         ]
 
         # Create app - Databricks will read app.yaml from workspace_path
+        print("Creating app compute...")
         app = App(
             name=app_name,
             description=description,
@@ -389,7 +389,7 @@ def create_app(
         print(f"  ✅ App created: {result.name}")
 
         # Trigger initial deployment with source code
-        print("  ⏳ Deploying source code...")
+        print("  ⏳ Deploying source code and waiting for app to be ready...")
         app_deployment = AppDeployment(source_code_path=workspace_path)
         deployment_result = workspace_client.apps.deploy_and_wait(
             app_name=app_name,

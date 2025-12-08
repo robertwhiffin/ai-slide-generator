@@ -3,14 +3,17 @@ import './index.css';
 import { SelectionProvider } from './contexts/SelectionContext';
 import { ProfileProvider } from './contexts/ProfileContext';
 import { SessionProvider } from './contexts/SessionContext';
+import { GenerationProvider } from './contexts/GenerationContext';
 
 function App() {
   return (
     <ProfileProvider>
       <SessionProvider>
-        <SelectionProvider>
-          <AppLayout />
-        </SelectionProvider>
+        <GenerationProvider>
+          <SelectionProvider>
+            <AppLayout />
+          </SelectionProvider>
+        </GenerationProvider>
       </SessionProvider>
     </ProfileProvider>
   );

@@ -31,15 +31,15 @@ Generate professional HTML slide decks from natural language using LLMs and Data
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
 │  Frontend (React + Vite + TypeScript)                               │
-│  ├─ Chat Panel: Send prompts, view responses                        │
+│  ├─ Chat Panel: Real-time SSE streaming, message persistence        │
 │  ├─ Selection Ribbon: Pick slides for editing                       │
 │  └─ Slide Panel: View, reorder, edit slides                         │
 └──────────────────────────┬──────────────────────────────────────────┘
-                           │ REST API
+                           │ REST API + SSE
 ┌──────────────────────────▼──────────────────────────────────────────┐
 │  Backend (FastAPI + LangChain)                                      │
-│  ├─ ChatService: Session management, slide deck state               │
-│  ├─ SlideGeneratorAgent: Tool-calling LLM agent                     │
+│  ├─ ChatService: Session management, streaming, history             │
+│  ├─ SlideGeneratorAgent: Tool-calling LLM with callbacks            │
 │  ├─ SlideDeck: HTML parsing and manipulation                        │
 │  └─ Genie Tool: Natural language → SQL data retrieval               │
 └──────────────────────────┬──────────────────────────────────────────┘
@@ -55,6 +55,7 @@ Generate professional HTML slide decks from natural language using LLMs and Data
 
 **Key Components:**
 - **LangChain Agent:** Orchestrates multi-step reasoning with tool calls
+- **SSE Streaming:** Real-time progress via Server-Sent Events with message persistence
 - **Genie Integration:** Converts natural language to SQL queries against your data
 - **SlideDeck Parser:** Robust HTML parsing with BeautifulSoup for slide manipulation
 - **Chart.js:** Data visualizations with defensive rendering
@@ -250,6 +251,7 @@ ai-slide-generator/
 |----------|-------------|
 | [Backend Overview](docs/technical/backend-overview.md) | FastAPI, agent lifecycle, API contracts |
 | [Frontend Overview](docs/technical/frontend-overview.md) | React components, state management |
+| [Real-Time Streaming](docs/technical/real-time-streaming.md) | SSE events, conversation persistence |
 | [Databricks Deployment](docs/technical/databricks-app-deployment.md) | Deployment CLI, environments |
 | [Slide Parser](docs/technical/slide-parser-and-script-management.md) | HTML parsing, script handling |
 | [Database Config](docs/technical/database-configuration.md) | PostgreSQL/Lakebase schema |
