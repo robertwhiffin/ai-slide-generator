@@ -13,7 +13,6 @@ from langchain_core.messages import HumanMessage
 
 from src.core.databricks_client import get_databricks_client
 from src.core.settings_db import load_settings_from_database
-from src.services.tools import initialize_genie_conversation, query_genie_space
 
 logger = logging.getLogger(__name__)
 
@@ -136,35 +135,50 @@ class ConfigurationValidator:
             logger.error(f"LLM validation failed: {e}", exc_info=True)
 
     def _validate_genie(self) -> None:
-        """Test Genie with a query."""
+        """Test Genie with a query.
+        
+        Uses self.settings.genie.space_id directly to ensure we validate
+        the profile's configured Genie space, not the globally cached one.
+        """
         logger.info("Validating Genie space")
 
+        # Use the profile's space_id directly, not get_settings()
+        space_id = self.settings.genie.space_id
+        client = get_databricks_client()
         conversation_id = None
-        try:
-            # Initialize conversation
-            conversation_id = initialize_genie_conversation(
-                placeholder_message="System: Testing configuration"
-            )
 
-            # Query Genie
-            result = query_genie_space(
-                query="Return a table of how many rows you have per table",
+        try:
+            # Initialize conversation directly with the profile's space_id
+            response = client.genie.start_conversation_and_wait(
+                space_id=space_id,
+                content="System: Testing configuration"
+            )
+            conversation_id = response.conversation_id
+
+            # Query Genie with a test query
+            query_response = client.genie.create_message_and_wait(
+                space_id=space_id,
                 conversation_id=conversation_id,
-                max_retries=1,
+                content="Return a table of how many rows you have per table"
             )
 
             # Check result - Genie can respond with message and/or data
-            if result and (result.get("data") or result.get("message")):
+            has_data = bool(query_response.attachments)
+            has_message = any(
+                att.text for att in query_response.attachments
+            ) if query_response.attachments else False
+
+            if has_data or has_message:
                 response_types = []
-                if result.get("message"):
+                if has_message:
                     response_types.append("message")
-                if result.get("data"):
+                if has_data:
                     response_types.append("data")
                 
                 self.results.append(ValidationResult(
                     component="Genie",
                     success=True,
-                    message=f"Successfully connected to Genie space: {self.settings.genie.space_id}",
+                    message=f"Successfully connected to Genie space: {space_id}",
                     details=f"Query executed and returned {', '.join(response_types)}"
                 ))
                 logger.info("Genie validation successful")
@@ -173,7 +187,7 @@ class ConfigurationValidator:
                     component="Genie",
                     success=False,
                     message="Failed to query Genie: No data returned",
-                    details=f"Space ID: {self.settings.genie.space_id}"
+                    details=f"Space ID: {space_id}"
                 ))
                 logger.warning("Genie validation failed: no data")
 
@@ -183,16 +197,15 @@ class ConfigurationValidator:
                 component="Genie",
                 success=False,
                 message=f"Failed to query Genie: {error_msg}",
-                details=f"Space ID: {self.settings.genie.space_id}"
+                details=f"Space ID: {space_id}"
             ))
             logger.error(f"Genie validation failed: {e}", exc_info=True)
         finally:
             # Clean up conversation if created
             if conversation_id:
                 try:
-                    client = get_databricks_client()
                     client.genie.delete_conversation(
-                        space_id=self.settings.genie.space_id,
+                        space_id=space_id,
                         conversation_id=conversation_id
                     )
                     logger.info(f"Cleaned up test conversation: {conversation_id}")

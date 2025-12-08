@@ -36,6 +36,7 @@ export const GenieForm: React.FC<GenieFormProps> = ({
   const [manualSpaceId, setManualSpaceId] = useState('');
   const [lookingUp, setLookingUp] = useState(false);
   const [lookupError, setLookupError] = useState<string | null>(null);
+  const [saveSuccess, setSaveSuccess] = useState(false);
 
   // Load current space on mount
   useEffect(() => {
@@ -120,6 +121,7 @@ export const GenieForm: React.FC<GenieFormProps> = ({
     try {
       setSaveError(null);
       setValidationResult(null);
+      setSaveSuccess(false);
       
       // Find the selected space name and auto-populate description if empty
       const spaceDetails = availableSpaces[selectedSpaceId];
@@ -157,6 +159,9 @@ export const GenieForm: React.FC<GenieFormProps> = ({
       // Reload data
       const space = await configApi.getGenieSpace(profileId);
       setCurrentSpace(space);
+      
+      // Show success message with reminder to load profile
+      setSaveSuccess(true);
     } catch (err) {
       const message = err instanceof ConfigApiError 
         ? err.message 
@@ -171,6 +176,7 @@ export const GenieForm: React.FC<GenieFormProps> = ({
     setSelectedSpaceId(spaceId);
     setManualSpaceId(''); // Clear manual input when selecting from dropdown
     setLookupError(null);
+    setSaveSuccess(false); // Clear success message when selection changes
     
     // Always update description from selected space (or clear if no description)
     if (spaceId && availableSpaces[spaceId]) {
@@ -406,6 +412,25 @@ export const GenieForm: React.FC<GenieFormProps> = ({
             : 'bg-yellow-50 border-yellow-200 text-yellow-700'
         }`}>
           <strong>Validation:</strong> {validationResult.message}
+        </div>
+      )}
+
+      {/* Save Success with Reminder */}
+      {saveSuccess && (
+        <div className="bg-blue-50 border border-blue-200 rounded-md p-4">
+          <div className="flex items-start gap-3">
+            <span className="text-blue-500 text-lg">✓</span>
+            <div>
+              <p className="text-sm font-medium text-blue-800">
+                Genie configuration saved successfully!
+              </p>
+              <p className="text-sm text-blue-700 mt-1">
+                <strong>Important:</strong> To apply these changes to the running application, 
+                you must <strong>Load this profile</strong> from the profile list. 
+                Close this dialog and click the "Load" button next to this profile.
+              </p>
+            </div>
+          </div>
         </div>
       )}
 

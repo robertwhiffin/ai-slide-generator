@@ -355,4 +355,250 @@ export const api = {
 
     return response.json();
   },
+
+  /**
+   * Stream chat messages via Server-Sent Events
+   * 
+   * @param sessionId - Session ID
+   * @param message - User message
+   * @param slideContext - Optional slide context for editing
+   * @param onEvent - Callback for each streaming event
+   * @param onError - Callback for errors
+   * @returns Function to cancel the stream
+   */
+  streamChat(
+    sessionId: string,
+    message: string,
+    slideContext: SlideContext | undefined,
+    onEvent: (event: StreamEvent) => void,
+    onError: (error: Error) => void,
+  ): () => void {
+    const controller = new AbortController();
+
+    const runStream = async () => {
+      try {
+        const response = await fetch(`${API_BASE_URL}/api/chat/stream`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            session_id: sessionId,
+            message,
+            slide_context: slideContext,
+          }),
+          signal: controller.signal,
+        });
+
+        if (!response.ok) {
+          const error = await response.json().catch(() => ({}));
+          throw new ApiError(
+            response.status,
+            error.detail || 'Failed to start streaming'
+          );
+        }
+
+        const reader = response.body?.getReader();
+        if (!reader) {
+          throw new Error('No response body');
+        }
+
+        const decoder = new TextDecoder();
+        let buffer = '';
+
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+
+          buffer += decoder.decode(value, { stream: true });
+
+          // Process complete SSE events
+          const lines = buffer.split('\n');
+          buffer = lines.pop() || ''; // Keep incomplete line in buffer
+          
+          for (const line of lines) {
+            if (line.startsWith('event: ')) {
+              // Event type is embedded in the JSON data, skip this line
+              continue;
+            } else if (line.startsWith('data: ')) {
+              const data = line.slice(6);
+              try {
+                const event = JSON.parse(data) as StreamEvent;
+                onEvent(event);
+              } catch (e) {
+                console.warn('Failed to parse SSE data:', data, e);
+              }
+            }
+          }
+        }
+      } catch (error) {
+        if (error instanceof Error && error.name === 'AbortError') {
+          // Stream was cancelled, don't report as error
+          return;
+        }
+        onError(error instanceof Error ? error : new Error(String(error)));
+      }
+    };
+
+    runStream();
+
+    // Return cancel function
+    return () => {
+      controller.abort();
+    };
+  },
+
+  /**
+   * Submit a chat request for async processing (polling-based)
+   * 
+   * @param sessionId - Session ID
+   * @param message - User message
+   * @param slideContext - Optional slide context for editing
+   * @returns Promise with request_id
+   */
+  async submitChatAsync(
+    sessionId: string,
+    message: string,
+    slideContext?: SlideContext,
+  ): Promise<{ request_id: string }> {
+    const response = await fetch(`${API_BASE_URL}/api/chat/async`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        session_id: sessionId,
+        message,
+        slide_context: slideContext,
+      }),
+    });
+
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({}));
+      throw new ApiError(response.status, error.detail || 'Failed to submit chat');
+    }
+
+    return response.json();
+  },
+
+  /**
+   * Poll for chat request status and new messages
+   * 
+   * @param requestId - Request ID from submitChatAsync
+   * @param afterMessageId - Return messages after this ID
+   * @returns Promise with poll response
+   */
+  async pollChat(requestId: string, afterMessageId: number = 0): Promise<PollResponse> {
+    const response = await fetch(
+      `${API_BASE_URL}/api/chat/poll/${requestId}?after_message_id=${afterMessageId}`,
+    );
+
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({}));
+      throw new ApiError(response.status, error.detail || 'Failed to poll chat');
+    }
+
+    return response.json();
+  },
+
+  /**
+   * Start polling for chat messages
+   * 
+   * @param sessionId - Session ID
+   * @param message - User message
+   * @param slideContext - Optional slide context
+   * @param onEvent - Callback for each event
+   * @param onError - Callback for errors
+   * @returns Function to cancel polling
+   */
+  startPolling(
+    sessionId: string,
+    message: string,
+    slideContext: SlideContext | undefined,
+    onEvent: (event: StreamEvent) => void,
+    onError: (error: Error) => void,
+  ): () => void {
+    let cancelled = false;
+    let pollInterval: ReturnType<typeof setInterval> | null = null;
+
+    (async () => {
+      try {
+        const { request_id } = await this.submitChatAsync(sessionId, message, slideContext);
+
+        let lastMessageId = 0;
+
+        pollInterval = setInterval(async () => {
+          if (cancelled) {
+            if (pollInterval) clearInterval(pollInterval);
+            return;
+          }
+
+          try {
+            const response = await this.pollChat(request_id, lastMessageId);
+
+            // Process new events
+            for (const event of response.events) {
+              onEvent(event);
+            }
+            lastMessageId = response.last_message_id;
+
+            // Stop polling on completion
+            if (response.status === 'completed' || response.status === 'error') {
+              if (pollInterval) clearInterval(pollInterval);
+
+              if (response.status === 'error') {
+                onError(new Error(response.error || 'Request failed'));
+              } else if (response.result) {
+                // Emit complete event
+                onEvent({
+                  type: 'complete',
+                  slides: response.result.slides,
+                  raw_html: response.result.raw_html,
+                  replacement_info: response.result.replacement_info,
+                });
+              }
+            }
+          } catch (err) {
+            console.error('Poll error:', err);
+            // Don't stop polling on transient errors
+          }
+        }, POLL_INTERVAL_MS);
+
+      } catch (err) {
+        onError(err instanceof Error ? err : new Error('Failed to start chat'));
+      }
+    })();
+
+    // Return cancel function
+    return () => {
+      cancelled = true;
+      if (pollInterval) clearInterval(pollInterval);
+    };
+  },
+
+  /**
+   * Send a chat message using the appropriate method (SSE or polling)
+   * 
+   * Automatically detects the environment and uses:
+   * - SSE streaming for local development
+   * - Polling for Databricks Apps (due to 60s proxy timeout)
+   * 
+   * @param sessionId - Session ID
+   * @param message - User message
+   * @param slideContext - Optional slide context
+   * @param onEvent - Callback for each event
+   * @param onError - Callback for errors
+   * @returns Function to cancel the request
+   */
+  sendChatMessage(
+    sessionId: string,
+    message: string,
+    slideContext: SlideContext | undefined,
+    onEvent: (event: StreamEvent) => void,
+    onError: (error: Error) => void,
+  ): () => void {
+    if (isPollingMode()) {
+      return this.startPolling(sessionId, message, slideContext, onEvent, onError);
+    } else {
+      return this.streamChat(sessionId, message, slideContext, onEvent, onError);
+    }
+  },
 };
