@@ -93,6 +93,21 @@ def acquire_session_lock(self, session_id: str, timeout_seconds: int = 300) -> b
 | `is_processing` | `BOOLEAN NOT NULL DEFAULT FALSE` | Lock flag |
 | `processing_started_at` | `TIMESTAMP` | Stale lock detection (>5 min) |
 
+### 5. Async Chat Requests (Polling Mode)
+
+For polling-based streaming, async requests are tracked in the `chat_requests` table:
+
+| Column | Type | Purpose |
+|--------|------|---------|
+| `request_id` | `VARCHAR(64)` | Unique request identifier |
+| `session_id` | `INTEGER FK` | Links to user_sessions |
+| `status` | `VARCHAR(20)` | `pending`/`running`/`completed`/`error` |
+| `result_json` | `TEXT` | Final result (slides, raw_html) |
+| `created_at` | `TIMESTAMP` | Request creation time |
+| `completed_at` | `TIMESTAMP` | Request completion time |
+
+Messages are linked to requests via `session_messages.request_id` for efficient polling.
+
 ### 3. Per-Request Tool Binding
 
 The LangChain agent previously used a shared `current_session_id` instance variable—a race condition when multiple requests ran in parallel. Now tools are created per-request with the session ID bound via closure:
@@ -184,14 +199,34 @@ Each worker has its own `ChatService` singleton and deck cache. The database-bas
 
 ## Database Migration
 
-Existing databases need the new columns:
+Existing databases need the session locking columns:
 
 ```sql
 ALTER TABLE user_sessions ADD COLUMN is_processing BOOLEAN NOT NULL DEFAULT FALSE;
 ALTER TABLE user_sessions ADD COLUMN processing_started_at TIMESTAMP;
 ```
 
-Fresh deployments create these columns automatically via SQLAlchemy model definitions.
+For polling support, run `scripts/migrate_polling_support.sql`:
+
+```sql
+CREATE TABLE IF NOT EXISTS chat_requests (
+    id SERIAL PRIMARY KEY,
+    request_id VARCHAR(64) UNIQUE NOT NULL,
+    session_id INTEGER NOT NULL REFERENCES user_sessions(id) ON DELETE CASCADE,
+    status VARCHAR(20) DEFAULT 'pending',
+    error_message TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    completed_at TIMESTAMP,
+    result_json TEXT
+);
+CREATE INDEX IF NOT EXISTS ix_chat_requests_request_id ON chat_requests(request_id);
+CREATE INDEX IF NOT EXISTS ix_chat_requests_session_id ON chat_requests(session_id);
+
+ALTER TABLE session_messages ADD COLUMN IF NOT EXISTS request_id VARCHAR(64);
+CREATE INDEX IF NOT EXISTS ix_session_messages_request_id ON session_messages(request_id);
+```
+
+Fresh deployments create these tables automatically via SQLAlchemy model definitions.
 
 ---
 
