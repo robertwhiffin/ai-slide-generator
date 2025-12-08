@@ -111,10 +111,9 @@ class TestSlideGeneratorAgent:
             assert agent.settings == mock_settings
             assert agent.client == mock_client
             assert agent.model is not None
-            assert agent.tools is not None
             assert agent.prompt is not None
-            assert agent.agent_executor is not None
-            assert agent.current_session_id is None
+            # Note: tools and agent_executor are now created per-request for thread safety
+            assert agent.sessions == {}
 
     def test_agent_initialization_missing_prompt(
         self, mock_settings, mock_client, mock_mlflow, mock_langchain_components
@@ -137,13 +136,21 @@ class TestSlideGeneratorAgent:
         model = agent_with_mocks.model
         assert model is not None
 
-    def test_create_tools_valid(self, agent_with_mocks):
-        """Test tool creation."""
-        tools = agent_with_mocks.tools
+    def test_create_tools_for_session_valid(self, agent_with_mocks):
+        """Test tool creation for a specific session."""
+        # Mock initialize_genie_conversation for create_session call
+        with patch("src.services.agent.initialize_genie_conversation") as mock_init:
+            mock_init.return_value = "test-genie-conv-id-session"
 
-        assert len(tools) == 1
-        assert tools[0].name == "query_genie_space"
-        assert "Genie" in tools[0].description
+            # Create a session first (tools need a session to bind to)
+            session_id = agent_with_mocks.create_session()
+
+            # Create tools for the session
+            tools = agent_with_mocks._create_tools_for_session(session_id)
+
+            assert len(tools) == 1
+            assert tools[0].name == "query_genie_space"
+            assert "Genie" in tools[0].description
     
     def test_session_management(self, agent_with_mocks):
         """Test session creation, retrieval, and management."""

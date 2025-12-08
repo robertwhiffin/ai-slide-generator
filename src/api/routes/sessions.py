@@ -1,8 +1,10 @@
 """Session management endpoints.
 
 Provides CRUD operations for managing user sessions with persistent storage.
+All blocking database calls are wrapped with asyncio.to_thread to avoid blocking the event loop.
 """
 
+import asyncio
 import logging
 from typing import List, Optional
 
@@ -33,7 +35,8 @@ async def create_session(request: CreateSessionRequest = None):
 
     try:
         session_manager = get_session_manager()
-        result = session_manager.create_session(
+        result = await asyncio.to_thread(
+            session_manager.create_session,
             user_id=request.user_id,
             title=request.title,
         )
@@ -69,7 +72,11 @@ async def list_sessions(
     """
     try:
         session_manager = get_session_manager()
-        sessions = session_manager.list_sessions(user_id=user_id, limit=limit)
+        sessions = await asyncio.to_thread(
+            session_manager.list_sessions,
+            user_id=user_id,
+            limit=limit,
+        )
 
         return {"sessions": sessions, "count": len(sessions)}
 
@@ -83,17 +90,31 @@ async def list_sessions(
 
 @router.get("/{session_id}")
 async def get_session(session_id: str):
-    """Get session details.
+    """Get session details including messages and slides.
 
     Args:
         session_id: Session identifier
 
     Returns:
-        Session information
+        Session information with messages and slide_deck
     """
     try:
         session_manager = get_session_manager()
-        return session_manager.get_session(session_id)
+
+        # Get session info
+        session = await asyncio.to_thread(session_manager.get_session, session_id)
+
+        # Get messages for conversation restoration
+        messages = await asyncio.to_thread(session_manager.get_messages, session_id)
+
+        # Get slide deck if it exists
+        slide_deck = await asyncio.to_thread(session_manager.get_slide_deck, session_id)
+
+        return {
+            **session,
+            "messages": messages,
+            "slide_deck": slide_deck,
+        }
 
     except SessionNotFoundError:
         raise HTTPException(
@@ -121,7 +142,11 @@ async def update_session(session_id: str, title: str = None):
     """
     try:
         session_manager = get_session_manager()
-        result = session_manager.rename_session(session_id, title)
+        result = await asyncio.to_thread(
+            session_manager.rename_session,
+            session_id,
+            title,
+        )
 
         logger.info(
             "Session renamed via API",
@@ -155,7 +180,7 @@ async def delete_session(session_id: str):
     """
     try:
         session_manager = get_session_manager()
-        session_manager.delete_session(session_id)
+        await asyncio.to_thread(session_manager.delete_session, session_id)
 
         logger.info("Session deleted via API", extra={"session_id": session_id})
 
@@ -190,7 +215,11 @@ async def get_session_messages(
     """
     try:
         session_manager = get_session_manager()
-        messages = session_manager.get_messages(session_id, limit=limit)
+        messages = await asyncio.to_thread(
+            session_manager.get_messages,
+            session_id,
+            limit=limit,
+        )
 
         return {"session_id": session_id, "messages": messages, "count": len(messages)}
 
@@ -219,7 +248,7 @@ async def get_session_slides(session_id: str):
     """
     try:
         session_manager = get_session_manager()
-        deck = session_manager.get_slide_deck(session_id)
+        deck = await asyncio.to_thread(session_manager.get_slide_deck, session_id)
 
         return {"session_id": session_id, "slide_deck": deck}
 
@@ -245,7 +274,7 @@ async def cleanup_expired_sessions():
     """
     try:
         session_manager = get_session_manager()
-        count = session_manager.cleanup_expired_sessions()
+        count = await asyncio.to_thread(session_manager.cleanup_expired_sessions)
 
         logger.info("Session cleanup completed", extra={"deleted_count": count})
 
