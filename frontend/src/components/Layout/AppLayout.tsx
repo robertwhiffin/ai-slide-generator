@@ -153,7 +153,7 @@ export const AppLayout: React.FC = () => {
                 }`}
                 title={isGenerating ? 'Navigation disabled during generation' : undefined}
               >
-                Settings
+                Profiles
               </button>
               <button
                 onClick={() => setViewMode('help')}
