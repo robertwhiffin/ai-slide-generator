@@ -10,7 +10,7 @@ from typing import Any, Dict, List, Optional
 from bs4 import BeautifulSoup
 
 from src.utils.css_utils import merge_css
-from src.utils.html_utils import extract_canvas_ids_from_script
+from src.utils.html_utils import extract_canvas_ids_from_script, split_script_by_canvas
 
 from .slide import Slide
 
@@ -239,21 +239,32 @@ class SlideDeck:
         for script_tag in soup.find_all('script', src=True):
             external_scripts.append(script_tag['src'])
 
-        # Extract inline scripts
+        # Extract inline scripts, splitting multi-canvas blocks into per-canvas blocks
         script_blocks: OrderedDict[str, ScriptBlock] = OrderedDict()
         canvas_to_script: Dict[str, str] = {}
         inline_scripts = soup.find_all('script', src=False)
-        for idx, script_tag in enumerate(inline_scripts):
+        block_index = 0
+
+        for script_tag in inline_scripts:
             script_content = script_tag.string or script_tag.get_text()
             if not script_content:
                 continue
             cleaned = script_content.strip()
-            canvas_ids = extract_canvas_ids_from_script(cleaned)
-            key = cls._generate_script_key(canvas_ids, idx)
-            block = ScriptBlock(key=key, text=cleaned, canvas_ids=set(canvas_ids))
-            script_blocks[key] = block
-            for canvas_id in canvas_ids:
-                canvas_to_script[canvas_id] = key
+
+            # Split multi-canvas scripts into per-canvas segments
+            segments = split_script_by_canvas(cleaned)
+
+            for segment_text, segment_canvas_ids in segments:
+                key = cls._generate_script_key(segment_canvas_ids, block_index)
+                block = ScriptBlock(
+                    key=key,
+                    text=segment_text,
+                    canvas_ids=set(segment_canvas_ids),
+                )
+                script_blocks[key] = block
+                for canvas_id in segment_canvas_ids:
+                    canvas_to_script[canvas_id] = key
+                block_index += 1
 
         # Phase 2: Extract Slides
         slide_elements = soup.find_all('div', class_='slide')
