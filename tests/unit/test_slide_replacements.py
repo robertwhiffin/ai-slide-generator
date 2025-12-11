@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 
 from src.api.schemas.requests import SlideContext
-from src.api.services.chat_service import validate_canvas_scripts
+from src.domain.slide import Slide
 from src.services.agent import AgentError, SlideGeneratorAgent
 
 
@@ -52,7 +52,9 @@ class TestSlideReplacementParsing:
         assert result["original_indices"] == original_indices
         assert result["original_count"] == len(original_indices)
         assert result["replacement_count"] == expected_count
+        # replacement_slides are now Slide objects
         assert len(result["replacement_slides"]) == expected_count
+        assert all(isinstance(s, Slide) for s in result["replacement_slides"])
         assert result["success"] is True
 
     def test_parse_replacements_no_slides_error(
@@ -67,7 +69,7 @@ class TestSlideReplacementParsing:
         self,
         agent_stub: SlideGeneratorAgent,
     ) -> None:
-        """Parser should collect canvas ids and associated scripts."""
+        """Parser should collect canvas ids and attach scripts to Slide objects."""
 
         for script_tag in ("<script data-slide-scripts>", "<script>"):
             html_response = f"""
@@ -85,10 +87,15 @@ class TestSlideReplacementParsing:
 
             result = agent_stub._parse_slide_replacements(html_response, [0])
 
+            # Canvas IDs extracted
             assert result["canvas_ids"] == ["chartA"]
-            assert "chartA" in result["replacement_scripts"]
-            assert "<script" not in result["replacement_scripts"]
-            assert result["script_canvas_ids"] == ["chartA"]
+            
+            # replacement_slides are now Slide objects with scripts attached
+            slides = result["replacement_slides"]
+            assert len(slides) == 1
+            assert isinstance(slides[0], Slide)
+            assert "chartA" in slides[0].scripts
+            assert "new Chart" in slides[0].scripts
 
     def test_validate_canvas_scripts_full_html_success(
         self,
@@ -153,23 +160,4 @@ class TestSlideContextValidation:
             )
 
 
-class TestCanvasScriptValidation:
-    """Validate helper that enforces chart script parity."""
-
-    def test_validation_passes_when_scripts_present(self) -> None:
-        """No error when every canvas id has script coverage."""
-        validate_canvas_scripts(
-            canvas_ids=["chart1"],
-            script_text="document.getElementById('chart1')",
-            existing_scripts="",
-        )
-
-    def test_validation_fails_when_scripts_missing(self) -> None:
-        """Raise ValueError when a canvas lacks initialization."""
-        with pytest.raises(ValueError, match="Missing Chart.js initialization"):
-            validate_canvas_scripts(
-                canvas_ids=["chart2"],
-                script_text="document.getElementById('chart1')",
-                existing_scripts="",
-            )
 

@@ -2,6 +2,7 @@ export interface Slide {
   index: number;
   slide_id: string;
   html: string;
+  scripts: string;  // JavaScript for this slide's charts (e.g., Chart.js initialization)
 }
 
 export interface SlideDeck {
@@ -26,10 +27,7 @@ export interface ReplacementInfo {
   net_change?: number;
   operation?: string;
   original_indices?: number[];
-  replacement_slides?: string[];
-  replacement_scripts?: string;
   success?: boolean;
   error?: string | null;
   canvas_ids?: string[];
-  script_canvas_ids?: string[];
 }

@@ -2,7 +2,6 @@
 
 import pytest
 from pathlib import Path
-from src.api.services.chat_service import ChatService
 from src.domain.slide_deck import SlideDeck
 from src.domain.slide import Slide
 
@@ -44,14 +43,13 @@ def sample_html():
 @pytest.fixture
 def sample_deck():
     """Fixture providing a sample slide deck."""
-    slide1 = Slide(html='<div class="slide"><h1>Slide 1</h1></div>')
+    slide1 = Slide(html='<div class="slide"><h1>Slide 1</h1></div>', scripts="console.log('test');")
     slide2 = Slide(html='<div class="slide"><h1>Slide 2</h1></div>')
     
     return SlideDeck(
         title="Test Deck",
         css="body { margin: 0; }",
         external_scripts=["https://cdn.tailwindcss.com"],
-        scripts="console.log('test');",
         slides=[slide1, slide2]
     )
 
@@ -268,83 +266,66 @@ class TestSlideOperations:
 
 
 class TestScriptManagement:
-    """Test structured script block management."""
+    """Test inline script management on Slide objects."""
     
-    def test_remove_canvas_scripts(self, canvas_slide_html):
-        """Removing a canvas should drop its script block."""
+    def test_scripts_stored_on_slides(self, canvas_slide_html):
+        """Scripts are stored directly on Slide objects."""
         deck = SlideDeck.from_html_string(canvas_slide_html)
+        
+        # Script should be on the slide
+        assert len(deck.slides) == 1
+        assert "chartA" in deck.slides[0].scripts
+        assert "new Chart" in deck.slides[0].scripts
+        
+        # Aggregated scripts should also contain it (IIFE-wrapped)
         assert "chartA" in deck.scripts
-        
-        deck.remove_canvas_scripts(["chartA"])
-        
-        assert deck.scripts == ""
-        assert list(deck.script_blocks.keys()) == []
     
-    def test_add_script_block_replaces_existing(self, canvas_slide_html):
-        """Adding a script block replaces prior versions for same canvas."""
-        deck = SlideDeck.from_html_string(canvas_slide_html)
-        new_script = """
-        const canvas = document.getElementById('chartA');
-        if (canvas) { canvas.getContext('2d'); console.log('updated'); }
-        """
+    def test_scripts_aggregated_with_iife_wrapping(self):
+        """Aggregated scripts are IIFE-wrapped to prevent variable collisions."""
+        slide1 = Slide(
+            html='<div class="slide"><h1>Slide 1</h1></div>',
+            scripts="const x = 1;"
+        )
+        slide2 = Slide(
+            html='<div class="slide"><h1>Slide 2</h1></div>',
+            scripts="const x = 2;"
+        )
+        deck = SlideDeck(slides=[slide1, slide2])
         
-        deck.add_script_block(new_script, ["chartA"])
+        # Each script should be wrapped in IIFE
+        assert "(function() {" in deck.scripts
+        assert "})();" in deck.scripts
+        # Both scripts should be present
+        assert "const x = 1;" in deck.scripts
+        assert "const x = 2;" in deck.scripts
+    
+    def test_removing_slide_removes_its_scripts(self):
+        """When a slide is removed, its scripts are removed automatically."""
+        slide1 = Slide(
+            html='<div class="slide"><h1>Slide 1</h1></div>',
+            scripts="console.log('slide1');"
+        )
+        slide2 = Slide(
+            html='<div class="slide"><h1>Slide 2</h1></div>',
+            scripts="console.log('slide2');"
+        )
+        deck = SlideDeck(slides=[slide1, slide2])
         
-        assert "updated" in deck.scripts
-        assert deck.scripts.count("updated") == 1
-        assert "new Chart" not in deck.scripts
-
-    def test_apply_replacement_removes_existing_canvas_scripts(self):
-        """Replacing slides removes prior scripts even if canvas persists elsewhere."""
-        import threading
+        assert "slide1" in deck.scripts
+        assert "slide2" in deck.scripts
         
-        html = """<!DOCTYPE html>
-<html>
-<body>
-<div class="slide"><canvas id="campaignsChart"></canvas></div>
-<div class="slide"><canvas id="territoryChart"></canvas></div>
-<script>
-const campaignsCanvas = document.getElementById('campaignsChart');
-if (campaignsCanvas) { console.log('old campaigns'); }
-</script>
-</body>
-</html>"""
-
-        deck = SlideDeck.from_html_string(html)
-        session_id = "test-session"
-
-        service = ChatService.__new__(ChatService)
-        service._cache_lock = threading.Lock()  # Required for thread-safe cache access
-        service._deck_cache = {session_id: deck}
-
-        replacement_script = """
-// Canvas: campaignsChart
-const campaignsCanvas = document.getElementById('campaignsChart');
-if (campaignsCanvas) { console.log('new campaigns'); }
-// Canvas: territoryChart
-const territoryCanvas = document.querySelector('#territoryChart');
-if (territoryCanvas) { console.log('new territory'); }
-"""
-
-        replacement_info = {
-            "start_index": 1,
-            "original_count": 1,
-            "replacement_slides": ['<div class="slide"><canvas id="territoryChart"></canvas></div>'],
-            "replacement_scripts": replacement_script,
-            "canvas_ids": ["territoryChart"],
-        }
-
-        service._apply_slide_replacements(replacement_info, session_id=session_id)
-
-        updated_deck = service._deck_cache[session_id]
-        assert "new campaigns" in updated_deck.scripts
-        assert "new territory" in updated_deck.scripts
-        assert "old campaigns" not in updated_deck.scripts
-
-    def test_multi_canvas_script_splits_during_parsing(self):
-        """Multi-canvas script blocks are split into per-canvas blocks during parsing.
+        # Remove first slide
+        deck.remove_slide(0)
         
-        This prevents duplicate variable declarations when replacing a single canvas.
+        # slide1's script should be gone
+        assert "slide1" not in deck.scripts
+        # slide2's script should remain
+        assert "slide2" in deck.scripts
+
+    def test_multi_canvas_script_splits_to_slides(self):
+        """Multi-canvas script blocks are split and assigned to respective slides.
+        
+        This prevents duplicate variable declarations when replacing a single slide.
         Regression test for: 'Identifier canvas1 has already been declared'.
         """
         # HTML with a monolithic script block containing multiple chart definitions
@@ -381,54 +362,32 @@ if (canvas3) {
 
         deck = SlideDeck.from_html_string(html)
 
-        # Should have 3 separate script blocks (one per canvas)
-        assert len(deck.script_blocks) == 3
+        # Should have 3 slides
+        assert len(deck.slides) == 3
         
-        # Each canvas should map to its own script block
-        assert "overallTrendChart" in deck.canvas_to_script
-        assert "growthChart" in deck.canvas_to_script
-        assert "lobPieChart" in deck.canvas_to_script
+        # Each slide should have its own isolated script
+        assert "overallTrendChart" in deck.slides[0].scripts
+        assert "growthChart" not in deck.slides[0].scripts
         
-        # Each script block should only contain code for its canvas
-        for key, block in deck.script_blocks.items():
-            assert len(block.canvas_ids) == 1
-            
-        # Verify canvas1 code is isolated
-        canvas1_key = deck.canvas_to_script["overallTrendChart"]
-        canvas1_block = deck.script_blocks[canvas1_key]
-        assert "overallTrendChart" in canvas1_block.text
-        assert "growthChart" not in canvas1_block.text
-        assert "lobPieChart" not in canvas1_block.text
+        assert "growthChart" in deck.slides[1].scripts
+        assert "overallTrendChart" not in deck.slides[1].scripts
+        
+        assert "lobPieChart" in deck.slides[2].scripts
+        assert "overallTrendChart" not in deck.slides[2].scripts
 
-        # Now test removal - only canvas1's script should be removed
-        deck.remove_canvas_scripts(["overallTrendChart"])
+        # Now test removal - removing slide 0 should only remove its script
+        deck.remove_slide(0)
         
-        # canvas1 script should be gone
-        assert "overallTrendChart" not in deck.canvas_to_script
-        assert canvas1_key not in deck.script_blocks
+        # overallTrendChart script should be gone
         assert "overallTrendChart" not in deck.scripts
         
-        # canvas2 and canvas3 scripts should remain
+        # Other scripts should remain
         assert "growthChart" in deck.scripts
         assert "lobPieChart" in deck.scripts
         
-        # Now add a replacement script for canvas1
-        replacement_script = """
-// Canvas: overallTrendChart
-const canvas1 = document.getElementById('overallTrendChart');
-if (canvas1) {
-    const ctx1 = canvas1.getContext('2d');
-    new Chart(ctx1, { type: 'line', data: { labels: ['Updated'], datasets: [] } });
-}
-"""
-        deck.add_script_block(replacement_script, ["overallTrendChart"])
-        
-        # Should have 3 blocks again
-        assert len(deck.script_blocks) == 3
-        
-        # No duplicate definitions - count occurrences of canvas1
-        assert deck.scripts.count("const canvas1") == 1
-        assert "Updated" in deck.scripts
+        # Verify IIFE wrapping prevents variable collision in aggregated scripts
+        # (canvas1, canvas2, canvas3 are all isolated in their IIFEs)
+        assert "(function() {" in deck.scripts
 
 
 class TestKnitting:
@@ -465,14 +424,15 @@ class TestKnitting:
         assert '<script src=' in html
     
     def test_render_single_slide(self, sample_deck):
-        """Test rendering individual slide."""
+        """Test rendering individual slide uses only that slide's scripts."""
         html = sample_deck.render_slide(0)
         
         assert "<!DOCTYPE html>" in html
         assert "Slide 1" in html
         assert "Slide 2" not in html  # Should only include one slide
         assert sample_deck.css in html
-        assert sample_deck.scripts in html
+        # Uses slide's individual scripts (not IIFE-wrapped)
+        assert sample_deck.slides[0].scripts.strip() in html
     
     def test_render_slide_title(self, sample_deck):
         """Test rendered slide has correct title."""
