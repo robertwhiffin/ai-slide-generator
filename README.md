@@ -253,7 +253,7 @@ ai-slide-generator/
 | [Frontend Overview](docs/technical/frontend-overview.md) | React components, state management |
 | [Real-Time Streaming](docs/technical/real-time-streaming.md) | SSE events, conversation persistence |
 | [Databricks Deployment](docs/technical/databricks-app-deployment.md) | Deployment CLI, environments |
-| [Slide Parser](docs/technical/slide-parser-and-script-management.md) | HTML parsing, script handling |
+| [Slide Parser](docs/technical/slide-parser-and-script-management.md) | HTML parsing, CSS merging, script handling |
 | [Database Config](docs/technical/database-configuration.md) | PostgreSQL/Lakebase schema |
 
 ---
