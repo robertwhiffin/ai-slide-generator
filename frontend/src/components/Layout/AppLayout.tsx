@@ -34,13 +34,9 @@ export const AppLayout: React.FC = () => {
 
   // Handle restoring a session from history
   const handleSessionRestore = useCallback(async (restoredSessionId: string) => {
-    const restoredDeck = await switchSession(restoredSessionId);
-    if (restoredDeck) {
-      setSlideDeck(restoredDeck);
-    } else {
-      setSlideDeck(null);
-    }
-    setRawHtml(null); // Raw HTML isn't stored, so clear it
+    const { slideDeck: restoredDeck, rawHtml: restoredRawHtml } = await switchSession(restoredSessionId);
+    setSlideDeck(restoredDeck);
+    setRawHtml(restoredRawHtml);
     setChatKey(prev => prev + 1);
     setViewMode('main');
   }, [switchSession]);
