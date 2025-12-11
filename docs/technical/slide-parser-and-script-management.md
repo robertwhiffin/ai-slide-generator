@@ -29,22 +29,42 @@ The pipeline narrative below focuses on the shared HTML/CSS/script path that con
 ### 2. Backend Parsing & Script Management
 #### 2.1 SlideDeck Parsing
 ```python
-# src/schemas/slide_deck.py
+# src/domain/slide_deck.py
 soup = BeautifulSoup(html_content, 'html.parser')
 script_blocks: OrderedDict[str, ScriptBlock] = OrderedDict()
 inline_scripts = soup.find_all('script', src=False)
-for idx, script_tag in enumerate(inline_scripts):
+block_index = 0
+
+for script_tag in inline_scripts:
     script_content = script_tag.string or script_tag.get_text()
     cleaned = script_content.strip()
-    canvas_ids = extract_canvas_ids_from_script(cleaned)
-    key = cls._generate_script_key(canvas_ids, idx)
-    block = ScriptBlock(key=key, text=cleaned, canvas_ids=set(canvas_ids))
-    script_blocks[key] = block
+
+    # Split multi-canvas scripts into per-canvas segments
+    segments = split_script_by_canvas(cleaned)
+
+    for segment_text, segment_canvas_ids in segments:
+        key = cls._generate_script_key(segment_canvas_ids, block_index)
+        block = ScriptBlock(key=key, text=segment_text, canvas_ids=set(segment_canvas_ids))
+        script_blocks[key] = block
+        for canvas_id in segment_canvas_ids:
+            canvas_to_script[canvas_id] = key
+        block_index += 1
 ```
 
-- Each inline `<script>` becomes a `ScriptBlock`.
-- `canvas_to_script` maps every canvas ID to the block key for quick removal/replacement.
-- Slides are stored as `Slide` objects (`src/models/slide.py`) containing raw `<div class="slide">...</div>` HTML.
+- Multi-canvas `<script>` tags are **split into per-canvas segments** during parsing via `split_script_by_canvas()`.
+- Each segment becomes its own `ScriptBlock`, ensuring clean removal/replacement of individual canvases.
+- `canvas_to_script` maps every canvas ID to its isolated block key.
+- Slides are stored as `Slide` objects (`src/domain/slide.py`) containing raw `<div class="slide">...</div>` HTML.
+
+#### 2.1.1 Script Splitting Heuristics
+
+The `split_script_by_canvas()` function (`src/utils/html_utils.py`) detects chart block boundaries by looking for:
+
+1. `// Canvas: <id>` comment markers (most specific)
+2. `// Chart N:` comment patterns
+3. Variable declarations near `getElementById()` calls
+
+This prevents the "Identifier already declared" error when editing a single chart in a deck that originally had a monolithic multi-chart script block.
 
 #### 2.2 Canvas Extraction Heuristics
 ```python
@@ -218,12 +238,13 @@ const slideHTML = `
 
 #### 6.1 Script Integrity
 1. **Prompt constraints** ensure the LLM emits one script per canvas with clear markers and unique variables.
-2. **Extraction heuristics** pick up canvas IDs from multiple patterns and from the comment marker.
-3. **Fallback chain** ensures canvas IDs are resolved even if script parsing fails: parsed script → regex extraction → slide HTML canvas elements.
-4. **Backend logic** removes any existing script block tied to canvases mentioned in the new script, even if the slide wasn't removed.
-5. **Frontend** only ever renders the backend deck, so charts run with the exact scripts produced by the server.
+2. **Parse-time splitting** breaks monolithic multi-canvas script blocks into isolated per-canvas `ScriptBlock`s, preventing "Identifier already declared" errors during edits.
+3. **Extraction heuristics** pick up canvas IDs from multiple patterns and from the comment marker.
+4. **Fallback chain** ensures canvas IDs are resolved even if script parsing fails: parsed script → regex extraction → slide HTML canvas elements.
+5. **Backend logic** removes any existing script block tied to canvases mentioned in the new script, even if the slide wasn't removed.
+6. **Frontend** only ever renders the backend deck, so charts run with the exact scripts produced by the server.
 
-If the prompt is ever violated (e.g., multi-canvas blocks reappear), the backend still deduplicates because every referenced canvas triggers `remove_canvas_scripts`.
+If the prompt is ever violated (e.g., multi-canvas blocks reappear), the parse-time splitting heuristics still isolate each canvas's code, and `remove_canvas_scripts` cleanly removes only the targeted canvas.
 
 #### 6.2 CSS Integrity
 1. **Selector-level merging** ensures edits only affect the CSS rules they modify; unrelated styles are preserved.
@@ -242,7 +263,7 @@ If the prompt is ever violated (e.g., multi-canvas blocks reappear), the backend
 | --- | --- |
 | Prompt / LLM Output Rules | `config/prompts.yaml` |
 | Slide & script parsing | `src/domain/slide_deck.py`, `src/domain/slide.py` |
-| Canvas heuristics | `src/utils/html_utils.py` |
+| Canvas heuristics & script splitting | `src/utils/html_utils.py` (`split_script_by_canvas`, `extract_canvas_ids_from_script`) |
 | CSS parsing & merging | `src/utils/css_utils.py` |
 | Agent response extraction | `src/services/agent.py` (`_parse_slide_replacements`, `_extract_css_from_response`) |
 | Chat orchestration & replacements | `src/api/services/chat_service.py` |
@@ -256,7 +277,6 @@ If the prompt is ever violated (e.g., multi-canvas blocks reappear), the backend
 ### 8. Future Enhancements
 - Consider storing per-canvas script hashes so we can detect no-op edits (would slot into the backend flow documented in `backend-overview.md`).
 - Capture shared helper scripts separately if the LLM needs to reuse functions across canvases.
-- Add automated validation that rejects multi-canvas blocks at the API boundary; coordinate any new validation responses with the frontend contract in `frontend-overview.md`.
 - CSS diff visualization: show users which selectors were modified during edits.
 - Scoped CSS: consider prefixing selectors per-slide to prevent style leakage between slides.
 
