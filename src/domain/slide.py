@@ -13,17 +13,20 @@ class Slide:
     Attributes:
         html: The complete HTML for this slide
         slide_id: Optional unique identifier for this slide
+        scripts: JavaScript code for this slide's charts (e.g., Chart.js initialization)
     """
 
-    def __init__(self, html: str, slide_id: Optional[str] = None):
+    def __init__(self, html: str, slide_id: Optional[str] = None, scripts: str = ""):
         """Initialize a Slide with HTML content.
         
         Args:
             html: The complete HTML for this slide (including outer <div class="slide">)
             slide_id: Optional unique identifier for this slide
+            scripts: JavaScript code for this slide's charts
         """
         self.html = html
         self.slide_id = slide_id
+        self.scripts = scripts
 
     def to_html(self) -> str:
         """Return the HTML string for this slide.
@@ -37,11 +40,12 @@ class Slide:
         """Create a deep copy of this slide.
         
         Returns:
-            A new Slide instance with copied HTML content
+            A new Slide instance with copied HTML and scripts content
         """
         return Slide(
             html=copy.deepcopy(self.html),
-            slide_id=self.slide_id
+            slide_id=self.slide_id,
+            scripts=copy.deepcopy(self.scripts)
         )
 
     def __str__(self) -> str:
@@ -64,5 +68,5 @@ class Slide:
         Returns:
             String representation for debugging
         """
-        return f"Slide(slide_id={self.slide_id!r}, html_length={len(self.html)})"
+        return f"Slide(slide_id={self.slide_id!r}, html_length={len(self.html)}, scripts_length={len(self.scripts)})"
 
