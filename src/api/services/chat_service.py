@@ -687,8 +687,35 @@ class ChatService:
             },
         )
 
-        replacement_script_canvas_ids = script_canvas_ids or extract_canvas_ids_from_script(
-            replacement_scripts
+        # Merge replacement CSS into deck
+        replacement_css = replacement_info.get("replacement_css", "")
+        if replacement_css:
+            current_deck.update_css(replacement_css)
+            logger.info(
+                "Merged replacement CSS",
+                extra={"css_length": len(replacement_css)},
+            )
+
+        # Get canvas IDs from replacement SLIDES (authoritative source)
+        incoming_canvas_ids: list[str] = []
+        for slide_html in replacement_slides:
+            incoming_canvas_ids.extend(extract_canvas_ids_from_html(slide_html))
+
+        # Fallback chain: script parsing → regex extraction → slide HTML
+        replacement_script_canvas_ids = (
+            script_canvas_ids
+            or extract_canvas_ids_from_script(replacement_scripts)
+            or incoming_canvas_ids
+        )
+
+        logger.debug(
+            "Script canvas ID resolution",
+            extra={
+                "from_script_parsing": script_canvas_ids,
+                "from_regex": extract_canvas_ids_from_script(replacement_scripts) if not script_canvas_ids else None,
+                "from_slide_html": incoming_canvas_ids if not script_canvas_ids else None,
+                "resolved": replacement_script_canvas_ids,
+            },
         )
 
         if replacement_script_canvas_ids:
