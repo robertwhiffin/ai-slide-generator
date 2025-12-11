@@ -2,6 +2,9 @@
 
 All session state is stored in the database (PostgreSQL in dev, Lakebase in prod).
 Sessions are auto-created on first message if they don't exist.
+
+Scripts are stored directly on Slide objects. When a slide is replaced,
+its scripts are automatically replaced with it - no separate cleanup needed.
 """
 
 import logging
@@ -19,42 +22,25 @@ from src.domain.slide import Slide
 from src.domain.slide_deck import SlideDeck
 from src.services.agent import create_agent
 from src.services.streaming_callback import StreamingCallbackHandler
-from src.utils.html_utils import (
-    extract_canvas_ids_from_html,
-    extract_canvas_ids_from_script,
-)
 
 logger = logging.getLogger(__name__)
 
 
-def validate_canvas_scripts(
-    canvas_ids: List[str],
-    script_text: str,
-    existing_scripts: str,
-) -> None:
+def _sanitize_replacement_info(replacement_info: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """Sanitize replacement_info for JSON serialization.
+    
+    Removes or converts non-serializable fields like Slide objects.
+    The frontend doesn't need raw Slide objects since it gets the full deck.
     """
-    Ensure every canvas id has a corresponding initialization script.
-
-    Raises:
-        ValueError: If any canvas lacks an associated script.
-    """
-    if not canvas_ids:
-        return
-
-    missing: list[str] = []
-    for canvas_id in canvas_ids:
-        if canvas_id in existing_scripts:
-            continue
-        if script_text and canvas_id in script_text:
-            continue
-        missing.append(canvas_id)
-
-    if missing:
-        raise ValueError(
-            "Missing Chart.js initialization for canvas ids: "
-            f"{', '.join(missing)}. Include a <script data-slide-scripts> block "
-            "with document.getElementById('<id>') for each canvas."
-        )
+    if not replacement_info:
+        return None
+    
+    # Create a copy without replacement_slides (contains Slide objects)
+    sanitized = {
+        k: v for k, v in replacement_info.items()
+        if k != "replacement_slides"
+    }
+    return sanitized
 
 
 class ChatService:
@@ -290,7 +276,7 @@ class ChatService:
                 "slide_deck": slide_deck_dict,
                 "raw_html": raw_html,
                 "metadata": result["metadata"],
-                "replacement_info": replacement_info,
+                "replacement_info": _sanitize_replacement_info(replacement_info),
                 "session_id": session_id,
             }
 
@@ -464,12 +450,12 @@ class ChatService:
         # Update session activity
         session_manager.update_last_activity(session_id)
 
-        # Yield final complete event
+        # Yield final complete event (sanitize replacement_info for JSON serialization)
         yield StreamEvent(
             type=StreamEventType.COMPLETE,
             slides=slide_deck_dict,
             raw_html=raw_html,
-            replacement_info=replacement_info,
+            replacement_info=_sanitize_replacement_info(replacement_info),
             metadata=result.get("metadata"),
         )
 
@@ -625,10 +611,16 @@ class ChatService:
         Apply slide replacements to the session's slide deck.
 
         Handles variable-length replacements by removing the original block
-        and inserting the new slides at the same start index.
+        and inserting the new Slide objects at the same start index.
+        
+        Scripts are attached directly to Slide objects, so when a slide
+        is removed its scripts go with it automatically.
 
         Args:
             replacement_info: Information about the replacement operation
+                - replacement_slides: List of Slide objects (with scripts attached)
+                - replacement_css: Optional CSS to merge
+                - start_index, original_count: Position info
             session_id: Session ID
         """
         current_deck = self._get_or_load_deck(session_id)
@@ -638,10 +630,7 @@ class ChatService:
 
         start_idx = replacement_info["start_index"]
         original_count = replacement_info["original_count"]
-        replacement_slides = replacement_info["replacement_slides"]
-        replacement_scripts = replacement_info.get("replacement_scripts", "")
-        canvas_ids = replacement_info.get("canvas_ids", [])
-        script_canvas_ids = replacement_info.get("script_canvas_ids")
+        replacement_slides: List[Slide] = replacement_info["replacement_slides"]
 
         # Validate replacement range
         if start_idx < 0 or start_idx >= len(current_deck.slides):
@@ -649,20 +638,7 @@ class ChatService:
         if start_idx + original_count > len(current_deck.slides):
             raise ValueError("Replacement range exceeds deck size")
 
-        validate_canvas_scripts(
-            canvas_ids=canvas_ids,
-            script_text=replacement_scripts,
-            existing_scripts=current_deck.scripts or "",
-        )
-
-        outgoing_canvas_ids: list[str] = []
-        for offset in range(original_count):
-            slide_html = current_deck.slides[start_idx + offset].html
-            outgoing_canvas_ids.extend(extract_canvas_ids_from_html(slide_html))
-
-        if outgoing_canvas_ids:
-            current_deck.remove_canvas_scripts(outgoing_canvas_ids)
-
+        # Remove original slides (scripts go with them automatically)
         for _ in range(original_count):
             current_deck.remove_slide(start_idx)
 
@@ -671,12 +647,11 @@ class ChatService:
             extra={"count": original_count, "start_index": start_idx},
         )
 
-        for idx, slide_html in enumerate(replacement_slides):
-            new_slide = Slide(
-                html=slide_html,
-                slide_id=f"slide_{start_idx + idx}",
-            )
-            current_deck.insert_slide(new_slide, start_idx + idx)
+        # Insert replacement slides (scripts already attached)
+        for idx, slide in enumerate(replacement_slides):
+            # Update slide_id to reflect new position
+            slide.slide_id = f"slide_{start_idx + idx}"
+            current_deck.insert_slide(slide, start_idx + idx)
 
         logger.info(
             "Inserted replacement slides",
@@ -696,61 +671,11 @@ class ChatService:
                 extra={"css_length": len(replacement_css)},
             )
 
-        # Get canvas IDs from replacement SLIDES (authoritative source)
-        incoming_canvas_ids: list[str] = []
-        for slide_html in replacement_slides:
-            incoming_canvas_ids.extend(extract_canvas_ids_from_html(slide_html))
-
-        # Fallback chain: script parsing → regex extraction → slide HTML
-        replacement_script_canvas_ids = (
-            script_canvas_ids
-            or extract_canvas_ids_from_script(replacement_scripts)
-            or incoming_canvas_ids
-        )
-
-        logger.debug(
-            "Script canvas ID resolution",
-            extra={
-                "from_script_parsing": script_canvas_ids,
-                "from_regex": extract_canvas_ids_from_script(replacement_scripts) if not script_canvas_ids else None,
-                "from_slide_html": incoming_canvas_ids if not script_canvas_ids else None,
-                "resolved": replacement_script_canvas_ids,
-            },
-        )
-
-        if replacement_script_canvas_ids:
-            current_deck.remove_canvas_scripts(replacement_script_canvas_ids)
-
-        self._append_replacement_scripts(
-            script_text=replacement_scripts,
-            script_canvas_ids=replacement_script_canvas_ids,
-            session_id=session_id,
-        )
-
         # Update cache (thread-safe)
         with self._cache_lock:
             self._deck_cache[session_id] = current_deck
 
         return current_deck.to_dict()
-
-    def _append_replacement_scripts(
-        self,
-        script_text: str,
-        script_canvas_ids: Optional[List[str]] = None,
-        session_id: str = "",
-    ) -> None:
-        """Append or replace validated replacement scripts on the deck."""
-        with self._cache_lock:
-            current_deck = self._deck_cache.get(session_id)
-
-        if not current_deck:
-            return
-
-        if not script_text or not script_text.strip():
-            return
-
-        canvas_ids = script_canvas_ids or []
-        current_deck.add_script_block(script_text, canvas_ids)
 
     def get_slides(self, session_id: str) -> Optional[Dict[str, Any]]:
         """Get slide deck for a session.

@@ -60,8 +60,10 @@ export const SlideTile: React.FC<SlideTileProps> = ({
     return () => window.removeEventListener('resize', updateScale);
   }, []);
 
-  // Build complete HTML for iframe
+  // Build complete HTML for iframe using slide-specific scripts
+  // Each slide is rendered in its own iframe, so no IIFE wrapping needed
   const slideHTML = useMemo(() => {
+    const slideScripts = slide.scripts || '';
     return `
 <!DOCTYPE html>
 <html lang="en">
@@ -75,20 +77,11 @@ export const SlideTile: React.FC<SlideTileProps> = ({
 </head>
 <body>
   ${slide.html}
-  <script>
-    // Wrap scripts in try-catch to handle multi-slide chart initialization
-    // Each slide contains all scripts but only has its own canvas elements
-    try {
-      ${slideDeck.scripts}
-    } catch (error) {
-      // Silently catch expected errors from missing canvas elements
-      console.debug('Chart initialization skipped for missing canvas:', error.message);
-    }
-  </script>
+  ${slideScripts ? `<script>${slideScripts}</script>` : ''}
 </body>
 </html>
     `.trim();
-  }, [slide.html, slideDeck.css, slideDeck.scripts, slideDeck.external_scripts]);
+  }, [slide.html, slide.scripts, slideDeck.css, slideDeck.external_scripts]);
 
   // Calculate scaled dimensions
   const scaledHeight = SLIDE_HEIGHT * scale;
