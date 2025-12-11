@@ -32,11 +32,12 @@ interface SlidePanelProps {
   slideDeck: SlideDeck | null;
   rawHtml: string | null;
   onSlideChange: (slideDeck: SlideDeck) => void;
+  scrollToSlide?: { index: number; key: number } | null;
 }
 
 type ViewMode = 'tiles' | 'rawhtml' | 'rawtext';
 
-export const SlidePanel: React.FC<SlidePanelProps> = ({ slideDeck, rawHtml, onSlideChange }) => {
+export const SlidePanel: React.FC<SlidePanelProps> = ({ slideDeck, rawHtml, onSlideChange, scrollToSlide }) => {
   const [isReordering, setIsReordering] = useState(false);
   const [viewMode, setViewMode] = useState<ViewMode>('tiles');
   const [isExportingPDF, setIsExportingPDF] = useState(false);
@@ -46,6 +47,7 @@ export const SlidePanel: React.FC<SlidePanelProps> = ({ slideDeck, rawHtml, onSl
   const [isPresentationMode, setIsPresentationMode] = useState(false);
   const { selectedIndices, setSelection, clearSelection } = useSelection();
   const { sessionId } = useSession();
+  const slideRefs = useRef<Map<number, HTMLDivElement>>(new Map());
   
   const sensors = useSensors(
     useSensor(PointerSensor),
@@ -226,6 +228,16 @@ export const SlidePanel: React.FC<SlidePanelProps> = ({ slideDeck, rawHtml, onSl
       return () => document.removeEventListener('mousedown', handleClickOutside);
     }
   }, [showExportMenu]);
+
+  // Scroll to slide when scrollToSlide changes
+  useEffect(() => {
+    if (scrollToSlide != null && viewMode === 'tiles') {
+      const slideElement = slideRefs.current.get(scrollToSlide.index);
+      if (slideElement) {
+        slideElement.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      }
+    }
+  }, [scrollToSlide, viewMode]);
   const handleSaveAsHTML = () => {
     if (!slideDeck) return;
 
@@ -502,15 +514,25 @@ export const SlidePanel: React.FC<SlidePanelProps> = ({ slideDeck, rawHtml, onSl
                   strategy={verticalListSortingStrategy}
                 >
         {slideDeck.slides.map((slide, index) => (
-          <SlideTile
+          <div
             key={slide.slide_id}
-            slide={slide}
-            slideDeck={slideDeck}
-            index={index}
-                      onDelete={() => handleDeleteSlide(index)}
-                      onDuplicate={() => handleDuplicateSlide(index)}
-                      onUpdate={(html) => handleUpdateSlide(index, html)}
-          />
+            ref={(el) => {
+              if (el) {
+                slideRefs.current.set(index, el);
+              } else {
+                slideRefs.current.delete(index);
+              }
+            }}
+          >
+            <SlideTile
+              slide={slide}
+              slideDeck={slideDeck}
+              index={index}
+              onDelete={() => handleDeleteSlide(index)}
+              onDuplicate={() => handleDuplicateSlide(index)}
+              onUpdate={(html) => handleUpdateSlide(index, html)}
+            />
+          </div>
         ))}
                 </SortableContext>
               </DndContext>

@@ -25,11 +25,14 @@ How the React/Vite frontend is structured, how it communicates with backend APIs
 ```
 
 - **ChatPanel** owns chat history and calls backend APIs to generate or edit slides.
-- **SelectionRibbon** mirrors the current `SlideDeck` and lets users pick consecutive slides for editing context.
-- **SlidePanel** shows parsed slides, raw HTML render, or plain HTML text; exposes per-slide actions (edit, duplicate, delete, reorder).
+- **SelectionRibbon** mirrors the current `SlideDeck` with dual interaction:
+  - **Click slide preview** – scrolls the main SlidePanel to that slide
+  - **Click checkbox** – toggles slide selection for chat context (contiguous only)
+- **SlidePanel** shows parsed slides, raw HTML render, or plain HTML text; exposes per-slide actions (edit, duplicate, delete, reorder). Accepts `scrollToSlide` prop to navigate to a specific slide.
 - **AppLayout** manages shared state:
   - `slideDeck: SlideDeck | null` – parsed slides plus CSS/script metadata
   - `rawHtml: string | null` – exact HTML from the AI for debugging views
+  - `scrollTarget: { index, key } | null` – coordinates ribbon-to-panel navigation
 
 ---
 
@@ -98,7 +101,7 @@ Parsed tiles, rendered raw HTML (`iframe`), and raw HTML text (`<pre>`). Users c
 | `src/components/SlidePanel/SlidePanel.tsx` | Hosts drag/drop, tabs, per-slide CRUD | `api.getSlides`, `api.reorderSlides`, `api.updateSlide`, `api.duplicateSlide`, `api.deleteSlide` |
 | `src/components/SlidePanel/SlideTile.tsx` | Slide preview, selection button, editor modal trigger | Prop callbacks to `SlidePanel` |
 | `src/components/SlidePanel/HTMLEditorModal.tsx` | Monaco editor with validation (requires `<div class="slide">`) | Calls `api.updateSlide` then `api.getSlides` |
-| `src/components/SlidePanel/SelectionRibbon.tsx` + `SlideSelection.tsx` | Thumbnail strip for contiguous multi-select | None (updates `SelectionContext`) |
+| `src/components/SlidePanel/SelectionRibbon.tsx` + `SlideSelection.tsx` | Thumbnail strip with dual interaction: preview click navigates main panel, checkbox toggles selection for chat context | `onSlideNavigate` callback to `AppLayout`, updates `SelectionContext` |
 | `src/hooks/useKeyboardShortcuts.ts` | `Esc` clears selection globally | None |
 | `src/utils/loadingMessages.ts` | Rotating messages during LLM calls | None |
 
@@ -136,8 +139,10 @@ Parsed tiles, rendered raw HTML (`iframe`), and raw HTML text (`<pre>`). Users c
 4. Response updates `messages`, `slideDeck`, and `rawHtml`
 5. `SelectionContext` cleared after fresh slides arrive
 
-### Selecting Slides
+### Selecting Slides and Navigation
 
+- **Ribbon navigation:** Clicking a slide preview in `SelectionRibbon` scrolls `SlidePanel` to that slide via `scrollToSlide` prop
+- **Ribbon selection:** Clicking a checkbox in `SelectionRibbon` toggles that slide's selection for chat context
 - `SelectionRibbon` recomputes on deck changes
 - Non-contiguous selections show warning and are ignored
 - `SlideTile` action button marks single slides
@@ -195,9 +200,10 @@ Errors bubble up as `ApiError` (status + message). Common statuses:
 
 1. **Start session** – Load app, session created on first interaction
 2. **Generate baseline deck** – Enter prompt, chat panel shows loading, slides appear
-3. **Refine slides** – Select contiguous slides via ribbon, provide instructions
-4. **Manual adjustments** – Edit HTML via modal, duplicate/delete/reorder
-5. **QA raw output** – Compare raw HTML render vs parsed slides
+3. **Navigate slides** – Click slide preview in ribbon to scroll main panel to that slide
+4. **Refine slides** – Use checkbox in ribbon to select contiguous slides for chat context, provide instructions
+5. **Manual adjustments** – Edit HTML via modal, duplicate/delete/reorder
+6. **QA raw output** – Compare raw HTML render vs parsed slides
 
 ---
 
