@@ -433,6 +433,7 @@ class SlideGeneratorAgent:
         soup = BeautifulSoup(llm_response, "html.parser")
         slide_divs = soup.find_all("div", class_="slide")
         script_blocks, script_canvas_ids = self._extract_script_blocks(soup)
+        replacement_css = self._extract_css_from_response(soup)
 
         if not slide_divs:
             raise AgentError(
@@ -465,6 +466,7 @@ class SlideGeneratorAgent:
         return {
             "replacement_slides": replacement_slides,
             "replacement_scripts": "\n".join(script_blocks) if script_blocks else "",
+            "replacement_css": replacement_css,
             "original_indices": original_indices,
             "start_index": start_index,
             "original_count": original_count,
@@ -487,6 +489,21 @@ class SlideGeneratorAgent:
                 if canvas_id:
                     ids.append(canvas_id)
         return ids
+
+    def _extract_css_from_response(self, soup: BeautifulSoup) -> str:
+        """Extract CSS content from LLM response.
+        
+        Args:
+            soup: BeautifulSoup parsed HTML
+            
+        Returns:
+            Concatenated CSS from all <style> tags
+        """
+        css_parts = []
+        for style_tag in soup.find_all('style'):
+            if style_tag.string:
+                css_parts.append(style_tag.string.strip())
+        return '\n'.join(css_parts)
 
     def _extract_script_blocks(self, soup: BeautifulSoup) -> tuple[list[str], list[str]]:
         """
