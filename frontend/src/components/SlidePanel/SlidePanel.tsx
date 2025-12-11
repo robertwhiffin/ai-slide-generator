@@ -455,24 +455,30 @@ export const SlidePanel: React.FC<SlidePanelProps> = ({ slideDeck, rawHtml, onSl
           {isDebugMode() && (
             <>
               <button
-                onClick={() => setViewMode('rawhtml')}
+                onClick={() => rawHtml && setViewMode('rawhtml')}
                 className={`px-6 py-3 text-sm font-medium border-b-2 transition-colors ${
-                  viewMode === 'rawhtml'
+                  !rawHtml
+                    ? 'border-transparent text-gray-300 cursor-not-allowed'
+                    : viewMode === 'rawhtml'
                     ? 'border-blue-600 text-blue-600'
                     : 'border-transparent text-gray-600 hover:text-gray-800 hover:border-gray-300'
                 }`}
                 disabled={!rawHtml}
+                title={!rawHtml ? 'Generate slides first to enable this view' : 'View raw HTML rendered in iframe'}
               >
                 Raw HTML (Rendered)
               </button>
               <button
-                onClick={() => setViewMode('rawtext')}
+                onClick={() => rawHtml && setViewMode('rawtext')}
                 className={`px-6 py-3 text-sm font-medium border-b-2 transition-colors ${
-                  viewMode === 'rawtext'
+                  !rawHtml
+                    ? 'border-transparent text-gray-300 cursor-not-allowed'
+                    : viewMode === 'rawtext'
                     ? 'border-blue-600 text-blue-600'
                     : 'border-transparent text-gray-600 hover:text-gray-800 hover:border-gray-300'
                 }`}
                 disabled={!rawHtml}
+                title={!rawHtml ? 'Generate slides first to enable this view' : 'View raw HTML source code'}
               >
                 Raw HTML (Text)
               </button>
