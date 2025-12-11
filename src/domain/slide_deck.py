@@ -9,6 +9,7 @@ from typing import Any, Dict, List, Optional
 
 from bs4 import BeautifulSoup
 
+from src.utils.css_utils import merge_css
 from src.utils.html_utils import extract_canvas_ids_from_script
 
 from .slide import Slide
@@ -166,6 +167,19 @@ class SlideDeck:
             self.canvas_to_script[canvas_id] = key
 
         self.recompute_scripts()
+
+    def update_css(self, replacement_css: str) -> None:
+        """Merge replacement CSS rules into deck CSS.
+        
+        Selectors in replacement_css override matching selectors in existing CSS.
+        New selectors are appended. Existing selectors not in replacement are preserved.
+        
+        Args:
+            replacement_css: CSS from edit response to merge
+        """
+        if not replacement_css or not replacement_css.strip():
+            return
+        self.css = merge_css(self.css, replacement_css)
 
     @classmethod
     def from_html(cls, html_path: str) -> 'SlideDeck':
