@@ -341,6 +341,95 @@ if (territoryCanvas) { console.log('new territory'); }
         assert "new territory" in updated_deck.scripts
         assert "old campaigns" not in updated_deck.scripts
 
+    def test_multi_canvas_script_splits_during_parsing(self):
+        """Multi-canvas script blocks are split into per-canvas blocks during parsing.
+        
+        This prevents duplicate variable declarations when replacing a single canvas.
+        Regression test for: 'Identifier canvas1 has already been declared'.
+        """
+        # HTML with a monolithic script block containing multiple chart definitions
+        html = """<!DOCTYPE html>
+<html>
+<body>
+<div class="slide"><canvas id="overallTrendChart"></canvas></div>
+<div class="slide"><canvas id="growthChart"></canvas></div>
+<div class="slide"><canvas id="lobPieChart"></canvas></div>
+<script>
+// Chart 1: Overall Trend
+const canvas1 = document.getElementById('overallTrendChart');
+if (canvas1) {
+    const ctx1 = canvas1.getContext('2d');
+    new Chart(ctx1, { type: 'line', data: { labels: ['Jan', 'Feb'], datasets: [] } });
+}
+
+// Chart 2: Growth Rate
+const canvas2 = document.getElementById('growthChart');
+if (canvas2) {
+    const ctx2 = canvas2.getContext('2d');
+    new Chart(ctx2, { type: 'bar', data: { labels: ['Q1', 'Q2'], datasets: [] } });
+}
+
+// Chart 3: LOB Pie Chart
+const canvas3 = document.getElementById('lobPieChart');
+if (canvas3) {
+    const ctx3 = canvas3.getContext('2d');
+    new Chart(ctx3, { type: 'doughnut', data: { labels: ['A', 'B'], datasets: [] } });
+}
+</script>
+</body>
+</html>"""
+
+        deck = SlideDeck.from_html_string(html)
+
+        # Should have 3 separate script blocks (one per canvas)
+        assert len(deck.script_blocks) == 3
+        
+        # Each canvas should map to its own script block
+        assert "overallTrendChart" in deck.canvas_to_script
+        assert "growthChart" in deck.canvas_to_script
+        assert "lobPieChart" in deck.canvas_to_script
+        
+        # Each script block should only contain code for its canvas
+        for key, block in deck.script_blocks.items():
+            assert len(block.canvas_ids) == 1
+            
+        # Verify canvas1 code is isolated
+        canvas1_key = deck.canvas_to_script["overallTrendChart"]
+        canvas1_block = deck.script_blocks[canvas1_key]
+        assert "overallTrendChart" in canvas1_block.text
+        assert "growthChart" not in canvas1_block.text
+        assert "lobPieChart" not in canvas1_block.text
+
+        # Now test removal - only canvas1's script should be removed
+        deck.remove_canvas_scripts(["overallTrendChart"])
+        
+        # canvas1 script should be gone
+        assert "overallTrendChart" not in deck.canvas_to_script
+        assert canvas1_key not in deck.script_blocks
+        assert "overallTrendChart" not in deck.scripts
+        
+        # canvas2 and canvas3 scripts should remain
+        assert "growthChart" in deck.scripts
+        assert "lobPieChart" in deck.scripts
+        
+        # Now add a replacement script for canvas1
+        replacement_script = """
+// Canvas: overallTrendChart
+const canvas1 = document.getElementById('overallTrendChart');
+if (canvas1) {
+    const ctx1 = canvas1.getContext('2d');
+    new Chart(ctx1, { type: 'line', data: { labels: ['Updated'], datasets: [] } });
+}
+"""
+        deck.add_script_block(replacement_script, ["overallTrendChart"])
+        
+        # Should have 3 blocks again
+        assert len(deck.script_blocks) == 3
+        
+        # No duplicate definitions - count occurrences of canvas1
+        assert deck.scripts.count("const canvas1") == 1
+        assert "Updated" in deck.scripts
+
 
 class TestKnitting:
     """Test HTML reconstruction (knitting)."""
