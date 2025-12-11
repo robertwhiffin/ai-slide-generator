@@ -9,6 +9,7 @@ interface SlideSelectionProps {
   selectedIndices: number[];
   onSelectionChange: (indices: number[]) => void;
   onNonContiguousSelection?: (attemptedIndices: number[]) => void;
+  onSlideNavigate?: (index: number) => void;
 }
 
 export const SlideSelection: React.FC<SlideSelectionProps> = ({
@@ -17,6 +18,7 @@ export const SlideSelection: React.FC<SlideSelectionProps> = ({
   selectedIndices,
   onSelectionChange,
   onNonContiguousSelection,
+  onSlideNavigate,
 }) => {
   const toggleSelection = (index: number) => {
     const isSelected = selectedIndices.includes(index);
@@ -76,7 +78,7 @@ export const SlideSelection: React.FC<SlideSelectionProps> = ({
   }, [slideDeck?.css, slideDeck?.external_scripts, slideDeck?.scripts]);
 
   const handleCardClick = (index: number) => {
-    toggleSelection(index);
+    onSlideNavigate?.(index);
   };
 
   if (!slides || slides.length === 0) {
@@ -124,6 +126,7 @@ export const SlideSelection: React.FC<SlideSelectionProps> = ({
                 className="slide-preview-frame"
                 scrolling="no"
               />
+              <div className="slide-preview-overlay" aria-hidden="true" />
             </div>
             {isSelected && (
               <div className="selection-indicator" aria-hidden="true">

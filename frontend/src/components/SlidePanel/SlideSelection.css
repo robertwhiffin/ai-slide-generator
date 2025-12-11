@@ -86,5 +86,21 @@
   background: #ffffff;
   transform: scale(0.18);
   transform-origin: top left;
+  pointer-events: none; /* Allow clicks to pass through to overlay */
+}
+
+.slide-preview-overlay {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  cursor: pointer;
+  background: transparent;
+  transition: background 0.15s ease;
+}
+
+.slide-thumbnail:hover .slide-preview-overlay {
+  background: rgba(59, 130, 246, 0.08);
 }
 
