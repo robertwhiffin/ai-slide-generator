@@ -120,6 +120,7 @@ Mutation endpoints return **409 Conflict** if the session is already processing 
 | `src/core/settings_db.py` | Settings from database | Profile-based configuration with hot-reload. |
 | `src/core/databricks_client.py` | Databricks connection | Thread-safe singleton `WorkspaceClient`. |
 | `src/utils/html_utils.py` | Canvas/script analysis | Extracts `canvas` ids from HTML and JS for validation. |
+| `src/utils/css_utils.py` | CSS parsing & merging | Selector-level merge for edit responses using `tinycss2`. |
 | `src/utils/logging_config.py` | Structured logging | JSON/text formatters, RotatingFileHandler. |
 
 ---
@@ -154,14 +155,16 @@ Breaking these invariants (e.g., submitting non-contiguous indices, missing `.sl
 
 1. Frontend sends `slide_context = { indices, slide_htmls }`.
 2. Agent prepends a `<slide-context>…</slide-context>` block to the human message so the LLM edits in place.
-3. `_parse_slide_replacements()` parses the LLM’s HTML into discrete slide blocks and collects:
-   - `replacement_slides`, `replacement_scripts`
+3. `_parse_slide_replacements()` parses the LLM's HTML into discrete slide blocks and collects:
+   - `replacement_slides`, `replacement_scripts`, `replacement_css`
    - `start_index`, `original_count`, `replacement_count`, `net_change`
    - Canvas IDs referenced inside HTML or `<script data-slide-scripts>` blocks
-4. `_apply_slide_replacements()` removes the original segment, inserts the new slides, and rewrites script blocks so every canvas gets exactly one Chart.js initializer.
-5. `replacement_info` is bubbled back to the frontend where `ReplacementFeedback` displays summaries like “Expanded 1 slide into 2 (+1)”.
+4. `_apply_slide_replacements()` removes the original segment, inserts the new slides, merges CSS rules, and rewrites script blocks so every canvas gets exactly one Chart.js initializer.
+5. **CSS merging**: replacement CSS is merged selector-by-selector—matching selectors are overridden, new ones appended, and unrelated rules preserved.
+6. **Canvas ID fallback chain**: if script parsing misses IDs, the system falls back to regex extraction, then to canvas elements in the slide HTML.
+7. `replacement_info` is bubbled back to the frontend where `ReplacementFeedback` displays summaries like "Expanded 1 slide into 2 (+1)".
 
-If the agent’s HTML lacks `.slide` wrappers, has out-of-range indices, or references canvas IDs without scripts, the request fails fast with descriptive errors to keep state consistent.
+If the agent's HTML has empty slides, out-of-range indices, or references canvas IDs without scripts, the request fails fast with descriptive errors to keep state consistent.
 
 ---
 

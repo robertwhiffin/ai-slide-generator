@@ -573,13 +573,13 @@ After implementing all changes:
 
 3. **Manual testing:**
 
-            - Start dev server: `uvicorn src.api.main:app --reload`
-            - Open frontend at `http://localhost:5173`
-            - Generate a slide deck with a colored box (e.g., stat card)
-            - Select the slide and ask to change the color
-            - Verify the color changes in the rendered slide
-            - Check "Raw HTML" view to confirm CSS was updated
-            - For charts: verify no duplicate Chart.js errors in browser console
+                                                - Start dev server: `uvicorn src.api.main:app --reload`
+                                                - Open frontend at `http://localhost:5173`
+                                                - Generate a slide deck with a colored box (e.g., stat card)
+                                                - Select the slide and ask to change the color
+                                                - Verify the color changes in the rendered slide
+                                                - Check "Raw HTML" view to confirm CSS was updated
+                                                - For charts: verify no duplicate Chart.js errors in browser console
 
 4. **Check logs for new debug output:**
    ```bash
