@@ -447,8 +447,6 @@ class SlideGeneratorAgent:
         for idx, slide_html in enumerate(replacement_slides):
             if not slide_html.strip():
                 raise AgentError(f"Slide {idx} is empty")
-            if 'class="slide"' not in slide_html:
-                raise AgentError(f"Slide {idx} missing class='slide' wrapper")
 
         original_count = len(original_indices)
         replacement_count = len(replacement_slides)
