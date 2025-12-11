@@ -5,10 +5,12 @@ import { SlideSelection } from './SlideSelection';
 
 interface SelectionRibbonProps {
   slideDeck: SlideDeck | null;
+  onSlideNavigate?: (index: number) => void;
 }
 
 export const SelectionRibbon: React.FC<SelectionRibbonProps> = ({
   slideDeck,
+  onSlideNavigate,
 }) => {
   const { selectedIndices, setSelection, clearSelection } = useSelection();
   const [warning, setWarning] = useState<string | null>(null);
@@ -59,6 +61,7 @@ export const SelectionRibbon: React.FC<SelectionRibbonProps> = ({
         selectedIndices={selectedIndices}
         onSelectionChange={handleSelectionChange}
         onNonContiguousSelection={handleNonContiguousSelection}
+        onSlideNavigate={onSlideNavigate}
       />
     );
   };

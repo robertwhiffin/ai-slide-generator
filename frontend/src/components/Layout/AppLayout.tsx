@@ -20,8 +20,15 @@ export const AppLayout: React.FC = () => {
   const [showSaveDialog, setShowSaveDialog] = useState(false);
   // Key to force remount ChatPanel when profile/session changes
   const [chatKey, setChatKey] = useState<number>(0);
+  // Track which slide to scroll to in the main panel (uses key to allow re-scroll to same index)
+  const [scrollTarget, setScrollTarget] = useState<{ index: number; key: number } | null>(null);
   const { sessionTitle, createNewSession, switchSession, renameSession } = useSession();
   const { isGenerating } = useGeneration();
+
+  // Handle navigation from ribbon to main slide panel
+  const handleSlideNavigate = useCallback((index: number) => {
+    setScrollTarget(prev => ({ index, key: (prev?.key ?? 0) + 1 }));
+  }, []);
 
   // Reset chat state and create new session when profile changes
   const handleProfileChange = useCallback(() => {
@@ -198,7 +205,7 @@ export const AppLayout: React.FC = () => {
           </div>
 
           {/* Selection Ribbon */}
-          <SelectionRibbon slideDeck={slideDeck} />
+          <SelectionRibbon slideDeck={slideDeck} onSlideNavigate={handleSlideNavigate} />
 
           {/* Slide Panel */}
           <div className="flex-1">
@@ -206,6 +213,7 @@ export const AppLayout: React.FC = () => {
               slideDeck={slideDeck}
               rawHtml={rawHtml}
               onSlideChange={setSlideDeck}
+              scrollToSlide={scrollTarget}
             />
           </div>
         </div>
