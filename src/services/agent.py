@@ -25,8 +25,9 @@ from pydantic import BaseModel, Field
 from src.core.databricks_client import get_databricks_client
 
 from src.core.settings_db import get_settings
+from src.domain.slide import Slide
 from src.services.tools import initialize_genie_conversation, query_genie_space
-from src.utils.html_utils import extract_canvas_ids_from_script
+from src.utils.html_utils import extract_canvas_ids_from_script, split_script_by_canvas
 
 logger = logging.getLogger(__name__)
 
@@ -414,15 +415,21 @@ class SlideGeneratorAgent:
         Parse LLM response to extract slide replacements.
 
         The LLM can return any number of slides. This method extracts all
-        <div class="slide"> elements and returns them as replacements for the
-        original contiguous block.
+        <div class="slide"> elements and returns them as Slide objects
+        with scripts attached via canvas ID matching.
+
+        Scripts are associated with slides by:
+        1. Building a canvas-to-slide index from the replacement slides
+        2. Splitting each script by canvas using split_script_by_canvas()
+        3. Assigning each segment to the slide containing its canvas
+        4. Fallback: assign to last slide if no canvas match
 
         Args:
             llm_response: Raw HTML response from LLM
             original_indices: List of original indices provided as context
 
         Returns:
-            Dict with replacement details
+            Dict with replacement details including Slide objects with scripts
 
         Raises:
             AgentError: If parsing fails or no slides found
@@ -432,7 +439,6 @@ class SlideGeneratorAgent:
 
         soup = BeautifulSoup(llm_response, "html.parser")
         slide_divs = soup.find_all("div", class_="slide")
-        script_blocks, script_canvas_ids = self._extract_script_blocks(soup)
         replacement_css = self._extract_css_from_response(soup)
 
         if not slide_divs:
@@ -441,12 +447,47 @@ class SlideGeneratorAgent:
                 "<div class='slide'>...</div> block."
             )
 
-        replacement_slides = [str(slide) for slide in slide_divs]
-        canvas_ids = self._extract_canvas_ids(slide_divs)
+        # Build slides and canvas-to-slide index
+        replacement_slides: list[Slide] = []
+        canvas_to_slide: dict[str, int] = {}
+        canvas_ids: list[str] = []
 
-        for idx, slide_html in enumerate(replacement_slides):
+        for idx, slide_div in enumerate(slide_divs):
+            slide_html = str(slide_div)
             if not slide_html.strip():
                 raise AgentError(f"Slide {idx} is empty")
+
+            slide = Slide(html=slide_html, slide_id=f"slide_{idx}")
+            replacement_slides.append(slide)
+
+            # Index canvases in this slide
+            for canvas in slide_div.find_all("canvas"):
+                canvas_id = canvas.get("id")
+                if canvas_id:
+                    canvas_to_slide[canvas_id] = idx
+                    canvas_ids.append(canvas_id)
+
+        # Assign scripts to slides via canvas matching
+        for script_tag in soup.find_all("script", src=False):
+            script_text = script_tag.get_text() or ""
+            if not script_text.strip():
+                continue
+
+            # Split multi-canvas scripts into per-canvas segments
+            segments = split_script_by_canvas(script_text)
+
+            for segment_text, segment_canvas_ids in segments:
+                assigned = False
+                for canvas_id in segment_canvas_ids:
+                    if canvas_id in canvas_to_slide:
+                        slide_idx = canvas_to_slide[canvas_id]
+                        replacement_slides[slide_idx].scripts += segment_text.strip() + "\n"
+                        assigned = True
+                        break
+
+                # Fallback: assign to last slide if no canvas match
+                if not assigned and replacement_slides:
+                    replacement_slides[-1].scripts += segment_text.strip() + "\n"
 
         original_count = len(original_indices)
         replacement_count = len(replacement_slides)
@@ -458,12 +499,12 @@ class SlideGeneratorAgent:
                 "original_count": original_count,
                 "replacement_count": replacement_count,
                 "start_index": start_index,
+                "canvas_ids": canvas_ids,
             },
         )
 
         return {
-            "replacement_slides": replacement_slides,
-            "replacement_scripts": "\n".join(script_blocks) if script_blocks else "",
+            "replacement_slides": replacement_slides,  # Slide objects with scripts
             "replacement_css": replacement_css,
             "original_indices": original_indices,
             "start_index": start_index,
@@ -474,19 +515,7 @@ class SlideGeneratorAgent:
             "error": None,
             "operation": "edit",
             "canvas_ids": canvas_ids,
-            "script_canvas_ids": script_canvas_ids,
         }
-
-    @staticmethod
-    def _extract_canvas_ids(slide_divs: list[Any]) -> list[str]:
-        """Collect canvas ids from the replacement slides."""
-        ids: list[str] = []
-        for slide in slide_divs:
-            for canvas in slide.find_all("canvas"):
-                canvas_id = canvas.get("id")
-                if canvas_id:
-                    ids.append(canvas_id)
-        return ids
 
     def _extract_css_from_response(self, soup: BeautifulSoup) -> str:
         """Extract CSS content from LLM response.
@@ -502,30 +531,6 @@ class SlideGeneratorAgent:
             if style_tag.string:
                 css_parts.append(style_tag.string.strip())
         return '\n'.join(css_parts)
-
-    def _extract_script_blocks(self, soup: BeautifulSoup) -> tuple[list[str], list[str]]:
-        """
-        Extract script blocks marked for slide replacements and collect canvas ids referenced.
-        """
-        script_blocks: list[str] = []
-        script_canvas_ids: list[str] = []
-
-        script_tags = soup.find_all("script")
-        tagged_scripts = [tag for tag in script_tags if tag.get("data-slide-scripts") is not None]
-
-        # Fallback: if no scripts were tagged, use trailing scripts after the slide blocks
-        candidate_scripts = tagged_scripts
-        if not candidate_scripts:
-            candidate_scripts = script_tags
-
-        for tag in candidate_scripts:
-            script_text = tag.get_text() or ""
-            script_canvas_ids.extend(extract_canvas_ids_from_script(script_text))
-
-            if script_text.strip():
-                script_blocks.append(script_text.strip())
-
-        return script_blocks, script_canvas_ids
 
     def _validate_canvas_scripts_in_html(self, html_content: str) -> None:
         """
