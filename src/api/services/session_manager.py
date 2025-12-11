@@ -397,6 +397,9 @@ class SessionManager:
                 # Ensure it has required fields
                 deck_dict.setdefault("title", deck.title)
                 deck_dict.setdefault("slide_count", deck.slide_count)
+                # Include html_content for raw HTML debug view
+                if deck.html_content:
+                    deck_dict["html_content"] = deck.html_content
                 return deck_dict
             
             # Legacy: return basic info without slides array

@@ -10,13 +10,18 @@ function generateLocalSessionId(): string {
   return crypto.randomUUID();
 }
 
+interface SessionRestoreResult {
+  slideDeck: SlideDeck | null;
+  rawHtml: string | null;
+}
+
 interface SessionContextType {
   sessionId: string | null;
   sessionTitle: string | null;
   isInitializing: boolean;
   error: string | null;
   createNewSession: () => void;
-  switchSession: (sessionId: string) => Promise<SlideDeck | null>;
+  switchSession: (sessionId: string) => Promise<SessionRestoreResult>;
   renameSession: (title: string) => Promise<void>;
 }
 
@@ -50,8 +55,9 @@ export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ child
 
   /**
    * Switch to an existing (persisted) session from history.
+   * Returns both the slide deck and raw HTML for debug view.
    */
-  const switchSession = useCallback(async (newSessionId: string): Promise<SlideDeck | null> => {
+  const switchSession = useCallback(async (newSessionId: string): Promise<SessionRestoreResult> => {
     setIsInitializing(true);
     setError(null);
     try {
@@ -60,9 +66,12 @@ export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ child
       
       // Get slide deck if it has one
       let slideDeck: SlideDeck | null = null;
+      let rawHtml: string | null = null;
       if (sessionInfo.has_slide_deck) {
         const result = await api.getSlides(newSessionId);
         slideDeck = result.slide_deck;
+        // Extract raw HTML from the slide deck (stored as html_content in DB)
+        rawHtml = slideDeck?.html_content || null;
       }
 
       // Update state
@@ -70,13 +79,13 @@ export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ child
       setSessionTitle(sessionInfo.title);
       api.setCurrentSessionId(newSessionId);
 
-      return slideDeck;
+      return { slideDeck, rawHtml };
     } catch (err) {
       console.error('Failed to switch session:', err);
       setError('Failed to restore session. Starting new session.');
       // Fall back to creating new local session
       createNewSession();
-      return null;
+      return { slideDeck: null, rawHtml: null };
     } finally {
       setIsInitializing(false);
     }
