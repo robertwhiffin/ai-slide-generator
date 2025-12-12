@@ -1,0 +1,206 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MegaCorp Account Review - Updated Slide</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            background: #F9FAFB;
+            width: 1280px;
+            margin: 0 auto;
+            padding: 0;
+            overflow-x: hidden;
+        }
+        
+        .slide {
+            width: 1280px;
+            height: 720px;
+            background: white;
+            margin-bottom: 20px;
+            padding: 60px 80px;
+            display: flex;
+            flex-direction: column;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+            position: relative;
+        }
+        
+        .slide h2 {
+            font-size: 42px;
+            font-weight: 700;
+            color: #102025;
+            margin-bottom: 12px;
+        }
+        
+        .slide h3 {
+            font-size: 22px;
+            color: #5D6D71;
+            margin-bottom: 32px;
+            font-weight: 400;
+        }
+        
+        .content {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            gap: 24px;
+        }
+        
+        .metrics-grid {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 20px;
+        }
+        
+        .metric-card {
+            background: white;
+            border-radius: 10px;
+            padding: 24px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+            border-left: 4px solid #EB4A34;
+        }
+        
+        .metric-card.green {
+            border-left-color: #4BA676;
+        }
+        
+        .metric-card.blue {
+            border-left-color: #3C71AF;
+        }
+        
+        .metric-label {
+            font-size: 14px;
+            color: #5D6D71;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            margin-bottom: 8px;
+        }
+        
+        .metric-value {
+            font-size: 36px;
+            font-weight: 700;
+            color: #102025;
+            margin-bottom: 4px;
+        }
+        
+        .metric-change {
+            font-size: 14px;
+            font-weight: 600;
+        }
+        
+        .metric-change.positive {
+            color: #4BA676;
+        }
+        
+        .chart-container {
+            position: relative;
+            height: 320px;
+            background: white;
+            border-radius: 12px;
+            padding: 20px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+        }
+        
+        .chart-container canvas {
+            max-height: 280px;
+        }
+        
+        .footer {
+            position: absolute;
+            bottom: 30px;
+            right: 80px;
+            font-size: 14px;
+            color: #5D6D71;
+        }
+        
+        .logo {
+            position: absolute;
+            top: 30px;
+            right: 80px;
+            font-size: 18px;
+            font-weight: 700;
+            color: #EB4A34;
+        }
+    </style>
+</head>
+<body>
+
+<div class="slide">
+    <div class="logo">DATABRICKS</div>
+    <h2>Consistent year-over-year growth across all fiscal years</h2>
+    <h3>Annual spend increased from $2.4M (FY2022) to $5.5M (FY2024)</h3>
+    <div class="content">
+        <div class="chart-container">
+            <canvas id="historicalSpendChart"></canvas>
+        </div>
+        <div class="metrics-grid">
+            <div class="metric-card">
+                <div class="metric-label">FY2022 Spend</div>
+                <div class="metric-value">$2.4M</div>
+                <div class="metric-change">Baseline year</div>
+            </div>
+            <div class="metric-card green">
+                <div class="metric-label">FY2023 Spend</div>
+                <div class="metric-value">$3.9M</div>
+                <div class="metric-change positive">↑ 63% YoY</div>
+            </div>
+            <div class="metric-card blue">
+                <div class="metric-label">FY2024 Spend</div>
+                <div class="metric-value">$5.5M</div>
+                <div class="metric-change positive">↑ 38% YoY</div>
+            </div>
+        </div>
+    </div>
+    <div class="footer">Slide 2</div>
+</div>
+
+<script data-slide-scripts>
+const historicalCanvas = document.getElementById('historicalSpendChart');
+if (historicalCanvas) {
+    const ctx = historicalCanvas.getContext('2d');
+    new Chart(ctx, {
+        type: 'bar',
+        data: {
+            labels: ['FY2022', 'FY2023', 'FY2024'],
+            datasets: [{
+                label: 'Annual Spend ($M)',
+                data: [2.4, 3.9, 5.5],
+                backgroundColor: ['#EB4A34', '#4BA676', '#3C71AF'],
+                borderRadius: 8
+            }]
+        },
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: {
+                legend: { display: false },
+                title: {
+                    display: true,
+                    text: 'Total Annual Databricks Spend',
+                    font: { size: 16, weight: '600' },
+                    color: '#102025'
+                }
+            },
+            scales: {
+                y: {
+                    beginAtZero: true,
+                    ticks: {
+                        callback: function(value) { return '$' + value + 'M'; }
+                    }
+                }
+            }
+        }
+    });
+}
+</script>
+
+</body>
+</html>
