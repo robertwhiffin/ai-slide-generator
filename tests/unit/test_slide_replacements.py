@@ -160,4 +160,111 @@ class TestSlideContextValidation:
             )
 
 
+class TestSampleHTMLReplacements:
+    """Test _parse_slide_replacements with sample HTML fixtures."""
+
+    def test_parse_single_slide_replacement_scenarios(
+        self,
+        agent_stub: SlideGeneratorAgent,
+    ) -> None:
+        """update1.html and update2.html parse as single-slide replacements."""
+        from tests.fixtures.sample_htmls import load_update1, load_update2
+
+        # update1: replaces slide 3 (index 2)
+        result1 = agent_stub._parse_slide_replacements(load_update1(), [2])
+
+        assert result1["success"] is True
+        assert result1["original_count"] == 1
+        assert result1["replacement_count"] == 1
+        assert len(result1["replacement_slides"]) == 1
+        assert result1["start_index"] == 2
+        assert result1["net_change"] == 0
+
+        # Slide should have historicalSpendChart script
+        slide1 = result1["replacement_slides"][0]
+        assert isinstance(slide1, Slide)
+        assert "historicalSpendChart" in slide1.scripts
+        assert "getElementById" in slide1.scripts
+
+        # Canvas ID should be extracted
+        assert "historicalSpendChart" in result1["canvas_ids"]
+
+        # update2: replaces slide 6 (index 5)
+        result2 = agent_stub._parse_slide_replacements(load_update2(), [5])
+
+        assert result2["success"] is True
+        assert result2["original_count"] == 1
+        assert result2["replacement_count"] == 1
+        assert result2["start_index"] == 5
+
+        # Slide should have retailChart script with line chart type
+        slide2 = result2["replacement_slides"][0]
+        assert "retailChart" in slide2.scripts
+        assert "type: 'line'" in slide2.scripts
+        assert "retailChart" in result2["canvas_ids"]
+
+    def test_parse_consolidation_replacement(
+        self,
+        agent_stub: SlideGeneratorAgent,
+    ) -> None:
+        """update3.html parses correctly for 3-to-1 slide consolidation."""
+        from tests.fixtures.sample_htmls import load_update3
+
+        # update3: replaces slides 13-15 (indices 12, 13, 14) with 1 slide
+        result = agent_stub._parse_slide_replacements(load_update3(), [12, 13, 14])
+
+        assert result["success"] is True
+        assert result["original_count"] == 3
+        assert result["replacement_count"] == 1
+        assert result["net_change"] == -2  # 3 slides reduced to 1
+        assert result["start_index"] == 12
+
+        # Single replacement slide
+        assert len(result["replacement_slides"]) == 1
+        slide = result["replacement_slides"][0]
+        assert isinstance(slide, Slide)
+
+        # No canvas in update3, so no scripts
+        assert slide.scripts.strip() == ""
+        assert result["canvas_ids"] == []
+
+        # Content should include consolidated elements
+        assert "Strategic recommendations" in slide.html
+        assert "metric-card" in slide.html
+
+    def test_replacement_css_extraction(
+        self,
+        agent_stub: SlideGeneratorAgent,
+    ) -> None:
+        """Verify CSS is extracted from replacement HTMLs."""
+        from tests.fixtures.sample_htmls import load_update1, load_update3
+
+        # update1 has CSS
+        result1 = agent_stub._parse_slide_replacements(load_update1(), [2])
+        css1 = result1.get("replacement_css", "")
+
+        # Should have CSS content
+        assert len(css1) > 100
+        assert ".slide" in css1
+
+        # update3 also has CSS
+        result3 = agent_stub._parse_slide_replacements(load_update3(), [12, 13, 14])
+        css3 = result3.get("replacement_css", "")
+
+        assert len(css3) > 100
+        assert ".metric-card" in css3
+
+    def test_original_indices_preserved(
+        self,
+        agent_stub: SlideGeneratorAgent,
+    ) -> None:
+        """Verify original_indices are preserved in replacement info."""
+        from tests.fixtures.sample_htmls import load_update3
+
+        indices = [12, 13, 14]
+        result = agent_stub._parse_slide_replacements(load_update3(), indices)
+
+        assert result["original_indices"] == indices
+        assert result["start_index"] == min(indices)
+        assert result["original_count"] == len(indices)
 

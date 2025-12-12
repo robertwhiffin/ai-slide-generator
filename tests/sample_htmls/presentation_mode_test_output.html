@@ -1,0 +1,533 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Sample Slide with Chart</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/reveal.js@5/dist/reveal.css">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/reveal.js@5/dist/theme/white.css">
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <style>
+    html, body {
+      margin: 0;
+      padding: 0;
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      background: #000;
+    }
+    .reveal-viewport {
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      width: 100%;
+      height: 100%;
+    }
+    .reveal {
+      width: 100%;
+      height: 100%;
+    }
+    .reveal .slides {
+      text-align: left;
+    }
+    .reveal .slides section {
+      height: 100%;
+      width: 100%;
+      padding: 0;
+      box-sizing: border-box;
+    }
+    .reveal .slides section .slide {
+      width: 100% !important;
+      height: 100% !important;
+      min-height: 100% !important;
+      max-height: 100% !important;
+      position: relative;
+      box-sizing: border-box;
+    }
+    .reveal canvas {
+      max-width: 100%;
+    }
+    * {
+margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+}
+
+body {
+font-family: "Inter", "SF Pro Display", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+            background-color: #F9FAFB;
+            width: 1280px;
+            overflow-y: auto;
+}
+
+.slide {
+width: 1280px;
+            height: 720px;
+            background: white;
+            padding: 60px 80px;
+            display: flex;
+            flex-direction: column;
+            gap: 32px;
+            margin-bottom: 20px;
+}
+
+.slide-header {
+display: flex;
+            flex-direction: column;
+            gap: 8px;
+}
+
+.slide-title {
+font-size: 48px;
+            font-weight: 700;
+            color: #102025;
+            line-height: 1.2;
+}
+
+.slide-subtitle {
+font-size: 20px;
+            color: #5D6D71;
+            line-height: 1.4;
+}
+
+.chart-container {
+flex: 1;
+            background: #F9FAFB;
+            border-radius: 12px;
+            padding: 24px;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            max-height: 450px;
+}
+
+canvas {
+max-height: 400px;
+}
+
+.map-container {
+flex: 1;
+            background: #F9FAFB;
+            border-radius: 12px;
+            padding: 32px;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+            display: flex;
+            gap: 24px;
+            align-items: center;
+            justify-content: center;
+}
+
+.region-grid {
+display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 24px;
+            width: 100%;
+            max-width: 900px;
+}
+
+.region-card {
+background: white;
+            border-radius: 8px;
+            padding: 24px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.08);
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+}
+
+.region-name {
+font-size: 18px;
+            font-weight: 600;
+            color: #102025;
+}
+
+.region-value {
+font-size: 32px;
+            font-weight: 700;
+            color: #EB4A34;
+}
+
+.region-bar {
+height: 8px;
+            background: #E5E7EB;
+            border-radius: 4px;
+            overflow: hidden;
+}
+
+.region-bar-fill {
+height: 100%;
+            background: linear-gradient(90deg, #EB4A34, #F2AE3D);
+            border-radius: 4px;
+            transition: width 0.3s ease;
+}
+
+.choropleth-container {
+flex: 1;
+            background: #F9FAFB;
+            border-radius: 12px;
+            padding: 32px;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+            display: flex;
+            flex-direction: column;
+            gap: 24px;
+}
+
+.world-map {
+display: grid;
+            grid-template-columns: repeat(12, 1fr);
+            grid-template-rows: repeat(6, 1fr);
+            gap: 4px;
+            flex: 1;
+            max-height: 400px;
+}
+
+.map-region {
+border-radius: 6px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 14px;
+            font-weight: 600;
+            color: white;
+            cursor: pointer;
+            transition: transform 0.2s, box-shadow 0.2s;
+            position: relative;
+}
+
+.map-region:hover {
+transform: scale(1.05);
+            box-shadow: 0 6px 12px rgba(0,0,0,0.2);
+}
+
+.na-region {
+grid-column: 2 / 5;
+            grid-row: 2 / 4;
+            background: linear-gradient(135deg, #DC2626, #EF4444);
+}
+
+.emea-region {
+grid-column: 5 / 8;
+            grid-row: 2 / 4;
+            background: linear-gradient(135deg, #EA580C, #F97316);
+}
+
+.apac-region {
+grid-column: 9 / 12;
+            grid-row: 2 / 5;
+            background: linear-gradient(135deg, #F59E0B, #FBBF24);
+}
+
+.latam-region {
+grid-column: 2 / 5;
+            grid-row: 4 / 6;
+            background: linear-gradient(135deg, #FCD34D, #FDE68A);
+            color: #102025;
+}
+
+.legend {
+display: flex;
+            align-items: center;
+            gap: 16px;
+            justify-content: center;
+}
+
+.legend-item {
+display: flex;
+            align-items: center;
+            gap: 8px;
+            font-size: 14px;
+            color: #5D6D71;
+}
+
+.legend-color {
+width: 24px;
+            height: 24px;
+            border-radius: 4px;
+}
+
+.legend-label {
+font-weight: 500;
+}
+
+.map-tooltip {
+position: absolute;
+            background: #102025;
+            color: white;
+            padding: 8px 12px;
+            border-radius: 6px;
+            font-size: 12px;
+            white-space: nowrap;
+            pointer-events: none;
+            opacity: 0;
+            transition: opacity 0.2s;
+            bottom: 100%;
+            left: 50%;
+            transform: translateX(-50%);
+            margin-bottom: 8px;
+}
+
+.map-region:hover .map-tooltip {
+opacity: 1;
+}
+  </style>
+</head>
+<body>
+  <div class="reveal-viewport">
+    <div class="reveal">
+      <div class="slides">
+        <section><div class="slide">
+<div class="slide-header">
+<h1 class="slide-title">Revenue growth accelerated in Q4</h1>
+<p class="slide-subtitle">Quarterly revenue increased 34% year-over-year driven by enterprise expansion</p>
+</div>
+<div class="chart-container">
+<canvas id="revenueChart"></canvas>
+</div>
+</div></section>
+<section><div class="slide">
+<div class="slide-header">
+<h1 class="slide-title">Enterprise customers drive majority of revenue</h1>
+<p class="slide-subtitle">Large accounts represent 68% of total revenue with strong retention rates</p>
+</div>
+<div class="chart-container">
+<canvas id="segmentChart"></canvas>
+</div>
+</div></section>
+<section><div class="slide">
+<div class="slide-header">
+<h1 class="slide-title">North America leads global expansion</h1>
+<p class="slide-subtitle">Regional growth shows strong momentum across all markets with EMEA accelerating</p>
+</div>
+<div class="map-container">
+<div class="region-grid">
+<div class="region-card">
+<div class="region-name">🇺🇸 North America</div>
+<div class="region-value">$2.8M</div>
+<div class="region-bar">
+<div class="region-bar-fill" style="width: 100%;"></div>
+</div>
+</div>
+<div class="region-card">
+<div class="region-name">🇪🇺 EMEA</div>
+<div class="region-value">$1.2M</div>
+<div class="region-bar">
+<div class="region-bar-fill" style="width: 43%;"></div>
+</div>
+</div>
+<div class="region-card">
+<div class="region-name">🌏 APAC</div>
+<div class="region-value">$0.8M</div>
+<div class="region-bar">
+<div class="region-bar-fill" style="width: 29%;"></div>
+</div>
+</div>
+<div class="region-card">
+<div class="region-name">🌎 LATAM</div>
+<div class="region-value">$0.4M</div>
+<div class="region-bar">
+<div class="region-bar-fill" style="width: 14%;"></div>
+</div>
+</div>
+</div>
+</div>
+</div></section>
+<section><div class="slide">
+<div class="slide-header">
+<h1 class="slide-title">Market penetration varies significantly by region</h1>
+<p class="slide-subtitle">Heat map reveals untapped opportunities in emerging markets</p>
+</div>
+<div class="choropleth-container">
+<div class="world-map">
+<div class="map-region na-region">
+<span>North America</span>
+<div class="map-tooltip">$2.8M • 53% market share</div>
+</div>
+<div class="map-region emea-region">
+<span>EMEA</span>
+<div class="map-tooltip">$1.2M • 23% market share</div>
+</div>
+<div class="map-region apac-region">
+<span>APAC</span>
+<div class="map-tooltip">$0.8M • 15% market share</div>
+</div>
+<div class="map-region latam-region">
+<span>LATAM</span>
+<div class="map-tooltip">$0.4M • 8% market share</div>
+</div>
+</div>
+<div class="legend">
+<div class="legend-item">
+<div class="legend-color" style="background: linear-gradient(135deg, #DC2626, #EF4444);"></div>
+<span class="legend-label">High Revenue ($2M+)</span>
+</div>
+<div class="legend-item">
+<div class="legend-color" style="background: linear-gradient(135deg, #EA580C, #F97316);"></div>
+<span class="legend-label">Medium Revenue ($1-2M)</span>
+</div>
+<div class="legend-item">
+<div class="legend-color" style="background: linear-gradient(135deg, #F59E0B, #FBBF24);"></div>
+<span class="legend-label">Growing Revenue ($0.5-1M)</span>
+</div>
+<div class="legend-item">
+<div class="legend-color" style="background: linear-gradient(135deg, #FCD34D, #FDE68A);"></div>
+<span class="legend-label">Emerging Revenue (&lt;$0.5M)</span>
+</div>
+</div>
+</div>
+</div></section>
+      </div>
+    </div>
+  </div>
+  <script src="https://cdn.jsdelivr.net/npm/reveal.js@5/dist/reveal.js"></script>
+  <script>
+    function waitForChartJs(callback, maxAttempts = 50) {
+      let attempts = 0;
+      const check = () => {
+        attempts++;
+        if (typeof Chart !== 'undefined') {
+          callback();
+        } else if (attempts < maxAttempts) {
+          setTimeout(check, 100);
+        }
+      };
+      check();
+    }
+
+    function initializeCharts() {
+      (function() {
+const canvas1 = document.getElementById('revenueChart');
+        if (canvas1) {
+            const ctx1 = canvas1.getContext('2d');
+            new Chart(ctx1, {
+                type: 'line',
+                data: {
+                    labels: ['Q1 2023', 'Q2 2023', 'Q3 2023', 'Q4 2023', 'Q1 2024'],
+                    datasets: [{
+                        label: 'Revenue ($M)',
+                        data: [2.4, 2.8, 3.1, 3.6, 4.2],
+                        borderColor: '#EB4A34',
+                        backgroundColor: 'rgba(235, 74, 52, 0.1)',
+                        borderWidth: 3,
+                        fill: true,
+                        tension: 0.4,
+                        pointRadius: 6,
+                        pointBackgroundColor: '#EB4A34',
+                        pointBorderColor: '#fff',
+                        pointBorderWidth: 2,
+                        pointHoverRadius: 8
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: {
+                        legend: {
+                            display: false
+                        },
+                        tooltip: {
+                            backgroundColor: '#102025',
+                            padding: 12,
+                            titleFont: { size: 14, weight: 'bold' },
+                            bodyFont: { size: 13 },
+                            cornerRadius: 8
+                        }
+                    },
+                    scales: {
+                        y: {
+                            beginAtZero: true,
+                            ticks: {
+                                font: { size: 14 },
+                                color: '#5D6D71',
+                                callback: function(value) {
+                                    return '$' + value + 'M';
+                                }
+                            },
+                            grid: {
+                                color: '#E5E7EB'
+                            }
+                        },
+                        x: {
+                            ticks: {
+                                font: { size: 14 },
+                                color: '#5D6D71'
+                            },
+                            grid: {
+                                display: false
+                            }
+                        }
+                    }
+                }
+            });
+        }
+})();
+
+(function() {
+const canvas1 = document.getElementById('segmentChart');
+        if (canvas1) {
+            const ctx1 = canvas1.getContext('2d');
+            new Chart(ctx1, {
+                type: 'doughnut',
+                data: {
+                    labels: ['Enterprise', 'Mid-Market', 'Small Business', 'Startup'],
+                    datasets: [{
+                        data: [68, 18, 10, 4],
+                        backgroundColor: ['#6366F1', '#8B5CF6', '#EC4899', '#F59E0B'],
+                        borderWidth: 0,
+                        hoverOffset: 10
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: {
+                        legend: {
+                            position: 'right',
+                            labels: {
+                                font: { size: 16 },
+                                color: '#102025',
+                                padding: 20,
+                                usePointStyle: true,
+                                pointStyle: 'circle'
+                            }
+                        },
+                        tooltip: {
+                            backgroundColor: '#102025',
+                            padding: 12,
+                            titleFont: { size: 14, weight: 'bold' },
+                            bodyFont: { size: 13 },
+                            cornerRadius: 8,
+                            callbacks: {
+                                label: function(context) {
+                                    return context.label + ': ' + context.parsed + '%';
+                                }
+                            }
+                        }
+                    },
+                    cutout: '65%'
+                }
+            });
+        }
+})();
+    }
+
+    Reveal.initialize({
+      hash: true,
+      controls: true,
+      progress: true,
+      slideNumber: true,
+      overview: true,
+      width: 1280,
+      height: 720,
+      margin: 0,
+      minScale: 0.1,
+      maxScale: 2.0,
+      center: true,
+      transition: 'slide',
+      display: 'flex'
+    }).then(() => {
+      waitForChartJs(initializeCharts);
+    });
+  </script>
+</body>
+</html>
