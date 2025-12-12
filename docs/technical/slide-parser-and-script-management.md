@@ -1,6 +1,6 @@
 ## HTML Manipulation Architecture
 
-This document explains how agent-generated HTML flows through the system, how CSS and script blocks are managed during edits, and how the frontend renders slides. It walks through key files plus code excerpts so new contributors can jump in quickly.
+This document explains how agent-generated HTML flows through the system, how CSS and scripts are managed during edits, and how the frontend renders slides. It walks through key files plus code excerpts so new contributors can jump in quickly.
 
 Use this alongside:
 - `frontend-overview.md` for UI layout/state ownership and API usage.
@@ -15,48 +15,100 @@ The pipeline narrative below focuses on the shared HTML/CSS/script path that con
    - Returns full HTML or replacement slide blocks plus scripts and CSS.
    - Prompt enforces "one canvas per script" (`// Canvas: <id>` comment, unique variable names).
 2. **Backend Parsing & Storage**
-   - `SlideDeck.from_html_string` (`src/domain/slide_deck.py`) splits HTML into slides, CSS, and `ScriptBlock`s.
-   - `_parse_slide_replacements` (`src/services/agent.py`) extracts slides, scripts, and CSS from edit responses.
-   - `ChatService` (`src/api/services/chat_service.py`) merges CSS and scripts, then caches the updated deck.
+   - `SlideDeck.from_html_string` (`src/domain/slide_deck.py`) parses HTML into slides with scripts attached directly to each `Slide` object.
+   - `_parse_slide_replacements` (`src/services/agent.py`) extracts slides as `Slide` objects with scripts via canvas ID matching.
+   - `ChatService` (`src/api/services/chat_service.py`) merges CSS and replaces slides (scripts travel with them).
 3. **API Layer**
    - REST endpoints in `src/api/routes/slides.py` expose deck operations (get, reorder, update, duplicate, delete).
 4. **Frontend Consumption**
    - `frontend/src/services/api.ts` talks to `/api/chat` and `/api/slides`.
-   - `ChatPanel` feeds new decks into React state; `SlidePanel` renders "Parsed", "Raw HTML", and "Raw Text" views.
+   - `ChatPanel` feeds new decks into React state; `SlidePanel` renders individual slides using `slide.scripts`.
 
 ---
 
-### 2. Backend Parsing & Script Management
-#### 2.1 SlideDeck Parsing
-```python
-# src/domain/slide_deck.py
-soup = BeautifulSoup(html_content, 'html.parser')
-script_blocks: OrderedDict[str, ScriptBlock] = OrderedDict()
-inline_scripts = soup.find_all('script', src=False)
-block_index = 0
+### 2. Inline Scripts Architecture
 
-for script_tag in inline_scripts:
-    script_content = script_tag.string or script_tag.get_text()
-    cleaned = script_content.strip()
+Scripts are stored directly on `Slide` objects. This ensures that when a slide is deleted or replaced, its scripts are automatically removed—no orphaned scripts possible.
 
-    # Split multi-canvas scripts into per-canvas segments
-    segments = split_script_by_canvas(cleaned)
-
-    for segment_text, segment_canvas_ids in segments:
-        key = cls._generate_script_key(segment_canvas_ids, block_index)
-        block = ScriptBlock(key=key, text=segment_text, canvas_ids=set(segment_canvas_ids))
-        script_blocks[key] = block
-        for canvas_id in segment_canvas_ids:
-            canvas_to_script[canvas_id] = key
-        block_index += 1
+```
+Slide {
+    html: str       # The <div class="slide">...</div> HTML
+    slide_id: str   # Unique identifier like "slide_0"
+    scripts: str    # JavaScript for this slide's charts
+}
 ```
 
-- Multi-canvas `<script>` tags are **split into per-canvas segments** during parsing via `split_script_by_canvas()`.
-- Each segment becomes its own `ScriptBlock`, ensuring clean removal/replacement of individual canvases.
-- `canvas_to_script` maps every canvas ID to its isolated block key.
-- Slides are stored as `Slide` objects (`src/domain/slide.py`) containing raw `<div class="slide">...</div>` HTML.
+#### 2.1 SlideDeck Parsing
 
-#### 2.1.1 Script Splitting Heuristics
+```python
+# src/domain/slide_deck.py
+@classmethod
+def from_html_string(cls, html_content: str) -> 'SlideDeck':
+    soup = BeautifulSoup(html_content, 'html.parser')
+    
+    # Phase 1: Parse slides and build canvas-to-slide index
+    slide_elements = soup.find_all('div', class_='slide')
+    slides = []
+    canvas_to_slide: Dict[str, int] = {}  # canvas_id -> slide_index
+    
+    for idx, slide_element in enumerate(slide_elements):
+        slide = Slide(html=str(slide_element), slide_id=f"slide_{idx}")
+        slides.append(slide)
+        # Index canvases in this slide
+        for canvas in slide_element.find_all('canvas'):
+            canvas_id = canvas.get('id')
+            if canvas_id:
+                canvas_to_slide[canvas_id] = idx
+    
+    # Phase 2: Parse scripts and assign to slides via canvas matching
+    for script_tag in soup.find_all('script', src=False):
+        script_text = script_tag.string or script_tag.get_text()
+        if not script_text or not script_text.strip():
+            continue
+        
+        # Split multi-canvas scripts into per-canvas segments
+        segments = split_script_by_canvas(script_text)
+        
+        for segment_text, canvas_ids in segments:
+            # Find slide by canvas ID
+            assigned = False
+            for canvas_id in canvas_ids:
+                if canvas_id in canvas_to_slide:
+                    slide_idx = canvas_to_slide[canvas_id]
+                    slides[slide_idx].scripts += segment_text.strip() + "\n"
+                    assigned = True
+                    break
+            
+            # Fallback: assign to last slide if no canvas match
+            if not assigned and slides:
+                slides[-1].scripts += segment_text.strip() + "\n"
+```
+
+Key points:
+- **Canvas-to-slide index**: Maps canvas IDs to slide indices for script assignment.
+- **Multi-canvas splitting**: `split_script_by_canvas()` splits monolithic scripts into per-canvas segments.
+- **Fallback assignment**: Scripts without recognizable canvas IDs go to the last slide.
+
+#### 2.2 IIFE Wrapping for Aggregated Scripts
+
+When all scripts need to run in the same document (presentation mode, `knit()` output), they're wrapped in IIFEs to prevent variable collisions:
+
+```python
+# src/domain/slide_deck.py
+@property
+def scripts(self) -> str:
+    """Aggregate all slide scripts with IIFE wrapping for scope isolation."""
+    parts = []
+    for slide in self.slides:
+        if slide.scripts and slide.scripts.strip():
+            wrapped = f"(function() {{\n{slide.scripts.strip()}\n}})();"
+            parts.append(wrapped)
+    return "\n\n".join(parts)
+```
+
+This ensures that `const canvas1` in one slide doesn't conflict with `const canvas1` in another slide.
+
+#### 2.3 Script Splitting Heuristics
 
 The `split_script_by_canvas()` function (`src/utils/html_utils.py`) detects chart block boundaries by looking for:
 
@@ -66,7 +118,7 @@ The `split_script_by_canvas()` function (`src/utils/html_utils.py`) detects char
 
 This prevents the "Identifier already declared" error when editing a single chart in a deck that originally had a monolithic multi-chart script block.
 
-#### 2.2 Canvas Extraction Heuristics
+#### 2.4 Canvas Extraction Heuristics
 ```python
 # src/utils/html_utils.py
 CANVAS_ID_PATTERN = re.compile(r"getElementById\s*\(\s*['\"]([\w\-.:]+)['\"]\s*\)")
@@ -83,24 +135,7 @@ def extract_canvas_ids_from_script(script_text: str) -> List[str]:
 - Detects canvases mentioned via `getElementById`, `querySelector('#id')`, or an explicit `// Canvas: foo` comment.
 - Order is preserved and duplicates removed.
 
-#### 2.3 Adding & Removing Script Blocks
-```python
-# src/domain/slide_deck.py
-def remove_canvas_scripts(self, canvas_ids: List[str]) -> None:
-    for canvas_id in canvas_ids:
-        key = self.canvas_to_script.pop(canvas_id, None)
-        ...
-        if not block.canvas_ids:
-            keys_to_remove.add(key)
-    for key in keys_to_remove:
-        self.script_blocks.pop(key, None)
-    self.recompute_scripts()
-```
-
-- Removing a canvas updates both `canvas_to_script` and the aggregated `self.scripts`.
-- `add_script_block` uses `_generate_script_key` to create deterministic keys (`canvas:<id>:<index>` or `script:n` fallback) and rebuilds `self.scripts`.
-
-#### 2.4 CSS Parsing & Merging
+#### 2.5 CSS Parsing & Merging
 
 When editing slides, the LLM may return updated CSS (e.g., changing a box color). The system extracts and merges CSS selectors so edits override matching rules while preserving unrelated styles.
 
@@ -125,50 +160,84 @@ def merge_css(existing_css: str, replacement_css: str) -> str:
 
 ---
 
-### 3. ChatService Replacement Flow
-`ChatService` coordinates agent interactions, stores the canonical HTML, and handles targeted edits.
+### 3. Agent Parsing & Slide Replacement
+
+#### 3.1 Agent Response Parsing
+
+`_parse_slide_replacements` (`src/services/agent.py`) returns `Slide` objects with scripts attached:
+
+```python
+def _parse_slide_replacements(self, llm_response: str, original_indices: list[int]) -> dict:
+    soup = BeautifulSoup(llm_response, "html.parser")
+    slide_divs = soup.find_all("div", class_="slide")
+    
+    # Build slides and canvas-to-slide index
+    replacement_slides: list[Slide] = []
+    canvas_to_slide: dict[str, int] = {}
+    
+    for idx, slide_div in enumerate(slide_divs):
+        slide = Slide(html=str(slide_div), slide_id=f"slide_{idx}")
+        replacement_slides.append(slide)
+        for canvas in slide_div.find_all("canvas"):
+            canvas_id = canvas.get("id")
+            if canvas_id:
+                canvas_to_slide[canvas_id] = idx
+    
+    # Assign scripts to slides via canvas matching
+    for script_tag in soup.find_all("script", src=False):
+        script_text = script_tag.get_text() or ""
+        segments = split_script_by_canvas(script_text)
+        for segment_text, canvas_ids in segments:
+            for canvas_id in canvas_ids:
+                if canvas_id in canvas_to_slide:
+                    replacement_slides[canvas_to_slide[canvas_id]].scripts += segment_text
+                    break
+    
+    return {
+        "replacement_slides": replacement_slides,  # Slide objects with scripts
+        "replacement_css": ...,
+        ...
+    }
+```
+
+#### 3.2 ChatService Replacement Flow
+
+`ChatService` coordinates agent interactions and handles targeted edits:
 
 ```python
 # src/api/services/chat_service.py
-# CSS merge (new)
-replacement_css = replacement_info.get("replacement_css", "")
-if replacement_css:
-    current_deck.update_css(replacement_css)
-
-# Canvas ID resolution with fallback chain
-incoming_canvas_ids = [extract_canvas_ids_from_html(slide) for slide in replacement_slides]
-replacement_script_canvas_ids = (
-    script_canvas_ids                                    # from script parsing
-    or extract_canvas_ids_from_script(replacement_scripts)  # regex extraction
-    or incoming_canvas_ids                               # from slide HTML
-)
+def _apply_slide_replacements(self, replacement_info: dict, session_id: str) -> dict:
+    current_deck = self._get_or_load_deck(session_id)
+    
+    start_idx = replacement_info["start_index"]
+    original_count = replacement_info["original_count"]
+    replacement_slides: List[Slide] = replacement_info["replacement_slides"]
+    
+    # Remove original slides (scripts go with them automatically)
+    for _ in range(original_count):
+        current_deck.remove_slide(start_idx)
+    
+    # Insert replacement slides (scripts already attached)
+    for idx, slide in enumerate(replacement_slides):
+        slide.slide_id = f"slide_{start_idx + idx}"
+        current_deck.insert_slide(slide, start_idx + idx)
+    
+    # Merge replacement CSS
+    if replacement_info.get("replacement_css"):
+        current_deck.update_css(replacement_info["replacement_css"])
+    
+    return current_deck.to_dict()
 ```
 
-1. **User selects slides; ChatPanel sends message** (see frontend below).
-2. **Agent returns `replacement_info`** with new slide HTML, optional `replacement_scripts`, and optional `replacement_css`.
-3. `_apply_slide_replacements` removes outgoing slides and their canvases based on HTML:
-   - collects canvas IDs from removed slides via `extract_canvas_ids_from_html`.
-   - splices new `Slide` objects into `self.current_deck`.
-4. **CSS merge**: if the LLM returned CSS, `update_css()` merges it into the deck, overriding matching selectors.
-5. **Per-canvas script overwrite** with fallback chain:
-   - Determine canvas IDs from: (1) parsed script tags, (2) regex extraction, (3) canvas elements in slide HTML.
-   - Always remove existing script blocks for those IDs (even if associated slides persist).
-   - Append the new block via `add_script_block`.
-6. **Raw HTML**: after replacements, `self.raw_html = self.current_deck.knit()`. Only chat operations mutate `raw_html`, preserving a single agent-controlled source.
-
-Relevant methods:
-- `_apply_slide_replacements` – orchestrates slide/CSS/script merging
-- `_append_replacement_scripts` – adds validated script blocks
-- `update_css` – merges CSS rules
-- `remove_canvas_scripts`, `add_script_block` – script block management
+Key simplification: **No manual script cleanup needed**. When a slide is removed, its scripts are removed automatically. When a slide is inserted, its scripts come with it.
 
 ---
 
 ### 4. API Surface
 - `POST /api/chat` (see `src/api/routes/chat.py` via `ChatService.send_message`) returns:
-  - `slide_deck`: serialized `SlideDeck`.
+  - `slide_deck`: serialized `SlideDeck` with per-slide scripts.
   - `raw_html`: canonical HTML string.
-  - `replacement_info`: metadata for UI messaging.
+  - `replacement_info`: metadata for UI messaging (sanitized to remove Slide objects).
 - `GET /api/slides`, `PUT /api/slides/reorder`, `PATCH /api/slides/{index}`, etc. are thin wrappers around `ChatService` helpers.
 
 `frontend/src/services/api.ts` wraps these endpoints. Example:
@@ -189,62 +258,57 @@ export const api = {
 
 #### 5.1 React State Ownership
 - `frontend/src/components/Layout/AppLayout.tsx` keeps `slideDeck` and `rawHtml` in React state.
-- `ChatPanel` receives only `rawHtml`; once the backend responds, it calls `onSlidesGenerated(deck, raw)` to update global state. The frontend no longer performs optimistic script merging.
+- `ChatPanel` receives only `rawHtml`; once the backend responds, it calls `onSlidesGenerated(deck, raw)` to update global state.
 
-#### 5.2 ChatPanel → Backend
-```typescript
-// frontend/src/components/ChatPanel/ChatPanel.tsx
-const slideContext = hasSelection ? { indices, slide_htmls } : undefined;
-const response = await api.sendMessage({ message, maxSlides, slideContext });
-if (response.slide_deck) {
-  onSlidesGenerated(response.slide_deck, nextRawHtml);
-  clearSelection();
-}
-if (response.replacement_info && slideContext) {
-  setLastReplacement(response.replacement_info);
-}
-```
+#### 5.2 SlideTile Rendering
 
-#### 5.3 SlidePanel Views
-- **Parsed Slides**: `SlideTile` renders each slide inside an `<iframe>` built from the deck.
+Each slide is rendered in its own `<iframe>` using **only that slide's scripts** (no IIFE needed since each iframe has isolated scope):
+
 ```tsx
 // frontend/src/components/SlidePanel/SlideTile.tsx
-const slideHTML = `
+const slideHTML = useMemo(() => {
+  const slideScripts = slide.scripts || '';
+  return `
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
-  ...
-  ${slideDeck.external_scripts.map(...) }
+  ${slideDeck.external_scripts.map(src => `<script src="${src}"></script>`).join('\n')}
   <style>${slideDeck.css}</style>
 </head>
 <body>
   ${slide.html}
-  <script>
-    try { ${slideDeck.scripts} } catch (error) { ... }
-  </script>
+  ${slideScripts ? `<script>${slideScripts}</script>` : ''}
 </body>
-</html>`;
+</html>`.trim();
+}, [slide.html, slide.scripts, slideDeck.css, slideDeck.external_scripts]);
 ```
-- **Raw HTML (Rendered/Text)**: use `rawHtml` from backend to show the canonical response for debugging mismatches.
+
+Key improvement: No more try-catch around scripts—each slide only runs its own code.
+
+#### 5.3 Presentation Mode & Raw HTML
+
+For presentation mode and raw HTML views, all slides are rendered together. These use `slideDeck.scripts` which returns IIFE-wrapped aggregated scripts:
+
+```tsx
+// Used in PresentationMode.tsx, SlidePanel.tsx (raw view)
+${slideDeck.scripts}  // IIFE-wrapped, safe for shared scope
+```
 
 #### 5.4 Slide Selection & Context
 - `SelectionContext` tracks selected slide indices/HTML.
 - `SlideSelection` and `SlideTile` share this context so the user can highlight slides before requesting edits.
-- `applyReplacements` helper was removed; backend becomes the single source of truth for script state.
+- Backend becomes the single source of truth for script state.
 
 ---
 
 ### 6. Integrity Guarantees
 
 #### 6.1 Script Integrity
-1. **Prompt constraints** ensure the LLM emits one script per canvas with clear markers and unique variables.
-2. **Parse-time splitting** breaks monolithic multi-canvas script blocks into isolated per-canvas `ScriptBlock`s, preventing "Identifier already declared" errors during edits.
-3. **Extraction heuristics** pick up canvas IDs from multiple patterns and from the comment marker.
-4. **Fallback chain** ensures canvas IDs are resolved even if script parsing fails: parsed script → regex extraction → slide HTML canvas elements.
-5. **Backend logic** removes any existing script block tied to canvases mentioned in the new script, even if the slide wasn't removed.
-6. **Frontend** only ever renders the backend deck, so charts run with the exact scripts produced by the server.
-
-If the prompt is ever violated (e.g., multi-canvas blocks reappear), the parse-time splitting heuristics still isolate each canvas's code, and `remove_canvas_scripts` cleanly removes only the targeted canvas.
+1. **Inline storage**: Scripts are stored on `Slide` objects—when a slide is removed, its scripts are automatically removed.
+2. **Canvas-aware splitting**: Multi-canvas scripts are split and assigned to the correct slides during parsing.
+3. **IIFE wrapping**: Aggregated scripts (for presentation mode) are wrapped in IIFEs to prevent variable collisions.
+4. **Fallback assignment**: Scripts without canvas IDs are assigned to the last slide.
+5. **No orphans**: The slide-owns-scripts model eliminates orphaned script blocks.
 
 #### 6.2 CSS Integrity
 1. **Selector-level merging** ensures edits only affect the CSS rules they modify; unrelated styles are preserved.
@@ -254,7 +318,6 @@ If the prompt is ever violated (e.g., multi-canvas blocks reappear), the parse-t
 #### 6.3 Slide Validation
 - Slides are identified by BeautifulSoup's `find_all("div", class_="slide")`, which correctly matches multi-class elements like `class="slide title-slide"`.
 - Empty slide content is rejected with a descriptive error.
-- Canvas/script alignment is validated before deck updates to prevent orphaned charts.
 
 ---
 
@@ -262,23 +325,24 @@ If the prompt is ever violated (e.g., multi-canvas blocks reappear), the parse-t
 | Concern | File |
 | --- | --- |
 | Prompt / LLM Output Rules | `config/prompts.yaml` |
-| Slide & script parsing | `src/domain/slide_deck.py`, `src/domain/slide.py` |
+| Slide class with scripts | `src/domain/slide.py` |
+| SlideDeck parsing & IIFE aggregation | `src/domain/slide_deck.py` |
 | Canvas heuristics & script splitting | `src/utils/html_utils.py` (`split_script_by_canvas`, `extract_canvas_ids_from_script`) |
 | CSS parsing & merging | `src/utils/css_utils.py` |
-| Agent response extraction | `src/services/agent.py` (`_parse_slide_replacements`, `_extract_css_from_response`) |
+| Agent response extraction | `src/services/agent.py` (`_parse_slide_replacements`) |
 | Chat orchestration & replacements | `src/api/services/chat_service.py` |
 | REST endpoints | `src/api/routes/slides.py`, `src/api/routes/chat.py` |
 | React state & views | `frontend/src/components/Layout/AppLayout.tsx`, `frontend/src/components/ChatPanel`, `frontend/src/components/SlidePanel` |
 | API client | `frontend/src/services/api.ts` |
-| Tests | `tests/unit/test_html_utils.py`, `tests/unit/test_slide_deck.py`, `tests/unit/test_css_utils.py` |
+| TypeScript types | `frontend/src/types/slide.ts` |
+| Tests | `tests/unit/test_html_utils.py`, `tests/unit/test_slide_deck.py`, `tests/unit/test_slide_replacements.py` |
 
 ---
 
 ### 8. Future Enhancements
-- Consider storing per-canvas script hashes so we can detect no-op edits (would slot into the backend flow documented in `backend-overview.md`).
-- Capture shared helper scripts separately if the LLM needs to reuse functions across canvases.
+- Consider storing per-slide script hashes so we can detect no-op edits.
 - CSS diff visualization: show users which selectors were modified during edits.
 - Scoped CSS: consider prefixing selectors per-slide to prevent style leakage between slides.
+- Global scripts: add a `SlideDeck.global_scripts` field for truly shared utility functions.
 
-With these pieces, contributors can trace exactly how HTML is parsed, transformed, and rendered across the stack. For deeper dives, start with `SlideDeck` and `ChatService`, then follow the API responses into `ChatPanel` and `SlidePanel`. See the companion overview docs for broader context on how the UI and API are structured around this pipeline.
-
+With these pieces, contributors can trace exactly how HTML is parsed, transformed, and rendered across the stack. For deeper dives, start with `Slide` and `SlideDeck`, then follow the API responses into `ChatPanel` and `SlidePanel`. See the companion overview docs for broader context on how the UI and API are structured around this pipeline.
