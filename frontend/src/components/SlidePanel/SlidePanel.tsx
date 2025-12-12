@@ -298,6 +298,34 @@ export const SlidePanel: React.FC<SlidePanelProps> = ({ slideDeck, rawHtml, onSl
     .reveal canvas {
       max-width: 100%;
     }
+    /* Neutralize reveal.js typography styles so slide CSS takes precedence */
+    .reveal .slides section h1,
+    .reveal .slides section h2,
+    .reveal .slides section h3,
+    .reveal .slides section h4,
+    .reveal .slides section h5,
+    .reveal .slides section h6 {
+      font-size: inherit;
+      font-weight: inherit;
+      line-height: inherit;
+      margin: 0;
+      text-transform: none;
+      color: inherit;
+      text-shadow: none;
+    }
+    .reveal .slides section p {
+      font-size: inherit;
+      line-height: inherit;
+      margin: 0;
+    }
+    .reveal .slides section ul,
+    .reveal .slides section ol {
+      margin: 0;
+      padding: 0;
+    }
+    .reveal .slides section a {
+      color: inherit;
+    }
     ${slideDeck.css}
   </style>
 </head>
