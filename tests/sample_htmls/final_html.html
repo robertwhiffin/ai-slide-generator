@@ -1,0 +1,1229 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MegaCorp Account Review - Databricks Spend Analysis</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+* {
+margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+}
+
+body {
+font-family: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+            background: #F9FAFB;
+            width: 1280px;
+            margin: 0 auto;
+            padding: 0;
+            overflow-x: hidden;
+}
+
+.slide {
+width: 1280px;
+            height: 720px;
+            background: white;
+            margin-bottom: 20px;
+            padding: 60px 80px;
+            display: flex;
+            flex-direction: column;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+            position: relative;
+}
+
+.title-slide {
+justify-content: center;
+            align-items: center;
+            background: linear-gradient(135deg, #102025 0%, #2B3940 100%);
+            color: white;
+            text-align: center;
+}
+
+.title-slide h1 {
+font-size: 56px;
+            font-weight: 700;
+            margin-bottom: 24px;
+            color: white;
+}
+
+.title-slide .subtitle {
+font-size: 28px;
+            color: #F9FAFB;
+            margin-bottom: 48px;
+            font-weight: 300;
+}
+
+.title-slide .meta {
+font-size: 18px;
+            color: #F9FAFB;
+            opacity: 0.8;
+}
+
+.slide h2 {
+font-size: 42px;
+            font-weight: 700;
+            color: #102025;
+            margin-bottom: 12px;
+}
+
+.slide h3 {
+font-size: 22px;
+            color: #5D6D71;
+            margin-bottom: 24px;
+            font-weight: 400;
+}
+
+.content {
+flex: 1;
+            display: flex;
+            flex-direction: column;
+            gap: 16px;
+}
+
+.card {
+background: #F9FAFB;
+            border-radius: 12px;
+            padding: 16px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+}
+
+.metrics-grid {
+display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 16px;
+}
+
+.metric-card {
+background: white;
+            border-radius: 10px;
+            padding: 16px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+            border-left: 4px solid #EB4A34;
+}
+
+.metric-card.green {
+border-left-color: #4BA676;
+}
+
+.metric-card.blue {
+border-left-color: #3C71AF;
+}
+
+.metric-card.yellow {
+border-left-color: #F2AE3D;
+}
+
+.metric-label {
+font-size: 12px;
+            color: #5D6D71;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            margin-bottom: 6px;
+}
+
+.metric-value {
+font-size: 28px;
+            font-weight: 700;
+            color: #102025;
+            margin-bottom: 2px;
+}
+
+.metric-change {
+font-size: 12px;
+            font-weight: 600;
+}
+
+.metric-change.positive {
+color: #4BA676;
+}
+
+.metric-change.negative {
+color: #EB4A34;
+}
+
+.chart-container {
+position: relative;
+            height: 320px;
+            background: white;
+            border-radius: 12px;
+            padding: 20px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+}
+
+.two-charts {
+display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 24px;
+}
+
+.chart-container canvas {
+max-height: 280px;
+}
+
+table {
+width: 100%;
+            border-collapse: collapse;
+            background: white;
+            border-radius: 12px;
+            overflow: hidden;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+}
+
+thead {
+background: #102025;
+            color: white;
+}
+
+th {
+padding: 12px;
+            text-align: left;
+            font-weight: 600;
+            font-size: 12px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+}
+
+td {
+padding: 10px 12px;
+            border-bottom: 1px solid #F9FAFB;
+            color: #2B3940;
+            font-size: 14px;
+}
+
+tr:last-child td {
+border-bottom: none;
+}
+
+tbody tr:hover {
+background: #F9FAFB;
+}
+
+.highlight {
+color: #EB4A34;
+            font-weight: 600;
+}
+
+.positive {
+color: #4BA676;
+            font-weight: 600;
+}
+
+.bullet-list {
+list-style: none;
+            padding: 0;
+}
+
+.bullet-list li {
+padding: 8px 0 8px 24px;
+            position: relative;
+            font-size: 15px;
+            color: #2B3940;
+            line-height: 1.5;
+}
+
+.bullet-list li:before {
+content: "→";
+            position: absolute;
+            left: 0;
+            color: #EB4A34;
+            font-weight: 700;
+            font-size: 16px;
+}
+
+.footer {
+position: absolute;
+            bottom: 30px;
+            right: 80px;
+            font-size: 14px;
+            color: #5D6D71;
+}
+
+.logo {
+position: absolute;
+            top: 30px;
+            right: 80px;
+            font-size: 18px;
+            font-weight: 700;
+            color: #EB4A34;
+}
+
+.two-column {
+display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 16px;
+}
+
+.section-title {
+font-size: 16px;
+            font-weight: 700;
+            color: #102025;
+            margin-bottom: 8px;
+}
+    </style>
+</head>
+<body>
+
+<div class="slide title-slide">
+<h1>MegaCorp Account Review</h1>
+<div class="subtitle">Databricks Platform Investment &amp; Growth Analysis</div>
+<div class="meta">FY2022 - FY2024 Performance | 1 &amp; 3 Year Forecasts<br/>December 2024</div>
+</div>
+
+<div class="slide">
+<div class="logo">DATABRICKS</div>
+<h2>Strong 127% growth over 3 years demonstrates platform value</h2>
+<h3>MegaCorp's Databricks investment has scaled from $2.4M to $5.5M annually</h3>
+<div class="content">
+<div class="metrics-grid">
+<div class="metric-card">
+<div class="metric-label">Total 3-Year Spend</div>
+<div class="metric-value">$11.8M</div>
+<div class="metric-change positive">↑ 127% growth</div>
+</div>
+<div class="metric-card green">
+<div class="metric-label">FY2024 Annual Spend</div>
+<div class="metric-value">$5.5M</div>
+<div class="metric-change positive">↑ 38% YoY</div>
+</div>
+<div class="metric-card blue">
+<div class="metric-label">Active Lines of Business</div>
+<div class="metric-value">5</div>
+<div class="metric-change positive">100% adoption</div>
+</div>
+</div>
+<div class="card">
+<ul class="bullet-list">
+<li><strong>Financial Services</strong> leads consumption at 42% of total spend, driven by real-time risk analytics</li>
+<li><strong>Retail &amp; E-commerce</strong> shows fastest growth at 156% CAGR with personalization initiatives</li>
+<li><strong>Manufacturing</strong> emerging as strategic growth area with IoT and predictive maintenance expansion</li>
+</ul>
+</div>
+</div>
+<div class="footer">Slide 1</div>
+</div>
+
+<div class="slide">
+<div class="logo">DATABRICKS</div>
+<h2>Consistent year-over-year growth across all fiscal years</h2>
+<h3>Annual spend increased from $2.4M (FY2022) to $5.5M (FY2024)</h3>
+<div class="content">
+<div class="chart-container">
+<canvas id="historicalSpendChart"></canvas>
+</div>
+<div class="metrics-grid">
+<div class="metric-card">
+<div class="metric-label">FY2022 Spend</div>
+<div class="metric-value">$2.4M</div>
+<div class="metric-change">Baseline year</div>
+</div>
+<div class="metric-card green">
+<div class="metric-label">FY2023 Spend</div>
+<div class="metric-value">$3.9M</div>
+<div class="metric-change positive">↑ 63% YoY</div>
+</div>
+<div class="metric-card blue">
+<div class="metric-label">FY2024 Spend</div>
+<div class="metric-value">$5.5M</div>
+<div class="metric-change positive">↑ 38% YoY</div>
+</div>
+</div>
+</div>
+<div class="footer">Slide 2</div>
+</div>
+
+<div class="slide">
+<div class="logo">DATABRICKS</div>
+<h2>Financial Services dominates spend at 42% of total investment</h2>
+<h3>All five lines of business show active engagement with the platform</h3>
+<div class="content">
+<div class="two-charts">
+<div class="chart-container">
+<canvas id="lobPieChart"></canvas>
+</div>
+<div class="chart-container">
+<canvas id="lobTrendChart"></canvas>
+</div>
+</div>
+<table>
+<thead>
+<tr>
+<th>Line of Business</th>
+<th>FY2024 Spend</th>
+<th>% of Total</th>
+<th>3-Year CAGR</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Financial Services</strong></td>
+<td>$2,310,000</td>
+<td class="highlight">42%</td>
+<td class="positive">+118%</td>
+</tr>
+<tr>
+<td><strong>Retail &amp; E-commerce</strong></td>
+<td>$1,265,000</td>
+<td>23%</td>
+<td class="positive">+156%</td>
+</tr>
+<tr>
+<td><strong>Healthcare &amp; Life Sciences</strong></td>
+<td>$935,000</td>
+<td>17%</td>
+<td class="positive">+102%</td>
+</tr>
+<tr>
+<td><strong>Manufacturing</strong></td>
+<td>$660,000</td>
+<td>12%</td>
+<td class="positive">+145%</td>
+</tr>
+<tr>
+<td><strong>Telecommunications</strong></td>
+<td>$330,000</td>
+<td>6%</td>
+<td class="positive">+89%</td>
+</tr>
+</tbody>
+</table>
+</div>
+<div class="footer">Slide 3</div>
+</div>
+
+<div class="slide">
+<div class="logo">DATABRICKS</div>
+<h2>Financial Services spend grew 118% driven by risk analytics</h2>
+<h3>Real-time fraud detection and regulatory compliance are primary use cases</h3>
+<div class="content">
+<div class="chart-container">
+<canvas id="financialServicesChart"></canvas>
+</div>
+<div class="card">
+<ul class="bullet-list">
+<li>Scaled from $1.06M (FY2022) to $2.31M (FY2024) as real-time risk models expanded</li>
+<li>Q4 FY2024 spike reflects deployment of new anti-money laundering ML pipelines</li>
+<li>Platform now processes 15M+ transactions daily for fraud detection</li>
+</ul>
+</div>
+</div>
+<div class="footer">Slide 4</div>
+</div>
+
+<div class="slide">
+<div class="logo">DATABRICKS</div>
+<h2>Retail &amp; E-commerce shows explosive 156% CAGR growth</h2>
+<h3>Customer personalization and inventory optimization driving rapid expansion</h3>
+<div class="content">
+<div class="chart-container">
+<canvas id="retailChart"></canvas>
+</div>
+<div class="metrics-grid">
+<div class="metric-card">
+<div class="metric-label">FY2022 Baseline</div>
+<div class="metric-value">$485K</div>
+<div class="metric-change">Initial deployment</div>
+</div>
+<div class="metric-card green">
+<div class="metric-label">FY2024 Spend</div>
+<div class="metric-value">$1.27M</div>
+<div class="metric-change positive">↑ 161% growth</div>
+</div>
+<div class="metric-card blue">
+<div class="metric-label">Key Initiative</div>
+<div class="metric-value">AI Recs</div>
+<div class="metric-change">35% uplift in conversion</div>
+</div>
+</div>
+</div>
+<div class="footer">Slide 5</div>
+</div>
+
+<div class="slide">
+<div class="logo">DATABRICKS</div>
+<h2>Manufacturing and Healthcare show strong momentum</h2>
+<h3>IoT analytics and clinical research accelerating platform adoption</h3>
+<div class="content">
+<div class="two-charts">
+<div class="chart-container">
+<canvas id="manufacturingChart"></canvas>
+</div>
+<div class="chart-container">
+<canvas id="healthcareChart"></canvas>
+</div>
+</div>
+<div class="card">
+<ul class="bullet-list">
+<li><strong>Manufacturing:</strong> 145% CAGR with predictive maintenance reducing downtime by 28%</li>
+<li><strong>Healthcare:</strong> 102% CAGR powering clinical trial analytics and patient outcome modeling</li>
+</ul>
+</div>
+</div>
+<div class="footer">Slide 6</div>
+</div>
+
+<div class="slide">
+<div class="logo">DATABRICKS</div>
+<h2>FY2025 forecast projects $7.2M spend with 32% growth</h2>
+<h3>GenAI initiatives and data governance expansion driving near-term growth</h3>
+<div class="content">
+<div class="chart-container">
+<canvas id="oneYearForecastChart"></canvas>
+</div>
+<table>
+<thead>
+<tr>
+<th>Line of Business</th>
+<th>FY2024 Actual</th>
+<th>FY2025 Forecast</th>
+<th>Growth</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Financial Services</strong></td>
+<td>$2,310,000</td>
+<td>$3,000,000</td>
+<td class="positive">+30%</td>
+</tr>
+<tr>
+<td><strong>Retail &amp; E-commerce</strong></td>
+<td>$1,265,000</td>
+<td>$1,750,000</td>
+<td class="positive">+38%</td>
+</tr>
+<tr>
+<td><strong>Healthcare &amp; Life Sciences</strong></td>
+<td>$935,000</td>
+<td>$1,250,000</td>
+<td class="positive">+34%</td>
+</tr>
+<tr>
+<td><strong>Manufacturing</strong></td>
+<td>$660,000</td>
+<td>$950,000</td>
+<td class="positive">+44%</td>
+</tr>
+<tr>
+<td><strong>Telecommunications</strong></td>
+<td>$330,000</td>
+<td>$425,000</td>
+<td class="positive">+29%</td>
+</tr>
+</tbody>
+</table>
+</div>
+<div class="footer">Slide 7</div>
+</div>
+
+<div class="slide">
+<div class="logo">DATABRICKS</div>
+<h2>Three-year outlook forecasts $12.8M by FY2027</h2>
+<h3>133% cumulative growth driven by AI/ML maturity and multi-cloud expansion</h3>
+<div class="content">
+<div class="chart-container">
+<canvas id="threeYearForecastChart"></canvas>
+</div>
+<div class="metrics-grid">
+<div class="metric-card">
+<div class="metric-label">FY2025 Forecast</div>
+<div class="metric-value">$7.2M</div>
+<div class="metric-change positive">↑ 32% YoY</div>
+</div>
+<div class="metric-card green">
+<div class="metric-label">FY2026 Forecast</div>
+<div class="metric-value">$9.7M</div>
+<div class="metric-change positive">↑ 35% YoY</div>
+</div>
+<div class="metric-card blue">
+<div class="metric-label">FY2027 Forecast</div>
+<div class="metric-value">$12.8M</div>
+<div class="metric-change positive">↑ 32% YoY</div>
+</div>
+</div>
+</div>
+<div class="footer">Slide 8</div>
+</div>
+
+<div class="slide">
+<div class="logo">DATABRICKS</div>
+<h2>All lines of business projected for sustained growth</h2>
+<h3>Financial Services maintains leadership while Retail closes the gap</h3>
+<div class="content">
+<div class="chart-container">
+<canvas id="lobForecastChart"></canvas>
+</div>
+<table>
+<thead>
+<tr>
+<th>Line of Business</th>
+<th>FY2025</th>
+<th>FY2026</th>
+<th>FY2027</th>
+<th>3-Yr CAGR</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Financial Services</strong></td>
+<td>$3.00M</td>
+<td>$3.98M</td>
+<td>$5.15M</td>
+<td class="positive">+30%</td>
+</tr>
+<tr>
+<td><strong>Retail &amp; E-commerce</strong></td>
+<td>$1.75M</td>
+<td>$2.45M</td>
+<td>$3.33M</td>
+<td class="positive">+38%</td>
+</tr>
+<tr>
+<td><strong>Healthcare &amp; Life Sciences</strong></td>
+<td>$1.25M</td>
+<td>$1.69M</td>
+<td>$2.24M</td>
+<td class="positive">+34%</td>
+</tr>
+<tr>
+<td><strong>Manufacturing</strong></td>
+<td>$0.95M</td>
+<td>$1.33M</td>
+<td>$1.79M</td>
+<td class="positive">+39%</td>
+</tr>
+<tr>
+<td><strong>Telecommunications</strong></td>
+<td>$0.43M</td>
+<td>$0.55M</td>
+<td>$0.69M</td>
+<td class="positive">+28%</td>
+</tr>
+</tbody>
+</table>
+</div>
+<div class="footer">Slide 9</div>
+</div>
+
+<div class="slide">
+<div class="logo">DATABRICKS</div>
+<h2>Five strategic initiatives will drive forecasted growth</h2>
+<h3>GenAI, real-time analytics, and governance are top investment priorities</h3>
+<div class="content">
+<div class="card">
+<ul class="bullet-list">
+<li><strong>Generative AI Deployment:</strong> Enterprise LLM applications across customer service and content generation expected to add $1.8M annually</li>
+<li><strong>Real-Time Streaming:</strong> Expansion of streaming analytics for Financial Services and Telecom to drive $1.2M incremental spend</li>
+<li><strong>Data Governance &amp; Unity Catalog:</strong> Enterprise-wide rollout supporting compliance and data mesh architecture</li>
+<li><strong>Multi-Cloud Strategy:</strong> Azure expansion alongside existing AWS footprint to support global operations</li>
+<li><strong>Advanced Analytics COE:</strong> Centralized center of excellence to accelerate ML model deployment across all LOBs</li>
+</ul>
+</div>
+</div>
+<div class="footer">Slide 10</div>
+</div>
+
+<div class="slide">
+<div class="logo">DATABRICKS</div>
+<h2>Budget constraints and talent gaps pose moderate risks</h2>
+<h3>Proactive mitigation strategies identified for each risk area</h3>
+<div class="content">
+<table>
+<thead>
+<tr>
+<th>Risk Factor</th>
+<th>Impact</th>
+<th>Probability</th>
+<th>Mitigation Strategy</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Economic Downturn</strong></td>
+<td class="highlight">High</td>
+<td>Medium</td>
+<td>Focus on ROI-positive use cases; flexible consumption model</td>
+</tr>
+<tr>
+<td><strong>Skills Shortage</strong></td>
+<td>Medium</td>
+<td class="highlight">High</td>
+<td>Databricks Academy training; partner ecosystem engagement</td>
+</tr>
+<tr>
+<td><strong>Cloud Cost Optimization</strong></td>
+<td>Medium</td>
+<td>Medium</td>
+<td>Implement automated cluster management; reserved capacity</td>
+</tr>
+<tr>
+<td><strong>Competitive Pressure</strong></td>
+<td>Low</td>
+<td>Medium</td>
+<td>Deepen platform integration; showcase unique capabilities</td>
+</tr>
+</tbody>
+</table>
+<div class="card" style="margin-top: 24px;">
+<ul class="bullet-list">
+<li>Quarterly business reviews to track value realization and adjust forecasts</li>
+<li>FinOps framework implementation to optimize consumption patterns</li>
+</ul>
+</div>
+</div>
+<div class="footer">Slide 11</div>
+</div>
+
+<div class="slide">
+<div class="logo">DATABRICKS</div>
+<h2>Strategic recommendations and next steps</h2>
+<h3>Collaborative action plan to maximize platform value and drive growth</h3>
+<div class="content">
+<div class="metrics-grid">
+<div class="metric-card">
+<div class="metric-label">Historical Performance</div>
+<div class="metric-value">127%</div>
+<div class="metric-change positive">3-year growth achieved</div>
+</div>
+<div class="metric-card green">
+<div class="metric-label">Current Run Rate</div>
+<div class="metric-value">$5.5M</div>
+<div class="metric-change">FY2024 spend</div>
+</div>
+<div class="metric-card blue">
+<div class="metric-label">FY2027 Target</div>
+<div class="metric-value">$12.8M</div>
+<div class="metric-change positive">133% growth forecast</div>
+</div>
+</div>
+<div class="two-column">
+<div class="card">
+<div class="section-title">Key Recommendations</div>
+<ul class="bullet-list">
+<li><strong>Unity Catalog:</strong> Enterprise governance to unlock secure data sharing</li>
+<li><strong>GenAI COE:</strong> Deploy LLM applications targeting $2M+ value</li>
+<li><strong>Manufacturing:</strong> Expand predictive maintenance use cases</li>
+<li><strong>FinOps:</strong> Automated optimization for 18% efficiency gain</li>
+</ul>
+</div>
+<div class="card">
+<div class="section-title">Q1 FY2025 Action Plan</div>
+<ul class="bullet-list">
+<li><strong>Executive Business Review</strong> - January 2025</li>
+<li><strong>Unity Catalog Deployment</strong> - Q1 2025</li>
+<li><strong>GenAI Pilot Launch</strong> - February 2025</li>
+<li><strong>FinOps Assessment</strong> - Q1 2025</li>
+<li><strong>Training Program</strong> - 150 users to certify</li>
+</ul>
+</div>
+</div>
+<div class="metrics-grid">
+<div class="metric-card green">
+<div class="metric-label">Efficiency Gain Target</div>
+<div class="metric-value">18%</div>
+<div class="metric-change">Cost optimization potential</div>
+</div>
+<div class="metric-card blue">
+<div class="metric-label">GenAI Value Target</div>
+<div class="metric-value">$2M+</div>
+<div class="metric-change">First-year business impact</div>
+</div>
+<div class="metric-card yellow">
+<div class="metric-label">Training Investment</div>
+<div class="metric-value">150</div>
+<div class="metric-change">Users to certify in FY2025</div>
+</div>
+</div>
+<div class="card" style="background: linear-gradient(135deg, #102025 0%, #2B3940 100%); color: white; text-align: center; padding: 12px;">
+<p style="font-size: 16px; line-height: 1.5; margin: 0;">
+<strong>Thank you for your partnership.</strong> We look forward to continuing to support MegaCorp's data and AI transformation journey.
+            </p>
+</div>
+</div>
+<div class="footer">Slide 12</div>
+</div>
+
+<script>
+(function() {
+const historicalCanvas = document.getElementById('historicalSpendChart');
+if (historicalCanvas) {
+    const ctx = historicalCanvas.getContext('2d');
+    new Chart(ctx, {
+        type: 'bar',
+        data: {
+            labels: ['FY2022', 'FY2023', 'FY2024'],
+            datasets: [{
+                label: 'Annual Spend ($M)',
+                data: [2.4, 3.9, 5.5],
+                backgroundColor: ['#EB4A34', '#4BA676', '#3C71AF'],
+                borderRadius: 8
+            }]
+        },
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: {
+                legend: { display: false },
+                title: {
+                    display: true,
+                    text: 'Total Annual Databricks Spend',
+                    font: { size: 16, weight: '600' },
+                    color: '#102025'
+                }
+            },
+            scales: {
+                y: {
+                    beginAtZero: true,
+                    ticks: {
+                        callback: function(value) { return '$' + value + 'M'; }
+                    }
+                }
+            }
+        }
+    });
+}
+})();
+
+(function() {
+// Slide 4: LOB Pie Chart
+const lobPieCanvas = document.getElementById('lobPieChart');
+if (lobPieCanvas) {
+    const ctx2 = lobPieCanvas.getContext('2d');
+    new Chart(ctx2, {
+        type: 'doughnut',
+        data: {
+            labels: ['Financial Services', 'Retail & E-commerce', 'Healthcare', 'Manufacturing', 'Telecom'],
+            datasets: [{
+                data: [42, 23, 17, 12, 6],
+                backgroundColor: ['#EB4A34', '#4BA676', '#3C71AF', '#F2AE3D', '#5D6D71'],
+                borderWidth: 2,
+                borderColor: '#fff'
+            }]
+        },
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: {
+                legend: { position: 'bottom' },
+                title: {
+                    display: true,
+                    text: 'FY2024 Spend by LOB (%)',
+                    font: { size: 14, weight: '600' },
+                    color: '#102025'
+                }
+            }
+        }
+    });
+}
+// Slide 4: LOB Trend Chart
+const lobTrendCanvas = document.getElementById('lobTrendChart');
+if (lobTrendCanvas) {
+    const ctx3 = lobTrendCanvas.getContext('2d');
+    new Chart(ctx3, {
+        type: 'line',
+        data: {
+            labels: ['FY2022', 'FY2023', 'FY2024'],
+            datasets: [
+                {
+                    label: 'Financial Services',
+                    data: [1.06, 1.68, 2.31],
+                    borderColor: '#EB4A34',
+                    backgroundColor: 'rgba(235, 74, 52, 0.1)',
+                    tension: 0.3,
+                    fill: true
+                },
+                {
+                    label: 'Retail & E-commerce',
+                    data: [0.485, 0.82, 1.265],
+                    borderColor: '#4BA676',
+                    backgroundColor: 'rgba(75, 166, 118, 0.1)',
+                    tension: 0.3,
+                    fill: true
+                },
+                {
+                    label: 'Healthcare',
+                    data: [0.46, 0.72, 0.935],
+                    borderColor: '#3C71AF',
+                    backgroundColor: 'rgba(60, 113, 175, 0.1)',
+                    tension: 0.3,
+                    fill: true
+                }
+            ]
+        },
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: {
+                legend: { position: 'bottom', labels: { boxWidth: 12, font: { size: 11 } } },
+                title: {
+                    display: true,
+                    text: 'Top 3 LOB Trends ($M)',
+                    font: { size: 14, weight: '600' },
+                    color: '#102025'
+                }
+            },
+            scales: {
+                y: {
+                    beginAtZero: true,
+                    ticks: {
+                        callback: function(value) { return '$' + value + 'M'; }
+                    }
+                }
+            }
+        }
+    });
+}
+})();
+
+(function() {
+// Slide 5: Financial Services Chart
+const financialCanvas = document.getElementById('financialServicesChart');
+if (financialCanvas) {
+    const ctx4 = financialCanvas.getContext('2d');
+    new Chart(ctx4, {
+        type: 'line',
+        data: {
+            labels: ['Q1 FY22', 'Q2 FY22', 'Q3 FY22', 'Q4 FY22', 'Q1 FY23', 'Q2 FY23', 'Q3 FY23', 'Q4 FY23', 'Q1 FY24', 'Q2 FY24', 'Q3 FY24', 'Q4 FY24'],
+            datasets: [{
+                label: 'Quarterly Spend ($K)',
+                data: [245, 255, 270, 290, 380, 405, 425, 470, 520, 560, 590, 640],
+                borderColor: '#EB4A34',
+                backgroundColor: 'rgba(235, 74, 52, 0.1)',
+                tension: 0.3,
+                fill: true,
+                pointRadius: 4,
+                pointHoverRadius: 6
+            }]
+        },
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: {
+                legend: { display: false },
+                title: {
+                    display: true,
+                    text: 'Financial Services Quarterly Spend Trend',
+                    font: { size: 16, weight: '600' },
+                    color: '#102025'
+                }
+            },
+            scales: {
+                y: {
+                    beginAtZero: true,
+                    ticks: {
+                        callback: function(value) { return '$' + value + 'K'; }
+                    }
+                }
+            }
+        }
+    });
+}
+})();
+
+(function() {
+const retailCanvas = document.getElementById('retailChart');
+if (retailCanvas) {
+    const ctx = retailCanvas.getContext('2d');
+    new Chart(ctx, {
+        type: 'line',
+        data: {
+            labels: ['Q1 FY22', 'Q2 FY22', 'Q3 FY22', 'Q4 FY22', 'Q1 FY23', 'Q2 FY23', 'Q3 FY23', 'Q4 FY23', 'Q1 FY24', 'Q2 FY24', 'Q3 FY24', 'Q4 FY24'],
+            datasets: [{
+                label: 'Quarterly Spend ($K)',
+                data: [110, 115, 125, 135, 180, 195, 210, 235, 285, 310, 330, 340],
+                borderColor: '#4BA676',
+                backgroundColor: 'rgba(75, 166, 118, 0.1)',
+                tension: 0.3,
+                fill: true,
+                pointRadius: 5,
+                pointHoverRadius: 7,
+                pointBackgroundColor: '#4BA676',
+                pointBorderColor: '#fff',
+                pointBorderWidth: 2
+            }]
+        },
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: {
+                legend: { display: false },
+                title: {
+                    display: true,
+                    text: 'Retail & E-commerce Quarterly Spend Growth',
+                    font: { size: 16, weight: '600' },
+                    color: '#102025'
+                }
+            },
+            scales: {
+                y: {
+                    beginAtZero: true,
+                    ticks: {
+                        callback: function(value) { return '$' + value + 'K'; }
+                    }
+                }
+            }
+        }
+    });
+}
+})();
+
+(function() {
+// Slide 7: Manufacturing Chart
+const mfgCanvas = document.getElementById('manufacturingChart');
+if (mfgCanvas) {
+    const ctx6 = mfgCanvas.getContext('2d');
+    new Chart(ctx6, {
+        type: 'line',
+        data: {
+            labels: ['FY2022', 'FY2023', 'FY2024'],
+            datasets: [{
+                label: 'Manufacturing ($K)',
+                data: [270, 445, 660],
+                borderColor: '#F2AE3D',
+                backgroundColor: 'rgba(242, 174, 61, 0.2)',
+                tension: 0.3,
+                fill: true,
+                pointRadius: 6,
+                pointHoverRadius: 8
+            }]
+        },
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: {
+                legend: { display: false },
+                title: {
+                    display: true,
+                    text: 'Manufacturing: 145% CAGR',
+                    font: { size: 14, weight: '600' },
+                    color: '#102025'
+                }
+            },
+            scales: {
+                y: {
+                    beginAtZero: true,
+                    ticks: {
+                        callback: function(value) { return '$' + value + 'K'; }
+                    }
+                }
+            }
+        }
+    });
+}
+// Slide 7: Healthcare Chart
+const healthcareCanvas = document.getElementById('healthcareChart');
+if (healthcareCanvas) {
+    const ctx7 = healthcareCanvas.getContext('2d');
+    new Chart(ctx7, {
+        type: 'line',
+        data: {
+            labels: ['FY2022', 'FY2023', 'FY2024'],
+            datasets: [{
+                label: 'Healthcare ($K)',
+                data: [460, 720, 935],
+                borderColor: '#3C71AF',
+                backgroundColor: 'rgba(60, 113, 175, 0.2)',
+                tension: 0.3,
+                fill: true,
+                pointRadius: 6,
+                pointHoverRadius: 8
+            }]
+        },
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: {
+                legend: { display: false },
+                title: {
+                    display: true,
+                    text: 'Healthcare: 102% CAGR',
+                    font: { size: 14, weight: '600' },
+                    color: '#102025'
+                }
+            },
+            scales: {
+                y: {
+                    beginAtZero: true,
+                    ticks: {
+                        callback: function(value) { return '$' + value + 'K'; }
+                    }
+                }
+            }
+        }
+    });
+}
+})();
+
+(function() {
+// Slide 8: 1-Year Forecast Chart
+const oneYearCanvas = document.getElementById('oneYearForecastChart');
+if (oneYearCanvas) {
+    const ctx8 = oneYearCanvas.getContext('2d');
+    new Chart(ctx8, {
+        type: 'bar',
+        data: {
+            labels: ['FY2022', 'FY2023', 'FY2024', 'FY2025 (F)'],
+            datasets: [{
+                label: 'Annual Spend ($M)',
+                data: [2.4, 3.9, 5.5, 7.2],
+                backgroundColor: ['#5D6D71', '#5D6D71', '#5D6D71', '#EB4A34'],
+                borderRadius: 8
+            }]
+        },
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: {
+                legend: { display: false },
+                title: {
+                    display: true,
+                    text: 'Historical Actuals vs FY2025 Forecast',
+                    font: { size: 16, weight: '600' },
+                    color: '#102025'
+                }
+            },
+            scales: {
+                y: {
+                    beginAtZero: true,
+                    ticks: {
+                        callback: function(value) { return '$' + value + 'M'; }
+                    }
+                }
+            }
+        }
+    });
+}
+})();
+
+(function() {
+// Slide 9: 3-Year Forecast Chart
+const threeYearCanvas = document.getElementById('threeYearForecastChart');
+if (threeYearCanvas) {
+    const ctx9 = threeYearCanvas.getContext('2d');
+    new Chart(ctx9, {
+        type: 'line',
+        data: {
+            labels: ['FY2022', 'FY2023', 'FY2024', 'FY2025 (F)', 'FY2026 (F)', 'FY2027 (F)'],
+            datasets: [{
+                label: 'Annual Spend ($M)',
+                data: [2.4, 3.9, 5.5, 7.2, 9.7, 12.8],
+                borderColor: '#EB4A34',
+                backgroundColor: 'rgba(235, 74, 52, 0.1)',
+                tension: 0.3,
+                fill: true,
+                pointRadius: 6,
+                pointHoverRadius: 8,
+                segment: {
+                    borderDash: ctx => ctx.p0DataIndex >= 2 ? [5, 5] : undefined
+                }
+            }]
+        },
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: {
+                legend: { display: false },
+                title: {
+                    display: true,
+                    text: 'Historical Performance & 3-Year Forecast',
+                    font: { size: 16, weight: '600' },
+                    color: '#102025'
+                }
+            },
+            scales: {
+                y: {
+                    beginAtZero: true,
+                    ticks: {
+                        callback: function(value) { return '$' + value + 'M'; }
+                    }
+                }
+            }
+        }
+    });
+}
+})();
+
+(function() {
+// Slide 10: LOB Forecast Chart
+const lobForecastCanvas = document.getElementById('lobForecastChart');
+if (lobForecastCanvas) {
+    const ctx10 = lobForecastCanvas.getContext('2d');
+    new Chart(ctx10, {
+        type: 'line',
+        data: {
+            labels: ['FY2022', 'FY2023', 'FY2024', 'FY2025 (F)', 'FY2026 (F)', 'FY2027 (F)'],
+            datasets: [
+                {
+                    label: 'Financial Services',
+                    data: [1.06, 1.68, 2.31, 3.0, 3.98, 5.15],
+                    borderColor: '#EB4A34',
+                    backgroundColor: 'rgba(235, 74, 52, 0.1)',
+                    tension: 0.3,
+                    fill: true
+                },
+                {
+                    label: 'Retail & E-commerce',
+                    data: [0.485, 0.82, 1.265, 1.75, 2.45, 3.33],
+                    borderColor: '#4BA676',
+                    backgroundColor: 'rgba(75, 166, 118, 0.1)',
+                    tension: 0.3,
+                    fill: true
+                },
+                {
+                    label: 'Healthcare',
+                    data: [0.46, 0.72, 0.935, 1.25, 1.69, 2.24],
+                    borderColor: '#3C71AF',
+                    backgroundColor: 'rgba(60, 113, 175, 0.1)',
+                    tension: 0.3,
+                    fill: true
+                },
+                {
+                    label: 'Manufacturing',
+                    data: [0.27, 0.445, 0.66, 0.95, 1.33, 1.79],
+                    borderColor: '#F2AE3D',
+                    backgroundColor: 'rgba(242, 174, 61, 0.1)',
+                    tension: 0.3,
+                    fill: true
+                },
+                {
+                    label: 'Telecommunications',
+                    data: [0.175, 0.255, 0.33, 0.425, 0.55, 0.69],
+                    borderColor: '#5D6D71',
+                    backgroundColor: 'rgba(93, 109, 113, 0.1)',
+                    tension: 0.3,
+                    fill: true
+                }
+            ]
+        },
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: {
+                legend: { 
+                    position: 'bottom',
+                    labels: { boxWidth: 12, font: { size: 11 } }
+                },
+                title: {
+                    display: true,
+                    text: 'Spend Forecast by Line of Business ($M)',
+                    font: { size: 16, weight: '600' },
+                    color: '#102025'
+                }
+            },
+            scales: {
+                y: {
+                    beginAtZero: true,
+                    ticks: {
+                        callback: function(value) { return '$' + value + 'M'; }
+                    }
+                }
+            }
+        }
+    });
+}
+})();
+</script>
+
+</body>
+</html>

@@ -588,3 +588,96 @@ class TestEdgeCases:
         assert "subtitle" in deck.slides[0].html.lower()
         assert "Item 1" in deck.slides[0].html
 
+
+class TestSampleHTMLParsing:
+    """Unit tests using sample_htmls fixtures for realistic HTML parsing."""
+
+    def test_parse_original_deck_valid_structure(self) -> None:
+        """Verify original_deck.html parses with correct structure."""
+        from tests.fixtures.sample_htmls import load_original_deck
+
+        deck = SlideDeck.from_html_string(load_original_deck())
+
+        # Structure checks
+        assert deck.title == "MegaCorp Account Review - Databricks Spend Analysis"
+        assert len(deck.slides) == 15
+        assert SlideDeck.CHART_JS_URL in deck.external_scripts
+
+        # CSS should be present
+        assert len(deck.css) > 1000  # Substantial CSS
+
+        # First slide should be title slide
+        assert "title-slide" in deck.slides[0].html
+        assert "MegaCorp Account Review" in deck.slides[0].html
+
+        # Canvas IDs should be in correct slides
+        canvas_slide_mapping = {
+            2: "historicalSpendChart",
+            3: "lobPieChart",
+            4: "financialServicesChart",
+            5: "retailChart",
+            6: "manufacturingChart",
+            7: "oneYearForecastChart",
+            8: "threeYearForecastChart",
+            9: "lobForecastChart",
+        }
+
+        for slide_idx, canvas_id in canvas_slide_mapping.items():
+            assert canvas_id in deck.slides[slide_idx].scripts, (
+                f"Canvas {canvas_id} not found in slide {slide_idx} scripts"
+            )
+
+    def test_parse_update_htmls_valid_structure(self) -> None:
+        """Verify update HTMLs parse with correct scripts attached."""
+        from tests.fixtures.sample_htmls import load_update1, load_update2, load_update3
+
+        # update1: single slide with historicalSpendChart
+        deck1 = SlideDeck.from_html_string(load_update1())
+        assert len(deck1.slides) == 1
+        assert "historicalSpendChart" in deck1.slides[0].scripts
+        # Verify chart config changed (colors are different)
+        assert "backgroundColor" in deck1.slides[0].scripts
+
+        # update2: single slide with retailChart (changed from bar to line)
+        deck2 = SlideDeck.from_html_string(load_update2())
+        assert len(deck2.slides) == 1
+        assert "retailChart" in deck2.slides[0].scripts
+        assert "type: 'line'" in deck2.slides[0].scripts
+
+        # update3: single slide with no canvas (consolidated text slide)
+        deck3 = SlideDeck.from_html_string(load_update3())
+        assert len(deck3.slides) == 1
+        assert deck3.slides[0].scripts.strip() == ""
+        assert "Strategic recommendations" in deck3.slides[0].html
+
+    def test_iife_wrapping_for_multiple_slides(self) -> None:
+        """Verify IIFE wrapping prevents variable collisions in aggregated scripts."""
+        from tests.fixtures.sample_htmls import load_original_deck
+
+        deck = SlideDeck.from_html_string(load_original_deck())
+
+        # Aggregated scripts should have IIFE wrappers
+        assert "(function() {" in deck.scripts
+        assert "})();" in deck.scripts
+
+        # Count IIFE wrappers - should match number of slides with scripts
+        slides_with_scripts = len([s for s in deck.slides if s.scripts.strip()])
+        iife_count = deck.scripts.count("(function() {")
+        assert iife_count == slides_with_scripts
+
+    def test_css_extraction_from_original_deck(self) -> None:
+        """Verify CSS is correctly extracted from original deck."""
+        from tests.fixtures.sample_htmls import load_original_deck
+
+        deck = SlideDeck.from_html_string(load_original_deck())
+
+        # Key CSS selectors should be present
+        assert ".slide" in deck.css
+        assert ".title-slide" in deck.css
+        assert ".metric-card" in deck.css
+        assert ".chart-container" in deck.css
+
+        # Color values should be present
+        assert "#102025" in deck.css  # Dark color
+        assert "#EB4A34" in deck.css  # Accent color
+
