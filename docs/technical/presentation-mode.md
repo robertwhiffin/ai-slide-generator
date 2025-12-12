@@ -196,7 +196,9 @@ When enabled, "Raw HTML (Rendered)" and "Raw HTML (Text)" tabs appear for compar
 
 ## CSS Overrides for Slides
 
-The generated HTML includes overrides to make slides fill the reveal.js viewport:
+The generated HTML includes overrides to make slides fill the reveal.js viewport and neutralize reveal.js theme styles:
+
+### Viewport Sizing
 
 ```css
 .reveal .slides section .slide {
@@ -208,6 +210,43 @@ The generated HTML includes overrides to make slides fill the reveal.js viewport
 ```
 
 This ensures the fixed 1280×720 slide content scales properly within reveal.js's responsive layout.
+
+### Typography Reset
+
+Reveal.js themes (e.g., `white.css`) apply default styles to headings, paragraphs, lists, and links that can override slide-specific styling. The following resets neutralize these defaults so the slide's own CSS takes precedence:
+
+```css
+/* Neutralize reveal.js typography styles */
+.reveal .slides section h1,
+.reveal .slides section h2,
+.reveal .slides section h3,
+.reveal .slides section h4,
+.reveal .slides section h5,
+.reveal .slides section h6 {
+  font-size: inherit;
+  font-weight: inherit;
+  line-height: inherit;
+  margin: 0;
+  text-transform: none;
+  color: inherit;
+  text-shadow: none;
+}
+.reveal .slides section p {
+  font-size: inherit;
+  line-height: inherit;
+  margin: 0;
+}
+.reveal .slides section ul,
+.reveal .slides section ol {
+  margin: 0;
+  padding: 0;
+}
+.reveal .slides section a {
+  color: inherit;
+}
+```
+
+Without these resets, reveal.js would apply styles like `h1 { font-size: 2.5em }`, causing titles to balloon and push content off-screen.
 
 ---
 
