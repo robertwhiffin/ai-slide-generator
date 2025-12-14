@@ -241,8 +241,22 @@ export const SlidePanel: React.FC<SlidePanelProps> = ({ slideDeck, rawHtml, onSl
   const handleSaveAsHTML = () => {
     if (!slideDeck) return;
 
+    // Generate HTML for each slide with its own container
     const slidesHtml = slideDeck.slides
-      .map((slide) => `<section>${slide.html}</section>`)
+      .map((slide, index) => {
+        const slideScripts = slide.scripts || '';
+        return `
+    <div class="slide-wrapper" data-slide-index="${index}">
+      <div class="slide-container">
+        ${slide.html}
+      </div>
+      ${slideScripts ? `<script>
+        (function() {
+          ${slideScripts}
+        })();
+      </script>` : ''}
+    </div>`;
+      })
       .join('\n');
 
     const externalScriptsHtml = slideDeck.external_scripts
@@ -255,90 +269,65 @@ export const SlidePanel: React.FC<SlidePanelProps> = ({ slideDeck, rawHtml, onSl
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>${slideDeck.title || 'Presentation'}</title>
-  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/reveal.js@5/dist/reveal.css">
-  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/reveal.js@5/dist/theme/white.css">
   ${externalScriptsHtml}
   <style>
-    html, body {
+    * {
       margin: 0;
       padding: 0;
+      box-sizing: border-box;
+    }
+    html, body {
       width: 100%;
       height: 100%;
-      overflow: hidden;
-      background: #000;
+      overflow: auto;
+      background: #f9fafb;
     }
-    .reveal-viewport {
+    body {
+      padding: 40px 20px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 40px;
+    }
+    /* Slide wrapper - contains each slide with spacing */
+    .slide-wrapper {
+      width: 100%;
+      max-width: 1280px;
+      margin: 0 auto;
       display: flex;
       justify-content: center;
-      align-items: center;
-      width: 100%;
-      height: 100%;
+      align-items: flex-start;
+      page-break-after: always; /* For printing */
     }
-    .reveal {
-      width: 100%;
-      height: 100%;
-    }
-    .reveal .slides {
-      text-align: left;
-    }
-    .reveal .slides section {
-      height: 100%;
-      width: 100%;
-      padding: 0;
-      box-sizing: border-box;
-    }
-    .reveal .slides section .slide {
-      width: 100% !important;
-      height: 100% !important;
-      min-height: 100% !important;
-      max-height: 100% !important;
-      position: relative;
-      box-sizing: border-box;
-    }
-    .reveal canvas {
+    /* Slide container - maintains 16:9 aspect ratio */
+    .slide-container {
+      width: 1280px;
+      height: 720px;
       max-width: 100%;
+      max-height: calc(100vh - 80px);
+      position: relative;
+      background: #ffffff;
+      overflow: auto;
+      box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+      border-radius: 8px;
     }
-    /* Neutralize reveal.js typography styles so slide CSS takes precedence */
-    .reveal .slides section h1,
-    .reveal .slides section h2,
-    .reveal .slides section h3,
-    .reveal .slides section h4,
-    .reveal .slides section h5,
-    .reveal .slides section h6 {
-      font-size: inherit;
-      font-weight: inherit;
-      line-height: inherit;
-      margin: 0;
-      text-transform: none;
-      color: inherit;
-      text-shadow: none;
+    /* Ensure slide content fills container */
+    .slide-container > * {
+      width: 100%;
+      min-height: 100%;
     }
-    .reveal .slides section p {
-      font-size: inherit;
-      line-height: inherit;
-      margin: 0;
-    }
-    .reveal .slides section ul,
-    .reveal .slides section ol {
-      margin: 0;
-      padding: 0;
-    }
-    .reveal .slides section a {
-      color: inherit;
+    /* Chart canvas scaling */
+    canvas {
+      max-width: 100%;
+      height: auto;
     }
     ${slideDeck.css}
   </style>
 </head>
 <body>
-  <div class="reveal-viewport">
-    <div class="reveal">
-      <div class="slides">
-        ${slidesHtml}
-      </div>
-    </div>
-  </div>
-  <script src="https://cdn.jsdelivr.net/npm/reveal.js@5/dist/reveal.js"></script>
+  ${slidesHtml}
   <script>
+    // Wait for Chart.js to be available before running scripts
     function waitForChartJs(callback, maxAttempts = 50) {
       let attempts = 0;
       const check = () => {
@@ -347,32 +336,33 @@ export const SlidePanel: React.FC<SlidePanelProps> = ({ slideDeck, rawHtml, onSl
           callback();
         } else if (attempts < maxAttempts) {
           setTimeout(check, 100);
+        } else {
+          console.error('Chart.js failed to load');
         }
       };
       check();
     }
 
     function initializeCharts() {
-      ${slideDeck.scripts}
+      console.log('Initializing charts for all slides...');
+      try {
+        // Individual slide scripts are already executed in their own IIFEs above
+        // Deck-level scripts (if any) are also already wrapped in IIFEs
+        ${slideDeck.scripts || ''}
+        console.log('Charts initialized successfully');
+      } catch (err) {
+        console.error('Chart initialization error:', err);
+      }
     }
 
-    Reveal.initialize({
-      hash: true,
-      controls: true,
-      progress: true,
-      slideNumber: true,
-      overview: true,
-      width: 1280,
-      height: 720,
-      margin: 0,
-      minScale: 0.1,
-      maxScale: 2.0,
-      center: true,
-      transition: 'slide',
-      display: 'flex'
-    }).then(() => {
+    // Initialize charts after DOM is ready
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', () => {
+        waitForChartJs(initializeCharts);
+      });
+    } else {
       waitForChartJs(initializeCharts);
-    });
+    }
   </script>
 </body>
 </html>`;
