@@ -52,44 +52,68 @@ class HtmlToPptxConverterV3:
     # Prompts for LLM code generation
     SYSTEM_PROMPT = """Generate Python code with convert_to_pptx(html_str, output_path, assets_dir) function.
 
-Tools: Presentation, slide_layouts[6], shapes.add_textbox/picture/chart(), CategoryChartData, Pt(), RGBColor(), PP_ALIGN, Inches()
+CRITICAL: Start code with REQUIRED imports:
+from pptx import Presentation
+from pptx.util import Inches, Pt
+from pptx.enum.text import PP_ALIGN
+from pptx.dml.color import RGBColor
+import os
 
+Tools: Presentation, slide_layouts[6], shapes.add_textbox/picture/chart(), CategoryChartData, Pt(), RGBColor(), PP_ALIGN, Inches()
 Slide: 10" × 7.5". Bounds: left ≥ 0.5", top ≥ 0.5", left + width ≤ 9.5", top + height ≤ 7.0"
 
-CRITICAL - COLOR EXTRACTION:
-- Extract ALL colors from CSS classes, inline styles, and style tags
-- Convert hex colors to RGBColor: RGBColor(0x10, 0x20, 0x25) for #102025
-- Apply background colors to slide: slide.background.fill.solid()
-- Apply text colors: text_frame.paragraphs[0].font.color.rgb = RGBColor(r, g, b)
-- For gradients: Use solid fill with dominant color or create gradient fill
-- Preserve badge colors, border colors, highlight box colors exactly
+COLOR EXTRACTION:
+- Extract ALL colors from CSS/inline styles. Convert hex to RGBColor: #102025 → RGBColor(16, 32, 37)
+- Use: RGBColor(int(hex[1:3], 16), int(hex[3:5], 16), int(hex[5:7], 16))
+- Apply: slide.background.fill.solid(); slide.background.fill.fore_color.rgb = RGBColor(r, g, b)
+- For gradients, use first color. Preserve all badge/border/highlight colors.
 
-CRITICAL - LAYOUT PRESERVATION:
-- Preserve two-column layouts: Create side-by-side text boxes
-- Preserve grid layouts: Position elements in grid pattern
-- Preserve centered layouts: Use PP_ALIGN.CENTER for title slides
-- Maintain spacing and gaps between elements
+BOX/CARD EXTRACTION (CONSISTENT DETAIL):
+- Extract ALL nested elements from EVERY box/card:
+  * .metric-card: .metric-label, .metric-value, .metric-subtext (if present), colors, border-left (4px), border-radius
+  * .highlight-box: ALL text including <strong>, background, border-left, text color, font size
+  * .lob-badge/.badge-*: text, background color, text color, border-radius, padding
+  * Tables: ALL headers, ALL cells, colors, borders
+- CRITICAL: Same detail level for ALL boxes of same type. Extract ALL text nodes. Create separate text box per box.
 
-Positioning (NO OVERLAPS - CONSISTENT SPACING):
-- Title (slide-title class): left=0.5-1.0", top=0.5", height=0.8-1.0", font size=32-36pt (reduced from 44pt)
-- Subtitle (slide-subtitle class): left=0.5-1.0", top=1.6-1.8" (consistent 0.15-0.2" gap after title), height=0.6-0.8", font size=20-22pt (reduced from 28pt)
-- Body content: top ≥ 2.8-3.0" (consistent 0.2-0.3" gap after subtitle), left ≥ 0.5", ends ≤ 7.0", font ≤ 18pt
-- CRITICAL: Maintain consistent spacing - title to subtitle gap: 0.15-0.2", subtitle to body gap: 0.2-0.3"
-- Use ONE text box per element with word_wrap=True
-- Set font sizes explicitly: title_frame.paragraphs[0].font.size = Pt(32) or Pt(36), subtitle Pt(20) or Pt(22)
+LAYOUT:
+- two-column: side-by-side (left: 0.5-4.5", right: 5.0-9.5")
+- metric-grid: 3 columns (0.5-3.5", 3.8-6.8", 7.1-9.5")
+  - title-slide (.title-slide class): CRITICAL - center ALL text horizontally and vertically
+    * Center text boxes: left = (10" - width) / 2, use width=8.0", so left=1.0"
+    * Vertical center: top = (7.5" - total_height) / 2, typically top=2.0-2.5" for title
+    * Set alignment: text_frame.paragraphs[0].alignment = PP_ALIGN.CENTER
+    * Dark background: slide.background.fill.solid(); slide.background.fill.fore_color.rgb = RGBColor(r, g, b)
+  * Example: title_box = slide.shapes.add_textbox(Inches(1.0), Inches(2.5), Inches(8.0), Inches(1.0)); title_frame = title_box.text_frame; title_frame.paragraphs[0].alignment = PP_ALIGN.CENTER
+- Maintain 0.2-0.25" gaps. Preserve alignment (PP_ALIGN.LEFT/CENTER/RIGHT).
 
-Charts (CRITICAL - MANDATORY):
-- FIRST: Check for chart images in assets_dir (chart_0.png, chart_1.png, etc.): 
-  * Check: os.path.exists(os.path.join(assets_dir, "chart_0.png"))
-  * List all chart images: [f for f in os.listdir(assets_dir) if f.startswith("chart_") and f.endswith(".png")]
-- If chart images exist: 
-  * Use slide.shapes.add_picture(os.path.join(assets_dir, "chart_0.png"), left, top, width, height)
-  * Match each chart image to its canvas element in HTML (chart_0.png → first canvas, chart_1.png → second canvas, etc.)
-  * Find canvas position in HTML (look for .chart-container class or canvas element)
-  * Position chart image at canvas location (typically left=1.0", top=4.0", width=8.0", height=3.5")
-  * Chart images MUST be used when available - they contain the fully rendered charts
-- If no chart images: Extract Chart.js data (rawData, datasets, new Chart) and create CategoryChartData
-- Only use data from HTML, never create fake data
+POSITIONING:
+- Title slide (.title-slide .slide-title): 
+  * MUST center horizontally: left = (10" - width) / 2, use width=8.0", so left=1.0"
+  * MUST center vertically: Calculate total content height (title + subtitle + gaps), then top = (7.5" - total_height) / 2
+  * Typical: left=Inches(1.0), top=Inches(2.5), width=Inches(8.0), height=Inches(1.0)
+  * CRITICAL: text_frame.paragraphs[0].alignment = PP_ALIGN.CENTER (MUST set this)
+  * Font: Pt(36) STRICT, color: white RGBColor(255, 255, 255)
+  * Example code: title_box = slide.shapes.add_textbox(Inches(1.0), Inches(2.5), Inches(8.0), Inches(1.0)); title_frame = title_box.text_frame; title_frame.text = "Title Text"; title_frame.paragraphs[0].alignment = PP_ALIGN.CENTER; title_frame.paragraphs[0].font.size = Pt(36); title_frame.paragraphs[0].font.color.rgb = RGBColor(255, 255, 255)
+- Title slide subtitle (.title-slide .slide-subtitle):
+  * MUST center horizontally: Use same left and width as title (left=1.0", width=8.0")
+  * Position below title: top = title_top + title_height + 0.2" (if title at top=2.5" with height=1.0", then subtitle top=3.7")
+  * Typical: left=Inches(1.0), top=Inches(3.7), width=Inches(8.0), height=Inches(0.8)
+  * CRITICAL: text_frame.paragraphs[0].alignment = PP_ALIGN.CENTER (MUST set this)
+  * Font: Pt(16) STRICT, color: white/light RGBColor(249, 250, 251) or RGBColor(255, 255, 255)
+  * Example code: subtitle_box = slide.shapes.add_textbox(Inches(1.0), Inches(3.7), Inches(8.0), Inches(0.8)); subtitle_frame = subtitle_box.text_frame; subtitle_frame.text = "Subtitle Text"; subtitle_frame.paragraphs[0].alignment = PP_ALIGN.CENTER; subtitle_frame.paragraphs[0].font.size = Pt(16); subtitle_frame.paragraphs[0].font.color.rgb = RGBColor(249, 250, 251)
+- Regular slide title (.slide-title): top=0.5", height=0.8-1.0", font=Pt(36) STRICT, left=0.5-1.0", PP_ALIGN.LEFT
+- Regular slide subtitle (.slide-subtitle): top=1.6-1.8", height=0.6-0.8", font=Pt(16) STRICT, left=0.5-1.0", PP_ALIGN.LEFT
+- Body: top ≥ 2.8-3.0", left ≥ 0.5", font ≤ 18pt
+- Spacing: title→subtitle 0.15-0.2", subtitle→body 0.2-0.3"
+- CRITICAL: Use EXACT font sizes: title_frame.paragraphs[0].font.size = Pt(36) for ALL titles, Pt(16) for ALL subtitles. NO ranges, NO variations. Apply to both title-slide and regular slides.
+- One text box per element, word_wrap=True. Set font sizes explicitly with Pt().
+
+CHARTS:
+- Check: chart_files = [f for f in os.listdir(assets_dir) if f.startswith("chart_") and f.endswith(".png")]
+- If exists: slide.shapes.add_picture(os.path.join(assets_dir, "chart_0.png"), left, top, width, height)
+- Match chart_N.png to Nth canvas. Position at canvas location (typically left=1.0", top=4.0", width=8.0", height=3.5")
+- If no images: Extract Chart.js data from <script> tags. Only use data from HTML.
 
 Return ONLY Python code."""
 
@@ -97,98 +121,128 @@ Return ONLY Python code."""
 
 {html_content}
 
-Screenshot: {use_screenshot}
 {screenshot_note}
 
-CRITICAL REQUIREMENTS:
+REQUIREMENTS:
 
 1. COLOR EXTRACTION:
-   - Parse ALL CSS classes and inline styles in the HTML
-   - Extract background colors (background, background-color, linear-gradient)
-   - Extract text colors (color property)
-   - Extract border colors (border-left-color, border-color)
-   - Convert hex colors to RGBColor: #102025 → RGBColor(16, 32, 37)
-   - Apply slide background: slide.background.fill.solid(); slide.background.fill.fore_color.rgb = RGBColor(r, g, b)
-   - For gradients like "linear-gradient(135deg, #102025 0%, #2B3940 100%)", use first color #102025 → RGBColor(16, 32, 37)
-   - Apply text colors to all text elements
-   - Preserve badge colors, highlight box colors, metric card colors
+   - Parse ALL CSS/inline styles. Convert hex: #102025 → RGBColor(16, 32, 37)
+   - Use: RGBColor(int(hex[1:3], 16), int(hex[3:5], 16), int(hex[5:7], 16))
+   - Apply: slide.background.fill.solid(); slide.background.fill.fore_color.rgb = RGBColor(r, g, b)
+   - Gradients: use first color. Preserve all badge/border/highlight colors.
 
-2. LAYOUT PRESERVATION:
-   - If HTML has "two-column" class: Create two side-by-side text boxes (left: 0.5-4.5", right: 5.0-9.5")
-   - If HTML has "metric-grid": Position metric cards in grid (3 columns: 0.5-3.5", 3.8-6.8", 7.1-9.5")
-   - If HTML has "title-slide" class: Center all content, apply dark background
-   - Preserve spacing: Maintain gaps between elements (20-24px ≈ 0.2-0.25")
-   - Preserve alignment: Use PP_ALIGN.LEFT, PP_ALIGN.CENTER, PP_ALIGN.RIGHT as in HTML
+2. BOX/CARD EXTRACTION (CONSISTENT DETAIL):
+   - Extract ALL nested elements from EVERY box/card:
+     * .metric-card: .metric-label, .metric-value, .metric-subtext (if present), all colors, border-left (4px), border-radius
+     * .highlight-box: ALL text including <strong>, background, border-left, text color, font size
+     * .lob-badge/.badge-*: text, background, text color, border-radius, padding
+     * Tables: ALL headers, ALL cells, colors, borders
+   - CRITICAL: Same detail level for ALL boxes of same type. Extract ALL text nodes. Create separate text box per box.
 
-3. POSITIONING (CONSISTENT SPACING - REDUCED SIZES):
-   - Slide: 10" × 7.5", bounds: left ≥ 0.5", top ≥ 0.5", left + width ≤ 9.5", top + height ≤ 7.0"
-   - Title (.slide-title): top=0.5", height=0.8-1.0", font size=32-36pt (REDUCED from 44pt), left=0.5-1.0"
-   - Subtitle (.slide-subtitle): top=1.6-1.8" (consistent 0.15-0.2" gap after title), height=0.6-0.8", font size=20-22pt (REDUCED from 28pt), left=0.5-1.0"
-   - Body content: top ≥ 2.8-3.0" (consistent 0.2-0.3" gap after subtitle), left ≥ 0.5"
-   - CRITICAL: Set font sizes explicitly using Pt() - title: Pt(32) or Pt(36), subtitle: Pt(20) or Pt(22)
-   - CRITICAL: Maintain consistent spacing - title to subtitle: 0.15-0.2", subtitle to body: 0.2-0.3"
-   - One text box per element, word_wrap=True
+3. LAYOUT:
+   - two-column: side-by-side (left: 0.5-4.5", right: 5.0-9.5")
+   - metric-grid: 3 columns (0.5-3.5", 3.8-6.8", 7.1-9.5")
+  - title-slide (.title-slide class): CRITICAL - center ALL text horizontally and vertically
+    * Center text boxes: left = (10" - width) / 2, use width=8.0", so left=1.0"
+    * Vertical center: top = (7.5" - total_height) / 2, typically top=2.0-2.5" for title
+    * Set alignment: text_frame.paragraphs[0].alignment = PP_ALIGN.CENTER
+    * Dark background: slide.background.fill.solid(); slide.background.fill.fore_color.rgb = RGBColor(r, g, b)
+   - Maintain 0.2-0.25" gaps. Preserve alignment (PP_ALIGN.LEFT/CENTER/RIGHT).
 
-4. CHARTS (CRITICAL - MANDATORY):
-   - FIRST: Check for chart images in assets_dir (chart_0.png, chart_1.png, etc.):
-     * Check: os.path.exists(os.path.join(assets_dir, "chart_0.png"))
-     * List all: chart_files = [f for f in os.listdir(assets_dir) if f.startswith("chart_") and f.endswith(".png")]
-   - If chart images exist: 
-     * Use slide.shapes.add_picture(os.path.join(assets_dir, "chart_0.png"), left, top, width, height)
-     * Match each chart image to its canvas element (chart_0.png → first canvas, chart_1.png → second canvas, etc.)
-     * Find canvas position in HTML (look for .chart-container class or canvas element)
-     * Position chart image at canvas location (typically left=1.0", top=4.0", width=8.0", height=3.5")
-     * Chart images MUST be used when available - they contain the fully rendered charts
-   - If no chart images: Extract Chart.js data (rawData, datasets, new Chart) and create CategoryChartData
-   - Only use data from HTML, never create fake data
+4. POSITIONING:
+   - Title slide (.title-slide .slide-title): 
+     * MUST center horizontally: left = (10" - width) / 2, use width=8.0", so left=1.0"
+     * MUST center vertically: Calculate total content height (title + subtitle + gaps), then top = (7.5" - total_height) / 2
+     * Typical: left=Inches(1.0), top=Inches(2.5), width=Inches(8.0), height=Inches(1.0)
+     * CRITICAL: text_frame.paragraphs[0].alignment = PP_ALIGN.CENTER (MUST set this)
+     * Font: Pt(36) STRICT, color: white RGBColor(255, 255, 255)
+     * Example code: title_box = slide.shapes.add_textbox(Inches(1.0), Inches(2.5), Inches(8.0), Inches(1.0)); title_frame = title_box.text_frame; title_frame.text = "Title Text"; title_frame.paragraphs[0].alignment = PP_ALIGN.CENTER; title_frame.paragraphs[0].font.size = Pt(36); title_frame.paragraphs[0].font.color.rgb = RGBColor(255, 255, 255)
+   - Title slide subtitle (.title-slide .slide-subtitle):
+     * MUST center horizontally: Use same left and width as title (left=1.0", width=8.0")
+     * Position below title: top = title_top + title_height + 0.2" (if title at top=2.5" with height=1.0", then subtitle top=3.7")
+     * Typical: left=Inches(1.0), top=Inches(3.7), width=Inches(8.0), height=Inches(0.8)
+     * CRITICAL: text_frame.paragraphs[0].alignment = PP_ALIGN.CENTER (MUST set this)
+     * Font: Pt(16) STRICT, color: white/light RGBColor(249, 250, 251) or RGBColor(255, 255, 255)
+     * Example code: subtitle_box = slide.shapes.add_textbox(Inches(1.0), Inches(3.7), Inches(8.0), Inches(0.8)); subtitle_frame = subtitle_box.text_frame; subtitle_frame.text = "Subtitle Text"; subtitle_frame.paragraphs[0].alignment = PP_ALIGN.CENTER; subtitle_frame.paragraphs[0].font.size = Pt(16); subtitle_frame.paragraphs[0].font.color.rgb = RGBColor(249, 250, 251)
+   - Regular slide title (.slide-title): top=0.5", height=0.8-1.0", font=Pt(36) STRICT, left=0.5-1.0", PP_ALIGN.LEFT
+   - Regular slide subtitle (.slide-subtitle): top=1.6-1.8", height=0.6-0.8", font=Pt(16) STRICT, left=0.5-1.0", PP_ALIGN.LEFT
+   - Body: top ≥ 2.8-3.0", left ≥ 0.5", font ≤ 18pt
+   - Spacing: title→subtitle 0.15-0.2", subtitle→body 0.2-0.3"
+   - CRITICAL: Use EXACT font sizes: title_frame.paragraphs[0].font.size = Pt(36) for ALL titles, Pt(16) for ALL subtitles. NO ranges, NO variations. Apply to both title-slide and regular slides.
+   - One text box per element, word_wrap=True. Set font sizes explicitly with Pt().
+
+5. CHARTS:
+   - Check: chart_files = [f for f in os.listdir(assets_dir) if f.startswith("chart_") and f.endswith(".png")]
+   - If exists: slide.shapes.add_picture(os.path.join(assets_dir, "chart_0.png"), left, top, width, height)
+   - Match chart_N.png to Nth canvas. Position at canvas location (typically left=1.0", top=4.0", width=8.0", height=3.5")
+   - If no images: Extract Chart.js data from <script> tags. Only use data from HTML.
 
 Return Python code with convert_to_pptx(html_str, output_path, assets_dir)."""
 
     # For multi-slide support
     MULTI_SLIDE_SYSTEM_PROMPT = """Generate Python code with add_slide_to_presentation(prs, html_str, assets_dir) function.
 
-Tools: prs.slides.add_slide(prs.slide_layouts[6]), shapes.add_textbox/picture/chart(), CategoryChartData, Pt(), RGBColor(), PP_ALIGN, Inches()
+CRITICAL: Start code with REQUIRED imports:
+from pptx.util import Inches, Pt
+from pptx.enum.text import PP_ALIGN
+from pptx.dml.color import RGBColor
+import os
 
+Tools: prs.slides.add_slide(prs.slide_layouts[6]), shapes.add_textbox/picture/chart(), CategoryChartData, Pt(), RGBColor(), PP_ALIGN, Inches()
 Slide: 10" × 7.5". Bounds: left ≥ 0.5", top ≥ 0.5", left + width ≤ 9.5", top + height ≤ 7.0"
 
-CRITICAL - COLOR EXTRACTION:
-- Extract ALL colors from CSS classes, inline styles, and style tags
-- Convert hex colors to RGBColor using: RGBColor(int(hex[1:3], 16), int(hex[3:5], 16), int(hex[5:7], 16))
-  Example: #102025 → RGBColor(16, 32, 37), #EB4A34 → RGBColor(235, 74, 52)
-- Apply slide background: 
-  slide.background.fill.solid()
-  slide.background.fill.fore_color.rgb = RGBColor(r, g, b)
-- For gradients like "linear-gradient(135deg, #102025 0%, #2B3940 100%)": Use first color #102025
-- Apply text colors: text_frame.paragraphs[0].font.color.rgb = RGBColor(r, g, b)
-- Preserve ALL colors: badge colors, border colors, highlight box colors, metric card colors
+COLOR EXTRACTION:
+- Extract ALL colors from CSS/inline styles. Convert hex to RGBColor: #102025 → RGBColor(16, 32, 37)
+- Use: RGBColor(int(hex[1:3], 16), int(hex[3:5], 16), int(hex[5:7], 16))
+- Apply: slide.background.fill.solid(); slide.background.fill.fore_color.rgb = RGBColor(r, g, b)
+- For gradients, use first color. Preserve all badge/border/highlight colors.
 
-CRITICAL - LAYOUT PRESERVATION:
-- Preserve two-column layouts: Create side-by-side text boxes (left: 0.5-4.5", right: 5.0-9.5")
-- Preserve metric-grid (3 columns): Position at 0.5-3.5", 3.8-6.8", 7.1-9.5" horizontally
-- Preserve title-slide: Center all content (PP_ALIGN.CENTER), apply dark background
-- Maintain spacing: Gaps of 20-24px ≈ 0.2-0.25" between elements
-- Preserve alignment: Use PP_ALIGN.LEFT, PP_ALIGN.CENTER, PP_ALIGN.RIGHT as in HTML
+BOX/CARD EXTRACTION (CONSISTENT DETAIL):
+- Extract ALL nested elements from EVERY box/card:
+  * .metric-card: .metric-label, .metric-value, .metric-subtext (if present), colors, border-left (4px), border-radius
+  * .highlight-box: ALL text including <strong>, background, border-left, text color, font size
+  * .lob-badge/.badge-*: text, background color, text color, border-radius, padding
+  * Tables: ALL headers, ALL cells, colors, borders
+- CRITICAL: Same detail level for ALL boxes of same type. Extract ALL text nodes. Create separate text box per box.
 
-Positioning (NO OVERLAPS - CONSISTENT SPACING):
-- Title (slide-title class): left=0.5-1.0", top=0.5", height=0.8-1.0", font size=32-36pt (reduced from 44pt)
-- Subtitle (slide-subtitle class): left=0.5-1.0", top=1.6-1.8" (consistent 0.15-0.2" gap after title), height=0.6-0.8", font size=20-22pt (reduced from 28pt)
-- Body content: top ≥ 2.8-3.0" (consistent 0.2-0.3" gap after subtitle), left ≥ 0.5", ends ≤ 7.0", font ≤ 18pt
-- CRITICAL: Maintain consistent spacing - title to subtitle gap: 0.15-0.2", subtitle to body gap: 0.2-0.3"
-- Use ONE text box per element with word_wrap=True
-- Set font sizes explicitly: title_frame.paragraphs[0].font.size = Pt(32) or Pt(36), subtitle Pt(20) or Pt(22)
+LAYOUT:
+- two-column: side-by-side (left: 0.5-4.5", right: 5.0-9.5")
+- metric-grid: 3 columns (0.5-3.5", 3.8-6.8", 7.1-9.5")
+  - title-slide (.title-slide class): CRITICAL - center ALL text horizontally and vertically
+    * Center text boxes: left = (10" - width) / 2, use width=8.0", so left=1.0"
+    * Vertical center: top = (7.5" - total_height) / 2, typically top=2.0-2.5" for title
+    * Set alignment: text_frame.paragraphs[0].alignment = PP_ALIGN.CENTER
+    * Dark background: slide.background.fill.solid(); slide.background.fill.fore_color.rgb = RGBColor(r, g, b)
+  * Example: title_box = slide.shapes.add_textbox(Inches(1.0), Inches(2.5), Inches(8.0), Inches(1.0)); title_frame = title_box.text_frame; title_frame.paragraphs[0].alignment = PP_ALIGN.CENTER
+- Maintain 0.2-0.25" gaps. Preserve alignment (PP_ALIGN.LEFT/CENTER/RIGHT).
 
-Charts (CRITICAL - MANDATORY):
-- FIRST: Check for chart images in assets_dir (chart_0.png, chart_1.png, etc.): 
-  * Check: os.path.exists(os.path.join(assets_dir, "chart_0.png"))
-  * List all chart images: [f for f in os.listdir(assets_dir) if f.startswith("chart_") and f.endswith(".png")]
-- If chart images exist: 
-  * Use slide.shapes.add_picture(os.path.join(assets_dir, "chart_0.png"), left, top, width, height)
-  * Match each chart image to its canvas element in HTML (chart_0.png → first canvas, chart_1.png → second canvas, etc.)
-  * Find canvas position in HTML (look for .chart-container class or canvas element)
-  * Position chart image at canvas location (typically left=1.0", top=4.0", width=8.0", height=3.5")
-  * Chart images MUST be used when available - they contain the fully rendered charts
-- If no chart images: Extract Chart.js data (rawData, datasets, new Chart) and create CategoryChartData
-- Only use data from HTML, never create fake data
+POSITIONING:
+- Title slide (.title-slide .slide-title): 
+  * MUST center horizontally: left = (10" - width) / 2, use width=8.0", so left=1.0"
+  * MUST center vertically: Calculate total content height (title + subtitle + gaps), then top = (7.5" - total_height) / 2
+  * Typical: left=Inches(1.0), top=Inches(2.5), width=Inches(8.0), height=Inches(1.0)
+  * CRITICAL: text_frame.paragraphs[0].alignment = PP_ALIGN.CENTER (MUST set this)
+  * Font: Pt(36) STRICT, color: white RGBColor(255, 255, 255)
+  * Example code: title_box = slide.shapes.add_textbox(Inches(1.0), Inches(2.5), Inches(8.0), Inches(1.0)); title_frame = title_box.text_frame; title_frame.text = "Title Text"; title_frame.paragraphs[0].alignment = PP_ALIGN.CENTER; title_frame.paragraphs[0].font.size = Pt(36); title_frame.paragraphs[0].font.color.rgb = RGBColor(255, 255, 255)
+- Title slide subtitle (.title-slide .slide-subtitle):
+  * MUST center horizontally: Use same left and width as title (left=1.0", width=8.0")
+  * Position below title: top = title_top + title_height + 0.2" (if title at top=2.5" with height=1.0", then subtitle top=3.7")
+  * Typical: left=Inches(1.0), top=Inches(3.7), width=Inches(8.0), height=Inches(0.8)
+  * CRITICAL: text_frame.paragraphs[0].alignment = PP_ALIGN.CENTER (MUST set this)
+  * Font: Pt(16) STRICT, color: white/light RGBColor(249, 250, 251) or RGBColor(255, 255, 255)
+  * Example code: subtitle_box = slide.shapes.add_textbox(Inches(1.0), Inches(3.7), Inches(8.0), Inches(0.8)); subtitle_frame = subtitle_box.text_frame; subtitle_frame.text = "Subtitle Text"; subtitle_frame.paragraphs[0].alignment = PP_ALIGN.CENTER; subtitle_frame.paragraphs[0].font.size = Pt(16); subtitle_frame.paragraphs[0].font.color.rgb = RGBColor(249, 250, 251)
+- Regular slide title (.slide-title): top=0.5", height=0.8-1.0", font=Pt(36) STRICT, left=0.5-1.0", PP_ALIGN.LEFT
+- Regular slide subtitle (.slide-subtitle): top=1.6-1.8", height=0.6-0.8", font=Pt(16) STRICT, left=0.5-1.0", PP_ALIGN.LEFT
+- Body: top ≥ 2.8-3.0", left ≥ 0.5", font ≤ 18pt
+- Spacing: title→subtitle 0.15-0.2", subtitle→body 0.2-0.3"
+- CRITICAL: Use EXACT font sizes: title_frame.paragraphs[0].font.size = Pt(36) for ALL titles, Pt(16) for ALL subtitles. NO ranges, NO variations. Apply to both title-slide and regular slides.
+- One text box per element, word_wrap=True. Set font sizes explicitly with Pt().
+
+CHARTS:
+- Check: chart_files = [f for f in os.listdir(assets_dir) if f.startswith("chart_") and f.endswith(".png")]
+- If exists: slide.shapes.add_picture(os.path.join(assets_dir, "chart_0.png"), left, top, width, height)
+- Match chart_N.png to Nth canvas. Position at canvas location (typically left=1.0", top=4.0", width=8.0", height=3.5")
+- If no images: Extract Chart.js data from <script> tags. Only use data from HTML.
 
 Return ONLY Python code."""
 
@@ -196,53 +250,61 @@ Return ONLY Python code."""
 
 {html_content}
 
-Screenshot: {has_screenshot}
 {screenshot_note}
 
-CRITICAL REQUIREMENTS:
+REQUIREMENTS:
 
-1. COLOR EXTRACTION (MANDATORY):
-   - Parse ALL CSS classes and inline styles in the HTML
-   - Extract background colors (background, background-color, linear-gradient)
-   - Extract text colors (color property)
-   - Extract border colors (border-left-color, border-color)
-   - Convert hex to RGBColor: hex_to_rgb = lambda h: RGBColor(int(h[1:3], 16), int(h[3:5], 16), int(h[5:7], 16))
-     Examples: #102025 → RGBColor(16, 32, 37), #EB4A34 → RGBColor(235, 74, 52), #F9FAFB → RGBColor(249, 250, 251)
-   - Apply slide background: 
-     slide.background.fill.solid()
-     slide.background.fill.fore_color.rgb = hex_to_rgb("#102025")  # Use color from .slide or .title-slide class
-   - For gradients "linear-gradient(135deg, #102025 0%, #2B3940 100%)": Use first color #102025
-   - Apply text colors to ALL text elements matching CSS
-   - Preserve badge colors (.badge-audit, .badge-forensics, etc.), highlight box colors, metric card colors
+1. COLOR EXTRACTION:
+   - Parse ALL CSS/inline styles. Convert hex: #102025 → RGBColor(16, 32, 37)
+   - Use: hex_to_rgb = lambda h: RGBColor(int(h[1:3], 16), int(h[3:5], 16), int(h[5:7], 16))
+   - Apply: slide.background.fill.solid(); slide.background.fill.fore_color.rgb = hex_to_rgb("#102025")
+   - Gradients: use first color. Preserve all badge/border/highlight colors.
 
-2. LAYOUT PRESERVATION:
-   - If HTML has "two-column" class: Create two side-by-side text boxes (left: 0.5-4.5", right: 5.0-9.5")
-   - If HTML has "metric-grid": Position metric cards in grid (3 columns: 0.5-3.5", 3.8-6.8", 7.1-9.5")
-   - If HTML has "title-slide" class: Center all content, apply dark background
-   - Preserve spacing: Maintain gaps between elements (20-24px ≈ 0.2-0.25")
-   - Preserve alignment: Use PP_ALIGN.LEFT, PP_ALIGN.CENTER, PP_ALIGN.RIGHT as in HTML
+2. BOX/CARD EXTRACTION (CONSISTENT DETAIL):
+   - Extract ALL nested elements from EVERY box/card:
+     * .metric-card: .metric-label, .metric-value, .metric-subtext (if present), all colors, border-left (4px), border-radius
+     * .highlight-box: ALL text including <strong>, background, border-left, text color, font size
+     * .lob-badge/.badge-*: text, background, text color, border-radius, padding
+     * Tables: ALL headers, ALL cells, colors, borders
+   - CRITICAL: Same detail level for ALL boxes of same type. Extract ALL text nodes. Create separate text box per box.
 
-3. POSITIONING (CONSISTENT SPACING - REDUCED SIZES):
-   - Slide: 10" × 7.5", bounds: left ≥ 0.5", top ≥ 0.5", left + width ≤ 9.5", top + height ≤ 7.0"
-   - Title (.slide-title): top=0.5", height=0.8-1.0", font size=32-36pt (REDUCED from 44pt), left=0.5-1.0"
-   - Subtitle (.slide-subtitle): top=1.6-1.8" (consistent 0.15-0.2" gap after title), height=0.6-0.8", font size=20-22pt (REDUCED from 28pt), left=0.5-1.0"
-   - Body content: top ≥ 2.8-3.0" (consistent 0.2-0.3" gap after subtitle), left ≥ 0.5"
-   - CRITICAL: Set font sizes explicitly using Pt() - title: Pt(32) or Pt(36), subtitle: Pt(20) or Pt(22)
-   - CRITICAL: Maintain consistent spacing - title to subtitle: 0.15-0.2", subtitle to body: 0.2-0.3"
-   - One text box per element, word_wrap=True
+3. LAYOUT:
+   - two-column: side-by-side (left: 0.5-4.5", right: 5.0-9.5")
+   - metric-grid: 3 columns (0.5-3.5", 3.8-6.8", 7.1-9.5")
+  - title-slide (.title-slide class): CRITICAL - center ALL text horizontally and vertically
+    * Center text boxes: left = (10" - width) / 2, use width=8.0", so left=1.0"
+    * Vertical center: top = (7.5" - total_height) / 2, typically top=2.0-2.5" for title
+    * Set alignment: text_frame.paragraphs[0].alignment = PP_ALIGN.CENTER
+    * Dark background: slide.background.fill.solid(); slide.background.fill.fore_color.rgb = RGBColor(r, g, b)
+   - Maintain 0.2-0.25" gaps. Preserve alignment (PP_ALIGN.LEFT/CENTER/RIGHT).
 
-4. CHARTS (CRITICAL - MANDATORY):
-   - FIRST: Check for chart images in assets_dir (chart_0.png, chart_1.png, etc.):
-     * Check: os.path.exists(os.path.join(assets_dir, "chart_0.png"))
-     * List all: chart_files = [f for f in os.listdir(assets_dir) if f.startswith("chart_") and f.endswith(".png")]
-   - If chart images exist: 
-     * Use slide.shapes.add_picture(os.path.join(assets_dir, "chart_0.png"), left, top, width, height)
-     * Match each chart image to its canvas element (chart_0.png → first canvas, chart_1.png → second canvas, etc.)
-     * Find canvas position in HTML (look for .chart-container class or canvas element)
-     * Position chart image at canvas location (typically left=1.0", top=4.0", width=8.0", height=3.5")
-     * Chart images MUST be used when available - they contain the fully rendered charts
-   - If no chart images: Extract Chart.js data (rawData, datasets, new Chart) and create CategoryChartData
-   - Only use data from HTML, never create fake data
+4. POSITIONING:
+   - Title slide (.title-slide .slide-title): 
+     * MUST center horizontally: left = (10" - width) / 2, use width=8.0", so left=1.0"
+     * MUST center vertically: Calculate total content height (title + subtitle + gaps), then top = (7.5" - total_height) / 2
+     * Typical: left=Inches(1.0), top=Inches(2.5), width=Inches(8.0), height=Inches(1.0)
+     * CRITICAL: text_frame.paragraphs[0].alignment = PP_ALIGN.CENTER (MUST set this)
+     * Font: Pt(36) STRICT, color: white RGBColor(255, 255, 255)
+     * Example code: title_box = slide.shapes.add_textbox(Inches(1.0), Inches(2.5), Inches(8.0), Inches(1.0)); title_frame = title_box.text_frame; title_frame.text = "Title Text"; title_frame.paragraphs[0].alignment = PP_ALIGN.CENTER; title_frame.paragraphs[0].font.size = Pt(36); title_frame.paragraphs[0].font.color.rgb = RGBColor(255, 255, 255)
+   - Title slide subtitle (.title-slide .slide-subtitle):
+     * MUST center horizontally: Use same left and width as title (left=1.0", width=8.0")
+     * Position below title: top = title_top + title_height + 0.2" (if title at top=2.5" with height=1.0", then subtitle top=3.7")
+     * Typical: left=Inches(1.0), top=Inches(3.7), width=Inches(8.0), height=Inches(0.8)
+     * CRITICAL: text_frame.paragraphs[0].alignment = PP_ALIGN.CENTER (MUST set this)
+     * Font: Pt(16) STRICT, color: white/light RGBColor(249, 250, 251) or RGBColor(255, 255, 255)
+     * Example code: subtitle_box = slide.shapes.add_textbox(Inches(1.0), Inches(3.7), Inches(8.0), Inches(0.8)); subtitle_frame = subtitle_box.text_frame; subtitle_frame.text = "Subtitle Text"; subtitle_frame.paragraphs[0].alignment = PP_ALIGN.CENTER; subtitle_frame.paragraphs[0].font.size = Pt(16); subtitle_frame.paragraphs[0].font.color.rgb = RGBColor(249, 250, 251)
+   - Regular slide title (.slide-title): top=0.5", height=0.8-1.0", font=Pt(36) STRICT, left=0.5-1.0", PP_ALIGN.LEFT
+   - Regular slide subtitle (.slide-subtitle): top=1.6-1.8", height=0.6-0.8", font=Pt(16) STRICT, left=0.5-1.0", PP_ALIGN.LEFT
+   - Body: top ≥ 2.8-3.0", left ≥ 0.5", font ≤ 18pt
+   - Spacing: title→subtitle 0.15-0.2", subtitle→body 0.2-0.3"
+   - CRITICAL: Use EXACT font sizes: title_frame.paragraphs[0].font.size = Pt(36) for ALL titles, Pt(16) for ALL subtitles. NO ranges, NO variations. Apply to both title-slide and regular slides.
+   - One text box per element, word_wrap=True. Set font sizes explicitly with Pt().
+
+5. CHARTS:
+   - Check: chart_files = [f for f in os.listdir(assets_dir) if f.startswith("chart_") and f.endswith(".png")]
+   - If exists: slide.shapes.add_picture(os.path.join(assets_dir, "chart_0.png"), left, top, width, height)
+   - Match chart_N.png to Nth canvas. Position at canvas location (typically left=1.0", top=4.0", width=8.0", height=3.5")
+   - If no images: Extract Chart.js data from <script> tags. Only use data from HTML.
 
 Return Python code with add_slide_to_presentation(prs, html_str, assets_dir)."""
 
@@ -250,23 +312,21 @@ Return Python code with add_slide_to_presentation(prs, html_str, assets_dir)."""
         self,
         workspace_client: Optional[WorkspaceClient] = None,
         model_endpoint: Optional[str] = None,
-        profile: Optional[str] = None
     ):
         """Initialize V3 converter.
         
         Args:
-            workspace_client: Databricks client (optional)
+            workspace_client: Databricks client (optional, uses singleton if not provided)
             model_endpoint: LLM model name (default: databricks-claude-sonnet-4-5)
-            profile: Databricks profile for client creation (default: logfood)
         """
         self.model_endpoint = model_endpoint or self.DEFAULT_MODEL
         
+        # Use provided client or get singleton from databricks_client
         if workspace_client:
             self.ws_client = workspace_client
-        elif profile:
-            self.ws_client = WorkspaceClient(profile=profile, product='slide-generator')
         else:
-            self.ws_client = WorkspaceClient(profile='logfood', product='slide-generator')
+            from src.core.databricks_client import get_databricks_client
+            self.ws_client = get_databricks_client()
         
         # Initialize OpenAI-compatible client for LLM calls
         self.llm_client = self.ws_client.serving_endpoints.get_open_ai_client()
@@ -531,14 +591,12 @@ Return Python code with add_slide_to_presentation(prs, html_str, assets_dir)."""
         if chart_images:
             chart_files_str = ", ".join(chart_images)
             screenshot_note = (
-                f"CRITICAL: Chart images exist in assets_dir: {chart_files_str}. "
-                f"You MUST use them: slide.shapes.add_picture(os.path.join(assets_dir, '{chart_images[0]}'), left, top, width, height). "
-                "Find the canvas element position in HTML and place chart image there. "
-                "The chart images contain the fully rendered charts - use them instead of creating charts programmatically. "
-                f"Match each chart image to its corresponding canvas element (chart_0.png → first canvas, chart_1.png → second canvas, etc.)."
+                f"Chart images exist: {chart_files_str}. "
+                f"Use: slide.shapes.add_picture(os.path.join(assets_dir, '{chart_images[0]}'), left, top, width, height). "
+                f"Match chart_N.png to Nth canvas. Position at canvas location in HTML."
             )
         else:
-            screenshot_note = "No chart images available. Extract Chart.js data (rawData, datasets, new Chart) from <script> tags and create chart with CategoryChartData. Only use data from HTML."
+            screenshot_note = "No chart images. Extract Chart.js data from <script> tags. Only use data from HTML."
         
         prompt = self.USER_PROMPT_TEMPLATE.format(
             html_content=html_content,
@@ -588,14 +646,12 @@ Return Python code with add_slide_to_presentation(prs, html_str, assets_dir)."""
         if chart_images:
             chart_files_str = ", ".join(chart_images)
             screenshot_note = (
-                f"CRITICAL: Chart images exist in assets_dir: {chart_files_str}. "
-                f"You MUST use them: slide.shapes.add_picture(os.path.join(assets_dir, '{chart_images[0]}'), left, top, width, height). "
-                "Find the canvas element position in HTML and place chart image there. "
-                "The chart images contain the fully rendered charts - use them instead of creating charts programmatically. "
-                f"Match each chart image to its corresponding canvas element in the HTML (chart_0.png → first canvas, chart_1.png → second canvas, etc.)."
+                f"Chart images exist: {chart_files_str}. "
+                f"Use: slide.shapes.add_picture(os.path.join(assets_dir, '{chart_images[0]}'), left, top, width, height). "
+                f"Match chart_N.png to Nth canvas. Position at canvas location in HTML."
             )
         else:
-            screenshot_note = "No chart images available. Extract Chart.js data (rawData, datasets, new Chart) from <script> tags and create chart with CategoryChartData. Only use data from HTML."
+            screenshot_note = "No chart images. Extract Chart.js data from <script> tags. Only use data from HTML."
         
         prompt = self.MULTI_SLIDE_USER_PROMPT.format(
             html_content=html_content,
@@ -661,6 +717,63 @@ Return Python code with add_slide_to_presentation(prs, html_str, assets_dir)."""
             logger.error("LLM call failed", exc_info=True, extra={"error": str(e)})
             return None
     
+    def _ensure_playwright_browsers(self) -> None:
+        """Ensure Playwright browser binaries are installed.
+        
+        This method checks if Chromium is installed and installs it if missing.
+        Uses subprocess to call Playwright's install command programmatically.
+        """
+        try:
+            import subprocess
+            import sys
+            
+            # First, try to verify if Chromium is already installed
+            # by attempting to launch it (quick check)
+            try:
+                from playwright.sync_api import sync_playwright
+                with sync_playwright() as p:
+                    browser = p.chromium.launch(headless=True)
+                    browser.close()
+                logger.debug("Playwright Chromium is already installed")
+                return
+            except Exception:
+                # Chromium not installed or launch failed, proceed to install
+                pass
+            
+            # Install Chromium using subprocess (most reliable method)
+            logger.info("Playwright browsers not found, installing Chromium...")
+            print("[PLAYWRIGHT] Installing Chromium browser binaries (this may take a minute)...")
+            
+            result = subprocess.run(
+                [sys.executable, "-m", "playwright", "install", "chromium"],
+                capture_output=True,
+                text=True,
+                timeout=300  # 5 minute timeout
+            )
+            
+            if result.returncode == 0:
+                logger.info("Playwright Chromium installed successfully")
+                print("[PLAYWRIGHT] ✓ Chromium installed successfully")
+            else:
+                error_msg = result.stderr or result.stdout
+                logger.warning(f"Playwright install had issues: {error_msg}")
+                print(f"[PLAYWRIGHT] ⚠️  Install warning: {error_msg}")
+                # Don't raise - allow code to continue, it will fail later with a clearer error
+                    
+        except ImportError:
+            logger.error("Playwright not installed. Install with: pip install playwright")
+            print("[PLAYWRIGHT] ❌ Playwright package not installed")
+            # Don't raise - allow code to continue, it will fail later with a clearer error
+        except Exception as e:
+            # Check if it's a timeout error
+            if "TimeoutExpired" in str(type(e)) or "timeout" in str(e).lower():
+                logger.error("Playwright install timed out after 5 minutes")
+                print("[PLAYWRIGHT] ❌ Install timed out")
+            else:
+                logger.error(f"Error ensuring Playwright browsers: {e}", exc_info=True)
+                print(f"[PLAYWRIGHT] ❌ Error: {e}")
+            # Don't raise - allow code to continue, it will fail later with a clearer error
+    
     async def _capture_screenshot(self, html_path: str, assets_dir: str) -> list[str]:
         """Capture screenshots of chart canvas elements from HTML using Playwright (async).
         
@@ -672,6 +785,9 @@ Return Python code with add_slide_to_presentation(prs, html_str, assets_dir)."""
             List of paths to captured chart images (e.g., ['chart_0.png', 'chart_1.png'])
         """
         try:
+            # Ensure browsers are installed before attempting to use Playwright
+            self._ensure_playwright_browsers()
+            
             from playwright.async_api import async_playwright
             
             logger.info(
@@ -1068,6 +1184,18 @@ Return Python code with add_slide_to_presentation(prs, html_str, assets_dir)."""
         Raises:
             PPTXConversionError: If code execution fails
         """
+        # Ensure required imports are present
+        required_imports = """from pptx import Presentation
+from pptx.util import Inches, Pt
+from pptx.enum.text import PP_ALIGN
+from pptx.dml.color import RGBColor
+import os
+"""
+        # Check if imports are already present
+        if "from pptx import Presentation" not in code and "from pptx import" not in code:
+            code = required_imports + "\n" + code
+            logger.debug("Injected required imports into generated code")
+        
         # Save code to temp file
         temp_module_path = Path(tempfile.mktemp(suffix=".py", prefix="converter_"))
         temp_module_path.write_text(code, encoding='utf-8')
@@ -1104,6 +1232,17 @@ Return Python code with add_slide_to_presentation(prs, html_str, assets_dir)."""
             html_str: HTML content
             assets_dir: Directory containing assets
         """
+        # Ensure required imports are present
+        required_imports = """from pptx.util import Inches, Pt
+from pptx.enum.text import PP_ALIGN
+from pptx.dml.color import RGBColor
+import os
+"""
+        # Check if imports are already present
+        if "from pptx.util import" not in code:
+            code = required_imports + "\n" + code
+            logger.debug("Injected required imports into generated code")
+        
         # Save code to temp file
         temp_module_path = Path(tempfile.mktemp(suffix=".py", prefix="slide_adder_"))
         temp_module_path.write_text(code, encoding='utf-8')
