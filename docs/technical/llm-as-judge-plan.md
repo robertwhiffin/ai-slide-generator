@@ -78,8 +78,8 @@ Users need confidence that AI-generated slides accurately reflect data from Geni
 ### 🔲 Pending (Next Steps)
 
 **High Priority:**
-- [ ] **Persist verification with session** - Store verification results in `deck_json` so they survive refresh/restore
-- [ ] **Clear verification on slide edit** - When slide HTML changes, clear its verification status
+- [x] **Persist verification with session** - ✅ Done: Stored in `slide.verification` within `deck_json`
+- [x] **Clear verification on slide edit** - ✅ Done: Cleared when slide HTML is modified
 - [ ] **User feedback storage** - Currently logged to MLflow spans only; consider persisting for analysis
 
 **Phase 2:**
@@ -145,7 +145,7 @@ The rationale is extracted from the `numerical_accuracy` assessment in the `asse
 | Tool call queries | ✅ | `SessionMessage.metadata_json` | Good |
 | Genie responses | ⚠️ | `SessionMessage.content` | Truncated to 500 chars |
 | Slide deck | ✅ | `SessionSlideDeck.deck_json` | Good - full deck preserved |
-| Verification results | ⚠️ | React state only | Lost on refresh - needs persistence |
+| Verification results | ✅ | `slide.verification` in deck_json | Persists with session, survives refresh/restore |
 | User feedback | ⚠️ | MLflow spans only | Not persisted for analysis |
 | Genie link | ⚠️ | Opens room only | Deep-link to conversation not supported by Databricks |
 
@@ -431,6 +431,9 @@ cd "/path/to/project"
 | Genie link opens correct URL | ✅ Works |
 | Evaluation runs visible in MLflow UI | ✅ Works |
 | Feedback buttons (thumbs up/down) | ✅ Works |
+| Verification persists on page refresh | ✅ Works |
+| Verification restored from session history | ✅ Works |
+| Verification cleared on slide edit | ✅ Works |
 
 ---
 

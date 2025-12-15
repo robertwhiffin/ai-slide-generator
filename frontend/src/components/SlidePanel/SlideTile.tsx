@@ -17,6 +17,7 @@ interface SlideTileProps {
   onDelete: () => void;
   onDuplicate: () => void;
   onUpdate: (html: string) => Promise<void>;
+  onVerificationUpdate: (verification: VerificationResult | null) => Promise<void>;
 }
 
 const SLIDE_WIDTH = 1280;
@@ -31,17 +32,25 @@ export const SlideTile: React.FC<SlideTileProps> = ({
   onDelete,
   onDuplicate,
   onUpdate,
+  onVerificationUpdate,
 }) => {
   const [isEditing, setIsEditing] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
   const [scale, setScale] = useState(1);
   const { selectedIndices, setSelection } = useSelection();
   
-  // Verification state
-  const [verificationResult, setVerificationResult] = useState<VerificationResult | undefined>();
+  // Verification state - initialize from persisted slide.verification
+  const [verificationResult, setVerificationResult] = useState<VerificationResult | undefined>(
+    slide.verification
+  );
   const [isVerifying, setIsVerifying] = useState(false);
-  const [lastVerifiedAt, setLastVerifiedAt] = useState<string | undefined>();
-  const [lastEditedAt, setLastEditedAt] = useState<string | undefined>();
+  const [isStale, setIsStale] = useState(false);
+
+  // Sync verification state when slide.verification changes (e.g., session restore)
+  useEffect(() => {
+    setVerificationResult(slide.verification);
+    setIsStale(false);  // Reset stale when verification is loaded
+  }, [slide.verification]);
 
   // Handle verification
   const handleVerify = async () => {
@@ -50,15 +59,19 @@ export const SlideTile: React.FC<SlideTileProps> = ({
     setIsVerifying(true);
     try {
       const result = await api.verifySlide(sessionId, index);
-      setVerificationResult({
+      const verification: VerificationResult = {
         ...result,
         rating: result.rating as VerificationResult['rating'],
         timestamp: new Date().toISOString(),
-      });
-      setLastVerifiedAt(new Date().toISOString());
+      };
+      setVerificationResult(verification);
+      setIsStale(false);
+      
+      // Persist verification to backend
+      await onVerificationUpdate(verification);
     } catch (error) {
       console.error('Verification failed:', error);
-      setVerificationResult({
+      const errorResult: VerificationResult = {
         score: 0,
         rating: 'error',
         explanation: error instanceof Error ? error.message : 'Verification failed',
@@ -66,14 +79,13 @@ export const SlideTile: React.FC<SlideTileProps> = ({
         duration_ms: 0,
         error: true,
         error_message: error instanceof Error ? error.message : 'Unknown error',
-      });
+      };
+      setVerificationResult(errorResult);
+      // Don't persist error results
     } finally {
       setIsVerifying(false);
     }
   };
-
-  // Check if verification is stale (slide edited after verification)
-  const isStale = !!(lastVerifiedAt && lastEditedAt && new Date(lastEditedAt) > new Date(lastVerifiedAt));
 
   const {
     attributes,
@@ -242,7 +254,14 @@ export const SlideTile: React.FC<SlideTileProps> = ({
           html={slide.html}
           onSave={async (newHtml) => {
             await onUpdate(newHtml);
-            setLastEditedAt(new Date().toISOString());  // Mark as edited for stale verification
+            
+            // Clear verification when slide is edited
+            if (verificationResult) {
+              setVerificationResult(undefined);
+              setIsStale(false);
+              // Persist the cleared verification
+              await onVerificationUpdate(null);
+            }
             setIsEditing(false);
           }}
           onCancel={() => setIsEditing(false)}
