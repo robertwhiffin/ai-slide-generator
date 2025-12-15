@@ -64,6 +64,14 @@ export const SlideTile: React.FC<SlideTileProps> = ({
         rating: result.rating as VerificationResult['rating'],
         timestamp: new Date().toISOString(),
       };
+      
+      // Log trace_id for easy access
+      console.log(`[Verification] Slide ${index} verified:`, {
+        score: verification.score,
+        rating: verification.rating,
+        trace_id: verification.trace_id,
+      });
+      
       setVerificationResult(verification);
       setIsStale(false);
       

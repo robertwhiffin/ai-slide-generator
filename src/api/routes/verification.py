@@ -46,6 +46,7 @@ class FeedbackRequest(BaseModel):
     slide_index: int
     is_positive: bool
     rationale: Optional[str] = None
+    trace_id: Optional[str] = None  # MLflow trace ID to link feedback to
 
 
 @router.post("/{slide_index}", response_model=VerifySlideResponse)
@@ -118,12 +119,13 @@ async def verify_slide(slide_index: int, request: VerifySlideRequest):
         genie_data = "\n---\n".join(genie_data_parts) if genie_data_parts else ""
 
         if not genie_data:
-            # No Genie data found - this might be a title slide or no queries were made
+            # No Genie data found - verification cannot be performed
+            # Return "unknown" rating instead of misleading "excellent"
             return VerifySlideResponse(
-                score=100,
-                rating="excellent",
-                explanation="No source data to verify against. This may be a title slide or slides generated without data queries.",
-                issues=[],
+                score=0,
+                rating="unknown",
+                explanation="No source data available for verification. This may be a title slide or slides generated without data queries.",
+                issues=[{"type": "no_data", "detail": "No Genie query results found in session"}],
                 duration_ms=0,
                 genie_conversation_id=genie_conversation_id,
                 error=False,
@@ -176,37 +178,98 @@ async def verify_slide(slide_index: int, request: VerifySlideRequest):
 async def submit_feedback(slide_index: int, request: FeedbackRequest):
     """Submit user feedback on a verification result.
 
-    Feedback is logged to MLflow for quality monitoring and model improvement.
-    Negative feedback requires a rationale to understand what went wrong.
+    Feedback is logged to MLflow as a structured Assessment using log_feedback().
+    This enables:
+    - Proper labeling workflow in MLflow UI
+    - Aggregation and querying of human feedback
+    - Quality monitoring over time
+    - Improving the judge prompt based on patterns
 
     Args:
         slide_index: Index of the slide
-        request: FeedbackRequest with feedback details
+        request: FeedbackRequest with feedback details and trace_id
 
     Returns:
-        Confirmation of feedback submission
+        Confirmation of feedback submission with trace linkage info
     """
+    import mlflow
+    from mlflow.entities import AssessmentSource, AssessmentSourceType
+
+    feedback_data = {
+        "session_id": request.session_id,
+        "slide_index": slide_index,
+        "is_positive": request.is_positive,
+        "rationale": request.rationale,
+        "trace_id": request.trace_id,
+    }
+
+    feedback_logged = False
+
     try:
-        import mlflow
+        # Set MLflow tracking URI to Databricks (same as evaluation)
+        mlflow.set_tracking_uri("databricks")
+        
+        # Log feedback using MLflow's log_feedback API (proper Assessment structure)
+        if request.trace_id:
+            try:
+                from mlflow import MlflowClient
+                
+                # First, verify the trace exists
+                client = MlflowClient(tracking_uri="databricks")
+                try:
+                    # Try to get the trace to verify it exists
+                    trace_info = client.get_trace(request.trace_id)
+                    logger.info(f"Found trace: {request.trace_id}")
+                except Exception as trace_error:
+                    logger.warning(f"Trace not found in MLflow: {trace_error}")
+                    raise
+                
+                # Create assessment source (human feedback)
+                source = AssessmentSource(
+                    source_type=AssessmentSourceType.HUMAN,
+                    source_id=f"session_{request.session_id[:8]}",  # Truncate for readability
+                )
 
-        # Log feedback to MLflow
-        # Note: This requires an active trace - in practice, we'd link to the
-        # verification trace_id from the previous request
-        feedback_data = {
-            "session_id": request.session_id,
-            "slide_index": slide_index,
-            "is_positive": request.is_positive,
-            "rationale": request.rationale,
-        }
+                # Log as structured feedback/assessment
+                mlflow.log_feedback(
+                    trace_id=request.trace_id,
+                    name="human_verification_feedback",
+                    value=request.is_positive,  # True/False
+                    rationale=request.rationale or (
+                        "User confirmed verification is accurate"
+                        if request.is_positive
+                        else "User indicated verification has issues"
+                    ),
+                    source=source,
+                    metadata={
+                        "session_id": request.session_id,
+                        "slide_index": slide_index,
+                        "feedback_type": "positive" if request.is_positive else "negative",
+                    },
+                )
 
-        # Use MLflow's log_feedback if available
-        # For now, log as a param in a new span
-        with mlflow.start_span(name="verification_feedback") as span:
-            span.set_attribute("session_id", request.session_id)
-            span.set_attribute("slide_index", slide_index)
-            span.set_attribute("is_positive", request.is_positive)
-            if request.rationale:
-                span.set_attribute("rationale", request.rationale)
+                feedback_logged = True
+
+                logger.info(
+                    "Feedback logged as Assessment to trace",
+                    extra={
+                        "trace_id": request.trace_id,
+                        "is_positive": request.is_positive,
+                    },
+                )
+
+            except Exception as feedback_error:
+                logger.error(
+                    f"Failed to log feedback as assessment: {feedback_error}",
+                    extra={"trace_id": request.trace_id},
+                )
+                # Don't fallback to tags - Assessments are the proper structure
+                # If this fails, something is wrong with MLflow setup
+        else:
+            logger.warning(
+                "Feedback submitted without trace_id - cannot link to verification",
+                extra=feedback_data,
+            )
 
         logger.info(
             "Verification feedback submitted",
@@ -216,6 +279,8 @@ async def submit_feedback(slide_index: int, request: FeedbackRequest):
         return {
             "status": "success",
             "message": "Feedback submitted successfully",
+            "linked_to_trace": request.trace_id is not None,
+            "feedback_logged": feedback_logged,
             "feedback": feedback_data,
         }
 

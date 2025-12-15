@@ -31,7 +31,7 @@ Frontend fetch -> FastAPI router ->   │ ChatService (singleton)│
 
 - **Routers** (`src/api/routes/*.py`) validate HTTP payloads and map 1:1 to frontend calls. All endpoints use `asyncio.to_thread()` for blocking operations.
 - **`ChatService`** (`src/api/services/chat_service.py`) is a process-wide singleton that owns the `SlideGeneratorAgent` and a session-scoped deck cache. Thread-safe via `_cache_lock`.
-- **`SessionManager`** (`src/api/services/session_manager.py`) handles database-backed sessions with locking for concurrent request handling.
+- **`SessionManager`** (`src/api/services/session_manager.py`) handles database-backed sessions with locking for concurrent request handling. Stores full slide deck structure (including LLM as Judge verification results) as JSON in `SessionSlideDeck.deck_json` for session restoration.
 - **`SlideGeneratorAgent`** (`src/services/agent.py`) wraps LangChain's tool-calling agent. Tools are created per-request with session ID bound via closure to eliminate race conditions.
 - **`SlideDeck` / `Slide` models** (`src/models/...`) parse, manipulate, and serialize slides so both chat and CRUD endpoints share the same representation.
 
@@ -64,6 +64,15 @@ Frontend fetch -> FastAPI router ->   │ ChatService (singleton)│
 | `PATCH` | `/api/slides/{index}` | Update HTML (requires `session_id` in body) | `routes/slides.update_slide` |
 | `POST` | `/api/slides/{index}/duplicate` | Clone (requires `session_id` in body) | `routes/slides.duplicate_slide` |
 | `DELETE` | `/api/slides/{index}` | Delete (requires `session_id` query param) | `routes/slides.delete_slide` |
+| `PATCH` | `/api/slides/{index}/verification` | Update verification result (persists with session) | `routes/slides.update_slide_verification` |
+
+### Verification Endpoints (LLM as Judge)
+
+| Method | Path | Purpose | Backend handler |
+| --- | --- | --- | --- |
+| `POST` | `/api/verification/{slide_index}` | Verify slide accuracy against Genie source data | `routes/verification.verify_slide` |
+| `POST` | `/api/verification/{slide_index}/feedback` | Submit human feedback on verification (logged to MLflow) | `routes/verification.submit_feedback` |
+| `GET` | `/api/verification/genie-link` | Get Genie conversation URL for source data review | `routes/verification.get_genie_link` |
 
 All responses conform to the Pydantic models in `src/api/models/responses.py`. Structure mirrors what the frontend expects (`messages`, `slide_deck`, `raw_html`, `metadata`, optional `replacement_info`).
 
@@ -202,6 +211,8 @@ Keep this doc synchronized whenever you add new modules, features (e.g., streami
 ## Cross-References
 
 - [Frontend Overview](frontend-overview.md) – UI/state patterns and backend touchpoints
+- [LLM as Judge Verification](llm-as-judge-verification.md) – On-demand slide accuracy verification using MLflow and human feedback collection
+- [Database Configuration](database-configuration.md) – Schema details including `SessionSlideDeck.deck_json` persistence of verification results
 - [Real-Time Streaming](real-time-streaming.md) – SSE events and conversation persistence
 - [Multi-User Concurrency](multi-user-concurrency.md) – session locking and async handling
 - [Slide Parser & Script Management](slide-parser-and-script-management.md) – HTML parsing flow

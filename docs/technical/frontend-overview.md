@@ -62,11 +62,19 @@ interface SlideDeck {
   css: string;
   external_scripts: string[];
   scripts: string;
-  slides: { index: number; slide_id: string; html: string }[];
+  slides: Slide[];
+}
+
+interface Slide {
+  index: number;
+  slide_id: string;
+  html: string;
+  scripts: string;
+  verification?: VerificationResult;  // LLM as Judge verification (persisted with session)
 }
 ```
 
-Slides are HTML snippets embedded in iframes for preview.
+Slides are HTML snippets embedded in iframes for preview. The optional `verification` field stores on-demand accuracy checks using MLflow's LLM as Judge.
 
 ### 3. Selection Context (`src/contexts/SelectionContext.tsx`)
 
@@ -98,8 +106,9 @@ Parsed tiles, rendered raw HTML (`iframe`), and raw HTML text (`<pre>`). Users c
 | `src/components/ChatPanel/ChatPanel.tsx` | Sends prompts via SSE or polling, displays real-time events, loads persisted messages | `api.sendChatMessage`, `api.getSession` |
 | `src/components/ChatPanel/ChatInput.tsx` | Textarea with selection badge when context exists | None (props only) |
 | `src/components/ChatPanel/MessageList.tsx` & `Message.tsx` | Renders conversation, collapses HTML/tool outputs | None |
-| `src/components/SlidePanel/SlidePanel.tsx` | Hosts drag/drop, tabs, per-slide CRUD | `api.getSlides`, `api.reorderSlides`, `api.updateSlide`, `api.duplicateSlide`, `api.deleteSlide` |
-| `src/components/SlidePanel/SlideTile.tsx` | Slide preview, selection button, editor modal trigger | Prop callbacks to `SlidePanel` |
+| `src/components/SlidePanel/SlidePanel.tsx` | Hosts drag/drop, tabs, per-slide CRUD, verification persistence | `api.getSlides`, `api.reorderSlides`, `api.updateSlide`, `api.duplicateSlide`, `api.deleteSlide`, `api.updateSlideVerification` |
+| `src/components/SlidePanel/SlideTile.tsx` | Slide preview, selection button, editor modal, verification trigger, clears verification on edit | Prop callbacks to `SlidePanel`, `api.verifySlide` |
+| `src/components/SlidePanel/VerificationBadge.tsx` | Gavel button, rating badge, details popup, feedback UI (thumbs up/down) | `api.verifySlide`, `api.submitVerificationFeedback` |
 | `src/components/SlidePanel/HTMLEditorModal.tsx` | Monaco editor with validation (requires `<div class="slide">`) | Calls `api.updateSlide` then `api.getSlides` |
 | `src/components/SlidePanel/SelectionRibbon.tsx` + `SlideSelection.tsx` | Thumbnail strip with dual interaction: preview click navigates main panel, checkbox toggles selection for chat context | `onSlideNavigate` callback to `AppLayout`, updates `SelectionContext` |
 | `src/hooks/useKeyboardShortcuts.ts` | `Esc` clears selection globally | None |
@@ -186,6 +195,15 @@ Parsed tiles, rendered raw HTML (`iframe`), and raw HTML text (`<pre>`). Users c
 | `updateSlide` | PATCH | `/api/slides/{index}` | `{ session_id, html }` | `Slide` |
 | `duplicateSlide` | POST | `/api/slides/{index}/duplicate` | `{ session_id }` | `SlideDeck` |
 | `deleteSlide` | DELETE | `/api/slides/{index}` | query: `session_id` | `SlideDeck` |
+| `updateSlideVerification` | PATCH | `/api/slides/{index}/verification` | `{ session_id, verification }` | `SlideDeck` |
+
+### Verification Endpoints (LLM as Judge)
+
+| Method | HTTP | Path | Request | Returns |
+|--------|------|------|---------|---------|
+| `verifySlide` | POST | `/api/verification/{index}` | `{ session_id }` | `VerificationResult` |
+| `submitVerificationFeedback` | POST | `/api/verification/{index}/feedback` | `{ session_id, is_positive, rationale?, trace_id? }` | `{ status, message, linked_to_trace }` |
+| `getGenieLink` | GET | `/api/verification/genie-link` | query: `session_id` | `{ has_genie_conversation, url?, ... }` |
 
 ### Error Handling
 
@@ -231,6 +249,7 @@ Errors bubble up as `ApiError` (status + message). Common statuses:
 ## Cross-References
 
 - [Backend Overview](backend-overview.md) – FastAPI routes and agent lifecycle
+- [LLM as Judge Verification](llm-as-judge-verification.md) – On-demand slide accuracy verification and human feedback collection
 - [Real-Time Streaming](real-time-streaming.md) – SSE events and conversation persistence
 - [Multi-User Concurrency](multi-user-concurrency.md) – session locking and async handling
 - [Slide Parser & Script Management](slide-parser-and-script-management.md) – HTML parsing and Chart.js reconciliation

@@ -660,13 +660,15 @@ export const api = {
 
   /**
    * Submit feedback on a verification result
+   * Feedback is linked to the original verification trace for labeling/review
    */
   async submitVerificationFeedback(
     sessionId: string,
     slideIndex: number,
     isPositive: boolean,
-    rationale?: string
-  ): Promise<{ status: string; message: string }> {
+    rationale?: string,
+    traceId?: string  // Links feedback to the verification trace in MLflow
+  ): Promise<{ status: string; message: string; linked_to_trace: boolean }> {
     const response = await fetch(`${API_BASE_URL}/api/verification/${slideIndex}/feedback`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -675,6 +677,7 @@ export const api = {
         slide_index: slideIndex,
         is_positive: isPositive,
         rationale,
+        trace_id: traceId,
       }),
     });
 
