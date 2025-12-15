@@ -15,7 +15,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from src.api.routes import chat, slides, export,sessions
+from src.api.routes import chat, slides, export, sessions, verification
 from src.api.routes.settings import (
     ai_infra_router,
     genie_router,
@@ -101,6 +101,7 @@ app.include_router(chat.router)
 app.include_router(slides.router)
 app.include_router(export.router)
 app.include_router(sessions.router)
+app.include_router(verification.router)
 
 # Configuration management routers
 app.include_router(profiles_router, prefix="/api/settings", tags=["settings"])

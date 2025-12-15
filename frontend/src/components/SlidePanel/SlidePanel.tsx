@@ -556,6 +556,7 @@ export const SlidePanel: React.FC<SlidePanelProps> = ({ slideDeck, rawHtml, onSl
               slide={slide}
               slideDeck={slideDeck}
               index={index}
+              sessionId={sessionId || ''}
               onDelete={() => handleDeleteSlide(index)}
               onDuplicate={() => handleDuplicateSlide(index)}
               onUpdate={(html) => handleUpdateSlide(index, html)}
