@@ -251,6 +251,65 @@ class SessionMessage(Base):
     created_at: datetime
 ```
 
+### SessionSlideDeck
+
+Slide deck state for a session, including LLM as Judge verification results.
+
+```python
+class SessionSlideDeck(Base):
+    id: int
+    session_id: int              # Foreign key to user_sessions (unique)
+    title: str | None            # Deck title
+    html_content: str            # Full HTML content (knitted slides)
+    scripts_content: str | None  # JavaScript content (Chart.js, etc.)
+    slide_count: int             # Number of slides
+    deck_json: str | None        # JSON blob with full SlideDeck structure
+    created_at: datetime
+    updated_at: datetime
+```
+
+**deck_json Structure:**
+
+The `deck_json` field stores the complete slide deck as JSON, including:
+- **slides[]**: Array of slide objects with `html`, `scripts`, and **`verification`** results
+- **css**: Global CSS styles
+- **external_scripts**: External library URLs (Chart.js)
+- **scripts**: Global JavaScript
+
+**Verification Persistence:**
+
+LLM as Judge verification results are stored in `deck_json` within each slide object:
+
+```json
+{
+  "title": "Q4 Revenue Analysis",
+  "slides": [
+    {
+      "index": 0,
+      "slide_id": "slide-abc123",
+      "html": "<div class=\"slide\">...</div>",
+      "scripts": "new Chart(...);",
+      "verification": {
+        "score": 95,
+        "rating": "excellent",
+        "explanation": "All data accurate...",
+        "issues": [],
+        "duration_ms": 1523,
+        "trace_id": "tr-abc123...",
+        "genie_conversation_id": "01j...",
+        "error": false,
+        "timestamp": "2024-12-15T10:30:00Z"
+      }
+    }
+  ],
+  "css": "...",
+  "external_scripts": ["https://cdn.jsdelivr.net/npm/chart.js"],
+  "scripts": "..."
+}
+```
+
+When a session is restored, the frontend receives the full `deck_json` with all verification results intact. See [LLM as Judge Verification](llm-as-judge-verification.md) for details on the verification system.
+
 ### ChatRequest
 
 Tracks async chat requests for polling-based streaming.

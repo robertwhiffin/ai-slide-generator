@@ -80,7 +80,7 @@ Users need confidence that AI-generated slides accurately reflect data from Geni
 **High Priority:**
 - [x] **Persist verification with session** - ✅ Done: Stored in `slide.verification` within `deck_json`
 - [x] **Clear verification on slide edit** - ✅ Done: Cleared when slide HTML is modified
-- [ ] **User feedback storage** - Currently logged to MLflow spans only; consider persisting for analysis
+- [x] **User feedback storage** - ✅ Done: Logged as structured Assessments in MLflow using `log_feedback()`
 
 **Phase 2:**
 - [ ] Narrative Quality Judge
@@ -146,7 +146,7 @@ The rationale is extracted from the `numerical_accuracy` assessment in the `asse
 | Genie responses | ⚠️ | `SessionMessage.content` | Truncated to 500 chars |
 | Slide deck | ✅ | `SessionSlideDeck.deck_json` | Good - full deck preserved |
 | Verification results | ✅ | `slide.verification` in deck_json | Persists with session, survives refresh/restore |
-| User feedback | ⚠️ | MLflow spans only | Not persisted for analysis |
+| User feedback | ✅ | MLflow Assessments (Databricks) | Structured assessments linked to traces |
 | Genie link | ⚠️ | Opens room only | Deep-link to conversation not supported by Databricks |
 
 ### ⚠️ Known Limitation: No Query-to-Slide Mapping
@@ -268,13 +268,33 @@ Separate judge prompt focused on qualitative aspects.
 
 ### MLflow Integration
 
-Feedback is logged via MLflow spans for traceability.
+**✅ Implemented:** Feedback is logged as structured **Assessments** using `mlflow.log_feedback()`.
 
-**⚠️ Current Limitation:** Feedback is only logged to MLflow spans (in-memory during request).
-It is NOT persisted to a database for later analysis. Future work could:
-- Store feedback in a dedicated table
-- Link feedback to specific verification runs
-- Build a feedback dashboard for quality monitoring
+```python
+mlflow.set_tracking_uri("databricks")
+mlflow.log_feedback(
+    trace_id=trace_id,
+    name="human_verification_feedback",
+    value=is_positive,  # True/False
+    rationale=user_comment,
+    source=AssessmentSource(
+        source_type=AssessmentSourceType.HUMAN,
+        source_id=f"session_{session_id[:8]}"
+    ),
+    metadata={
+        "session_id": session_id,
+        "slide_index": slide_index,
+        "feedback_type": "positive" | "negative",
+    }
+)
+```
+
+**Benefits:**
+- ✅ Feedback appears in MLflow UI under trace's "Assessments" section
+- ✅ Structured data (not just tags) for easy querying
+- ✅ Linked directly to verification trace for full context
+- ✅ Enables labeling workflows and quality monitoring
+- ✅ Can be queried via MLflow API for analysis
 
 ---
 
@@ -334,9 +354,22 @@ When opened, users can find:
   "session_id": "uuid-string",
   "slide_index": 0,
   "is_positive": false,
-  "rationale": "Slide shows $9.2M but source says $9.1M"
+  "rationale": "Slide shows $9.2M but source says $9.1M",
+  "trace_id": "tr-abc123..."
 }
 ```
+
+**Response:**
+```json
+{
+  "status": "success",
+  "message": "Feedback submitted successfully",
+  "linked_to_trace": true,
+  "feedback_logged": true
+}
+```
+
+**Note:** The `trace_id` is obtained from the verification response and passed to link feedback to the original verification trace.
 
 ### Endpoint: `GET /api/verification/genie-link?session_id={id}`
 
@@ -357,10 +390,13 @@ Features:
 - Click to expand details panel with:
   - Score bar visualization
   - **Assessment explanation/rationale** (from MLflow judge)
+  - **MLflow Trace ID** (displayed with copy button for easy access)
   - Issues list (if any)
   - Genie link to view source data
-- Thumbs up/down feedback (👎 requires comment)
+- Thumbs up/down feedback (👎 requires comment, Enter to submit)
+- Feedback automatically linked to verification trace
 - Stale indicator when slide is edited post-verification
+- Console logging of trace_id for debugging
 
 ### 2. Help Tab
 
@@ -444,3 +480,131 @@ cd "/path/to/project"
 | Verify 1 slide | ~$0.01-0.03 | On-demand |
 | Verify 10-slide deck | ~$0.10-0.30 | On-demand |
 | Auto-verification | $0 | Never (disabled) |
+
+---
+
+## Known Limitations & Future Work
+
+### 1. Narrative Quality Verification (Phase 2 - Not Implemented)
+
+**Status:** ⏳ Planned for future release
+
+**Description:**
+Current verification focuses on **numerical accuracy only** (Phase 1). Phase 2 will add narrative/storytelling quality assessment:
+- Logical flow across the full deck
+- Meaningful insights and conclusions
+- Clear narrative arc
+- Data-supported claims
+
+**Why Not Implemented Yet:**
+- Phase 1 (numerical accuracy) must be validated and refined first
+- Narrative quality requires different judge prompts and evaluation criteria
+- Need to gather user feedback on Phase 1 effectiveness before expanding scope
+
+**Workaround:**
+Users must manually review narrative quality and storytelling coherence.
+
+---
+
+### 2. Genie Conversation Deep-Linking Limitation
+
+**Status:** 🔒 External Platform Constraint
+
+**Description:**
+The "View Source Data" link currently opens the **Genie space/room** rather than the specific conversation used for slide generation.
+
+**Technical Details:**
+```python
+# Current behavior (src/api/routes/verification.py:335)
+genie_url = f"{workspace_url}/genie/rooms/{space_id}"
+# Returns: https://<workspace>/genie/rooms/<space_id>
+```
+
+**Why:**
+- Genie UI does not support deep-linking to specific conversations by conversation_id
+- The conversation_id is stored in our session metadata and returned by the API
+- However, no Databricks Genie URL format allows direct navigation to a conversation
+
+**Impact:**
+- Users must manually find the recent conversation in the Genie room
+- Inefficient for reviewers needing quick access to source data
+
+**Potential Solutions:**
+1. **Wait for Databricks feature:** Monitor Genie API/UI for conversation deep-linking support
+2. **Custom query viewer:** Build our own UI to display Genie query results (bypasses Genie UI entirely)
+3. **API-based data fetch:** Use Genie SDK to fetch and display conversation data in-app (requires additional API calls)
+
+**Current Workaround:**
+- Link message: "Opens Genie room. Look for recent conversations to find queries used."
+- conversation_id is returned in API response for potential future use
+
+---
+
+### 3. Genie Data Capture and Mapping
+
+**Status:** ✅ Working as Designed (with clarifications)
+
+**What We Capture:**
+All Genie query results are captured **as raw CSV/data** without explicit mapping to specific slides:
+
+```python
+# Session structure
+session = {
+    "genie_conversation_id": "01j...",
+    "genie_queries": [
+        {
+            "query_id": "01j...",
+            "sql": "SELECT ...",
+            "result_csv": "col1,col2\nval1,val2\n...",
+            "row_count": 150,
+            "timestamp": "2024-12-15T..."
+        },
+        # ... more queries
+    ]
+}
+```
+
+**What Verification Can Assess:**
+✅ Numbers on slides match numbers in **any** Genie query result  
+✅ Derived calculations (e.g., "50% growth") are correct given source data  
+✅ Semantic equivalence (7M = 7,000,000 = $7.2M)  
+✅ Chart data accuracy  
+
+**What Verification Cannot Assess:**
+❌ Which specific Genie query corresponds to which slide  
+❌ Whether the LLM used the "right" query for a slide's topic  
+❌ Data freshness (verification uses cached query results)  
+
+**Design Rationale:**
+- The LLM slide generator has full context of all Genie queries
+- It chooses which data to use for each slide based on the user's conversation
+- Verification checks if the slide **accurately represents** the data it chose to use
+- We don't enforce a 1:1 slide→query mapping because:
+  - One slide might combine data from multiple queries
+  - One query might feed data to multiple slides
+  - The LLM's query selection is part of the creative process
+
+**Example:**
+```
+User: "Show me Q1 revenue by region, then create a trend slide"
+
+Genie Queries:
+1. Q1 revenue by region → 4 regions, $7M total
+2. Revenue trend Q1-Q4 → 4 quarters
+
+Slide 1: Regional breakdown (uses Query 1)
+Slide 2: Quarterly trend (uses Query 2)
+Slide 3: "Q1 represented 25% of annual revenue" (derives from both queries)
+
+Verification:
+- Slide 1: Checks regional numbers against Query 1 ✓
+- Slide 2: Checks trend data against Query 2 ✓
+- Slide 3: Validates "25%" calculation from Query 1 + Query 2 ✓
+```
+
+**Improvement Opportunities:**
+1. **Query attribution:** Log which query(ies) the LLM used for each slide (requires LangGraph instrumentation)
+2. **Explicit mapping UI:** Show users which query fed which slide
+3. **Query rerun:** Allow re-running specific queries if data is stale
+
+---

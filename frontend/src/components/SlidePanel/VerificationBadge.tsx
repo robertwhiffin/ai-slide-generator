@@ -26,6 +26,7 @@ export const VerificationBadge: React.FC<VerificationBadgeProps> = ({
   const [showFeedback, setShowFeedback] = useState(false);
   const [feedbackRationale, setFeedbackRationale] = useState('');
   const [feedbackSubmitted, setFeedbackSubmitted] = useState(false);
+  const [isSubmitting, setIsSubmitting] = useState(false);
 
   const handleFeedback = async (isPositive: boolean) => {
     if (!isPositive && !feedbackRationale.trim()) {
@@ -34,18 +35,34 @@ export const VerificationBadge: React.FC<VerificationBadgeProps> = ({
       return;
     }
 
+    if (isSubmitting) return;
+    setIsSubmitting(true);
+
     try {
+      // Pass trace_id to link feedback to the original verification trace in MLflow
+      // This enables labeling sessions where reviewers can see feedback
       await api.submitVerificationFeedback(
         sessionId,
         slideIndex,
         isPositive,
-        isPositive ? undefined : feedbackRationale
+        isPositive ? undefined : feedbackRationale,
+        verificationResult?.trace_id  // Links feedback to verification trace
       );
       setFeedbackSubmitted(true);
       setShowFeedback(false);
-      setTimeout(() => setFeedbackSubmitted(false), 3000);
+      setFeedbackRationale('');
+      // Don't reset feedbackSubmitted - keep it permanent until re-verification
     } catch (error) {
       console.error('Failed to submit feedback:', error);
+      setIsSubmitting(false);  // Allow retry on error
+    }
+  };
+
+  // Handle Enter key in textarea
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (e.key === 'Enter' && !e.shiftKey && feedbackRationale.trim()) {
+      e.preventDefault();
+      handleFeedback(false);
     }
   };
 
@@ -167,6 +184,26 @@ export const VerificationBadge: React.FC<VerificationBadgeProps> = ({
             </div>
           )}
 
+          {/* MLflow Trace ID */}
+          {verificationResult.trace_id && (
+            <div className="mb-3 p-2 bg-gray-50 rounded">
+              <div className="flex items-center justify-between">
+                <span className="text-xs text-gray-500">MLflow Trace ID:</span>
+                <button
+                  onClick={() => {
+                    navigator.clipboard.writeText(verificationResult.trace_id || '');
+                    alert('Trace ID copied!');
+                  }}
+                  className="text-xs text-blue-600 hover:underline"
+                  title="Copy trace ID"
+                >
+                  Copy
+                </button>
+              </div>
+              <code className="text-xs text-gray-700 break-all">{verificationResult.trace_id}</code>
+            </div>
+          )}
+
           {/* Genie Link */}
           {verificationResult.genie_conversation_id && (
             <button
@@ -187,21 +224,23 @@ export const VerificationBadge: React.FC<VerificationBadgeProps> = ({
             </button>
           )}
 
-          {/* Feedback */}
+          {/* Feedback - only show if not already submitted */}
           {!feedbackSubmitted && !showFeedback && (
             <div className="flex items-center justify-between pt-3 border-t">
               <span className="text-xs text-gray-500">Is this accurate?</span>
               <div className="flex items-center space-x-2">
                 <button
                   onClick={() => handleFeedback(true)}
-                  className="p-1.5 text-green-600 hover:bg-green-50 rounded"
+                  disabled={isSubmitting}
+                  className="p-1.5 text-green-600 hover:bg-green-50 rounded disabled:opacity-50"
                   title="Yes, accurate"
                 >
                   <FiThumbsUp size={16} />
                 </button>
                 <button
                   onClick={() => handleFeedback(false)}
-                  className="p-1.5 text-red-600 hover:bg-red-50 rounded"
+                  disabled={isSubmitting}
+                  className="p-1.5 text-red-600 hover:bg-red-50 rounded disabled:opacity-50"
                   title="No, issues found"
                 >
                   <FiThumbsDown size={16} />
@@ -211,7 +250,7 @@ export const VerificationBadge: React.FC<VerificationBadgeProps> = ({
           )}
 
           {/* Feedback Form */}
-          {showFeedback && (
+          {showFeedback && !feedbackSubmitted && (
             <div className="pt-3 border-t">
               <label className="text-xs text-gray-600 block mb-1">
                 What's wrong with this assessment?
@@ -219,22 +258,29 @@ export const VerificationBadge: React.FC<VerificationBadgeProps> = ({
               <textarea
                 value={feedbackRationale}
                 onChange={(e) => setFeedbackRationale(e.target.value)}
+                onKeyDown={handleKeyDown}
                 className="w-full text-sm border rounded p-2 h-16 resize-none"
-                placeholder="Please describe the issue..."
+                placeholder="Please describe the issue... (Enter to submit)"
+                disabled={isSubmitting}
+                autoFocus
               />
               <div className="flex justify-end space-x-2 mt-2">
                 <button
-                  onClick={() => setShowFeedback(false)}
+                  onClick={() => {
+                    setShowFeedback(false);
+                    setFeedbackRationale('');
+                  }}
                   className="text-xs text-gray-500 hover:text-gray-700"
+                  disabled={isSubmitting}
                 >
                   Cancel
                 </button>
                 <button
                   onClick={() => handleFeedback(false)}
-                  disabled={!feedbackRationale.trim()}
+                  disabled={!feedbackRationale.trim() || isSubmitting}
                   className="text-xs bg-red-500 text-white px-3 py-1 rounded hover:bg-red-600 disabled:opacity-50"
                 >
-                  Submit
+                  {isSubmitting ? 'Submitting...' : 'Submit'}
                 </button>
               </div>
             </div>

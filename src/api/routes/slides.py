@@ -336,7 +336,12 @@ async def update_slide_verification(index: int, request: UpdateVerificationReque
             )
 
         # Update verification for the slide
-        slides[index]["verification"] = request.verification
+        # If verification is None, remove the key entirely (avoids null in JSON)
+        # This ensures frontend receives undefined instead of null
+        if request.verification is None:
+            slides[index].pop("verification", None)
+        else:
+            slides[index]["verification"] = request.verification
 
         # Save updated deck
         import json
