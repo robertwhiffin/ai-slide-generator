@@ -3,13 +3,17 @@ import { useSortable } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
 import { FiEdit, FiCopy, FiTrash2, FiMove, FiMessageSquare } from 'react-icons/fi';
 import type { Slide, SlideDeck } from '../../types/slide';
+import type { VerificationResult } from '../../types/verification';
 import { HTMLEditorModal } from './HTMLEditorModal';
 import { useSelection } from '../../contexts/SelectionContext';
+import { VerificationBadge } from './VerificationBadge';
+import { api } from '../../services/api';
 
 interface SlideTileProps {
   slide: Slide;
   slideDeck: SlideDeck;
   index: number;
+  sessionId: string;
   onDelete: () => void;
   onDuplicate: () => void;
   onUpdate: (html: string) => Promise<void>;
@@ -23,6 +27,7 @@ export const SlideTile: React.FC<SlideTileProps> = ({
   slide,
   slideDeck,
   index,
+  sessionId,
   onDelete,
   onDuplicate,
   onUpdate,
@@ -31,6 +36,44 @@ export const SlideTile: React.FC<SlideTileProps> = ({
   const containerRef = useRef<HTMLDivElement>(null);
   const [scale, setScale] = useState(1);
   const { selectedIndices, setSelection } = useSelection();
+  
+  // Verification state
+  const [verificationResult, setVerificationResult] = useState<VerificationResult | undefined>();
+  const [isVerifying, setIsVerifying] = useState(false);
+  const [lastVerifiedAt, setLastVerifiedAt] = useState<string | undefined>();
+  const [lastEditedAt, setLastEditedAt] = useState<string | undefined>();
+
+  // Handle verification
+  const handleVerify = async () => {
+    if (!sessionId || isVerifying) return;
+    
+    setIsVerifying(true);
+    try {
+      const result = await api.verifySlide(sessionId, index);
+      setVerificationResult({
+        ...result,
+        rating: result.rating as VerificationResult['rating'],
+        timestamp: new Date().toISOString(),
+      });
+      setLastVerifiedAt(new Date().toISOString());
+    } catch (error) {
+      console.error('Verification failed:', error);
+      setVerificationResult({
+        score: 0,
+        rating: 'error',
+        explanation: error instanceof Error ? error.message : 'Verification failed',
+        issues: [],
+        duration_ms: 0,
+        error: true,
+        error_message: error instanceof Error ? error.message : 'Unknown error',
+      });
+    } finally {
+      setIsVerifying(false);
+    }
+  };
+
+  // Check if verification is stale (slide edited after verification)
+  const isStale = !!(lastVerifiedAt && lastEditedAt && new Date(lastEditedAt) > new Date(lastVerifiedAt));
 
   const {
     attributes,
@@ -124,6 +167,16 @@ export const SlideTile: React.FC<SlideTileProps> = ({
 
           {/* Action Buttons */}
           <div className="flex items-center space-x-1">
+            {/* Verification Badge/Button */}
+            <VerificationBadge
+              slideIndex={index}
+              sessionId={sessionId}
+              verificationResult={verificationResult}
+              isVerifying={isVerifying}
+              onVerify={handleVerify}
+              isStale={isStale}
+            />
+            
             <button
               onClick={() => setSelection([index], [slide])}
               className={`p-1 rounded ${
@@ -189,6 +242,7 @@ export const SlideTile: React.FC<SlideTileProps> = ({
           html={slide.html}
           onSave={async (newHtml) => {
             await onUpdate(newHtml);
+            setLastEditedAt(new Date().toISOString());  // Mark as edited for stale verification
             setIsEditing(false);
           }}
           onCancel={() => setIsEditing(false)}

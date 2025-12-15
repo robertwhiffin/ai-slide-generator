@@ -1,7 +1,8 @@
 import React, { useState } from 'react';
-import { FiArrowLeft, FiMessageSquare, FiClock, FiSettings, FiInfo } from 'react-icons/fi';
+import { FiArrowLeft, FiMessageSquare, FiClock, FiSettings, FiInfo, FiShield } from 'react-icons/fi';
+import { FaGavel } from 'react-icons/fa';
 
-type HelpTab = 'overview' | 'generator' | 'history' | 'settings';
+type HelpTab = 'overview' | 'generator' | 'history' | 'settings' | 'verification';
 
 interface HelpPageProps {
   onBack: () => void;
@@ -51,6 +52,7 @@ export const HelpPage: React.FC<HelpPageProps> = ({ onBack }) => {
       <div className="flex gap-2 mb-6 flex-wrap">
         <TabButton tab="overview" label="Overview" icon={FiInfo} />
         <TabButton tab="generator" label="Generator" icon={FiMessageSquare} />
+        <TabButton tab="verification" label="Verification" icon={FiShield} />
         <TabButton tab="history" label="History" icon={FiClock} />
         <TabButton tab="settings" label="Settings" icon={FiSettings} />
       </div>
@@ -59,6 +61,7 @@ export const HelpPage: React.FC<HelpPageProps> = ({ onBack }) => {
       <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-6 min-h-[400px]">
         {activeTab === 'overview' && <OverviewTab setActiveTab={setActiveTab} QuickLinkButton={QuickLinkButton} />}
         {activeTab === 'generator' && <GeneratorTab />}
+        {activeTab === 'verification' && <VerificationTab />}
         {activeTab === 'history' && <HistoryTab />}
         {activeTab === 'settings' && <SettingsTab />}
       </div>
@@ -102,6 +105,7 @@ const OverviewTab: React.FC<{
       <h2 className="text-lg font-semibold text-gray-800 mb-3">Navigation Quick Links</h2>
       <div className="flex gap-2 flex-wrap">
         <QuickLinkButton tab="generator" label="Learn about Generator →" />
+        <QuickLinkButton tab="verification" label="Learn about Verification →" />
         <QuickLinkButton tab="history" label="Learn about History →" />
         <QuickLinkButton tab="settings" label="Learn about Settings →" />
       </div>
@@ -180,6 +184,106 @@ const HistoryTab: React.FC = () => (
           <li>Sessions are automatically saved each time you send a message</li>
         </ul>
       </div>
+    </section>
+  </div>
+);
+
+// Verification Tab Content
+const VerificationTab: React.FC = () => (
+  <div className="space-y-6">
+    <section>
+      <h2 className="text-lg font-semibold text-gray-800 mb-3">What is Slide Verification?</h2>
+      <p className="text-gray-600 mb-3">
+        Verification uses an <strong>LLM as Judge</strong> to check that the numbers and data shown 
+        on your slides accurately represent the source data from Genie. This helps ensure your 
+        presentation doesn't contain AI hallucinations or calculation errors.
+      </p>
+      <div className="flex items-center gap-2 text-amber-700 bg-amber-50 rounded-lg p-3">
+        <FaGavel size={20} />
+        <span className="text-sm">Click the gavel icon on any slide to verify its accuracy.</span>
+      </div>
+    </section>
+
+    <section>
+      <h2 className="text-lg font-semibold text-gray-800 mb-3">How It Works</h2>
+      <ol className="list-decimal list-inside text-gray-600 space-y-2">
+        <li>The verifier compares the <strong>Genie query results</strong> (source data) against the <strong>slide content</strong></li>
+        <li>It performs <strong>semantic comparison</strong> — "7M" and "7,000,000" are considered equivalent</li>
+        <li>Derived calculations (like "50% growth") are validated against source numbers</li>
+        <li>Chart data (Chart.js) is also verified against the source</li>
+      </ol>
+    </section>
+
+    <section>
+      <h2 className="text-lg font-semibold text-gray-800 mb-3">Verification Ratings</h2>
+      <div className="grid grid-cols-2 gap-3">
+        <div className="flex items-center gap-2">
+          <span className="px-2 py-1 text-xs font-medium rounded bg-green-100 text-green-800 border border-green-300">✓ 95%</span>
+          <span className="text-sm text-gray-600"><strong>Excellent:</strong> All data accurate</span>
+        </div>
+        <div className="flex items-center gap-2">
+          <span className="px-2 py-1 text-xs font-medium rounded bg-emerald-100 text-emerald-700 border border-emerald-300">✓ 80%</span>
+          <span className="text-sm text-gray-600"><strong>Good:</strong> Minor omissions only</span>
+        </div>
+        <div className="flex items-center gap-2">
+          <span className="px-2 py-1 text-xs font-medium rounded bg-yellow-100 text-yellow-800 border border-yellow-300">~ 60%</span>
+          <span className="text-sm text-gray-600"><strong>Moderate:</strong> Some data missing</span>
+        </div>
+        <div className="flex items-center gap-2">
+          <span className="px-2 py-1 text-xs font-medium rounded bg-orange-100 text-orange-800 border border-orange-300">✗ 40%</span>
+          <span className="text-sm text-gray-600"><strong>Poor:</strong> Errors or missing data</span>
+        </div>
+        <div className="flex items-center gap-2">
+          <span className="px-2 py-1 text-xs font-medium rounded bg-red-100 text-red-800 border border-red-300">✗ 15%</span>
+          <span className="text-sm text-gray-600"><strong>Failing:</strong> Major inaccuracies</span>
+        </div>
+      </div>
+    </section>
+
+    <section>
+      <h2 className="text-lg font-semibold text-gray-800 mb-3">What Passes / Fails</h2>
+      <div className="grid md:grid-cols-2 gap-4">
+        <div className="bg-green-50 rounded-lg p-3">
+          <h4 className="font-medium text-green-800 mb-2">✓ These Pass</h4>
+          <ul className="text-sm text-green-700 space-y-1">
+            <li>• 7,234,567 shown as "7.2M" or "$7.2M"</li>
+            <li>• 0.15 shown as "15%"</li>
+            <li>• Reasonable rounding</li>
+            <li>• "50% growth" if Q1=100, Q2=150</li>
+          </ul>
+        </div>
+        <div className="bg-red-50 rounded-lg p-3">
+          <h4 className="font-medium text-red-800 mb-2">✗ These Fail</h4>
+          <ul className="text-sm text-red-700 space-y-1">
+            <li>• Source says 7M, slide shows 9M</li>
+            <li>• Swapped values (Q1 and Q2 reversed)</li>
+            <li>• Hallucinated numbers not in source</li>
+            <li>• Wrong calculations</li>
+          </ul>
+        </div>
+      </div>
+    </section>
+
+    <section>
+      <h2 className="text-lg font-semibold text-gray-800 mb-3">Cost & Usage</h2>
+      <div className="bg-blue-50 rounded-lg p-4">
+        <ul className="list-disc list-inside text-gray-700 space-y-2">
+          <li>Verification is <strong>on-demand</strong> — only runs when you click the gavel</li>
+          <li>Each verification makes one LLM call (using Claude via Databricks)</li>
+          <li>Typical cost: ~$0.01-0.03 per slide verification</li>
+          <li>Results persist within your session (survive page refresh)</li>
+          <li>If you edit a slide, re-verify to ensure accuracy</li>
+        </ul>
+      </div>
+    </section>
+
+    <section>
+      <h2 className="text-lg font-semibold text-gray-800 mb-3">Feedback</h2>
+      <p className="text-gray-600">
+        After verification, you can provide feedback using 👍/👎 buttons. Negative feedback 
+        asks for details to help improve the accuracy of future verifications. All feedback 
+        is logged to MLflow for quality monitoring.
+      </p>
     </section>
   </div>
 );

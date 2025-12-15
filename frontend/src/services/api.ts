@@ -602,6 +602,88 @@ export const api = {
     }
   },
 
+  // ============ Verification API ============
+
+  /**
+   * Verify a slide's numerical accuracy against source data
+   */
+  async verifySlide(
+    sessionId: string,
+    slideIndex: number
+  ): Promise<{
+    score: number;
+    rating: string;
+    explanation: string;
+    issues: Array<{ type: string; detail: string }>;
+    duration_ms: number;
+    trace_id?: string;
+    genie_conversation_id?: string;
+    error: boolean;
+    error_message?: string;
+  }> {
+    const response = await fetch(`${API_BASE_URL}/api/verification/${slideIndex}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ session_id: sessionId }),
+    });
+
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({}));
+      throw new ApiError(response.status, error.detail || 'Failed to verify slide');
+    }
+
+    return response.json();
+  },
+
+  /**
+   * Submit feedback on a verification result
+   */
+  async submitVerificationFeedback(
+    sessionId: string,
+    slideIndex: number,
+    isPositive: boolean,
+    rationale?: string
+  ): Promise<{ status: string; message: string }> {
+    const response = await fetch(`${API_BASE_URL}/api/verification/${slideIndex}/feedback`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        session_id: sessionId,
+        slide_index: slideIndex,
+        is_positive: isPositive,
+        rationale,
+      }),
+    });
+
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({}));
+      throw new ApiError(response.status, error.detail || 'Failed to submit feedback');
+    }
+
+    return response.json();
+  },
+
+  /**
+   * Get the Genie conversation link for viewing source data
+   */
+  async getGenieLink(sessionId: string): Promise<{
+    has_genie_conversation: boolean;
+    conversation_id?: string;
+    url?: string;
+    message: string;
+  }> {
+    const response = await fetch(
+      `${API_BASE_URL}/api/verification/genie-link?session_id=${encodeURIComponent(sessionId)}`
+    );
+
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({}));
+      throw new ApiError(response.status, error.detail || 'Failed to get Genie link');
+    }
+
+    return response.json();
+  },
+
   /**
    * Export slides to PowerPoint format
    * 
