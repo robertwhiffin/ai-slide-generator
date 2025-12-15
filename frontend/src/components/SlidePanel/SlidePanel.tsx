@@ -140,6 +140,24 @@ export const SlidePanel: React.FC<SlidePanelProps> = ({ slideDeck, rawHtml, onSl
     }
   };
 
+  const handleVerificationUpdate = async (index: number, verification: import('../../types/verification').VerificationResult | null) => {
+    if (!slideDeck || !sessionId) return;
+
+    try {
+      // Save verification to backend but DON'T replace the whole deck
+      // This prevents overwriting other slide data (like charts)
+      await api.updateSlideVerification(index, sessionId, verification);
+      
+      // Update only the verification field locally
+      const updatedSlides = [...slideDeck.slides];
+      updatedSlides[index] = { ...updatedSlides[index], verification: verification || undefined };
+      onSlideChange({ ...slideDeck, slides: updatedSlides });
+    } catch (error) {
+      console.error('Failed to update verification:', error);
+      // Don't throw - verification persistence is non-critical
+    }
+  };
+
   const handleExportPDF = async () => {
     if (!slideDeck || isExportingPDF) return;
 
@@ -560,6 +578,7 @@ export const SlidePanel: React.FC<SlidePanelProps> = ({ slideDeck, rawHtml, onSl
               onDelete={() => handleDeleteSlide(index)}
               onDuplicate={() => handleDuplicateSlide(index)}
               onUpdate={(html) => handleUpdateSlide(index, html)}
+              onVerificationUpdate={(verification) => handleVerificationUpdate(index, verification)}
             />
           </div>
         ))}

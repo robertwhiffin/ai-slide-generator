@@ -1,5 +1,6 @@
 import type { ChatResponse } from '../types/message';
 import type { SlideDeck, Slide, SlideContext, ReplacementInfo } from '../types/slide';
+import type { VerificationResult } from '../types/verification';
 
 // Use relative URLs in production, localhost in development
 const API_BASE_URL = import.meta.env.VITE_API_URL || (
@@ -351,6 +352,28 @@ export const api = {
 
     if (!response.ok) {
       throw new ApiError(response.status, 'Failed to delete slide');
+    }
+
+    return response.json();
+  },
+
+  /**
+   * Update a slide's verification result
+   * Persists verification with the session so it survives refresh/restore
+   */
+  async updateSlideVerification(
+    index: number,
+    sessionId: string,
+    verification: VerificationResult | null
+  ): Promise<SlideDeck> {
+    const response = await fetch(`${API_BASE_URL}/api/slides/${index}/verification`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ session_id: sessionId, verification }),
+    });
+
+    if (!response.ok) {
+      throw new ApiError(response.status, 'Failed to update slide verification');
     }
 
     return response.json();
