@@ -14,8 +14,10 @@ export const PresentationMode: React.FC<PresentationModeProps> = ({
   startIndex = 0,
 }) => {
   const [currentSlideIndex, setCurrentSlideIndex] = useState(startIndex);
+  const [scale, setScale] = useState(1);
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
+  const wrapperRef = useRef<HTMLDivElement>(null);
 
   // Generate HTML for current slide (no reveal.js)
   const currentSlideHTML = useMemo(() => {
@@ -47,19 +49,18 @@ export const PresentationMode: React.FC<PresentationModeProps> = ({
     body {
       display: flex;
       justify-content: center;
-      align-items: flex-start;
-      padding: 20px;
+      align-items: center;
+      padding: 0;
+      margin: 0;
     }
-    /* Slide container - maintains 16:9 aspect ratio, scales to fit viewport */
+    /* Slide container - maintains 16:9 aspect ratio */
     .slide-container {
       width: 1280px;
       height: 720px;
-      max-width: 100vw;
-      max-height: 100vh;
       position: relative;
       background: #ffffff;
-      overflow: auto;
-      margin: auto;
+      overflow: hidden;
+      margin: 0;
     }
     /* Ensure slide content fills container */
     .slide-container > * {
@@ -117,6 +118,32 @@ export const PresentationMode: React.FC<PresentationModeProps> = ({
 </body>
 </html>`;
   }, [currentSlideIndex, slideDeck]);
+
+  // Calculate scale factor to fit viewport while maintaining aspect ratio
+  useEffect(() => {
+    const calculateScale = () => {
+      const baseWidth = 1280;
+      const baseHeight = 720;
+      const viewportWidth = window.innerWidth;
+      const viewportHeight = window.innerHeight;
+      
+      const scaleX = viewportWidth / baseWidth;
+      const scaleY = viewportHeight / baseHeight;
+      
+      // Use the smaller scale to ensure content fits without distortion
+      const newScale = Math.min(scaleX, scaleY);
+      setScale(newScale);
+    };
+
+    calculateScale();
+    window.addEventListener('resize', calculateScale);
+    window.addEventListener('orientationchange', calculateScale);
+
+    return () => {
+      window.removeEventListener('resize', calculateScale);
+      window.removeEventListener('orientationchange', calculateScale);
+    };
+  }, []);
 
   // Update iframe content when slide changes
   useEffect(() => {
@@ -202,8 +229,19 @@ export const PresentationMode: React.FC<PresentationModeProps> = ({
       if (!document.fullscreenElement) {
         onExit();
       } else {
-        // Refocus container when entering fullscreen
+        // Recalculate scale when entering fullscreen (viewport size may change)
         setTimeout(() => {
+          const baseWidth = 1280;
+          const baseHeight = 720;
+          const viewportWidth = window.innerWidth;
+          const viewportHeight = window.innerHeight;
+          
+          const scaleX = viewportWidth / baseWidth;
+          const scaleY = viewportHeight / baseHeight;
+          const newScale = Math.min(scaleX, scaleY);
+          setScale(newScale);
+          
+          // Refocus container when entering fullscreen
           if (containerRef.current) {
             containerRef.current.focus();
           }
@@ -245,7 +283,7 @@ export const PresentationMode: React.FC<PresentationModeProps> = ({
         backgroundColor: '#000000',
         margin: 0,
         padding: 0,
-        overflow: 'auto',
+        overflow: 'hidden',
         display: 'flex',
         justifyContent: 'center',
         alignItems: 'center',
@@ -292,24 +330,38 @@ export const PresentationMode: React.FC<PresentationModeProps> = ({
         ← → Navigate | ESC Exit
       </div>
 
-      {/* Single iframe that updates content */}
-      <iframe
-        ref={iframeRef}
-        srcDoc={currentSlideHTML}
-        tabIndex={-1}
+      {/* Iframe wrapper that maintains 16:9 aspect ratio and scales to fit viewport */}
+      <div
+        ref={wrapperRef}
         style={{
-          width: '100%',
-          height: '100%',
-          border: 'none',
-          display: 'block',
-          margin: 0,
-          padding: 0,
-          pointerEvents: 'auto', // Allow interactions within iframe
+          width: '100vw',
+          height: '100vh',
+          display: 'flex',
+          justifyContent: 'center',
+          alignItems: 'center',
+          position: 'relative',
         }}
-        sandbox="allow-scripts allow-same-origin"
-        title={`Slide ${currentSlideIndex + 1}`}
-        onLoad={handleIframeLoad}
-      />
+      >
+        <iframe
+          ref={iframeRef}
+          srcDoc={currentSlideHTML}
+          tabIndex={-1}
+          style={{
+            width: '1280px',
+            height: '720px',
+            border: 'none',
+            display: 'block',
+            margin: 0,
+            padding: 0,
+            pointerEvents: 'auto',
+            transform: `scale(${scale})`,
+            transformOrigin: 'center center',
+          }}
+          sandbox="allow-scripts allow-same-origin"
+          title={`Slide ${currentSlideIndex + 1}`}
+          onLoad={handleIframeLoad}
+        />
+      </div>
     </div>,
     document.body
   );
