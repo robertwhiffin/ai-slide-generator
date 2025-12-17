@@ -2,6 +2,7 @@ import React, { useMemo, useRef, useState, useEffect } from 'react';
 import { useSortable } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
 import { FiEdit, FiCopy, FiTrash2, FiMove, FiMessageSquare, FiDatabase } from 'react-icons/fi';
+import { FiEdit, FiCopy, FiTrash2, FiMove, FiMessageSquare, FiMaximize2 } from 'react-icons/fi';
 import type { Slide, SlideDeck } from '../../types/slide';
 import type { VerificationResult } from '../../types/verification';
 import { HTMLEditorModal } from './HTMLEditorModal';
@@ -19,6 +20,8 @@ interface SlideTileProps {
   onUpdate: (html: string) => Promise<void>;
   onVerificationUpdate: (verification: VerificationResult | null) => Promise<void>;
   isAutoVerifying?: boolean;  // True when auto-verification is running for this slide
+  onOptimize?: () => void;
+  isOptimizing?: boolean;
 }
 
 const SLIDE_WIDTH = 1280;
@@ -35,6 +38,8 @@ export const SlideTile: React.FC<SlideTileProps> = ({
   onUpdate,
   onVerificationUpdate,
   isAutoVerifying = false,
+  onOptimize,
+  isOptimizing = false,
 }) => {
   const [isEditing, setIsEditing] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -247,6 +252,24 @@ export const SlideTile: React.FC<SlideTileProps> = ({
             >
               <FiMessageSquare size={16} />
             </button>
+            {onOptimize && (
+              <button
+                onClick={onOptimize}
+                disabled={isOptimizing}
+                className={`p-1 rounded ${
+                  isOptimizing
+                    ? 'text-gray-400 cursor-not-allowed'
+                    : 'text-purple-600 hover:bg-purple-50'
+                }`}
+                title={isOptimizing ? 'Optimizing layout...' : 'Optimize layout to prevent overflow'}
+              >
+                {isOptimizing ? (
+                  <div className="animate-spin rounded-full h-4 w-4 border-2 border-purple-600 border-t-transparent"></div>
+                ) : (
+                  <FiMaximize2 size={16} />
+                )}
+              </button>
+            )}
             <button
               onClick={() => setIsEditing(true)}
               className="p-1 text-blue-600 hover:bg-blue-50 rounded"

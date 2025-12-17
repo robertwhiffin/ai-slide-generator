@@ -110,6 +110,8 @@ Parsed tiles, rendered raw HTML (`iframe`), and raw HTML text (`<pre>`). Users c
 | `src/components/SlidePanel/SlidePanel.tsx` | Hosts drag/drop, tabs, per-slide CRUD, auto-verification trigger for unverified slides | `api.getSlides`, `api.reorderSlides`, `api.updateSlide`, `api.duplicateSlide`, `api.deleteSlide`, `api.verifySlide` |
 | `src/components/SlidePanel/SlideTile.tsx` | Slide preview, selection button, editor modal, Genie source data button, displays verification badge | Prop callbacks to `SlidePanel`, `api.getGenieLink` |
 | `src/components/SlidePanel/VerificationBadge.tsx` | Rating badge, details popup, feedback UI (thumbs up/down), manual re-verify option | `api.verifySlide`, `api.submitVerificationFeedback` |
+| `src/components/SlidePanel/SlidePanel.tsx` | Hosts drag/drop, tabs, per-slide CRUD, optimize layout handler | `api.getSlides`, `api.reorderSlides`, `api.updateSlide`, `api.duplicateSlide`, `api.deleteSlide`, `api.sendChatMessage` |
+| `src/components/SlidePanel/SlideTile.tsx` | Slide preview, selection button, editor modal trigger, optimize layout button | Prop callbacks to `SlidePanel` |
 | `src/components/SlidePanel/HTMLEditorModal.tsx` | Monaco editor with validation (requires `<div class="slide">`) | Calls `api.updateSlide` then `api.getSlides` |
 | `src/components/SlidePanel/SelectionRibbon.tsx` + `SlideSelection.tsx` | Thumbnail strip with dual interaction: preview click navigates main panel, checkbox toggles selection for chat context | `onSlideNavigate` callback to `AppLayout`, updates `SelectionContext` |
 | `src/hooks/useKeyboardShortcuts.ts` | `Esc` clears selection globally | None |
@@ -166,6 +168,28 @@ Parsed tiles, rendered raw HTML (`iframe`), and raw HTML text (`<pre>`). Users c
 | **Duplicate** | `api.duplicateSlide(index, sessionId)` | Returns full updated deck |
 | **Delete** | `api.deleteSlide(index, sessionId)` | Returns full updated deck |
 | **Edit HTML** | `api.updateSlide(index, html, sessionId)` | Validates `.slide` wrapper |
+| **Optimize Layout** | `api.sendChatMessage(sessionId, message, slideContext)` | Sends optimization prompt with slide context; preserves chart scripts automatically via backend |
+
+### Optimize Layout Feature
+
+The optimize layout feature allows users to automatically fix slide overflow issues while preserving chart functionality:
+
+1. **Trigger**: Click the optimize icon (purple maximize button) on any slide tile
+2. **Process**: 
+   - Sends chat message "optimize layout not to overflow" with explicit instructions to preserve all `<canvas>` elements and their IDs
+   - Includes slide HTML as context
+   - Backend preserves original scripts for matching canvas IDs during replacement
+3. **Result**: 
+   - Slide layout is optimized to prevent overflow
+   - Chart elements and their IDs are preserved
+   - Original chart scripts are automatically re-attached if canvas IDs match
+   - Loading state shown during optimization
+
+The optimization prompt explicitly instructs the agent to:
+- Preserve ALL `<canvas>` elements exactly (no modification, removal, or ID changes)
+- Only adjust spacing, padding, margins, font sizes, and positioning of non-chart elements
+- Maintain 1280x720px slide dimensions
+- Not modify any chart-related HTML structure
 
 ---
 
@@ -234,9 +258,11 @@ Errors bubble up as `ApiError` (status + message). Common statuses:
 - **Single source of truth:** Backend responses are canonical. Refetch after mutations.
 - **Selection integrity:** Always preserve contiguity when setting selections programmatically.
 - **Script safety:** `SlideTile` wraps scripts in try/catch for graceful chart failures.
+- **Script preservation:** Backend automatically preserves chart scripts when canvas IDs match during slide replacement (e.g., optimize layout).
 - **Validation:** `HTMLEditorModal` requires `<div class="slide">` wrapper.
 - **Session scope:** All operations require valid session ID. Handle 409 with retry/wait UX.
 - **Loading UX:** `getRotatingLoadingMessage` keeps UI responsive during long LLM calls.
+- **Optimize layout:** Preserves chart functionality by maintaining canvas IDs and automatically re-attaching scripts.
 
 ---
 
