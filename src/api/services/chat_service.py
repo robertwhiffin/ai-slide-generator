@@ -16,12 +16,15 @@ from typing import Any, Dict, Generator, List, Optional
 from langchain_community.chat_message_histories import ChatMessageHistory
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
+from bs4 import BeautifulSoup
+
 from src.api.schemas.streaming import StreamEvent, StreamEventType
 from src.api.services.session_manager import get_session_manager, SessionNotFoundError
 from src.domain.slide import Slide
 from src.domain.slide_deck import SlideDeck
 from src.services.agent import create_agent
 from src.services.streaming_callback import StreamingCallbackHandler
+from src.utils.html_utils import extract_canvas_ids_from_html, extract_canvas_ids_from_script, split_script_by_canvas
 
 logger = logging.getLogger(__name__)
 
@@ -638,6 +641,24 @@ class ChatService:
         if start_idx + original_count > len(current_deck.slides):
             raise ValueError("Replacement range exceeds deck size")
 
+        # Preserve scripts from original slides before removal
+        # Map canvas IDs to their scripts for later re-attachment
+        canvas_id_to_script: Dict[str, str] = {}
+        for i in range(original_count):
+            original_slide = current_deck.slides[start_idx + i]
+            if original_slide.scripts:
+                # Extract canvas IDs from original slide HTML
+                original_canvas_ids = extract_canvas_ids_from_html(original_slide.html)
+                # Split scripts by canvas and map to canvas IDs
+                script_segments = split_script_by_canvas(original_slide.scripts)
+                for segment_text, segment_canvas_ids in script_segments:
+                    for canvas_id in segment_canvas_ids:
+                        if canvas_id in original_canvas_ids:
+                            # Store script for this canvas ID
+                            if canvas_id not in canvas_id_to_script:
+                                canvas_id_to_script[canvas_id] = ""
+                            canvas_id_to_script[canvas_id] += segment_text.strip() + "\n"
+
         # Remove original slides (scripts go with them automatically)
         for _ in range(original_count):
             current_deck.remove_slide(start_idx)
@@ -647,10 +668,44 @@ class ChatService:
             extra={"count": original_count, "start_index": start_idx},
         )
 
-        # Insert replacement slides (scripts already attached)
+        # Insert replacement slides and preserve scripts if canvas IDs match
         for idx, slide in enumerate(replacement_slides):
             # Update slide_id to reflect new position
             slide.slide_id = f"slide_{start_idx + idx}"
+            
+            # Extract canvas IDs from replacement slide HTML
+            replacement_canvas_ids = extract_canvas_ids_from_html(slide.html)
+            
+            # Extract canvas IDs that replacement scripts reference
+            replacement_script_canvas_ids = set()
+            if slide.scripts:
+                script_segments = split_script_by_canvas(slide.scripts)
+                for _, segment_canvas_ids in script_segments:
+                    replacement_script_canvas_ids.update(segment_canvas_ids)
+            
+            # Preserve original scripts for canvas IDs that exist in replacement but aren't in replacement scripts
+            preserved_count = 0
+            for canvas_id in replacement_canvas_ids:
+                if canvas_id in canvas_id_to_script and canvas_id not in replacement_script_canvas_ids:
+                    # Canvas exists in replacement but no script provided - preserve original
+                    if not slide.scripts:
+                        slide.scripts = ""
+                    slide.scripts += canvas_id_to_script[canvas_id]
+                    preserved_count += 1
+                    logger.info(
+                        "Preserved script for canvas",
+                        extra={"canvas_id": canvas_id, "slide_index": start_idx + idx},
+                    )
+            
+            if preserved_count > 0:
+                logger.info(
+                    "Preserved scripts for replacement slide",
+                    extra={
+                        "slide_index": start_idx + idx,
+                        "preserved_count": preserved_count,
+                    },
+                )
+            
             current_deck.insert_slide(slide, start_idx + idx)
 
         logger.info(
