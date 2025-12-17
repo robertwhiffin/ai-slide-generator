@@ -1,8 +1,7 @@
 import React, { useMemo, useRef, useState, useEffect } from 'react';
 import { useSortable } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
-import { FiEdit, FiCopy, FiTrash2, FiMove, FiMessageSquare, FiDatabase } from 'react-icons/fi';
-import { FiEdit, FiCopy, FiTrash2, FiMove, FiMessageSquare, FiMaximize2 } from 'react-icons/fi';
+import { FiEdit, FiCopy, FiTrash2, FiMove, FiMessageSquare, FiDatabase, FiMaximize2 } from 'react-icons/fi';
 import type { Slide, SlideDeck } from '../../types/slide';
 import type { VerificationResult } from '../../types/verification';
 import { HTMLEditorModal } from './HTMLEditorModal';
