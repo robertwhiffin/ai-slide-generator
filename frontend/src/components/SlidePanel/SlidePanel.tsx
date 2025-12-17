@@ -88,8 +88,12 @@ export const SlidePanel: React.FC<SlidePanelProps> = ({ slideDeck, rawHtml, onSl
         const newOrder = newSlides.map((_, idx) => 
           slideDeck.slides.findIndex(s => s.slide_id === newSlides[idx].slide_id)
         );
-        const updatedDeck = await api.reorderSlides(newOrder, sessionId);
-        onSlideChange(updatedDeck);
+        await api.reorderSlides(newOrder, sessionId);
+        // Fetch full deck to get verification merged from verification_map
+        const result = await api.getSlides(sessionId);
+        if (result.slide_deck) {
+          onSlideChange(result.slide_deck);
+        }
         clearSelection();
       } catch (error) {
         console.error('Failed to reorder:', error);
@@ -108,8 +112,12 @@ export const SlidePanel: React.FC<SlidePanelProps> = ({ slideDeck, rawHtml, onSl
     if (!confirm(`Delete slide ${index + 1}?`)) return;
 
     try {
-      const updatedDeck = await api.deleteSlide(index, sessionId);
-      onSlideChange(updatedDeck);
+      await api.deleteSlide(index, sessionId);
+      // Fetch full deck to get verification merged from verification_map
+      const result = await api.getSlides(sessionId);
+      if (result.slide_deck) {
+        onSlideChange(result.slide_deck);
+      }
       clearSelection();
     } catch (error) {
       console.error('Failed to delete:', error);
@@ -121,8 +129,12 @@ export const SlidePanel: React.FC<SlidePanelProps> = ({ slideDeck, rawHtml, onSl
     if (!slideDeck || !sessionId) return;
 
     try {
-      const updatedDeck = await api.duplicateSlide(index, sessionId);
-      onSlideChange(updatedDeck);
+      await api.duplicateSlide(index, sessionId);
+      // Fetch full deck to get verification merged from verification_map
+      const result = await api.getSlides(sessionId);
+      if (result.slide_deck) {
+        onSlideChange(result.slide_deck);
+      }
       clearSelection();
     } catch (error) {
       console.error('Failed to duplicate:', error);
