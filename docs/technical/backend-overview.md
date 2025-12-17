@@ -31,7 +31,7 @@ Frontend fetch -> FastAPI router ->   │ ChatService (singleton)│
 
 - **Routers** (`src/api/routes/*.py`) validate HTTP payloads and map 1:1 to frontend calls. All endpoints use `asyncio.to_thread()` for blocking operations.
 - **`ChatService`** (`src/api/services/chat_service.py`) is a process-wide singleton that owns the `SlideGeneratorAgent` and a session-scoped deck cache. Thread-safe via `_cache_lock`.
-- **`SessionManager`** (`src/api/services/session_manager.py`) handles database-backed sessions with locking for concurrent request handling. Stores full slide deck structure (including LLM as Judge verification results) as JSON in `SessionSlideDeck.deck_json` for session restoration.
+- **`SessionManager`** (`src/api/services/session_manager.py`) handles database-backed sessions with locking for concurrent request handling. Stores slide deck in `deck_json` and verification results separately in `verification_map` (keyed by content hash) for persistence across deck regeneration.
 - **`SlideGeneratorAgent`** (`src/services/agent.py`) wraps LangChain's tool-calling agent. Tools are created per-request with session ID bound via closure to eliminate race conditions.
 - **`SlideDeck` / `Slide` models** (`src/models/...`) parse, manipulate, and serialize slides so both chat and CRUD endpoints share the same representation.
 
@@ -211,8 +211,8 @@ Keep this doc synchronized whenever you add new modules, features (e.g., streami
 ## Cross-References
 
 - [Frontend Overview](frontend-overview.md) – UI/state patterns and backend touchpoints
-- [LLM as Judge Verification](llm-as-judge-verification.md) – On-demand slide accuracy verification using MLflow and human feedback collection
-- [Database Configuration](database-configuration.md) – Schema details including `SessionSlideDeck.deck_json` persistence of verification results
+- [LLM as Judge Verification](llm-as-judge-verification.md) – Auto slide accuracy verification using MLflow and human feedback collection
+- [Database Configuration](database-configuration.md) – Schema details including `verification_map` for content-hash-based verification persistence
 - [Real-Time Streaming](real-time-streaming.md) – SSE events and conversation persistence
 - [Multi-User Concurrency](multi-user-concurrency.md) – session locking and async handling
 - [Slide Parser & Script Management](slide-parser-and-script-management.md) – HTML parsing flow

@@ -1,7 +1,7 @@
 import React, { useMemo, useRef, useState, useEffect } from 'react';
 import { useSortable } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
-import { FiEdit, FiCopy, FiTrash2, FiMove, FiMessageSquare } from 'react-icons/fi';
+import { FiEdit, FiCopy, FiTrash2, FiMove, FiMessageSquare, FiDatabase } from 'react-icons/fi';
 import type { Slide, SlideDeck } from '../../types/slide';
 import type { VerificationResult } from '../../types/verification';
 import { HTMLEditorModal } from './HTMLEditorModal';
@@ -18,6 +18,7 @@ interface SlideTileProps {
   onDuplicate: () => void;
   onUpdate: (html: string) => Promise<void>;
   onVerificationUpdate: (verification: VerificationResult | null) => Promise<void>;
+  isAutoVerifying?: boolean;  // True when auto-verification is running for this slide
 }
 
 const SLIDE_WIDTH = 1280;
@@ -33,6 +34,7 @@ export const SlideTile: React.FC<SlideTileProps> = ({
   onDuplicate,
   onUpdate,
   onVerificationUpdate,
+  isAutoVerifying = false,
 }) => {
   const [isEditing, setIsEditing] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -43,8 +45,32 @@ export const SlideTile: React.FC<SlideTileProps> = ({
   const [verificationResult, setVerificationResult] = useState<VerificationResult | undefined>(
     slide.verification
   );
-  const [isVerifying, setIsVerifying] = useState(false);
+  const [isManualVerifying, setIsManualVerifying] = useState(false);
   const [isStale, setIsStale] = useState(false);
+  const [isLoadingGenieLink, setIsLoadingGenieLink] = useState(false);
+  
+  // Combined verifying state (manual or auto)
+  const isVerifying = isManualVerifying || isAutoVerifying;
+
+  // Handle opening Genie conversation link
+  const handleOpenGenieLink = async () => {
+    if (isLoadingGenieLink) return;
+    
+    setIsLoadingGenieLink(true);
+    try {
+      const link = await api.getGenieLink(sessionId);
+      if (link.url) {
+        window.open(link.url, '_blank');
+      } else {
+        alert(link.message || 'No Genie conversation available');
+      }
+    } catch (error) {
+      console.error('Failed to get Genie link:', error);
+      alert('Failed to get Genie conversation link');
+    } finally {
+      setIsLoadingGenieLink(false);
+    }
+  };
 
   // Sync verification state when slide.verification changes (e.g., session restore)
   useEffect(() => {
@@ -52,11 +78,11 @@ export const SlideTile: React.FC<SlideTileProps> = ({
     setIsStale(false);  // Reset stale when verification is loaded
   }, [slide.verification]);
 
-  // Handle verification
+  // Handle manual verification (user clicks verify button)
   const handleVerify = async () => {
     if (!sessionId || isVerifying) return;
     
-    setIsVerifying(true);
+    setIsManualVerifying(true);
     try {
       const result = await api.verifySlide(sessionId, index);
       const verification: VerificationResult = {
@@ -66,16 +92,18 @@ export const SlideTile: React.FC<SlideTileProps> = ({
       };
       
       // Log trace_id for easy access
-      console.log(`[Verification] Slide ${index} verified:`, {
+      console.log(`[Verification] Slide ${index + 1} verified:`, {
         score: verification.score,
         rating: verification.rating,
         trace_id: verification.trace_id,
+        content_hash: slide.content_hash,
       });
       
       setVerificationResult(verification);
       setIsStale(false);
       
-      // Persist verification to backend
+      // Note: Backend now saves verification automatically by content hash
+      // This call updates local state for the parent component
       await onVerificationUpdate(verification);
     } catch (error) {
       console.error('Verification failed:', error);
@@ -91,7 +119,7 @@ export const SlideTile: React.FC<SlideTileProps> = ({
       setVerificationResult(errorResult);
       // Don't persist error results
     } finally {
-      setIsVerifying(false);
+      setIsManualVerifying(false);
     }
   };
 
@@ -196,6 +224,16 @@ export const SlideTile: React.FC<SlideTileProps> = ({
               onVerify={handleVerify}
               isStale={isStale}
             />
+            
+            {/* Genie Source Data Link */}
+            <button
+              onClick={handleOpenGenieLink}
+              disabled={isLoadingGenieLink}
+              className="p-1 text-purple-600 hover:bg-purple-50 rounded disabled:opacity-50"
+              title="View Genie Source Data"
+            >
+              <FiDatabase size={16} />
+            </button>
             
             <button
               onClick={() => setSelection([index], [slide])}

@@ -230,7 +230,7 @@ class UserSession(Base):
     title: str                   # Session title
     created_at: datetime
     last_activity: datetime
-    genie_conversation_id: str | None  # Genie conversation tracking
+    genie_conversation_id: str | None  # Genie conversation ID (saved on first query, persists for source data links)
     is_processing: bool          # Lock flag for concurrent requests
     processing_started_at: datetime | None
 ```
@@ -263,52 +263,48 @@ class SessionSlideDeck(Base):
     html_content: str            # Full HTML content (knitted slides)
     scripts_content: str | None  # JavaScript content (Chart.js, etc.)
     slide_count: int             # Number of slides
-    deck_json: str | None        # JSON blob with full SlideDeck structure
+    deck_json: str | None        # JSON blob with full SlideDeck structure (slides, css, scripts)
+    verification_map: str | None # JSON: {"content_hash": VerificationResult} - separate from deck_json
     created_at: datetime
     updated_at: datetime
 ```
 
 **deck_json Structure:**
 
-The `deck_json` field stores the complete slide deck as JSON, including:
-- **slides[]**: Array of slide objects with `html`, `scripts`, and **`verification`** results
+The `deck_json` field stores the slide deck structure (without verification):
+- **slides[]**: Array of slide objects with `html` and `scripts`
 - **css**: Global CSS styles
 - **external_scripts**: External library URLs (Chart.js)
 - **scripts**: Global JavaScript
 
-**Verification Persistence:**
+**Verification Persistence (verification_map):**
 
-LLM as Judge verification results are stored in `deck_json` within each slide object:
+LLM as Judge verification is stored **separately** in `verification_map`, keyed by content hash:
 
 ```json
 {
-  "title": "Q4 Revenue Analysis",
-  "slides": [
-    {
-      "index": 0,
-      "slide_id": "slide-abc123",
-      "html": "<div class=\"slide\">...</div>",
-      "scripts": "new Chart(...);",
-      "verification": {
-        "score": 95,
-        "rating": "excellent",
-        "explanation": "All data accurate...",
-        "issues": [],
-        "duration_ms": 1523,
-        "trace_id": "tr-abc123...",
-        "genie_conversation_id": "01j...",
-        "error": false,
-        "timestamp": "2024-12-15T10:30:00Z"
-      }
-    }
-  ],
-  "css": "...",
-  "external_scripts": ["https://cdn.jsdelivr.net/npm/chart.js"],
-  "scripts": "..."
+  "a1b2c3d4e5f67890": {
+    "score": 95,
+    "rating": "excellent",
+    "explanation": "All data accurate...",
+    "issues": [],
+    "duration_ms": 1523,
+    "trace_id": "tr-abc123...",
+    "genie_conversation_id": "01j...",
+    "error": false,
+    "timestamp": "2024-12-15T10:30:00Z"
+  },
+  "f9e8d7c6b5a43210": {
+    "score": 80,
+    "rating": "good",
+    ...
+  }
 }
 ```
 
-When a session is restored, the frontend receives the full `deck_json` with all verification results intact. See [LLM as Judge Verification](llm-as-judge-verification.md) for details on the verification system.
+**Why separate storage?** When chat regenerates slides (e.g., "add a title slide"), `deck_json` is overwritten. By storing verification in a separate column keyed by content hash, existing verification survives deck regeneration. On load, verification is merged back into slides by matching content hashes.
+
+See [LLM as Judge Verification](llm-as-judge-verification.md) for details on the verification system.
 
 ### ChatRequest
 
