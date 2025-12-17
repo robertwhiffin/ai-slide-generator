@@ -202,20 +202,15 @@ Focus on optimizing text layout, container sizing, and spacing to prevent conten
 
         case 'complete':
           setOptimizingSlideIndex(null);
-          // If entire slide deck is returned, use it
-          if (event.slides) {
-            onSlideChange(event.slides);
-          } else {
-            // Fallback: fetch updated deck
-            api.getSlides(sessionId).then((result) => {
-              if (result.slide_deck) {
-                onSlideChange(result.slide_deck);
-              }
-            }).catch((err) => {
-              console.error('Failed to fetch updated slides:', err);
-              alert('Failed to fetch updated slides after optimization');
-            });
-          }
+          // Always fetch full deck to get verification merged from verification_map
+          api.getSlides(sessionId).then((result) => {
+            if (result.slide_deck) {
+              onSlideChange(result.slide_deck);
+            }
+          }).catch((err) => {
+            console.error('Failed to fetch updated slides:', err);
+            alert('Failed to fetch updated slides after optimization');
+          });
           break;
       }
     };
