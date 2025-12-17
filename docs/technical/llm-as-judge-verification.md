@@ -1,15 +1,16 @@
 # LLM as Judge Verification System
 
-On-demand numerical accuracy verification for generated slides using MLflow's custom prompt judge, with human feedback collection for continuous improvement.
+Automatic numerical accuracy verification for generated slides using MLflow's custom prompt judge, with content-hash-based persistence and human feedback collection.
 
 ---
 
 ## Stack / Entry Points
 
 - **Backend:** MLflow 3.6+ (`make_judge` API), litellm 1.80+ (Databricks model routing), FastAPI verification routes
-- **Frontend:** React verification badge component, feedback UI with thumbs up/down
+- **Frontend:** React auto-verification in `SlidePanel`, verification badge component, feedback UI
+- **Storage:** PostgreSQL `verification_map` column (JSON keyed by content hash)
 - **MLflow:** Traces logged to Databricks workspace for verification runs and human feedback
-- **Boot files:** `src/services/evaluation/llm_judge.py` (core evaluator), `src/api/routes/verification.py` (API endpoints)
+- **Boot files:** `src/services/evaluation/llm_judge.py` (core evaluator), `src/api/routes/verification.py` (API endpoints), `src/utils/slide_hash.py` (content hashing)
 - **Environment:** Requires `DATABRICKS_HOST` and `DATABRICKS_TOKEN` for MLflow tracking
 
 ---
@@ -17,29 +18,34 @@ On-demand numerical accuracy verification for generated slides using MLflow's cu
 ## Architecture Snapshot
 
 ```
-User clicks gavel → Frontend (VerificationBadge.tsx)
-                           ↓
+Slides generated/modified → Frontend (SlidePanel.tsx)
+                                   ↓
+                    Auto-verify slides without verification
+                    (parallel API calls for each unverified slide)
+                                   ↓
                     POST /api/verification/{slide_index}
-                           ↓
+                                   ↓
               Backend (verification.py) assembles:
                 - Slide HTML + scripts (what LLM generated)
                 - Genie query results (source truth)
-                           ↓
+                                   ↓
               evaluate_with_judge(genie_data, slide_content)
-                           ↓
+                                   ↓
               MLflow make_judge creates custom prompt judge:
                 - Semantic comparison (7M = 7,000,000)
                 - Derived calc validation (growth % from Q1/Q2)
                 - Chart data accuracy (Chart.js arrays)
-                           ↓
+                                   ↓
               Judge returns: score (0-100), rating, explanation, issues
-                           ↓
+                                   ↓
+              Backend saves to verification_map[content_hash]
+                                   ↓
               Frontend displays badge with rating + details popup
-                           ↓
+                                   ↓
           User provides feedback (👍/👎 + optional rationale)
-                           ↓
+                                   ↓
               POST /api/verification/{slide_index}/feedback
-                           ↓
+                                   ↓
               mlflow.log_feedback(trace_id, ...) 
                 → Logged as Assessment in Databricks MLflow UI
 ```
@@ -66,6 +72,7 @@ interface VerificationResult {
   error: boolean;
   error_message?: string;
   timestamp?: string;               // ISO string
+  content_hash?: string;            // Hash of slide content (for persistence)
 }
 ```
 
@@ -89,7 +96,25 @@ elif score >= 30: rating = "poor"
 else: rating = "failing"
 ```
 
-### 3. Judge Prompt Structure
+### 3. Content Hash Persistence
+
+Verification results persist separately from slide content using content-hash-based storage:
+
+```python
+# Database schema
+class SessionSlideDeck(Base):
+    deck_json = Column(Text)           # Slides (html, scripts, css) - NO verification
+    verification_map = Column(Text)    # JSON: {"content_hash": VerificationResult}
+
+# Hash computation (src/utils/slide_hash.py)
+def compute_slide_hash(html: str) -> str:
+    normalized = normalize_html(html)  # Strip whitespace, comments, lowercase
+    return hashlib.sha256(normalized.encode()).hexdigest()[:16]
+```
+
+**Why content hash?** Decouples verification from slide regeneration. When chat modifies slides, `deck_json` is overwritten but `verification_map` is preserved. On load, verification is merged back by matching content hashes.
+
+### 4. Judge Prompt Structure
 
 The custom prompt judge evaluates:
 - **Numerical exactness:** Source `7234567` ↔ Slide `7.2M` (✓ pass)
@@ -111,15 +136,17 @@ See `src/services/evaluation/llm_judge.py::_build_judge_prompt()` for full promp
 | `src/services/evaluation/llm_judge.py` | Core judge evaluation logic using MLflow 3.x make_judge | MLflow (`mlflow.genai.make_judge`, `mlflow.set_tracking_uri`) |
 | `src/services/evaluation/__init__.py` | Exports `evaluate_with_judge`, `LLMJudgeResult`, `RATING_SCORES` | None (module exports) |
 | `src/api/routes/verification.py` | FastAPI endpoints for verification and feedback | MLflow (`log_feedback`), `SessionManager`, `evaluate_with_judge` |
+| `src/utils/slide_hash.py` | HTML normalization and content hash computation | None (pure functions) |
+| `src/api/services/session_manager.py` | Load/save verification_map, merge verification on get_slide_deck | Database |
 
 ### Frontend
 
 | Path | Responsibility | Backend Touchpoints |
 |------|----------------|---------------------|
-| `frontend/src/components/SlidePanel/VerificationBadge.tsx` | Renders gavel button, rating badge, details popup, feedback UI | `api.verifySlide`, `api.submitVerificationFeedback` |
-| `frontend/src/components/SlidePanel/SlideTile.tsx` | Hosts `VerificationBadge`, manages verification state, clears on edit | Calls `onVerificationUpdate` prop to persist |
-| `frontend/src/components/SlidePanel/SlidePanel.tsx` | Persists verification to backend via `api.updateSlideVerification` | `api.updateSlideVerification` |
-| `frontend/src/services/api.ts` | API client methods for verification flow | `/api/verification/{index}`, `/api/verification/{index}/feedback`, `/api/verification/genie-link` |
+| `frontend/src/components/SlidePanel/SlidePanel.tsx` | Auto-verification trigger, parallel verify calls, state management | `api.verifySlide`, `api.getSlides` |
+| `frontend/src/components/SlidePanel/VerificationBadge.tsx` | Renders rating badge, details popup, feedback UI | `api.submitVerificationFeedback` |
+| `frontend/src/components/SlidePanel/SlideTile.tsx` | Hosts badge, Genie source data button, edit detection | `api.getGenieLink` |
+| `frontend/src/services/api.ts` | API client methods for verification flow | `/api/verification/*` endpoints |
 | `frontend/src/types/verification.ts` | TypeScript types and utility functions (badge colors, icons) | None (types only) |
 | `frontend/src/components/Help/HelpPage.tsx` | Verification tab with user documentation | None (UI only) |
 
@@ -127,68 +154,46 @@ See `src/services/evaluation/llm_judge.py::_build_judge_prompt()` for full promp
 
 ## State/Data Flow
 
-### Verification Flow (numbered steps)
+### Auto-Verification Flow
 
-1. **User triggers verification**
-   - User hovers over `SlideTile`, clicks gavel icon
-   - `VerificationBadge` calls `onVerify()` → `SlideTile::handleVerify()`
+1. **Slides generated or modified**
+   - Chat completes → frontend fetches slides via `api.getSlides()`
+   - Backend returns slides with `content_hash` computed for each
 
-2. **Frontend requests verification**
-   - `api.verifySlide(sessionId, slideIndex)` → `POST /api/verification/{slide_index}`
-   - Request body: `{ session_id: "abc123" }`
+2. **Frontend triggers auto-verification**
+   - `SlidePanel` effect detects slides without verification
+   - Filters out already-attempted hashes (prevents re-triggering)
+   - Calls `runAutoVerification()` for unverified slides in parallel
 
-3. **Backend assembles inputs**
-   - Fetch slide HTML + scripts from session's slide deck
-   - Fetch all Genie query results from session metadata
-   - If no Genie data found → return `rating="unknown"` (skip verification)
-
-4. **Judge evaluation**
+3. **Backend verifies each slide**
+   - Fetch slide HTML + Genie query results
+   - If no Genie data → return `rating="unknown"` (skip verification)
    - Call `evaluate_with_judge(genie_data, slide_content)`
-   - MLflow `make_judge` creates custom prompt judge with Databricks Claude endpoint
-   - Judge analyzes slide against source data, returns score + explanation
-   - MLflow logs trace to Databricks workspace
+   - Save result to `verification_map[content_hash]`
 
-5. **Backend returns result**
-   - Response includes: `score`, `rating`, `explanation`, `issues`, `trace_id`, `genie_conversation_id`
-   - Trace ID links verification run to MLflow for feedback association
+4. **Frontend displays results**
+   - Refresh slides to get merged verification
+   - Badges appear on each slide with color-coded rating
 
-6. **Frontend displays result**
-   - Badge shows rating with color-coded indicator
-   - Click badge → popup with score, explanation, issues, MLflow trace ID
-   - Verification persisted via `api.updateSlideVerification` (survives refresh)
+### Verification Persistence Behavior
 
-7. **User provides feedback (optional)**
-   - 👍 Thumbs up → instant submission with positive feedback
-   - 👎 Thumbs down → modal asks "What's wrong?" → user provides rationale
-   - Feedback submitted via `api.submitVerificationFeedback(... , traceId)`
+| Action | Verification Behavior |
+|--------|----------------------|
+| Generate new slides | All slides auto-verified (no hash match) |
+| Edit a slide | Only edited slide re-verified (hash changed) |
+| Add slides via chat | Existing slides keep verification, new slides auto-verified |
+| Delete a slide | Other slides keep verification (different hashes) |
+| Reorder slides | All slides keep verification (position-independent) |
+| Restore session | Verification merged back by hash match |
 
-8. **Feedback logged to MLflow**
-   - Backend calls `mlflow.log_feedback(trace_id, name="human_verification_feedback", ...)`
-   - Logged as structured Assessment in MLflow UI under original trace
-   - Includes: `value` (true/false), `rationale`, `source` (HUMAN), `metadata` (session, slide index)
+### Human Feedback Flow
 
-9. **Slide edit triggers re-verification**
-   - User edits slide HTML → `SlideTile` clears verification result
-   - Badge switches back to gavel (no rating) to prompt re-verification
-
-### Human Feedback Session (MLflow Labeling Workflow)
-
-1. **Reviewer accesses MLflow UI**
-   - Navigate to Databricks workspace → MLflow → Experiments → Traces
-   - Filter traces by `name="slide_verification"` or date range
-
-2. **Review traces with feedback**
-   - Each trace shows: verification inputs, judge output, human feedback (if provided)
-   - Feedback appears under "Assessments" tab in trace details
-
-3. **Analyze feedback patterns**
-   - Query traces via MLflow API: `mlflow.search_traces(filter_string="tags.user_feedback = 'negative'")`
-   - Export feedback for analysis: CSV with trace_id, rating, human_feedback, rationale
-
-4. **Improve judge prompt**
-   - Identify common false positives/negatives from feedback
-   - Refine judge prompt in `llm_judge.py::_build_judge_prompt()`
-   - Re-run historical verifications to validate improvements
+1. User clicks verification badge → popup shows details
+2. User provides feedback via 👍/👎 buttons
+3. 👎 opens rationale input → user explains issue
+4. Frontend calls `api.submitVerificationFeedback(... , traceId)`
+5. Backend logs to MLflow as structured Assessment
+6. Feedback visible in MLflow UI under original trace
 
 ---
 
@@ -200,7 +205,7 @@ See `src/services/evaluation/llm_judge.py::_build_judge_prompt()` for full promp
 |--------|------|--------------|----------|---------|
 | `POST` | `/api/verification/{slide_index}` | `{ session_id }` | `VerifySlideResponse` | Verify slide accuracy |
 | `POST` | `/api/verification/{slide_index}/feedback` | `{ session_id, is_positive, rationale?, trace_id? }` | `{ status, message, linked_to_trace }` | Submit human feedback |
-| `GET` | `/api/verification/genie-link?session_id=...` | – | `{ has_genie_conversation, conversation_id?, url?, message }` | Get Genie conversation URL |
+| `GET` | `/api/verification/genie-link?session_id=...` | – | `{ has_genie_conversation, url?, message }` | Get Genie conversation URL |
 
 ### Frontend API Client (`api.ts`)
 
@@ -220,53 +225,26 @@ api.submitVerificationFeedback(
 // Get Genie link
 api.getGenieLink(sessionId: string): Promise<{
   has_genie_conversation,
-  conversation_id?,
   url?,
   message
 }>
-
-// Persist verification to session
-api.updateSlideVerification(
-  index: number,
-  sessionId: string,
-  verification: VerificationResult | null
-): Promise<SlideDeck>
 ```
 
 ### MLflow APIs Used
 
 ```python
-# Judge creation
-from mlflow.genai.judges import custom_prompt_judge
-from mlflow.genai.scorers import scorer
-
-judge = custom_prompt_judge(
-    name="slide_accuracy_judge",
-    prompt_template=judge_prompt,
-    model="databricks-claude-3-5-sonnet",
-    parameters={"temperature": 0},
-    scorer=scorer(target="score"),
-)
-
-# Evaluation
-result = judge.score(slide_content, genie_data)
-
 # Feedback logging
 mlflow.set_tracking_uri("databricks")
 mlflow.log_feedback(
     trace_id=trace_id,
     name="human_verification_feedback",
-    value=is_positive,  # True/False
+    value=is_positive,
     rationale=user_comment,
     source=AssessmentSource(
         source_type=AssessmentSourceType.HUMAN,
         source_id=f"session_{session_id[:8]}"
     ),
-    metadata={
-        "session_id": session_id,
-        "slide_index": slide_index,
-        "feedback_type": "positive" | "negative",
-    }
+    metadata={"session_id": session_id, "slide_index": slide_index}
 )
 ```
 
@@ -277,48 +255,45 @@ mlflow.log_feedback(
 ### Error Handling
 
 1. **No Genie data (title slides, no-query sessions)**
-   - Backend returns `score=0`, `rating="unknown"`, explanation indicates no source data
+   - Backend returns `score=0`, `rating="unknown"`
    - Frontend shows gray badge: "? Unknown"
-   - Not considered an error – expected for non-data slides
+   - Not an error – expected for non-data slides
 
 2. **MLflow judge failure (network, model timeout)**
    - Backend catches exception, returns `error=true`, `error_message`
    - Frontend shows red badge: "! Error"
-   - Error result not persisted (ephemeral)
+   - Error result not persisted
 
 3. **Feedback submission failure**
-   - If `log_feedback()` fails (trace not found, network issue), error logged but request returns 200
-   - Response includes `linked_to_trace: false` to indicate feedback wasn't linked
-   - User sees success message (feedback captured in logs even if MLflow link fails)
-
-4. **Slide edited after verification**
-   - Verification cleared immediately on edit
-   - Badge returns to gavel (no rating)
-   - User must re-verify after changes
+   - If `log_feedback()` fails, error logged but request returns 200
+   - Response includes `linked_to_trace: false`
 
 ### Logging & Tracing
 
-- **Verification events:** Structured logs in `src/api/routes/verification.py` with session_id, slide_index, score, rating
-- **Feedback events:** Logged with trace_id, is_positive, rationale length
-- **MLflow traces:** All verifications logged to Databricks with tag `feature=slide_verification`
-- **Performance:** Judge latency typically 1-3 seconds (depends on Claude API)
+- **Verification events:** Structured logs with session_id, slide_index, score, rating, content_hash
+- **MLflow traces:** All verifications logged to Databricks
+- **Performance:** Judge latency typically 1-3 seconds
 
 ### Configuration
 
 ```python
 # src/services/evaluation/llm_judge.py
-DATABRICKS_MODEL = "databricks-claude-3-5-sonnet"  # Model used for judging
+DATABRICKS_MODEL = "databricks-claude-3-5-sonnet"
 JUDGE_TEMPERATURE = 0  # Deterministic judgments
 
-# MLflow tracking URI
-mlflow.set_tracking_uri("databricks")  # Logs to configured Databricks workspace
+# MLflow tracking
+mlflow.set_tracking_uri("databricks")
 ```
 
-### Testing Hooks
+### Database Migration
 
-- **Spike test:** `test_llm_judge_spike.py` validates judge with correct/wrong/title slide samples
-- **Unit tests:** `tests/test_llm_judge_spike.py` mocks MLflow judge for fast CI
-- **Manual testing:** Use Help page → Verification tab for user-facing guide
+If upgrading from a version without `verification_map`:
+
+```sql
+ALTER TABLE session_slide_decks ADD COLUMN verification_map TEXT;
+```
+
+Backward compatible – NULL treated as empty dict `{}`.
 
 ---
 
@@ -326,102 +301,52 @@ mlflow.set_tracking_uri("databricks")  # Logs to configured Databricks workspace
 
 ### Adding New Validation Checks
 
-**To extend the judge to check new aspects (e.g., chart labels, data freshness):**
-
 1. Update judge prompt in `src/services/evaluation/llm_judge.py::_build_judge_prompt()`
-2. Add new issue types to prompt (e.g., `"chart_labels_mismatch"`)
-3. Parse new issues in `LLMJudgeResult` dataclass if needed
-4. Update frontend `VerificationResult` interface to match
-5. Add test cases in `test_llm_judge_spike.py`
+2. Add new issue types to prompt
+3. Update frontend `VerificationResult` interface if needed
+4. Add test cases in `test_llm_judge_spike.py`
 
 ### Changing Rating Thresholds
 
-**To adjust score → rating mapping:**
-
 1. Modify `RATING_SCORES` dict in `llm_judge.py`
-2. Update `_score_to_rating()` function logic
+2. Update `_score_to_rating()` function
 3. Update frontend rating color mapping in `verification.ts::getRatingColor()`
-4. Update Help page documentation (`HelpPage.tsx`)
+4. Update Help page documentation
 
 ### Custom Feedback Fields
 
-**To capture additional feedback metadata:**
-
-1. Add fields to `FeedbackRequest` Pydantic model in `verification.py`
-2. Update frontend `api.submitVerificationFeedback()` call in `VerificationBadge.tsx`
-3. Include new fields in `mlflow.log_feedback()` metadata dict
-4. Query new fields via MLflow API for analysis
-
-### Exporting Feedback for Analysis
-
-**To bulk export feedback for model improvement:**
-
-```python
-from mlflow.tracking import MlflowClient
-
-client = MlflowClient(tracking_uri="databricks")
-
-# Search all verification traces with negative feedback
-traces = client.search_traces(
-    experiment_ids=["..."],
-    filter_string='tags.user_feedback = "negative"',
-    max_results=1000,
-)
-
-# Export to CSV
-import pandas as pd
-feedback_data = []
-for trace in traces:
-    assessments = trace.assessments  # Human feedback
-    for a in assessments:
-        feedback_data.append({
-            "trace_id": trace.info.trace_id,
-            "session_id": trace.tags.get("session_id"),
-            "slide_index": trace.tags.get("slide_index"),
-            "verification_score": trace.data["score"],
-            "verification_rating": trace.data["rating"],
-            "human_feedback": a.value,  # True/False
-            "rationale": a.rationale,
-            "timestamp": a.timestamp,
-        })
-
-df = pd.DataFrame(feedback_data)
-df.to_csv("verification_feedback.csv", index=False)
-```
+1. Add fields to `FeedbackRequest` Pydantic model
+2. Update frontend `api.submitVerificationFeedback()` call
+3. Include new fields in `mlflow.log_feedback()` metadata
 
 ---
 
 ## Known Limitations
 
-### 1. Genie Conversation Deep-Linking
+### 1. No Slide → Query Mapping
 
-- **Issue:** "View Source Data" link opens Genie room/space, not specific conversation
-- **Why:** Databricks Genie UI doesn't support conversation_id deep-linking
-- **Workaround:** User must manually find recent conversation in Genie room
-- **Potential solutions:** Wait for Databricks feature, build custom query viewer, use Genie SDK to fetch data in-app
+The LLM as Judge verifies each slide against **all** Genie query results from the session, not the specific query that generated that slide.
 
-### 2. No Slide → Query Mapping
+**Why:** The agent makes multiple queries during slide generation but doesn't tag which query's data goes to which slide.
 
-- **Behavior:** All Genie query results passed to judge without explicit slide → query link
-- **Rationale:** LLM generator has full context, chooses relevant data per slide
-- **Impact:** Verification checks if slide data matches *any* query, not a specific query
-- **Future:** Log which query(ies) LLM used per slide via LangGraph instrumentation
+**Practical impact:** Verification still works correctly—the judge finds matching data. However, it cannot tell you *which* query produced a specific slide's content.
 
-### 3. Narrative Quality Not Assessed
+**Future consideration:** Log query attribution per slide during generation.
 
-- **Status:** Phase 1 verifies numerical accuracy only
-- **Phase 2 (future):** Add narrative quality judge for storytelling, logical flow, insight quality
-- **Workaround:** Manual review for narrative coherence
+### 2. Narrative Quality Not Assessed (Future Consideration)
+
+- Phase 1 verifies numerical accuracy only
+- Nice to have: Add narrative coherence scoring for story flow and logical structure
 
 ---
 
 ## Cross-References
 
-- [Frontend Overview](frontend-overview.md) – React component structure and API client
+- [Frontend Overview](frontend-overview.md) – React component structure
 - [Backend Overview](backend-overview.md) – FastAPI routes and session management
-- [LLM as Judge Plan](llm-as-judge-plan.md) – Implementation plan and detailed design decisions (user doc, supplemental)
+- [Database Configuration](database-configuration.md) – Schema details including verification_map
 
 ---
 
-**Last Updated:** 2024-12-15  
-**Status:** ✅ Production-ready (Phase 1 – Numerical Accuracy)
+**Last Updated:** 2024-12-16  
+**Status:** ✅ Production-ready (Phase 1 – Numerical Accuracy + Auto-Verification)

@@ -199,7 +199,19 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
           const nextRawHtml = event.raw_html ?? rawHtml ?? null;
 
           if (event.slides) {
-            onSlidesGenerated(event.slides, nextRawHtml);
+            // Fetch slides from API to get content_hash for auto-verification
+            // The API returns slides with content_hash computed and verification merged
+            api.getSlides(sessionId).then(result => {
+              if (result.slide_deck) {
+                onSlidesGenerated(result.slide_deck, result.raw_html ?? nextRawHtml);
+              } else {
+                // Fallback to event.slides if API fails
+                onSlidesGenerated(event.slides!, nextRawHtml);
+              }
+            }).catch(() => {
+              // Fallback to event.slides if API fails
+              onSlidesGenerated(event.slides!, nextRawHtml);
+            });
             clearSelection();
           }
 

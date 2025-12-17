@@ -301,21 +301,28 @@ async def delete_slide(index: int, session_id: str = Query(..., description="Ses
 
 @router.patch("/{index}/verification")
 async def update_slide_verification(index: int, request: UpdateVerificationRequest):
-    """Update a slide's verification result.
+    """Update a slide's verification result in verification_map.
 
-    This persists the LLM as Judge verification result with the slide
-    so it survives page refresh and session restore.
+    Note: With the content hash approach, verification is normally saved
+    automatically by the verify_slide endpoint. This endpoint can be used
+    to explicitly save or clear verification results.
+    
+    When verification is None (clearing), this is typically not needed
+    because editing a slide changes its content hash, so the old verification
+    naturally won't match.
 
     Args:
         index: Slide index to update
         request: UpdateVerificationRequest with session_id and verification result
 
     Returns:
-        Updated slide deck
+        Updated slide deck with verification merged
 
     Raises:
         HTTPException: 400 for validation errors, 404 if slide not found, 500 on error
     """
+    from src.utils.slide_hash import compute_slide_hash
+    
     session_manager = get_session_manager()
 
     try:
@@ -335,36 +342,46 @@ async def update_slide_verification(index: int, request: UpdateVerificationReque
                 detail=f"Slide index {index} out of range (0-{len(slides)-1})",
             )
 
-        # Update verification for the slide
-        # If verification is None, remove the key entirely (avoids null in JSON)
-        # This ensures frontend receives undefined instead of null
-        if request.verification is None:
-            slides[index].pop("verification", None)
+        slide = slides[index]
+        slide_html = slide.get("html", "")
+        content_hash = compute_slide_hash(slide_html)
+
+        if request.verification is not None:
+            # Save verification by content hash
+            await asyncio.to_thread(
+                session_manager.save_verification,
+                request.session_id,
+                content_hash,
+                request.verification,
+            )
+            
+            logger.info(
+                "Updated slide verification",
+                extra={
+                    "index": index,
+                    "session_id": request.session_id,
+                    "content_hash": content_hash,
+                    "has_verification": True,
+                },
+            )
         else:
-            slides[index]["verification"] = request.verification
+            # Clearing verification is typically not needed with hash-based approach
+            # The old verification naturally won't match after content edit
+            logger.info(
+                "Clear verification request (no-op with hash-based storage)",
+                extra={
+                    "index": index,
+                    "session_id": request.session_id,
+                },
+            )
 
-        # Save updated deck
-        import json
-        await asyncio.to_thread(
-            session_manager.save_slide_deck,
+        # Reload deck to get updated verification merged in
+        updated_deck = await asyncio.to_thread(
+            session_manager.get_slide_deck,
             request.session_id,
-            deck.get("title"),
-            deck.get("html_content", ""),
-            deck.get("scripts", ""),
-            len(slides),
-            deck,  # Full deck dict with updated verification
         )
 
-        logger.info(
-            "Updated slide verification",
-            extra={
-                "index": index,
-                "session_id": request.session_id,
-                "has_verification": request.verification is not None,
-            },
-        )
-
-        return deck
+        return updated_deck
 
     except HTTPException:
         raise

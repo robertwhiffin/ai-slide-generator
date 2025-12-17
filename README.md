@@ -59,6 +59,7 @@ Generate professional HTML slide decks from natural language using LLMs and Data
 - **Genie Integration:** Converts natural language to SQL queries against your data
 - **SlideDeck Parser:** Robust HTML parsing with BeautifulSoup for slide manipulation
 - **Chart.js:** Data visualizations with defensive rendering
+- **LLM as Judge:** Auto-verifies slide accuracy against Genie source data with MLflow tracing
 
 ---
 

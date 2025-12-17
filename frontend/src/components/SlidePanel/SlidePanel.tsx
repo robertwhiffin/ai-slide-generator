@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useRef } from 'react';
+import React, { useEffect, useState, useRef, useCallback } from 'react';
 import {
   DndContext,
   closestCenter,
@@ -48,6 +48,11 @@ export const SlidePanel: React.FC<SlidePanelProps> = ({ slideDeck, rawHtml, onSl
   const { selectedIndices, setSelection, clearSelection } = useSelection();
   const { sessionId } = useSession();
   const slideRefs = useRef<Map<number, HTMLDivElement>>(new Map());
+  
+  // Auto-verification state
+  const [isAutoVerifying, setIsAutoVerifying] = useState(false);
+  const [verifyingSlides, setVerifyingSlides] = useState<Set<number>>(new Set());
+  const autoVerifyTriggeredRef = useRef<Set<string>>(new Set()); // Track which content hashes we've tried to verify
   
   const sensors = useSensors(
     useSensor(PointerSensor),
@@ -256,6 +261,82 @@ export const SlidePanel: React.FC<SlidePanelProps> = ({ slideDeck, rawHtml, onSl
       }
     }
   }, [scrollToSlide, viewMode]);
+
+  // Auto-verify slides that don't have verification
+  const runAutoVerification = useCallback(async (slidesToVerify: Array<{ index: number; contentHash: string }>) => {
+    if (!sessionId || slidesToVerify.length === 0 || isAutoVerifying) return;
+
+    setIsAutoVerifying(true);
+    console.log(`[Auto-verify] Starting verification for ${slidesToVerify.length} slides`);
+
+    // Mark all slides as being verified
+    setVerifyingSlides(new Set(slidesToVerify.map(s => s.index)));
+
+    // Verify slides in parallel
+    const verificationPromises = slidesToVerify.map(async ({ index, contentHash }) => {
+      try {
+        // Mark this content hash as attempted (prevent re-triggering)
+        autoVerifyTriggeredRef.current.add(contentHash);
+        
+        console.log(`[Auto-verify] Verifying slide ${index + 1} (hash: ${contentHash.substring(0, 8)}...)`);
+        await api.verifySlide(sessionId, index);
+        console.log(`[Auto-verify] Slide ${index + 1} verified`);
+        return { index, success: true };
+      } catch (error) {
+        console.error(`[Auto-verify] Failed to verify slide ${index + 1}:`, error);
+        return { index, success: false, error };
+      }
+    });
+
+    await Promise.all(verificationPromises);
+
+    // Refresh slides to get updated verification results (merged from verification_map)
+    try {
+      const result = await api.getSlides(sessionId);
+      if (result.slide_deck) {
+        onSlideChange(result.slide_deck);
+      }
+    } catch (error) {
+      console.error('[Auto-verify] Failed to refresh slides:', error);
+    }
+
+    setVerifyingSlides(new Set());
+    setIsAutoVerifying(false);
+    console.log('[Auto-verify] Completed');
+  }, [sessionId, isAutoVerifying, onSlideChange]);
+
+  // Effect to trigger auto-verification when slides change
+  useEffect(() => {
+    if (!slideDeck || !sessionId || isAutoVerifying) return;
+
+    // Find slides that need verification (no verification and not already attempted)
+    const slidesNeedingVerification = slideDeck.slides
+      .map((slide, index) => ({
+        index,
+        slide,
+        contentHash: slide.content_hash || '',
+      }))
+      .filter(({ slide, contentHash }) => {
+        // Skip if already has verification
+        if (slide.verification) return false;
+        // Skip if no content hash (shouldn't happen, but be safe)
+        if (!contentHash) return false;
+        // Skip if we've already tried to verify this content
+        if (autoVerifyTriggeredRef.current.has(contentHash)) return false;
+        return true;
+      });
+
+    if (slidesNeedingVerification.length > 0) {
+      console.log(`[Auto-verify] Found ${slidesNeedingVerification.length} slides needing verification`);
+      runAutoVerification(slidesNeedingVerification);
+    }
+  }, [slideDeck, sessionId, isAutoVerifying, runAutoVerification]);
+
+  // Clear auto-verify tracking when session changes
+  useEffect(() => {
+    autoVerifyTriggeredRef.current.clear();
+  }, [sessionId]);
+
   const handleSaveAsHTML = () => {
     if (!slideDeck) return;
 
@@ -431,6 +512,7 @@ export const SlidePanel: React.FC<SlidePanelProps> = ({ slideDeck, rawHtml, onSl
               {isReordering && ' • Reordering...'}
               {isExportingPDF && ' • Exporting PDF...'}
               {isExportingPPTX && ' • Exporting PowerPoint...'}
+              {isAutoVerifying && ` • Verifying ${verifyingSlides.size} slide${verifyingSlides.size !== 1 ? 's' : ''}...`}
             </p>
           </div>
           
@@ -579,6 +661,7 @@ export const SlidePanel: React.FC<SlidePanelProps> = ({ slideDeck, rawHtml, onSl
               onDuplicate={() => handleDuplicateSlide(index)}
               onUpdate={(html) => handleUpdateSlide(index, html)}
               onVerificationUpdate={(verification) => handleVerificationUpdate(index, verification)}
+              isAutoVerifying={verifyingSlides.has(index)}
             />
           </div>
         ))}

@@ -198,20 +198,49 @@ const VerificationTab: React.FC = () => (
         on your slides accurately represent the source data from Genie. This helps ensure your 
         presentation doesn't contain AI hallucinations or calculation errors.
       </p>
-      <div className="flex items-center gap-2 text-amber-700 bg-amber-50 rounded-lg p-3">
+      <div className="flex items-center gap-2 text-green-700 bg-green-50 rounded-lg p-3">
         <FaGavel size={20} />
-        <span className="text-sm">Click the gavel icon on any slide to verify its accuracy.</span>
+        <span className="text-sm"><strong>Auto-verification:</strong> Slides are automatically verified when generated. You'll see the status appear on each slide.</span>
       </div>
     </section>
 
     <section>
       <h2 className="text-lg font-semibold text-gray-800 mb-3">How It Works</h2>
       <ol className="list-decimal list-inside text-gray-600 space-y-2">
-        <li>The verifier compares the <strong>Genie query results</strong> (source data) against the <strong>slide content</strong></li>
+        <li><strong>Auto-verification</strong> runs automatically when slides are generated or added</li>
+        <li>The verifier compares <strong>Genie query results</strong> (source data) against <strong>slide content</strong></li>
         <li>It performs <strong>semantic comparison</strong> — "7M" and "7,000,000" are considered equivalent</li>
         <li>Derived calculations (like "50% growth") are validated against source numbers</li>
         <li>Chart data (Chart.js) is also verified against the source</li>
       </ol>
+    </section>
+
+    <section>
+      <h2 className="text-lg font-semibold text-gray-800 mb-3">Verification Badge</h2>
+      <div className="bg-amber-50 rounded-lg p-4 mb-3">
+        <ul className="list-disc list-inside text-gray-700 space-y-2">
+          <li>Each slide shows a <strong>verification badge</strong> with its score and rating</li>
+          <li>Click the badge to see detailed explanation and any issues found</li>
+          <li>If you <strong>edit a slide</strong>, verification automatically re-runs for that slide</li>
+          <li>If you <strong>add a new slide</strong>, only the new slide is verified (existing slides keep their results)</li>
+        </ul>
+      </div>
+    </section>
+
+    <section>
+      <h2 className="text-lg font-semibold text-gray-800 mb-3">Viewing Genie Source Data</h2>
+      <div className="bg-purple-50 rounded-lg p-4">
+        <p className="text-gray-700 mb-2">
+          You can view the original Genie queries and data that were used to generate your slides:
+        </p>
+        <ul className="list-disc list-inside text-gray-700 space-y-2">
+          <li><strong>Database icon</strong> on each slide tile — opens the Genie conversation in a new tab</li>
+          <li><strong>"View Source Data in Genie" link</strong> — available in the verification details popup</li>
+        </ul>
+        <p className="text-sm text-gray-500 mt-2">
+          This shows all queries made during your session, helping you understand where the data came from.
+        </p>
+      </div>
     </section>
 
     <section>
@@ -236,6 +265,10 @@ const VerificationTab: React.FC = () => (
         <div className="flex items-center gap-2">
           <span className="px-2 py-1 text-xs font-medium rounded bg-red-100 text-red-800 border border-red-300">✗ 15%</span>
           <span className="text-sm text-gray-600"><strong>Failing:</strong> Major inaccuracies</span>
+        </div>
+        <div className="flex items-center gap-2">
+          <span className="px-2 py-1 text-xs font-medium rounded bg-gray-100 text-gray-600 border border-gray-300">? Unknown</span>
+          <span className="text-sm text-gray-600"><strong>Unknown:</strong> No source data available</span>
         </div>
       </div>
     </section>
@@ -268,11 +301,10 @@ const VerificationTab: React.FC = () => (
       <h2 className="text-lg font-semibold text-gray-800 mb-3">Cost & Usage</h2>
       <div className="bg-blue-50 rounded-lg p-4">
         <ul className="list-disc list-inside text-gray-700 space-y-2">
-          <li>Verification is <strong>on-demand</strong> — only runs when you click the gavel</li>
+          <li>Verification runs <strong>automatically</strong> when slides are generated or edited</li>
           <li>Each verification makes one LLM call (using Claude via Databricks)</li>
           <li>Typical cost: ~$0.01-0.03 per slide verification</li>
-          <li>Results persist within your session (survive page refresh)</li>
-          <li>If you edit a slide, re-verify to ensure accuracy</li>
+          <li>Verification is efficient — only new or edited slides are verified</li>
         </ul>
       </div>
     </section>
@@ -280,9 +312,9 @@ const VerificationTab: React.FC = () => (
     <section>
       <h2 className="text-lg font-semibold text-gray-800 mb-3">Feedback</h2>
       <p className="text-gray-600">
-        After verification, you can provide feedback using 👍/👎 buttons. Negative feedback 
-        asks for details to help improve the accuracy of future verifications. All feedback 
-        is logged to MLflow for quality monitoring.
+        After verification, you can provide feedback using 👍/👎 buttons in the verification popup. 
+        Negative feedback asks for details to help improve accuracy. All feedback is logged to 
+        MLflow for quality monitoring and model improvement.
       </p>
     </section>
   </div>
