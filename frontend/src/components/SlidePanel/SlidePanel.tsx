@@ -174,17 +174,17 @@ export const SlidePanel: React.FC<SlidePanelProps> = ({ slideDeck, rawHtml, onSl
       slide_htmls: [slide.html],
     };
 
-    const message = `optimize layout not to overflow. 
+    const message = `Optimize the layout of the slide to prevent content overflow. Return only the HTML for this slide, no other text.
 
-CRITICAL REQUIREMENTS:
-1. Preserve ALL <canvas> elements exactly - do NOT modify, remove, rename, or change their id attributes
-2. Keep all canvas elements in the same positions relative to their containers
-3. Do NOT modify any chart-related HTML structure
-4. Only adjust spacing, padding, margins, font sizes, and positioning of text and container elements
-5. Maintain the 1280x720px slide dimensions
-6. Do NOT add, remove, or modify any <script> tags - chart scripts are handled separately
+      CRITICAL REQUIREMENTS:
+      1. Preserve ALL <canvas> elements exactly - do NOT modify, remove, rename, or change their id attributes
+      2. Keep all canvas elements in the same positions relative to their containers
+      3. Do NOT modify any chart-related HTML structure
+      4. Only adjust spacing, padding, margins, font sizes, and positioning of text and container elements
+      5. Maintain the 1280x720px slide dimensions
+      6. Do NOT add, remove, or modify any <script> tags - chart scripts are handled separately
 
-Focus on optimizing text layout, container sizing, and spacing to prevent content overflow while keeping all chart elements completely unchanged.`;
+      Focus on optimizing text layout, container sizing, and spacing to prevent content overflow while keeping all chart elements completely unchanged.`;
 
     // Handle streaming events
     const handleStreamEvent = (event: StreamEvent) => {
