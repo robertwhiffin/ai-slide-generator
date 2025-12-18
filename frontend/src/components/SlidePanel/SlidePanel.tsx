@@ -125,23 +125,6 @@ export const SlidePanel: React.FC<SlidePanelProps> = ({ slideDeck, rawHtml, onSl
     }
   };
 
-  const handleDuplicateSlide = async (index: number) => {
-    if (!slideDeck || !sessionId) return;
-
-    try {
-      await api.duplicateSlide(index, sessionId);
-      // Fetch full deck to get verification merged from verification_map
-      const result = await api.getSlides(sessionId);
-      if (result.slide_deck) {
-        onSlideChange(result.slide_deck);
-      }
-      clearSelection();
-    } catch (error) {
-      console.error('Failed to duplicate:', error);
-      alert('Failed to duplicate slide');
-    }
-  };
-
   const handleUpdateSlide = async (index: number, html: string) => {
     if (!slideDeck || !sessionId) return;
 
@@ -735,7 +718,6 @@ Focus on optimizing text layout, container sizing, and spacing to prevent conten
               index={index}
               sessionId={sessionId || ''}
               onDelete={() => handleDeleteSlide(index)}
-              onDuplicate={() => handleDuplicateSlide(index)}
               onUpdate={(html) => handleUpdateSlide(index, html)}
               onVerificationUpdate={(verification) => handleVerificationUpdate(index, verification)}
               isAutoVerifying={verifyingSlides.has(index)}
