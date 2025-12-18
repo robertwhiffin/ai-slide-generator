@@ -1,7 +1,8 @@
 import React, { useMemo, useRef, useState, useEffect } from 'react';
 import { useSortable } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
-import { FiEdit, FiCopy, FiTrash2, FiMove, FiMessageSquare, FiDatabase, FiMaximize2 } from 'react-icons/fi';
+import { FiEdit, FiTrash2, FiMove, FiMessageSquare, FiDatabase, FiMaximize2 } from 'react-icons/fi';
+import { Tooltip } from '../common/Tooltip';
 import type { Slide, SlideDeck } from '../../types/slide';
 import type { VerificationResult } from '../../types/verification';
 import { HTMLEditorModal } from './HTMLEditorModal';
@@ -15,7 +16,6 @@ interface SlideTileProps {
   index: number;
   sessionId: string;
   onDelete: () => void;
-  onDuplicate: () => void;
   onUpdate: (html: string) => Promise<void>;
   onVerificationUpdate: (verification: VerificationResult | null) => Promise<void>;
   isAutoVerifying?: boolean;  // True when auto-verification is running for this slide
@@ -33,7 +33,6 @@ export const SlideTile: React.FC<SlideTileProps> = ({
   index,
   sessionId,
   onDelete,
-  onDuplicate,
   onUpdate,
   onVerificationUpdate,
   isAutoVerifying = false,
@@ -203,14 +202,15 @@ export const SlideTile: React.FC<SlideTileProps> = ({
       <div className="px-4 py-2 bg-gray-100 border-b flex items-center justify-between">
           <div className="flex items-center space-x-2">
             {/* Drag Handle */}
-            <button
-              {...attributes}
-              {...listeners}
-              className="cursor-grab active:cursor-grabbing text-gray-500 hover:text-gray-700"
-              title="Drag to reorder"
-            >
-              <FiMove size={18} />
-            </button>
+            <Tooltip text="Drag to reorder">
+              <button
+                {...attributes}
+                {...listeners}
+                className="cursor-grab active:cursor-grabbing text-gray-500 hover:text-gray-700"
+              >
+                <FiMove size={18} />
+              </button>
+            </Tooltip>
             
         <span className="text-sm font-medium text-gray-700">
           Slide {index + 1}
@@ -230,68 +230,65 @@ export const SlideTile: React.FC<SlideTileProps> = ({
             />
             
             {/* Genie Source Data Link */}
-            <button
-              onClick={handleOpenGenieLink}
-              disabled={isLoadingGenieLink}
-              className="p-1 text-purple-600 hover:bg-purple-50 rounded disabled:opacity-50"
-              title="View Genie Source Data"
-            >
-              <FiDatabase size={16} />
-            </button>
-            
-            <button
-              onClick={() => setSelection([index], [slide])}
-              className={`p-1 rounded ${
-                isSelected
-                  ? 'text-blue-700 bg-blue-50'
-                  : 'text-indigo-600 hover:bg-indigo-50'
-              }`}
-              aria-pressed={isSelected}
-              title={isSelected ? 'Selected for editing' : 'Add to chat context'}
-            >
-              <FiMessageSquare size={16} />
-            </button>
-            {onOptimize && (
+            <Tooltip text="View source data">
               <button
-                onClick={onOptimize}
-                disabled={isOptimizing}
-                className={`p-1 rounded ${
-                  isOptimizing
-                    ? 'text-gray-400 cursor-not-allowed'
-                    : 'text-purple-600 hover:bg-purple-50'
-                }`}
-                title={isOptimizing ? 'Optimizing layout...' : 'Optimize layout to prevent overflow'}
+                onClick={handleOpenGenieLink}
+                disabled={isLoadingGenieLink}
+                className="p-1 text-purple-600 hover:bg-purple-50 rounded disabled:opacity-50"
               >
-                {isOptimizing ? (
-                  <div className="animate-spin rounded-full h-4 w-4 border-2 border-purple-600 border-t-transparent"></div>
-                ) : (
-                  <FiMaximize2 size={16} />
-                )}
+                <FiDatabase size={16} />
               </button>
+            </Tooltip>
+            
+            <Tooltip text={isSelected ? 'Selected for editing' : 'Add to chat context'}>
+              <button
+                onClick={() => setSelection([index], [slide])}
+                className={`p-1 rounded ${
+                  isSelected
+                    ? 'text-blue-700 bg-blue-50'
+                    : 'text-indigo-600 hover:bg-indigo-50'
+                }`}
+                aria-pressed={isSelected}
+              >
+                <FiMessageSquare size={16} />
+              </button>
+            </Tooltip>
+            {onOptimize && (
+              <Tooltip text={isOptimizing ? 'Optimizing layout...' : 'Optimize layout'}>
+                <button
+                  onClick={onOptimize}
+                  disabled={isOptimizing}
+                  className={`p-1 rounded ${
+                    isOptimizing
+                      ? 'text-gray-400 cursor-not-allowed'
+                      : 'text-purple-600 hover:bg-purple-50'
+                  }`}
+                >
+                  {isOptimizing ? (
+                    <div className="animate-spin rounded-full h-4 w-4 border-2 border-purple-600 border-t-transparent"></div>
+                  ) : (
+                    <FiMaximize2 size={16} />
+                  )}
+                </button>
+              </Tooltip>
             )}
-            <button
-              onClick={() => setIsEditing(true)}
-              className="p-1 text-blue-600 hover:bg-blue-50 rounded"
-              title="Edit HTML"
-            >
-              <FiEdit size={16} />
-            </button>
+            <Tooltip text="Edit slide HTML">
+              <button
+                onClick={() => setIsEditing(true)}
+                className="p-1 text-blue-600 hover:bg-blue-50 rounded"
+              >
+                <FiEdit size={16} />
+              </button>
+            </Tooltip>
             
-            <button
-              onClick={onDuplicate}
-              className="p-1 text-green-600 hover:bg-green-50 rounded"
-              title="Duplicate"
-            >
-              <FiCopy size={16} />
-            </button>
-            
-            <button
-              onClick={onDelete}
-              className="p-1 text-red-600 hover:bg-red-50 rounded"
-              title="Delete"
-            >
-              <FiTrash2 size={16} />
-            </button>
+            <Tooltip text="Delete slide" align="end">
+              <button
+                onClick={onDelete}
+                className="p-1 text-red-600 hover:bg-red-50 rounded"
+              >
+                <FiTrash2 size={16} />
+              </button>
+            </Tooltip>
           </div>
       </div>
 
