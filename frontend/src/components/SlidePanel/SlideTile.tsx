@@ -317,6 +317,8 @@ export const SlideTile: React.FC<SlideTileProps> = ({
       {isEditing && (
         <HTMLEditorModal
           html={slide.html}
+          slideDeck={slideDeck}
+          slide={slide}
           onSave={async (newHtml) => {
             await onUpdate(newHtml);
             
