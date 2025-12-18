@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useRef, useState, forwardRef, useImperativeHandle } from 'react';
 import type { Message } from '../../types/message';
 import type { ReplacementInfo, SlideDeck } from '../../types/slide';
 import { MessageList } from './MessageList';
@@ -14,15 +14,24 @@ import { useSession } from '../../contexts/SessionContext';
 import { useGeneration } from '../../contexts/GenerationContext';
 import { useKeyboardShortcuts } from '../../hooks/useKeyboardShortcuts';
 
+interface SlideContext {
+  indices: number[];
+  slide_htmls: string[];
+}
+
+export interface ChatPanelHandle {
+  sendMessage: (content: string, slideContext?: SlideContext) => void;
+}
+
 interface ChatPanelProps {
   rawHtml: string | null;
   onSlidesGenerated: (slideDeck: SlideDeck, rawHtml: string | null) => void;
 }
 
-export const ChatPanel: React.FC<ChatPanelProps> = ({
+export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(({
   rawHtml,
   onSlidesGenerated,
-}) => {
+}, ref) => {
   const [messages, setMessages] = useState<Message[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [loadingMessage, setLoadingMessage] = useState<string>('');
@@ -94,7 +103,7 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
     setLoadingMessage('');
   };
 
-  const handleSendMessage = async (content: string) => {
+  const handleSendMessage = async (content: string, explicitSlideContext?: SlideContext) => {
     const trimmedContent = content.trim();
     if (!trimmedContent) {
       return;
@@ -127,13 +136,15 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
       setLoadingMessage(getRotatingLoadingMessage(messageIndexRef.current));
     }, 3000);
 
-    const slideContext =
+    // Use explicit slide context if provided, otherwise use selection context
+    const slideContext = explicitSlideContext ?? (
       hasSelection && selectedIndices.length > 0
         ? {
             indices: selectedIndices,
             slide_htmls: selectedSlides.map(slide => slide.html),
           }
-        : undefined;
+        : undefined
+    );
 
     // Handle streaming events
     const handleStreamEvent = (event: StreamEvent) => {
@@ -238,6 +249,13 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
     );
   };
 
+  // Expose sendMessage method to parent components via ref
+  useImperativeHandle(ref, () => ({
+    sendMessage: (content: string, slideContext?: SlideContext) => {
+      handleSendMessage(content, slideContext);
+    },
+  }), [handleSendMessage]);
+
   // Cleanup on unmount
   useEffect(() => {
     return () => {
@@ -302,4 +320,4 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
       )}
     </div>
   );
-};
+});
