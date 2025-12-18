@@ -112,7 +112,11 @@ Parsed tiles, rendered raw HTML (`iframe`), and raw HTML text (`<pre>`). Users c
 | `src/components/SlidePanel/VerificationBadge.tsx` | Rating badge, details popup, feedback UI (thumbs up/down), manual re-verify option | `api.verifySlide`, `api.submitVerificationFeedback` |
 | `src/components/SlidePanel/SlidePanel.tsx` | Hosts drag/drop, tabs, per-slide CRUD, optimize layout handler | `api.getSlides`, `api.reorderSlides`, `api.updateSlide`, `api.deleteSlide`, `api.sendChatMessage` |
 | `src/components/SlidePanel/SlideTile.tsx` | Slide preview, selection button, editor modal trigger, optimize layout button | Prop callbacks to `SlidePanel` |
-| `src/components/SlidePanel/HTMLEditorModal.tsx` | Monaco editor with validation (requires `<div class="slide">`) | Calls `api.updateSlide` then `api.getSlides` |
+| `src/components/SlidePanel/HTMLEditorModal.tsx` | Visual slide editor with tree-based text editing. Parses any HTML structure into editable nodes. Charts shown read-only. | Calls `api.updateSlide` then `api.getSlides` |
+| `src/components/SlidePanel/visualEditor.types.ts` | TypeScript interfaces for EditableNode and TreeState | None |
+| `src/components/SlidePanel/treeParser.ts` | HTML parsing utilities: buildEditableTree, applyTextChange, buildPreviewHtml | None |
+| `src/components/SlidePanel/ElementTreeView.tsx` | Tree view component with collapsible nodes and inline text editing | None |
+| `src/components/SlidePanel/VisualEditorPanel.tsx` | Split-pane visual editor with element tree and live preview | None |
 | `src/components/SlidePanel/SelectionRibbon.tsx` + `SlideSelection.tsx` | Thumbnail strip with dual interaction: preview click navigates main panel, checkbox toggles selection for chat context | `onSlideNavigate` callback to `AppLayout`, updates `SelectionContext` |
 | `src/hooks/useKeyboardShortcuts.ts` | `Esc` clears selection globally | None |
 | `src/utils/loadingMessages.ts` | Rotating messages during LLM calls | None |
@@ -258,7 +262,7 @@ Errors bubble up as `ApiError` (status + message). Common statuses:
 - **Selection integrity:** Always preserve contiguity when setting selections programmatically.
 - **Script safety:** `SlideTile` wraps scripts in try/catch for graceful chart failures.
 - **Script preservation:** Backend automatically preserves chart scripts when canvas IDs match during slide replacement (e.g., optimize layout).
-- **Validation:** `HTMLEditorModal` requires `<div class="slide">` wrapper.
+- **Visual editing:** `HTMLEditorModal` provides tree-based text editing without HTML knowledge. Charts (canvas elements) are read-only to preserve Chart.js functionality.
 - **Session scope:** All operations require valid session ID. Handle 409 with retry/wait UX.
 - **Loading UX:** `getRotatingLoadingMessage` keeps UI responsive during long LLM calls.
 - **Optimize layout:** Preserves chart functionality by maintaining canvas IDs and automatically re-attaching scripts.
