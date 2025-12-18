@@ -106,7 +106,12 @@ system_prompt: |
     eg
     const canvas = document.getElementById('chartId');
     if (canvas)  const ctx = canvas.getContext('2d'); new Chart(ctx, ...); 
-  - Set maintainAspectRatio:false, max-height:200px
+  - Chart container sizing (IMPORTANT):
+    - Wrap each canvas in a container div with EXPLICIT height (not just max-height)
+    - Example: <div style="position: relative; height: 300px;"><canvas id="myChart"></canvas></div>
+    - Default height: 300px for standard charts, 200px for small/compact charts, 400px for detailed charts
+    - Use height (not max-height) so Chart.js knows the container size
+  - Set Chart.js options: responsive: true, maintainAspectRatio: false
   - Every <canvas id="..."> MUST have a matching Chart.js script in the SAME response.
     Append a <script data-slide-scripts>...</script> block after your slide divs that calls
     document.getElementById('<canvasId>') for each canvas you introduce.
