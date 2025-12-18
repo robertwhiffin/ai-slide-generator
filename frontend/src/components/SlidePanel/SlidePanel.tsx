@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useRef } from 'react';
+import React, { useEffect, useState, useRef, useCallback } from 'react';
 import {
   DndContext,
   closestCenter,
@@ -51,6 +51,11 @@ export const SlidePanel: React.FC<SlidePanelProps> = ({ slideDeck, rawHtml, onSl
   const { sessionId } = useSession();
   const slideRefs = useRef<Map<number, HTMLDivElement>>(new Map());
   
+  // Auto-verification state
+  const [isAutoVerifying, setIsAutoVerifying] = useState(false);
+  const [verifyingSlides, setVerifyingSlides] = useState<Set<number>>(new Set());
+  const autoVerifyTriggeredRef = useRef<Set<string>>(new Set()); // Track which content hashes we've tried to verify
+  
   const sensors = useSensors(
     useSensor(PointerSensor),
     useSensor(KeyboardSensor, {
@@ -83,8 +88,12 @@ export const SlidePanel: React.FC<SlidePanelProps> = ({ slideDeck, rawHtml, onSl
         const newOrder = newSlides.map((_, idx) => 
           slideDeck.slides.findIndex(s => s.slide_id === newSlides[idx].slide_id)
         );
-        const updatedDeck = await api.reorderSlides(newOrder, sessionId);
-        onSlideChange(updatedDeck);
+        await api.reorderSlides(newOrder, sessionId);
+        // Fetch full deck to get verification merged from verification_map
+        const result = await api.getSlides(sessionId);
+        if (result.slide_deck) {
+          onSlideChange(result.slide_deck);
+        }
         clearSelection();
       } catch (error) {
         console.error('Failed to reorder:', error);
@@ -103,8 +112,12 @@ export const SlidePanel: React.FC<SlidePanelProps> = ({ slideDeck, rawHtml, onSl
     if (!confirm(`Delete slide ${index + 1}?`)) return;
 
     try {
-      const updatedDeck = await api.deleteSlide(index, sessionId);
-      onSlideChange(updatedDeck);
+      await api.deleteSlide(index, sessionId);
+      // Fetch full deck to get verification merged from verification_map
+      const result = await api.getSlides(sessionId);
+      if (result.slide_deck) {
+        onSlideChange(result.slide_deck);
+      }
       clearSelection();
     } catch (error) {
       console.error('Failed to delete:', error);
@@ -116,8 +129,12 @@ export const SlidePanel: React.FC<SlidePanelProps> = ({ slideDeck, rawHtml, onSl
     if (!slideDeck || !sessionId) return;
 
     try {
-      const updatedDeck = await api.duplicateSlide(index, sessionId);
-      onSlideChange(updatedDeck);
+      await api.duplicateSlide(index, sessionId);
+      // Fetch full deck to get verification merged from verification_map
+      const result = await api.getSlides(sessionId);
+      if (result.slide_deck) {
+        onSlideChange(result.slide_deck);
+      }
       clearSelection();
     } catch (error) {
       console.error('Failed to duplicate:', error);
@@ -139,6 +156,24 @@ export const SlidePanel: React.FC<SlidePanelProps> = ({ slideDeck, rawHtml, onSl
     } catch (error) {
       console.error('Failed to update:', error);
       throw error; // Re-throw for editor to handle
+    }
+  };
+
+  const handleVerificationUpdate = async (index: number, verification: import('../../types/verification').VerificationResult | null) => {
+    if (!slideDeck || !sessionId) return;
+
+    try {
+      // Save verification to backend but DON'T replace the whole deck
+      // This prevents overwriting other slide data (like charts)
+      await api.updateSlideVerification(index, sessionId, verification);
+      
+      // Update only the verification field locally
+      const updatedSlides = [...slideDeck.slides];
+      updatedSlides[index] = { ...updatedSlides[index], verification: verification || undefined };
+      onSlideChange({ ...slideDeck, slides: updatedSlides });
+    } catch (error) {
+      console.error('Failed to update verification:', error);
+      // Don't throw - verification persistence is non-critical
     }
   };
 
@@ -179,20 +214,15 @@ Focus on optimizing text layout, container sizing, and spacing to prevent conten
 
         case 'complete':
           setOptimizingSlideIndex(null);
-          // If entire slide deck is returned, use it
-          if (event.slides) {
-            onSlideChange(event.slides);
-          } else {
-            // Fallback: fetch updated deck
-            api.getSlides(sessionId).then((result) => {
-              if (result.slide_deck) {
-                onSlideChange(result.slide_deck);
-              }
-            }).catch((err) => {
-              console.error('Failed to fetch updated slides:', err);
-              alert('Failed to fetch updated slides after optimization');
-            });
-          }
+          // Always fetch full deck to get verification merged from verification_map
+          api.getSlides(sessionId).then((result) => {
+            if (result.slide_deck) {
+              onSlideChange(result.slide_deck);
+            }
+          }).catch((err) => {
+            console.error('Failed to fetch updated slides:', err);
+            alert('Failed to fetch updated slides after optimization');
+          });
           break;
       }
     };
@@ -318,6 +348,82 @@ Focus on optimizing text layout, container sizing, and spacing to prevent conten
       }
     }
   }, [scrollToSlide, viewMode]);
+
+  // Auto-verify slides that don't have verification
+  const runAutoVerification = useCallback(async (slidesToVerify: Array<{ index: number; contentHash: string }>) => {
+    if (!sessionId || slidesToVerify.length === 0 || isAutoVerifying) return;
+
+    setIsAutoVerifying(true);
+    console.log(`[Auto-verify] Starting verification for ${slidesToVerify.length} slides`);
+
+    // Mark all slides as being verified
+    setVerifyingSlides(new Set(slidesToVerify.map(s => s.index)));
+
+    // Verify slides in parallel
+    const verificationPromises = slidesToVerify.map(async ({ index, contentHash }) => {
+      try {
+        // Mark this content hash as attempted (prevent re-triggering)
+        autoVerifyTriggeredRef.current.add(contentHash);
+        
+        console.log(`[Auto-verify] Verifying slide ${index + 1} (hash: ${contentHash.substring(0, 8)}...)`);
+        await api.verifySlide(sessionId, index);
+        console.log(`[Auto-verify] Slide ${index + 1} verified`);
+        return { index, success: true };
+      } catch (error) {
+        console.error(`[Auto-verify] Failed to verify slide ${index + 1}:`, error);
+        return { index, success: false, error };
+      }
+    });
+
+    await Promise.all(verificationPromises);
+
+    // Refresh slides to get updated verification results (merged from verification_map)
+    try {
+      const result = await api.getSlides(sessionId);
+      if (result.slide_deck) {
+        onSlideChange(result.slide_deck);
+      }
+    } catch (error) {
+      console.error('[Auto-verify] Failed to refresh slides:', error);
+    }
+
+    setVerifyingSlides(new Set());
+    setIsAutoVerifying(false);
+    console.log('[Auto-verify] Completed');
+  }, [sessionId, isAutoVerifying, onSlideChange]);
+
+  // Effect to trigger auto-verification when slides change
+  useEffect(() => {
+    if (!slideDeck || !sessionId || isAutoVerifying) return;
+
+    // Find slides that need verification (no verification and not already attempted)
+    const slidesNeedingVerification = slideDeck.slides
+      .map((slide, index) => ({
+        index,
+        slide,
+        contentHash: slide.content_hash || '',
+      }))
+      .filter(({ slide, contentHash }) => {
+        // Skip if already has verification
+        if (slide.verification) return false;
+        // Skip if no content hash (shouldn't happen, but be safe)
+        if (!contentHash) return false;
+        // Skip if we've already tried to verify this content
+        if (autoVerifyTriggeredRef.current.has(contentHash)) return false;
+        return true;
+      });
+
+    if (slidesNeedingVerification.length > 0) {
+      console.log(`[Auto-verify] Found ${slidesNeedingVerification.length} slides needing verification`);
+      runAutoVerification(slidesNeedingVerification);
+    }
+  }, [slideDeck, sessionId, isAutoVerifying, runAutoVerification]);
+
+  // Clear auto-verify tracking when session changes
+  useEffect(() => {
+    autoVerifyTriggeredRef.current.clear();
+  }, [sessionId]);
+
   const handleSaveAsHTML = () => {
     if (!slideDeck) return;
 
@@ -483,6 +589,7 @@ Focus on optimizing text layout, container sizing, and spacing to prevent conten
               {isReordering && ' • Reordering...'}
               {isExportingPDF && ' • Exporting PDF...'}
               {isExportingPPTX && ' • Exporting PowerPoint...'}
+              {isAutoVerifying && ` • Verifying ${verifyingSlides.size} slide${verifyingSlides.size !== 1 ? 's' : ''}...`}
             </p>
           </div>
           
@@ -626,9 +733,12 @@ Focus on optimizing text layout, container sizing, and spacing to prevent conten
               slide={slide}
               slideDeck={slideDeck}
               index={index}
+              sessionId={sessionId || ''}
               onDelete={() => handleDeleteSlide(index)}
               onDuplicate={() => handleDuplicateSlide(index)}
               onUpdate={(html) => handleUpdateSlide(index, html)}
+              onVerificationUpdate={(verification) => handleVerificationUpdate(index, verification)}
+              isAutoVerifying={verifyingSlides.has(index)}
               onOptimize={() => handleOptimizeLayout(index)}
               isOptimizing={optimizingSlideIndex === index}
             />

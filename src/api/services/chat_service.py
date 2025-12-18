@@ -486,6 +486,16 @@ class ChatService:
         """
         # Check if agent already has this session
         if session_id in self.agent.sessions:
+            # Agent session exists - ensure genie_conversation_id is persisted to DB
+            agent_genie_id = self.agent.sessions[session_id].get("genie_conversation_id")
+            if agent_genie_id and not genie_conversation_id:
+                # Agent has genie ID but DB doesn't - save it now
+                session_manager = get_session_manager()
+                session_manager.set_genie_conversation_id(session_id, agent_genie_id)
+                logger.info(
+                    "Persisted existing genie_conversation_id to database",
+                    extra={"session_id": session_id, "genie_conversation_id": agent_genie_id},
+                )
             return
 
         logger.info(
@@ -733,14 +743,30 @@ class ChatService:
         return current_deck.to_dict()
 
     def get_slides(self, session_id: str) -> Optional[Dict[str, Any]]:
-        """Get slide deck for a session.
+        """Get slide deck for a session with verification merged.
+
+        Uses session_manager.get_slide_deck() to ensure:
+        - Verification is merged from verification_map by content hash
+        - content_hash is added to each slide for frontend auto-verify
 
         Args:
             session_id: Session ID
 
         Returns:
-            Slide deck dictionary or None if no slides exist
+            Slide deck dictionary with content_hash and verification, or None
         """
+        from src.api.services.session_manager import get_session_manager
+        
+        session_manager = get_session_manager()
+        try:
+            # Use session_manager to get deck with verification merged
+            deck_dict = session_manager.get_slide_deck(session_id)
+            if deck_dict and deck_dict.get("slides"):
+                return deck_dict
+        except Exception as e:
+            logger.warning(f"Failed to load deck from session_manager: {e}")
+        
+        # Fallback to internal cache (without verification/content_hash)
         deck = self._get_or_load_deck(session_id)
         if not deck:
             return None

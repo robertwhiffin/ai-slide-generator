@@ -141,6 +141,8 @@ class SessionSlideDeck(Base):
     """Slide deck state for a session.
 
     Stores the current slide deck HTML and metadata for persistence.
+    Verification results are stored separately in verification_map to survive
+    deck regeneration when chat modifies slides.
     """
 
     __tablename__ = "session_slide_decks"
@@ -160,7 +162,12 @@ class SessionSlideDeck(Base):
     slide_count = Column(Integer, default=0)
     
     # Full SlideDeck structure as JSON (for restoration)
+    # Note: Verification is NOT stored here - it's in verification_map
     deck_json = Column(Text)  # JSON with slides array, css, external_scripts, scripts
+    
+    # Verification results keyed by content hash (survives deck regeneration)
+    # JSON format: {"content_hash": {"score": 95, "rating": "excellent", ...}}
+    verification_map = Column(Text, nullable=True)
 
     # Timestamps
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)

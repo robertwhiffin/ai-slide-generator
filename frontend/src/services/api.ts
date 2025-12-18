@@ -1,5 +1,6 @@
 import type { ChatResponse } from '../types/message';
 import type { SlideDeck, Slide, SlideContext, ReplacementInfo } from '../types/slide';
+import type { VerificationResult } from '../types/verification';
 
 // Use relative URLs in production, localhost in development
 const API_BASE_URL = import.meta.env.VITE_API_URL || (
@@ -357,6 +358,28 @@ export const api = {
   },
 
   /**
+   * Update a slide's verification result
+   * Persists verification with the session so it survives refresh/restore
+   */
+  async updateSlideVerification(
+    index: number,
+    sessionId: string,
+    verification: VerificationResult | null
+  ): Promise<SlideDeck> {
+    const response = await fetch(`${API_BASE_URL}/api/slides/${index}/verification`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ session_id: sessionId, verification }),
+    });
+
+    if (!response.ok) {
+      throw new ApiError(response.status, 'Failed to update slide verification');
+    }
+
+    return response.json();
+  },
+
+  /**
    * Stream chat messages via Server-Sent Events
    * 
    * @param sessionId - Session ID
@@ -600,6 +623,91 @@ export const api = {
     } else {
       return this.streamChat(sessionId, message, slideContext, onEvent, onError);
     }
+  },
+
+  // ============ Verification API ============
+
+  /**
+   * Verify a slide's numerical accuracy against source data
+   */
+  async verifySlide(
+    sessionId: string,
+    slideIndex: number
+  ): Promise<{
+    score: number;
+    rating: string;
+    explanation: string;
+    issues: Array<{ type: string; detail: string }>;
+    duration_ms: number;
+    trace_id?: string;
+    genie_conversation_id?: string;
+    error: boolean;
+    error_message?: string;
+  }> {
+    const response = await fetch(`${API_BASE_URL}/api/verification/${slideIndex}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ session_id: sessionId }),
+    });
+
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({}));
+      throw new ApiError(response.status, error.detail || 'Failed to verify slide');
+    }
+
+    return response.json();
+  },
+
+  /**
+   * Submit feedback on a verification result
+   * Feedback is linked to the original verification trace for labeling/review
+   */
+  async submitVerificationFeedback(
+    sessionId: string,
+    slideIndex: number,
+    isPositive: boolean,
+    rationale?: string,
+    traceId?: string  // Links feedback to the verification trace in MLflow
+  ): Promise<{ status: string; message: string; linked_to_trace: boolean }> {
+    const response = await fetch(`${API_BASE_URL}/api/verification/${slideIndex}/feedback`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        session_id: sessionId,
+        slide_index: slideIndex,
+        is_positive: isPositive,
+        rationale,
+        trace_id: traceId,
+      }),
+    });
+
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({}));
+      throw new ApiError(response.status, error.detail || 'Failed to submit feedback');
+    }
+
+    return response.json();
+  },
+
+  /**
+   * Get the Genie conversation link for viewing source data
+   */
+  async getGenieLink(sessionId: string): Promise<{
+    has_genie_conversation: boolean;
+    conversation_id?: string;
+    url?: string;
+    message: string;
+  }> {
+    const response = await fetch(
+      `${API_BASE_URL}/api/verification/genie-link?session_id=${encodeURIComponent(sessionId)}`
+    );
+
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({}));
+      throw new ApiError(response.status, error.detail || 'Failed to get Genie link');
+    }
+
+    return response.json();
   },
 
   /**

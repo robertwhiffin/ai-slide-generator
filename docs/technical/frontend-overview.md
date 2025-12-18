@@ -62,11 +62,20 @@ interface SlideDeck {
   css: string;
   external_scripts: string[];
   scripts: string;
-  slides: { index: number; slide_id: string; html: string }[];
+  slides: Slide[];
+}
+
+interface Slide {
+  index: number;
+  slide_id: string;
+  html: string;
+  scripts: string;
+  content_hash?: string;              // SHA256 hash of normalized HTML (for verification persistence)
+  verification?: VerificationResult;  // LLM as Judge verification (auto-verified, persisted by content hash)
 }
 ```
 
-Slides are HTML snippets embedded in iframes for preview.
+Slides are HTML snippets embedded in iframes for preview. The optional `verification` field stores auto-verification accuracy checks using MLflow's LLM as Judge (runs automatically when slides are generated or edited).
 
 ### 3. Selection Context (`src/contexts/SelectionContext.tsx`)
 
@@ -98,6 +107,9 @@ Parsed tiles, rendered raw HTML (`iframe`), and raw HTML text (`<pre>`). Users c
 | `src/components/ChatPanel/ChatPanel.tsx` | Sends prompts via SSE or polling, displays real-time events, loads persisted messages | `api.sendChatMessage`, `api.getSession` |
 | `src/components/ChatPanel/ChatInput.tsx` | Textarea with selection badge when context exists | None (props only) |
 | `src/components/ChatPanel/MessageList.tsx` & `Message.tsx` | Renders conversation, collapses HTML/tool outputs | None |
+| `src/components/SlidePanel/SlidePanel.tsx` | Hosts drag/drop, tabs, per-slide CRUD, auto-verification trigger for unverified slides | `api.getSlides`, `api.reorderSlides`, `api.updateSlide`, `api.duplicateSlide`, `api.deleteSlide`, `api.verifySlide` |
+| `src/components/SlidePanel/SlideTile.tsx` | Slide preview, selection button, editor modal, Genie source data button, displays verification badge | Prop callbacks to `SlidePanel`, `api.getGenieLink` |
+| `src/components/SlidePanel/VerificationBadge.tsx` | Rating badge, details popup, feedback UI (thumbs up/down), manual re-verify option | `api.verifySlide`, `api.submitVerificationFeedback` |
 | `src/components/SlidePanel/SlidePanel.tsx` | Hosts drag/drop, tabs, per-slide CRUD, optimize layout handler | `api.getSlides`, `api.reorderSlides`, `api.updateSlide`, `api.duplicateSlide`, `api.deleteSlide`, `api.sendChatMessage` |
 | `src/components/SlidePanel/SlideTile.tsx` | Slide preview, selection button, editor modal trigger, optimize layout button | Prop callbacks to `SlidePanel` |
 | `src/components/SlidePanel/HTMLEditorModal.tsx` | Monaco editor with validation (requires `<div class="slide">`) | Calls `api.updateSlide` then `api.getSlides` |
@@ -208,6 +220,15 @@ The optimization prompt explicitly instructs the agent to:
 | `updateSlide` | PATCH | `/api/slides/{index}` | `{ session_id, html }` | `Slide` |
 | `duplicateSlide` | POST | `/api/slides/{index}/duplicate` | `{ session_id }` | `SlideDeck` |
 | `deleteSlide` | DELETE | `/api/slides/{index}` | query: `session_id` | `SlideDeck` |
+| `updateSlideVerification` | PATCH | `/api/slides/{index}/verification` | `{ session_id, verification }` | `SlideDeck` |
+
+### Verification Endpoints (LLM as Judge)
+
+| Method | HTTP | Path | Request | Returns |
+|--------|------|------|---------|---------|
+| `verifySlide` | POST | `/api/verification/{index}` | `{ session_id }` | `VerificationResult` |
+| `submitVerificationFeedback` | POST | `/api/verification/{index}/feedback` | `{ session_id, is_positive, rationale?, trace_id? }` | `{ status, message, linked_to_trace }` |
+| `getGenieLink` | GET | `/api/verification/genie-link` | query: `session_id` | `{ has_genie_conversation, url?, ... }` |
 
 ### Error Handling
 
@@ -222,11 +243,13 @@ Errors bubble up as `ApiError` (status + message). Common statuses:
 
 1. **Start session** – Load app, session created on first interaction
 2. **Generate baseline deck** – Enter prompt, chat panel shows loading, slides appear
-3. **Navigate slides** – Click slide preview in ribbon to scroll main panel to that slide
-4. **Refine slides** – Use checkbox in ribbon to select contiguous slides for chat context, provide instructions
-5. **Optimize layout** – Click optimize icon on slide tile to automatically fix overflow while preserving charts
-6. **Manual adjustments** – Edit HTML via modal, duplicate/delete/reorder
-7. **QA raw output** – Compare raw HTML render vs parsed slides
+3. **Auto-verification** – LLM as Judge automatically verifies each slide against Genie source data
+4. **Navigate slides** – Click slide preview in ribbon to scroll main panel to that slide
+5. **Review verification** – Click verification badge for details, provide feedback (👍/👎)
+6. **Refine slides** – Use checkbox in ribbon to select contiguous slides for chat context, provide instructions
+7. **Manual adjustments** – Edit HTML via modal, duplicate/delete/reorder (edited slides auto-re-verify)
+8. **View source data** – Click database icon on slide to open Genie conversation
+9. **QA raw output** – Compare raw HTML render vs parsed slides
 
 ---
 
@@ -256,6 +279,7 @@ Errors bubble up as `ApiError` (status + message). Common statuses:
 ## Cross-References
 
 - [Backend Overview](backend-overview.md) – FastAPI routes and agent lifecycle
+- [LLM as Judge Verification](llm-as-judge-verification.md) – Auto slide accuracy verification and human feedback collection
 - [Real-Time Streaming](real-time-streaming.md) – SSE events and conversation persistence
 - [Multi-User Concurrency](multi-user-concurrency.md) – session locking and async handling
 - [Slide Parser & Script Management](slide-parser-and-script-management.md) – HTML parsing and Chart.js reconciliation
