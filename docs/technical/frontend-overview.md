@@ -28,7 +28,7 @@ How the React/Vite frontend is structured, how it communicates with backend APIs
 - **SelectionRibbon** mirrors the current `SlideDeck` with dual interaction:
   - **Click slide preview** – scrolls the main SlidePanel to that slide
   - **Click checkbox** – toggles slide selection for chat context (contiguous only)
-- **SlidePanel** shows parsed slides, raw HTML render, or plain HTML text; exposes per-slide actions (edit, duplicate, delete, reorder). Accepts `scrollToSlide` prop to navigate to a specific slide.
+- **SlidePanel** shows parsed slides, raw HTML render, or plain HTML text; exposes per-slide actions (edit, delete, reorder). Accepts `scrollToSlide` prop to navigate to a specific slide.
 - **AppLayout** manages shared state:
   - `slideDeck: SlideDeck | null` – parsed slides plus CSS/script metadata
   - `rawHtml: string | null` – exact HTML from the AI for debugging views
@@ -107,15 +107,16 @@ Parsed tiles, rendered raw HTML (`iframe`), and raw HTML text (`<pre>`). Users c
 | `src/components/ChatPanel/ChatPanel.tsx` | Sends prompts via SSE or polling, displays real-time events, loads persisted messages | `api.sendChatMessage`, `api.getSession` |
 | `src/components/ChatPanel/ChatInput.tsx` | Textarea with selection badge when context exists | None (props only) |
 | `src/components/ChatPanel/MessageList.tsx` & `Message.tsx` | Renders conversation, collapses HTML/tool outputs | None |
-| `src/components/SlidePanel/SlidePanel.tsx` | Hosts drag/drop, tabs, per-slide CRUD, auto-verification trigger for unverified slides | `api.getSlides`, `api.reorderSlides`, `api.updateSlide`, `api.duplicateSlide`, `api.deleteSlide`, `api.verifySlide` |
+| `src/components/SlidePanel/SlidePanel.tsx` | Hosts drag/drop, tabs, per-slide CRUD, auto-verification trigger for unverified slides | `api.getSlides`, `api.reorderSlides`, `api.updateSlide`, `api.deleteSlide`, `api.verifySlide` |
 | `src/components/SlidePanel/SlideTile.tsx` | Slide preview, selection button, editor modal, Genie source data button, displays verification badge | Prop callbacks to `SlidePanel`, `api.getGenieLink` |
 | `src/components/SlidePanel/VerificationBadge.tsx` | Rating badge, details popup, feedback UI (thumbs up/down), manual re-verify option | `api.verifySlide`, `api.submitVerificationFeedback` |
-| `src/components/SlidePanel/SlidePanel.tsx` | Hosts drag/drop, tabs, per-slide CRUD, optimize layout handler | `api.getSlides`, `api.reorderSlides`, `api.updateSlide`, `api.duplicateSlide`, `api.deleteSlide`, `api.sendChatMessage` |
+| `src/components/SlidePanel/SlidePanel.tsx` | Hosts drag/drop, tabs, per-slide CRUD, optimize layout handler | `api.getSlides`, `api.reorderSlides`, `api.updateSlide`, `api.deleteSlide`, `api.sendChatMessage` |
 | `src/components/SlidePanel/SlideTile.tsx` | Slide preview, selection button, editor modal trigger, optimize layout button | Prop callbacks to `SlidePanel` |
 | `src/components/SlidePanel/HTMLEditorModal.tsx` | Monaco editor with validation (requires `<div class="slide">`) | Calls `api.updateSlide` then `api.getSlides` |
 | `src/components/SlidePanel/SelectionRibbon.tsx` + `SlideSelection.tsx` | Thumbnail strip with dual interaction: preview click navigates main panel, checkbox toggles selection for chat context | `onSlideNavigate` callback to `AppLayout`, updates `SelectionContext` |
 | `src/hooks/useKeyboardShortcuts.ts` | `Esc` clears selection globally | None |
 | `src/utils/loadingMessages.ts` | Rotating messages during LLM calls | None |
+| `src/components/common/Tooltip.tsx` | Lightweight hover tooltip wrapper using Tailwind; appears instantly on hover | None |
 
 ---
 
@@ -165,7 +166,6 @@ Parsed tiles, rendered raw HTML (`iframe`), and raw HTML text (`<pre>`). Users c
 | Operation | API Call | Notes |
 |-----------|----------|-------|
 | **Reorder** | `api.reorderSlides(newOrder, sessionId)` | Optimistic UI with rollback on failure |
-| **Duplicate** | `api.duplicateSlide(index, sessionId)` | Returns full updated deck |
 | **Delete** | `api.deleteSlide(index, sessionId)` | Returns full updated deck |
 | **Edit HTML** | `api.updateSlide(index, html, sessionId)` | Validates `.slide` wrapper |
 | **Optimize Layout** | `api.sendChatMessage(sessionId, message, slideContext)` | Sends optimization prompt with slide context; preserves chart scripts automatically via backend |
@@ -218,7 +218,6 @@ The optimization prompt explicitly instructs the agent to:
 | `getSlides` | GET | `/api/sessions/{id}/slides` | – | `{ session_id, slide_deck }` |
 | `reorderSlides` | PUT | `/api/slides/reorder` | `{ session_id, new_order }` | `SlideDeck` |
 | `updateSlide` | PATCH | `/api/slides/{index}` | `{ session_id, html }` | `Slide` |
-| `duplicateSlide` | POST | `/api/slides/{index}/duplicate` | `{ session_id }` | `SlideDeck` |
 | `deleteSlide` | DELETE | `/api/slides/{index}` | query: `session_id` | `SlideDeck` |
 | `updateSlideVerification` | PATCH | `/api/slides/{index}/verification` | `{ session_id, verification }` | `SlideDeck` |
 
@@ -247,7 +246,7 @@ Errors bubble up as `ApiError` (status + message). Common statuses:
 4. **Navigate slides** – Click slide preview in ribbon to scroll main panel to that slide
 5. **Review verification** – Click verification badge for details, provide feedback (👍/👎)
 6. **Refine slides** – Use checkbox in ribbon to select contiguous slides for chat context, provide instructions
-7. **Manual adjustments** – Edit HTML via modal, duplicate/delete/reorder (edited slides auto-re-verify)
+7. **Manual adjustments** – Edit HTML via modal, delete/reorder (edited slides auto-re-verify)
 8. **View source data** – Click database icon on slide to open Genie conversation
 9. **QA raw output** – Compare raw HTML render vs parsed slides
 

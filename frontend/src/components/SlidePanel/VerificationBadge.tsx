@@ -4,6 +4,7 @@ import { FiThumbsUp, FiThumbsDown, FiX, FiExternalLink } from 'react-icons/fi';
 import type { VerificationResult } from '../../types/verification';
 import { getRatingColor, getRatingText, getRatingIcon } from '../../types/verification';
 import { api } from '../../services/api';
+import { Tooltip } from '../common/Tooltip';
 
 interface VerificationBadgeProps {
   slideIndex: number;
@@ -91,13 +92,14 @@ export const VerificationBadge: React.FC<VerificationBadgeProps> = ({
   // No result yet - show verify button
   if (!verificationResult && !isVerifying) {
     return (
-      <button
-        onClick={onVerify}
-        className="p-1 text-amber-600 hover:bg-amber-50 rounded"
-        title="Verify slide accuracy"
-      >
-        <FaGavel size={16} />
-      </button>
+      <Tooltip text="Verify slide accuracy">
+        <button
+          onClick={onVerify}
+          className="p-1 text-amber-600 hover:bg-amber-50 rounded"
+        >
+          <FaGavel size={16} />
+        </button>
+      </Tooltip>
     );
   }
 
@@ -120,17 +122,18 @@ export const VerificationBadge: React.FC<VerificationBadgeProps> = ({
   return (
     <div className="relative">
       {/* Badge */}
-      <button
-        onClick={() => setShowDetails(!showDetails)}
-        className={`flex items-center space-x-1 px-2 py-0.5 text-xs font-medium rounded border ${badgeColor} ${
-          isStale ? 'opacity-60' : ''
-        }`}
-        title={isStale ? 'Verification may be outdated - slide was edited' : 'Click for details'}
-      >
-        <span>{badgeIcon}</span>
-        <span>{verificationResult.score}%</span>
-        {isStale && <span className="text-orange-500">⚠</span>}
-      </button>
+      <Tooltip text={isStale ? 'Verification outdated - click for details' : 'Verification details'}>
+        <button
+          onClick={() => setShowDetails(!showDetails)}
+          className={`flex items-center space-x-1 px-2 py-0.5 text-xs font-medium rounded border ${badgeColor} ${
+            isStale ? 'opacity-60' : ''
+          }`}
+        >
+          <span>{badgeIcon}</span>
+          <span>{verificationResult.score}%</span>
+          {isStale && <span className="text-orange-500">⚠</span>}
+        </button>
+      </Tooltip>
 
       {/* Click-away overlay */}
       {showDetails && (
@@ -230,16 +233,17 @@ export const VerificationBadge: React.FC<VerificationBadgeProps> = ({
               <div className="mb-3 p-2 bg-white rounded border">
                 <div className="flex items-center justify-between">
                   <span className="text-xs text-gray-500">MLflow Trace ID:</span>
-                  <button
-                    onClick={() => {
-                      navigator.clipboard.writeText(verificationResult.trace_id || '');
-                      alert('Trace ID copied!');
-                    }}
-                    className="text-xs text-blue-600 hover:underline"
-                    title="Copy trace ID"
-                  >
-                    Copy
-                  </button>
+                  <Tooltip text="Copy trace ID" position="top">
+                    <button
+                      onClick={() => {
+                        navigator.clipboard.writeText(verificationResult.trace_id || '');
+                        alert('Trace ID copied!');
+                      }}
+                      className="text-xs text-blue-600 hover:underline"
+                    >
+                      Copy
+                    </button>
+                  </Tooltip>
                 </div>
                 <code className="text-xs text-gray-700 break-all">{verificationResult.trace_id}</code>
               </div>
@@ -270,22 +274,24 @@ export const VerificationBadge: React.FC<VerificationBadgeProps> = ({
               <div className="flex items-center justify-between pt-2 border-t">
                 <span className="text-xs text-gray-500">Is this accurate?</span>
                 <div className="flex items-center space-x-2">
-                  <button
-                    onClick={() => handleFeedback(true)}
-                    disabled={isSubmitting}
-                    className="p-1.5 text-green-600 hover:bg-green-50 rounded disabled:opacity-50"
-                    title="Yes, accurate"
-                  >
-                    <FiThumbsUp size={16} />
-                  </button>
-                  <button
-                    onClick={() => handleFeedback(false)}
-                    disabled={isSubmitting}
-                    className="p-1.5 text-red-600 hover:bg-red-50 rounded disabled:opacity-50"
-                    title="No, issues found"
-                  >
-                    <FiThumbsDown size={16} />
-                  </button>
+                  <Tooltip text="Yes, accurate" position="top">
+                    <button
+                      onClick={() => handleFeedback(true)}
+                      disabled={isSubmitting}
+                      className="p-1.5 text-green-600 hover:bg-green-50 rounded disabled:opacity-50"
+                    >
+                      <FiThumbsUp size={16} />
+                    </button>
+                  </Tooltip>
+                  <Tooltip text="No, issues found" position="top">
+                    <button
+                      onClick={() => handleFeedback(false)}
+                      disabled={isSubmitting}
+                      className="p-1.5 text-red-600 hover:bg-red-50 rounded disabled:opacity-50"
+                    >
+                      <FiThumbsDown size={16} />
+                    </button>
+                  </Tooltip>
                 </div>
               </div>
             )}
