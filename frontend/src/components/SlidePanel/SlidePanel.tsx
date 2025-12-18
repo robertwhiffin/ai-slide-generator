@@ -174,7 +174,7 @@ export const SlidePanel: React.FC<SlidePanelProps> = ({ slideDeck, rawHtml, onSl
       slide_htmls: [slide.html],
     };
 
-    const message = `Optimize the layout of the slide to prevent content overflow. Return only the HTML for this slide, no other text.
+    const message = `Optimize the layout of this slide to prevent content overflow. Return only the HTML for this slide, no other text.
 
       CRITICAL REQUIREMENTS:
       1. Preserve ALL <canvas> elements exactly - do NOT modify, remove, rename, or change their id attributes
