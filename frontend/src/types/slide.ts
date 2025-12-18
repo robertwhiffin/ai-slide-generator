@@ -1,8 +1,12 @@
+import type { VerificationResult } from './verification';
+
 export interface Slide {
   index: number;
   slide_id: string;
   html: string;
   scripts: string;  // JavaScript for this slide's charts (e.g., Chart.js initialization)
+  verification?: VerificationResult;  // LLM as Judge verification result (merged from verification_map)
+  content_hash?: string;  // Hash of slide content for verification lookup
 }
 
 export interface SlideDeck {

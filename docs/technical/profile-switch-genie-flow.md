@@ -422,6 +422,21 @@ logger.info(f"Current active profile: {settings.profile_id}, space: {settings.ge
 
 ---
 
+## Known Limitations
+
+### Cross-Profile Session Restore
+
+When switching profiles, `genie_conversation_id` for **all** sessions is cleared (not just the current session). This causes:
+
+- Sessions created under Profile A lose their Genie link when Profile B is loaded
+- Restoring a session from a different profile shows "No Genie queries were made in this session"
+
+**Current behavior:** Acceptable for single-profile workflows. Genie conversations remain linked as long as the user stays on the same profile.
+
+**Future improvement:** Add `profile_id` to `UserSession` to only clear Genie IDs for sessions matching the switched profile.
+
+---
+
 ## Expected Flow Summary
 
 ✅ **Correct Flow:**

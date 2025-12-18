@@ -1,18 +1,24 @@
 import React, { useMemo, useRef, useState, useEffect } from 'react';
 import { useSortable } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
-import { FiEdit, FiCopy, FiTrash2, FiMove, FiMessageSquare, FiMaximize2 } from 'react-icons/fi';
+import { FiEdit, FiCopy, FiTrash2, FiMove, FiMessageSquare, FiDatabase, FiMaximize2 } from 'react-icons/fi';
 import type { Slide, SlideDeck } from '../../types/slide';
+import type { VerificationResult } from '../../types/verification';
 import { HTMLEditorModal } from './HTMLEditorModal';
 import { useSelection } from '../../contexts/SelectionContext';
+import { VerificationBadge } from './VerificationBadge';
+import { api } from '../../services/api';
 
 interface SlideTileProps {
   slide: Slide;
   slideDeck: SlideDeck;
   index: number;
+  sessionId: string;
   onDelete: () => void;
   onDuplicate: () => void;
   onUpdate: (html: string) => Promise<void>;
+  onVerificationUpdate: (verification: VerificationResult | null) => Promise<void>;
+  isAutoVerifying?: boolean;  // True when auto-verification is running for this slide
   onOptimize?: () => void;
   isOptimizing?: boolean;
 }
@@ -25,9 +31,12 @@ export const SlideTile: React.FC<SlideTileProps> = ({
   slide,
   slideDeck,
   index,
+  sessionId,
   onDelete,
   onDuplicate,
   onUpdate,
+  onVerificationUpdate,
+  isAutoVerifying = false,
   onOptimize,
   isOptimizing = false,
 }) => {
@@ -35,6 +44,88 @@ export const SlideTile: React.FC<SlideTileProps> = ({
   const containerRef = useRef<HTMLDivElement>(null);
   const [scale, setScale] = useState(1);
   const { selectedIndices, setSelection } = useSelection();
+  
+  // Verification state - initialize from persisted slide.verification
+  const [verificationResult, setVerificationResult] = useState<VerificationResult | undefined>(
+    slide.verification
+  );
+  const [isManualVerifying, setIsManualVerifying] = useState(false);
+  const [isStale, setIsStale] = useState(false);
+  const [isLoadingGenieLink, setIsLoadingGenieLink] = useState(false);
+  
+  // Combined verifying state (manual or auto)
+  const isVerifying = isManualVerifying || isAutoVerifying;
+
+  // Handle opening Genie conversation link
+  const handleOpenGenieLink = async () => {
+    if (isLoadingGenieLink) return;
+    
+    setIsLoadingGenieLink(true);
+    try {
+      const link = await api.getGenieLink(sessionId);
+      if (link.url) {
+        window.open(link.url, '_blank');
+      } else {
+        alert(link.message || 'No Genie conversation available');
+      }
+    } catch (error) {
+      console.error('Failed to get Genie link:', error);
+      alert('Failed to get Genie conversation link');
+    } finally {
+      setIsLoadingGenieLink(false);
+    }
+  };
+
+  // Sync verification state when slide.verification changes (e.g., session restore)
+  useEffect(() => {
+    setVerificationResult(slide.verification);
+    setIsStale(false);  // Reset stale when verification is loaded
+  }, [slide.verification]);
+
+  // Handle manual verification (user clicks verify button)
+  const handleVerify = async () => {
+    if (!sessionId || isVerifying) return;
+    
+    setIsManualVerifying(true);
+    try {
+      const result = await api.verifySlide(sessionId, index);
+      const verification: VerificationResult = {
+        ...result,
+        rating: result.rating as VerificationResult['rating'],
+        timestamp: new Date().toISOString(),
+      };
+      
+      // Log trace_id for easy access
+      console.log(`[Verification] Slide ${index + 1} verified:`, {
+        score: verification.score,
+        rating: verification.rating,
+        trace_id: verification.trace_id,
+        content_hash: slide.content_hash,
+      });
+      
+      setVerificationResult(verification);
+      setIsStale(false);
+      
+      // Note: Backend now saves verification automatically by content hash
+      // This call updates local state for the parent component
+      await onVerificationUpdate(verification);
+    } catch (error) {
+      console.error('Verification failed:', error);
+      const errorResult: VerificationResult = {
+        score: 0,
+        rating: 'error',
+        explanation: error instanceof Error ? error.message : 'Verification failed',
+        issues: [],
+        duration_ms: 0,
+        error: true,
+        error_message: error instanceof Error ? error.message : 'Unknown error',
+      };
+      setVerificationResult(errorResult);
+      // Don't persist error results
+    } finally {
+      setIsManualVerifying(false);
+    }
+  };
 
   const {
     attributes,
@@ -128,6 +219,26 @@ export const SlideTile: React.FC<SlideTileProps> = ({
 
           {/* Action Buttons */}
           <div className="flex items-center space-x-1">
+            {/* Verification Badge/Button */}
+            <VerificationBadge
+              slideIndex={index}
+              sessionId={sessionId}
+              verificationResult={verificationResult}
+              isVerifying={isVerifying}
+              onVerify={handleVerify}
+              isStale={isStale}
+            />
+            
+            {/* Genie Source Data Link */}
+            <button
+              onClick={handleOpenGenieLink}
+              disabled={isLoadingGenieLink}
+              className="p-1 text-purple-600 hover:bg-purple-50 rounded disabled:opacity-50"
+              title="View Genie Source Data"
+            >
+              <FiDatabase size={16} />
+            </button>
+            
             <button
               onClick={() => setSelection([index], [slide])}
               className={`p-1 rounded ${
@@ -211,6 +322,14 @@ export const SlideTile: React.FC<SlideTileProps> = ({
           html={slide.html}
           onSave={async (newHtml) => {
             await onUpdate(newHtml);
+            
+            // Clear verification when slide is edited
+            if (verificationResult) {
+              setVerificationResult(undefined);
+              setIsStale(false);
+              // Persist the cleared verification
+              await onVerificationUpdate(null);
+            }
             setIsEditing(false);
           }}
           onCancel={() => setIsEditing(false)}

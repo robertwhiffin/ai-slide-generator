@@ -20,6 +20,7 @@ langchain-text-splitters==1.0.0
 
 # MLflow and observability
 mlflow==3.6.0
+litellm==1.80.0  # Required for MLflow judge with Databricks models
 opentelemetry-api==1.38.0
 opentelemetry-sdk==1.38.0
 

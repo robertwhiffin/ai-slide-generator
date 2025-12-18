@@ -375,14 +375,19 @@ class SessionManager:
             }
 
     def get_slide_deck(self, session_id: str) -> Optional[Dict[str, Any]]:
-        """Get slide deck for a session.
+        """Get slide deck for a session with verification merged by content hash.
+
+        Verification results are stored separately in verification_map and
+        merged back into slides based on content hash matching.
 
         Args:
             session_id: Session to get deck for
 
         Returns:
-            Full SlideDeck dictionary (with slides array) or None if no deck exists
+            Full SlideDeck dictionary (with slides array and verification) or None
         """
+        from src.utils.slide_hash import compute_slide_hash
+        
         with get_db_session() as db:
             session = self._get_session_or_raise(db, session_id)
 
@@ -390,6 +395,14 @@ class SessionManager:
                 return None
 
             deck = session.slide_deck
+            
+            # Load verification map (separate from deck_json)
+            verification_map = {}
+            if deck.verification_map:
+                try:
+                    verification_map = json.loads(deck.verification_map)
+                except json.JSONDecodeError:
+                    logger.warning(f"Invalid verification_map JSON for session {session_id}")
             
             # Return full deck structure if available
             if deck.deck_json:
@@ -400,6 +413,14 @@ class SessionManager:
                 # Include html_content for raw HTML debug view
                 if deck.html_content:
                     deck_dict["html_content"] = deck.html_content
+                
+                # Merge verification into slides by content hash
+                for slide in deck_dict.get("slides", []):
+                    if slide.get("html"):
+                        content_hash = compute_slide_hash(slide["html"])
+                        slide["verification"] = verification_map.get(content_hash)
+                        slide["content_hash"] = content_hash
+                
                 return deck_dict
             
             # Legacy: return basic info without slides array
@@ -411,6 +432,75 @@ class SessionManager:
                 "created_at": deck.created_at.isoformat(),
                 "updated_at": deck.updated_at.isoformat(),
             }
+
+    def save_verification(
+        self,
+        session_id: str,
+        content_hash: str,
+        verification: Dict[str, Any],
+    ) -> None:
+        """Save verification result for a slide by content hash.
+
+        Verification is stored separately from deck_json so it survives
+        deck regeneration when chat modifies slides.
+
+        Args:
+            session_id: Session to save verification for
+            content_hash: Hash of the slide content
+            verification: Verification result dictionary
+        """
+        with get_db_session() as db:
+            session = self._get_session_or_raise(db, session_id)
+
+            if not session.slide_deck:
+                logger.warning(f"No slide deck for session {session_id}, cannot save verification")
+                return
+
+            deck = session.slide_deck
+            
+            # Load existing verification map
+            verification_map = {}
+            if deck.verification_map:
+                try:
+                    verification_map = json.loads(deck.verification_map)
+                except json.JSONDecodeError:
+                    logger.warning(f"Invalid verification_map JSON, starting fresh")
+            
+            # Update with new verification
+            verification_map[content_hash] = verification
+            
+            # Save back to database
+            deck.verification_map = json.dumps(verification_map)
+            
+            logger.info(
+                "Saved verification",
+                extra={
+                    "session_id": session_id,
+                    "content_hash": content_hash,
+                    "score": verification.get("score"),
+                },
+            )
+
+    def get_verification_map(self, session_id: str) -> Dict[str, Any]:
+        """Get the verification map for a session.
+
+        Args:
+            session_id: Session to get verification map for
+
+        Returns:
+            Dictionary mapping content hashes to verification results
+        """
+        with get_db_session() as db:
+            session = self._get_session_or_raise(db, session_id)
+
+            if not session.slide_deck or not session.slide_deck.verification_map:
+                return {}
+
+            try:
+                return json.loads(session.slide_deck.verification_map)
+            except json.JSONDecodeError:
+                logger.warning(f"Invalid verification_map JSON for session {session_id}")
+                return {}
 
     # Session locking for concurrent request handling
     def acquire_session_lock(self, session_id: str, timeout_seconds: int = 300) -> bool:
