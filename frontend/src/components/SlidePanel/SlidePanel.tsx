@@ -179,7 +179,7 @@ export const SlidePanel: React.FC<SlidePanelProps> = ({ slideDeck, rawHtml, onSl
       slide_htmls: [slide.html],
     };
 
-    const message = `Optimize the layout of this slide to prevent content overflow. Return only the HTML for this slide, no other text.
+    const message = `Optimize the layout of this slide to make good use of the slide real estate whilst preventing content overflow. Return only the HTML for this slide, no other text.
 
       CRITICAL REQUIREMENTS:
       1. Preserve ALL <canvas> elements exactly - do NOT modify, remove, rename, or change their id attributes
@@ -189,7 +189,7 @@ export const SlidePanel: React.FC<SlidePanelProps> = ({ slideDeck, rawHtml, onSl
       5. Maintain the 1280x720px slide dimensions
       6. Do NOT add, remove, or modify any <script> tags - chart scripts are handled separately
 
-      Focus on optimizing text layout, container sizing, and spacing to prevent content overflow while keeping all chart elements completely unchanged.`;
+      Focus on optimizing text layout, container sizing, and spacing while keeping all chart elements completely unchanged.`;
 
     // Send through ChatPanel so message appears in chat UI
     onSendMessage(message, slideContext);
