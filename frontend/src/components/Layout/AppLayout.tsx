@@ -1,6 +1,6 @@
-import React, { useState, useCallback } from 'react';
+import React, { useState, useCallback, useRef } from 'react';
 import type { SlideDeck } from '../../types/slide';
-import { ChatPanel } from '../ChatPanel/ChatPanel';
+import { ChatPanel, type ChatPanelHandle } from '../ChatPanel/ChatPanel';
 import { SlidePanel } from '../SlidePanel/SlidePanel';
 import { SelectionRibbon } from '../SlidePanel/SelectionRibbon';
 import { ProfileSelector } from '../config/ProfileSelector';
@@ -22,12 +22,18 @@ export const AppLayout: React.FC = () => {
   const [chatKey, setChatKey] = useState<number>(0);
   // Track which slide to scroll to in the main panel (uses key to allow re-scroll to same index)
   const [scrollTarget, setScrollTarget] = useState<{ index: number; key: number } | null>(null);
+  const chatPanelRef = useRef<ChatPanelHandle>(null);
   const { sessionTitle, createNewSession, switchSession, renameSession } = useSession();
   const { isGenerating } = useGeneration();
 
   // Handle navigation from ribbon to main slide panel
   const handleSlideNavigate = useCallback((index: number) => {
     setScrollTarget(prev => ({ index, key: (prev?.key ?? 0) + 1 }));
+  }, []);
+
+  // Send a message through the chat panel (used by SlidePanel for optimize layout)
+  const handleSendMessage = useCallback((content: string, slideContext?: { indices: number[]; slide_htmls: string[] }) => {
+    chatPanelRef.current?.sendMessage(content, slideContext);
   }, []);
 
   // Reset chat state and create new session when profile changes
@@ -196,6 +202,7 @@ export const AppLayout: React.FC = () => {
           <div className="w-[32%] min-w-[260px] border-r">
             <ChatPanel
               key={chatKey}
+              ref={chatPanelRef}
               rawHtml={rawHtml}
               onSlidesGenerated={(deck, raw) => {
                 setSlideDeck(deck);
@@ -214,6 +221,7 @@ export const AppLayout: React.FC = () => {
               rawHtml={rawHtml}
               onSlideChange={setSlideDeck}
               scrollToSlide={scrollTarget}
+              onSendMessage={handleSendMessage}
             />
           </div>
         </div>

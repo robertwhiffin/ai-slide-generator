@@ -18,7 +18,7 @@ import { FiPlay, FiDownload, FiFile, FiFileText, FiCode } from 'react-icons/fi';
 import type { Slide, SlideDeck } from '../../types/slide';
 import { SlideTile } from './SlideTile';
 import { PresentationMode } from '../PresentationMode';
-import { api, type StreamEvent } from '../../services/api';
+import { api } from '../../services/api';
 import { useSelection } from '../../contexts/SelectionContext';
 import { exportSlideDeckToPDF } from '../../services/pdf_client';
 import { useSession } from '../../contexts/SessionContext';
@@ -28,16 +28,22 @@ const isDebugMode = (): boolean => {
   return urlParams.get('debug')?.toLowerCase() === 'true' || localStorage.getItem('debug')?.toLowerCase() === 'true';
 };
 
+interface SlideContext {
+  indices: number[];
+  slide_htmls: string[];
+}
+
 interface SlidePanelProps {
   slideDeck: SlideDeck | null;
   rawHtml: string | null;
   onSlideChange: (slideDeck: SlideDeck) => void;
   scrollToSlide?: { index: number; key: number } | null;
+  onSendMessage?: (content: string, slideContext?: SlideContext) => void;
 }
 
 type ViewMode = 'tiles' | 'rawhtml' | 'rawtext';
 
-export const SlidePanel: React.FC<SlidePanelProps> = ({ slideDeck, rawHtml, onSlideChange, scrollToSlide }) => {
+export const SlidePanel: React.FC<SlidePanelProps> = ({ slideDeck, rawHtml, onSlideChange, scrollToSlide, onSendMessage }) => {
   const [isReordering, setIsReordering] = useState(false);
   const [viewMode, setViewMode] = useState<ViewMode>('tiles');
   const [isExportingPDF, setIsExportingPDF] = useState(false);
@@ -46,7 +52,6 @@ export const SlidePanel: React.FC<SlidePanelProps> = ({ slideDeck, rawHtml, onSl
   const exportMenuRef = useRef<HTMLDivElement>(null);
   const [isPresentationMode, setIsPresentationMode] = useState(false);
   const [optimizingSlideIndex, setOptimizingSlideIndex] = useState<number | null>(null);
-  const cancelOptimizeRef = useRef<(() => void) | null>(null);
   const { selectedIndices, setSelection, clearSelection } = useSelection();
   const { sessionId } = useSession();
   const slideRefs = useRef<Map<number, HTMLDivElement>>(new Map());
@@ -161,7 +166,7 @@ export const SlidePanel: React.FC<SlidePanelProps> = ({ slideDeck, rawHtml, onSl
   };
 
   const handleOptimizeLayout = (index: number) => {
-    if (!slideDeck || !sessionId || optimizingSlideIndex !== null) return;
+    if (!slideDeck || !onSendMessage || optimizingSlideIndex !== null) return;
 
     const slide = slideDeck.slides[index];
     if (!slide) return;
@@ -174,64 +179,28 @@ export const SlidePanel: React.FC<SlidePanelProps> = ({ slideDeck, rawHtml, onSl
       slide_htmls: [slide.html],
     };
 
-    const message = `optimize layout not to overflow. 
+    const message = `Optimize the layout of this slide to prevent content overflow. Return only the HTML for this slide, no other text.
 
-CRITICAL REQUIREMENTS:
-1. Preserve ALL <canvas> elements exactly - do NOT modify, remove, rename, or change their id attributes
-2. Keep all canvas elements in the same positions relative to their containers
-3. Do NOT modify any chart-related HTML structure
-4. Only adjust spacing, padding, margins, font sizes, and positioning of text and container elements
-5. Maintain the 1280x720px slide dimensions
-6. Do NOT add, remove, or modify any <script> tags - chart scripts are handled separately
+      CRITICAL REQUIREMENTS:
+      1. Preserve ALL <canvas> elements exactly - do NOT modify, remove, rename, or change their id attributes
+      2. Keep all canvas elements in the same positions relative to their containers
+      3. Do NOT modify any chart-related HTML structure
+      4. Only adjust spacing, padding, margins, font sizes, and positioning of text and container elements
+      5. Maintain the 1280x720px slide dimensions
+      6. Do NOT add, remove, or modify any <script> tags - chart scripts are handled separately
 
-Focus on optimizing text layout, container sizing, and spacing to prevent content overflow while keeping all chart elements completely unchanged.`;
+      Focus on optimizing text layout, container sizing, and spacing to prevent content overflow while keeping all chart elements completely unchanged.`;
 
-    // Handle streaming events
-    const handleStreamEvent = (event: StreamEvent) => {
-      switch (event.type) {
-        case 'error':
-          console.error('Optimize layout error:', event.error);
-          alert(event.error || 'Failed to optimize layout');
-          setOptimizingSlideIndex(null);
-          break;
-
-        case 'complete':
-          setOptimizingSlideIndex(null);
-          // Always fetch full deck to get verification merged from verification_map
-          api.getSlides(sessionId).then((result) => {
-            if (result.slide_deck) {
-              onSlideChange(result.slide_deck);
-            }
-          }).catch((err) => {
-            console.error('Failed to fetch updated slides:', err);
-            alert('Failed to fetch updated slides after optimization');
-          });
-          break;
-      }
-    };
-
-    // Start streaming
-    cancelOptimizeRef.current = api.sendChatMessage(
-      sessionId,
-      message,
-      slideContext,
-      handleStreamEvent,
-      (err) => {
-        console.error('Optimize layout error:', err);
-        alert(err.message || 'Failed to optimize layout');
-        setOptimizingSlideIndex(null);
-      }
-    );
+    // Send through ChatPanel so message appears in chat UI
+    onSendMessage(message, slideContext);
   };
 
-  // Cleanup on unmount
+  // Clear optimizing state when slideDeck updates (optimization completed)
   useEffect(() => {
-    return () => {
-      if (cancelOptimizeRef.current) {
-        cancelOptimizeRef.current();
-      }
-    };
-  }, []);
+    if (optimizingSlideIndex !== null) {
+      setOptimizingSlideIndex(null);
+    }
+  }, [slideDeck]);
 
   const handleExportPDF = async () => {
     if (!slideDeck || isExportingPDF) return;
