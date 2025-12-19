@@ -141,6 +141,15 @@ if IS_PRODUCTION:
             name="assets",
         )
 
+        # Serve favicon from dist root
+        @app.get("/favicon.svg")
+        async def serve_favicon():
+            """Serve favicon."""
+            favicon_path = frontend_dist / "favicon.svg"
+            if favicon_path.exists():
+                return FileResponse(str(favicon_path), media_type="image/svg+xml")
+            raise HTTPException(status_code=404, detail="Favicon not found")
+
         # Serve index.html for all other routes (SPA routing)
         @app.get("/{full_path:path}")
         async def serve_spa(full_path: str):
