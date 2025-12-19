@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState, forwardRef, useImperativeHandle } from 'react';
+import { useEffect, useRef, useState, forwardRef, useImperativeHandle } from 'react';
 import type { Message } from '../../types/message';
 import type { ReplacementInfo, SlideDeck } from '../../types/slide';
 import { MessageList } from './MessageList';
@@ -214,7 +214,7 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(({
             // The API returns slides with content_hash computed and verification merged
             api.getSlides(sessionId).then(result => {
               if (result.slide_deck) {
-                onSlidesGenerated(result.slide_deck, result.raw_html ?? nextRawHtml);
+                onSlidesGenerated(result.slide_deck, nextRawHtml);
               } else {
                 // Fallback to event.slides if API fails
                 onSlidesGenerated(event.slides!, nextRawHtml);
