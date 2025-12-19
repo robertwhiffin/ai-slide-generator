@@ -79,7 +79,7 @@ export const AppLayout: React.FC = () => {
       <header className="bg-blue-600 text-white px-6 py-4 shadow-md">
         <div className="flex items-center justify-between">
           <div>
-            <h1 className="text-xl font-bold">AI Slide Generator</h1>
+            <h1 className="text-xl font-bold">Databricks Storyteller</h1>
             <p className="text-sm text-blue-100 flex items-center gap-2">
               {sessionTitle && (
                 <>
