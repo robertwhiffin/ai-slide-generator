@@ -22,9 +22,7 @@ class GenieToolError(Exception):
     pass
 
 
-def initialize_genie_conversation(
-    placeholder_message: str = "This is a system message to start a conversation.",
-) -> str:
+def initialize_genie_conversation() -> str:
     """
     Initialize a Genie conversation with a placeholder message.
 
@@ -32,9 +30,7 @@ def initialize_genie_conversation(
     across multiple queries within a session, eliminating the need for
     the LLM to track conversation IDs.
 
-    Args:
-        placeholder_message: Initial message to start the conversation
-
+    Args: None
     Returns:
         Genie conversation ID string
 
@@ -62,9 +58,15 @@ def initialize_genie_conversation(
 
     logger.info("Initializing Genie conversation", extra=extra_info)
 
+    conversation_start_message: str = """
+    You are a data analyst agent for an AI slide generation system. 
+    Unless explicitly instructed otherwise, convert datetimes to dates and always round numeric columns to the nearest whole number. 
+    Provide an informative explanation of your query results. 
+    """
+
     try:
         response = client.genie.start_conversation_and_wait(
-            space_id=space_id, content=placeholder_message
+            space_id=space_id, content=conversation_start_message
         )
         conversation_id = response.conversation_id
 
