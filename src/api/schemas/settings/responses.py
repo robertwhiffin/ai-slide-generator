@@ -71,9 +71,9 @@ class PromptsConfig(BaseModel):
 
     id: int
     profile_id: int
+    selected_deck_prompt_id: Optional[int] = None
     system_prompt: str
     slide_editing_instructions: str
-    user_prompt_template: str
     created_at: datetime
     updated_at: datetime
 

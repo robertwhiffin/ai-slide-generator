@@ -60,6 +60,7 @@ Generate professional HTML slide decks from natural language using LLMs and Data
 - **SlideDeck Parser:** Robust HTML parsing with BeautifulSoup for slide manipulation
 - **Chart.js:** Data visualizations with defensive rendering
 - **LLM as Judge:** Auto-verifies slide accuracy against Genie source data with MLflow tracing
+- **Deck Prompt Library:** Reusable presentation templates for consistent, standardized decks
 
 ---
 
@@ -266,6 +267,14 @@ ai-slide-generator/
 ```
 Create a 10-slide presentation about Q3 revenue trends
 ```
+
+### Use Deck Prompts
+
+For standardized presentations (e.g., QBRs, consumption reviews), use Deck Prompts:
+
+1. Go to **Deck Prompts** page to view/create templates
+2. In **Profiles**, select a profile and go to the **Deck Prompt** tab
+3. Select a template — the AI will follow its structure when generating slides
 
 ### Edit Existing Slides
 

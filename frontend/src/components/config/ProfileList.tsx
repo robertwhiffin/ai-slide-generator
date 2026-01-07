@@ -345,7 +345,6 @@ export const ProfileList: React.FC<ProfileListProps> = ({ onProfileChange }) => 
         isOpen={formMode !== null}
         mode={formMode || 'create'}
         profile={editingProfile || undefined}
-        profiles={profiles}
         onSubmit={handleFormSubmit}
         onCancel={() => {
           setFormMode(null);

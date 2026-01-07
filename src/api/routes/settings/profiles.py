@@ -121,20 +121,26 @@ def create_profile(
         request: Profile creation request
         
     Returns:
-        Created profile with default configurations
+        Created profile with default configurations.
+        Note: Genie space must be configured separately after creation.
+        MLflow experiment name is auto-set based on creator's username.
         
     Raises:
-        400: Invalid request or source profile not found
+        400: Invalid request
         409: Profile name already exists
     """
     try:
-        # TODO: Get actual user from authentication
-        user = "system"
+        # Get the current user from Databricks for MLflow experiment path
+        try:
+            from src.core.databricks_client import get_databricks_client
+            client = get_databricks_client()
+            user = client.current_user.me().user_name
+        except Exception:
+            user = "system"
 
         profile = service.create_profile(
             name=request.name,
             description=request.description,
-            copy_from_id=request.copy_from_profile_id,
             user=user,
         )
         return profile

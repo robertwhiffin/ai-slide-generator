@@ -76,7 +76,6 @@ def update_prompts_config(
         validator = ConfigValidator()
         result = validator.validate_prompts(
             system_prompt=request.system_prompt,
-            user_prompt_template=request.user_prompt_template,
         )
         if not result.valid:
             raise HTTPException(
@@ -89,9 +88,9 @@ def update_prompts_config(
 
         config = service.update_prompts_config(
             profile_id=profile_id,
+            selected_deck_prompt_id=request.selected_deck_prompt_id,
             system_prompt=request.system_prompt,
             slide_editing_instructions=request.slide_editing_instructions,
-            user_prompt_template=request.user_prompt_template,
             user=user,
         )
         return config

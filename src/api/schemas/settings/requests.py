@@ -9,7 +9,6 @@ class ProfileCreate(BaseModel):
 
     name: str = Field(..., min_length=1, max_length=100, description="Profile name")
     description: Optional[str] = Field(None, description="Profile description")
-    copy_from_profile_id: Optional[int] = Field(None, description="Copy configs from this profile ID")
 
     @field_validator("name")
     @classmethod
@@ -111,17 +110,9 @@ class MLflowConfigUpdate(BaseModel):
 class PromptsConfigUpdate(BaseModel):
     """Request to update prompts configuration."""
 
-    system_prompt: Optional[str] = Field(None, description="System prompt")
-    slide_editing_instructions: Optional[str] = Field(None, description="Slide editing instructions")
-    user_prompt_template: Optional[str] = Field(None, description="User prompt template")
-
-    @field_validator("user_prompt_template")
-    @classmethod
-    def validate_user_template(cls, v: Optional[str]) -> Optional[str]:
-        """Validate user prompt template has required placeholder."""
-        if v is not None and "{question}" not in v:
-            raise ValueError("User prompt template must contain {question} placeholder")
-        return v
+    selected_deck_prompt_id: Optional[int] = Field(None, description="Selected deck prompt from library (null to clear)")
+    system_prompt: Optional[str] = Field(None, description="System prompt (advanced)")
+    slide_editing_instructions: Optional[str] = Field(None, description="Slide editing instructions (advanced)")
 
     @field_validator("system_prompt")
     @classmethod

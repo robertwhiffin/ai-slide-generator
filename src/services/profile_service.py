@@ -64,18 +64,18 @@ class ProfileService:
         self,
         name: str,
         description: Optional[str],
-        copy_from_id: Optional[int],
         user: str,
     ) -> ConfigProfile:
         """
         Create new profile.
         
         If no default profile exists, the new profile will be set as default.
+        New profiles require explicit Genie space configuration - no default is created.
+        MLflow experiment name is auto-set based on creator's username.
         
         Args:
             name: Profile name
             description: Profile description
-            copy_from_id: If provided, copy configs from this profile
             user: User creating the profile
             
         Returns:
@@ -100,79 +100,32 @@ class ProfileService:
         self.db.add(profile)
         self.db.flush()
 
-        if copy_from_id:
-            # Copy from existing profile
-            source_profile = self.get_profile(copy_from_id)
-            if not source_profile:
-                raise ValueError(f"Source profile {copy_from_id} not found")
+        # Use defaults for AI infrastructure
+        ai_infra = ConfigAIInfra(
+            profile_id=profile.id,
+            llm_endpoint=DEFAULT_CONFIG["llm"]["endpoint"],
+            llm_temperature=DEFAULT_CONFIG["llm"]["temperature"],
+            llm_max_tokens=DEFAULT_CONFIG["llm"]["max_tokens"],
+        )
+        self.db.add(ai_infra)
 
-            # Copy AI db_app_deployment
-            ai_infra = ConfigAIInfra(
-                profile_id=profile.id,
-                llm_endpoint=source_profile.ai_infra.llm_endpoint,
-                llm_temperature=source_profile.ai_infra.llm_temperature,
-                llm_max_tokens=source_profile.ai_infra.llm_max_tokens,
-            )
-            self.db.add(ai_infra)
+        # NO default Genie space - user must explicitly configure one
 
-            # Copy Genie space (only one per profile)
-            if source_profile.genie_spaces:
-                # Copy the first (and only) genie space
-                space = source_profile.genie_spaces[0]
-                new_space = ConfigGenieSpace(
-                    profile_id=profile.id,
-                    space_id=space.space_id,
-                    space_name=space.space_name,
-                    description=space.description,
-                )
-                self.db.add(new_space)
+        # Auto-set MLflow experiment name based on creator's username
+        experiment_name = f"/Workspace/Users/{user}/ai-slide-generator"
+        mlflow = ConfigMLflow(
+            profile_id=profile.id,
+            experiment_name=experiment_name,
+        )
+        self.db.add(mlflow)
 
-            # Copy MLflow
-            mlflow = ConfigMLflow(
-                profile_id=profile.id,
-                experiment_name=source_profile.mlflow.experiment_name,
-            )
-            self.db.add(mlflow)
-
-            # Copy prompts
-            prompts = ConfigPrompts(
-                profile_id=profile.id,
-                system_prompt=source_profile.prompts.system_prompt,
-                slide_editing_instructions=source_profile.prompts.slide_editing_instructions,
-                user_prompt_template=source_profile.prompts.user_prompt_template,
-            )
-            self.db.add(prompts)
-        else:
-            # Use defaults
-            ai_infra = ConfigAIInfra(
-                profile_id=profile.id,
-                llm_endpoint=DEFAULT_CONFIG["llm"]["endpoint"],
-                llm_temperature=DEFAULT_CONFIG["llm"]["temperature"],
-                llm_max_tokens=DEFAULT_CONFIG["llm"]["max_tokens"],
-            )
-            self.db.add(ai_infra)
-
-            genie_space = ConfigGenieSpace(
-                profile_id=profile.id,
-                space_id=DEFAULT_CONFIG["genie"]["space_id"],
-                space_name=DEFAULT_CONFIG["genie"]["space_name"],
-                description=DEFAULT_CONFIG["genie"]["description"],
-            )
-            self.db.add(genie_space)
-
-            mlflow = ConfigMLflow(
-                profile_id=profile.id,
-                experiment_name=DEFAULT_CONFIG["mlflow"]["experiment_name"],
-            )
-            self.db.add(mlflow)
-
-            prompts = ConfigPrompts(
-                profile_id=profile.id,
-                system_prompt=DEFAULT_CONFIG["prompts"]["system_prompt"],
-                slide_editing_instructions=DEFAULT_CONFIG["prompts"]["slide_editing_instructions"],
-                user_prompt_template=DEFAULT_CONFIG["prompts"]["user_prompt_template"],
-            )
-            self.db.add(prompts)
+        # Use default prompts
+        prompts = ConfigPrompts(
+            profile_id=profile.id,
+            system_prompt=DEFAULT_CONFIG["prompts"]["system_prompt"],
+            slide_editing_instructions=DEFAULT_CONFIG["prompts"]["slide_editing_instructions"],
+        )
+        self.db.add(prompts)
 
         # Log creation
         history = ConfigHistory(
@@ -310,6 +263,9 @@ class ProfileService:
         """
         Duplicate profile with new name.
         
+        Copies all configuration from the source profile including
+        AI infrastructure, Genie space, MLflow, and prompts.
+        
         Args:
             profile_id: Profile to duplicate
             new_name: Name for new profile
@@ -318,10 +274,77 @@ class ProfileService:
         Returns:
             New profile
         """
-        return self.create_profile(
-            name=new_name,
-            description=f"Copy of profile {profile_id}",
-            copy_from_id=profile_id,
-            user=user,
+        source_profile = self.get_profile(profile_id)
+        if not source_profile:
+            raise ValueError(f"Source profile {profile_id} not found")
+
+        # Check if a default profile already exists
+        has_default = (
+            self.db.query(ConfigProfile)
+            .filter(ConfigProfile.is_default == True)
+            .first()
+            is not None
         )
+
+        # Create new profile
+        profile = ConfigProfile(
+            name=new_name,
+            description=f"Copy of {source_profile.name}",
+            is_default=not has_default,
+            created_by=user,
+            updated_by=user,
+        )
+        self.db.add(profile)
+        self.db.flush()
+
+        # Copy AI infrastructure
+        ai_infra = ConfigAIInfra(
+            profile_id=profile.id,
+            llm_endpoint=source_profile.ai_infra.llm_endpoint,
+            llm_temperature=source_profile.ai_infra.llm_temperature,
+            llm_max_tokens=source_profile.ai_infra.llm_max_tokens,
+        )
+        self.db.add(ai_infra)
+
+        # Copy Genie space if exists
+        if source_profile.genie_spaces:
+            space = source_profile.genie_spaces[0]
+            new_space = ConfigGenieSpace(
+                profile_id=profile.id,
+                space_id=space.space_id,
+                space_name=space.space_name,
+                description=space.description,
+            )
+            self.db.add(new_space)
+
+        # Copy MLflow config
+        mlflow = ConfigMLflow(
+            profile_id=profile.id,
+            experiment_name=source_profile.mlflow.experiment_name,
+        )
+        self.db.add(mlflow)
+
+        # Copy prompts
+        prompts = ConfigPrompts(
+            profile_id=profile.id,
+            system_prompt=source_profile.prompts.system_prompt,
+            slide_editing_instructions=source_profile.prompts.slide_editing_instructions,
+            selected_deck_prompt_id=source_profile.prompts.selected_deck_prompt_id,
+        )
+        self.db.add(prompts)
+
+        # Log creation
+        history = ConfigHistory(
+            profile_id=profile.id,
+            domain="profile",
+            action="duplicate",
+            changed_by=user,
+            changes={"source_profile_id": profile_id, "name": new_name},
+        )
+        self.db.add(history)
+
+        self.db.commit()
+        self.db.refresh(profile)
+
+        return profile
 

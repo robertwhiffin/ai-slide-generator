@@ -18,6 +18,7 @@ from fastapi.staticfiles import StaticFiles
 from src.api.routes import chat, slides, export, sessions, verification
 from src.api.routes.settings import (
     ai_infra_router,
+    deck_prompts_router,
     genie_router,
     mlflow_router,
     profiles_router,
@@ -106,6 +107,7 @@ app.include_router(verification.router)
 # Configuration management routers
 app.include_router(profiles_router, prefix="/api/settings", tags=["settings"])
 app.include_router(ai_infra_router, prefix="/api/settings", tags=["settings"])
+app.include_router(deck_prompts_router, prefix="/api/settings", tags=["settings"])
 app.include_router(genie_router, prefix="/api/settings", tags=["settings"])
 app.include_router(mlflow_router, prefix="/api/settings", tags=["settings"])
 app.include_router(prompts_router, prefix="/api/settings", tags=["settings"])
