@@ -59,6 +59,7 @@ Frontend fetch -> FastAPI router ->   │ ChatService (singleton)│
 | `POST` | `/api/chat/async` | Submit for async processing (polling) | `routes/chat.submit_chat_async` |
 | `GET` | `/api/chat/poll/{request_id}` | Poll for async request status | `routes/chat.poll_chat` |
 | `GET` | `/api/health` | Lightweight readiness probe | `routes/chat.health_check` |
+| `GET` | `/api/user/current` | Get current Databricks user (username, display_name) | `main.get_current_user` |
 | `GET` | `/api/slides` | Get slides (requires `session_id` query param) | `routes/slides.get_slides` |
 | `PUT` | `/api/slides/reorder` | Reorder (requires `session_id` in body) | `routes/slides.reorder_slides` |
 | `PATCH` | `/api/slides/{index}` | Update HTML (requires `session_id` in body) | `routes/slides.update_slide` |
@@ -79,7 +80,8 @@ Frontend fetch -> FastAPI router ->   │ ChatService (singleton)│
 | Method | Path | Purpose | Backend handler |
 | --- | --- | --- | --- |
 | `GET` | `/api/settings/profiles` | List all profiles | `routes/settings/profiles.list_profiles` |
-| `POST` | `/api/settings/profiles` | Create profile | `routes/settings/profiles.create_profile` |
+| `POST` | `/api/settings/profiles` | Create profile (basic, requires subsequent config) | `routes/settings/profiles.create_profile` |
+| `POST` | `/api/settings/profiles/with-config` | Create profile with all config in one request (wizard) | `routes/settings/profiles.create_profile_with_config` |
 | `GET` | `/api/settings/profiles/{id}` | Get profile details | `routes/settings/profiles.get_profile` |
 | `PUT` | `/api/settings/profiles/{id}` | Update profile | `routes/settings/profiles.update_profile` |
 | `DELETE` | `/api/settings/profiles/{id}` | Delete profile | `routes/settings/profiles.delete_profile` |
