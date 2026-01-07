@@ -36,6 +36,33 @@ export interface ProfileCreate {
   description?: string | null;
 }
 
+/**
+ * Extended profile creation with inline configurations.
+ * Used by the creation wizard to create a complete profile in one request.
+ */
+export interface ProfileCreateWithConfig {
+  name: string;
+  description?: string | null;
+  genie_space: {
+    space_id: string;
+    space_name: string;
+    description?: string | null;
+  };
+  ai_infra?: {
+    llm_endpoint?: string;
+    llm_temperature?: number;
+    llm_max_tokens?: number;
+  };
+  mlflow?: {
+    experiment_name: string;
+  };
+  prompts?: {
+    selected_deck_prompt_id?: number | null;
+    system_prompt?: string;
+    slide_editing_instructions?: string;
+  };
+}
+
 export interface ProfileUpdate {
   name?: string;
   description?: string | null;
@@ -233,6 +260,17 @@ export const configApi = {
   
   createProfile: (data: ProfileCreate): Promise<ProfileDetail> =>
     fetchJson(`${API_BASE}/profiles`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(data),
+    }),
+  
+  /**
+   * Create a profile with all configurations in one request.
+   * Used by the creation wizard for complete profile setup.
+   */
+  createProfileWithConfig: (data: ProfileCreateWithConfig): Promise<ProfileDetail> =>
+    fetchJson(`${API_BASE}/profiles/with-config`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(data),

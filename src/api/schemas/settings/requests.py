@@ -19,6 +19,70 @@ class ProfileCreate(BaseModel):
         return v.strip()
 
 
+class GenieSpaceCreateInline(BaseModel):
+    """Inline Genie space configuration for profile creation wizard."""
+
+    space_id: str = Field(..., min_length=1, description="Genie space ID")
+    space_name: str = Field(..., min_length=1, max_length=255, description="Space display name")
+    description: Optional[str] = Field(None, description="Space description")
+
+
+class AIInfraCreateInline(BaseModel):
+    """Inline AI infrastructure configuration for profile creation wizard."""
+
+    llm_endpoint: Optional[str] = Field(None, description="LLM endpoint name")
+    llm_temperature: Optional[float] = Field(None, ge=0.0, le=1.0, description="LLM temperature")
+    llm_max_tokens: Optional[int] = Field(None, gt=0, description="Max tokens")
+
+
+class MLflowCreateInline(BaseModel):
+    """Inline MLflow configuration for profile creation wizard."""
+
+    experiment_name: str = Field(..., min_length=1, description="MLflow experiment name")
+
+    @field_validator("experiment_name")
+    @classmethod
+    def validate_experiment_name(cls, v: str) -> str:
+        """Validate experiment name."""
+        if not v.strip():
+            raise ValueError("Experiment name cannot be empty")
+        if not v.startswith("/"):
+            raise ValueError("Experiment name must start with /")
+        return v.strip()
+
+
+class PromptsCreateInline(BaseModel):
+    """Inline prompts configuration for profile creation wizard."""
+
+    selected_deck_prompt_id: Optional[int] = Field(None, description="Selected deck prompt")
+    system_prompt: Optional[str] = Field(None, description="System prompt")
+    slide_editing_instructions: Optional[str] = Field(None, description="Slide editing instructions")
+
+
+class ProfileCreateWithConfig(BaseModel):
+    """
+    Request to create a profile with all configurations inline.
+    
+    Used by the creation wizard to create a complete profile in one request.
+    Genie space is required; other configurations have defaults.
+    """
+
+    name: str = Field(..., min_length=1, max_length=100, description="Profile name")
+    description: Optional[str] = Field(None, description="Profile description")
+    genie_space: GenieSpaceCreateInline = Field(..., description="Genie space (required)")
+    ai_infra: Optional[AIInfraCreateInline] = Field(None, description="AI infrastructure")
+    mlflow: Optional[MLflowCreateInline] = Field(None, description="MLflow configuration")
+    prompts: Optional[PromptsCreateInline] = Field(None, description="Prompts configuration")
+
+    @field_validator("name")
+    @classmethod
+    def validate_name(cls, v: str) -> str:
+        """Validate profile name."""
+        if not v.strip():
+            raise ValueError("Profile name cannot be empty")
+        return v.strip()
+
+
 class ProfileUpdate(BaseModel):
     """Request to update profile metadata."""
 

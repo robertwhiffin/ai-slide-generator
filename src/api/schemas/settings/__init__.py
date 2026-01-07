@@ -5,6 +5,7 @@ from src.api.schemas.settings.requests import (
     GenieSpaceUpdate,
     MLflowConfigUpdate,
     ProfileCreate,
+    ProfileCreateWithConfig,
     ProfileDuplicate,
     ProfileUpdate,
     PromptsConfigUpdate,
@@ -25,6 +26,7 @@ from src.api.schemas.settings.responses import (
 __all__ = [
     # Requests
     "ProfileCreate",
+    "ProfileCreateWithConfig",
     "ProfileUpdate",
     "ProfileDuplicate",
     "AIInfraConfigUpdate",
