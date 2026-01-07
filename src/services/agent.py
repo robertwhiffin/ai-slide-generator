@@ -243,26 +243,49 @@ class SlideGeneratorAgent:
         return [genie_tool]
 
     def _create_prompt(self) -> ChatPromptTemplate:
-        """Create prompt template with system prompt from settings and chat history."""
+        """Create prompt template with system prompt from settings and chat history.
+        
+        Prompt structure (when all components present):
+        1. Deck prompt (from library) - defines presentation type/content
+        2. System prompt - defines slide generation rules/formatting
+        3. Slide editing instructions - defines editing behavior
+        """
+        deck_prompt = self.settings.prompts.get("deck_prompt", "")
         system_prompt = self.settings.prompts.get("system_prompt", "")
         editing_prompt = self.settings.prompts.get("slide_editing_instructions", "")
 
         if not system_prompt:
             raise AgentError("System prompt not found in configuration")
 
+        # Build the complete system prompt
+        prompt_parts = []
+        
+        # Deck prompt comes first - sets context for what type of presentation to create
+        if deck_prompt:
+            prompt_parts.append(f"PRESENTATION CONTEXT:\n{deck_prompt.strip()}")
+        
+        # Core system prompt for slide generation
+        prompt_parts.append(system_prompt.rstrip())
+        
+        # Editing instructions appended at the end
         if editing_prompt:
-            system_prompt = f"{system_prompt.rstrip()}\n\n{editing_prompt.strip()}"
+            prompt_parts.append(editing_prompt.strip())
+        
+        full_system_prompt = "\n\n".join(prompt_parts)
 
         prompt = ChatPromptTemplate.from_messages(
             [
-                ("system", system_prompt),
+                ("system", full_system_prompt),
                 ("placeholder", "{chat_history}"),  # Conversation history for multi-turn
                 ("human", "{input}"),
                 ("placeholder", "{agent_scratchpad}"),
             ]
         )
 
-        logger.info("Prompt template created with chat history support")
+        logger.info(
+            "Prompt template created",
+            extra={"has_deck_prompt": bool(deck_prompt), "has_editing_prompt": bool(editing_prompt)}
+        )
         return prompt
 
     def _create_agent_executor(self, tools: list[StructuredTool]) -> AgentExecutor:

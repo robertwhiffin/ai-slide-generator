@@ -1,7 +1,7 @@
 # Database Configuration System
 
 **Status:** Complete - Configuration & Session Models  
-**Last Updated:** December 8, 2025
+**Last Updated:** January 7, 2026
 
 ## Overview
 
@@ -24,8 +24,9 @@ The database consists of configuration and session tables:
 2. **`config_ai_infra`** - AI/LLM settings (endpoint, temperature, max tokens)
 3. **`config_genie_spaces`** - Databricks Genie space configurations
 4. **`config_mlflow`** - MLflow experiment settings
-5. **`config_prompts`** - System prompts and templates
+5. **`config_prompts`** - System prompts and deck prompt selection
 6. **`config_history`** - Audit trail of all configuration changes
+7. **`slide_deck_prompt_library`** - Global deck prompt templates (shared across profiles)
 
 **Session Tables:**
 7. **`user_sessions`** - User conversation sessions with processing locks
@@ -40,8 +41,10 @@ The database consists of configuration and session tables:
 config_profiles (1) ──┬── (1) config_ai_infra
                       ├── (1) config_genie_spaces
                       ├── (1) config_mlflow
-                      ├── (1) config_prompts
+                      ├── (1) config_prompts ──── (0..1) slide_deck_prompt_library
                       └── (n) config_history
+
+slide_deck_prompt_library (global) ──── (n) config_prompts (via selected_deck_prompt_id FK)
 ```
 
 **Session Tables:**
@@ -187,18 +190,42 @@ class ConfigMLflow(Base):
 
 ### ConfigPrompts
 
-System prompts and templates for the LLM.
+System prompts and deck prompt selection for the LLM.
 
 ```python
 class ConfigPrompts(Base):
     id: int
     profile_id: int                      # Foreign key to config_profiles
-    system_prompt: str                   # Main system prompt
-    slide_editing_instructions: str      # Editing mode instructions
-    user_prompt_template: str            # Template for user messages
+    selected_deck_prompt_id: int | None  # FK to slide_deck_prompt_library (optional)
+    system_prompt: str                   # Main system prompt (advanced)
+    slide_editing_instructions: str      # Editing mode instructions (advanced)
     created_at: datetime
     updated_at: datetime
 ```
+
+### SlideDeckPromptLibrary
+
+Global deck prompt templates shared across all profiles.
+
+```python
+class SlideDeckPromptLibrary(Base):
+    id: int
+    name: str                    # Template name (e.g., "Quarterly Business Review")
+    description: str | None      # What this template is for
+    category: str | None         # Grouping (e.g., "Report", "Review", "Summary")
+    prompt_content: str          # Full prompt instructions for the AI
+    is_active: bool              # Whether available for selection
+    created_by: str | None       # Who created it
+    created_at: datetime
+    updated_by: str | None       # Who last updated it
+    updated_at: datetime
+```
+
+**How deck prompts work:**
+1. Deck prompts are created globally (not per-profile)
+2. Each profile can select one deck prompt via `config_prompts.selected_deck_prompt_id`
+3. When generating slides, the deck prompt content is prepended to the system prompt
+4. This enables standardized presentations without users retyping instructions each time
 
 ### ConfigHistory
 
@@ -369,14 +396,28 @@ python scripts/init_database.py
 
 This creates:
 - A "default" profile marked as the default
-- Default AI infrastructure settings
+- Default AI infrastructure settings (LLM endpoint: `databricks-claude-sonnet-4-5`)
 - Default Genie space configuration (one per profile)
 - Default MLflow experiment name
 - Default system prompts
+- Seed deck prompts (Consumption Review, QBR, Executive Summary, Use Case Analysis)
+
+### Profile Creation
+
+Profiles are created via a 6-step wizard that collects all required configuration:
+
+1. **Basic Info** - Name and description
+2. **Genie Space** - Required data source with AI description
+3. **LLM Settings** - Defaults to `databricks-claude-sonnet-4-5`
+4. **MLflow** - Auto-populated with `/Workspace/Users/{username}/ai-slide-generator`
+5. **Deck Prompt** - Optional template selection
+6. **Review** - Confirmation before creation
+
+The wizard creates the profile and all configurations in a single transaction via `ProfileService.create_profile_with_config()`. This ensures profiles are always complete and usable immediately after creation.
 
 ### Default Values
 
-Defined in `src/config/defaults.py`:
+Defined in `src/core/defaults.py`:
 
 ```python
 DEFAULT_CONFIG = {
@@ -385,21 +426,28 @@ DEFAULT_CONFIG = {
         "temperature": 0.7,
         "max_tokens": 60000,
     },
-    "genie": {
-        "space_id": "01effebcc2781b6bbb749077a55d31e3",
-        "space_name": "Databricks Usage Analytics",
-        "description": "Databricks usage data space",
-    },
-    "mlflow": {
-        "experiment_name": "/Workspace/Users/{username}/ai-slide-generator",
-    },
+    # No default Genie space - must be explicitly configured per profile
     "prompts": {
         "system_prompt": "...",
         "slide_editing_instructions": "...",
-        "user_prompt_template": "{question}",
     },
 }
 ```
+
+**Note:** Genie space must be explicitly configured for each profile. MLflow experiment name is auto-set based on the profile creator's username.
+
+### Default Deck Prompts
+
+The database is seeded with default deck prompt templates:
+
+| Name | Category | Description |
+|------|----------|-------------|
+| Consumption Review | Review | Analyze usage trends and optimization opportunities |
+| Quarterly Business Review | Report | QBR structure with metrics, achievements, and outlook |
+| Executive Summary | Summary | Concise 5-7 slide format for leadership |
+| Use Case Analysis | Analysis | Portfolio overview with blocker identification |
+
+Run `python scripts/init_database.py --reset` to recreate the database with seed data.
 
 ## Testing
 

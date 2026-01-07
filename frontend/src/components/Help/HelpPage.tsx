@@ -1,8 +1,8 @@
 import React, { useState } from 'react';
-import { FiArrowLeft, FiMessageSquare, FiClock, FiSettings, FiInfo, FiShield } from 'react-icons/fi';
+import { FiArrowLeft, FiMessageSquare, FiClock, FiSettings, FiInfo, FiShield, FiFileText } from 'react-icons/fi';
 import { FaGavel } from 'react-icons/fa';
 
-type HelpTab = 'overview' | 'generator' | 'history' | 'settings' | 'verification';
+type HelpTab = 'overview' | 'generator' | 'history' | 'settings' | 'deck_prompts' | 'verification';
 
 interface HelpPageProps {
   onBack: () => void;
@@ -55,6 +55,7 @@ export const HelpPage: React.FC<HelpPageProps> = ({ onBack }) => {
         <TabButton tab="verification" label="Verification" icon={FiShield} />
         <TabButton tab="history" label="History" icon={FiClock} />
         <TabButton tab="settings" label="Settings" icon={FiSettings} />
+        <TabButton tab="deck_prompts" label="Deck Prompts" icon={FiFileText} />
       </div>
 
       {/* Content area */}
@@ -64,6 +65,7 @@ export const HelpPage: React.FC<HelpPageProps> = ({ onBack }) => {
         {activeTab === 'verification' && <VerificationTab />}
         {activeTab === 'history' && <HistoryTab />}
         {activeTab === 'settings' && <SettingsTab />}
+        {activeTab === 'deck_prompts' && <DeckPromptsTab />}
       </div>
     </div>
   );
@@ -108,6 +110,7 @@ const OverviewTab: React.FC<{
         <QuickLinkButton tab="verification" label="Learn about Verification →" />
         <QuickLinkButton tab="history" label="Learn about History →" />
         <QuickLinkButton tab="settings" label="Learn about Settings →" />
+        <QuickLinkButton tab="deck_prompts" label="Learn about Deck Prompts →" />
       </div>
     </section>
   </div>
@@ -331,6 +334,17 @@ const SettingsTab: React.FC = () => (
     </section>
 
     <section>
+      <h2 className="text-lg font-semibold text-gray-800 mb-3">Profile Configuration Tabs</h2>
+      <ul className="list-disc list-inside text-gray-600 space-y-2">
+        <li><span className="font-medium">AI Infrastructure:</span> LLM endpoint, temperature, and token limits</li>
+        <li><span className="font-medium">Genie Spaces:</span> Connect to your Databricks Genie data source</li>
+        <li><span className="font-medium">MLflow:</span> Experiment tracking configuration</li>
+        <li><span className="font-medium">Deck Prompt:</span> Select a presentation template from the library</li>
+        <li><span className="font-medium">Advanced:</span> System prompts for power users (rarely modified)</li>
+      </ul>
+    </section>
+
+    <section>
       <h2 className="text-lg font-semibold text-gray-800 mb-3">Actions</h2>
       <ul className="list-disc list-inside text-gray-600 space-y-2">
         <li><span className="font-medium">View and Edit:</span> Modify profile settings and configuration</li>
@@ -350,6 +364,98 @@ const SettingsTab: React.FC = () => (
           <li>Share configurations across team members</li>
           <li>Maintain separate dev/prod configurations</li>
         </ul>
+      </div>
+    </section>
+  </div>
+);
+
+// Deck Prompts Tab Content
+const DeckPromptsTab: React.FC = () => (
+  <div className="space-y-6">
+    <section>
+      <h2 className="text-lg font-semibold text-gray-800 mb-3">What are Deck Prompts?</h2>
+      <p className="text-gray-600 mb-3">
+        Deck Prompts are reusable presentation templates that guide the AI in creating specific types of presentations.
+        Instead of explaining what kind of deck you want each time, you can select a pre-built prompt that the AI follows.
+      </p>
+      <div className="bg-blue-50 rounded-lg p-4">
+        <p className="text-blue-800 text-sm">
+          <strong>Example:</strong> A "Quarterly Business Review" deck prompt tells the AI to structure slides with 
+          executive summary, metrics deep-dive, achievements, challenges, and next quarter outlook.
+        </p>
+      </div>
+    </section>
+
+    <section>
+      <h2 className="text-lg font-semibold text-gray-800 mb-3">How They Work</h2>
+      <ol className="list-decimal list-inside text-gray-600 space-y-2">
+        <li>Create deck prompts in the <strong>Deck Prompts</strong> page (top navigation)</li>
+        <li>In a Profile, go to the <strong>Deck Prompt</strong> tab and select a prompt</li>
+        <li>When you generate slides, the AI follows the selected prompt's structure</li>
+        <li>You can still add your own instructions in the chat — they combine with the deck prompt</li>
+      </ol>
+    </section>
+
+    <section>
+      <h2 className="text-lg font-semibold text-gray-800 mb-3">Managing Deck Prompts</h2>
+      <div className="bg-gray-50 rounded-lg p-4">
+        <ul className="list-disc list-inside text-gray-700 space-y-2">
+          <li><span className="font-medium">Create:</span> Click "+ Create Prompt" to add a new template</li>
+          <li><span className="font-medium">Preview:</span> Expand any prompt to see its full content</li>
+          <li><span className="font-medium">Edit:</span> Modify name, description, category, or content</li>
+          <li><span className="font-medium">Delete:</span> Remove prompts you no longer need</li>
+        </ul>
+      </div>
+    </section>
+
+    <section>
+      <h2 className="text-lg font-semibold text-gray-800 mb-3">Writing Good Deck Prompts</h2>
+      <div className="grid md:grid-cols-2 gap-4">
+        <div className="bg-green-50 rounded-lg p-3">
+          <h4 className="font-medium text-green-800 mb-2">✓ Include</h4>
+          <ul className="text-sm text-green-700 space-y-1">
+            <li>• Clear presentation type name</li>
+            <li>• Section structure and order</li>
+            <li>• What data to query for</li>
+            <li>• Specific metrics or KPIs to highlight</li>
+            <li>• Chart type recommendations</li>
+          </ul>
+        </div>
+        <div className="bg-red-50 rounded-lg p-3">
+          <h4 className="font-medium text-red-800 mb-2">✗ Avoid</h4>
+          <ul className="text-sm text-red-700 space-y-1">
+            <li>• Hardcoded data values</li>
+            <li>• Specific colors or fonts (use Advanced settings)</li>
+            <li>• HTML formatting instructions</li>
+            <li>• Too rigid structure that doesn't fit data</li>
+          </ul>
+        </div>
+      </div>
+    </section>
+
+    <section>
+      <h2 className="text-lg font-semibold text-gray-800 mb-3">Default Templates</h2>
+      <p className="text-gray-600 mb-3">
+        The system comes with several pre-built templates:
+      </p>
+      <ul className="list-disc list-inside text-gray-600 space-y-1">
+        <li><span className="font-medium">Consumption Review:</span> Analyze usage trends and optimization opportunities</li>
+        <li><span className="font-medium">Quarterly Business Review:</span> QBR structure with metrics, achievements, and outlook</li>
+        <li><span className="font-medium">Executive Summary:</span> Concise 5-7 slide format for leadership</li>
+        <li><span className="font-medium">Use Case Analysis:</span> Portfolio overview with blocker identification</li>
+      </ul>
+    </section>
+
+    <section>
+      <h2 className="text-lg font-semibold text-gray-800 mb-3">Deck Prompts vs Advanced Settings</h2>
+      <div className="bg-amber-50 rounded-lg p-4">
+        <p className="text-gray-700 mb-2">
+          <strong>Deck Prompts</strong> define <em>what kind of presentation</em> to create (structure, sections, data focus).
+        </p>
+        <p className="text-gray-700">
+          <strong>Advanced Settings</strong> define <em>how</em> slides are generated (formatting rules, HTML structure, chart styling).
+          Most users never need to modify Advanced settings.
+        </p>
       </div>
     </section>
   </div>

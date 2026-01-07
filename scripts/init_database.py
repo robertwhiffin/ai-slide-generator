@@ -1,4 +1,5 @@
 """Initialize database with profiles from YAML seed file."""
+import argparse
 import os
 import sys
 from pathlib import Path
@@ -12,13 +13,14 @@ load_dotenv()
 # Add project root to path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from src.core.database import get_db_session, init_db
+from src.core.database import get_db_session, init_db, Base, get_engine
 from src.database.models import (
     ConfigAIInfra,
     ConfigGenieSpace,
     ConfigMLflow,
     ConfigProfile,
     ConfigPrompts,
+    SlideDeckPromptLibrary,
 )
 
 
@@ -35,18 +37,60 @@ def load_seed_profiles():
     return data.get('profiles', [])
 
 
-def initialize_database():
+def reset_database():
+    """Drop all tables and recreate them."""
+    print("⚠️  Resetting database (dropping all tables)...")
+    engine = get_engine()
+    Base.metadata.drop_all(bind=engine)
+    print("✓ Tables dropped")
+    
+    print("Creating tables with new schema...")
+    Base.metadata.create_all(bind=engine)
+    print("✓ Tables created")
+
+
+def seed_deck_prompts(db):
+    """Seed the deck prompt library with default templates."""
+    from src.core.init_default_profile import DEFAULT_DECK_PROMPTS
+    
+    existing_count = db.query(SlideDeckPromptLibrary).count()
+    if existing_count > 0:
+        print(f"  ✓ Deck prompts already exist ({existing_count} prompts)")
+        return
+    
+    for prompt_data in DEFAULT_DECK_PROMPTS:
+        prompt = SlideDeckPromptLibrary(
+            name=prompt_data["name"],
+            description=prompt_data["description"],
+            category=prompt_data["category"],
+            prompt_content=prompt_data["prompt_content"],
+            is_active=True,
+            created_by="system",
+            updated_by="system",
+        )
+        db.add(prompt)
+    
+    print(f"  ✓ Seeded {len(DEFAULT_DECK_PROMPTS)} deck prompts")
+
+
+def initialize_database(reset: bool = False):
     """Initialize database with seed profiles from YAML."""
     
-    # Ensure tables exist (safe to call multiple times)
-    print("Ensuring database tables exist...")
-    init_db()
-    print("✓ Tables ready")
+    if reset:
+        reset_database()
+    else:
+        # Ensure tables exist (safe to call multiple times)
+        print("Ensuring database tables exist...")
+        init_db()
+        print("✓ Tables ready")
     
     with get_db_session() as db:
+        # Seed deck prompts first (global library)
+        seed_deck_prompts(db)
+        
         # Check if any profiles exist
         existing = db.query(ConfigProfile).first()
-        if existing:
+        if existing and not reset:
             print("✓ Database already initialized")
             return
         
@@ -121,14 +165,13 @@ def initialize_database():
                 db.add(mlflow)
                 print(f"  ✓ MLflow: {experiment_name}")
             
-            # Create prompts
+            # Create prompts (no more user_prompt_template)
             prompts_config = seed.get('prompts', {})
             if prompts_config:
                 prompts = ConfigPrompts(
                     profile_id=profile.id,
                     system_prompt=prompts_config['system_prompt'],
                     slide_editing_instructions=prompts_config['slide_editing_instructions'],
-                    user_prompt_template=prompts_config['user_prompt_template'],
                 )
                 db.add(prompts)
                 print(f"  ✓ Prompts settings")
@@ -138,8 +181,23 @@ def initialize_database():
 
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Initialize database with seed profiles")
+    parser.add_argument(
+        "--reset", 
+        action="store_true", 
+        help="Drop all tables and recreate (WARNING: destroys all data)"
+    )
+    args = parser.parse_args()
+    
+    if args.reset:
+        print("\n⚠️  WARNING: This will DELETE ALL DATA in the database!")
+        confirm = input("Type 'yes' to confirm: ")
+        if confirm.lower() != 'yes':
+            print("Aborted.")
+            sys.exit(0)
+    
     try:
-        initialize_database()
+        initialize_database(reset=args.reset)
     except Exception as e:
         print(f"✗ Error initializing database: {e}")
         import traceback

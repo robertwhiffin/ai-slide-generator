@@ -34,7 +34,33 @@ export interface ProfileDetail extends Profile {
 export interface ProfileCreate {
   name: string;
   description?: string | null;
-  copy_from_profile_id?: number | null;
+}
+
+/**
+ * Extended profile creation with inline configurations.
+ * Used by the creation wizard to create a complete profile in one request.
+ */
+export interface ProfileCreateWithConfig {
+  name: string;
+  description?: string | null;
+  genie_space: {
+    space_id: string;
+    space_name: string;
+    description?: string | null;
+  };
+  ai_infra?: {
+    llm_endpoint?: string;
+    llm_temperature?: number;
+    llm_max_tokens?: number;
+  };
+  mlflow?: {
+    experiment_name: string;
+  };
+  prompts?: {
+    selected_deck_prompt_id?: number | null;
+    system_prompt?: string;
+    slide_editing_instructions?: string;
+  };
 }
 
 export interface ProfileUpdate {
@@ -102,17 +128,51 @@ export interface MLflowConfigUpdate {
 export interface PromptsConfig {
   id: number;
   profile_id: number;
+  selected_deck_prompt_id: number | null;
   system_prompt: string;
   slide_editing_instructions: string;
-  user_prompt_template: string;
   created_at: string;
   updated_at: string;
 }
 
 export interface PromptsConfigUpdate {
+  selected_deck_prompt_id?: number | null;
   system_prompt?: string;
   slide_editing_instructions?: string;
-  user_prompt_template?: string;
+}
+
+// Deck Prompt Library types
+
+export interface DeckPrompt {
+  id: number;
+  name: string;
+  description: string | null;
+  category: string | null;
+  prompt_content: string;
+  is_active: boolean;
+  created_by: string | null;
+  created_at: string;
+  updated_by: string | null;
+  updated_at: string;
+}
+
+export interface DeckPromptCreate {
+  name: string;
+  description?: string | null;
+  category?: string | null;
+  prompt_content: string;
+}
+
+export interface DeckPromptUpdate {
+  name?: string;
+  description?: string | null;
+  category?: string | null;
+  prompt_content?: string;
+}
+
+export interface DeckPromptListResponse {
+  prompts: DeckPrompt[];
+  total: number;
 }
 
 export interface EndpointsList {
@@ -200,6 +260,17 @@ export const configApi = {
   
   createProfile: (data: ProfileCreate): Promise<ProfileDetail> =>
     fetchJson(`${API_BASE}/profiles`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(data),
+    }),
+  
+  /**
+   * Create a profile with all configurations in one request.
+   * Used by the creation wizard for complete profile setup.
+   */
+  createProfileWithConfig: (data: ProfileCreateWithConfig): Promise<ProfileDetail> =>
+    fetchJson(`${API_BASE}/profiles/with-config`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(data),
@@ -309,6 +380,35 @@ export const configApi = {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(data),
+    }),
+
+  // Deck Prompts Library
+  
+  listDeckPrompts: (category?: string): Promise<DeckPromptListResponse> => {
+    const params = category ? `?category=${encodeURIComponent(category)}` : '';
+    return fetchJson(`${API_BASE}/deck-prompts${params}`);
+  },
+  
+  getDeckPrompt: (promptId: number): Promise<DeckPrompt> =>
+    fetchJson(`${API_BASE}/deck-prompts/${promptId}`),
+  
+  createDeckPrompt: (data: DeckPromptCreate): Promise<DeckPrompt> =>
+    fetchJson(`${API_BASE}/deck-prompts`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(data),
+    }),
+  
+  updateDeckPrompt: (promptId: number, data: DeckPromptUpdate): Promise<DeckPrompt> =>
+    fetchJson(`${API_BASE}/deck-prompts/${promptId}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(data),
+    }),
+  
+  deleteDeckPrompt: (promptId: number): Promise<void> =>
+    fetchJson(`${API_BASE}/deck-prompts/${promptId}`, {
+      method: 'DELETE',
     }),
   
   // Validation

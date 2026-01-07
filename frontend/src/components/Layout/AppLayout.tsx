@@ -5,13 +5,14 @@ import { SlidePanel } from '../SlidePanel/SlidePanel';
 import { SelectionRibbon } from '../SlidePanel/SelectionRibbon';
 import { ProfileSelector } from '../config/ProfileSelector';
 import { ProfileList } from '../config/ProfileList';
+import { DeckPromptList } from '../config/DeckPromptList';
 import { SessionHistory } from '../History/SessionHistory';
 import { SaveAsDialog } from '../History/SaveAsDialog';
 import { HelpPage } from '../Help';
 import { useSession } from '../../contexts/SessionContext';
 import { useGeneration } from '../../contexts/GenerationContext';
 
-type ViewMode = 'main' | 'profiles' | 'history' | 'help';
+type ViewMode = 'main' | 'profiles' | 'deck_prompts' | 'history' | 'help';
 
 export const AppLayout: React.FC = () => {
   const [slideDeck, setSlideDeck] = useState<SlideDeck | null>(null);
@@ -165,6 +166,20 @@ export const AppLayout: React.FC = () => {
                 Profiles
               </button>
               <button
+                onClick={() => setViewMode('deck_prompts')}
+                disabled={isGenerating}
+                className={`px-3 py-1.5 rounded text-sm transition-colors ${
+                  viewMode === 'deck_prompts'
+                    ? 'bg-blue-700 text-white'
+                    : isGenerating
+                    ? 'bg-blue-400 text-blue-200 cursor-not-allowed opacity-50'
+                    : 'bg-blue-500 hover:bg-blue-700 text-blue-100'
+                }`}
+                title={isGenerating ? 'Navigation disabled during generation' : undefined}
+              >
+                Deck Prompts
+              </button>
+              <button
                 onClick={() => setViewMode('help')}
                 disabled={isGenerating}
                 className={`px-3 py-1.5 rounded text-sm transition-colors ${
@@ -242,6 +257,14 @@ export const AppLayout: React.FC = () => {
         <div className="flex-1 overflow-auto bg-gray-50">
           <div className="max-w-7xl mx-auto p-6">
             <ProfileList onProfileChange={handleProfileChange} />
+          </div>
+        </div>
+      )}
+
+      {viewMode === 'deck_prompts' && (
+        <div className="flex-1 overflow-auto bg-gray-50">
+          <div className="max-w-7xl mx-auto p-6">
+            <DeckPromptList />
           </div>
         </div>
       )}
