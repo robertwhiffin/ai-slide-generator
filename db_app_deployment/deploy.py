@@ -563,11 +563,66 @@ def setup_database_schema_and_tables(
         print("  You may need to run table initialization manually after app starts")
 
 
+def reset_database_tables(
+    workspace_client: WorkspaceClient,
+    instance_name: str,
+    schema: str,
+) -> None:
+    """
+    Drop and recreate all database tables.
+
+    WARNING: This will delete all data in the schema!
+
+    Args:
+        workspace_client: Databricks workspace client
+        instance_name: Lakebase instance name
+        schema: Schema name containing application tables
+    """
+    print("🗑️  Resetting database tables...")
+    print(f"   Instance: {instance_name}")
+    print(f"   Schema: {schema}")
+
+    try:
+        from sqlalchemy import create_engine, text
+
+        from src.core.database import Base
+        from src.core.lakebase import get_lakebase_connection_url
+
+        # Get connection URL
+        connection_url = get_lakebase_connection_url(
+            instance_name=instance_name,
+            schema=schema,
+            client=workspace_client,
+        )
+
+        # Create engine
+        engine = create_engine(connection_url)
+
+        # Set search path and drop all tables
+        with engine.connect() as conn:
+            conn.execute(text(f'SET search_path TO "{schema}"'))
+            conn.commit()
+
+        print("  Dropping all tables...")
+        Base.metadata.drop_all(bind=engine)
+        print("  ✅ All tables dropped")
+
+        print("  Recreating tables...")
+        Base.metadata.create_all(bind=engine)
+        print("  ✅ Tables recreated")
+
+        print("✅ Database reset complete")
+
+    except Exception as e:
+        raise DeploymentError(f"Database reset failed: {e}") from e
+
+
 def deploy(
     env: str,
     action: str,
     profile: str,
     dry_run: bool = False,
+    reset_db: bool = False,
 ) -> None:
     """
     Main deployment function.
@@ -577,6 +632,7 @@ def deploy(
         action: Action to perform (create, update, delete)
         profile: Databricks profile name from ~/.databrickscfg
         dry_run: If True, only validate without deploying
+        reset_db: If True, drop and recreate database tables before deploying
     """
     project_root = Path(__file__).parent.parent
 
@@ -627,6 +683,38 @@ def deploy(
             delete_app(workspace_client, config.app_name)
             print("✅ Deletion complete")
             return
+
+        # Handle reset-db flag (can be combined with create/update)
+        if reset_db:
+            # Safety check for production
+            if env == "production":
+                print("❌ Database reset is not allowed in production!")
+                print("   To reset production database, do it manually via SQL.")
+                sys.exit(1)
+
+            print()
+            print("⚠️  WARNING: This will DELETE ALL DATA in the database!")
+            print(f"   Environment: {env}")
+            print(f"   Instance: {config.lakebase.database_name}")
+            print(f"   Schema: {config.lakebase.schema}")
+            print()
+
+            confirm = input("Type 'RESET' to confirm: ")
+            if confirm != "RESET":
+                print("❌ Reset cancelled")
+                sys.exit(0)
+
+            print()
+            reset_database_tables(
+                workspace_client,
+                instance_name=config.lakebase.database_name,
+                schema=config.lakebase.schema,
+            )
+            print()
+
+            # If no other action specified with reset-db, we're done
+            if action is None:
+                return
 
         # Step 1: Create Lakebase instance (if not exists)
         print("📊 Setting up Lakebase database instance...")
@@ -756,6 +844,12 @@ def main() -> None:
         help="Validate configuration without deploying",
     )
 
+    parser.add_argument(
+        "--reset-db",
+        action="store_true",
+        help="Drop and recreate database tables before deploying (WARNING: deletes all data)",
+    )
+
     args = parser.parse_args()
 
     deploy(
@@ -763,6 +857,7 @@ def main() -> None:
         action=args.action,
         dry_run=args.dry_run,
         profile=args.profile,
+        reset_db=args.reset_db,
     )
 
 
