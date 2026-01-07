@@ -108,7 +108,25 @@ Slides are HTML snippets embedded in iframes for preview. The optional `verifica
 
 Parsed tiles, rendered raw HTML (`iframe`), and raw HTML text (`<pre>`). Users can compare parser output vs. model output.
 
-### 7. Deck Prompt Library (`src/components/config/DeckPromptList.tsx`)
+### 7. Profile Creation Wizard (`src/components/config/ProfileCreationWizard.tsx`)
+
+Profile creation uses a 6-step wizard that ensures all required configuration is collected before the profile is created:
+
+**Wizard Steps:**
+1. **Basic Info** - Profile name and description
+2. **Genie Space** - Required data source selection with description (for AI context)
+3. **LLM Settings** - Model endpoint, temperature, max tokens (defaults: `databricks-claude-sonnet-4-5`, 0.7, 60000)
+4. **MLflow** - Experiment name (auto-populated with `/Workspace/Users/{username}/ai-slide-generator`)
+5. **Deck Prompt** - Optional presentation template selection
+6. **Review** - Summary of all settings before creation
+
+**Key behaviors:**
+- The "Next" button is disabled until required fields are completed
+- Username is fetched from Databricks via `/api/user/current` for MLflow path
+- Profile is created with all configurations in a single transaction via `POST /api/settings/profiles/with-config`
+- After creation, the new profile is automatically set as default and loaded
+
+### 8. Deck Prompt Library (`src/components/config/DeckPromptList.tsx`)
 
 Deck Prompts are reusable presentation templates that guide AI slide generation:
 
@@ -157,6 +175,7 @@ interface DeckPrompt {
 | `src/hooks/useKeyboardShortcuts.ts` | `Esc` clears selection globally | None |
 | `src/utils/loadingMessages.ts` | Rotating messages during LLM calls | None |
 | `src/components/common/Tooltip.tsx` | Lightweight hover tooltip wrapper using Tailwind; appears instantly on hover | None |
+| `src/components/config/ProfileCreationWizard.tsx` | 6-step wizard for complete profile creation; collects all required config before creating | `configApi.createProfileWithConfig`, `/api/user/current` |
 | `src/components/config/DeckPromptList.tsx` | Deck prompt library management: list, create, edit, delete prompts | `configApi.listDeckPrompts`, `configApi.createDeckPrompt`, `configApi.updateDeckPrompt`, `configApi.deleteDeckPrompt` |
 | `src/components/config/DeckPromptForm.tsx` | Modal form for creating/editing deck prompts with Monaco editor | None (callback props) |
 | `src/components/config/DeckPromptSelector.tsx` | Profile configuration tab for selecting a deck prompt from the library | `configApi.listDeckPrompts`, `configApi.updatePromptsConfig` |
@@ -284,6 +303,18 @@ Errors bubble up as `ApiError` (status + message). Common statuses:
 
 ## User Flow Reference
 
+### Profile Creation
+1. **Open Profiles page** – Click "Profiles" in navigation
+2. **Start wizard** – Click "Create Profile" button
+3. **Basic Info** – Enter profile name and optional description
+4. **Genie Space** – Select data source and provide AI description
+5. **LLM Settings** – Configure model (defaults pre-populated)
+6. **MLflow** – Review experiment path (auto-populated with username)
+7. **Deck Prompt** – Optionally select a presentation template
+8. **Review & Create** – Confirm settings and create
+9. **Auto-activate** – New profile is automatically set as default and loaded
+
+### Slide Generation
 1. **Start session** – Load app, session created on first interaction
 2. **Generate baseline deck** – Enter prompt, chat panel shows loading, slides appear
 3. **Auto-verification** – LLM as Judge automatically verifies each slide against Genie source data

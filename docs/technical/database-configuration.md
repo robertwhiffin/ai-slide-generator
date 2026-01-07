@@ -1,7 +1,7 @@
 # Database Configuration System
 
 **Status:** Complete - Configuration & Session Models  
-**Last Updated:** December 8, 2025
+**Last Updated:** January 7, 2026
 
 ## Overview
 
@@ -396,10 +396,24 @@ python scripts/init_database.py
 
 This creates:
 - A "default" profile marked as the default
-- Default AI infrastructure settings
+- Default AI infrastructure settings (LLM endpoint: `databricks-claude-sonnet-4-5`)
 - Default Genie space configuration (one per profile)
 - Default MLflow experiment name
 - Default system prompts
+- Seed deck prompts (Consumption Review, QBR, Executive Summary, Use Case Analysis)
+
+### Profile Creation
+
+Profiles are created via a 6-step wizard that collects all required configuration:
+
+1. **Basic Info** - Name and description
+2. **Genie Space** - Required data source with AI description
+3. **LLM Settings** - Defaults to `databricks-claude-sonnet-4-5`
+4. **MLflow** - Auto-populated with `/Workspace/Users/{username}/ai-slide-generator`
+5. **Deck Prompt** - Optional template selection
+6. **Review** - Confirmation before creation
+
+The wizard creates the profile and all configurations in a single transaction via `ProfileService.create_profile_with_config()`. This ensures profiles are always complete and usable immediately after creation.
 
 ### Default Values
 
