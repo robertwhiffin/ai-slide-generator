@@ -1,8 +1,15 @@
 /**
  * Types for slide verification using LLM as Judge
+ * 
+ * RAG (Red/Amber/Green) rating system:
+ * - green: ≥80% - No issues detected
+ * - amber: 50-79% - Review suggested
+ * - red: <50% - Review required
+ * - unknown: No source data available (title slides, etc.)
+ * - error: Verification failed
  */
 
-export type VerificationRating = 'excellent' | 'good' | 'moderate' | 'poor' | 'failing' | 'error' | 'unknown';
+export type VerificationRating = 'green' | 'amber' | 'red' | 'error' | 'unknown';
 
 export interface VerificationResult {
   score: number;
@@ -27,66 +34,77 @@ export interface VerificationState {
 }
 
 /**
- * Get badge color based on rating
+ * Get badge color based on RAG rating
  */
 export const getRatingColor = (rating: VerificationRating): string => {
   switch (rating) {
-    case 'excellent':
+    case 'green':
       return 'bg-green-100 text-green-800 border-green-300';
-    case 'good':
-      return 'bg-emerald-100 text-emerald-700 border-emerald-300';
-    case 'moderate':
-      return 'bg-yellow-100 text-yellow-800 border-yellow-300';
-    case 'poor':
-      return 'bg-orange-100 text-orange-800 border-orange-300';
-    case 'failing':
+    case 'amber':
+      return 'bg-amber-100 text-amber-800 border-amber-300';
+    case 'red':
       return 'bg-red-100 text-red-800 border-red-300';
     case 'error':
-      return 'bg-gray-100 text-gray-600 border-gray-300';
+    case 'unknown':
     default:
       return 'bg-gray-100 text-gray-600 border-gray-300';
   }
 };
 
 /**
- * Get badge icon based on rating
+ * Get badge icon based on RAG rating
  */
 export const getRatingIcon = (rating: VerificationRating): string => {
   switch (rating) {
-    case 'excellent':
-    case 'good':
-      return '✓';
-    case 'moderate':
-      return '~';
-    case 'poor':
-    case 'failing':
-      return '✗';
+    case 'green':
+      return '●';  // Solid circle for RAG indicator
+    case 'amber':
+      return '●';
+    case 'red':
+      return '●';
     case 'error':
       return '!';
+    case 'unknown':
     default:
-      return '?';
+      return '○';  // Empty circle for unknown
   }
 };
 
 /**
- * Get human-readable rating text
+ * Get human-readable rating text for popup header
  */
 export const getRatingText = (rating: VerificationRating): string => {
   switch (rating) {
-    case 'excellent':
-      return 'Verified - Excellent';
-    case 'good':
-      return 'Verified - Good';
-    case 'moderate':
-      return 'Verified - Moderate';
-    case 'poor':
-      return 'Issues Found';
-    case 'failing':
-      return 'Verification Failed';
+    case 'green':
+      return 'No Issues Detected';
+    case 'amber':
+      return 'Review Suggested';
+    case 'red':
+      return 'Review Required';
+    case 'error':
+      return 'Verification Error';
+    case 'unknown':
+    default:
+      return 'Unable to Verify';
+  }
+};
+
+/**
+ * Get short label for badge display
+ */
+export const getRatingLabel = (rating: VerificationRating): string => {
+  switch (rating) {
+    case 'green':
+      return 'No issues';
+    case 'amber':
+      return 'Review suggested';
+    case 'red':
+      return 'Review required';
     case 'error':
       return 'Error';
+    case 'unknown':
     default:
-      return 'Unknown';
+      return 'Unable to verify';
   }
 };
 
