@@ -2,7 +2,7 @@ import React, { useState, useRef, useEffect } from 'react';
 import { FaGavel } from 'react-icons/fa';
 import { FiThumbsUp, FiThumbsDown, FiX, FiExternalLink } from 'react-icons/fi';
 import type { VerificationResult } from '../../types/verification';
-import { getRatingColor, getRatingText, getRatingIcon } from '../../types/verification';
+import { getRatingColor, getRatingText, getRatingIcon, getRatingLabel } from '../../types/verification';
 import { api } from '../../services/api';
 import { Tooltip } from '../common/Tooltip';
 
@@ -121,8 +121,8 @@ export const VerificationBadge: React.FC<VerificationBadgeProps> = ({
 
   return (
     <div className="relative">
-      {/* Badge */}
-      <Tooltip text={isStale ? 'Verification outdated - click for details' : 'Verification details'}>
+      {/* Badge - RAG indicator */}
+      <Tooltip text={isStale ? 'Verification outdated - click for details' : 'Click for verification details'}>
         <button
           onClick={() => setShowDetails(!showDetails)}
           className={`flex items-center space-x-1 px-2 py-0.5 text-xs font-medium rounded border ${badgeColor} ${
@@ -130,7 +130,7 @@ export const VerificationBadge: React.FC<VerificationBadgeProps> = ({
           }`}
         >
           <span>{badgeIcon}</span>
-          <span>{verificationResult.score}%</span>
+          <span>{getRatingLabel(verificationResult.rating)}</span>
           {isStale && <span className="text-orange-500">⚠</span>}
         </button>
       </Tooltip>
@@ -164,25 +164,28 @@ export const VerificationBadge: React.FC<VerificationBadgeProps> = ({
               </button>
             </div>
 
-            {/* Score */}
-            <div className="mb-3">
-              <div className="flex items-center justify-between text-sm">
-                <span className="text-gray-600">Accuracy Score</span>
-                <span className={`font-bold ${
-                  verificationResult.score >= 70 ? 'text-green-600' : 
-                  verificationResult.score >= 50 ? 'text-yellow-600' : 'text-red-600'
+            {/* Rating indicator */}
+            <div className={`mb-3 p-2 rounded-lg ${
+              verificationResult.rating === 'green' ? 'bg-green-50 border border-green-200' :
+              verificationResult.rating === 'amber' ? 'bg-amber-50 border border-amber-200' :
+              verificationResult.rating === 'red' ? 'bg-red-50 border border-red-200' :
+              'bg-gray-50 border border-gray-200'
+            }`}>
+              <div className="flex items-center space-x-2">
+                <span className={`text-lg ${
+                  verificationResult.rating === 'green' ? 'text-green-600' :
+                  verificationResult.rating === 'amber' ? 'text-amber-600' :
+                  verificationResult.rating === 'red' ? 'text-red-600' :
+                  'text-gray-500'
+                }`}>●</span>
+                <span className={`text-sm font-medium ${
+                  verificationResult.rating === 'green' ? 'text-green-800' :
+                  verificationResult.rating === 'amber' ? 'text-amber-800' :
+                  verificationResult.rating === 'red' ? 'text-red-800' :
+                  'text-gray-600'
                 }`}>
-                  {verificationResult.score}%
+                  {getRatingText(verificationResult.rating)}
                 </span>
-              </div>
-              <div className="mt-1 h-2 bg-gray-200 rounded-full overflow-hidden">
-                <div
-                  className={`h-full ${
-                    verificationResult.score >= 70 ? 'bg-green-500' : 
-                    verificationResult.score >= 50 ? 'bg-yellow-500' : 'bg-red-500'
-                  }`}
-                  style={{ width: `${verificationResult.score}%` }}
-                />
               </div>
             </div>
           </div>
