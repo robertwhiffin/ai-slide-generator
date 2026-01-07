@@ -50,6 +50,7 @@ export const ProfileList: React.FC<ProfileListProps> = ({ onProfileChange }) => 
   const [duplicateName, setDuplicateName] = useState('');
   const [showDuplicateInput, setShowDuplicateInput] = useState<number | null>(null);
   const [viewingProfileId, setViewingProfileId] = useState<number | null>(null);
+  const [viewingProfileMode, setViewingProfileMode] = useState<'view' | 'edit'>('view');
 
   // Handle create profile
   const handleCreate = () => {
@@ -60,7 +61,13 @@ export const ProfileList: React.FC<ProfileListProps> = ({ onProfileChange }) => 
   // Handle form submit (create only)
   const handleFormSubmit = async (data: ProfileCreate | ProfileUpdate) => {
     if (formMode === 'create') {
-      await createProfile(data as ProfileCreate);
+      const newProfile = await createProfile(data as ProfileCreate);
+      // Open the new profile in edit mode immediately
+      setFormMode(null);
+      setEditingProfile(null);
+      setViewingProfileId(newProfile.id);
+      setViewingProfileMode('edit');
+      return;
     }
     setFormMode(null);
     setEditingProfile(null);
@@ -234,7 +241,10 @@ export const ProfileList: React.FC<ProfileListProps> = ({ onProfileChange }) => 
                     <div className="flex gap-2">
                       {/* View and Edit Button */}
                       <button
-                        onClick={() => setViewingProfileId(profile.id)}
+                        onClick={() => {
+                          setViewingProfileId(profile.id);
+                          setViewingProfileMode('view');
+                        }}
                         disabled={actionLoading === profile.id}
                         className="px-3 py-1 bg-indigo-500 hover:bg-indigo-600 text-white text-xs rounded transition-colors disabled:bg-gray-300"
                         title="View and edit configuration"
@@ -365,7 +375,11 @@ export const ProfileList: React.FC<ProfileListProps> = ({ onProfileChange }) => 
       {viewingProfileId !== null && (
         <ProfileDetailView
           profileId={viewingProfileId}
-          onClose={() => setViewingProfileId(null)}
+          onClose={() => {
+            setViewingProfileId(null);
+            setViewingProfileMode('view');
+          }}
+          initialMode={viewingProfileMode}
         />
       )}
     </div>

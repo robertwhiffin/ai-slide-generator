@@ -19,13 +19,18 @@ type ViewMode = 'view' | 'edit';
 interface ProfileDetailProps {
   profileId: number;
   onClose: () => void;
+  initialMode?: ViewMode;
 }
 
-export const ProfileDetailView: React.FC<ProfileDetailProps> = ({ profileId, onClose }) => {
+export const ProfileDetailView: React.FC<ProfileDetailProps> = ({ 
+  profileId, 
+  onClose,
+  initialMode = 'view',
+}) => {
   const [profile, setProfile] = useState<ProfileDetail | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [mode, setMode] = useState<ViewMode>('view');
+  const [mode, setMode] = useState<ViewMode>(initialMode);
   const [deckPrompt, setDeckPrompt] = useState<DeckPrompt | null>(null);
   
   // Editable profile metadata
