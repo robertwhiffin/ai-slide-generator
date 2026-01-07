@@ -111,25 +111,17 @@ class ConfigValidator:
     def validate_prompts(
         self,
         system_prompt: str = None,
-        user_prompt_template: str = None,
     ) -> ValidationResult:
         """
         Validate prompts.
         
         Args:
-            system_prompt: System prompt
-            user_prompt_template: User prompt template
+            system_prompt: System prompt (optional)
             
         Returns:
             ValidationResult
         """
-        # Check required placeholders in user template
-        if user_prompt_template is not None:
-            if "{question}" not in user_prompt_template:
-                return ValidationResult(
-                    valid=False,
-                    error="User prompt template must contain {question} placeholder",
-                )
-
+        # System prompt validation - just check it's not empty if provided
+        # No required placeholders for system prompt
         return ValidationResult(valid=True)
 

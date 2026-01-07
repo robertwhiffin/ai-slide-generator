@@ -16,13 +16,23 @@ How the React/Vite frontend is structured, how it communicates with backend APIs
 
 ```
 ┌──────────────────────────────────────────────────────────────┐
-│ Header: title + session metadata                              │
+│ Header: title + session metadata + navigation                 │
+│ [Generator] [History] [Profiles] [Deck Prompts] [Help]        │
 ├──────────────┬──────────────┬─────────────────────────────────┤
 │ Chat Panel   │ Selection    │ Slide Panel                     │
 │ (32% width)  │ Ribbon       │ (flex-1)                        │
 │              │ (fixed 256px)│                                 │
 └──────────────┴──────────────┴─────────────────────────────────┘
 ```
+
+### View Modes
+
+The app has five view modes controlled by navigation buttons:
+- **Generator** (`main`): The primary slide generation interface
+- **History**: Session list and restore functionality
+- **Profiles**: Configuration profile management
+- **Deck Prompts**: Presentation template library management
+- **Help**: Documentation and usage guide
 
 - **ChatPanel** owns chat history and calls backend APIs to generate or edit slides.
 - **SelectionRibbon** mirrors the current `SlideDeck` with dual interaction:
@@ -98,6 +108,32 @@ Slides are HTML snippets embedded in iframes for preview. The optional `verifica
 
 Parsed tiles, rendered raw HTML (`iframe`), and raw HTML text (`<pre>`). Users can compare parser output vs. model output.
 
+### 7. Deck Prompt Library (`src/components/config/DeckPromptList.tsx`)
+
+Deck Prompts are reusable presentation templates that guide AI slide generation:
+
+```typescript
+interface DeckPrompt {
+  id: number;
+  name: string;              // e.g., "Quarterly Business Review"
+  description: string | null;
+  category: string | null;   // e.g., "Report", "Summary", "Analysis"
+  prompt_content: string;    // Instructions for the AI
+  is_active: boolean;
+  created_by: string | null;
+}
+```
+
+**How they work:**
+1. Prompts are managed globally via the **Deck Prompts** page
+2. Each Profile can select one prompt via the **Deck Prompt** tab in profile settings
+3. When generating slides, the selected prompt content is prepended to the system prompt
+4. User chat messages combine with the deck prompt for context-aware generation
+
+**Profile Configuration Tabs:**
+- **Deck Prompt**: Select a presentation template (user-friendly)
+- **Advanced**: Edit system prompts directly (power users only)
+
 ---
 
 ## Component Responsibilities
@@ -121,6 +157,10 @@ Parsed tiles, rendered raw HTML (`iframe`), and raw HTML text (`<pre>`). Users c
 | `src/hooks/useKeyboardShortcuts.ts` | `Esc` clears selection globally | None |
 | `src/utils/loadingMessages.ts` | Rotating messages during LLM calls | None |
 | `src/components/common/Tooltip.tsx` | Lightweight hover tooltip wrapper using Tailwind; appears instantly on hover | None |
+| `src/components/config/DeckPromptList.tsx` | Deck prompt library management: list, create, edit, delete prompts | `configApi.listDeckPrompts`, `configApi.createDeckPrompt`, `configApi.updateDeckPrompt`, `configApi.deleteDeckPrompt` |
+| `src/components/config/DeckPromptForm.tsx` | Modal form for creating/editing deck prompts with Monaco editor | None (callback props) |
+| `src/components/config/DeckPromptSelector.tsx` | Profile configuration tab for selecting a deck prompt from the library | `configApi.listDeckPrompts`, `configApi.updatePromptsConfig` |
+| `src/components/config/AdvancedSettingsEditor.tsx` | Power-user interface for editing system prompts (hidden from typical users) | `configApi.updatePromptsConfig` |
 
 ---
 

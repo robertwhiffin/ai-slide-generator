@@ -6,14 +6,7 @@ DEFAULT_CONFIG = {
         "temperature": 0.7,
         "max_tokens": 60000,
     },
-    "genie": {
-        "space_id": "01effebcc2781b6bbb749077a55d31e3",
-        "space_name": "Databricks Usage Analytics",
-        "description": "Databricks usage data space",
-    },
-    "mlflow": {
-        "experiment_name": "/Workspace/Users/{username}/ai-slide-generator",
-    },
+    # No default Genie space - must be explicitly configured per profile
     "prompts": {
         "system_prompt": """You are an expert data analyst and presentation creator with access to tools. You respond only valid HTML. Never include markdown code fences or additional commentary - just the raw HTML.
 
@@ -209,7 +202,6 @@ This means the user wants to modify these specific slides. Your response should:
    - If you cannot fulfill the request, return a single slide explaining why
    - If data is needed but unavailable, state this clearly in a slide
    - Ensure all returned HTML is valid""",
-        "user_prompt_template": "{question}",
     },
 }
 

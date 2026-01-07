@@ -147,8 +147,6 @@ profiles:
         - Maintain consistent formatting across all slides
         - Ensure smooth integration with surrounding slides
 
-      user_prompt_template: "{question}"
-
   # Profile 2: Use Cases Analysis
   - name: "use cases"
     description: "Copy of profile 1"
@@ -178,6 +176,4 @@ profiles:
 
       slide_editing_instructions: |
         When editing slides, maintain consistency with the existing presentation style and structure.
-
-      user_prompt_template: "{question}"
 

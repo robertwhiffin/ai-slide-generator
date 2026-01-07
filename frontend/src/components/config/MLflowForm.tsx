@@ -2,6 +2,8 @@
  * MLflow configuration form.
  * 
  * Simple form for MLflow experiment name with validation.
+ * The experiment name is auto-populated when a profile is created
+ * based on the creator's username.
  */
 
 import React, { useState, useEffect } from 'react';
@@ -114,7 +116,7 @@ export const MLflowForm: React.FC<MLflowFormProps> = ({ config, onSave, saving =
           type="text"
           value={experimentName}
           onChange={(e) => setExperimentName(e.target.value)}
-          placeholder="/Workspace/Users/{username}/ai-slide-generator"
+          placeholder="/Workspace/Users/..."
           className="w-full px-3 py-2 border border-gray-300 rounded focus:outline-none focus:ring-2 focus:ring-blue-500 font-mono text-sm"
           disabled={saving}
         />
@@ -123,7 +125,8 @@ export const MLflowForm: React.FC<MLflowFormProps> = ({ config, onSave, saving =
             <strong>Format:</strong> Must start with <code className="px-1 bg-gray-100 rounded">/</code>
           </p>
           <p>
-            <strong>Example:</strong> <code className="px-1 bg-gray-100 rounded">/Workspace/Users/your.email@company.com/ai-slide-generator</code>
+            This value was automatically set based on the profile creator's username.
+            You can customize it if needed.
           </p>
           <p>
             MLflow experiments are used to track model training and inference metrics.

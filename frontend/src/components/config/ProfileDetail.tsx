@@ -10,7 +10,7 @@
  */
 
 import React, { useEffect, useState } from 'react';
-import type { ProfileDetail } from '../../api/config';
+import type { ProfileDetail, DeckPrompt } from '../../api/config';
 import { configApi, ConfigApiError } from '../../api/config';
 import { ConfigTabs } from './ConfigTabs';
 
@@ -26,6 +26,7 @@ export const ProfileDetailView: React.FC<ProfileDetailProps> = ({ profileId, onC
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [mode, setMode] = useState<ViewMode>('view');
+  const [deckPrompt, setDeckPrompt] = useState<DeckPrompt | null>(null);
   
   // Editable profile metadata
   const [editedName, setEditedName] = useState('');
@@ -42,6 +43,19 @@ export const ProfileDetailView: React.FC<ProfileDetailProps> = ({ profileId, onC
         setProfile(data);
         setEditedName(data.name);
         setEditedDescription(data.description || '');
+        
+        // Load deck prompt name if selected
+        if (data.prompts.selected_deck_prompt_id) {
+          try {
+            const prompt = await configApi.getDeckPrompt(data.prompts.selected_deck_prompt_id);
+            setDeckPrompt(prompt);
+          } catch {
+            // Prompt may have been deleted
+            setDeckPrompt(null);
+          }
+        } else {
+          setDeckPrompt(null);
+        }
       } catch (err) {
         const message = err instanceof ConfigApiError 
           ? err.message 
@@ -273,30 +287,27 @@ export const ProfileDetailView: React.FC<ProfileDetailProps> = ({ profileId, onC
             </div>
           </div>
 
-          {/* Prompts */}
+          {/* Deck Prompt */}
           <div className="mb-6">
             <h3 className="text-lg font-semibold text-gray-900 mb-3 flex items-center gap-2">
-              <span className="text-orange-600">💬</span> Prompts
+              <span className="text-orange-600">📋</span> Deck Prompt
             </h3>
-            <div className="space-y-4">
-              <div className="bg-gray-50 rounded p-4">
-                <label className="text-xs font-medium text-gray-500 uppercase">System Prompt</label>
-                <pre className="text-xs text-gray-900 mt-2 whitespace-pre-wrap font-mono bg-white p-3 rounded border border-gray-200 max-h-40 overflow-y-auto">
-                  {profile.prompts.system_prompt}
-                </pre>
-              </div>
-              <div className="bg-gray-50 rounded p-4">
-                <label className="text-xs font-medium text-gray-500 uppercase">Slide Editing Instructions</label>
-                <pre className="text-xs text-gray-900 mt-2 whitespace-pre-wrap font-mono bg-white p-3 rounded border border-gray-200 max-h-40 overflow-y-auto">
-                  {profile.prompts.slide_editing_instructions}
-                </pre>
-              </div>
-              <div className="bg-gray-50 rounded p-4">
-                <label className="text-xs font-medium text-gray-500 uppercase">User Prompt Template</label>
-                <pre className="text-xs text-gray-900 mt-2 whitespace-pre-wrap font-mono bg-white p-3 rounded border border-gray-200 max-h-40 overflow-y-auto">
-                  {profile.prompts.user_prompt_template}
-                </pre>
-              </div>
+            <div className="bg-gray-50 rounded p-4">
+              {deckPrompt ? (
+                <div>
+                  <p className="text-sm font-medium text-gray-900">{deckPrompt.name}</p>
+                  {deckPrompt.category && (
+                    <span className="inline-block mt-1 px-2 py-0.5 bg-purple-100 text-purple-700 text-xs rounded-full">
+                      {deckPrompt.category}
+                    </span>
+                  )}
+                  {deckPrompt.description && (
+                    <p className="text-sm text-gray-600 mt-2">{deckPrompt.description}</p>
+                  )}
+                </div>
+              ) : (
+                <p className="text-sm text-gray-500 italic">No deck prompt selected</p>
+              )}
             </div>
           </div>
 

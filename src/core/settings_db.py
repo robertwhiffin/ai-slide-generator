@@ -286,6 +286,21 @@ def load_settings_from_database(profile_id: Optional[int] = None) -> AppSettings
             if not prompts:
                 raise ValueError(f"Prompts settings not found for profile {profile.id}")
 
+            # Load deck prompt content if selected
+            deck_prompt_content = None
+            if prompts.selected_deck_prompt_id:
+                from src.database.models import SlideDeckPromptLibrary
+                deck_prompt = db.query(SlideDeckPromptLibrary).filter_by(
+                    id=prompts.selected_deck_prompt_id,
+                    is_active=True
+                ).first()
+                if deck_prompt:
+                    deck_prompt_content = deck_prompt.prompt_content
+                    logger.info(
+                        "Loaded deck prompt",
+                        extra={"deck_prompt_name": deck_prompt.name, "deck_prompt_id": deck_prompt.id}
+                    )
+
             # Get username for MLflow experiment name formatting
             try:
                 from src.core.databricks_client import get_databricks_client
@@ -326,9 +341,9 @@ def load_settings_from_database(profile_id: Optional[int] = None) -> AppSettings
                 genie=genie_settings,
                 mlflow=mlflow_settings,
                 prompts={
+                    "deck_prompt": deck_prompt_content or "",
                     "system_prompt": prompts.system_prompt,
                     "slide_editing_instructions": prompts.slide_editing_instructions,
-                    "user_prompt_template": prompts.user_prompt_template,
                 },
                 environment=os.getenv("ENVIRONMENT", "development"),
             )

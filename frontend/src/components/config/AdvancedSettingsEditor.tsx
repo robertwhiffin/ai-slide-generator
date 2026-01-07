@@ -1,55 +1,43 @@
 /**
- * Prompts configuration editor.
+ * Advanced Settings Editor component.
  * 
- * Uses Monaco Editor for rich editing of:
- * - System prompt
+ * Power-user interface for editing:
+ * - System prompt (slide generation instructions)
  * - Slide editing instructions
- * - User prompt template
  * 
- * Includes placeholder validation.
+ * These are typically not modified by regular users.
+ * User prompt template is hidden (uses default {question}).
  */
 
 import React, { useState, useEffect } from 'react';
 import Editor from '@monaco-editor/react';
 import type { PromptsConfig, PromptsConfigUpdate } from '../../api/config';
 
-interface PromptsEditorProps {
+interface AdvancedSettingsEditorProps {
   config: PromptsConfig;
   onSave: (data: PromptsConfigUpdate) => Promise<void>;
   saving?: boolean;
 }
 
-export const PromptsEditor: React.FC<PromptsEditorProps> = ({ config, onSave, saving = false }) => {
+export const AdvancedSettingsEditor: React.FC<AdvancedSettingsEditorProps> = ({ 
+  config, 
+  onSave, 
+  saving = false 
+}) => {
   const [systemPrompt, setSystemPrompt] = useState(config.system_prompt);
   const [slideEditingInstructions, setSlideEditingInstructions] = useState(config.slide_editing_instructions);
-  const [userPromptTemplate, setUserPromptTemplate] = useState(config.user_prompt_template);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState(false);
-  const [warnings, setWarnings] = useState<string[]>([]);
 
   // Update form when config changes
   useEffect(() => {
     setSystemPrompt(config.system_prompt);
     setSlideEditingInstructions(config.slide_editing_instructions);
-    setUserPromptTemplate(config.user_prompt_template);
   }, [config]);
 
   const isDirty =
     systemPrompt !== config.system_prompt ||
-    slideEditingInstructions !== config.slide_editing_instructions ||
-    userPromptTemplate !== config.user_prompt_template;
-
-  // Validate placeholders
-  useEffect(() => {
-    const newWarnings: string[] = [];
-
-    // Check for required placeholder in user prompt
-    if (!userPromptTemplate.includes('{question}')) {
-      newWarnings.push('User Prompt Template: Missing required placeholder {question}');
-    }
-
-    setWarnings(newWarnings);
-  }, [userPromptTemplate]);
+    slideEditingInstructions !== config.slide_editing_instructions;
 
   const validate = (): string | null => {
     if (!systemPrompt.trim()) {
@@ -57,12 +45,6 @@ export const PromptsEditor: React.FC<PromptsEditorProps> = ({ config, onSave, sa
     }
     if (!slideEditingInstructions.trim()) {
       return 'Slide editing instructions are required';
-    }
-    if (!userPromptTemplate.trim()) {
-      return 'User prompt template is required';
-    }
-    if (!userPromptTemplate.includes('{question}')) {
-      return 'User prompt template must include {question} placeholder';
     }
     return null;
   };
@@ -81,7 +63,6 @@ export const PromptsEditor: React.FC<PromptsEditorProps> = ({ config, onSave, sa
       await onSave({
         system_prompt: systemPrompt,
         slide_editing_instructions: slideEditingInstructions,
-        user_prompt_template: userPromptTemplate,
       });
       setSuccess(true);
       setTimeout(() => setSuccess(false), 3000);
@@ -93,13 +74,27 @@ export const PromptsEditor: React.FC<PromptsEditorProps> = ({ config, onSave, sa
   const handleReset = () => {
     setSystemPrompt(config.system_prompt);
     setSlideEditingInstructions(config.slide_editing_instructions);
-    setUserPromptTemplate(config.user_prompt_template);
     setError(null);
     setSuccess(false);
   };
 
   return (
     <div className="space-y-6">
+      {/* Warning Banner */}
+      <div className="bg-amber-50 border border-amber-200 rounded p-4">
+        <div className="flex items-start gap-3">
+          <span className="text-amber-600 text-xl">⚠️</span>
+          <div>
+            <h3 className="text-sm font-medium text-amber-800">Advanced Settings</h3>
+            <p className="text-sm text-amber-700 mt-1">
+              These settings control how the AI generates and formats slides. 
+              Only modify these if you understand the impact on slide generation behavior.
+              Most users should use the Deck Prompt tab instead.
+            </p>
+          </div>
+        </div>
+      </div>
+
       {/* Status Messages */}
       {error && (
         <div className="p-3 bg-red-50 border border-red-200 rounded text-red-700 text-sm">
@@ -108,17 +103,7 @@ export const PromptsEditor: React.FC<PromptsEditorProps> = ({ config, onSave, sa
       )}
       {success && (
         <div className="p-3 bg-green-50 border border-green-200 rounded text-green-700 text-sm">
-          Configuration saved successfully!
-        </div>
-      )}
-      {warnings.length > 0 && (
-        <div className="p-3 bg-yellow-50 border border-yellow-200 rounded text-yellow-700 text-sm">
-          <div className="font-medium mb-1">⚠️ Warnings:</div>
-          <ul className="list-disc list-inside space-y-1">
-            {warnings.map((warning, idx) => (
-              <li key={idx}>{warning}</li>
-            ))}
-          </ul>
+          Advanced settings saved successfully!
         </div>
       )}
 
@@ -126,12 +111,15 @@ export const PromptsEditor: React.FC<PromptsEditorProps> = ({ config, onSave, sa
       <div>
         <div className="flex items-center justify-between mb-2">
           <label className="block text-sm font-medium text-gray-700">
-            System Prompt <span className="text-red-500">*</span>
+            Slide Generation Instructions <span className="text-red-500">*</span>
           </label>
+          <span className="text-xs text-gray-500">
+            Controls HTML/CSS output, chart formatting, slide structure
+          </span>
         </div>
         <div className="border border-gray-300 rounded overflow-hidden">
           <Editor
-            height="300px"
+            height="350px"
             defaultLanguage="text"
             value={systemPrompt}
             onChange={(value) => setSystemPrompt(value || '')}
@@ -146,18 +134,24 @@ export const PromptsEditor: React.FC<PromptsEditorProps> = ({ config, onSave, sa
           />
         </div>
         <p className="mt-1 text-xs text-gray-500">
-          Base instructions for the LLM. Sets the context and tone for slide generation.
+          Core instructions for how the agent generates slides. Includes HTML structure, 
+          styling rules, Chart.js configuration, and output format requirements.
         </p>
       </div>
 
       {/* Slide Editing Instructions */}
       <div>
-        <label className="block text-sm font-medium text-gray-700 mb-2">
-          Slide Editing Instructions <span className="text-red-500">*</span>
-        </label>
+        <div className="flex items-center justify-between mb-2">
+          <label className="block text-sm font-medium text-gray-700">
+            Slide Editing Instructions <span className="text-red-500">*</span>
+          </label>
+          <span className="text-xs text-gray-500">
+            How to handle edit requests on existing slides
+          </span>
+        </div>
         <div className="border border-gray-300 rounded overflow-hidden">
           <Editor
-            height="200px"
+            height="250px"
             defaultLanguage="text"
             value={slideEditingInstructions}
             onChange={(value) => setSlideEditingInstructions(value || '')}
@@ -172,38 +166,8 @@ export const PromptsEditor: React.FC<PromptsEditorProps> = ({ config, onSave, sa
           />
         </div>
         <p className="mt-1 text-xs text-gray-500">
-          Additional instructions for editing existing slides.
-        </p>
-      </div>
-
-      {/* User Prompt Template */}
-      <div>
-        <div className="flex items-center justify-between mb-2">
-          <label className="block text-sm font-medium text-gray-700">
-            User Prompt Template <span className="text-red-500">*</span>
-          </label>
-          <span className="text-xs text-gray-500">
-            Required: <code className="px-1 bg-gray-100 rounded">{'{question}'}</code>
-          </span>
-        </div>
-        <div className="border border-gray-300 rounded overflow-hidden">
-          <Editor
-            height="100px"
-            defaultLanguage="text"
-            value={userPromptTemplate}
-            onChange={(value) => setUserPromptTemplate(value || '')}
-            options={{
-              minimap: { enabled: false },
-              wordWrap: 'on',
-              lineNumbers: 'off',
-              scrollBeyondLastLine: false,
-              fontSize: 13,
-              readOnly: saving,
-            }}
-          />
-        </div>
-        <p className="mt-1 text-xs text-gray-500">
-          Template for user messages. The <code className="px-1 bg-gray-100 rounded">{'{question}'}</code> placeholder is replaced with user input.
+          Instructions for modifying existing slides when users request edits.
+          Defines the slide-context format and replacement behavior.
         </p>
       </div>
 
@@ -219,9 +183,9 @@ export const PromptsEditor: React.FC<PromptsEditorProps> = ({ config, onSave, sa
         <button
           onClick={handleSave}
           disabled={!isDirty || saving}
-          className="px-4 py-2 bg-blue-500 hover:bg-blue-600 text-white rounded transition-colors disabled:bg-blue-300 disabled:cursor-not-allowed"
+          className="px-4 py-2 bg-amber-500 hover:bg-amber-600 text-white rounded transition-colors disabled:bg-amber-300 disabled:cursor-not-allowed"
         >
-          {saving ? 'Saving...' : 'Save Changes'}
+          {saving ? 'Saving...' : 'Save Advanced Settings'}
         </button>
       </div>
     </div>

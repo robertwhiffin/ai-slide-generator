@@ -74,6 +74,25 @@ Frontend fetch -> FastAPI router ->   │ ChatService (singleton)│
 | `POST` | `/api/verification/{slide_index}/feedback` | Submit human feedback on verification (logged to MLflow) | `routes/verification.submit_feedback` |
 | `GET` | `/api/verification/genie-link` | Get Genie conversation URL for source data review | `routes/verification.get_genie_link` |
 
+### Settings & Configuration Endpoints
+
+| Method | Path | Purpose | Backend handler |
+| --- | --- | --- | --- |
+| `GET` | `/api/settings/profiles` | List all profiles | `routes/settings/profiles.list_profiles` |
+| `POST` | `/api/settings/profiles` | Create profile | `routes/settings/profiles.create_profile` |
+| `GET` | `/api/settings/profiles/{id}` | Get profile details | `routes/settings/profiles.get_profile` |
+| `PUT` | `/api/settings/profiles/{id}` | Update profile | `routes/settings/profiles.update_profile` |
+| `DELETE` | `/api/settings/profiles/{id}` | Delete profile | `routes/settings/profiles.delete_profile` |
+| `POST` | `/api/settings/profiles/{id}/load` | Hot-reload profile | `routes/settings/profiles.load_profile` |
+| `GET` | `/api/settings/deck-prompts` | List deck prompts | `routes/settings/deck_prompts.list_deck_prompts` |
+| `POST` | `/api/settings/deck-prompts` | Create deck prompt | `routes/settings/deck_prompts.create_deck_prompt` |
+| `GET` | `/api/settings/deck-prompts/{id}` | Get deck prompt | `routes/settings/deck_prompts.get_deck_prompt` |
+| `PUT` | `/api/settings/deck-prompts/{id}` | Update deck prompt | `routes/settings/deck_prompts.update_deck_prompt` |
+| `DELETE` | `/api/settings/deck-prompts/{id}` | Delete deck prompt | `routes/settings/deck_prompts.delete_deck_prompt` |
+| `PUT` | `/api/settings/prompts/{profile_id}` | Update prompts config (including deck prompt selection) | `routes/settings/prompts.update_prompts_config` |
+
+**Deck Prompts** are global presentation templates stored in `slide_deck_prompt_library`. Profiles reference a selected prompt via `config_prompts.selected_deck_prompt_id`. When generating slides, the agent prepends the deck prompt content to the system prompt.
+
 All responses conform to the Pydantic models in `src/api/models/responses.py`. Structure mirrors what the frontend expects (`messages`, `slide_deck`, `raw_html`, `metadata`, optional `replacement_info`).
 
 Mutation endpoints return **409 Conflict** if the session is already processing another request. See [Multi-User Concurrency](multi-user-concurrency.md).
@@ -183,6 +202,10 @@ If the agent's HTML has empty slides, out-of-range indices, or references canvas
   - Configuration stored in database (profiles with LLM, Genie, MLflow, prompts settings).
   - Environment variables for secrets (`DATABRICKS_HOST`, `DATABRICKS_TOKEN`, `DATABASE_URL`).
   - `get_settings()` caches the merged `AppSettings`. Use `reload_settings()` to refresh from database.
+  - **Deck Prompts:** If a profile has `selected_deck_prompt_id` set, the prompt content is loaded and included in `settings.prompts["deck_prompt"]`.
+- **Deck Prompt Injection** (`src/services/agent.py`):
+  - When creating the system prompt, if `deck_prompt` is present, it's prepended to provide presentation structure guidance.
+  - This allows standardized decks (QBR, consumption review, etc.) without users retyping instructions.
 - **Databricks client** (`src/core/databricks_client.py`):
   - Thread-safe singleton `WorkspaceClient` that prefers configured profile → explicit host/token → environment fallback.
   - `initialize_genie_conversation()` and `query_genie_space()` both consume this singleton to avoid reconnecting per request.
