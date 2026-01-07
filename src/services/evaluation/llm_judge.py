@@ -20,16 +20,17 @@ import pandas as pd
 logger = logging.getLogger(__name__)
 
 
-# Rating type for feedback
-RatingType = Literal["excellent", "good", "moderate", "poor", "failing"]
+# Rating type for feedback (RAG: Red/Amber/Green)
+RatingType = Literal["green", "amber", "red"]
 
-# Rating to score mapping
+# Rating to score mapping (RAG system)
+# green: ≥80% - No issues detected
+# amber: 50-79% - Review suggested
+# red: <50% - Review required
 RATING_SCORES: Dict[str, int] = {
-    "excellent": 95,
-    "good": 80,
-    "moderate": 60,
-    "poor": 40,
-    "failing": 15,
+    "green": 85,   # High confidence, no issues
+    "amber": 65,   # Some concerns, review suggested
+    "red": 25,     # Significant issues, review required
 }
 
 
@@ -91,11 +92,9 @@ JUDGE_INSTRUCTIONS = """You are verifying that a presentation slide accurately r
 
 ## Choose ONE rating:
 
-- excellent: All numbers correctly represent the source data
-- good: Numbers are correct, maybe some minor omissions of non-critical data
-- moderate: Most numbers correct, but some important data missing
-- poor: Some numbers are wrong or key data is missing
-- failing: Major errors - wrong numbers, hallucinated data, or swapped values
+- green: All numbers correctly represent the source data (no issues detected)
+- amber: Most numbers correct but some concerns - minor errors or important data missing (review suggested)
+- red: Significant issues - wrong numbers, hallucinated data, swapped values, or major omissions (review required)
 
 Provide your rating and explain your reasoning in 2-3 sentences."""
 

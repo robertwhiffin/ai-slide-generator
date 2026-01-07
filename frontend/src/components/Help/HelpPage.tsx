@@ -248,30 +248,33 @@ const VerificationTab: React.FC = () => (
 
     <section>
       <h2 className="text-lg font-semibold text-gray-800 mb-3">Verification Ratings</h2>
-      <div className="grid grid-cols-2 gap-3">
-        <div className="flex items-center gap-2">
-          <span className="px-2 py-1 text-xs font-medium rounded bg-green-100 text-green-800 border border-green-300">✓ 95%</span>
-          <span className="text-sm text-gray-600"><strong>Excellent:</strong> All data accurate</span>
+      <p className="text-sm text-gray-600 mb-3">
+        Each slide is automatically verified against the source data. The verification uses a simple RAG (Red/Amber/Green) indicator:
+      </p>
+      <div className="space-y-2">
+        <div className="flex items-center gap-3 p-2 bg-green-50 rounded-lg border border-green-200">
+          <span className="px-2 py-1 text-xs font-medium rounded bg-green-100 text-green-800 border border-green-300 flex items-center gap-1">
+            <span className="text-green-600">●</span> No issues
+          </span>
+          <span className="text-sm text-gray-700">All data correctly represents the source — no action needed</span>
         </div>
-        <div className="flex items-center gap-2">
-          <span className="px-2 py-1 text-xs font-medium rounded bg-emerald-100 text-emerald-700 border border-emerald-300">✓ 80%</span>
-          <span className="text-sm text-gray-600"><strong>Good:</strong> Minor omissions only</span>
+        <div className="flex items-center gap-3 p-2 bg-amber-50 rounded-lg border border-amber-200">
+          <span className="px-2 py-1 text-xs font-medium rounded bg-amber-100 text-amber-800 border border-amber-300 flex items-center gap-1">
+            <span className="text-amber-600">●</span> Review suggested
+          </span>
+          <span className="text-sm text-gray-700">Some concerns detected — a quick review is recommended</span>
         </div>
-        <div className="flex items-center gap-2">
-          <span className="px-2 py-1 text-xs font-medium rounded bg-yellow-100 text-yellow-800 border border-yellow-300">~ 60%</span>
-          <span className="text-sm text-gray-600"><strong>Moderate:</strong> Some data missing</span>
+        <div className="flex items-center gap-3 p-2 bg-red-50 rounded-lg border border-red-200">
+          <span className="px-2 py-1 text-xs font-medium rounded bg-red-100 text-red-800 border border-red-300 flex items-center gap-1">
+            <span className="text-red-600">●</span> Review required
+          </span>
+          <span className="text-sm text-gray-700">Significant issues found — review before using this slide</span>
         </div>
-        <div className="flex items-center gap-2">
-          <span className="px-2 py-1 text-xs font-medium rounded bg-orange-100 text-orange-800 border border-orange-300">✗ 40%</span>
-          <span className="text-sm text-gray-600"><strong>Poor:</strong> Errors or missing data</span>
-        </div>
-        <div className="flex items-center gap-2">
-          <span className="px-2 py-1 text-xs font-medium rounded bg-red-100 text-red-800 border border-red-300">✗ 15%</span>
-          <span className="text-sm text-gray-600"><strong>Failing:</strong> Major inaccuracies</span>
-        </div>
-        <div className="flex items-center gap-2">
-          <span className="px-2 py-1 text-xs font-medium rounded bg-gray-100 text-gray-600 border border-gray-300">? Unknown</span>
-          <span className="text-sm text-gray-600"><strong>Unknown:</strong> No source data available</span>
+        <div className="flex items-center gap-3 p-2 bg-gray-50 rounded-lg border border-gray-200">
+          <span className="px-2 py-1 text-xs font-medium rounded bg-gray-100 text-gray-600 border border-gray-300 flex items-center gap-1">
+            <span className="text-gray-500">○</span> Unable to verify
+          </span>
+          <span className="text-sm text-gray-700">No source data available (e.g., title slides with no numbers)</span>
         </div>
       </div>
     </section>

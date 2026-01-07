@@ -59,8 +59,8 @@ Slides generated/modified → Frontend (SlidePanel.tsx)
 ```typescript
 // frontend/src/types/verification.ts
 interface VerificationResult {
-  score: number;                    // 0-100
-  rating: VerificationRating;       // 'excellent' | 'good' | 'moderate' | 'poor' | 'failing' | 'error' | 'unknown'
+  score: number;                    // 0-100 (internal use)
+  rating: VerificationRating;       // 'green' | 'amber' | 'red' | 'error' | 'unknown'
   explanation: string;              // Human-readable assessment
   issues: Array<{                   // Specific problems found
     type: string;
@@ -76,25 +76,31 @@ interface VerificationResult {
 }
 ```
 
-### 2. Rating Scale & Thresholds
+### 2. Rating Scale & Thresholds (RAG System)
+
+The verification uses a simple RAG (Red/Amber/Green) indicator system:
 
 ```python
 # src/services/evaluation/llm_judge.py
 RATING_SCORES = {
-    "excellent": 95,  # All data accurate
-    "good": 80,       # Minor omissions only
-    "moderate": 60,   # Some data missing
-    "poor": 40,       # Errors or missing data
-    "failing": 15,    # Major inaccuracies
+    "green": 85,   # No issues detected (≥80%)
+    "amber": 65,   # Review suggested (50-79%)
+    "red": 25,     # Review required (<50%)
 }
 
-# Score to rating mapping
-if score >= 85: rating = "excellent"
-elif score >= 70: rating = "good"
-elif score >= 50: rating = "moderate"
-elif score >= 30: rating = "poor"
-else: rating = "failing"
+# Rating thresholds:
+# - green: ≥80% — All data correctly represents source
+# - amber: 50-79% — Some concerns, review suggested
+# - red: <50% — Significant issues, review required
+# - unknown: No source data available (title slides, etc.)
 ```
+
+| Rating | Score Range | Badge Label | User Action |
+|--------|-------------|-------------|-------------|
+| 🟢 Green | ≥80% | No issues | Proceed with confidence |
+| 🟡 Amber | 50-79% | Review suggested | Quick review recommended |
+| 🔴 Red | <50% | Review required | Must review before using |
+| ⚪ Unknown | N/A | Unable to verify | No source data available |
 
 ### 3. Content Hash Persistence
 
@@ -308,10 +314,16 @@ Backward compatible – NULL treated as empty dict `{}`.
 
 ### Changing Rating Thresholds
 
-1. Modify `RATING_SCORES` dict in `llm_judge.py`
-2. Update `_score_to_rating()` function
-3. Update frontend rating color mapping in `verification.ts::getRatingColor()`
-4. Update Help page documentation
+The RAG system uses these thresholds:
+- **Green**: ≥80% (judge returns "green")
+- **Amber**: 50-79% (judge returns "amber")  
+- **Red**: <50% (judge returns "red")
+
+To modify:
+1. Update `RATING_SCORES` dict in `llm_judge.py`
+2. Update judge prompt instructions in `JUDGE_INSTRUCTIONS`
+3. Update frontend `verification.ts::getRatingColor()` and related functions
+4. Update Help page documentation in `HelpPage.tsx`
 
 ### Custom Feedback Fields
 
