@@ -9,10 +9,11 @@
  * - Load profile (hot-reload)
  */
 
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import type { Profile, ProfileCreate, ProfileUpdate } from '../../api/config';
 import { useProfiles } from '../../hooks/useProfiles';
 import { ProfileForm } from './ProfileForm';
+import { ProfileCreationWizard } from './ProfileCreationWizard';
 import { ConfirmDialog } from './ConfirmDialog';
 import { ProfileDetailView } from './ProfileDetail';
 
@@ -35,6 +36,8 @@ export const ProfileList: React.FC<ProfileListProps> = ({ onProfileChange }) => 
 
   const [formMode, setFormMode] = useState<'create' | 'edit' | null>(null);
   const [editingProfile, setEditingProfile] = useState<Profile | null>(null);
+  const [showCreationWizard, setShowCreationWizard] = useState(false);
+  const [currentUsername, setCurrentUsername] = useState('user');
   const [confirmDialog, setConfirmDialog] = useState<{
     isOpen: boolean;
     title: string;
@@ -52,23 +55,50 @@ export const ProfileList: React.FC<ProfileListProps> = ({ onProfileChange }) => 
   const [viewingProfileId, setViewingProfileId] = useState<number | null>(null);
   const [viewingProfileMode, setViewingProfileMode] = useState<'view' | 'edit'>('view');
 
-  // Handle create profile
+  // Fetch current username from Databricks on mount
+  useEffect(() => {
+    const fetchUsername = async () => {
+      try {
+        // Use environment-aware URL
+        const apiBase = import.meta.env.VITE_API_URL || (
+          import.meta.env.MODE === 'production' ? '' : 'http://localhost:8000'
+        );
+        const response = await fetch(`${apiBase}/api/user/current`);
+        if (response.ok) {
+          const data = await response.json();
+          setCurrentUsername(data.username || 'user');
+        }
+      } catch {
+        // Use default if fetch fails
+        setCurrentUsername('user');
+      }
+    };
+    fetchUsername();
+  }, []);
+
+  // Handle create profile - show wizard
   const handleCreate = () => {
-    setEditingProfile(null);
-    setFormMode('create');
+    setShowCreationWizard(true);
   };
 
-  // Handle form submit (create only)
-  const handleFormSubmit = async (data: ProfileCreate | ProfileUpdate) => {
-    if (formMode === 'create') {
-      const newProfile = await createProfile(data as ProfileCreate);
-      // Open the new profile in edit mode immediately
-      setFormMode(null);
-      setEditingProfile(null);
-      setViewingProfileId(newProfile.id);
-      setViewingProfileMode('edit');
-      return;
+  // Handle wizard success
+  const handleWizardSuccess = async (profileId: number) => {
+    setShowCreationWizard(false);
+    // Set as default and load the new profile
+    try {
+      await setDefaultProfile(profileId);
+      await loadProfile(profileId);
+      if (onProfileChange) {
+        onProfileChange();
+      }
+    } catch (err) {
+      console.error('Failed to activate new profile:', err);
     }
+  };
+
+  // Handle form submit (edit mode only - create uses wizard)
+  const handleFormSubmit = async (_data: ProfileCreate | ProfileUpdate) => {
+    // This is only used for editing, which is now handled in ProfileDetailView
     setFormMode(null);
     setEditingProfile(null);
   };
@@ -350,10 +380,18 @@ export const ProfileList: React.FC<ProfileListProps> = ({ onProfileChange }) => 
         )}
       </div>
 
-      {/* Profile Form Modal */}
+      {/* Profile Creation Wizard */}
+      <ProfileCreationWizard
+        isOpen={showCreationWizard}
+        onClose={() => setShowCreationWizard(false)}
+        onSuccess={handleWizardSuccess}
+        currentUsername={currentUsername}
+      />
+
+      {/* Profile Form Modal (for editing only) */}
       <ProfileForm
-        isOpen={formMode !== null}
-        mode={formMode || 'create'}
+        isOpen={formMode === 'edit'}
+        mode="edit"
         profile={editingProfile || undefined}
         onSubmit={handleFormSubmit}
         onCancel={() => {

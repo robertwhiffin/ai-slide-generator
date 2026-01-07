@@ -5,6 +5,7 @@
 export { ProfileSelector } from './ProfileSelector';
 export { ProfileList } from './ProfileList';
 export { ProfileForm } from './ProfileForm';
+export { ProfileCreationWizard } from './ProfileCreationWizard';
 export { ConfirmDialog } from './ConfirmDialog';
 export { ProfileDetailView } from './ProfileDetail';
 export { ConfigTabs } from './ConfigTabs';

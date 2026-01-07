@@ -123,6 +123,25 @@ async def health():
     }
 
 
+@app.get("/api/user/current")
+async def get_current_user():
+    """Get the current user from Databricks workspace client."""
+    try:
+        from src.core.databricks_client import get_databricks_client
+        client = get_databricks_client()
+        user = client.current_user.me()
+        return {
+            "username": user.user_name,
+            "display_name": user.display_name or user.user_name,
+        }
+    except Exception as e:
+        logger.warning(f"Failed to get current user: {e}")
+        return {
+            "username": "user",
+            "display_name": "User",
+        }
+
+
 # Production: Serve frontend static files
 if IS_PRODUCTION:
     # Get path to frontend dist directory

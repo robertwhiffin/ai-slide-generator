@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 
 from src.api.schemas.settings import (
     ProfileCreate,
+    ProfileCreateWithConfig,
     ProfileDetail,
     ProfileDuplicate,
     ProfileSummary,
@@ -151,6 +152,73 @@ def create_profile(
         )
     except Exception as e:
         logger.error(f"Error creating profile: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to create profile",
+        )
+
+
+@router.post("/with-config", response_model=ProfileDetail, status_code=status.HTTP_201_CREATED)
+def create_profile_with_config(
+    request: ProfileCreateWithConfig,
+    service: ProfileService = Depends(get_profile_service),
+):
+    """
+    Create a new profile with all configurations in one request.
+    
+    Used by the creation wizard for complete profile setup.
+    Genie space is required; other configurations have defaults.
+    
+    Args:
+        request: Profile creation request with inline configurations
+        
+    Returns:
+        Created profile with all configurations
+        
+    Raises:
+        400: Invalid request
+        409: Profile name already exists
+    """
+    try:
+        # Get the current user from Databricks
+        try:
+            from src.core.databricks_client import get_databricks_client
+            client = get_databricks_client()
+            user = client.current_user.me().user_name
+        except Exception:
+            user = "system"
+
+        profile = service.create_profile_with_config(
+            name=request.name,
+            description=request.description,
+            genie_space={
+                "space_id": request.genie_space.space_id,
+                "space_name": request.genie_space.space_name,
+                "description": request.genie_space.description,
+            },
+            ai_infra={
+                "llm_endpoint": request.ai_infra.llm_endpoint,
+                "llm_temperature": request.ai_infra.llm_temperature,
+                "llm_max_tokens": request.ai_infra.llm_max_tokens,
+            } if request.ai_infra else None,
+            mlflow={
+                "experiment_name": request.mlflow.experiment_name,
+            } if request.mlflow else None,
+            prompts={
+                "selected_deck_prompt_id": request.prompts.selected_deck_prompt_id,
+                "system_prompt": request.prompts.system_prompt,
+                "slide_editing_instructions": request.prompts.slide_editing_instructions,
+            } if request.prompts else None,
+            user=user,
+        )
+        return profile
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e),
+        )
+    except Exception as e:
+        logger.error(f"Error creating profile with config: {e}", exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to create profile",
