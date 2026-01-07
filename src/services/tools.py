@@ -10,7 +10,7 @@ from typing import Any, Optional
 
 import pandas as pd
 
-from src.core.databricks_client import get_databricks_client
+from src.core.databricks_client import get_user_client
 from src.core.settings_db import get_settings
 
 logger = logging.getLogger(__name__)
@@ -41,7 +41,7 @@ def initialize_genie_conversation() -> str:
         >>> conv_id = initialize_genie_conversation()
         >>> result = query_genie_space("show me data", conv_id)
     """
-    client = get_databricks_client()
+    client = get_user_client()
     settings = get_settings()
     space_id = settings.genie.space_id
 
@@ -116,7 +116,7 @@ def query_genie_space(
         >>> print(result['message'])
         >>> print(result['data'])
     """
-    client = get_databricks_client()
+    client = get_user_client()
     settings = get_settings()
     space_id = settings.genie.space_id
 

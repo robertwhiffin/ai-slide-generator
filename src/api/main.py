@@ -10,12 +10,13 @@ import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from src.api.routes import chat, slides, export, sessions, verification
+from src.core.databricks_client import create_user_client, set_user_client
 from src.api.routes.settings import (
     ai_infra_router,
     deck_prompts_router,
@@ -97,6 +98,35 @@ if not IS_PRODUCTION:
         allow_headers=["*"],
     )
 
+
+# User authentication middleware for on-behalf-of-user authorization
+@app.middleware("http")
+async def user_auth_middleware(request: Request, call_next):
+    """
+    Extract user token from Databricks Apps proxy and create user-scoped client.
+
+    When running as a Databricks App, the proxy forwards the authenticated user's
+    token in the x-forwarded-access-token header. This middleware extracts that
+    token and creates a request-scoped WorkspaceClient for Genie/LLM/MLflow calls.
+
+    In local development (no token header), operations fall back to system client.
+    """
+    token = request.headers.get("x-forwarded-access-token")
+    if token:
+        try:
+            user_client = create_user_client(token)
+            set_user_client(user_client)
+            logger.debug("User client set from forwarded token")
+        except Exception as e:
+            logger.warning(f"Failed to create user client from token: {e}")
+    try:
+        response = await call_next(request)
+        return response
+    finally:
+        # Always clean up the user client after request
+        set_user_client(None)
+
+
 # Include API routers
 app.include_router(chat.router)
 app.include_router(slides.router)
@@ -125,10 +155,14 @@ async def health():
 
 @app.get("/api/user/current")
 async def get_current_user():
-    """Get the current user from Databricks workspace client."""
+    """Get the current user from Databricks workspace client.
+
+    Uses user-scoped client when running as Databricks App (user's identity),
+    falls back to system client in local development (service principal).
+    """
     try:
-        from src.core.databricks_client import get_databricks_client
-        client = get_databricks_client()
+        from src.core.databricks_client import get_user_client
+        client = get_user_client()
         user = client.current_user.me()
         return {
             "username": user.user_name,

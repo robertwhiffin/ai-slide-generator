@@ -2,7 +2,7 @@
 Unit tests for the SlideGeneratorAgent.
 """
 
-from unittest.mock import Mock, patch
+from unittest.mock import MagicMock, Mock, patch
 
 import pytest
 
@@ -110,7 +110,7 @@ class TestSlideGeneratorAgent:
             # Verify components created
             assert agent.settings == mock_settings
             assert agent.client == mock_client
-            assert agent.model is not None
+            # Note: model is now created per-request for user context
             assert agent.prompt is not None
             # Note: tools and agent_executor are now created per-request for thread safety
             assert agent.sessions == {}
@@ -133,8 +133,11 @@ class TestSlideGeneratorAgent:
 
     def test_create_model_valid(self, agent_with_mocks):
         """Test model creation with valid settings."""
-        model = agent_with_mocks.model
-        assert model is not None
+        # Model is now created per-request via _create_model()
+        with patch("src.services.agent.get_user_client") as mock_user_client:
+            mock_user_client.return_value = MagicMock()
+            model = agent_with_mocks._create_model()
+            assert model is not None
 
     def test_create_tools_for_session_valid(self, agent_with_mocks):
         """Test tool creation for a specific session."""
