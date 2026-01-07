@@ -23,10 +23,183 @@ from src.database.models import (
     ConfigMLflow,
     ConfigProfile,
     ConfigPrompts,
+    SlideDeckPromptLibrary,
 )
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+
+# Default deck prompt templates for the library
+DEFAULT_DECK_PROMPTS = [
+    {
+        "name": "Consumption Review",
+        "description": "Template for consumption review meetings. Analyzes usage trends, identifies key drivers, and highlights areas for optimization.",
+        "category": "Review",
+        "prompt_content": """PRESENTATION TYPE: Consumption Review
+
+When creating a consumption review presentation, focus on:
+
+1. EXECUTIVE SUMMARY
+   - Overall consumption trend (increasing/decreasing/stable)
+   - Key highlight metrics (total spend, month-over-month change)
+   - Top 3 insights that require attention
+
+2. USAGE ANALYSIS
+   - Query for consumption data over the past 6-12 months
+   - Break down by major categories (compute, storage, etc.)
+   - Identify the top consumers and their growth patterns
+
+3. TREND IDENTIFICATION
+   - Look for seasonal patterns or anomalies
+   - Compare current period to previous periods
+   - Highlight significant changes (>10% movement)
+
+4. OPTIMIZATION OPPORTUNITIES
+   - Identify underutilized resources
+   - Highlight cost-saving opportunities
+   - Recommend actions based on data
+
+5. FORWARD OUTLOOK
+   - Project future consumption based on trends
+   - Flag any concerns or risks
+   - Provide actionable recommendations
+
+Structure the deck with clear data visualizations showing trends over time.""",
+    },
+    {
+        "name": "Quarterly Business Review",
+        "description": "Template for QBR presentations. Covers performance metrics, achievements, challenges, and strategic recommendations.",
+        "category": "Report",
+        "prompt_content": """PRESENTATION TYPE: Quarterly Business Review (QBR)
+
+When creating a QBR presentation, structure it as follows:
+
+1. QUARTER OVERVIEW
+   - Executive summary of the quarter
+   - Key performance indicators vs. targets
+   - Major achievements and milestones
+
+2. METRICS DEEP DIVE
+   - Query for all relevant metrics for the quarter
+   - Compare to previous quarter and same quarter last year
+   - Use charts to visualize performance trends
+
+3. SUCCESS STORIES
+   - Highlight specific wins with data
+   - Quantify impact where possible
+   - Include growth or improvement percentages
+
+4. CHALLENGES & LEARNINGS
+   - Acknowledge areas that didn't meet expectations
+   - Provide context with supporting data
+   - Share lessons learned
+
+5. NEXT QUARTER OUTLOOK
+   - Goals and targets for upcoming quarter
+   - Strategic initiatives planned
+   - Resource requirements or asks
+
+Use a professional, data-driven approach with clear visualizations for each section.""",
+    },
+    {
+        "name": "Executive Summary",
+        "description": "High-level overview format for executive audiences. Focuses on key metrics and strategic insights.",
+        "category": "Summary",
+        "prompt_content": """PRESENTATION TYPE: Executive Summary
+
+When creating an executive summary presentation:
+
+DESIGN PRINCIPLES:
+- Keep it concise - executives have limited time
+- Lead with insights, not data
+- Use clear, impactful titles that state the takeaway
+- Maximum 5-7 slides total
+
+STRUCTURE:
+1. HEADLINE SLIDE
+   - Single most important insight or conclusion
+   - One key metric that supports it
+
+2. SITUATION OVERVIEW
+   - Brief context (2-3 bullets max)
+   - Current state summary
+
+3. KEY FINDINGS (2-3 slides max)
+   - One major insight per slide
+   - Support each with 1-2 data points
+   - Use simple charts (bar or line)
+
+4. RECOMMENDATIONS
+   - Clear, actionable next steps
+   - Prioritized list (max 3 items)
+
+5. ASK (if applicable)
+   - What decision or action is needed
+   - Required resources or support
+
+Keep language simple and avoid jargon. Every data point should support a decision.""",
+    },
+    {
+        "name": "Use Case Analysis",
+        "description": "Template for analyzing use case progression and identifying blockers or accelerators.",
+        "category": "Analysis",
+        "prompt_content": """PRESENTATION TYPE: Use Case Analysis
+
+When analyzing use cases, focus on:
+
+1. PORTFOLIO OVERVIEW
+   - Total number of use cases in scope
+   - Distribution by stage/status
+   - Overall health metrics
+
+2. PROGRESSION ANALYSIS
+   - Query for use case movement between stages
+   - Identify velocity patterns
+   - Calculate average time in each stage
+
+3. BLOCKER IDENTIFICATION
+   - Find use cases that are stuck or slowed
+   - Categorize blockers (technical, resource, dependency)
+   - Quantify impact of each blocker type
+
+4. SUCCESS PATTERNS
+   - Identify fast-moving use cases
+   - Find common characteristics of successful progression
+   - Extract best practices
+
+5. RECOMMENDATIONS
+   - Specific actions to unblock stuck use cases
+   - Resource allocation suggestions
+   - Process improvements
+
+Use funnel charts for progression and bar charts for blocker analysis.""",
+    },
+]
+
+
+def _seed_deck_prompts(db) -> None:
+    """Seed the deck prompt library with default templates."""
+    existing_count = db.query(SlideDeckPromptLibrary).count()
+    if existing_count > 0:
+        logger.info(f"Deck prompt library already has {existing_count} prompts, skipping seed")
+        return
+
+    for prompt_data in DEFAULT_DECK_PROMPTS:
+        prompt = SlideDeckPromptLibrary(
+            name=prompt_data["name"],
+            description=prompt_data["description"],
+            category=prompt_data["category"],
+            prompt_content=prompt_data["prompt_content"],
+            is_active=True,
+            created_by="system",
+            updated_by="system",
+        )
+        db.add(prompt)
+        logger.info(f"Created deck prompt: {prompt_data['name']}")
+
+    logger.info(f"Seeded {len(DEFAULT_DECK_PROMPTS)} deck prompts")
+    print(f"  ✓ Seeded {len(DEFAULT_DECK_PROMPTS)} deck prompts in library")
 
 
 def init_default_profile() -> None:
@@ -55,7 +228,6 @@ def init_default_profile() -> None:
             prompts = {
                 "system_prompt": DEFAULT_CONFIG["prompts"]["system_prompt"],
                 "slide_editing_instructions": DEFAULT_CONFIG["prompts"]["slide_editing_instructions"],
-                "user_prompt_template": DEFAULT_CONFIG["prompts"]["user_prompt_template"],
             }
 
         with get_db_session() as db:
@@ -132,13 +304,12 @@ def init_default_profile() -> None:
                     "slide_editing_instructions",
                     DEFAULT_CONFIG["prompts"]["slide_editing_instructions"]
                 ),
-                user_prompt_template=prompts.get(
-                    "user_prompt_template",
-                    DEFAULT_CONFIG["prompts"]["user_prompt_template"]
-                ),
             )
             db.add(prompts_config)
             logger.info("Created prompts settings")
+
+            # Seed deck prompt library (global, not per-profile)
+            _seed_deck_prompts(db)
 
             db.commit()
 

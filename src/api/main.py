@@ -18,6 +18,7 @@ from fastapi.staticfiles import StaticFiles
 from src.api.routes import chat, slides, export, sessions, verification
 from src.api.routes.settings import (
     ai_infra_router,
+    deck_prompts_router,
     genie_router,
     mlflow_router,
     profiles_router,
@@ -106,6 +107,7 @@ app.include_router(verification.router)
 # Configuration management routers
 app.include_router(profiles_router, prefix="/api/settings", tags=["settings"])
 app.include_router(ai_infra_router, prefix="/api/settings", tags=["settings"])
+app.include_router(deck_prompts_router, prefix="/api/settings", tags=["settings"])
 app.include_router(genie_router, prefix="/api/settings", tags=["settings"])
 app.include_router(mlflow_router, prefix="/api/settings", tags=["settings"])
 app.include_router(prompts_router, prefix="/api/settings", tags=["settings"])
@@ -119,6 +121,25 @@ async def health():
         "environment": ENVIRONMENT,
         "version": "0.3.0",
     }
+
+
+@app.get("/api/user/current")
+async def get_current_user():
+    """Get the current user from Databricks workspace client."""
+    try:
+        from src.core.databricks_client import get_databricks_client
+        client = get_databricks_client()
+        user = client.current_user.me()
+        return {
+            "username": user.user_name,
+            "display_name": user.display_name or user.user_name,
+        }
+    except Exception as e:
+        logger.warning(f"Failed to get current user: {e}")
+        return {
+            "username": "user",
+            "display_name": "User",
+        }
 
 
 # Production: Serve frontend static files

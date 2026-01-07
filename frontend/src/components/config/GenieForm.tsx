@@ -22,7 +22,6 @@ export const GenieForm: React.FC<GenieFormProps> = ({
 }) => {
   const [currentSpace, setCurrentSpace] = useState<GenieSpace | null>(null);
   const [availableSpaces, setAvailableSpaces] = useState<{[spaceId: string]: {title: string; description: string}}>({});
-  const [sortedTitles, setSortedTitles] = useState<string[]>([]);
   const [selectedSpaceId, setSelectedSpaceId] = useState('');
   const [description, setDescription] = useState('');
   const [searchTerm, setSearchTerm] = useState('');
@@ -53,7 +52,7 @@ export const GenieForm: React.FC<GenieFormProps> = ({
         setDescription(space.description || '');
       } catch (err) {
         // 404 means no space configured yet - this is okay
-        if (err instanceof ConfigApiError && err.message.includes('404')) {
+        if (err instanceof ConfigApiError && err.status === 404) {
           // No space configured, leave as null
           setCurrentSpace(null);
         } else {
@@ -79,7 +78,6 @@ export const GenieForm: React.FC<GenieFormProps> = ({
       setLoadingSpaces(true);
       const available = await configApi.getAvailableGenieSpaces();
       setAvailableSpaces(available.spaces);
-      setSortedTitles(available.sorted_titles);
       setSpacesLoaded(true);
     } catch (err) {
       const message = err instanceof ConfigApiError 
@@ -225,18 +223,10 @@ export const GenieForm: React.FC<GenieFormProps> = ({
     }
   };
 
-  // Filter spaces by search term (use sorted titles)
-  const filteredTitles = sortedTitles.filter(title =>
-    title.toLowerCase().includes(searchTerm.toLowerCase())
-  );
-  
-  // Get space ID by title
-  const getSpaceIdByTitle = (title: string): string | null => {
-    for (const [id, details] of Object.entries(availableSpaces)) {
-      if (details.title === title) return id;
-    }
-    return null;
-  };
+  // Filter and sort spaces by search term - iterate by unique spaceId to avoid duplicate key issues
+  const filteredSpaces = Object.entries(availableSpaces)
+    .filter(([_, details]) => details.title.toLowerCase().includes(searchTerm.toLowerCase()))
+    .sort((a, b) => a[1].title.localeCompare(b[1].title));
 
   if (loading) {
     return (
@@ -312,24 +302,21 @@ export const GenieForm: React.FC<GenieFormProps> = ({
           disabled={saving || loadingSpaces}
         >
           <option value="">-- Select a Genie Space --</option>
-          {filteredTitles.map((title) => {
-            const spaceId = getSpaceIdByTitle(title);
-            return spaceId ? (
-              <option key={spaceId} value={spaceId}>
-                {title}
-              </option>
-            ) : null;
-          })}
+          {filteredSpaces.map(([spaceId, details]) => (
+            <option key={spaceId} value={spaceId}>
+              {details.title}
+            </option>
+          ))}
         </select>
 
         {loadingSpaces && (
-          <p className="mt-2 text-sm text-gray-500 flex items-center gap-2">
-            <div className="w-4 h-4 border-2 border-purple-600 border-t-transparent rounded-full animate-spin"></div>
+          <div className="mt-2 text-sm text-gray-500 flex items-center gap-2">
+            <span className="w-4 h-4 border-2 border-purple-600 border-t-transparent rounded-full animate-spin inline-block"></span>
             Loading available spaces...
-          </p>
+          </div>
         )}
 
-        {filteredTitles.length === 0 && searchTerm && !loadingSpaces && (
+        {filteredSpaces.length === 0 && searchTerm && !loadingSpaces && spacesLoaded && (
           <p className="mt-2 text-sm text-gray-500">
             No spaces found matching "{searchTerm}"
           </p>
@@ -385,7 +372,11 @@ export const GenieForm: React.FC<GenieFormProps> = ({
         <textarea
           value={description}
           onChange={(e) => setDescription(e.target.value)}
-          placeholder="Describe what data is available in this Genie space. The AI agent will use this to understand what queries it can make. E.g., 'Customer orders, product catalog, sales metrics by region and time period'"
+          placeholder={
+            selectedSpaceId && availableSpaces[selectedSpaceId] && !availableSpaces[selectedSpaceId].description
+              ? "No description set for this Genie space. Please provide one so the AI agent knows what data is available."
+              : "Describe what data is available in this Genie space. The AI agent will use this to understand what queries it can make. E.g., 'Customer orders, product catalog, sales metrics by region and time period'"
+          }
           className="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:ring-blue-500 focus:border-blue-500 font-mono text-sm"
           rows={4}
           disabled={saving}

@@ -138,15 +138,34 @@ class ConfigService:
     def update_prompts_config(
         self,
         profile_id: int,
+        selected_deck_prompt_id: int = None,
         system_prompt: str = None,
         slide_editing_instructions: str = None,
-        user_prompt_template: str = None,
         user: str = None,
+        clear_deck_prompt: bool = False,
     ) -> ConfigPrompts:
-        """Update prompts configuration."""
+        """Update prompts configuration.
+        
+        Args:
+            profile_id: Profile ID
+            selected_deck_prompt_id: ID of deck prompt from library (optional)
+            system_prompt: System prompt (advanced setting)
+            slide_editing_instructions: Slide editing instructions (advanced setting)
+            user: User making the change
+            clear_deck_prompt: If True, clear the selected deck prompt
+        """
         config = self.get_prompts_config(profile_id)
 
         changes = {}
+
+        # Handle deck prompt selection
+        if clear_deck_prompt:
+            if config.selected_deck_prompt_id is not None:
+                changes["selected_deck_prompt_id"] = {"old": config.selected_deck_prompt_id, "new": None}
+                config.selected_deck_prompt_id = None
+        elif selected_deck_prompt_id is not None and selected_deck_prompt_id != config.selected_deck_prompt_id:
+            changes["selected_deck_prompt_id"] = {"old": config.selected_deck_prompt_id, "new": selected_deck_prompt_id}
+            config.selected_deck_prompt_id = selected_deck_prompt_id
 
         if system_prompt is not None and system_prompt != config.system_prompt:
             changes["system_prompt"] = {"old": "...", "new": "..."}  # Don't log full prompts
@@ -155,10 +174,6 @@ class ConfigService:
         if slide_editing_instructions is not None and slide_editing_instructions != config.slide_editing_instructions:
             changes["slide_editing_instructions"] = {"old": "...", "new": "..."}
             config.slide_editing_instructions = slide_editing_instructions
-
-        if user_prompt_template is not None and user_prompt_template != config.user_prompt_template:
-            changes["user_prompt_template"] = {"old": config.user_prompt_template, "new": user_prompt_template}
-            config.user_prompt_template = user_prompt_template
 
         if changes:
             history = ConfigHistory(

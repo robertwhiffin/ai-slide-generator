@@ -2,18 +2,17 @@
  * Form component for creating and editing profiles.
  * 
  * Supports:
- * - Creating new profiles (with optional copy-from)
+ * - Creating new profiles
  * - Editing profile name and description
  */
 
 import React, { useState, useEffect } from 'react';
-import type { Profile, ProfileCreate, ProfileUpdate } from '../../api/config';
+import type { ProfileCreate, ProfileUpdate } from '../../api/config';
 
 interface ProfileFormProps {
   isOpen: boolean;
   mode: 'create' | 'edit';
-  profile?: Profile;
-  profiles?: Profile[];
+  profile?: { name: string; description: string | null };
   onSubmit: (data: ProfileCreate | ProfileUpdate) => Promise<void>;
   onCancel: () => void;
 }
@@ -22,13 +21,11 @@ export const ProfileForm: React.FC<ProfileFormProps> = ({
   isOpen,
   mode,
   profile,
-  profiles = [],
   onSubmit,
   onCancel,
 }) => {
   const [name, setName] = useState('');
   const [description, setDescription] = useState('');
-  const [copyFromId, setCopyFromId] = useState<number | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -40,7 +37,6 @@ export const ProfileForm: React.FC<ProfileFormProps> = ({
     } else {
       setName('');
       setDescription('');
-      setCopyFromId(null);
     }
     setError(null);
   }, [mode, profile, isOpen]);
@@ -73,7 +69,6 @@ export const ProfileForm: React.FC<ProfileFormProps> = ({
         const data: ProfileCreate = {
           name: name.trim(),
           description: description.trim() || null,
-          copy_from_profile_id: copyFromId,
         };
         await onSubmit(data);
       } else {
@@ -159,32 +154,6 @@ export const ProfileForm: React.FC<ProfileFormProps> = ({
               {description.length}/500 characters
             </p>
           </div>
-
-          {/* Copy From (Create mode only) */}
-          {mode === 'create' && profiles.length > 0 && (
-            <div>
-              <label htmlFor="copyFrom" className="block text-sm font-medium text-gray-700 mb-1">
-                Copy Configuration From
-              </label>
-              <select
-                id="copyFrom"
-                value={copyFromId || ''}
-                onChange={(e) => setCopyFromId(e.target.value ? Number(e.target.value) : null)}
-                className="w-full px-3 py-2 border border-gray-300 rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
-                disabled={isSubmitting}
-              >
-                <option value="">Create with default configuration</option>
-                {profiles.map((p) => (
-                  <option key={p.id} value={p.id}>
-                    {p.name} {p.is_default && '(Default)'}
-                  </option>
-                ))}
-              </select>
-              <p className="mt-1 text-xs text-gray-500">
-                Optional: Copy all settings from an existing profile
-              </p>
-            </div>
-          )}
 
           {/* Buttons */}
           <div className="flex justify-end gap-3 pt-4">

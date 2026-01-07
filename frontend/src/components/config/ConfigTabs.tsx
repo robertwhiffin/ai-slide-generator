@@ -5,7 +5,8 @@
  * - AI Infrastructure
  * - Genie Spaces
  * - MLflow
- * - Prompts
+ * - Deck Prompt (presentation templates)
+ * - Advanced (system prompts for power users)
  */
 
 import React, { useState } from 'react';
@@ -13,9 +14,10 @@ import { useConfig } from '../../hooks/useConfig';
 import { AIInfraForm } from './AIInfraForm';
 import { GenieForm } from './GenieForm';
 import { MLflowForm } from './MLflowForm';
-import { PromptsEditor } from './PromptsEditor';
+import { DeckPromptSelector } from './DeckPromptSelector';
+import { AdvancedSettingsEditor } from './AdvancedSettingsEditor';
 
-type TabId = 'ai_infra' | 'genie' | 'mlflow' | 'prompts';
+type TabId = 'ai_infra' | 'genie' | 'mlflow' | 'deck_prompt' | 'advanced';
 
 interface Tab {
   id: TabId;
@@ -27,7 +29,8 @@ const tabs: Tab[] = [
   { id: 'ai_infra', label: 'AI Infrastructure', icon: '🤖' },
   { id: 'genie', label: 'Genie Spaces', icon: '🧞' },
   { id: 'mlflow', label: 'MLflow', icon: '📊' },
-  { id: 'prompts', label: 'Prompts', icon: '💬' },
+  { id: 'deck_prompt', label: 'Deck Prompt', icon: '📋' },
+  { id: 'advanced', label: 'Advanced', icon: '⚙️' },
 ];
 
 interface ConfigTabsProps {
@@ -121,8 +124,17 @@ export const ConfigTabs: React.FC<ConfigTabsProps> = ({ profileId, profileName }
           />
         )}
 
-        {activeTab === 'prompts' && config.prompts && (
-          <PromptsEditor
+        {activeTab === 'deck_prompt' && config.prompts && (
+          <DeckPromptSelector
+            profileId={profileId}
+            currentPrompts={config.prompts}
+            onSave={reload}
+            saving={saving}
+          />
+        )}
+
+        {activeTab === 'advanced' && config.prompts && (
+          <AdvancedSettingsEditor
             config={config.prompts}
             onSave={updatePrompts}
             saving={saving}
