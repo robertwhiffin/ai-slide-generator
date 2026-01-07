@@ -12,7 +12,7 @@ from unittest.mock import MagicMock, Mock, patch
 import pytest
 from databricks.sdk import WorkspaceClient
 
-from src.core.databricks_client import reset_client
+from src.core.databricks_client import reset_client, reset_user_client
 
 
 @pytest.fixture(autouse=True)
@@ -23,8 +23,10 @@ def reset_singleton_client():
     This ensures tests don't interfere with each other.
     """
     reset_client()
+    reset_user_client()
     yield
     reset_client()
+    reset_user_client()
 
 
 @pytest.fixture(autouse=True)

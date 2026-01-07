@@ -1,21 +1,30 @@
 """
-Singleton Databricks client for efficient connection management.
+Databricks client management with dual-client architecture.
 
-This module provides a thread-safe singleton WorkspaceClient instance
-that is shared across all services.
+This module provides two types of WorkspaceClient:
+1. System Client (singleton): Uses service principal credentials for system operations
+2. User Client (request-scoped): Uses forwarded user token for Genie/LLM/MLflow
+
+The user client is set per-request via middleware and stored in a ContextVar.
 """
 
 import logging
+import os
 import threading
+from contextvars import ContextVar
 from typing import Optional
 
 from databricks.sdk import WorkspaceClient
 
 logger = logging.getLogger(__name__)
 
-# Global singleton instance
-_client_instance: Optional[WorkspaceClient] = None
-_client_lock = threading.Lock()
+# =============================================================================
+# System Client (Singleton - Service Principal)
+# =============================================================================
+
+# Global singleton instance for system operations
+_system_client: Optional[WorkspaceClient] = None
+_system_lock = threading.Lock()
 
 
 class DatabricksClientError(Exception):
@@ -24,99 +33,185 @@ class DatabricksClientError(Exception):
     pass
 
 
-def get_databricks_client(
-    force_new: bool = False,
-) -> WorkspaceClient:
+def get_system_client(force_new: bool = False) -> WorkspaceClient:
     """
-    Get the singleton Databricks WorkspaceClient instance.
+    Get the system-level WorkspaceClient (service principal).
 
-    This function implements a thread-safe singleton pattern. The client is
-    initialized lazily on first call and reused for all subsequent calls.
+    Used for system operations like loading settings, health checks,
+    and database operations. Uses environment variables for authentication.
 
     Args:
         force_new: If True, create a new client instance (useful for testing)
 
-    Authentication:
-        Uses environment variables (DATABRICKS_HOST, DATABRICKS_TOKEN) or
-        the default Databricks authentication chain (environment, settings file, etc.)
-
     Returns:
-        WorkspaceClient instance configured with credentials
+        WorkspaceClient instance with service principal credentials
 
     Raises:
         DatabricksClientError: If client initialization fails
     """
-    global _client_instance
+    global _system_client
 
     # Fast path: return existing instance without locking
-    if _client_instance is not None and not force_new:
-        return _client_instance
+    if _system_client is not None and not force_new:
+        return _system_client
 
     # Slow path: create new instance with lock
-    with _client_lock:
+    with _system_lock:
         # Double-check pattern: another thread may have created instance
-        if _client_instance is not None and not force_new:
-            return _client_instance
+        if _system_client is not None and not force_new:
+            return _system_client
 
         try:
-            # Initialize client from environment variables using Databricks SDK default auth chain
-            logger.info("Initializing Databricks client from environment variables")
-            _client_instance = WorkspaceClient()
+            logger.info("Initializing system Databricks client from environment")
+            _system_client = WorkspaceClient()
 
-            # Verify connection by making a simple API call
+            # Verify connection
             try:
-                current_user = _client_instance.current_user.me()
+                current_user = _system_client.current_user.me()
                 logger.info(
-                    "Databricks client initialized successfully",
+                    "System Databricks client initialized",
                     extra={
                         "user": current_user.user_name,
-                        "auth_method": "environment",
+                        "auth_method": "service_principal",
                     },
                 )
             except Exception as e:
-                _client_instance = None
+                _system_client = None
                 raise DatabricksClientError(
-                    f"Failed to verify Databricks connection: {e}"
+                    f"Failed to verify system Databricks connection: {e}"
                 ) from e
 
-            return _client_instance
+            return _system_client
 
         except DatabricksClientError:
             raise
         except Exception as e:
-            _client_instance = None
+            _system_client = None
             raise DatabricksClientError(
-                f"Failed to initialize Databricks client: {e}"
+                f"Failed to initialize system Databricks client: {e}"
             ) from e
+
+
+# Backward compatibility alias
+def get_databricks_client(force_new: bool = False) -> WorkspaceClient:
+    """
+    Alias for get_system_client() - maintains backward compatibility.
+
+    For user-scoped operations (Genie, LLM, MLflow), use get_user_client() instead.
+    """
+    return get_system_client(force_new)
 
 
 def reset_client() -> None:
     """
-    Reset the singleton client instance.
+    Reset the system client instance.
 
-    This is primarily useful for testing to ensure a clean state
-    between test cases.
+    Primarily useful for testing to ensure a clean state between test cases.
     """
-    global _client_instance
-    with _client_lock:
-        if _client_instance is not None:
-            logger.info("Resetting Databricks client instance")
-            _client_instance = None
+    global _system_client
+    with _system_lock:
+        if _system_client is not None:
+            logger.info("Resetting system Databricks client instance")
+            _system_client = None
 
 
 def verify_connection() -> bool:
     """
-    Verify that the Databricks connection is working.
+    Verify that the system Databricks connection is working.
 
     Returns:
         True if connection is successful, False otherwise
     """
     try:
-        client = get_databricks_client()
-        # Try to get current user as a simple health check
+        client = get_system_client()
         client.current_user.me()
         return True
     except Exception as e:
-        logger.error(f"Databricks connection verification failed: {e}")
+        logger.error(f"System Databricks connection verification failed: {e}")
         return False
 
+
+# =============================================================================
+# User Client (Request-Scoped - User Token)
+# =============================================================================
+
+# Request-scoped user client stored in ContextVar
+_user_client_var: ContextVar[Optional[WorkspaceClient]] = ContextVar(
+    "user_client", default=None
+)
+
+
+def create_user_client(token: str) -> WorkspaceClient:
+    """
+    Create a user-scoped WorkspaceClient from forwarded token.
+
+    Used for user-specific operations (Genie queries, LLM calls, MLflow).
+    The token comes from the x-forwarded-access-token header set by
+    the Databricks Apps proxy.
+
+    Args:
+        token: User's access token from request headers
+
+    Returns:
+        WorkspaceClient configured with user's credentials
+
+    Raises:
+        DatabricksClientError: If client creation fails
+    """
+    host = os.getenv("DATABRICKS_HOST")
+    if not host:
+        raise DatabricksClientError("DATABRICKS_HOST environment variable not set")
+
+    try:
+        client = WorkspaceClient(
+            host=host,
+            token=token,
+            auth_type="pat",  # Required for user token authentication
+        )
+        logger.debug("Created user-scoped Databricks client")
+        return client
+    except Exception as e:
+        raise DatabricksClientError(
+            f"Failed to create user Databricks client: {e}"
+        ) from e
+
+
+def set_user_client(client: Optional[WorkspaceClient]) -> None:
+    """
+    Set the request-scoped user client.
+
+    Called by middleware to set the user client at the start of a request
+    and clear it (set to None) at the end.
+
+    Args:
+        client: User's WorkspaceClient or None to clear
+    """
+    _user_client_var.set(client)
+
+
+def get_user_client() -> WorkspaceClient:
+    """
+    Get the user-scoped WorkspaceClient for Genie/LLM/MLflow operations.
+
+    Returns the request-scoped user client if available (set by middleware),
+    otherwise falls back to the system client (for local development).
+
+    Returns:
+        WorkspaceClient for user operations
+    """
+    client = _user_client_var.get()
+    if client is not None:
+        return client
+
+    # Fallback to system client for local development
+    logger.debug("No user client in context, falling back to system client")
+    return get_system_client()
+
+
+def reset_user_client() -> None:
+    """
+    Reset the user client context variable.
+
+    Primarily useful for testing.
+    """
+    _user_client_var.set(None)

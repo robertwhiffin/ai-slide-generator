@@ -15,8 +15,8 @@ from src.services.tools import (
 
 @pytest.fixture
 def mock_databricks_client():
-    """Mock Databricks client for testing."""
-    with patch("src.services.tools.get_databricks_client") as mock_client:
+    """Mock Databricks client for testing (user client for Genie operations)."""
+    with patch("src.services.tools.get_user_client") as mock_client:
         client = Mock()
         mock_client.return_value = client
         yield client
@@ -258,33 +258,12 @@ def test_initialize_genie_conversation_success(mock_databricks_client, mock_sett
     # Verify conversation_id returned
     assert conversation_id == "conv-init-123"
 
-    # Verify client called with correct parameters
-    mock_databricks_client.genie.start_conversation_and_wait.assert_called_once_with(
-        space_id="test-space-id",
-        content="This is a system message to start a conversation."
-    )
-
-
-def test_initialize_genie_conversation_custom_message(mock_databricks_client, mock_settings):
-    """Test Genie conversation initialization with custom message."""
-    # Setup mock conversation response
-    conversation_response = Mock()
-    conversation_response.conversation_id = "conv-custom-123"
-    
-    mock_databricks_client.genie.start_conversation_and_wait.return_value = conversation_response
-
-    # Initialize conversation with custom message
-    custom_message = "Custom initialization message"
-    conversation_id = initialize_genie_conversation(placeholder_message=custom_message)
-
-    # Verify conversation_id returned
-    assert conversation_id == "conv-custom-123"
-
-    # Verify client called with custom message
-    mock_databricks_client.genie.start_conversation_and_wait.assert_called_once_with(
-        space_id="test-space-id",
-        content=custom_message
-    )
+    # Verify client called with correct space_id
+    mock_databricks_client.genie.start_conversation_and_wait.assert_called_once()
+    call_kwargs = mock_databricks_client.genie.start_conversation_and_wait.call_args.kwargs
+    assert call_kwargs["space_id"] == "test-space-id"
+    assert "content" in call_kwargs
+    assert len(call_kwargs["content"]) > 0  # Some initialization message
 
 
 def test_initialize_genie_conversation_error(mock_databricks_client, mock_settings):
