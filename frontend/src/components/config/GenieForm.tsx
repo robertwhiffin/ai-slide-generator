@@ -372,7 +372,11 @@ export const GenieForm: React.FC<GenieFormProps> = ({
         <textarea
           value={description}
           onChange={(e) => setDescription(e.target.value)}
-          placeholder="Describe what data is available in this Genie space. The AI agent will use this to understand what queries it can make. E.g., 'Customer orders, product catalog, sales metrics by region and time period'"
+          placeholder={
+            selectedSpaceId && availableSpaces[selectedSpaceId] && !availableSpaces[selectedSpaceId].description
+              ? "No description set for this Genie space. Please provide one so the AI agent knows what data is available."
+              : "Describe what data is available in this Genie space. The AI agent will use this to understand what queries it can make. E.g., 'Customer orders, product catalog, sales metrics by region and time period'"
+          }
           className="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:ring-blue-500 focus:border-blue-500 font-mono text-sm"
           rows={4}
           disabled={saving}
