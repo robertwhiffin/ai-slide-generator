@@ -404,16 +404,18 @@ This creates:
 
 ### Profile Creation
 
-Profiles are created via a 6-step wizard that collects all required configuration:
+Profiles are created via a 4-step wizard that collects essential configuration. LLM and MLflow settings use backend defaults:
 
 1. **Basic Info** - Name and description
 2. **Genie Space** - Required data source with AI description
-3. **LLM Settings** - Defaults to `databricks-claude-sonnet-4-5`
-4. **MLflow** - Auto-populated with `/Workspace/Users/{username}/ai-slide-generator`
-5. **Deck Prompt** - Optional template selection
-6. **Review** - Confirmation before creation
+3. **Deck Prompt** - Optional template selection
+4. **Review** - Confirmation before creation
 
-The wizard creates the profile and all configurations in a single transaction via `ProfileService.create_profile_with_config()`. This ensures profiles are always complete and usable immediately after creation.
+**Backend Defaults Applied:**
+- **LLM**: `databricks-claude-sonnet-4-5`, temperature 0.7, max tokens 60000
+- **MLflow**: `/Workspace/Users/{username}/ai-slide-generator`
+
+The wizard creates the profile and all configurations in a single transaction via `ProfileService.create_profile_with_config()`. LLM and MLflow settings can be customized after profile creation in the profile settings.
 
 ### Default Values
 
