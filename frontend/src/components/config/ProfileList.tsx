@@ -27,7 +27,6 @@ export const ProfileList: React.FC<ProfileListProps> = ({ onProfileChange }) => 
     currentProfile,
     loading,
     error,
-    createProfile,
     deleteProfile,
     duplicateProfile,
     setDefaultProfile,
