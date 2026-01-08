@@ -12,7 +12,7 @@
 
 import React, { useState, useEffect } from 'react';
 import { FiCheck, FiChevronLeft, FiChevronRight, FiX, FiInfo } from 'react-icons/fi';
-import { configApi, type DeckPrompt, type AvailableGenieSpaces, type EndpointsList } from '../../api/config';
+import { configApi, type DeckPrompt, type AvailableGenieSpaces } from '../../api/config';
 
 // Wizard step definitions
 const STEPS = [
