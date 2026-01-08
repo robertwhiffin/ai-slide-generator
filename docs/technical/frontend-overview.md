@@ -110,20 +110,22 @@ Parsed tiles, rendered raw HTML (`iframe`), and raw HTML text (`<pre>`). Users c
 
 ### 7. Profile Creation Wizard (`src/components/config/ProfileCreationWizard.tsx`)
 
-Profile creation uses a 6-step wizard that ensures all required configuration is collected before the profile is created:
+Profile creation uses a 4-step wizard that collects only essential configuration. LLM and MLflow settings use backend defaults.
 
 **Wizard Steps:**
 1. **Basic Info** - Profile name and description
 2. **Genie Space** - Required data source selection with description (for AI context)
-3. **LLM Settings** - Model endpoint, temperature, max tokens (defaults: `databricks-claude-sonnet-4-5`, 0.7, 60000)
-4. **MLflow** - Experiment name (auto-populated with `/Workspace/Users/{username}/ai-slide-generator`)
-5. **Deck Prompt** - Optional presentation template selection
-6. **Review** - Summary of all settings before creation
+3. **Deck Prompt** - Optional presentation template selection
+4. **Review** - Summary of settings before creation
+
+**Default Values (applied automatically by backend):**
+- **LLM**: `databricks-claude-sonnet-4-5`, temperature 0.7, max tokens 60000
+- **MLflow**: `/Workspace/Users/{username}/ai-slide-generator`
 
 **Key behaviors:**
 - The "Next" button is disabled until required fields are completed
-- Username is fetched from Databricks via `/api/user/current` for MLflow path
 - Profile is created with all configurations in a single transaction via `POST /api/settings/profiles/with-config`
+- LLM and MLflow settings can be customized after profile creation in the profile settings
 - After creation, the new profile is automatically set as default and loaded
 
 ### 8. Deck Prompt Library (`src/components/config/DeckPromptList.tsx`)
@@ -175,7 +177,7 @@ interface DeckPrompt {
 | `src/hooks/useKeyboardShortcuts.ts` | `Esc` clears selection globally | None |
 | `src/utils/loadingMessages.ts` | Rotating messages during LLM calls | None |
 | `src/components/common/Tooltip.tsx` | Lightweight hover tooltip wrapper using Tailwind; appears instantly on hover | None |
-| `src/components/config/ProfileCreationWizard.tsx` | 6-step wizard for complete profile creation; collects all required config before creating | `configApi.createProfileWithConfig`, `/api/user/current` |
+| `src/components/config/ProfileCreationWizard.tsx` | 4-step wizard for profile creation; LLM and MLflow use backend defaults | `configApi.createProfileWithConfig` |
 | `src/components/config/DeckPromptList.tsx` | Deck prompt library management: list, create, edit, delete prompts | `configApi.listDeckPrompts`, `configApi.createDeckPrompt`, `configApi.updateDeckPrompt`, `configApi.deleteDeckPrompt` |
 | `src/components/config/DeckPromptForm.tsx` | Modal form for creating/editing deck prompts with Monaco editor | None (callback props) |
 | `src/components/config/DeckPromptSelector.tsx` | Profile configuration tab for selecting a deck prompt from the library | `configApi.listDeckPrompts`, `configApi.updatePromptsConfig` |
