@@ -72,7 +72,11 @@ class UserSession(Base):
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     last_activity = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
 
-    # Genie conversation tracking (cleared on profile switch)
+    # Profile tracking - which profile this session was created under
+    profile_id = Column(Integer, nullable=True, index=True)
+    profile_name = Column(String(255), nullable=True)  # Cached for display in history
+
+    # Genie conversation tracking (persists across profile switches)
     genie_conversation_id = Column(String(255), nullable=True)
 
     # Processing lock for concurrent request handling

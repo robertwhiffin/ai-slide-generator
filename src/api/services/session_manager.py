@@ -51,6 +51,8 @@ class SessionManager:
         user_id: Optional[str] = None,
         title: Optional[str] = None,
         session_id: Optional[str] = None,
+        profile_id: Optional[int] = None,
+        profile_name: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Create a new session.
 
@@ -58,6 +60,8 @@ class SessionManager:
             user_id: Optional user identifier for session isolation
             title: Optional session title
             session_id: Optional session ID (if not provided, one is generated)
+            profile_id: Optional profile ID this session belongs to
+            profile_name: Optional profile name (cached for display)
 
         Returns:
             Dictionary with session info including session_id
@@ -70,13 +74,15 @@ class SessionManager:
                 session_id=session_id,
                 user_id=user_id,
                 title=title or f"Session {datetime.utcnow().strftime('%Y-%m-%d %H:%M')}",
+                profile_id=profile_id,
+                profile_name=profile_name,
             )
             db.add(session)
             db.flush()
 
             logger.info(
                 "Created new session",
-                extra={"session_id": session_id, "user_id": user_id},
+                extra={"session_id": session_id, "user_id": user_id, "profile_id": profile_id},
             )
 
             return {
@@ -84,6 +90,8 @@ class SessionManager:
                 "user_id": user_id,
                 "title": session.title,
                 "created_at": session.created_at.isoformat(),
+                "profile_id": profile_id,
+                "profile_name": profile_name,
             }
 
     def get_session(self, session_id: str) -> Dict[str, Any]:
@@ -110,6 +118,8 @@ class SessionManager:
                 "genie_conversation_id": session.genie_conversation_id,
                 "message_count": len(session.messages),
                 "has_slide_deck": session.slide_deck is not None,
+                "profile_id": session.profile_id,
+                "profile_name": session.profile_name,
             }
 
     def list_sessions(
@@ -147,6 +157,8 @@ class SessionManager:
                     "last_activity": s.last_activity.isoformat(),
                     "message_count": len(s.messages),
                     "has_slide_deck": s.slide_deck is not None,
+                    "profile_id": s.profile_id,
+                    "profile_name": s.profile_name,
                 }
                 for s in sessions
             ]
@@ -228,6 +240,37 @@ class SessionManager:
                 "Updated Genie conversation ID",
                 extra={"session_id": session_id, "conversation_id": conversation_id},
             )
+
+    def set_session_profile(
+        self,
+        session_id: str,
+        profile_id: int,
+        profile_name: str,
+    ) -> None:
+        """Set the profile for a session.
+
+        Used to associate a session with a profile when it's first used.
+
+        Args:
+            session_id: Session to update
+            profile_id: Profile ID to associate
+            profile_name: Profile name (cached for display)
+        """
+        with get_db_session() as db:
+            session = self._get_session_or_raise(db, session_id)
+            # Only set if not already set (preserve original profile)
+            if session.profile_id is None:
+                session.profile_id = profile_id
+                session.profile_name = profile_name
+
+                logger.info(
+                    "Set session profile",
+                    extra={
+                        "session_id": session_id,
+                        "profile_id": profile_id,
+                        "profile_name": profile_name,
+                    },
+                )
 
     # Message operations
     def add_message(
@@ -573,13 +616,20 @@ class SessionManager:
             )
 
     # Chat request operations (for polling-based streaming)
-    def create_chat_request(self, session_id: str) -> str:
+    def create_chat_request(
+        self,
+        session_id: str,
+        profile_id: Optional[int] = None,
+        profile_name: Optional[str] = None,
+    ) -> str:
         """Create a new chat request, return request_id.
 
         Auto-creates the session if it doesn't exist.
 
         Args:
             session_id: Session to create request for
+            profile_id: Profile ID to associate with new sessions
+            profile_name: Profile name (cached for display)
 
         Returns:
             Generated request_id
@@ -599,12 +649,22 @@ class SessionManager:
                 session = UserSession(
                     session_id=session_id,
                     title=f"Session {datetime.utcnow().strftime('%Y-%m-%d %H:%M')}",
+                    profile_id=profile_id,
+                    profile_name=profile_name,
                 )
                 db.add(session)
                 db.flush()
                 logger.info(
                     "Auto-created session for chat request",
-                    extra={"session_id": session_id},
+                    extra={"session_id": session_id, "profile_id": profile_id},
+                )
+            elif session.profile_id is None and profile_id is not None:
+                # Update profile for existing session without one
+                session.profile_id = profile_id
+                session.profile_name = profile_name
+                logger.info(
+                    "Updated session profile on chat request",
+                    extra={"session_id": session_id, "profile_id": profile_id},
                 )
 
             chat_request = ChatRequest(
