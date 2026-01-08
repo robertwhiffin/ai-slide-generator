@@ -3,10 +3,10 @@
  * 
  * Displays and allows editing of all configuration settings for a profile:
  * - Profile name and description
- * - AI Infrastructure (endpoint, temperature, max tokens)
  * - Genie Spaces
+ * - Deck Prompt
+ * - AI Infrastructure (endpoint, temperature, max tokens)
  * - MLflow configuration
- * - Prompts
  */
 
 import React, { useEffect, useState } from 'react';
@@ -230,29 +230,6 @@ export const ProfileDetailView: React.FC<ProfileDetailProps> = ({
           ) : (
             /* View Mode - Show Read-Only Details */
             <div>
-          {/* AI Infrastructure */}
-          <div className="mb-6">
-            <h3 className="text-lg font-semibold text-gray-900 mb-3 flex items-center gap-2">
-              <span className="text-blue-600">🤖</span> AI Infrastructure
-            </h3>
-            <div className="bg-gray-50 rounded p-4 space-y-2">
-              <div className="grid grid-cols-3 gap-4">
-                <div>
-                  <label className="text-xs font-medium text-gray-500 uppercase">LLM Endpoint</label>
-                  <p className="text-sm text-gray-900 mt-1 font-mono">{profile.ai_infra.llm_endpoint}</p>
-                </div>
-                <div>
-                  <label className="text-xs font-medium text-gray-500 uppercase">Temperature</label>
-                  <p className="text-sm text-gray-900 mt-1">{profile.ai_infra.llm_temperature}</p>
-                </div>
-                <div>
-                  <label className="text-xs font-medium text-gray-500 uppercase">Max Tokens</label>
-                  <p className="text-sm text-gray-900 mt-1">{profile.ai_infra.llm_max_tokens}</p>
-                </div>
-              </div>
-            </div>
-          </div>
-
           {/* Genie Spaces */}
           <div className="mb-6">
             <h3 className="text-lg font-semibold text-gray-900 mb-3 flex items-center gap-2">
@@ -281,17 +258,6 @@ export const ProfileDetailView: React.FC<ProfileDetailProps> = ({
             </div>
           </div>
 
-          {/* MLflow */}
-          <div className="mb-6">
-            <h3 className="text-lg font-semibold text-gray-900 mb-3 flex items-center gap-2">
-              <span className="text-green-600">📊</span> MLflow
-            </h3>
-            <div className="bg-gray-50 rounded p-4">
-              <label className="text-xs font-medium text-gray-500 uppercase">Experiment Name</label>
-              <p className="text-sm text-gray-900 mt-1 font-mono">{profile.mlflow.experiment_name}</p>
-            </div>
-          </div>
-
           {/* Deck Prompt */}
           <div className="mb-6">
             <h3 className="text-lg font-semibold text-gray-900 mb-3 flex items-center gap-2">
@@ -313,6 +279,40 @@ export const ProfileDetailView: React.FC<ProfileDetailProps> = ({
               ) : (
                 <p className="text-sm text-gray-500 italic">No deck prompt selected</p>
               )}
+            </div>
+          </div>
+
+          {/* AI Infrastructure */}
+          <div className="mb-6">
+            <h3 className="text-lg font-semibold text-gray-900 mb-3 flex items-center gap-2">
+              <span className="text-blue-600">🤖</span> AI Infrastructure
+            </h3>
+            <div className="bg-gray-50 rounded p-4 space-y-2">
+              <div className="grid grid-cols-3 gap-4">
+                <div>
+                  <label className="text-xs font-medium text-gray-500 uppercase">LLM Endpoint</label>
+                  <p className="text-sm text-gray-900 mt-1 font-mono">{profile.ai_infra.llm_endpoint}</p>
+                </div>
+                <div>
+                  <label className="text-xs font-medium text-gray-500 uppercase">Temperature</label>
+                  <p className="text-sm text-gray-900 mt-1">{profile.ai_infra.llm_temperature}</p>
+                </div>
+                <div>
+                  <label className="text-xs font-medium text-gray-500 uppercase">Max Tokens</label>
+                  <p className="text-sm text-gray-900 mt-1">{profile.ai_infra.llm_max_tokens}</p>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          {/* MLflow */}
+          <div className="mb-6">
+            <h3 className="text-lg font-semibold text-gray-900 mb-3 flex items-center gap-2">
+              <span className="text-green-600">📊</span> MLflow
+            </h3>
+            <div className="bg-gray-50 rounded p-4">
+              <label className="text-xs font-medium text-gray-500 uppercase">Experiment Name</label>
+              <p className="text-sm text-gray-900 mt-1 font-mono">{profile.mlflow.experiment_name}</p>
             </div>
           </div>
 

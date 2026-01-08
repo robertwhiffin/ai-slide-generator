@@ -4,22 +4,22 @@
  * Steps:
  * 1. Basic Info (Name, Description)
  * 2. Genie Space (Required)
- * 3. LLM Configuration (Defaults pre-populated)
- * 4. MLflow (Auto-populated)
- * 5. Deck Prompt (Optional)
- * 6. Review & Create
+ * 3. Deck Prompt (Optional)
+ * 4. Review & Create
+ * 
+ * LLM and MLflow use backend defaults:
+ * - LLM: databricks-claude-sonnet-4-5
+ * - MLflow: /Workspace/Users/{username}/ai-slide-generator
  */
 
 import React, { useState, useEffect } from 'react';
 import { FiCheck, FiChevronLeft, FiChevronRight, FiX, FiInfo } from 'react-icons/fi';
 import { configApi, type DeckPrompt, type AvailableGenieSpaces } from '../../api/config';
 
-// Wizard step definitions
+// Wizard step definitions (4 steps - LLM and MLflow use backend defaults)
 const STEPS = [
   { id: 'basic', title: 'Basic Info', description: 'Name and description' },
   { id: 'genie', title: 'Genie Space', description: 'Data source (required)' },
-  { id: 'llm', title: 'LLM Settings', description: 'AI model configuration' },
-  { id: 'mlflow', title: 'MLflow', description: 'Experiment tracking' },
   { id: 'deck-prompt', title: 'Deck Prompt', description: 'Optional template' },
   { id: 'review', title: 'Review', description: 'Confirm and create' },
 ] as const;
@@ -35,12 +35,6 @@ interface WizardFormData {
   genieSpaceId: string;
   genieSpaceName: string;
   genieDescription: string;
-  // LLM
-  llmEndpoint: string;
-  llmTemperature: number;
-  llmMaxTokens: number;
-  // MLflow
-  mlflowExperimentName: string;
   // Deck prompt
   selectedDeckPromptId: number | null;
 }
@@ -56,7 +50,6 @@ export const ProfileCreationWizard: React.FC<ProfileCreationWizardProps> = ({
   isOpen,
   onClose,
   onSuccess,
-  currentUsername,
 }) => {
   // Current step
   const [currentStep, setCurrentStep] = useState<StepId>('basic');
@@ -68,18 +61,12 @@ export const ProfileCreationWizard: React.FC<ProfileCreationWizardProps> = ({
     genieSpaceId: '',
     genieSpaceName: '',
     genieDescription: '',
-    llmEndpoint: '',
-    llmTemperature: 0.7,
-    llmMaxTokens: 4096,
-    mlflowExperimentName: '',
     selectedDeckPromptId: null,
   });
   
   // Loading states
   const [availableSpaces, setAvailableSpaces] = useState<AvailableGenieSpaces['spaces']>({});
   const [loadingSpaces, setLoadingSpaces] = useState(false);
-  const [availableEndpoints, setAvailableEndpoints] = useState<string[]>([]);
-  const [loadingEndpoints, setLoadingEndpoints] = useState(false);
   const [deckPrompts, setDeckPrompts] = useState<DeckPrompt[]>([]);
   const [loadingPrompts, setLoadingPrompts] = useState(false);
   
@@ -95,74 +82,22 @@ export const ProfileCreationWizard: React.FC<ProfileCreationWizardProps> = ({
   // Filter for Genie spaces
   const [spaceFilter, setSpaceFilter] = useState('');
 
-  // Default LLM endpoint
-  const DEFAULT_LLM_ENDPOINT = 'databricks-claude-sonnet-4-5';
-  const DEFAULT_MAX_TOKENS = 60000;
-
   // Initialize defaults when wizard opens
   useEffect(() => {
     if (isOpen) {
       setCurrentStep('basic');
-      // Fetch actual username from backend
-      fetchUsername();
       setFormData({
         name: '',
         description: '',
         genieSpaceId: '',
         genieSpaceName: '',
         genieDescription: '',
-        llmEndpoint: DEFAULT_LLM_ENDPOINT,
-        llmTemperature: 0.7,
-        llmMaxTokens: DEFAULT_MAX_TOKENS,
-        mlflowExperimentName: `/Workspace/Users/${currentUsername}/ai-slide-generator`,
         selectedDeckPromptId: null,
       });
       setError(null);
-      loadEndpoints();
       loadDeckPrompts();
     }
-  }, [isOpen, currentUsername]);
-
-  // Fetch actual username from Databricks
-  const fetchUsername = async () => {
-    try {
-      // Use environment-aware URL
-      const apiBase = import.meta.env.VITE_API_URL || (
-        import.meta.env.MODE === 'production' ? '' : 'http://localhost:8000'
-      );
-      const response = await fetch(`${apiBase}/api/user/current`);
-      if (response.ok) {
-        const data = await response.json();
-        const username = data.username || currentUsername;
-        setFormData(prev => ({
-          ...prev,
-          mlflowExperimentName: `/Workspace/Users/${username}/ai-slide-generator`,
-        }));
-      }
-    } catch {
-      // Use prop value as fallback
-    }
-  };
-
-  // Load available LLM endpoints
-  const loadEndpoints = async () => {
-    setLoadingEndpoints(true);
-    try {
-      const response = await configApi.getAvailableEndpoints();
-      setAvailableEndpoints(response.endpoints);
-      // Prefer the default endpoint if available, otherwise use first available
-      if (response.endpoints.length > 0) {
-        const preferredEndpoint = response.endpoints.includes(DEFAULT_LLM_ENDPOINT)
-          ? DEFAULT_LLM_ENDPOINT
-          : response.endpoints[0];
-        setFormData(prev => ({ ...prev, llmEndpoint: preferredEndpoint }));
-      }
-    } catch (err) {
-      console.error('Failed to load endpoints:', err);
-    } finally {
-      setLoadingEndpoints(false);
-    }
-  };
+  }, [isOpen]);
 
   // Load available Genie spaces
   const loadGenieSpaces = async () => {
@@ -241,10 +176,6 @@ export const ProfileCreationWizard: React.FC<ProfileCreationWizardProps> = ({
         return formData.name.trim().length > 0;
       case 'genie':
         return formData.genieSpaceId.trim().length > 0 && formData.genieDescription.trim().length > 0;
-      case 'llm':
-        return formData.llmEndpoint.length > 0;
-      case 'mlflow':
-        return formData.mlflowExperimentName.startsWith('/');
       case 'deck-prompt':
         return true; // Optional
       case 'review':
@@ -280,6 +211,7 @@ export const ProfileCreationWizard: React.FC<ProfileCreationWizardProps> = ({
     
     try {
       // Create profile with inline configurations
+      // ai_infra and mlflow are omitted - backend uses defaults
       const response = await configApi.createProfileWithConfig({
         name: formData.name.trim(),
         description: formData.description.trim() || null,
@@ -288,14 +220,8 @@ export const ProfileCreationWizard: React.FC<ProfileCreationWizardProps> = ({
           space_name: formData.genieSpaceName,
           description: formData.genieDescription,
         },
-        ai_infra: {
-          llm_endpoint: formData.llmEndpoint,
-          llm_temperature: formData.llmTemperature,
-          llm_max_tokens: formData.llmMaxTokens,
-        },
-        mlflow: {
-          experiment_name: formData.mlflowExperimentName,
-        },
+        // ai_infra omitted - backend uses default (databricks-claude-sonnet-4-5)
+        // mlflow omitted - backend auto-sets based on user
         prompts: formData.selectedDeckPromptId ? {
           selected_deck_prompt_id: formData.selectedDeckPromptId,
         } : undefined,
@@ -523,106 +449,7 @@ export const ProfileCreationWizard: React.FC<ProfileCreationWizardProps> = ({
             </div>
           )}
 
-          {/* Step 3: LLM Settings */}
-          {currentStep === 'llm' && (
-            <div className="space-y-4">
-              <div>
-                <h3 className="text-lg font-medium text-gray-900 mb-2">LLM Configuration</h3>
-                <p className="text-sm text-gray-500 mb-4">
-                  Configure the language model used for slide generation.
-                </p>
-              </div>
-
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">
-                  LLM Endpoint <span className="text-red-500">*</span>
-                </label>
-                <select
-                  value={formData.llmEndpoint}
-                  onChange={(e) => setFormData(prev => ({ ...prev, llmEndpoint: e.target.value }))}
-                  className="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-purple-500"
-                  disabled={loadingEndpoints}
-                >
-                  <option value="">-- Select an endpoint --</option>
-                  {availableEndpoints.map(endpoint => (
-                    <option key={endpoint} value={endpoint}>
-                      {endpoint}
-                    </option>
-                  ))}
-                </select>
-                {loadingEndpoints && (
-                  <p className="mt-1 text-xs text-gray-500">Loading endpoints...</p>
-                )}
-              </div>
-
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">
-                  Temperature: {formData.llmTemperature.toFixed(2)}
-                </label>
-                <input
-                  type="range"
-                  min="0"
-                  max="1"
-                  step="0.05"
-                  value={formData.llmTemperature}
-                  onChange={(e) => setFormData(prev => ({ ...prev, llmTemperature: parseFloat(e.target.value) }))}
-                  className="w-full"
-                />
-                <p className="mt-1 text-xs text-gray-500">
-                  Lower = more deterministic, Higher = more creative
-                </p>
-              </div>
-
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">
-                  Max Tokens
-                </label>
-                <input
-                  type="number"
-                  value={formData.llmMaxTokens}
-                  onChange={(e) => setFormData(prev => ({ ...prev, llmMaxTokens: parseInt(e.target.value) || 4096 }))}
-                  min={100}
-                  max={100000}
-                  className="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-purple-500"
-                />
-              </div>
-            </div>
-          )}
-
-          {/* Step 4: MLflow */}
-          {currentStep === 'mlflow' && (
-            <div className="space-y-4">
-              <div>
-                <h3 className="text-lg font-medium text-gray-900 mb-2">MLflow Configuration</h3>
-                <p className="text-sm text-gray-500 mb-4">
-                  Configure experiment tracking. This is auto-populated based on your username.
-                </p>
-              </div>
-
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">
-                  Experiment Name <span className="text-red-500">*</span>
-                </label>
-                <input
-                  type="text"
-                  value={formData.mlflowExperimentName}
-                  onChange={(e) => setFormData(prev => ({ ...prev, mlflowExperimentName: e.target.value }))}
-                  placeholder="/Workspace/Users/username/experiment-name"
-                  className="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-purple-500 font-mono text-sm"
-                />
-                <p className="mt-1 text-xs text-gray-500">
-                  Must start with /. Recommended format: /Workspace/Users/your-username/experiment-name
-                </p>
-                {!formData.mlflowExperimentName.startsWith('/') && formData.mlflowExperimentName.length > 0 && (
-                  <p className="mt-1 text-xs text-red-500">
-                    Experiment name must start with /
-                  </p>
-                )}
-              </div>
-            </div>
-          )}
-
-          {/* Step 5: Deck Prompt */}
+          {/* Step 3: Deck Prompt */}
           {currentStep === 'deck-prompt' && (
             <div className="space-y-4">
               <div>
@@ -697,7 +524,7 @@ export const ProfileCreationWizard: React.FC<ProfileCreationWizardProps> = ({
             </div>
           )}
 
-          {/* Step 6: Review */}
+          {/* Step 4: Review */}
           {currentStep === 'review' && (
             <div className="space-y-4">
               <div>
@@ -730,28 +557,6 @@ export const ProfileCreationWizard: React.FC<ProfileCreationWizardProps> = ({
                   </dl>
                 </div>
 
-                {/* LLM */}
-                <div className="bg-blue-50 rounded-md p-4">
-                  <h4 className="text-sm font-medium text-blue-700 mb-2">LLM Settings</h4>
-                  <dl className="grid grid-cols-2 gap-2 text-sm">
-                    <dt className="text-blue-500">Endpoint:</dt>
-                    <dd className="font-medium text-blue-900">{formData.llmEndpoint}</dd>
-                    <dt className="text-blue-500">Temperature:</dt>
-                    <dd className="font-medium text-blue-900">{formData.llmTemperature}</dd>
-                    <dt className="text-blue-500">Max Tokens:</dt>
-                    <dd className="font-medium text-blue-900">{formData.llmMaxTokens}</dd>
-                  </dl>
-                </div>
-
-                {/* MLflow */}
-                <div className="bg-green-50 rounded-md p-4">
-                  <h4 className="text-sm font-medium text-green-700 mb-2">MLflow</h4>
-                  <dl className="grid grid-cols-2 gap-2 text-sm">
-                    <dt className="text-green-500">Experiment:</dt>
-                    <dd className="font-medium text-green-900 font-mono text-xs">{formData.mlflowExperimentName}</dd>
-                  </dl>
-                </div>
-
                 {/* Deck Prompt */}
                 <div className="bg-amber-50 rounded-md p-4">
                   <h4 className="text-sm font-medium text-amber-700 mb-2">Deck Prompt</h4>
@@ -761,6 +566,14 @@ export const ProfileCreationWizard: React.FC<ProfileCreationWizardProps> = ({
                       {selectedDeckPrompt ? selectedDeckPrompt.name : 'None selected'}
                     </dd>
                   </dl>
+                </div>
+
+                {/* Defaults note */}
+                <div className="bg-blue-50 rounded-md p-4">
+                  <h4 className="text-sm font-medium text-blue-700 mb-2">Defaults Applied</h4>
+                  <p className="text-sm text-blue-600">
+                    LLM and MLflow settings will use system defaults. You can customize these after profile creation in the profile settings.
+                  </p>
                 </div>
               </div>
             </div>
@@ -813,4 +626,3 @@ export const ProfileCreationWizard: React.FC<ProfileCreationWizardProps> = ({
     </div>
   );
 };
-

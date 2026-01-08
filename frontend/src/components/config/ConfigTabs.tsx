@@ -2,10 +2,10 @@
  * Tabbed configuration editor.
  * 
  * Provides tabbed interface for editing all configuration domains:
- * - AI Infrastructure
  * - Genie Spaces
- * - MLflow
  * - Deck Prompt (presentation templates)
+ * - AI Infrastructure
+ * - MLflow
  * - Advanced (system prompts for power users)
  */
 
@@ -26,10 +26,10 @@ interface Tab {
 }
 
 const tabs: Tab[] = [
-  { id: 'ai_infra', label: 'AI Infrastructure', icon: '🤖' },
   { id: 'genie', label: 'Genie Spaces', icon: '🧞' },
-  { id: 'mlflow', label: 'MLflow', icon: '📊' },
   { id: 'deck_prompt', label: 'Deck Prompt', icon: '📋' },
+  { id: 'ai_infra', label: 'AI Infrastructure', icon: '🤖' },
+  { id: 'mlflow', label: 'MLflow', icon: '📊' },
   { id: 'advanced', label: 'Advanced', icon: '⚙️' },
 ];
 
@@ -39,7 +39,7 @@ interface ConfigTabsProps {
 }
 
 export const ConfigTabs: React.FC<ConfigTabsProps> = ({ profileId, profileName }) => {
-  const [activeTab, setActiveTab] = useState<TabId>('ai_infra');
+  const [activeTab, setActiveTab] = useState<TabId>('genie');
   
   const {
     config,
