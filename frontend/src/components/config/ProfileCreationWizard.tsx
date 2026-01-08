@@ -128,11 +128,7 @@ export const ProfileCreationWizard: React.FC<ProfileCreationWizardProps> = ({
       const response = await configApi.listSlideStyles();
       const activeStyles = response.styles.filter(s => s.is_active);
       setSlideStyles(activeStyles);
-      // Auto-select "Databricks Brand" as default if available
-      const defaultStyle = activeStyles.find(s => s.name === 'Databricks Brand');
-      if (defaultStyle) {
-        setFormData(prev => ({ ...prev, selectedSlideStyleId: defaultStyle.id }));
-      }
+      // No auto-select - user must explicitly choose a style
     } catch (err) {
       console.error('Failed to load slide styles:', err);
     } finally {
@@ -204,7 +200,7 @@ export const ProfileCreationWizard: React.FC<ProfileCreationWizardProps> = ({
       case 'genie':
         return formData.genieSpaceId.trim().length > 0 && formData.genieDescription.trim().length > 0;
       case 'slide-style':
-        return true; // Optional - can proceed without selection
+        return formData.selectedSlideStyleId !== null; // Required - must select a style
       case 'deck-prompt':
         return true; // Optional
       case 'review':
@@ -486,7 +482,7 @@ export const ProfileCreationWizard: React.FC<ProfileCreationWizardProps> = ({
           {currentStep === 'slide-style' && (
             <div className="space-y-4">
               <div>
-                <h3 className="text-lg font-medium text-gray-900 mb-2">Slide Style</h3>
+                <h3 className="text-lg font-medium text-gray-900 mb-2">Slide Style <span className="text-red-500">*</span></h3>
                 <p className="text-sm text-gray-500 mb-4">
                   Choose a visual style for your slides. This controls typography, colors, and layout.
                 </p>
@@ -501,23 +497,6 @@ export const ProfileCreationWizard: React.FC<ProfileCreationWizardProps> = ({
                 </div>
               ) : (
                 <div className="space-y-2 max-h-64 overflow-y-auto">
-                  {/* Option for no slide style */}
-                  <label className={`block p-4 border rounded-md cursor-pointer transition-colors ${
-                    formData.selectedSlideStyleId === null 
-                      ? 'border-emerald-500 bg-emerald-50' 
-                      : 'border-gray-200 hover:border-gray-300'
-                  }`}>
-                    <input
-                      type="radio"
-                      name="slideStyle"
-                      checked={formData.selectedSlideStyleId === null}
-                      onChange={() => setFormData(prev => ({ ...prev, selectedSlideStyleId: null }))}
-                      className="sr-only"
-                    />
-                    <span className="font-medium text-gray-900">No slide style</span>
-                    <p className="text-sm text-gray-500">Use default system styling</p>
-                  </label>
-
                   {slideStyles.map(style => (
                     <label 
                       key={style.id} 

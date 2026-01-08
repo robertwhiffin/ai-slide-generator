@@ -164,6 +164,11 @@ export const SlideStyleList: React.FC = () => {
                       {style.category}
                     </span>
                   )}
+                  {style.is_system && (
+                    <span className="px-2 py-0.5 bg-blue-100 text-blue-700 text-xs rounded-full">
+                      System
+                    </span>
+                  )}
                   {!style.is_active && (
                     <span className="px-2 py-0.5 bg-gray-100 text-gray-500 text-xs rounded-full">
                       Inactive
@@ -186,20 +191,24 @@ export const SlideStyleList: React.FC = () => {
                 >
                   {expandedStyleId === style.id ? 'Hide' : 'Preview'}
                 </button>
-                <button
-                  onClick={() => handleEdit(style)}
-                  disabled={actionLoading === style.id}
-                  className="px-3 py-1 bg-indigo-500 hover:bg-indigo-600 text-white text-xs rounded transition-colors disabled:bg-gray-300"
-                >
-                  Edit
-                </button>
-                <button
-                  onClick={() => handleDelete(style)}
-                  disabled={actionLoading === style.id}
-                  className="px-3 py-1 bg-red-500 hover:bg-red-600 text-white text-xs rounded transition-colors disabled:bg-gray-300"
-                >
-                  Delete
-                </button>
+                {!style.is_system && (
+                  <>
+                    <button
+                      onClick={() => handleEdit(style)}
+                      disabled={actionLoading === style.id}
+                      className="px-3 py-1 bg-indigo-500 hover:bg-indigo-600 text-white text-xs rounded transition-colors disabled:bg-gray-300"
+                    >
+                      Edit
+                    </button>
+                    <button
+                      onClick={() => handleDelete(style)}
+                      disabled={actionLoading === style.id}
+                      className="px-3 py-1 bg-red-500 hover:bg-red-600 text-white text-xs rounded transition-colors disabled:bg-gray-300"
+                    >
+                      Delete
+                    </button>
+                  </>
+                )}
               </div>
             </div>
 

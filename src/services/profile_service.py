@@ -430,6 +430,7 @@ class ProfileService:
             system_prompt=source_profile.prompts.system_prompt,
             slide_editing_instructions=source_profile.prompts.slide_editing_instructions,
             selected_deck_prompt_id=source_profile.prompts.selected_deck_prompt_id,
+            selected_slide_style_id=source_profile.prompts.selected_slide_style_id,
         )
         self.db.add(prompts)
 

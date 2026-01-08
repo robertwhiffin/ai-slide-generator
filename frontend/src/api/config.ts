@@ -186,6 +186,7 @@ export interface SlideStyle {
   category: string | null;
   style_content: string;
   is_active: boolean;
+  is_system: boolean;  // Protected system styles cannot be edited/deleted
   created_by: string | null;
   created_at: string;
   updated_by: string | null;

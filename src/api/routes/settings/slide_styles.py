@@ -47,6 +47,7 @@ class SlideStyleResponse(SlideStyleBase):
     """Response schema for slide styles."""
     id: int
     is_active: bool
+    is_system: bool  # Protected system styles cannot be edited/deleted
     created_by: Optional[str]
     created_at: str
     updated_by: Optional[str]
@@ -100,6 +101,7 @@ def list_slide_styles(
                     category=s.category,
                     style_content=s.style_content,
                     is_active=s.is_active,
+                    is_system=s.is_system,
                     created_by=s.created_by,
                     created_at=s.created_at.isoformat(),
                     updated_by=s.updated_by,
@@ -152,6 +154,7 @@ def get_slide_style(
             category=style.category,
             style_content=style.style_content,
             is_active=style.is_active,
+            is_system=style.is_system,
             created_by=style.created_by,
             created_at=style.created_at.isoformat(),
             updated_by=style.updated_by,
@@ -227,6 +230,7 @@ def create_slide_style(
             category=style.category,
             style_content=style.style_content,
             is_active=style.is_active,
+            is_system=style.is_system,
             created_by=style.created_by,
             created_at=style.created_at.isoformat(),
             updated_by=style.updated_by,
@@ -274,6 +278,13 @@ def update_slide_style(
                 detail=f"Slide style {style_id} not found",
             )
         
+        # Protect system styles from editing
+        if style.is_system:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="System styles cannot be modified",
+            )
+        
         # Check for name conflict if name is being updated
         if request.name and request.name != style.name:
             existing = db.query(SlideStyleLibrary).filter(
@@ -314,6 +325,7 @@ def update_slide_style(
             category=style.category,
             style_content=style.style_content,
             is_active=style.is_active,
+            is_system=style.is_system,
             created_by=style.created_by,
             created_at=style.created_at.isoformat(),
             updated_by=style.updated_by,
@@ -355,6 +367,13 @@ def delete_slide_style(
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"Slide style {style_id} not found",
+            )
+        
+        # Protect system styles from deletion
+        if style.is_system:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="System styles cannot be deleted",
             )
         
         if hard_delete:

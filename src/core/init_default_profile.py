@@ -206,65 +206,18 @@ def _seed_deck_prompts(db) -> None:
 # Default slide styles for the library
 DEFAULT_SLIDE_STYLES = [
     {
+        "name": "System Default",
+        "description": "Protected system style. Use this as a template when creating your own custom styles.",
+        "category": "System",
+        "style_content": DEFAULT_SLIDE_STYLE,
+        "is_system": True,  # Cannot be edited or deleted
+    },
+    {
         "name": "Databricks Brand",
         "description": "Official Databricks brand colors and typography. Navy headers, Lava red accents, clean modern layout.",
         "category": "Brand",
         "style_content": DEFAULT_SLIDE_STYLE,
-    },
-    {
-        "name": "Minimal Light",
-        "description": "Clean, minimalist design with maximum whitespace. Ideal for data-heavy presentations.",
-        "category": "Minimal",
-        "style_content": """SLIDE VISUAL STYLE:
-
-Typography & Colors:
-- Clean sans-serif font (SF Pro/Helvetica/Arial)
-- H1: 44px bold, Black #1A1A1A | H2: 28px medium, Dark Gray #4A4A4A | Body: 16px, Gray #6B6B6B
-- Single accent color: Blue #2563EB
-- Background: Pure White #FFFFFF
-
-Layout & Structure:
-- Fixed slide size: 1280x720px per slide, white background
-- Body: width:1280px; height:720px; margin:0; padding:0; overflow:hidden
-- Generous whitespace - padding ≥32px around edges
-- Minimal visual elements - let content breathe
-- Cards/boxes: padding ≥24px, subtle border 1px #E5E5E5, no shadow
-
-Content Per Slide:
-- ONE clear title (≤50 chars) that states the key insight
-- Subtitle optional - use sparingly
-- Body text ≤30 words
-- Maximum 1-2 data visualizations per slide
-
-Chart Colors:
-['#2563EB','#64748B','#94A3B8','#CBD5E1']""",
-    },
-    {
-        "name": "Dark Mode",
-        "description": "Dark background with light text. High contrast for visual impact and reduced eye strain.",
-        "category": "Dark",
-        "style_content": """SLIDE VISUAL STYLE:
-
-Typography & Colors:
-- Modern sans-serif font (Inter/SF Pro/Helvetica)
-- H1: 44px bold, White #FFFFFF | H2: 30px, Light Gray #E5E7EB | Body: 16px, Gray #9CA3AF
-- Primary accent: Cyan #06B6D4 | Success: Green #10B981 | Warning: Amber #F59E0B | Error: Rose #F43F5E
-- Background: Dark Navy #0F172A
-
-Layout & Structure:
-- Fixed slide size: 1280x720px per slide, dark background
-- Body: width:1280px; height:720px; margin:0; padding:0; overflow:hidden
-- Use flexbox for layout with gaps of 16px
-- Cards/boxes: padding ≥20px, border-radius 12px, background #1E293B, subtle border 1px #334155
-
-Content Per Slide:
-- ONE clear title (≤55 chars) - high impact wording
-- Subtitle in lighter gray for context
-- Body text ≤40 words
-- Maximum 2 data visualizations per slide
-
-Chart Colors (optimized for dark backgrounds):
-['#06B6D4','#10B981','#F59E0B','#8B5CF6']""",
+        "is_system": False,  # User-editable
     },
 ]
 
@@ -290,14 +243,15 @@ def _seed_slide_styles(db) -> int | None:
             category=style_data["category"],
             style_content=style_data["style_content"],
             is_active=True,
+            is_system=style_data.get("is_system", False),
             created_by="system",
             updated_by="system",
         )
         db.add(style)
         db.flush()  # Get the ID
-        logger.info(f"Created slide style: {style_data['name']}")
+        logger.info(f"Created slide style: {style_data['name']} (is_system={style.is_system})")
         
-        # Track the default style ID
+        # Track the default style ID (prefer Databricks Brand for new profiles)
         if style_data["name"] == "Databricks Brand":
             default_style_id = style.id
 
