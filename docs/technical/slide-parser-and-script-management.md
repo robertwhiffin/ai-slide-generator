@@ -325,7 +325,7 @@ ${slideDeck.scripts}  // IIFE-wrapped, safe for shared scope
 ### 7. Key Files to Review
 | Concern | File |
 | --- | --- |
-| Prompt / LLM Output Rules | `config/prompts.yaml` |
+| Prompt / LLM Output Rules | `src/core/defaults.py` |
 | Slide class with scripts | `src/domain/slide.py` |
 | SlideDeck parsing & IIFE aggregation | `src/domain/slide_deck.py` |
 | Canvas heuristics & script splitting | `src/utils/html_utils.py` (`split_script_by_canvas`, `extract_canvas_ids_from_script`) |
