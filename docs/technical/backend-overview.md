@@ -91,9 +91,24 @@ Frontend fetch -> FastAPI router ->   │ ChatService (singleton)│
 | `GET` | `/api/settings/deck-prompts/{id}` | Get deck prompt | `routes/settings/deck_prompts.get_deck_prompt` |
 | `PUT` | `/api/settings/deck-prompts/{id}` | Update deck prompt | `routes/settings/deck_prompts.update_deck_prompt` |
 | `DELETE` | `/api/settings/deck-prompts/{id}` | Delete deck prompt | `routes/settings/deck_prompts.delete_deck_prompt` |
-| `PUT` | `/api/settings/prompts/{profile_id}` | Update prompts config (including deck prompt selection) | `routes/settings/prompts.update_prompts_config` |
+| `GET` | `/api/settings/slide-styles` | List slide styles | `routes/settings/slide_styles.list_slide_styles` |
+| `POST` | `/api/settings/slide-styles` | Create slide style | `routes/settings/slide_styles.create_slide_style` |
+| `GET` | `/api/settings/slide-styles/{id}` | Get slide style | `routes/settings/slide_styles.get_slide_style` |
+| `PUT` | `/api/settings/slide-styles/{id}` | Update slide style | `routes/settings/slide_styles.update_slide_style` |
+| `DELETE` | `/api/settings/slide-styles/{id}` | Delete slide style | `routes/settings/slide_styles.delete_slide_style` |
+| `PUT` | `/api/settings/prompts/{profile_id}` | Update prompts config (deck prompt, slide style selection) | `routes/settings/prompts.update_prompts_config` |
 
-**Deck Prompts** are global presentation templates stored in `slide_deck_prompt_library`. Profiles reference a selected prompt via `config_prompts.selected_deck_prompt_id`. When generating slides, the agent prepends the deck prompt content to the system prompt.
+**Deck Prompts** are global presentation templates stored in `slide_deck_prompt_library`. Profiles reference a selected prompt via `config_prompts.selected_deck_prompt_id`. When generating slides, the agent prepends the deck prompt content (WHAT to create).
+
+**Slide Styles** are global visual style configurations stored in `slide_style_library`. Profiles reference a selected style via `config_prompts.selected_slide_style_id`. When generating slides, the agent includes the style content (HOW slides should look).
+
+**Prompt Assembly Order** (in `src/services/agent.py`):
+1. Deck Prompt (optional) - defines presentation type/content
+2. Slide Style (from library) - defines visual appearance
+3. System Prompt (technical) - defines HTML/chart generation rules
+4. Slide Editing Instructions - defines editing behavior
+
+The **Advanced** tab in profile settings (system prompt, editing instructions) is hidden from regular users and only visible in debug mode (`?debug=true`).
 
 All responses conform to the Pydantic models in `src/api/models/responses.py`. Structure mirrors what the frontend expects (`messages`, `slide_deck`, `raw_html`, `metadata`, optional `replacement_info`).
 

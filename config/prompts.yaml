@@ -1,15 +1,25 @@
 # Prompt templates for the AI slide generator
-# These prompts guide the LLM's behavior during slide generation
-# Currently, this will produce a single page of HTML that is not scrollable. Replace the canvas and layout section with this to make this into a scrollable web page.
-#   - Slide size: 1280px wide, 720px minimum height per slide, white #FFFFFF background
-#   - <body> styles: width:1280px; margin:0 auto; padding:0; overflow-y:auto; overflow-x:hidden;
-#   - Each slide container: width:1280px; min-height:720px; margin:0 auto;
-#   - Content area: padding:16px; box-sizing:border-box;
-#   - Use flex layout: column; justify-between; gap ≥ 12px; min-height:0 on flex children
-#   - All boxes/cards symmetrical; padding ≥16px; margin/gap ≥12px; border-radius 8–12px
-#   - Shadow: 0 4px 6px rgba(0,0,0,.1); borders 1–2px #B2BAC0
-#   - Slides should stack vertically and be scrollable as a continuous webpage
-#   - Each slide should maintain 1280x720 dimensions but the page should allow vertical scrolling
+# 
+# ARCHITECTURE NOTES:
+# - These prompts are now stored in the database, not loaded from this file at runtime
+# - src/core/defaults.py contains the default prompt values used for seeding
+# - config_prompts table stores prompts per profile
+# - Prompts can be edited via the UI (debug mode only for system_prompt/editing_instructions)
+#
+# PROMPT ASSEMBLY ORDER (in src/services/agent.py):
+# 1. Deck Prompt (optional) - WHAT content to create (from slide_deck_prompt_library)
+# 2. Slide Style (from slide_style_library) - HOW slides should look (typography, colors)
+# 3. System Prompt (from config_prompts) - HOW to generate valid HTML/charts (technical)
+# 4. Slide Editing Instructions (from config_prompts) - HOW to handle edits
+#
+# USER-FACING vs TECHNICAL:
+# - Deck Prompts: User-facing, defines presentation type (e.g., "Quarterly Review")
+# - Slide Styles: User-facing, defines visual appearance (e.g., "Databricks Brand")
+# - System Prompt: Technical (hidden in debug mode), defines HTML output format
+# - Editing Instructions: Technical (hidden in debug mode), defines edit behavior
+#
+# This file is kept for reference and documentation purposes.
+# Actual defaults are in src/core/defaults.py
 
 
 

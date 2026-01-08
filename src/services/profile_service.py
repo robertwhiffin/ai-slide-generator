@@ -335,6 +335,7 @@ class ProfileService:
             system_prompt=prompts_config.get("system_prompt") or DEFAULT_CONFIG["prompts"]["system_prompt"],
             slide_editing_instructions=prompts_config.get("slide_editing_instructions") or DEFAULT_CONFIG["prompts"]["slide_editing_instructions"],
             selected_deck_prompt_id=prompts_config.get("selected_deck_prompt_id"),
+            selected_slide_style_id=prompts_config.get("selected_slide_style_id"),
         )
         self.db.add(prompts_record)
 

@@ -16,4 +16,7 @@ export { DeckPromptSelector } from './DeckPromptSelector';
 export { AdvancedSettingsEditor } from './AdvancedSettingsEditor';
 export { DeckPromptList } from './DeckPromptList';
 export { DeckPromptForm } from './DeckPromptForm';
+export { SlideStyleList } from './SlideStyleList';
+export { SlideStyleForm } from './SlideStyleForm';
+export { SlideStyleSelector } from './SlideStyleSelector';
 

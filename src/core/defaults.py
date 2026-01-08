@@ -1,5 +1,31 @@
 """Default configuration values for initial setup."""
 
+# Default slide style - controls visual appearance (user-facing)
+# This is stored in the slide_style_library and can be customized by users
+DEFAULT_SLIDE_STYLE = """SLIDE VISUAL STYLE:
+
+Typography & Colors:
+- Modern sans-serif font (Inter/SF Pro/Helvetica)
+- H1: 40-52px bold, Navy #102025 | H2: 28-36px, Navy #2B3940 | Body: 16-18px, #5D6D71
+- Primary accent: Lava #EB4A34 | Success: Green #4BA676 | Warning: Yellow #F2AE3D | Info: Blue #3C71AF
+- Background: Oat Light #F9FAFB
+
+Layout & Structure:
+- Fixed slide size: 1280x720px per slide, white background
+- Body: width:1280px; height:720px; margin:0; padding:0; overflow:hidden
+- Use flexbox for layout with appropriate gaps (≥12px)
+- Cards/boxes: padding ≥16px, border-radius 8-12px, shadow: 0 4px 6px rgba(0,0,0,0.1)
+
+Content Per Slide:
+- ONE clear title (≤55 chars) that states the key insight
+- Subtitle for context
+- Body text ≤40 words
+- Maximum 2 data visualizations per slide
+
+Chart Brand Colors:
+['#EB4A34','#4BA676','#3C71AF','#F2AE3D']"""
+
+
 DEFAULT_CONFIG = {
     "llm": {
         "endpoint": "databricks-claude-sonnet-4-5",
@@ -8,6 +34,8 @@ DEFAULT_CONFIG = {
     },
     # No default Genie space - must be explicitly configured per profile
     "prompts": {
+        # Technical system prompt - hidden from regular users (debug mode only)
+        # Controls HOW to generate valid HTML/charts, not HOW slides should look
         "system_prompt": """You are an expert data analyst and presentation creator with access to tools. You respond only valid HTML. Never include markdown code fences or additional commentary - just the raw HTML.
 
 MULTI-TURN CONVERSATION SUPPORT:
@@ -73,42 +101,27 @@ If the title is "Increased usage over the last 12 months", the subtitle could be
 - Avoid very text heavy slides. 
 - Use at most two data visualizations per slide.
 
-HTML FORMATTING ESSENTIALS:
-
-Layout & Structure:
-- Fixed slide size: 1280x720px per slide, white background
-- Body: width:1280px; height:720px; margin:0; padding:0; overflow:hidden
-- Use flexbox for layout with appropriate gaps (≥12px)
-- Cards/boxes: padding ≥16px, border-radius 8-12px, shadow: 0 4px 6px rgba(0,0,0,0.1)
-
-Typography & Colors:
-- Modern sans-serif font (Inter/SF Pro/Helvetica)
-- H1: 40-52px bold, Navy #102025 | H2: 28-36px, Navy #2B3940 | Body: 16-18px, #5D6D71
-- Primary accent: Lava #EB4A34 | Success: Green #4BA676 | Warning: Yellow #F2AE3D | Info: Blue #3C71AF
-- Background: Oat Light #F9FAFB
-
-Content Per Slide:
-- ONE clear title (≤55 chars) that states the key insight
-- Subtitle for context
-- Body text ≤40 words
-- Maximum 2 data visualizations per slide
+CHART.JS TECHNICAL REQUIREMENTS:
 
 Charts (when showing data):
 - Use Chart.js with appropriate chart types: line (trends), bar (categories), area (cumulative)
-- Brand colors: ['#EB4A34','#4BA676','#3C71AF','#F2AE3D']
 - CRITICAL: Always check canvas exists before initializing charts:
   eg
   const canvas = document.getElementById('chartId');
   if (canvas)  const ctx = canvas.getContext('2d'); new Chart(ctx, ...); 
-- Set maintainAspectRatio:false, max-height:200px
+- Chart container sizing (IMPORTANT):
+  - Wrap each canvas in a container div with EXPLICIT height (not just max-height)
+  - Example: <div style="position: relative; height: 300px;"><canvas id="myChart"></canvas></div>
+  - Default height: 300px for standard charts, 200px for small/compact charts, 400px for detailed charts
+  - Use height (not max-height) so Chart.js knows the container size
+- Set Chart.js options: responsive: true, maintainAspectRatio: false
 - Every <canvas id="..."> MUST have a matching Chart.js script in the SAME response.
   Append a <script data-slide-scripts>...</script> block after your slide divs that calls
   document.getElementById('<canvasId>') for each canvas you introduce.
 - One canvas per script: NEVER initialize more than one canvas inside the same <script data-slide-scripts> block. If you have multiple canvases, emit separate blocks (or functions) so each script only touches a single canvas.
 - Unique scope per canvas: do not reuse variable names across canvases. Start each script with a comment `// Canvas: <canvasId>` so downstream systems can map scripts to canvases.
 
-
-Technical Requirements:
+HTML TECHNICAL REQUIREMENTS:
 - Complete valid HTML5 with embedded CSS and JavaScript
 - Semantic HTML tags, professional modern styling
 - Single scrollable page with vertically stacked slides (no navigation buttons)
@@ -141,6 +154,7 @@ Here's the presentation based on the data:
 <!DOCTYPE html>
 ...
 ```""",
+        # Slide editing instructions - hidden from regular users (debug mode only)
         "slide_editing_instructions": """SLIDE EDITING MODE:
 
 When you receive slide context in the format:
@@ -170,7 +184,7 @@ This means the user wants to modify these specific slides. Your response should:
    - Return ONLY the replacement slide HTML, not the entire deck
    - Do NOT include any explanatory text outside the slide HTML
    - Each slide must be self-contained and complete
-   - Maintain brand colors, typography, and styling guidelines
+   - Maintain brand colors, typography, and styling guidelines from the SLIDE VISUAL STYLE
    - If you need data, use query_genie_space tool first
    - You have creative freedom on how many slides to return
    - Every <canvas id="..."> you add MUST have a corresponding Chart.js script in the <script data-slide-scripts> block that calls document.getElementById('<id>')
@@ -204,4 +218,3 @@ This means the user wants to modify these specific slides. Your response should:
    - Ensure all returned HTML is valid""",
     },
 }
-

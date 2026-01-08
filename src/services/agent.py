@@ -254,16 +254,20 @@ class SlideGeneratorAgent:
         """Create prompt template with system prompt from settings and chat history.
         
         Prompt structure (when all components present):
-        1. Deck prompt (from library) - defines presentation type/content
-        2. System prompt - defines slide generation rules/formatting
-        3. Slide editing instructions - defines editing behavior
+        1. Deck prompt (from library) - defines presentation type/content (WHAT to create)
+        2. Slide style (from library) - defines visual appearance (HOW it should look)
+        3. System prompt - defines technical generation rules (HOW to generate valid HTML/charts)
+        4. Slide editing instructions - defines editing behavior
         """
         deck_prompt = self.settings.prompts.get("deck_prompt", "")
+        slide_style = self.settings.prompts.get("slide_style", "")
         system_prompt = self.settings.prompts.get("system_prompt", "")
         editing_prompt = self.settings.prompts.get("slide_editing_instructions", "")
 
         if not system_prompt:
             raise AgentError("System prompt not found in configuration")
+        if not slide_style:
+            raise AgentError("Slide style not found in configuration")
 
         # Build the complete system prompt
         prompt_parts = []
@@ -272,7 +276,11 @@ class SlideGeneratorAgent:
         if deck_prompt:
             prompt_parts.append(f"PRESENTATION CONTEXT:\n{deck_prompt.strip()}")
         
-        # Core system prompt for slide generation
+        # Slide style defines visual appearance (user-controllable)
+        if slide_style:
+            prompt_parts.append(slide_style.strip())
+        
+        # Core system prompt for technical slide generation (hidden from regular users)
         prompt_parts.append(system_prompt.rstrip())
         
         # Editing instructions appended at the end
@@ -292,7 +300,11 @@ class SlideGeneratorAgent:
 
         logger.info(
             "Prompt template created",
-            extra={"has_deck_prompt": bool(deck_prompt), "has_editing_prompt": bool(editing_prompt)}
+            extra={
+                "has_deck_prompt": bool(deck_prompt),
+                "has_slide_style": bool(slide_style),
+                "has_editing_prompt": bool(editing_prompt),
+            }
         )
         return prompt
 
