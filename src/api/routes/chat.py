@@ -264,9 +264,18 @@ async def submit_chat_async(request: ChatRequest):
         )
 
     try:
-        # Create request record
+        # Get current profile info for session association
+        from src.core.settings_db import get_settings
+        settings = get_settings()
+        profile_id = getattr(settings, 'profile_id', None)
+        profile_name = getattr(settings, 'profile_name', None)
+
+        # Create request record with profile info
         request_id = await asyncio.to_thread(
-            session_manager.create_chat_request, request.session_id
+            session_manager.create_chat_request,
+            request.session_id,
+            profile_id,
+            profile_name,
         )
 
         # Persist user message

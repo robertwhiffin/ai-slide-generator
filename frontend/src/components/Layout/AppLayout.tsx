@@ -12,6 +12,8 @@ import { SaveAsDialog } from '../History/SaveAsDialog';
 import { HelpPage } from '../Help';
 import { useSession } from '../../contexts/SessionContext';
 import { useGeneration } from '../../contexts/GenerationContext';
+import { useProfiles } from '../../contexts/ProfileContext';
+import { api } from '../../services/api';
 
 type ViewMode = 'main' | 'profiles' | 'deck_prompts' | 'slide_styles' | 'history' | 'help';
 
@@ -27,6 +29,7 @@ export const AppLayout: React.FC = () => {
   const chatPanelRef = useRef<ChatPanelHandle>(null);
   const { sessionTitle, createNewSession, switchSession, renameSession } = useSession();
   const { isGenerating } = useGeneration();
+  const { currentProfile, loadProfile } = useProfiles();
 
   // Handle navigation from ribbon to main slide panel
   const handleSlideNavigate = useCallback((index: number) => {
@@ -48,13 +51,28 @@ export const AppLayout: React.FC = () => {
   }, [createNewSession]);
 
   // Handle restoring a session from history
+  // Auto-switches profile if the session belongs to a different profile
   const handleSessionRestore = useCallback(async (restoredSessionId: string) => {
-    const { slideDeck: restoredDeck, rawHtml: restoredRawHtml } = await switchSession(restoredSessionId);
-    setSlideDeck(restoredDeck);
-    setRawHtml(restoredRawHtml);
-    setChatKey(prev => prev + 1);
-    setViewMode('main');
-  }, [switchSession]);
+    try {
+      // First, get the session info to check its profile
+      const sessionInfo = await api.getSession(restoredSessionId);
+      
+      // If session has a profile_id and it's different from current, switch profiles first
+      if (sessionInfo.profile_id && currentProfile && sessionInfo.profile_id !== currentProfile.id) {
+        console.log(`Session belongs to profile ${sessionInfo.profile_name}, switching from ${currentProfile.name}`);
+        await loadProfile(sessionInfo.profile_id);
+      }
+      
+      // Now restore the session
+      const { slideDeck: restoredDeck, rawHtml: restoredRawHtml } = await switchSession(restoredSessionId);
+      setSlideDeck(restoredDeck);
+      setRawHtml(restoredRawHtml);
+      setChatKey(prev => prev + 1);
+      setViewMode('main');
+    } catch (err) {
+      console.error('Failed to restore session:', err);
+    }
+  }, [switchSession, currentProfile, loadProfile]);
 
   // Handle saving session with a custom name
   const handleSaveAs = useCallback(async (title: string) => {

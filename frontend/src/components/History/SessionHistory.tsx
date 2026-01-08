@@ -67,7 +67,16 @@ export const SessionHistory: React.FC<SessionHistoryProps> = ({
 
   const formatDate = (dateStr: string) => {
     const date = new Date(dateStr);
-    return date.toLocaleString();
+    // Compact date format with year: "1/8/2026, 2:20 PM"
+    return date.toLocaleDateString('en-US', { 
+      month: 'numeric', 
+      day: 'numeric',
+      year: 'numeric'
+    }) + ', ' + date.toLocaleTimeString('en-US', { 
+      hour: 'numeric', 
+      minute: '2-digit',
+      hour12: true 
+    });
   };
 
   if (loading) {
@@ -122,23 +131,26 @@ export const SessionHistory: React.FC<SessionHistoryProps> = ({
           </p>
         </div>
       ) : (
-        <div className="bg-white rounded-lg border border-gray-200 overflow-x-auto">
-          <table className="min-w-full divide-y divide-gray-200">
+        <div className="bg-white rounded-lg border border-gray-200">
+          <table className="w-full divide-y divide-gray-200 table-fixed">
             <thead className="bg-gray-50">
               <tr>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                <th className="w-[15%] px-3 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                  Profile
+                </th>
+                <th className="w-[28%] px-3 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
                   Session Name
                 </th>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                <th className="w-[14%] px-3 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
                   Created
                 </th>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                <th className="w-[14%] px-3 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
                   Last Activity
                 </th>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                <th className="w-[9%] px-3 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
                   Slides
                 </th>
-                <th className="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider">
+                <th className="w-[20%] px-3 py-3 text-center text-xs font-medium text-gray-500 uppercase tracking-wider">
                   Actions
                 </th>
               </tr>
@@ -151,9 +163,18 @@ export const SessionHistory: React.FC<SessionHistoryProps> = ({
                     session.session_id === currentSessionId ? 'bg-blue-50' : ''
                   }`}
                 >
-                  <td className="px-6 py-4 whitespace-nowrap">
+                  <td className="px-3 py-3">
+                    {session.profile_name ? (
+                      <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-purple-100 text-purple-800 truncate max-w-full" title={session.profile_name}>
+                        {session.profile_name}
+                      </span>
+                    ) : (
+                      <span className="text-gray-400 text-xs">—</span>
+                    )}
+                  </td>
+                  <td className="px-3 py-3">
                     {editingId === session.session_id ? (
-                      <div className="flex items-center gap-2">
+                      <div className="flex items-center gap-1">
                         <input
                           type="text"
                           value={editTitle}
@@ -162,56 +183,56 @@ export const SessionHistory: React.FC<SessionHistoryProps> = ({
                             if (e.key === 'Enter') handleRename(session.session_id);
                             if (e.key === 'Escape') setEditingId(null);
                           }}
-                          className="px-2 py-1 border border-gray-300 rounded text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                          className="w-full px-2 py-1 border border-gray-300 rounded text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
                           autoFocus
                         />
                         <button
                           onClick={() => handleRename(session.session_id)}
-                          className="text-green-600 hover:text-green-800"
+                          className="text-green-600 hover:text-green-800 flex-shrink-0"
                         >
                           ✓
                         </button>
                         <button
                           onClick={() => setEditingId(null)}
-                          className="text-gray-400 hover:text-gray-600"
+                          className="text-gray-400 hover:text-gray-600 flex-shrink-0"
                         >
                           ✕
                         </button>
                       </div>
                     ) : (
-                      <div className="flex items-center">
-                        <span className="text-sm font-medium text-gray-900">
+                      <div className="flex items-center gap-1">
+                        <span className="text-sm font-medium text-gray-900 truncate" title={session.title}>
                           {session.title}
                         </span>
                         {session.session_id === currentSessionId && (
-                          <span className="ml-2 px-2 py-0.5 text-xs font-medium bg-blue-100 text-blue-800 rounded">
+                          <span className="flex-shrink-0 px-1.5 py-0.5 text-xs font-medium bg-blue-100 text-blue-800 rounded">
                             Current
                           </span>
                         )}
                       </div>
                     )}
                   </td>
-                  <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
+                  <td className="px-3 py-3 text-xs text-gray-500">
                     {formatDate(session.created_at)}
                   </td>
-                  <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
+                  <td className="px-3 py-3 text-xs text-gray-500">
                     {session.last_activity ? formatDate(session.last_activity) : '-'}
                   </td>
-                  <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
+                  <td className="px-3 py-3 text-xs text-gray-500">
                     {session.has_slide_deck ? (
-                      <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-800">
-                        Has slides
+                      <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-800">
+                        Yes
                       </span>
                     ) : (
-                      <span className="text-gray-400">No slides</span>
+                      <span className="text-gray-400">No</span>
                     )}
                   </td>
-                  <td className="px-6 py-4 whitespace-nowrap text-right text-sm font-medium">
-                    <div className="flex items-center justify-end gap-2">
+                  <td className="px-3 py-3 text-center text-sm font-medium">
+                    <div className="flex items-center justify-center gap-2">
                       {session.session_id !== currentSessionId && session.has_slide_deck && (
                         <button
                           onClick={() => handleRestore(session.session_id)}
-                          className="text-blue-600 hover:text-blue-900"
+                          className="text-blue-600 hover:text-blue-900 text-xs"
                         >
                           Restore
                         </button>
@@ -221,13 +242,13 @@ export const SessionHistory: React.FC<SessionHistoryProps> = ({
                           setEditingId(session.session_id);
                           setEditTitle(session.title);
                         }}
-                        className="text-gray-600 hover:text-gray-900"
+                        className="text-gray-600 hover:text-gray-900 text-xs"
                       >
                         Rename
                       </button>
                       <button
                         onClick={() => handleDelete(session.session_id)}
-                        className="text-red-600 hover:text-red-900"
+                        className="text-red-600 hover:text-red-900 text-xs"
                       >
                         Delete
                       </button>

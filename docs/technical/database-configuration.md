@@ -247,7 +247,7 @@ class ConfigHistory(Base):
 
 ### UserSession
 
-User conversation sessions with processing lock support.
+User conversation sessions with processing lock support and profile association.
 
 ```python
 class UserSession(Base):
@@ -257,10 +257,14 @@ class UserSession(Base):
     title: str                   # Session title
     created_at: datetime
     last_activity: datetime
-    genie_conversation_id: str | None  # Genie conversation ID (saved on first query, persists for source data links)
+    profile_id: int | None       # Profile this session belongs to (for Genie space association)
+    profile_name: str | None     # Cached profile name for display in session history
+    genie_conversation_id: str | None  # Genie conversation ID (persists across profile switches)
     is_processing: bool          # Lock flag for concurrent requests
     processing_started_at: datetime | None
 ```
+
+**Note:** Sessions track their `profile_id` to preserve Genie conversation IDs across profile switches. When restoring a session, the frontend auto-switches to the session's profile.
 
 ### SessionMessage
 
