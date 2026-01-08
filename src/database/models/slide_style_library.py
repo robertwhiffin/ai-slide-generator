@@ -34,6 +34,7 @@ class SlideStyleLibrary(Base):
     style_content = Column(Text, nullable=False)
     
     is_active = Column(Boolean, default=True, nullable=False)
+    is_system = Column(Boolean, default=False, nullable=False)  # Protected system styles cannot be edited/deleted
     
     created_by = Column(String(255), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)

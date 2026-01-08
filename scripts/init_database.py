@@ -97,6 +97,7 @@ def seed_slide_styles(db) -> int | None:
             category=style_data["category"],
             style_content=style_data["style_content"],
             is_active=True,
+            is_system=style_data.get("is_system", False),
             created_by="system",
             updated_by="system",
         )
