@@ -4,11 +4,18 @@ This document traces the complete flow of a profile switch and how it affects Ge
 
 ## Overview
 
-When a user switches profiles, the system must:
-1. Load new configuration from database (including new Genie space ID)
-2. Reload the agent with new settings
-3. Clear old Genie conversation IDs
-4. Initialize new Genie conversations in the new space
+When a user switches profiles, the system:
+1. Loads new configuration from database (including new Genie space ID)
+2. Reloads the agent with new settings
+3. **Preserves** existing Genie conversation IDs (each session tracks its `profile_id`)
+4. Initializes new Genie conversations only for new sessions in the new space
+
+### Key Behavior (Updated)
+
+- **Sessions track their profile:** Each session stores `profile_id` and `profile_name`
+- **Genie IDs persist:** Switching profiles does NOT clear Genie conversation IDs
+- **Auto-switch on restore:** Restoring a session from a different profile auto-switches to that profile
+- **Profile shown in history:** Session history displays which profile each session belongs to
 
 ---
 
@@ -130,12 +137,13 @@ def load_profile(
 
 ```python
 def reload_agent(self, profile_id: Optional[int] = None) -> Dict[str, Any]:
-    """Reload agent with new settings from database."""
+    """Reload agent with new settings from database.
+    
+    Genie conversation IDs are PRESERVED - each session tracks its profile_id
+    and the genie_conversation_id remains valid for that profile's Genie space.
+    """
     with self._reload_lock:
-        # 1. Save current session state
-        sessions_backup = copy.deepcopy(self.agent.sessions)
-
-        # 2. Reload settings from database
+        # 1. Reload settings from database
         from src.core.settings_db import reload_settings
         new_settings = reload_settings(profile_id)  # ← RELOADS SETTINGS CACHE
 
@@ -147,19 +155,19 @@ def reload_agent(self, profile_id: Optional[int] = None) -> Dict[str, Any]:
             },
         )
 
-        # 3. Clear Genie conversation IDs (tied to old space)
-        for session_id, session in sessions_backup.items():
-            if "genie_conversation_id" in session:
-                session["genie_conversation_id"] = None  # ← CLEARED
+        # NOTE: Genie conversation IDs are NO LONGER cleared on profile switch.
+        # Each session stores its profile_id, so the genie_conversation_id
+        # remains valid when the user switches back to that profile.
 
-        # 4. Create new agent with new settings
+        # 2. Create new agent with new settings
         new_agent = create_agent()  # ← CREATES NEW AGENT
 
-        # 5. Restore sessions (with cleared Genie conversation IDs)
-        new_agent.sessions = sessions_backup
-
-        # 6. Atomic swap
+        # 3. Atomic swap
         self.agent = new_agent
+
+        # 4. Clear deck cache (settings may affect rendering)
+        with self._cache_lock:
+            self._deck_cache.clear()
 
         return {
             "status": "reloaded",
@@ -168,12 +176,10 @@ def reload_agent(self, profile_id: Optional[int] = None) -> Dict[str, Any]:
 ```
 
 **What happens:**
-1. Backs up existing session state (chat history)
-2. **Reloads settings from database** (including new Genie space ID)
-3. **Clears Genie conversation IDs** (they're tied to the old space)
-4. **Creates new agent** with new settings
-5. Restores session state (but with cleared Genie conversations)
-6. Swaps old agent with new agent
+1. **Reloads settings from database** (including new Genie space ID)
+2. **Creates new agent** with new settings
+3. Swaps old agent with new agent
+4. **Genie conversation IDs are PRESERVED** in the database (per-session)
 
 ---
 
@@ -422,43 +428,91 @@ logger.info(f"Current active profile: {settings.profile_id}, space: {settings.ge
 
 ---
 
-## Known Limitations
+## Session-Profile Association (Implemented)
 
-### Cross-Profile Session Restore
+### How It Works
 
-When switching profiles, `genie_conversation_id` for **all** sessions is cleared (not just the current session). This causes:
+Each session now tracks:
+- `profile_id`: The profile the session was created under
+- `profile_name`: Cached for display in session history
 
-- Sessions created under Profile A lose their Genie link when Profile B is loaded
-- Restoring a session from a different profile shows "No Genie queries were made in this session"
+**Database Model** (`UserSession`):
+```python
+profile_id = Column(Integer, nullable=True, index=True)
+profile_name = Column(String(255), nullable=True)
+genie_conversation_id = Column(String(255), nullable=True)  # Persists!
+```
 
-**Current behavior:** Acceptable for single-profile workflows. Genie conversations remain linked as long as the user stays on the same profile.
+### Auto-Profile Switch on Session Restore
 
-**Future improvement:** Add `profile_id` to `UserSession` to only clear Genie IDs for sessions matching the switched profile.
+When restoring a session from history:
+1. Frontend checks if session's `profile_id` differs from current profile
+2. If different, calls `loadProfile(session.profile_id)` first
+3. Then restores the session with its preserved Genie conversation
+
+**Frontend Logic** (`AppLayout.tsx`):
+```typescript
+const handleSessionRestore = async (restoredSessionId: string) => {
+  const sessionInfo = await api.getSession(restoredSessionId);
+  
+  // Auto-switch profile if needed
+  if (sessionInfo.profile_id && currentProfile && sessionInfo.profile_id !== currentProfile.id) {
+    await loadProfile(sessionInfo.profile_id);
+  }
+  
+  // Restore session (Genie ID is preserved!)
+  await switchSession(restoredSessionId);
+};
+```
+
+### Session History Display
+
+Session history now shows a "Profile" column before the session name, making it clear which profile each session belongs to.
 
 ---
 
 ## Expected Flow Summary
 
-✅ **Correct Flow:**
+✅ **Current Flow:**
 1. User switches profile → API call → `reload_agent(profile_id)`
 2. `reload_settings(profile_id)` clears cache and reloads from DB
 3. New agent created with `create_agent()`
-4. Agent calls `get_settings()` → gets NEW cached settings
-5. Genie conversation IDs cleared (set to `None`)
-6. Next Genie query → initializes new conversation in NEW space
-7. All subsequent queries use NEW space ID
+4. **Genie conversation IDs are PRESERVED** (no clearing)
+5. New sessions are associated with the new profile
+6. Restoring old session → auto-switches to its original profile
+7. Genie conversation ID works because profile matches
 
-❌ **What's Happening (Bug):**
-- Settings cache might not be properly updated
-- Tools calling `get_settings()` get OLD settings
-- Queries go to OLD Genie space
+### Example Scenario
+
+1. User on Profile "KPMG", creates Session-A → gets genie_conversation_id_A
+2. User switches to Profile "Cadence", creates Session-B → gets genie_conversation_id_B
+3. User switches back to "KPMG"
+4. User restores Session-A from history:
+   - Frontend detects Session-A belongs to KPMG
+   - Auto-switches to KPMG profile (if not already)
+   - Session-A's genie_conversation_id_A still works ✅
+5. User can view source data, continue conversation
 
 ---
 
-## Next Steps
+## Debugging
 
-1. Add comprehensive logging to track space ID through entire flow
-2. Verify `get_settings()` cache is properly cleared and repopulated
-3. Check if there are multiple instances of the settings cache
-4. Consider alternative caching strategy (e.g., using a module-level variable instead of `lru_cache`)
+### Verify Profile Association
+
+```python
+# Check session's profile in database
+SELECT session_id, title, profile_id, profile_name, genie_conversation_id 
+FROM user_sessions 
+ORDER BY last_activity DESC;
+```
+
+### Verify Genie IDs Persist
+
+After switching profiles, run:
+```sql
+-- Should NOT be NULL for sessions with Genie queries
+SELECT session_id, profile_name, genie_conversation_id 
+FROM user_sessions 
+WHERE genie_conversation_id IS NOT NULL;
+```
 
