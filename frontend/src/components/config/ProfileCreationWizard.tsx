@@ -14,12 +14,13 @@
 
 import React, { useState, useEffect } from 'react';
 import { FiCheck, FiChevronLeft, FiChevronRight, FiX, FiInfo } from 'react-icons/fi';
-import { configApi, type DeckPrompt, type AvailableGenieSpaces } from '../../api/config';
+import { configApi, type DeckPrompt, type SlideStyle, type AvailableGenieSpaces } from '../../api/config';
 
-// Wizard step definitions (4 steps - LLM and MLflow use backend defaults)
+// Wizard step definitions (5 steps - LLM and MLflow use backend defaults)
 const STEPS = [
   { id: 'basic', title: 'Basic Info', description: 'Name and description' },
   { id: 'genie', title: 'Genie Space', description: 'Data source (required)' },
+  { id: 'slide-style', title: 'Slide Style', description: 'Visual appearance' },
   { id: 'deck-prompt', title: 'Deck Prompt', description: 'Optional template' },
   { id: 'review', title: 'Review', description: 'Confirm and create' },
 ] as const;
@@ -35,6 +36,8 @@ interface WizardFormData {
   genieSpaceId: string;
   genieSpaceName: string;
   genieDescription: string;
+  // Slide style
+  selectedSlideStyleId: number | null;
   // Deck prompt
   selectedDeckPromptId: number | null;
 }
@@ -61,12 +64,15 @@ export const ProfileCreationWizard: React.FC<ProfileCreationWizardProps> = ({
     genieSpaceId: '',
     genieSpaceName: '',
     genieDescription: '',
+    selectedSlideStyleId: null,
     selectedDeckPromptId: null,
   });
   
   // Loading states
   const [availableSpaces, setAvailableSpaces] = useState<AvailableGenieSpaces['spaces']>({});
   const [loadingSpaces, setLoadingSpaces] = useState(false);
+  const [slideStyles, setSlideStyles] = useState<SlideStyle[]>([]);
+  const [loadingStyles, setLoadingStyles] = useState(false);
   const [deckPrompts, setDeckPrompts] = useState<DeckPrompt[]>([]);
   const [loadingPrompts, setLoadingPrompts] = useState(false);
   
@@ -92,9 +98,11 @@ export const ProfileCreationWizard: React.FC<ProfileCreationWizardProps> = ({
         genieSpaceId: '',
         genieSpaceName: '',
         genieDescription: '',
+        selectedSlideStyleId: null,
         selectedDeckPromptId: null,
       });
       setError(null);
+      loadSlideStyles();
       loadDeckPrompts();
     }
   }, [isOpen]);
@@ -110,6 +118,21 @@ export const ProfileCreationWizard: React.FC<ProfileCreationWizardProps> = ({
       console.error('Failed to load Genie spaces:', err);
     } finally {
       setLoadingSpaces(false);
+    }
+  };
+
+  // Load slide styles
+  const loadSlideStyles = async () => {
+    setLoadingStyles(true);
+    try {
+      const response = await configApi.listSlideStyles();
+      const activeStyles = response.styles.filter(s => s.is_active);
+      setSlideStyles(activeStyles);
+      // No auto-select - user must explicitly choose a style
+    } catch (err) {
+      console.error('Failed to load slide styles:', err);
+    } finally {
+      setLoadingStyles(false);
     }
   };
 
@@ -176,6 +199,8 @@ export const ProfileCreationWizard: React.FC<ProfileCreationWizardProps> = ({
         return formData.name.trim().length > 0;
       case 'genie':
         return formData.genieSpaceId.trim().length > 0 && formData.genieDescription.trim().length > 0;
+      case 'slide-style':
+        return formData.selectedSlideStyleId !== null; // Required - must select a style
       case 'deck-prompt':
         return true; // Optional
       case 'review':
@@ -212,6 +237,11 @@ export const ProfileCreationWizard: React.FC<ProfileCreationWizardProps> = ({
     try {
       // Create profile with inline configurations
       // ai_infra and mlflow are omitted - backend uses defaults
+      const promptsConfig = (formData.selectedDeckPromptId || formData.selectedSlideStyleId) ? {
+        selected_deck_prompt_id: formData.selectedDeckPromptId,
+        selected_slide_style_id: formData.selectedSlideStyleId,
+      } : undefined;
+      
       const response = await configApi.createProfileWithConfig({
         name: formData.name.trim(),
         description: formData.description.trim() || null,
@@ -222,9 +252,7 @@ export const ProfileCreationWizard: React.FC<ProfileCreationWizardProps> = ({
         },
         // ai_infra omitted - backend uses default (databricks-claude-sonnet-4-5)
         // mlflow omitted - backend auto-sets based on user
-        prompts: formData.selectedDeckPromptId ? {
-          selected_deck_prompt_id: formData.selectedDeckPromptId,
-        } : undefined,
+        prompts: promptsConfig,
       });
       
       onSuccess(response.id);
@@ -244,7 +272,8 @@ export const ProfileCreationWizard: React.FC<ProfileCreationWizardProps> = ({
 
   if (!isOpen) return null;
 
-  // Find selected deck prompt for display
+  // Find selected items for display
+  const selectedSlideStyle = slideStyles.find(s => s.id === formData.selectedSlideStyleId);
   const selectedDeckPrompt = deckPrompts.find(p => p.id === formData.selectedDeckPromptId);
 
   return (
@@ -449,7 +478,65 @@ export const ProfileCreationWizard: React.FC<ProfileCreationWizardProps> = ({
             </div>
           )}
 
-          {/* Step 3: Deck Prompt */}
+          {/* Step 3: Slide Style */}
+          {currentStep === 'slide-style' && (
+            <div className="space-y-4">
+              <div>
+                <h3 className="text-lg font-medium text-gray-900 mb-2">Slide Style <span className="text-red-500">*</span></h3>
+                <p className="text-sm text-gray-500 mb-4">
+                  Choose a visual style for your slides. This controls typography, colors, and layout.
+                </p>
+              </div>
+
+              {loadingStyles ? (
+                <p className="text-gray-500">Loading slide styles...</p>
+              ) : slideStyles.length === 0 ? (
+                <div className="bg-gray-50 border border-gray-200 rounded-md p-4 text-center text-gray-500">
+                  <p>No slide styles available.</p>
+                  <p className="text-sm mt-1">You can create them in the Slide Styles page.</p>
+                </div>
+              ) : (
+                <div className="space-y-2 max-h-64 overflow-y-auto">
+                  {slideStyles.map(style => (
+                    <label 
+                      key={style.id} 
+                      className={`block p-4 border rounded-md cursor-pointer transition-colors ${
+                        formData.selectedSlideStyleId === style.id 
+                          ? 'border-emerald-500 bg-emerald-50' 
+                          : 'border-gray-200 hover:border-gray-300'
+                      }`}
+                    >
+                      <input
+                        type="radio"
+                        name="slideStyle"
+                        checked={formData.selectedSlideStyleId === style.id}
+                        onChange={() => setFormData(prev => ({ ...prev, selectedSlideStyleId: style.id }))}
+                        className="sr-only"
+                      />
+                      <div className="flex items-start justify-between">
+                        <div>
+                          <span className="font-medium text-gray-900">{style.name}</span>
+                          {style.category && (
+                            <span className="ml-2 text-xs px-2 py-0.5 bg-gray-100 rounded-full">
+                              {style.category}
+                            </span>
+                          )}
+                          {style.description && (
+                            <p className="text-sm text-gray-500 mt-1">{style.description}</p>
+                          )}
+                        </div>
+                        {formData.selectedSlideStyleId === style.id && (
+                          <FiCheck className="text-emerald-600 flex-shrink-0" />
+                        )}
+                      </div>
+                    </label>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Step 4: Deck Prompt */}
           {currentStep === 'deck-prompt' && (
             <div className="space-y-4">
               <div>
@@ -554,6 +641,17 @@ export const ProfileCreationWizard: React.FC<ProfileCreationWizardProps> = ({
                     <dd className="font-medium text-purple-900">{formData.genieSpaceName}</dd>
                     <dt className="text-purple-500">Description:</dt>
                     <dd className="font-medium text-purple-900 col-span-2 whitespace-pre-wrap">{formData.genieDescription}</dd>
+                  </dl>
+                </div>
+
+                {/* Slide Style */}
+                <div className="bg-emerald-50 rounded-md p-4">
+                  <h4 className="text-sm font-medium text-emerald-700 mb-2">Slide Style</h4>
+                  <dl className="grid grid-cols-2 gap-2 text-sm">
+                    <dt className="text-emerald-500">Style:</dt>
+                    <dd className="font-medium text-emerald-900">
+                      {selectedSlideStyle ? selectedSlideStyle.name : 'None selected'}
+                    </dd>
                   </dl>
                 </div>
 

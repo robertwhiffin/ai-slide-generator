@@ -108,8 +108,14 @@ if psql -lqt | cut -d \| -f 1 | grep -qw "$DB_NAME"; then
     echo
     if [[ $REPLY =~ ^[Yy]$ ]]; then
         echo -e "${BLUE}➤ Dropping existing database...${NC}"
-        dropdb "$DB_NAME" 2>/dev/null || true
-        echo -e "${GREEN}✓ Database dropped${NC}"
+        if dropdb "$DB_NAME" 2>&1; then
+            echo -e "${GREEN}✓ Database dropped${NC}"
+        else
+            echo -e "${RED}✗ Failed to drop database${NC}"
+            echo -e "${YELLOW}This usually means there are active connections (e.g., backend server running).${NC}"
+            echo -e "${YELLOW}Stop any running services and try again.${NC}"
+            exit 1
+        fi
     else
         echo -e "${YELLOW}➤ Keeping existing database${NC}"
     fi

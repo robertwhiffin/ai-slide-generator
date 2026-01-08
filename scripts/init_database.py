@@ -14,6 +14,7 @@ load_dotenv()
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from src.core.database import get_db_session, init_db, Base, get_engine
+from src.core.defaults import DEFAULT_CONFIG
 from src.database.models import (
     ConfigAIInfra,
     ConfigGenieSpace,
@@ -21,6 +22,7 @@ from src.database.models import (
     ConfigProfile,
     ConfigPrompts,
     SlideDeckPromptLibrary,
+    SlideStyleLibrary,
 )
 
 
@@ -73,6 +75,44 @@ def seed_deck_prompts(db):
     print(f"  ✓ Seeded {len(DEFAULT_DECK_PROMPTS)} deck prompts")
 
 
+def seed_slide_styles(db) -> int | None:
+    """Seed the slide style library with default styles.
+    
+    Returns:
+        ID of the default style (Databricks Brand) if created, None otherwise
+    """
+    from src.core.init_default_profile import DEFAULT_SLIDE_STYLES
+    
+    existing_count = db.query(SlideStyleLibrary).count()
+    if existing_count > 0:
+        print(f"  ✓ Slide styles already exist ({existing_count} styles)")
+        # Return the ID of Databricks Brand if it exists
+        default_style = db.query(SlideStyleLibrary).filter_by(name="Databricks Brand").first()
+        return default_style.id if default_style else None
+    
+    default_style_id = None
+    for style_data in DEFAULT_SLIDE_STYLES:
+        style = SlideStyleLibrary(
+            name=style_data["name"],
+            description=style_data["description"],
+            category=style_data["category"],
+            style_content=style_data["style_content"],
+            is_active=True,
+            is_system=style_data.get("is_system", False),
+            created_by="system",
+            updated_by="system",
+        )
+        db.add(style)
+        db.flush()  # Get the ID
+        
+        # Track the default style ID
+        if style_data["name"] == "Databricks Brand":
+            default_style_id = style.id
+    
+    print(f"  ✓ Seeded {len(DEFAULT_SLIDE_STYLES)} slide styles")
+    return default_style_id
+
+
 def initialize_database(reset: bool = False):
     """Initialize database with seed profiles from YAML."""
     
@@ -85,8 +125,10 @@ def initialize_database(reset: bool = False):
         print("✓ Tables ready")
     
     with get_db_session() as db:
-        # Seed deck prompts first (global library)
+        # Seed global libraries first (they check internally if already seeded)
         seed_deck_prompts(db)
+        default_style_id = seed_slide_styles(db)
+        db.commit()
         
         # Check if any profiles exist
         existing = db.query(ConfigProfile).first()
@@ -165,16 +207,26 @@ def initialize_database(reset: bool = False):
                 db.add(mlflow)
                 print(f"  ✓ MLflow: {experiment_name}")
             
-            # Create prompts (no more user_prompt_template)
+            # Create prompts with default slide style
+            # Handle "USE_DEFAULT" values by substituting from defaults.py
             prompts_config = seed.get('prompts', {})
-            if prompts_config:
-                prompts = ConfigPrompts(
-                    profile_id=profile.id,
-                    system_prompt=prompts_config['system_prompt'],
-                    slide_editing_instructions=prompts_config['slide_editing_instructions'],
-                )
-                db.add(prompts)
-                print(f"  ✓ Prompts settings")
+            system_prompt = prompts_config.get('system_prompt', 'USE_DEFAULT')
+            slide_editing = prompts_config.get('slide_editing_instructions', 'USE_DEFAULT')
+            
+            # Substitute defaults if USE_DEFAULT is specified
+            if system_prompt == 'USE_DEFAULT':
+                system_prompt = DEFAULT_CONFIG['prompts']['system_prompt']
+            if slide_editing == 'USE_DEFAULT':
+                slide_editing = DEFAULT_CONFIG['prompts']['slide_editing_instructions']
+            
+            prompts = ConfigPrompts(
+                profile_id=profile.id,
+                selected_slide_style_id=default_style_id,
+                system_prompt=system_prompt,
+                slide_editing_instructions=slide_editing,
+            )
+            db.add(prompts)
+            print(f"  ✓ Prompts settings (with default slide style)")
         
         db.commit()
         print(f"\n✓ Successfully created {len(seed_profiles)} profiles")
