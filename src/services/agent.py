@@ -22,7 +22,7 @@ from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.tools import StructuredTool
 from pydantic import BaseModel, Field
 
-from src.core.databricks_client import get_databricks_client
+from src.core.databricks_client import get_databricks_client, get_user_client
 
 from src.core.settings_db import get_settings
 from src.domain.slide import Slide
@@ -86,14 +86,13 @@ class SlideGeneratorAgent:
         logger.info("Initializing SlideGeneratorAgent")
 
         self.settings = get_settings()
-        self.client = get_databricks_client()
+        self.client = get_databricks_client()  # System client for non-user operations
 
         # Set up MLflow
         self._setup_mlflow()
-        self.experiment_id=None
+        self.experiment_id = None
 
-        # Create LangChain components (tools created per-request to bind session_id)
-        self.model = self._create_model()
+        # Create LangChain prompt (model created per-request for user context)
         self.prompt = self._create_prompt()
 
         # Session storage for multi-turn conversations
@@ -140,17 +139,26 @@ class SlideGeneratorAgent:
             pass
 
     def _create_model(self) -> ChatDatabricks:
-        """Create LangChain Databricks model."""
+        """Create LangChain Databricks model with user context.
+
+        Creates a new ChatDatabricks instance per request using the
+        user-scoped WorkspaceClient. This ensures LLM calls are made
+        with the authenticated user's permissions.
+        """
         try:
+            # Get user-scoped client (falls back to system client in local dev)
+            user_client = get_user_client()
+
             model = ChatDatabricks(
                 endpoint=self.settings.llm.endpoint,
                 temperature=self.settings.llm.temperature,
                 max_tokens=self.settings.llm.max_tokens,
                 top_p=self.settings.llm.top_p,
+                workspace_client=user_client,
             )
 
             logger.info(
-                "ChatDatabricks model created",
+                "ChatDatabricks model created with user context",
                 extra={
                     "endpoint": self.settings.llm.endpoint,
                     "temperature": self.settings.llm.temperature,
@@ -302,10 +310,14 @@ class SlideGeneratorAgent:
         messages for chat interface display.
 
         Note: Chat history is managed per-session and passed via agent_input.
+        Model is created per-request to use user-scoped credentials.
         """
         try:
+            # Create model per-request for user context (Genie/LLM permissions)
+            model = self._create_model()
+
             # Create agent with session-specific tools
-            agent = create_tool_calling_agent(self.model, tools, self.prompt)
+            agent = create_tool_calling_agent(model, tools, self.prompt)
 
             # Create executor with intermediate steps enabled
             agent_executor = AgentExecutor(
@@ -986,9 +998,14 @@ class SlideGeneratorAgent:
 
         Returns:
             Configured AgentExecutor with callbacks
+
+        Note: Model is created per-request to use user-scoped credentials.
         """
         try:
-            agent = create_tool_calling_agent(self.model, tools, self.prompt)
+            # Create model per-request for user context (Genie/LLM permissions)
+            model = self._create_model()
+
+            agent = create_tool_calling_agent(model, tools, self.prompt)
 
             agent_executor = AgentExecutor(
                 agent=agent,

@@ -16,6 +16,9 @@ Use the `deploy.sh` wrapper script from the project root (activates venv automat
 # Delete app
 ./deploy.sh delete --env staging --profile <profile>
 
+# Update with database reset (drop and recreate tables first)
+./deploy.sh update --env development --profile <profile> --reset-db
+
 # Validate without deploying
 ./deploy.sh create --env production --profile <profile> --dry-run
 ```
@@ -43,7 +46,10 @@ python -m db_app_deployment.deploy --create --env development --profile <profile
 | `--update` | these | Update existing app |
 | `--delete` | three | Delete app |
 | `--profile` | Yes | Databricks CLI profile from `~/.databrickscfg` |
+| `--reset-db` | No | Drop and recreate database tables before deploying |
 | `--dry-run` | No | Validate config without deploying |
+
+> **Warning:** `--reset-db` deletes all data, is blocked in production, and requires typing `RESET` to confirm.
 
 ---
 
@@ -71,6 +77,21 @@ python -m db_app_deployment.deploy --create --env development --profile <profile
    - Grant permissions
 
 5. **Create/update Databricks App** with compute, env vars, and resources
+
+### Database Reset (`--reset-db`)
+
+For development/staging environments when schema changes require a fresh start.
+Combine with `update` to reset the database and deploy new code in one command:
+
+```bash
+./deploy.sh update --env development --profile <profile> --reset-db
+```
+
+This will:
+1. Connect to Lakebase instance
+2. Drop all tables in the app schema
+3. Recreate tables from current SQLAlchemy models
+4. Deploy the updated application code
 
 ---
 
