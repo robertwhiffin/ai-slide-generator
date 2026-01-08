@@ -10,7 +10,7 @@
  */
 
 import React, { useEffect, useState } from 'react';
-import type { ProfileDetail, DeckPrompt } from '../../api/config';
+import type { ProfileDetail, DeckPrompt, SlideStyle } from '../../api/config';
 import { configApi, ConfigApiError } from '../../api/config';
 import { ConfigTabs } from './ConfigTabs';
 
@@ -32,6 +32,7 @@ export const ProfileDetailView: React.FC<ProfileDetailProps> = ({
   const [error, setError] = useState<string | null>(null);
   const [mode, setMode] = useState<ViewMode>(initialMode);
   const [deckPrompt, setDeckPrompt] = useState<DeckPrompt | null>(null);
+  const [slideStyle, setSlideStyle] = useState<SlideStyle | null>(null);
   
   // Editable profile metadata
   const [editedName, setEditedName] = useState('');
@@ -48,6 +49,19 @@ export const ProfileDetailView: React.FC<ProfileDetailProps> = ({
         setProfile(data);
         setEditedName(data.name);
         setEditedDescription(data.description || '');
+        
+        // Load slide style name if selected
+        if (data.prompts.selected_slide_style_id) {
+          try {
+            const style = await configApi.getSlideStyle(data.prompts.selected_slide_style_id);
+            setSlideStyle(style);
+          } catch {
+            // Style may have been deleted
+            setSlideStyle(null);
+          }
+        } else {
+          setSlideStyle(null);
+        }
         
         // Load deck prompt name if selected
         if (data.prompts.selected_deck_prompt_id) {
@@ -254,6 +268,30 @@ export const ProfileDetailView: React.FC<ProfileDetailProps> = ({
                 ))
               ) : (
                 <p className="text-sm text-gray-500 italic">No Genie spaces configured</p>
+              )}
+            </div>
+          </div>
+
+          {/* Slide Style */}
+          <div className="mb-6">
+            <h3 className="text-lg font-semibold text-gray-900 mb-3 flex items-center gap-2">
+              <span className="text-emerald-600">🎨</span> Slide Style
+            </h3>
+            <div className="bg-gray-50 rounded p-4">
+              {slideStyle ? (
+                <div>
+                  <p className="text-sm font-medium text-gray-900">{slideStyle.name}</p>
+                  {slideStyle.category && (
+                    <span className="inline-block mt-1 px-2 py-0.5 bg-emerald-100 text-emerald-700 text-xs rounded-full">
+                      {slideStyle.category}
+                    </span>
+                  )}
+                  {slideStyle.description && (
+                    <p className="text-sm text-gray-600 mt-2">{slideStyle.description}</p>
+                  )}
+                </div>
+              ) : (
+                <p className="text-sm text-gray-500 italic">No slide style selected</p>
               )}
             </div>
           </div>

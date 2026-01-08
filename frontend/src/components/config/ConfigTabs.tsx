@@ -4,33 +4,42 @@
  * Provides tabbed interface for editing all configuration domains:
  * - Genie Spaces
  * - Deck Prompt (presentation templates)
+ * - Slide Style (visual appearance)
  * - AI Infrastructure
  * - MLflow
- * - Advanced (system prompts for power users)
+ * - Advanced (system prompts - debug mode only)
  */
 
-import React, { useState } from 'react';
+import React, { useState, useMemo } from 'react';
 import { useConfig } from '../../hooks/useConfig';
 import { AIInfraForm } from './AIInfraForm';
 import { GenieForm } from './GenieForm';
 import { MLflowForm } from './MLflowForm';
 import { DeckPromptSelector } from './DeckPromptSelector';
+import { SlideStyleSelector } from './SlideStyleSelector';
 import { AdvancedSettingsEditor } from './AdvancedSettingsEditor';
 
-type TabId = 'ai_infra' | 'genie' | 'mlflow' | 'deck_prompt' | 'advanced';
+type TabId = 'ai_infra' | 'genie' | 'mlflow' | 'deck_prompt' | 'slide_style' | 'advanced';
 
 interface Tab {
   id: TabId;
   label: string;
   icon: string;
+  debugOnly?: boolean;
 }
 
-const tabs: Tab[] = [
+const isDebugMode = (): boolean => {
+  const urlParams = new URLSearchParams(window.location.search);
+  return urlParams.get('debug')?.toLowerCase() === 'true' || localStorage.getItem('debug')?.toLowerCase() === 'true';
+};
+
+const allTabs: Tab[] = [
   { id: 'genie', label: 'Genie Spaces', icon: '🧞' },
   { id: 'deck_prompt', label: 'Deck Prompt', icon: '📋' },
+  { id: 'slide_style', label: 'Slide Style', icon: '🎨' },
   { id: 'ai_infra', label: 'AI Infrastructure', icon: '🤖' },
   { id: 'mlflow', label: 'MLflow', icon: '📊' },
-  { id: 'advanced', label: 'Advanced', icon: '⚙️' },
+  { id: 'advanced', label: 'Advanced', icon: '⚙️', debugOnly: true },
 ];
 
 interface ConfigTabsProps {
@@ -51,6 +60,12 @@ export const ConfigTabs: React.FC<ConfigTabsProps> = ({ profileId, profileName }
     updatePrompts,
     reload,
   } = useConfig(profileId);
+
+  // Filter tabs based on debug mode
+  const tabs = useMemo(() => {
+    const debugMode = isDebugMode();
+    return allTabs.filter(tab => !tab.debugOnly || debugMode);
+  }, []);
 
   if (loading) {
     return (
@@ -126,6 +141,15 @@ export const ConfigTabs: React.FC<ConfigTabsProps> = ({ profileId, profileName }
 
         {activeTab === 'deck_prompt' && config.prompts && (
           <DeckPromptSelector
+            profileId={profileId}
+            currentPrompts={config.prompts}
+            onSave={reload}
+            saving={saving}
+          />
+        )}
+
+        {activeTab === 'slide_style' && config.prompts && (
+          <SlideStyleSelector
             profileId={profileId}
             currentPrompts={config.prompts}
             onSave={reload}

@@ -206,6 +206,7 @@ def create_profile_with_config(
             } if request.mlflow else None,
             prompts={
                 "selected_deck_prompt_id": request.prompts.selected_deck_prompt_id,
+                "selected_slide_style_id": request.prompts.selected_slide_style_id,
                 "system_prompt": request.prompts.system_prompt,
                 "slide_editing_instructions": request.prompts.slide_editing_instructions,
             } if request.prompts else None,

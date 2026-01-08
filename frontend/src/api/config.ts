@@ -129,6 +129,7 @@ export interface PromptsConfig {
   id: number;
   profile_id: number;
   selected_deck_prompt_id: number | null;
+  selected_slide_style_id: number | null;
   system_prompt: string;
   slide_editing_instructions: string;
   created_at: string;
@@ -137,6 +138,7 @@ export interface PromptsConfig {
 
 export interface PromptsConfigUpdate {
   selected_deck_prompt_id?: number | null;
+  selected_slide_style_id?: number | null;
   system_prompt?: string;
   slide_editing_instructions?: string;
 }
@@ -172,6 +174,41 @@ export interface DeckPromptUpdate {
 
 export interface DeckPromptListResponse {
   prompts: DeckPrompt[];
+  total: number;
+}
+
+// Slide Style Library types
+
+export interface SlideStyle {
+  id: number;
+  name: string;
+  description: string | null;
+  category: string | null;
+  style_content: string;
+  is_active: boolean;
+  is_system: boolean;  // Protected system styles cannot be edited/deleted
+  created_by: string | null;
+  created_at: string;
+  updated_by: string | null;
+  updated_at: string;
+}
+
+export interface SlideStyleCreate {
+  name: string;
+  description?: string | null;
+  category?: string | null;
+  style_content: string;
+}
+
+export interface SlideStyleUpdate {
+  name?: string;
+  description?: string | null;
+  category?: string | null;
+  style_content?: string;
+}
+
+export interface SlideStyleListResponse {
+  styles: SlideStyle[];
   total: number;
 }
 
@@ -408,6 +445,35 @@ export const configApi = {
   
   deleteDeckPrompt: (promptId: number): Promise<void> =>
     fetchJson(`${API_BASE}/deck-prompts/${promptId}`, {
+      method: 'DELETE',
+    }),
+  
+  // Slide Styles Library
+  
+  listSlideStyles: (category?: string): Promise<SlideStyleListResponse> => {
+    const params = category ? `?category=${encodeURIComponent(category)}` : '';
+    return fetchJson(`${API_BASE}/slide-styles${params}`);
+  },
+  
+  getSlideStyle: (styleId: number): Promise<SlideStyle> =>
+    fetchJson(`${API_BASE}/slide-styles/${styleId}`),
+  
+  createSlideStyle: (data: SlideStyleCreate): Promise<SlideStyle> =>
+    fetchJson(`${API_BASE}/slide-styles`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(data),
+    }),
+  
+  updateSlideStyle: (styleId: number, data: SlideStyleUpdate): Promise<SlideStyle> =>
+    fetchJson(`${API_BASE}/slide-styles/${styleId}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(data),
+    }),
+  
+  deleteSlideStyle: (styleId: number): Promise<void> =>
+    fetchJson(`${API_BASE}/slide-styles/${styleId}`, {
       method: 'DELETE',
     }),
   

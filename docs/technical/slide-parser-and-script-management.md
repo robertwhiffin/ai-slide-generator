@@ -11,9 +11,10 @@ The pipeline narrative below focuses on the shared HTML/CSS/script path that con
 ---
 
 ### 1. High-Level Data Flow
-1. **Agent Output** (LLM via `config/prompts.yaml`)
+1. **Agent Output** (LLM via prompts from database)
    - Returns full HTML or replacement slide blocks plus scripts and CSS.
    - Prompt enforces "one canvas per script" (`// Canvas: <id>` comment, unique variable names).
+   - Prompt assembly order: Deck Prompt → Slide Style → System Prompt → Editing Instructions.
 2. **Backend Parsing & Storage**
    - `SlideDeck.from_html_string` (`src/domain/slide_deck.py`) parses HTML into slides with scripts attached directly to each `Slide` object.
    - `_parse_slide_replacements` (`src/services/agent.py`) extracts slides as `Slide` objects with scripts via canvas ID matching.
@@ -324,7 +325,7 @@ ${slideDeck.scripts}  // IIFE-wrapped, safe for shared scope
 ### 7. Key Files to Review
 | Concern | File |
 | --- | --- |
-| Prompt / LLM Output Rules | `config/prompts.yaml` |
+| Prompt / LLM Output Rules | `src/core/defaults.py` |
 | Slide class with scripts | `src/domain/slide.py` |
 | SlideDeck parsing & IIFE aggregation | `src/domain/slide_deck.py` |
 | Canvas heuristics & script splitting | `src/utils/html_utils.py` (`split_script_by_canvas`, `extract_canvas_ids_from_script`) |

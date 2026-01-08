@@ -15,8 +15,8 @@ project_root = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(project_root))
 
 from src.core.database import get_db_session
-from src.core.defaults import DEFAULT_CONFIG
-from src.core.config_loader import load_config, load_prompts
+from src.core.defaults import DEFAULT_CONFIG, DEFAULT_SLIDE_STYLE
+from src.core.config_loader import load_config
 from src.database.models import (
     ConfigAIInfra,
     ConfigGenieSpace,
@@ -24,6 +24,7 @@ from src.database.models import (
     ConfigProfile,
     ConfigPrompts,
     SlideDeckPromptLibrary,
+    SlideStyleLibrary,
 )
 
 logging.basicConfig(level=logging.INFO)
@@ -202,33 +203,88 @@ def _seed_deck_prompts(db) -> None:
     print(f"  ✓ Seeded {len(DEFAULT_DECK_PROMPTS)} deck prompts in library")
 
 
+# Default slide styles for the library
+DEFAULT_SLIDE_STYLES = [
+    {
+        "name": "System Default",
+        "description": "Protected system style. Use this as a template when creating your own custom styles.",
+        "category": "System",
+        "style_content": DEFAULT_SLIDE_STYLE,
+        "is_system": True,  # Cannot be edited or deleted
+    },
+    {
+        "name": "Databricks Brand",
+        "description": "Official Databricks brand colors and typography. Navy headers, Lava red accents, clean modern layout.",
+        "category": "Brand",
+        "style_content": DEFAULT_SLIDE_STYLE,
+        "is_system": False,  # User-editable
+    },
+]
+
+
+def _seed_slide_styles(db) -> int | None:
+    """Seed the slide style library with default styles.
+    
+    Returns:
+        ID of the default style (Databricks Brand) if created, None otherwise
+    """
+    existing_count = db.query(SlideStyleLibrary).count()
+    if existing_count > 0:
+        logger.info(f"Slide style library already has {existing_count} styles, skipping seed")
+        # Return the ID of Databricks Brand if it exists
+        default_style = db.query(SlideStyleLibrary).filter_by(name="Databricks Brand").first()
+        return default_style.id if default_style else None
+
+    default_style_id = None
+    for style_data in DEFAULT_SLIDE_STYLES:
+        style = SlideStyleLibrary(
+            name=style_data["name"],
+            description=style_data["description"],
+            category=style_data["category"],
+            style_content=style_data["style_content"],
+            is_active=True,
+            is_system=style_data.get("is_system", False),
+            created_by="system",
+            updated_by="system",
+        )
+        db.add(style)
+        db.flush()  # Get the ID
+        logger.info(f"Created slide style: {style_data['name']} (is_system={style.is_system})")
+        
+        # Track the default style ID (prefer Databricks Brand for new profiles)
+        if style_data["name"] == "Databricks Brand":
+            default_style_id = style.id
+
+    logger.info(f"Seeded {len(DEFAULT_SLIDE_STYLES)} slide styles")
+    print(f"  ✓ Seeded {len(DEFAULT_SLIDE_STYLES)} slide styles in library")
+    return default_style_id
+
+
 def init_default_profile() -> None:
     """
-    Initialize database with default profile from YAML files.
+    Initialize database with default profile.
     
     Creates a profile named "default" with configuration from:
-    - settings/settings.yaml
-    - settings/prompts.yaml
-    - src/settings/defaults.py (fallback)
+    - config/config.yaml - LLM settings (optional)
+    - src/core/defaults.py - prompts and fallback values
+    - slide_style_library - visual styling (seeded separately)
     
     Raises:
         Exception: If profile creation fails
     """
-    logger.info("Initializing default profile from YAML configuration")
+    logger.info("Initializing default profile")
 
     try:
-        # Load YAML configuration
+        # Load YAML configuration for LLM settings, use defaults for prompts
         try:
             config = load_config()
-            prompts = load_prompts()
-            logger.info("Loaded configuration from YAML files")
+            logger.info("Loaded LLM configuration from YAML")
         except Exception as e:
             logger.warning(f"Failed to load YAML settings, using defaults: {e}")
             config = DEFAULT_CONFIG
-            prompts = {
-                "system_prompt": DEFAULT_CONFIG["prompts"]["system_prompt"],
-                "slide_editing_instructions": DEFAULT_CONFIG["prompts"]["slide_editing_instructions"],
-            }
+        
+        # Prompts always come from defaults (visual styling from slide_style_library)
+        prompts = DEFAULT_CONFIG["prompts"]
 
         with get_db_session() as db:
             # Check if default profile already exists
@@ -296,20 +352,21 @@ def init_default_profile() -> None:
             db.add(mlflow_config)
             logger.info("Created MLflow settings")
 
-            # Create prompts settings
+            # Seed deck prompt library (global, not per-profile)
+            _seed_deck_prompts(db)
+
+            # Seed slide style library (global, not per-profile)
+            default_style_id = _seed_slide_styles(db)
+
+            # Create prompts settings with default slide style
             prompts_config = ConfigPrompts(
                 profile_id=profile.id,
-                system_prompt=prompts.get("system_prompt", DEFAULT_CONFIG["prompts"]["system_prompt"]),
-                slide_editing_instructions=prompts.get(
-                    "slide_editing_instructions",
-                    DEFAULT_CONFIG["prompts"]["slide_editing_instructions"]
-                ),
+                selected_slide_style_id=default_style_id,
+                system_prompt=prompts["system_prompt"],
+                slide_editing_instructions=prompts["slide_editing_instructions"],
             )
             db.add(prompts_config)
             logger.info("Created prompts settings")
-
-            # Seed deck prompt library (global, not per-profile)
-            _seed_deck_prompts(db)
 
             db.commit()
 

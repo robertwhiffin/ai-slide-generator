@@ -15,23 +15,24 @@ How the React/Vite frontend is structured, how it communicates with backend APIs
 ## High-Level Layout (`src/components/Layout/AppLayout.tsx`)
 
 ```
-┌──────────────────────────────────────────────────────────────┐
-│ Header: title + session metadata + navigation                 │
-│ [Generator] [History] [Profiles] [Deck Prompts] [Help]        │
-├──────────────┬──────────────┬─────────────────────────────────┤
-│ Chat Panel   │ Selection    │ Slide Panel                     │
-│ (32% width)  │ Ribbon       │ (flex-1)                        │
-│              │ (fixed 256px)│                                 │
-└──────────────┴──────────────┴─────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────────┐
+│ Header: title + session metadata + navigation                         │
+│ [Generator] [History] [Profiles] [Deck Prompts] [Slide Styles] [Help] │
+├──────────────┬──────────────┬─────────────────────────────────────────┤
+│ Chat Panel   │ Selection    │ Slide Panel                             │
+│ (32% width)  │ Ribbon       │ (flex-1)                                │
+│              │ (fixed 256px)│                                         │
+└──────────────┴──────────────┴─────────────────────────────────────────┘
 ```
 
 ### View Modes
 
-The app has five view modes controlled by navigation buttons:
+The app has six view modes controlled by navigation buttons:
 - **Generator** (`main`): The primary slide generation interface
 - **History**: Session list and restore functionality
 - **Profiles**: Configuration profile management
 - **Deck Prompts**: Presentation template library management
+- **Slide Styles**: Visual style library management (typography, colors, layout)
 - **Help**: Documentation and usage guide
 
 - **ChatPanel** owns chat history and calls backend APIs to generate or edit slides.
@@ -150,9 +151,32 @@ interface DeckPrompt {
 3. When generating slides, the selected prompt content is prepended to the system prompt
 4. User chat messages combine with the deck prompt for context-aware generation
 
+### 9. Slide Style Library (`src/components/config/SlideStyleList.tsx`)
+
+Slide Styles control the visual appearance of generated slides:
+
+```typescript
+interface SlideStyle {
+  id: number;
+  name: string;              // e.g., "Databricks Brand"
+  description: string | null;
+  category: string | null;   // e.g., "Brand", "Minimal", "Dark"
+  style_content: string;     // Typography, colors, layout rules
+  is_active: boolean;
+  created_by: string | null;
+}
+```
+
+**How they work:**
+1. Styles are managed globally via the **Slide Styles** page
+2. Each Profile can select one style via the **Slide Style** tab in profile settings
+3. When generating slides, the selected style content is included in the system prompt
+4. Styles define typography (fonts, sizes), colors (brand palette, accents), and layout rules
+
 **Profile Configuration Tabs:**
-- **Deck Prompt**: Select a presentation template (user-friendly)
-- **Advanced**: Edit system prompts directly (power users only)
+- **Deck Prompt**: Select a presentation template (WHAT to create)
+- **Slide Style**: Select visual appearance (HOW it should look)
+- **Advanced**: Edit system prompts directly (debug mode only - hidden by default)
 
 ---
 
@@ -181,7 +205,10 @@ interface DeckPrompt {
 | `src/components/config/DeckPromptList.tsx` | Deck prompt library management: list, create, edit, delete prompts | `configApi.listDeckPrompts`, `configApi.createDeckPrompt`, `configApi.updateDeckPrompt`, `configApi.deleteDeckPrompt` |
 | `src/components/config/DeckPromptForm.tsx` | Modal form for creating/editing deck prompts with Monaco editor | None (callback props) |
 | `src/components/config/DeckPromptSelector.tsx` | Profile configuration tab for selecting a deck prompt from the library | `configApi.listDeckPrompts`, `configApi.updatePromptsConfig` |
-| `src/components/config/AdvancedSettingsEditor.tsx` | Power-user interface for editing system prompts (hidden from typical users) | `configApi.updatePromptsConfig` |
+| `src/components/config/SlideStyleList.tsx` | Slide style library management: list, create, edit, delete styles | `configApi.listSlideStyles`, `configApi.createSlideStyle`, `configApi.updateSlideStyle`, `configApi.deleteSlideStyle` |
+| `src/components/config/SlideStyleForm.tsx` | Modal form for creating/editing slide styles with Monaco editor | None (callback props) |
+| `src/components/config/SlideStyleSelector.tsx` | Profile configuration tab for selecting a slide style from the library | `configApi.listSlideStyles`, `configApi.updatePromptsConfig` |
+| `src/components/config/AdvancedSettingsEditor.tsx` | Power-user interface for editing system prompts (debug mode only) | `configApi.updatePromptsConfig` |
 
 ---
 

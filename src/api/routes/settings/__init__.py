@@ -5,6 +5,7 @@ from src.api.routes.settings.genie import router as genie_router
 from src.api.routes.settings.mlflow import router as mlflow_router
 from src.api.routes.settings.profiles import router as profiles_router
 from src.api.routes.settings.prompts import router as prompts_router
+from src.api.routes.settings.slide_styles import router as slide_styles_router
 
 __all__ = [
     "profiles_router",
@@ -13,5 +14,6 @@ __all__ = [
     "genie_router",
     "mlflow_router",
     "prompts_router",
+    "slide_styles_router",
 ]
 
