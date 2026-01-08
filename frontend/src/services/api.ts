@@ -91,6 +91,8 @@ export interface Session {
   has_slide_deck?: boolean;
   messages?: SessionMessage[];
   slide_deck?: SlideDeck | null;
+  profile_id?: number | null;
+  profile_name?: string | null;
 }
 
 interface SendMessageParams {
