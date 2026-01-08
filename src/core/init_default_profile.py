@@ -15,7 +15,7 @@ project_root = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(project_root))
 
 from src.core.database import get_db_session
-from src.core.defaults import DEFAULT_CONFIG
+from src.core.defaults import DEFAULT_CONFIG, DEFAULT_SLIDE_STYLE
 from src.core.config_loader import load_config, load_prompts
 from src.database.models import (
     ConfigAIInfra,
@@ -24,6 +24,7 @@ from src.database.models import (
     ConfigProfile,
     ConfigPrompts,
     SlideDeckPromptLibrary,
+    SlideStyleLibrary,
 )
 
 logging.basicConfig(level=logging.INFO)
@@ -202,6 +203,109 @@ def _seed_deck_prompts(db) -> None:
     print(f"  ✓ Seeded {len(DEFAULT_DECK_PROMPTS)} deck prompts in library")
 
 
+# Default slide styles for the library
+DEFAULT_SLIDE_STYLES = [
+    {
+        "name": "Databricks Brand",
+        "description": "Official Databricks brand colors and typography. Navy headers, Lava red accents, clean modern layout.",
+        "category": "Brand",
+        "style_content": DEFAULT_SLIDE_STYLE,
+    },
+    {
+        "name": "Minimal Light",
+        "description": "Clean, minimalist design with maximum whitespace. Ideal for data-heavy presentations.",
+        "category": "Minimal",
+        "style_content": """SLIDE VISUAL STYLE:
+
+Typography & Colors:
+- Clean sans-serif font (SF Pro/Helvetica/Arial)
+- H1: 44px bold, Black #1A1A1A | H2: 28px medium, Dark Gray #4A4A4A | Body: 16px, Gray #6B6B6B
+- Single accent color: Blue #2563EB
+- Background: Pure White #FFFFFF
+
+Layout & Structure:
+- Fixed slide size: 1280x720px per slide, white background
+- Body: width:1280px; height:720px; margin:0; padding:0; overflow:hidden
+- Generous whitespace - padding ≥32px around edges
+- Minimal visual elements - let content breathe
+- Cards/boxes: padding ≥24px, subtle border 1px #E5E5E5, no shadow
+
+Content Per Slide:
+- ONE clear title (≤50 chars) that states the key insight
+- Subtitle optional - use sparingly
+- Body text ≤30 words
+- Maximum 1-2 data visualizations per slide
+
+Chart Colors:
+['#2563EB','#64748B','#94A3B8','#CBD5E1']""",
+    },
+    {
+        "name": "Dark Mode",
+        "description": "Dark background with light text. High contrast for visual impact and reduced eye strain.",
+        "category": "Dark",
+        "style_content": """SLIDE VISUAL STYLE:
+
+Typography & Colors:
+- Modern sans-serif font (Inter/SF Pro/Helvetica)
+- H1: 44px bold, White #FFFFFF | H2: 30px, Light Gray #E5E7EB | Body: 16px, Gray #9CA3AF
+- Primary accent: Cyan #06B6D4 | Success: Green #10B981 | Warning: Amber #F59E0B | Error: Rose #F43F5E
+- Background: Dark Navy #0F172A
+
+Layout & Structure:
+- Fixed slide size: 1280x720px per slide, dark background
+- Body: width:1280px; height:720px; margin:0; padding:0; overflow:hidden
+- Use flexbox for layout with gaps of 16px
+- Cards/boxes: padding ≥20px, border-radius 12px, background #1E293B, subtle border 1px #334155
+
+Content Per Slide:
+- ONE clear title (≤55 chars) - high impact wording
+- Subtitle in lighter gray for context
+- Body text ≤40 words
+- Maximum 2 data visualizations per slide
+
+Chart Colors (optimized for dark backgrounds):
+['#06B6D4','#10B981','#F59E0B','#8B5CF6']""",
+    },
+]
+
+
+def _seed_slide_styles(db) -> int | None:
+    """Seed the slide style library with default styles.
+    
+    Returns:
+        ID of the default style (Databricks Brand) if created, None otherwise
+    """
+    existing_count = db.query(SlideStyleLibrary).count()
+    if existing_count > 0:
+        logger.info(f"Slide style library already has {existing_count} styles, skipping seed")
+        # Return the ID of Databricks Brand if it exists
+        default_style = db.query(SlideStyleLibrary).filter_by(name="Databricks Brand").first()
+        return default_style.id if default_style else None
+
+    default_style_id = None
+    for style_data in DEFAULT_SLIDE_STYLES:
+        style = SlideStyleLibrary(
+            name=style_data["name"],
+            description=style_data["description"],
+            category=style_data["category"],
+            style_content=style_data["style_content"],
+            is_active=True,
+            created_by="system",
+            updated_by="system",
+        )
+        db.add(style)
+        db.flush()  # Get the ID
+        logger.info(f"Created slide style: {style_data['name']}")
+        
+        # Track the default style ID
+        if style_data["name"] == "Databricks Brand":
+            default_style_id = style.id
+
+    logger.info(f"Seeded {len(DEFAULT_SLIDE_STYLES)} slide styles")
+    print(f"  ✓ Seeded {len(DEFAULT_SLIDE_STYLES)} slide styles in library")
+    return default_style_id
+
+
 def init_default_profile() -> None:
     """
     Initialize database with default profile from YAML files.
@@ -296,9 +400,16 @@ def init_default_profile() -> None:
             db.add(mlflow_config)
             logger.info("Created MLflow settings")
 
-            # Create prompts settings
+            # Seed deck prompt library (global, not per-profile)
+            _seed_deck_prompts(db)
+
+            # Seed slide style library (global, not per-profile)
+            default_style_id = _seed_slide_styles(db)
+
+            # Create prompts settings with default slide style
             prompts_config = ConfigPrompts(
                 profile_id=profile.id,
+                selected_slide_style_id=default_style_id,
                 system_prompt=prompts.get("system_prompt", DEFAULT_CONFIG["prompts"]["system_prompt"]),
                 slide_editing_instructions=prompts.get(
                     "slide_editing_instructions",
@@ -307,9 +418,6 @@ def init_default_profile() -> None:
             )
             db.add(prompts_config)
             logger.info("Created prompts settings")
-
-            # Seed deck prompt library (global, not per-profile)
-            _seed_deck_prompts(db)
 
             db.commit()
 

@@ -55,6 +55,7 @@ class PromptsCreateInline(BaseModel):
     """Inline prompts configuration for profile creation wizard."""
 
     selected_deck_prompt_id: Optional[int] = Field(None, description="Selected deck prompt")
+    selected_slide_style_id: Optional[int] = Field(None, description="Selected slide style")
     system_prompt: Optional[str] = Field(None, description="System prompt")
     slide_editing_instructions: Optional[str] = Field(None, description="Slide editing instructions")
 
@@ -175,6 +176,7 @@ class PromptsConfigUpdate(BaseModel):
     """Request to update prompts configuration."""
 
     selected_deck_prompt_id: Optional[int] = Field(None, description="Selected deck prompt from library (null to clear)")
+    selected_slide_style_id: Optional[int] = Field(None, description="Selected slide style from library (null to clear)")
     system_prompt: Optional[str] = Field(None, description="System prompt (advanced)")
     slide_editing_instructions: Optional[str] = Field(None, description="Slide editing instructions (advanced)")
 

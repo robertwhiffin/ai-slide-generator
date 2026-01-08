@@ -24,6 +24,7 @@ from src.api.routes.settings import (
     mlflow_router,
     profiles_router,
     prompts_router,
+    slide_styles_router,
 )
 from src.api.services.job_queue import recover_stuck_requests, start_worker
 
@@ -141,6 +142,7 @@ app.include_router(deck_prompts_router, prefix="/api/settings", tags=["settings"
 app.include_router(genie_router, prefix="/api/settings", tags=["settings"])
 app.include_router(mlflow_router, prefix="/api/settings", tags=["settings"])
 app.include_router(prompts_router, prefix="/api/settings", tags=["settings"])
+app.include_router(slide_styles_router, prefix="/api/settings", tags=["settings"])
 
 
 @app.get("/api/health")

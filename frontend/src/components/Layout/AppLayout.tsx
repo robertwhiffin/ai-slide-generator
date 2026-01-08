@@ -6,13 +6,14 @@ import { SelectionRibbon } from '../SlidePanel/SelectionRibbon';
 import { ProfileSelector } from '../config/ProfileSelector';
 import { ProfileList } from '../config/ProfileList';
 import { DeckPromptList } from '../config/DeckPromptList';
+import { SlideStyleList } from '../config/SlideStyleList';
 import { SessionHistory } from '../History/SessionHistory';
 import { SaveAsDialog } from '../History/SaveAsDialog';
 import { HelpPage } from '../Help';
 import { useSession } from '../../contexts/SessionContext';
 import { useGeneration } from '../../contexts/GenerationContext';
 
-type ViewMode = 'main' | 'profiles' | 'deck_prompts' | 'history' | 'help';
+type ViewMode = 'main' | 'profiles' | 'deck_prompts' | 'slide_styles' | 'history' | 'help';
 
 export const AppLayout: React.FC = () => {
   const [slideDeck, setSlideDeck] = useState<SlideDeck | null>(null);
@@ -180,6 +181,20 @@ export const AppLayout: React.FC = () => {
                 Deck Prompts
               </button>
               <button
+                onClick={() => setViewMode('slide_styles')}
+                disabled={isGenerating}
+                className={`px-3 py-1.5 rounded text-sm transition-colors ${
+                  viewMode === 'slide_styles'
+                    ? 'bg-blue-700 text-white'
+                    : isGenerating
+                    ? 'bg-blue-400 text-blue-200 cursor-not-allowed opacity-50'
+                    : 'bg-blue-500 hover:bg-blue-700 text-blue-100'
+                }`}
+                title={isGenerating ? 'Navigation disabled during generation' : undefined}
+              >
+                Slide Styles
+              </button>
+              <button
                 onClick={() => setViewMode('help')}
                 disabled={isGenerating}
                 className={`px-3 py-1.5 rounded text-sm transition-colors ${
@@ -265,6 +280,14 @@ export const AppLayout: React.FC = () => {
         <div className="flex-1 overflow-auto bg-gray-50">
           <div className="max-w-7xl mx-auto p-6">
             <DeckPromptList />
+          </div>
+        </div>
+      )}
+
+      {viewMode === 'slide_styles' && (
+        <div className="flex-1 overflow-auto bg-gray-50">
+          <div className="max-w-7xl mx-auto p-6">
+            <SlideStyleList />
           </div>
         </div>
       )}

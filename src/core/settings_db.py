@@ -301,6 +301,21 @@ def load_settings_from_database(profile_id: Optional[int] = None) -> AppSettings
                         extra={"deck_prompt_name": deck_prompt.name, "deck_prompt_id": deck_prompt.id}
                     )
 
+            # Load slide style content if selected
+            slide_style_content = None
+            if prompts.selected_slide_style_id:
+                from src.database.models import SlideStyleLibrary
+                slide_style = db.query(SlideStyleLibrary).filter_by(
+                    id=prompts.selected_slide_style_id,
+                    is_active=True
+                ).first()
+                if slide_style:
+                    slide_style_content = slide_style.style_content
+                    logger.info(
+                        "Loaded slide style",
+                        extra={"slide_style_name": slide_style.name, "slide_style_id": slide_style.id}
+                    )
+
             # Get username for MLflow experiment name formatting
             try:
                 from src.core.databricks_client import get_databricks_client
@@ -342,6 +357,7 @@ def load_settings_from_database(profile_id: Optional[int] = None) -> AppSettings
                 mlflow=mlflow_settings,
                 prompts={
                     "deck_prompt": deck_prompt_content or "",
+                    "slide_style": slide_style_content or "",
                     "system_prompt": prompts.system_prompt,
                     "slide_editing_instructions": prompts.slide_editing_instructions,
                 },

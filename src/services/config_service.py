@@ -139,20 +139,24 @@ class ConfigService:
         self,
         profile_id: int,
         selected_deck_prompt_id: int = None,
+        selected_slide_style_id: int = None,
         system_prompt: str = None,
         slide_editing_instructions: str = None,
         user: str = None,
         clear_deck_prompt: bool = False,
+        clear_slide_style: bool = False,
     ) -> ConfigPrompts:
         """Update prompts configuration.
         
         Args:
             profile_id: Profile ID
             selected_deck_prompt_id: ID of deck prompt from library (optional)
+            selected_slide_style_id: ID of slide style from library (optional)
             system_prompt: System prompt (advanced setting)
             slide_editing_instructions: Slide editing instructions (advanced setting)
             user: User making the change
             clear_deck_prompt: If True, clear the selected deck prompt
+            clear_slide_style: If True, clear the selected slide style
         """
         config = self.get_prompts_config(profile_id)
 
@@ -166,6 +170,15 @@ class ConfigService:
         elif selected_deck_prompt_id is not None and selected_deck_prompt_id != config.selected_deck_prompt_id:
             changes["selected_deck_prompt_id"] = {"old": config.selected_deck_prompt_id, "new": selected_deck_prompt_id}
             config.selected_deck_prompt_id = selected_deck_prompt_id
+
+        # Handle slide style selection
+        if clear_slide_style:
+            if config.selected_slide_style_id is not None:
+                changes["selected_slide_style_id"] = {"old": config.selected_slide_style_id, "new": None}
+                config.selected_slide_style_id = None
+        elif selected_slide_style_id is not None and selected_slide_style_id != config.selected_slide_style_id:
+            changes["selected_slide_style_id"] = {"old": config.selected_slide_style_id, "new": selected_slide_style_id}
+            config.selected_slide_style_id = selected_slide_style_id
 
         if system_prompt is not None and system_prompt != config.system_prompt:
             changes["system_prompt"] = {"old": "...", "new": "..."}  # Don't log full prompts

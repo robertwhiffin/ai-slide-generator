@@ -89,6 +89,7 @@ def update_prompts_config(
         config = service.update_prompts_config(
             profile_id=profile_id,
             selected_deck_prompt_id=request.selected_deck_prompt_id,
+            selected_slide_style_id=request.selected_slide_style_id,
             system_prompt=request.system_prompt,
             slide_editing_instructions=request.slide_editing_instructions,
             user=user,
