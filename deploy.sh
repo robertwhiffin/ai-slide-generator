@@ -112,6 +112,15 @@ if [[ ! "$ENV" =~ ^(development|staging|production)$ ]]; then
     exit 1
 fi
 
+# Validate --include-databricks-prompts requires --reset-db
+if [ -n "$INCLUDE_DB_PROMPTS" ] && [ -z "$RESET_DB" ]; then
+    echo -e "${RED}❌ --include-databricks-prompts requires --reset-db${NC}"
+    echo "   The flag only affects database seeding, which requires a reset."
+    echo ""
+    echo "   Example: $0 $ACTION --env $ENV --profile $PROFILE --reset-db --include-databricks-prompts"
+    exit 1
+fi
+
 echo "🚀 AI Slide Generator Deployment"
 echo ""
 
