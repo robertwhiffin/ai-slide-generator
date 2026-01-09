@@ -107,14 +107,15 @@ class HtmlToPptxConverterV3:
         assets_dir = work_dir / "assets"
         assets_dir.mkdir()
         
-        # 2. Capture chart screenshots if requested
+        # 2. Chart screenshots are now captured client-side
+        # Server-side Playwright capture has been removed
         chart_images = []
         if use_screenshot and html_source_path:
-            chart_images = await self._capture_screenshot(html_source_path, str(assets_dir))
-            if chart_images:
-                logger.info("Chart screenshots captured", extra={"chart_count": len(chart_images), "charts": chart_images})
-            else:
-                logger.warning("Chart screenshot capture failed, continuing without them")
+            logger.warning(
+                "Server-side screenshot capture is no longer supported. "
+                "Use client-side capture via chart_images parameter."
+            )
+            print("[PPTX_CONVERTER] WARNING: Server-side screenshots disabled. Use client-side capture.")
         
         # 3. Call LLM to generate converter code
         logger.info("Calling LLM to generate converter code")
@@ -143,7 +144,8 @@ class HtmlToPptxConverterV3:
         slides: List[str],
         output_path: str,
         use_screenshot: bool = True,
-        html_source_paths: Optional[List[str]] = None
+        html_source_paths: Optional[List[str]] = None,
+        chart_images_per_slide: Optional[List[Dict[str, str]]] = None
     ) -> str:
         """Convert multiple HTML slides to PowerPoint deck.
         
@@ -151,7 +153,8 @@ class HtmlToPptxConverterV3:
             slides: List of HTML strings
             output_path: Path to save PPTX
             use_screenshot: Whether to capture screenshots
-            html_source_paths: Paths to HTML files (for screenshots)
+            html_source_paths: Paths to HTML files (for screenshots, if not using client images)
+            chart_images_per_slide: List of dicts mapping canvas_id to base64 data URL per slide
         
         Returns:
             Path to created PPTX file
@@ -203,13 +206,28 @@ class HtmlToPptxConverterV3:
                 }
             )
             
+            # Get chart images for this slide (if provided by client)
+            slide_chart_images = None
+            if chart_images_per_slide and i-1 < len(chart_images_per_slide):
+                slide_chart_images = chart_images_per_slide[i-1]
+                if slide_chart_images:
+                    print(f"[PPTX_CONVERTER] Slide {i}: Received {len(slide_chart_images)} client chart images (IDs: {list(slide_chart_images.keys())})")
+                else:
+                    print(f"[PPTX_CONVERTER] Slide {i}: Received empty chart images dict")
+            else:
+                if chart_images_per_slide is None:
+                    print(f"[PPTX_CONVERTER] Slide {i}: chart_images_per_slide is None")
+                else:
+                    print(f"[PPTX_CONVERTER] Slide {i}: No chart images at index {i-1} (total: {len(chart_images_per_slide)})")
+            
             # Create slide and add content using V3 approach
             await self._add_slide_to_presentation(
                 prs,
                 html_str,
                 use_screenshot=use_screenshot,
                 html_source_path=html_path,
-                slide_number=i
+                slide_number=i,
+                client_chart_images=slide_chart_images
             )
         
         # Save presentation
@@ -226,7 +244,8 @@ class HtmlToPptxConverterV3:
         html_str: str,
         use_screenshot: bool,
         html_source_path: Optional[str],
-        slide_number: int
+        slide_number: int,
+        client_chart_images: Optional[Dict[str, str]] = None
     ) -> None:
         """Add a slide to existing presentation using V3 approach.
         
@@ -234,37 +253,51 @@ class HtmlToPptxConverterV3:
             prs: Presentation object to add slide to
             html_str: HTML content for the slide
             use_screenshot: Whether to capture and use screenshot
-            html_source_path: Path to HTML file (for screenshot capture)
+            html_source_path: Path to HTML file (for screenshot capture, if not using client images)
             slide_number: Slide number for logging purposes
+            client_chart_images: Dict mapping canvas_id to base64 data URL (from client-side capture)
         """
         # 1. Setup working directory for this slide
         work_dir = Path(tempfile.mkdtemp(prefix=f"v3_slide_{slide_number}_"))
         assets_dir = work_dir / "assets"
         assets_dir.mkdir()
         
-        # 2. Capture chart screenshots if requested
+        # 2. Get chart images - prefer client-provided, fallback to server-side capture
         chart_images = []
-        if use_screenshot and html_source_path:
-            logger.info(
-                "Capturing chart screenshots for slide",
-                extra={
-                    "slide_number": slide_number,
-                    "html_source_path": html_source_path,
-                    "assets_dir": str(assets_dir)
-                }
-            )
-            print(f"[PPTX_CONVERTER] Capturing chart screenshots for slide {slide_number} from {html_source_path}")
-            chart_images = await self._capture_screenshot(html_source_path, str(assets_dir))
-            if chart_images:
+        if use_screenshot:
+            if client_chart_images:
+                # Save client-provided base64 images to files
                 logger.info(
-                    "Chart screenshots captured successfully",
+                    "Saving client-provided chart images",
                     extra={
                         "slide_number": slide_number,
-                        "chart_count": len(chart_images),
-                        "chart_files": chart_images
+                        "chart_count": len(client_chart_images),
+                        "assets_dir": str(assets_dir)
                     }
                 )
-                print(f"[PPTX_CONVERTER] Captured {len(chart_images)} chart screenshots for slide {slide_number}: {chart_images}")
+                print(f"[PPTX_CONVERTER] Saving {len(client_chart_images)} client-provided chart images for slide {slide_number}")
+                chart_images = self._save_client_chart_images(client_chart_images, str(assets_dir))
+                if chart_images:
+                    logger.info(
+                        "Client chart images saved successfully",
+                        extra={
+                            "slide_number": slide_number,
+                            "chart_count": len(chart_images),
+                            "chart_files": chart_images
+                        }
+                    )
+                    print(f"[PPTX_CONVERTER] Saved {len(chart_images)} chart images for slide {slide_number}: {chart_images}")
+            elif html_source_path:
+                # Server-side Playwright capture has been removed
+                # Client-side capture should be used instead
+                logger.warning(
+                    "Server-side screenshot capture is no longer supported for slide",
+                    extra={
+                        "slide_number": slide_number,
+                        "html_source_path": html_source_path
+                    }
+                )
+                print(f"[PPTX_CONVERTER] WARNING: Server-side screenshots disabled for slide {slide_number}. Use client-side capture.")
             else:
                 logger.warning("No chart screenshots captured", extra={"slide_number": slide_number})
                 print(f"[PPTX_CONVERTER] WARNING: No chart screenshots captured for slide {slide_number}")
@@ -333,11 +366,22 @@ class HtmlToPptxConverterV3:
         screenshot_note = ""
         if chart_images:
             chart_files_str = ", ".join(chart_images)
-            screenshot_note = (
-                f"Chart images exist: {chart_files_str}. "
-                f"Use: slide.shapes.add_picture(os.path.join(assets_dir, '{chart_images[0]}'), left, top, width, height). "
-                f"Match chart_N.png to Nth canvas. Position at canvas location in HTML."
-            )
+            # Provide clear instructions with all available chart files
+            if len(chart_images) == 1:
+                screenshot_note = (
+                    f"Chart image available: {chart_files_str}. "
+                    f"CRITICAL: Use slide.shapes.add_picture(os.path.join(assets_dir, '{chart_images[0]}'), left, top, width, height) to add this image. "
+                    f"Find the canvas element in the HTML (look for <canvas> tags) and position the image at that location. "
+                    f"Typical position: left=1.0\", top=3.5\", width=8.0\", height=3.5\" (adjust based on HTML layout)."
+                )
+            else:
+                screenshot_note = (
+                    f"Chart images available: {chart_files_str}. "
+                    f"CRITICAL: Use slide.shapes.add_picture() for each image. "
+                    f"Match each image filename to its corresponding canvas element in the HTML by canvas ID or position. "
+                    f"Find canvas elements in HTML and position images at their locations. "
+                    f"Example: slide.shapes.add_picture(os.path.join(assets_dir, '{chart_images[0]}'), left, top, width, height)"
+                )
         else:
             screenshot_note = "No chart images. Extract Chart.js data from <script> tags. Only use data from HTML."
         
@@ -387,11 +431,22 @@ class HtmlToPptxConverterV3:
         screenshot_note = ""
         if chart_images:
             chart_files_str = ", ".join(chart_images)
-            screenshot_note = (
-                f"Chart images exist: {chart_files_str}. "
-                f"Use: slide.shapes.add_picture(os.path.join(assets_dir, '{chart_images[0]}'), left, top, width, height). "
-                f"Match chart_N.png to Nth canvas. Position at canvas location in HTML."
-            )
+            # Provide clear instructions with all available chart files
+            if len(chart_images) == 1:
+                screenshot_note = (
+                    f"Chart image available: {chart_files_str}. "
+                    f"CRITICAL: Use slide.shapes.add_picture(os.path.join(assets_dir, '{chart_images[0]}'), left, top, width, height) to add this image. "
+                    f"Find the canvas element in the HTML (look for <canvas> tags) and position the image at that location. "
+                    f"Typical position: left=1.0\", top=3.5\", width=8.0\", height=3.5\" (adjust based on HTML layout)."
+                )
+            else:
+                screenshot_note = (
+                    f"Chart images available: {chart_files_str}. "
+                    f"CRITICAL: Use slide.shapes.add_picture() for each image. "
+                    f"Match each image filename to its corresponding canvas element in the HTML by canvas ID or position. "
+                    f"Find canvas elements in HTML and position images at their locations. "
+                    f"Example: slide.shapes.add_picture(os.path.join(assets_dir, '{chart_images[0]}'), left, top, width, height)"
+                )
         else:
             screenshot_note = "No chart images. Extract Chart.js data from <script> tags. Only use data from HTML."
         
@@ -458,372 +513,66 @@ class HtmlToPptxConverterV3:
             logger.error("LLM call failed", exc_info=True, extra={"error": str(e)})
             return None
     
-    def _ensure_playwright_browsers(self) -> None:
-        """Ensure Playwright browser binaries are installed.
-        
-        This method checks if Chromium is installed and installs it if missing.
-        Uses subprocess to call Playwright's install command programmatically.
-        """
-        try:
-            import subprocess
-            import sys
-            
-            # First, try to verify if Chromium is already installed
-            # by attempting to launch it (quick check)
-            try:
-                from playwright.sync_api import sync_playwright
-                with sync_playwright() as p:
-                    browser = p.chromium.launch(headless=True)
-                    browser.close()
-                logger.debug("Playwright Chromium is already installed")
-                return
-            except Exception:
-                # Chromium not installed or launch failed, proceed to install
-                pass
-            
-            # Install Chromium using subprocess (most reliable method)
-            logger.info("Playwright browsers not found, installing Chromium...")
-            print("[PLAYWRIGHT] Installing Chromium browser binaries (this may take a minute)...")
-            
-            result = subprocess.run(
-                [sys.executable, "-m", "playwright", "install", "chromium"],
-                capture_output=True,
-                text=True,
-                timeout=300  # 5 minute timeout
-            )
-            
-            if result.returncode == 0:
-                logger.info("Playwright Chromium installed successfully")
-                print("[PLAYWRIGHT] ✓ Chromium installed successfully")
-            else:
-                error_msg = result.stderr or result.stdout
-                logger.warning(f"Playwright install had issues: {error_msg}")
-                print(f"[PLAYWRIGHT] ⚠️  Install warning: {error_msg}")
-                # Don't raise - allow code to continue, it will fail later with a clearer error
-                    
-        except ImportError:
-            logger.error("Playwright not installed. Install with: pip install playwright")
-            print("[PLAYWRIGHT] ❌ Playwright package not installed")
-            # Don't raise - allow code to continue, it will fail later with a clearer error
-        except Exception as e:
-            # Check if it's a timeout error
-            if "TimeoutExpired" in str(type(e)) or "timeout" in str(e).lower():
-                logger.error("Playwright install timed out after 5 minutes")
-                print("[PLAYWRIGHT] ❌ Install timed out")
-            else:
-                logger.error(f"Error ensuring Playwright browsers: {e}", exc_info=True)
-                print(f"[PLAYWRIGHT] ❌ Error: {e}")
-            # Don't raise - allow code to continue, it will fail later with a clearer error
-    
-    async def _capture_screenshot(self, html_path: str, assets_dir: str) -> list[str]:
-        """Capture screenshots of chart canvas elements from HTML using Playwright (async).
+    def _save_client_chart_images(
+        self, 
+        client_chart_images: Dict[str, str], 
+        assets_dir: str
+    ) -> list[str]:
+        """Save client-provided base64 chart images to files.
         
         Args:
-            html_path: Path to HTML file
-            assets_dir: Directory to save chart screenshots
+            client_chart_images: Dict mapping canvas_id to base64 data URL
+            assets_dir: Directory to save chart images
         
         Returns:
-            List of paths to captured chart images (e.g., ['chart_0.png', 'chart_1.png'])
+            List of filenames of saved chart images (e.g., ['chart_0.png', 'chart_1.png'])
         """
-        try:
-            # Ensure browsers are installed before attempting to use Playwright
-            self._ensure_playwright_browsers()
-            
-            from playwright.async_api import async_playwright
-            
-            logger.info(
-                "Starting screenshot capture",
-                extra={"html_path": html_path, "assets_dir": assets_dir}
-            )
-            print(f"[SCREENSHOT] Capturing screenshot from {html_path}")
-            
-            async with async_playwright() as p:
-                browser = await p.chromium.launch(headless=True)
-                page = await browser.new_page(viewport={"width": 1280, "height": 720})
+        import base64
+        
+        chart_images = []
+        assets_path = Path(assets_dir)
+        
+        for canvas_id, base64_data in client_chart_images.items():
+            try:
+                # Extract base64 data (remove data:image/png;base64, prefix if present)
+                if ',' in base64_data:
+                    base64_data = base64_data.split(',', 1)[1]
                 
-                # Capture console logs for debugging
-                console_logs = []
-                page.on("console", lambda msg: console_logs.append(f"[{msg.type}] {msg.text}"))
+                # Decode base64 to bytes
+                image_bytes = base64.b64decode(base64_data)
                 
-                file_url = f"file://{os.path.abspath(html_path)}"
-                logger.debug(f"Loading HTML file: {file_url}")
-                print(f"[SCREENSHOT] Loading HTML: {file_url}")
-                
-                await page.goto(file_url, wait_until="networkidle", timeout=30000)
-                
-                # Wait for page to be fully loaded
-                await page.wait_for_load_state("networkidle", timeout=10000)
-                await page.wait_for_timeout(3000)  # Wait for initial rendering and scripts
-                
-                # Log console messages
-                if console_logs:
-                    logger.info(f"Console logs: {console_logs[-10:]}")  # Last 10 logs
-                    print(f"[SCREENSHOT] Console logs: {console_logs[-10:]}")
-                
-                # Check if Chart.js is loaded
-                chart_js_loaded = await page.evaluate("""() => {
-                    return typeof Chart !== 'undefined';
-                }""")
-                
-                logger.info(f"Chart.js loaded: {chart_js_loaded}")
-                print(f"[SCREENSHOT] Chart.js loaded: {chart_js_loaded}")
-                
-                # Wait for canvases to be rendered and charts to be initialized
-                canvas_count = await page.evaluate("""() => {
-                    return document.querySelectorAll('canvas').length;
-                }""")
-                
-                logger.info(f"Found {canvas_count} canvas elements")
-                print(f"[SCREENSHOT] Found {canvas_count} canvas elements")
-                
-                # CRITICAL: Set canvas dimensions explicitly in Playwright BEFORE chart scripts run
-                # This ensures canvases have dimensions before Chart.js tries to render
-                if canvas_count > 0:
-                    # First, wait a bit for HTML scripts to potentially set dimensions
-                    await page.wait_for_timeout(2000)
-                    
-                    # Then check and set dimensions if needed
-                    canvas_info = await page.evaluate("""() => {
-                        const canvases = document.querySelectorAll('canvas');
-                        const info = [];
-                        canvases.forEach((canvas, idx) => {
-                            const rect = canvas.getBoundingClientRect();
-                            const currentWidth = canvas.width;
-                            const currentHeight = canvas.height;
-                            
-                            if (currentWidth === 0 || currentHeight === 0) {
-                                if (rect.width > 0 && rect.height > 0) {
-                                    canvas.width = rect.width;
-                                    canvas.height = rect.height;
-                                } else {
-                                    // Use container dimensions or defaults
-                                    const container = canvas.closest('.chart-container') || canvas.parentElement;
-                                    if (container) {
-                                        const containerRect = container.getBoundingClientRect();
-                                        if (containerRect.width > 0 && containerRect.height > 0) {
-                                            canvas.width = containerRect.width;
-                                            canvas.height = containerRect.height;
-                                        } else {
-                                            canvas.width = 800;
-                                            canvas.height = 400;
-                                        }
-                                    } else {
-                                        canvas.width = 800;
-                                        canvas.height = 400;
-                                    }
-                                }
-                            }
-                            
-                            info.push({
-                                id: canvas.id || 'unnamed',
-                                width: canvas.width,
-                                height: canvas.height,
-                                rectWidth: rect.width,
-                                rectHeight: rect.height
-                            });
-                        });
-                        return info;
-                    }""")
-                    
-                    logger.info(f"Canvas dimensions set: {canvas_info}")
-                    print(f"[SCREENSHOT] Canvas dimensions: {canvas_info}")
-                    
-                    # Now trigger chart initialization if it hasn't happened
-                    # Check if charts are already initialized
-                    charts_initialized = await page.evaluate("""() => {
-                        const canvases = document.querySelectorAll('canvas');
-                        for (let canvas of canvases) {
-                            const ctx = canvas.getContext('2d');
-                            if (ctx) {
-                                try {
-                                    const imageData = ctx.getImageData(0, 0, 10, 10);
-                                    const data = imageData.data;
-                                    let hasContent = false;
-                                    for (let i = 3; i < data.length; i += 4) {
-                                        if (data[i] > 0) {
-                                            hasContent = true;
-                                            break;
-                                        }
-                                    }
-                                    if (hasContent) return true;
-                                } catch (e) {
-                                    // Canvas might not be ready
-                                }
-                            }
-                        }
-                        return false;
-                    }""")
-                    
-                    if not charts_initialized:
-                        # Charts haven't rendered yet, wait for HTML scripts to run
-                        logger.info("Charts not yet initialized, waiting for HTML scripts...")
-                        print("[SCREENSHOT] Charts not yet initialized, waiting for HTML scripts...")
-                        await page.wait_for_timeout(3000)  # Wait for chart scripts to execute
-                
-                if canvas_count > 0:
-                    # Wait for all canvases to be ready
-                    try:
-                        await page.wait_for_selector('canvas', timeout=10000)
-                        
-                        # Wait for Chart.js to initialize charts (multiple attempts with longer waits)
-                        max_attempts = 15
-                        charts_ready = False
-                        
-                        for attempt in range(max_attempts):
-                            await page.wait_for_timeout(1500)  # Wait 1.5 seconds between checks
-                            
-                            # Verify charts are actually drawn (check if canvas has content)
-                            charts_ready = await page.evaluate("""() => {
-                                const canvases = document.querySelectorAll('canvas');
-                                if (canvases.length === 0) return false;
-                                
-                                let allReady = true;
-                                for (let canvas of canvases) {
-                                    // Check if canvas has valid dimensions
-                                    if (canvas.width === 0 || canvas.height === 0) {
-                                        console.log('Canvas has zero dimensions');
-                                        allReady = false;
-                                        continue;
-                                    }
-                                    
-                                    const ctx = canvas.getContext('2d');
-                                    if (!ctx) {
-                                        console.log('Canvas context not available');
-                                        allReady = false;
-                                        continue;
-                                    }
-                                    
-                                    // Check a larger sample area (up to 200x200px)
-                                    const sampleWidth = Math.min(canvas.width, 200);
-                                    const sampleHeight = Math.min(canvas.height, 200);
-                                    const imageData = ctx.getImageData(0, 0, sampleWidth, sampleHeight);
-                                    const data = imageData.data;
-                                    
-                                    // Check if canvas has any non-transparent pixels
-                                    let hasContent = false;
-                                    let pixelCount = 0;
-                                    for (let i = 3; i < data.length; i += 4) {
-                                        if (data[i] > 0) {  // Alpha channel > 0 means visible
-                                            hasContent = true;
-                                            pixelCount++;
-                                        }
-                                    }
-                                    
-                                    // Need at least 50 pixels to be drawn (charts should have more)
-                                    if (!hasContent || pixelCount < 50) {
-                                        console.log('Canvas ' + canvas.id + ' has only ' + pixelCount + ' pixels');
-                                        allReady = false;
-                                    } else {
-                                        console.log('Canvas ' + canvas.id + ' is ready with ' + pixelCount + ' pixels');
-                                    }
-                                }
-                                return allReady;
-                    }""")
-                    
-                            if charts_ready:
-                                logger.info(f"Charts are ready after {attempt + 1} attempts")
-                                print(f"[SCREENSHOT] Charts are ready after {attempt + 1} attempts")
-                                # Wait one more second to ensure everything is fully rendered
-                                await page.wait_for_timeout(1000)
-                                break
-                            else:
-                                logger.debug(f"Charts not ready yet, attempt {attempt + 1}/{max_attempts}")
-                                print(f"[SCREENSHOT] Charts not ready yet, attempt {attempt + 1}/{max_attempts}")
-                        
-                        if not charts_ready:
-                            logger.warning("Charts may not be fully rendered, but proceeding with screenshot")
-                            print("[SCREENSHOT] WARNING: Charts may not be fully rendered, proceeding anyway")
-                            # Wait a bit more before capturing
-                            await page.wait_for_timeout(3000)
-                    except Exception as e:
-                        logger.warning(f"Error waiting for canvas: {e}")
-                        print(f"[SCREENSHOT] Warning waiting for canvas: {e}")
-                        # Still proceed with screenshot even if check fails
-                        await page.wait_for_timeout(4000)
-                
-                # Capture individual chart canvas elements instead of full slide
-                chart_images = []
-                
-                if canvas_count > 0:
-                    logger.info(f"Capturing {canvas_count} chart canvas elements")
-                    print(f"[SCREENSHOT] Capturing {canvas_count} chart canvas elements")
-                    
-                    # Get canvas information including positions
-                    canvas_data = await page.evaluate("""() => {
-                        const canvases = document.querySelectorAll('canvas');
-                        const data = [];
-                        canvases.forEach((canvas, idx) => {
-                            const rect = canvas.getBoundingClientRect();
-                            data.push({
-                                index: idx,
-                                id: canvas.id || `chart_${idx}`,
-                                x: Math.floor(rect.x),
-                                y: Math.floor(rect.y),
-                                width: Math.floor(rect.width),
-                                height: Math.floor(rect.height),
-                                canvasWidth: canvas.width,
-                                canvasHeight: canvas.height
-                            });
-                        });
-                        return data;
-                    }""")
-                    
-                    logger.info(f"Canvas data: {canvas_data}")
-                    print(f"[SCREENSHOT] Canvas data: {canvas_data}")
-                    
-                    # Capture each canvas individually
-                    for canvas_info in canvas_data:
-                        canvas_id = canvas_info['id']
-                        canvas_index = canvas_info['index']
-                        
-                        # Use canvas ID if available, otherwise use index
-                        if canvas_id and canvas_id != f'chart_{canvas_index}':
-                            filename = f"chart_{canvas_id}.png"
-                        else:
-                            filename = f"chart_{canvas_index}.png"
-                        
-                        chart_path = Path(assets_dir) / filename
-                        
-                        try:
-                            # Capture just the canvas element using element screenshot
-                            canvas_element = await page.query_selector(f'canvas:nth-of-type({canvas_index + 1})')
-                            
-                            if canvas_element:
-                                await canvas_element.screenshot(path=str(chart_path), type='png')
-                                
-                                if chart_path.exists():
-                                    file_size = chart_path.stat().st_size
-                                    logger.info(
-                                        f"Chart screenshot saved: {filename}, size: {file_size} bytes",
-                                        extra={
-                                            "canvas_id": canvas_id,
-                                            "canvas_index": canvas_index,
-                                            "dimensions": f"{canvas_info['width']}x{canvas_info['height']}"
-                                        }
-                                    )
-                                    print(f"[SCREENSHOT] Chart {canvas_index} ({canvas_id}) saved: {filename}, "
-                                          f"size: {file_size} bytes, dimensions: {canvas_info['width']}x{canvas_info['height']}")
-                                    chart_images.append(filename)
-                                else:
-                                    logger.warning(f"Chart screenshot file not created: {filename}")
-                                    print(f"[SCREENSHOT] WARNING: Chart screenshot file not created: {filename}")
-                            else:
-                                logger.warning(f"Canvas element not found for index {canvas_index}")
-                                print(f"[SCREENSHOT] WARNING: Canvas element not found for index {canvas_index}")
-                        except Exception as e:
-                            logger.warning(f"Failed to capture chart {canvas_index}: {e}", exc_info=True)
-                            print(f"[SCREENSHOT] WARNING: Failed to capture chart {canvas_index}: {e}")
+                # Determine filename from canvas_id
+                # Canvas IDs might be like "chart_0", "my_chart", etc.
+                if canvas_id.startswith('chart_'):
+                    filename = f"{canvas_id}.png"
                 else:
-                    logger.info("No canvas elements found, no chart screenshots to capture")
-                    print("[SCREENSHOT] No canvas elements found")
+                    # Use canvas_id as filename, sanitize if needed
+                    safe_id = "".join(c if c.isalnum() or c in ('_', '-') else '_' for c in canvas_id)
+                    filename = f"chart_{safe_id}.png"
                 
-                await browser.close()
-                return chart_images
+                chart_path = assets_path / filename
+                chart_path.write_bytes(image_bytes)
                 
-        except Exception as e:
-            logger.error("Screenshot failed", exc_info=True, extra={"html_path": html_path, "error": str(e)})
-            print(f"[SCREENSHOT] ERROR: Screenshot failed: {e}")
-            return []
+                if chart_path.exists():
+                    file_size = chart_path.stat().st_size
+                    logger.info(
+                        f"Saved client chart image: {filename}",
+                        extra={
+                            "canvas_id": canvas_id,
+                            "filename": filename,
+                            "file_size": file_size
+                        }
+                    )
+                    print(f"[CLIENT_CHART] Saved chart image: {filename} ({file_size} bytes) from canvas_id: {canvas_id}")
+                    chart_images.append(filename)
+                else:
+                    logger.warning(f"Chart image file not created: {filename}")
+                    print(f"[CLIENT_CHART] WARNING: Chart image file not created: {filename}")
+            except Exception as e:
+                logger.warning(f"Failed to save client chart image {canvas_id}: {e}", exc_info=True)
+                print(f"[CLIENT_CHART] WARNING: Failed to save chart image for canvas_id {canvas_id}: {e}")
+        
+        return chart_images
     
     def _truncate_html(self, html_str: str, max_length: int = 15000) -> str:
         """Truncate HTML to reasonable length for LLM while preserving CSS.

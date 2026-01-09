@@ -717,9 +717,52 @@ export const api = {
    * 
    * @param sessionId - Session ID
    * @param useScreenshot - Whether to use screenshots for chart rendering
+   * @param slideDeck - Slide deck to capture charts from (optional, for client-side capture)
    * @returns Promise with PPTX file as Blob
    */
-  async exportToPPTX(sessionId: string, useScreenshot: boolean = true): Promise<Blob> {
+  async exportToPPTX(
+    sessionId: string, 
+    useScreenshot: boolean = true,
+    slideDeck?: import('../types/slide').SlideDeck
+  ): Promise<Blob> {
+    // Capture chart images client-side if useScreenshot is true and slideDeck is provided
+    let chartImages: Array<Array<{ canvas_id: string; base64_data: string }>> | undefined;
+    
+    if (useScreenshot && slideDeck) {
+      try {
+        console.log(`[EXPORT] Starting client-side chart capture for ${slideDeck.slides.length} slides`);
+        const { captureSlideDeckCharts } = await import('./pptx_client');
+        const chartImagesPerSlide = await captureSlideDeckCharts(slideDeck);
+        
+        // Log capture results
+        const slidesWithCharts = chartImagesPerSlide.filter(slide => Object.keys(slide).length > 0).length;
+        console.log(`[EXPORT] Captured charts: ${slidesWithCharts} of ${chartImagesPerSlide.length} slides have charts`);
+        chartImagesPerSlide.forEach((slideCharts, idx) => {
+          if (Object.keys(slideCharts).length > 0) {
+            console.log(`[EXPORT] Slide ${idx + 1}: ${Object.keys(slideCharts).length} charts (IDs: ${Object.keys(slideCharts).join(', ')})`);
+          } else {
+            console.warn(`[EXPORT] Slide ${idx + 1}: No charts captured`);
+          }
+        });
+        
+        // Convert to API format
+        chartImages = chartImagesPerSlide.map((slideCharts) =>
+          Object.entries(slideCharts).map(([canvasId, base64Data]) => ({
+            canvas_id: canvasId,
+            base64_data: base64Data,
+          }))
+        );
+        
+        console.log(`[EXPORT] Sending ${chartImages.length} slides with chart data to backend`);
+      } catch (error) {
+        console.error('[EXPORT] Failed to capture chart images client-side:', error);
+        console.error('[EXPORT] Error details:', error instanceof Error ? error.stack : String(error));
+        // Continue without client images - backend will fall back to Playwright if available
+      }
+    } else {
+      console.log(`[EXPORT] Skipping client-side capture: useScreenshot=${useScreenshot}, slideDeck=${!!slideDeck}`);
+    }
+    
     const response = await fetch(`${API_BASE_URL}/api/export/pptx`, {
       method: 'POST',
       headers: {
@@ -728,6 +771,7 @@ export const api = {
       body: JSON.stringify({
         session_id: sessionId,
         use_screenshot: useScreenshot,
+        chart_images: chartImages,
       }),
     });
 
