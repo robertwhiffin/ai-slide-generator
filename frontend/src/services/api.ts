@@ -712,62 +712,29 @@ export const api = {
     return response.json();
   },
 
+  // ============ PPTX Export (polling-based for large decks) ============
+
   /**
-   * Export slides to PowerPoint format
+   * Response from async export endpoints
+   */
+
+
+  /**
+   * Start async PPTX export
    * 
    * @param sessionId - Session ID
    * @param useScreenshot - Whether to use screenshots for chart rendering
-   * @param slideDeck - Slide deck to capture charts from (optional, for client-side capture)
-   * @returns Promise with PPTX file as Blob
+   * @param chartImages - Pre-captured chart images
+   * @returns Promise with job_id
    */
-  async exportToPPTX(
-    sessionId: string, 
+  async startPPTXExport(
+    sessionId: string,
     useScreenshot: boolean = true,
-    slideDeck?: import('../types/slide').SlideDeck
-  ): Promise<Blob> {
-    // Capture chart images client-side if useScreenshot is true and slideDeck is provided
-    let chartImages: Array<Array<{ canvas_id: string; base64_data: string }>> | undefined;
-    
-    if (useScreenshot && slideDeck) {
-      try {
-        console.log(`[EXPORT] Starting client-side chart capture for ${slideDeck.slides.length} slides`);
-        const { captureSlideDeckCharts } = await import('./pptx_client');
-        const chartImagesPerSlide = await captureSlideDeckCharts(slideDeck);
-        
-        // Log capture results
-        const slidesWithCharts = chartImagesPerSlide.filter(slide => Object.keys(slide).length > 0).length;
-        console.log(`[EXPORT] Captured charts: ${slidesWithCharts} of ${chartImagesPerSlide.length} slides have charts`);
-        chartImagesPerSlide.forEach((slideCharts, idx) => {
-          if (Object.keys(slideCharts).length > 0) {
-            console.log(`[EXPORT] Slide ${idx + 1}: ${Object.keys(slideCharts).length} charts (IDs: ${Object.keys(slideCharts).join(', ')})`);
-          } else {
-            console.warn(`[EXPORT] Slide ${idx + 1}: No charts captured`);
-          }
-        });
-        
-        // Convert to API format
-        chartImages = chartImagesPerSlide.map((slideCharts) =>
-          Object.entries(slideCharts).map(([canvasId, base64Data]) => ({
-            canvas_id: canvasId,
-            base64_data: base64Data,
-          }))
-        );
-        
-        console.log(`[EXPORT] Sending ${chartImages.length} slides with chart data to backend`);
-      } catch (error) {
-        console.error('[EXPORT] Failed to capture chart images client-side:', error);
-        console.error('[EXPORT] Error details:', error instanceof Error ? error.stack : String(error));
-        // Continue without client images - backend will fall back to Playwright if available
-      }
-    } else {
-      console.log(`[EXPORT] Skipping client-side capture: useScreenshot=${useScreenshot}, slideDeck=${!!slideDeck}`);
-    }
-    
-    const response = await fetch(`${API_BASE_URL}/api/export/pptx`, {
+    chartImages?: Array<Array<{ canvas_id: string; base64_data: string }>>,
+  ): Promise<{ job_id: string; status: string; total_slides: number }> {
+    const response = await fetch(`${API_BASE_URL}/api/export/pptx/async`, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         session_id: sessionId,
         use_screenshot: useScreenshot,
@@ -777,12 +744,139 @@ export const api = {
 
     if (!response.ok) {
       const error = await response.json().catch(() => ({}));
-      throw new ApiError(
-        response.status,
-        error.detail || 'Failed to export PPTX'
-      );
+      throw new ApiError(response.status, error.detail || 'Failed to start export');
+    }
+
+    return response.json();
+  },
+
+  /**
+   * Poll for PPTX export status
+   * 
+   * @param jobId - Job ID from startPPTXExport
+   * @returns Promise with export status
+   */
+  async pollPPTXExport(jobId: string): Promise<{
+    job_id: string;
+    status: 'pending' | 'running' | 'completed' | 'error';
+    progress: number;
+    total_slides: number;
+    error?: string;
+  }> {
+    const response = await fetch(`${API_BASE_URL}/api/export/pptx/poll/${jobId}`);
+
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({}));
+      throw new ApiError(response.status, error.detail || 'Failed to poll export');
+    }
+
+    return response.json();
+  },
+
+  /**
+   * Download completed PPTX export
+   * 
+   * @param jobId - Job ID from startPPTXExport
+   * @returns Promise with PPTX file as Blob
+   */
+  async downloadPPTX(jobId: string): Promise<Blob> {
+    const response = await fetch(`${API_BASE_URL}/api/export/pptx/download/${jobId}`);
+
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({}));
+      throw new ApiError(response.status, error.detail || 'Failed to download PPTX');
     }
 
     return response.blob();
+  },
+
+  /**
+   * Export slides to PowerPoint format using async polling
+   * 
+   * This method handles the full export flow:
+   * 1. Capture charts client-side
+   * 2. Start async export
+   * 3. Poll until complete
+   * 4. Download the file
+   * 
+   * @param sessionId - Session ID
+   * @param useScreenshot - Whether to use screenshots for chart rendering
+   * @param slideDeck - Slide deck to capture charts from
+   * @param onProgress - Optional callback for progress updates
+   * @returns Promise with PPTX file as Blob
+   */
+  async exportToPPTX(
+    sessionId: string, 
+    useScreenshot: boolean = true,
+    slideDeck?: import('../types/slide').SlideDeck,
+    onProgress?: (progress: number, total: number, status: string) => void,
+  ): Promise<Blob> {
+    // Step 1: Capture chart images client-side
+    let chartImages: Array<Array<{ canvas_id: string; base64_data: string }>> | undefined;
+    
+    if (useScreenshot && slideDeck) {
+      try {
+        console.log(`[EXPORT] Starting client-side chart capture for ${slideDeck.slides.length} slides`);
+        onProgress?.(0, slideDeck.slides.length, 'Capturing charts...');
+        
+        const { captureSlideDeckCharts } = await import('./pptx_client');
+        const chartImagesPerSlide = await captureSlideDeckCharts(slideDeck);
+        
+        // Log capture results
+        const slidesWithCharts = chartImagesPerSlide.filter(slide => Object.keys(slide).length > 0).length;
+        console.log(`[EXPORT] Captured charts: ${slidesWithCharts} of ${chartImagesPerSlide.length} slides have charts`);
+        
+        // Convert to API format
+        chartImages = chartImagesPerSlide.map((slideCharts) =>
+          Object.entries(slideCharts).map(([canvasId, base64Data]) => ({
+            canvas_id: canvasId,
+            base64_data: base64Data,
+          }))
+        );
+      } catch (error) {
+        console.error('[EXPORT] Failed to capture chart images client-side:', error);
+        // Continue without client images
+      }
+    }
+
+    // Step 2: Start async export
+    console.log('[EXPORT] Starting async export...');
+    onProgress?.(0, slideDeck?.slides.length || 0, 'Starting export...');
+    
+    const { job_id, total_slides } = await this.startPPTXExport(
+      sessionId,
+      useScreenshot,
+      chartImages,
+    );
+    console.log(`[EXPORT] Export job started: ${job_id}, ${total_slides} slides`);
+
+    // Step 3: Poll until complete
+    const pollIntervalMs = 2000;
+    const maxPollAttempts = 300; // 10 minutes max
+    let attempts = 0;
+
+    while (attempts < maxPollAttempts) {
+      await new Promise((resolve) => setTimeout(resolve, pollIntervalMs));
+      attempts++;
+
+      const status = await this.pollPPTXExport(job_id);
+      console.log(`[EXPORT] Poll ${attempts}: ${status.status} (${status.progress}/${status.total_slides})`);
+      
+      onProgress?.(status.progress, status.total_slides, `Processing slide ${status.progress} of ${status.total_slides}...`);
+
+      if (status.status === 'completed') {
+        console.log('[EXPORT] Export completed, downloading...');
+        onProgress?.(status.total_slides, status.total_slides, 'Downloading...');
+        
+        // Step 4: Download the file
+        return this.downloadPPTX(job_id);
+      }
+
+      if (status.status === 'error') {
+        throw new ApiError(500, status.error || 'Export failed');
+      }
+    }
+
+    throw new ApiError(408, 'Export timed out');
   },
 };
