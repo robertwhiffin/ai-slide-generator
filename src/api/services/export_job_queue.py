@@ -235,15 +235,23 @@ async def convert_slides_with_progress(
 
 
 async def export_worker() -> None:
-    """Background worker that processes export jobs from the queue."""
+    """Background worker that processes export jobs from the queue.
+    
+    Runs blocking export work in a thread pool to avoid blocking the event loop.
+    This is critical - the LLM calls are synchronous and would otherwise block
+    all async operations including HTTP response handling.
+    """
     logger.info("Export job queue worker started")
     while True:
         try:
             job_id, payload = await export_queue.get()
             export_jobs[job_id]["status"] = "running"
+            logger.info(f"Export worker picked up job {job_id}")
 
             try:
-                await process_export_job(job_id, payload)
+                # Run the blocking export work in a thread pool
+                # This prevents LLM calls from blocking the event loop
+                await asyncio.to_thread(_run_export_job_sync, job_id, payload)
             except Exception as e:
                 export_jobs[job_id]["status"] = "error"
                 export_jobs[job_id]["error"] = str(e)
@@ -258,6 +266,23 @@ async def export_worker() -> None:
             break
         except Exception as e:
             logger.error(f"Export worker loop error: {e}")
+
+
+def _run_export_job_sync(job_id: str, payload: dict) -> None:
+    """Synchronous wrapper to run export job in thread pool.
+    
+    This is called from asyncio.to_thread() to run blocking I/O
+    (LLM calls, file operations) without blocking the event loop.
+    """
+    import asyncio
+    
+    # Create a new event loop for this thread
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+        loop.run_until_complete(process_export_job(job_id, payload))
+    finally:
+        loop.close()
 
 
 async def start_export_worker() -> asyncio.Task:
