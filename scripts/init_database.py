@@ -1,4 +1,17 @@
-"""Initialize database with profiles from YAML seed file."""
+"""Initialize database with profiles from YAML seed file.
+
+LOCAL DEVELOPMENT ONLY
+----------------------
+This script is for local development and testing. It seeds the database with:
+- All deck prompts (generic + Databricks-specific)
+- All slide styles (System Default + Databricks Brand)
+- Sample profiles from config/seed_profiles.yaml
+
+For Databricks App deployments, use deploy.sh instead which:
+- Only seeds generic deck prompts and System Default style by default
+- Does NOT create any profiles (users create their own)
+- Optionally includes Databricks content with --include-databricks-prompts flag
+"""
 import argparse
 import os
 import sys
