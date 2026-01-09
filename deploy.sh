@@ -18,7 +18,7 @@ cd "$PROJECT_ROOT"
 
 # Show usage
 usage() {
-    echo "Usage: $0 <action> --env <environment> --profile <databricks-profile> [--dry-run]"
+    echo "Usage: $0 <action> --env <environment> --profile <databricks-profile> [--dry-run] [--reset-db]"
     echo ""
     echo "Actions:"
     echo "  create    Create a new Databricks App"
@@ -29,11 +29,13 @@ usage() {
     echo "  --env        Environment: development, staging, or production"
     echo "  --profile    Databricks CLI profile from ~/.databrickscfg"
     echo "  --dry-run    Validate configuration without deploying"
+    echo "  --reset-db   Drop and recreate database tables (WARNING: deletes all data)"
     echo ""
     echo "Examples:"
     echo "  $0 create --env development --profile my-profile"
     echo "  $0 update --env production --profile prod-profile"
     echo "  $0 create --env staging --profile my-profile --dry-run"
+    echo "  $0 update --env development --profile my-profile --reset-db"
     exit 1
 }
 
@@ -42,6 +44,7 @@ ACTION=""
 ENV=""
 PROFILE=""
 DRY_RUN=""
+RESET_DB=""
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -59,6 +62,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --dry-run)
             DRY_RUN="--dry-run"
+            shift
+            ;;
+        --reset-db)
+            RESET_DB="--reset-db"
             shift
             ;;
         -h|--help)
@@ -118,8 +125,8 @@ echo -e "${GREEN}✅ Virtual environment activated${NC}"
 echo ""
 
 # Run the deployment
-echo -e "${BLUE}📦 Running deployment: $ACTION --env $ENV --profile $PROFILE $DRY_RUN${NC}"
+echo -e "${BLUE}📦 Running deployment: $ACTION --env $ENV --profile $PROFILE $DRY_RUN $RESET_DB${NC}"
 echo ""
 
-python -m db_app_deployment.deploy --$ACTION --env "$ENV" --profile "$PROFILE" $DRY_RUN
+python -m db_app_deployment.deploy --$ACTION --env "$ENV" --profile "$PROFILE" $DRY_RUN $RESET_DB
 
