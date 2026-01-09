@@ -31,43 +31,8 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
-# Default deck prompt templates for the library
-DEFAULT_DECK_PROMPTS = [
-    {
-        "name": "Consumption Review",
-        "description": "Template for consumption review meetings. Analyzes usage trends, identifies key drivers, and highlights areas for optimization.",
-        "category": "Review",
-        "prompt_content": """PRESENTATION TYPE: Consumption Review
-
-When creating a consumption review presentation, focus on:
-
-1. EXECUTIVE SUMMARY
-   - Overall consumption trend (increasing/decreasing/stable)
-   - Key highlight metrics (total spend, month-over-month change)
-   - Top 3 insights that require attention
-
-2. USAGE ANALYSIS
-   - Query for consumption data over the past 6-12 months
-   - Break down by major categories (compute, storage, etc.)
-   - Identify the top consumers and their growth patterns
-
-3. TREND IDENTIFICATION
-   - Look for seasonal patterns or anomalies
-   - Compare current period to previous periods
-   - Highlight significant changes (>10% movement)
-
-4. OPTIMIZATION OPPORTUNITIES
-   - Identify underutilized resources
-   - Highlight cost-saving opportunities
-   - Recommend actions based on data
-
-5. FORWARD OUTLOOK
-   - Project future consumption based on trends
-   - Flag any concerns or risks
-   - Provide actionable recommendations
-
-Structure the deck with clear data visualizations showing trends over time.""",
-    },
+# Generic deck prompt templates (always deployed)
+GENERIC_DECK_PROMPTS = [
     {
         "name": "Quarterly Business Review",
         "description": "Template for QBR presentations. Covers performance metrics, achievements, challenges, and strategic recommendations.",
@@ -141,6 +106,45 @@ STRUCTURE:
 
 Keep language simple and avoid jargon. Every data point should support a decision.""",
     },
+]
+
+# Databricks-specific deck prompt templates (only deployed with --include-databricks-prompts)
+DATABRICKS_DECK_PROMPTS = [
+    {
+        "name": "Consumption Review",
+        "description": "Template for consumption review meetings. Analyzes usage trends, identifies key drivers, and highlights areas for optimization.",
+        "category": "Review",
+        "prompt_content": """PRESENTATION TYPE: Consumption Review
+
+When creating a consumption review presentation, focus on:
+
+1. EXECUTIVE SUMMARY
+   - Overall consumption trend (increasing/decreasing/stable)
+   - Key highlight metrics (total spend, month-over-month change)
+   - Top 3 insights that require attention
+
+2. USAGE ANALYSIS
+   - Query for consumption data over the past 6-12 months
+   - Break down by major categories (compute, storage, etc.)
+   - Identify the top consumers and their growth patterns
+
+3. TREND IDENTIFICATION
+   - Look for seasonal patterns or anomalies
+   - Compare current period to previous periods
+   - Highlight significant changes (>10% movement)
+
+4. OPTIMIZATION OPPORTUNITIES
+   - Identify underutilized resources
+   - Highlight cost-saving opportunities
+   - Recommend actions based on data
+
+5. FORWARD OUTLOOK
+   - Project future consumption based on trends
+   - Flag any concerns or risks
+   - Provide actionable recommendations
+
+Structure the deck with clear data visualizations showing trends over time.""",
+    },
     {
         "name": "Use Case Analysis",
         "description": "Template for analyzing use case progression and identifying blockers or accelerators.",
@@ -178,6 +182,9 @@ Use funnel charts for progression and bar charts for blocker analysis.""",
     },
 ]
 
+# Combined list for backward compatibility (used by local dev scripts)
+DEFAULT_DECK_PROMPTS = GENERIC_DECK_PROMPTS + DATABRICKS_DECK_PROMPTS
+
 
 def _seed_deck_prompts(db) -> None:
     """Seed the deck prompt library with default templates."""
@@ -203,8 +210,8 @@ def _seed_deck_prompts(db) -> None:
     print(f"  ✓ Seeded {len(DEFAULT_DECK_PROMPTS)} deck prompts in library")
 
 
-# Default slide styles for the library
-DEFAULT_SLIDE_STYLES = [
+# System slide styles (always deployed)
+SYSTEM_SLIDE_STYLES = [
     {
         "name": "System Default",
         "description": "Protected system style. Use this as a template when creating your own custom styles.",
@@ -212,6 +219,10 @@ DEFAULT_SLIDE_STYLES = [
         "style_content": DEFAULT_SLIDE_STYLE,
         "is_system": True,  # Cannot be edited or deleted
     },
+]
+
+# Databricks-specific slide styles (only deployed with --include-databricks-prompts)
+DATABRICKS_SLIDE_STYLES = [
     {
         "name": "Databricks Brand",
         "description": "Official Databricks brand colors and typography. Navy headers, Lava red accents, clean modern layout.",
@@ -220,6 +231,9 @@ DEFAULT_SLIDE_STYLES = [
         "is_system": False,  # User-editable
     },
 ]
+
+# Combined list for backward compatibility (used by local dev scripts)
+DEFAULT_SLIDE_STYLES = SYSTEM_SLIDE_STYLES + DATABRICKS_SLIDE_STYLES
 
 
 def _seed_slide_styles(db) -> int | None:

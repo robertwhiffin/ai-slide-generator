@@ -567,6 +567,7 @@ def reset_database_tables(
     workspace_client: WorkspaceClient,
     instance_name: str,
     schema: str,
+    include_databricks_prompts: bool = False,
 ) -> None:
     """
     Drop and recreate all database tables, then seed with default data.
@@ -577,6 +578,7 @@ def reset_database_tables(
         workspace_client: Databricks workspace client
         instance_name: Lakebase instance name
         schema: Schema name containing application tables
+        include_databricks_prompts: If True, include Databricks-specific deck prompts and brand style
     """
     print("🗑️  Resetting database tables...")
     print(f"   Instance: {instance_name}")
@@ -612,9 +614,9 @@ def reset_database_tables(
         Base.metadata.create_all(bind=engine)
         print("  ✅ Tables recreated")
 
-        # Seed default data (deck prompts, slide styles, profiles)
+        # Seed default data (deck prompts, slide styles - no profiles for deployed apps)
         print("  Seeding default data...")
-        _seed_default_data(engine, schema, workspace_client)
+        _seed_default_data(engine, schema, workspace_client, include_databricks_prompts)
         print("  ✅ Default data seeded")
 
         print("✅ Database reset complete")
@@ -623,35 +625,51 @@ def reset_database_tables(
         raise DeploymentError(f"Database reset failed: {e}") from e
 
 
-def _seed_default_data(engine, schema: str, workspace_client: WorkspaceClient) -> None:
-    """Seed default deck prompts, slide styles, and profiles after reset."""
-    import os
-    from pathlib import Path
+def _seed_default_data(
+    engine,
+    schema: str,
+    workspace_client: WorkspaceClient,
+    include_databricks_prompts: bool = False,
+) -> None:
+    """Seed default deck prompts and slide styles after reset.
 
-    import yaml
+    Args:
+        engine: SQLAlchemy engine
+        schema: Database schema name
+        workspace_client: Databricks workspace client (unused, kept for API compatibility)
+        include_databricks_prompts: If True, include Databricks-specific deck prompts and brand style
+
+    Note:
+        Profiles are NOT seeded during Databricks deployment - users create their own.
+        For local development with profiles, use scripts/init_database.py instead.
+    """
     from sqlalchemy import text
     from sqlalchemy.orm import sessionmaker
 
-    from src.core.defaults import DEFAULT_CONFIG
-    from src.core.init_default_profile import DEFAULT_DECK_PROMPTS, DEFAULT_SLIDE_STYLES
+    from src.core.init_default_profile import (
+        GENERIC_DECK_PROMPTS,
+        DATABRICKS_DECK_PROMPTS,
+        SYSTEM_SLIDE_STYLES,
+        DATABRICKS_SLIDE_STYLES,
+    )
     from src.database.models import (
-        ConfigAIInfra,
-        ConfigGenieSpace,
-        ConfigMLflow,
-        ConfigProfile,
-        ConfigPrompts,
         SlideDeckPromptLibrary,
         SlideStyleLibrary,
     )
 
     Session = sessionmaker(bind=engine)
-    
+
     with Session() as db:
         # Set search path for this session
         db.execute(text(f'SET search_path TO "{schema}"'))
-        
+
+        # Determine which prompts to seed
+        deck_prompts = list(GENERIC_DECK_PROMPTS)
+        if include_databricks_prompts:
+            deck_prompts.extend(DATABRICKS_DECK_PROMPTS)
+
         # Seed deck prompts
-        for prompt_data in DEFAULT_DECK_PROMPTS:
+        for prompt_data in deck_prompts:
             prompt = SlideDeckPromptLibrary(
                 name=prompt_data["name"],
                 description=prompt_data["description"],
@@ -662,11 +680,15 @@ def _seed_default_data(engine, schema: str, workspace_client: WorkspaceClient) -
                 updated_by="system",
             )
             db.add(prompt)
-        print(f"    ✓ Seeded {len(DEFAULT_DECK_PROMPTS)} deck prompts")
+        print(f"    ✓ Seeded {len(deck_prompts)} deck prompts")
 
-        # Seed slide styles and track default
-        default_style_id = None
-        for style_data in DEFAULT_SLIDE_STYLES:
+        # Determine which styles to seed
+        slide_styles = list(SYSTEM_SLIDE_STYLES)
+        if include_databricks_prompts:
+            slide_styles.extend(DATABRICKS_SLIDE_STYLES)
+
+        # Seed slide styles
+        for style_data in slide_styles:
             style = SlideStyleLibrary(
                 name=style_data["name"],
                 description=style_data["description"],
@@ -678,96 +700,13 @@ def _seed_default_data(engine, schema: str, workspace_client: WorkspaceClient) -
                 updated_by="system",
             )
             db.add(style)
-            db.flush()
-            if style_data["name"] == "Databricks Brand":
-                default_style_id = style.id
-        print(f"    ✓ Seeded {len(DEFAULT_SLIDE_STYLES)} slide styles")
+        print(f"    ✓ Seeded {len(slide_styles)} slide styles")
 
-        # Load and create seed profiles
-        seed_file = Path(__file__).parent.parent / "config" / "seed_profiles.yaml"
-        if not seed_file.exists():
-            print("    ⚠️  No seed_profiles.yaml found, skipping profile creation")
-            db.commit()
-            return
-
-        with open(seed_file, "r") as f:
-            data = yaml.safe_load(f)
-        seed_profiles = data.get("profiles", [])
-
-        if not seed_profiles:
-            print("    ⚠️  No profiles in seed_profiles.yaml")
-            db.commit()
-            return
-
-        # Get username for MLflow experiment
-        try:
-            username = workspace_client.current_user.me().user_name
-        except Exception:
-            username = os.getenv("USER", "default_user")
-
-        for seed in seed_profiles:
-            # Create profile
-            profile = ConfigProfile(
-                name=seed["name"],
-                description=seed["description"],
-                is_default=seed.get("is_default", False),
-                created_by=seed.get("created_by", "system"),
-            )
-            db.add(profile)
-            db.flush()
-
-            # Create AI infrastructure
-            ai_config = seed.get("ai_infra", {})
-            if ai_config:
-                ai_infra = ConfigAIInfra(
-                    profile_id=profile.id,
-                    llm_endpoint=ai_config["llm_endpoint"],
-                    llm_temperature=ai_config["llm_temperature"],
-                    llm_max_tokens=ai_config["llm_max_tokens"],
-                )
-                db.add(ai_infra)
-
-            # Create Genie space
-            genie_config = seed.get("genie_space", {})
-            if genie_config:
-                genie_space = ConfigGenieSpace(
-                    profile_id=profile.id,
-                    space_id=genie_config["space_id"],
-                    space_name=genie_config["space_name"],
-                    description=genie_config.get("description", ""),
-                )
-                db.add(genie_space)
-
-            # Create MLflow settings
-            mlflow_config = seed.get("mlflow", {})
-            if mlflow_config:
-                experiment_name = mlflow_config["experiment_name"].format(username=username)
-                mlflow = ConfigMLflow(
-                    profile_id=profile.id,
-                    experiment_name=experiment_name,
-                )
-                db.add(mlflow)
-
-            # Create prompts with default slide style
-            prompts_config = seed.get("prompts", {})
-            system_prompt = prompts_config.get("system_prompt", "USE_DEFAULT")
-            slide_editing = prompts_config.get("slide_editing_instructions", "USE_DEFAULT")
-
-            if system_prompt == "USE_DEFAULT":
-                system_prompt = DEFAULT_CONFIG["prompts"]["system_prompt"]
-            if slide_editing == "USE_DEFAULT":
-                slide_editing = DEFAULT_CONFIG["prompts"]["slide_editing_instructions"]
-
-            prompts = ConfigPrompts(
-                profile_id=profile.id,
-                selected_slide_style_id=default_style_id,
-                system_prompt=system_prompt,
-                slide_editing_instructions=slide_editing,
-            )
-            db.add(prompts)
+        # Note: Profiles are NOT seeded for Databricks deployments.
+        # Users should create their own profiles via the UI.
+        # For local development with seed profiles, use scripts/init_database.py
 
         db.commit()
-        print(f"    ✓ Created {len(seed_profiles)} profiles from seed_profiles.yaml")
 
 
 def deploy(
@@ -776,6 +715,7 @@ def deploy(
     profile: str,
     dry_run: bool = False,
     reset_db: bool = False,
+    include_databricks_prompts: bool = False,
 ) -> None:
     """
     Main deployment function.
@@ -786,6 +726,7 @@ def deploy(
         profile: Databricks profile name from ~/.databrickscfg
         dry_run: If True, only validate without deploying
         reset_db: If True, drop and recreate database tables before deploying
+        include_databricks_prompts: If True, include Databricks-specific deck prompts and brand style
     """
     project_root = Path(__file__).parent.parent
 
@@ -862,6 +803,7 @@ def deploy(
                 workspace_client,
                 instance_name=config.lakebase.database_name,
                 schema=config.lakebase.schema,
+                include_databricks_prompts=include_databricks_prompts,
             )
             print()
 
@@ -1003,6 +945,12 @@ def main() -> None:
         help="Drop and recreate database tables before deploying (WARNING: deletes all data)",
     )
 
+    parser.add_argument(
+        "--include-databricks-prompts",
+        action="store_true",
+        help="Include Databricks-specific deck prompts and brand style (for internal use)",
+    )
+
     args = parser.parse_args()
 
     deploy(
@@ -1011,6 +959,7 @@ def main() -> None:
         dry_run=args.dry_run,
         profile=args.profile,
         reset_db=args.reset_db,
+        include_databricks_prompts=args.include_databricks_prompts,
     )
 
 
