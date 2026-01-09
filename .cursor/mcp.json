@@ -1,11 +1,10 @@
 {
-  "playwright": {
-    "command": "npx",
-    "args": [
-      "@playwright/mcp@latest",
-      "--isolated"
-    ],
-    "host": "localhost",
-    "port": 3000
+    "mcpServers": {
+      "playwright": {
+        "command": "npx",
+        "args": [
+          "@playwright/mcp@latest"
+        ]
+      }
+    }
   }
-}
