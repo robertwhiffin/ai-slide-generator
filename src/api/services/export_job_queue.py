@@ -81,25 +81,51 @@ async def process_export_job(job_id: str, payload: dict) -> None:
 
     This function:
     1. Updates job status to running
-    2. Processes each slide with progress updates
-    3. Stores the output file path
-    4. Marks job as completed
+    2. Fetches slide deck and builds HTML for each slide
+    3. Processes each slide with progress updates
+    4. Stores the output file path
+    5. Marks job as completed
 
     Args:
         job_id: Unique job identifier
-        payload: Job payload with session_id, slides_html, chart_images, etc.
+        payload: Job payload with session_id, chart_images, etc.
     """
+    from src.api.services.chat_service import get_chat_service
+    from src.api.routes.export import build_slide_html
     from src.services.html_to_pptx import HtmlToPptxConverterV3, PPTXConversionError
 
     session_id = payload["session_id"]
-    slides_html: List[str] = payload["slides_html"]
     chart_images_per_slide: Optional[List[Dict[str, str]]] = payload.get(
         "chart_images_per_slide"
     )
     title: str = payload.get("title", "slides")
 
-    total_slides = len(slides_html)
-    export_jobs[job_id]["total_slides"] = total_slides
+    try:
+        # Fetch slide deck from database
+        logger.info(f"Fetching slide deck for export job {job_id}")
+        chat_service = get_chat_service()
+        slide_deck = chat_service.get_slides(session_id)
+        
+        if not slide_deck or not slide_deck.get("slides"):
+            raise ValueError("No slides available")
+        
+        slides = slide_deck.get("slides", [])
+        total_slides = len(slides)
+        export_jobs[job_id]["total_slides"] = total_slides
+        
+        # Build HTML for each slide (this is the slow part we moved here)
+        logger.info(f"Building HTML for {total_slides} slides")
+        slides_html: List[str] = []
+        for i, slide in enumerate(slides):
+            slide_html = build_slide_html(slide, slide_deck)
+            slides_html.append(slide_html)
+            logger.debug(f"Built HTML for slide {i+1}/{total_slides}")
+        
+    except Exception as e:
+        logger.error(f"Failed to prepare slides for export: {e}", exc_info=True)
+        export_jobs[job_id]["status"] = "error"
+        export_jobs[job_id]["error"] = f"Failed to prepare slides: {str(e)}"
+        return
 
     try:
         # Update status to running

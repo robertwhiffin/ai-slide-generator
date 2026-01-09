@@ -629,20 +629,41 @@ async def start_pptx_export_async(request: ExportPPTXRequest):
     Raises:
         HTTPException: 404 if no slides available
     """
+    import asyncio
     from src.api.services.export_job_queue import (
         enqueue_export_job,
         generate_job_id,
     )
     
+    import time
+    start_time = time.time()
+    
+    # Log immediately to confirm request was received and parsed
+    print(f"[EXPORT_ASYNC] Handler started at {start_time:.3f}")
+    
+    chart_count = len(request.chart_images) if request.chart_images else 0
+    chart_data_size = 0
+    if request.chart_images:
+        for slide_charts in request.chart_images:
+            for img in slide_charts:
+                chart_data_size += len(img.base64_data) if img.base64_data else 0
+    
     logger.info(
-        "Received async PPTX export request",
+        f"Received async PPTX export request (chart_images: {chart_count} slides, ~{chart_data_size // 1024}KB)",
         extra={"session_id": request.session_id},
     )
+    print(f"[EXPORT_ASYNC] Request parsed: {chart_count} slides with chart images (~{chart_data_size // 1024}KB)")
     
     try:
-        # Get current slide deck
+        # Get current slide deck - just validate it exists and get count
+        # Don't build HTML here - that happens in the background worker
+        # Use asyncio.to_thread to avoid blocking
         chat_service = get_chat_service()
-        slide_deck = chat_service.get_slides(request.session_id)
+        
+        db_start = time.time()
+        slide_deck = await asyncio.to_thread(chat_service.get_slides, request.session_id)
+        db_time = time.time() - db_start
+        print(f"[EXPORT_ASYNC] DB fetch took {db_time:.2f}s")
         
         if not slide_deck or not slide_deck.get("slides"):
             raise HTTPException(status_code=404, detail="No slides available")
@@ -651,20 +672,15 @@ async def start_pptx_export_async(request: ExportPPTXRequest):
         total_slides = len(slides)
         
         logger.info(
-            f"Starting async PPTX export for {total_slides} slides",
+            f"Queueing async PPTX export for {total_slides} slides (DB: {db_time:.2f}s)",
             extra={
                 "session_id": request.session_id,
                 "total_slides": total_slides,
             },
         )
         
-        # Build complete HTML for each slide
-        slides_html = []
-        for i, slide in enumerate(slides):
-            slide_html = build_slide_html(slide, slide_deck)
-            slides_html.append(slide_html)
-        
         # Prepare chart images per slide (if provided by client)
+        # This is just converting the pydantic models to dicts - fast operation
         chart_images_per_slide = None
         if request.chart_images:
             chart_images_per_slide = [
@@ -673,18 +689,22 @@ async def start_pptx_export_async(request: ExportPPTXRequest):
             ]
         
         # Generate job ID and queue for processing
+        # Pass session_id - the worker will fetch and build HTML
         job_id = generate_job_id()
         
         await enqueue_export_job(
             job_id,
             {
                 "session_id": request.session_id,
-                "slides_html": slides_html,
                 "chart_images_per_slide": chart_images_per_slide,
                 "title": slide_deck.get("title", "slides"),
                 "total_slides": total_slides,
             },
         )
+        
+        total_time = time.time() - start_time
+        print(f"[EXPORT_ASYNC] Job queued in {total_time:.2f}s, returning job_id={job_id}")
+        logger.info(f"Export job queued in {total_time:.2f}s", extra={"job_id": job_id})
         
         return ExportJobResponse(
             job_id=job_id,
@@ -696,7 +716,8 @@ async def start_pptx_export_async(request: ExportPPTXRequest):
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Failed to start async export: {e}", exc_info=True)
+        total_time = time.time() - start_time
+        logger.error(f"Failed to start async export after {total_time:.2f}s: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 
