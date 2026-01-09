@@ -17,10 +17,17 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/export", tags=["export"])
 
 
+class ChartImage(BaseModel):
+    """Chart image data from client-side capture."""
+    canvas_id: str  # Canvas ID or index (e.g., "chart_0", "my_chart")
+    base64_data: str  # Base64 PNG data URL (data:image/png;base64,...)
+
+
 class ExportPPTXRequest(BaseModel):
     """Request to export slides to PPTX."""
     session_id: str  # Session ID to get slides from
     use_screenshot: bool = True  # Whether to use screenshot for charts
+    chart_images: Optional[list[list[ChartImage]]] = None  # Chart images per slide (client-side captured)
 
 
 def build_slide_html(slide: dict, slide_deck: dict) -> str:
@@ -117,7 +124,7 @@ def build_slide_html(slide: dict, slide_deck: dict) -> str:
 <body>
 {raw_slide_html}
   <script>
-    // Optimized chart initialization for file:// protocol and Playwright
+    // Chart initialization (client-side capture now used instead of server-side)
     (function() {{
       function initCharts() {{
         console.log('[CHART_INIT] Starting chart initialization process...');
@@ -495,12 +502,33 @@ async def export_to_pptx(request: ExportPPTXRequest):
                 }
             )
             
+            # Prepare chart images per slide (if provided by client)
+            chart_images_per_slide = None
+            if request.chart_images:
+                # Convert ChartImage objects to dicts
+                chart_images_per_slide = []
+                for slide_idx, slide_charts in enumerate(request.chart_images):
+                    chart_dict = {img.canvas_id: img.base64_data for img in slide_charts}
+                    chart_images_per_slide.append(chart_dict)
+                    if chart_dict:
+                        print(f"[EXPORT] Slide {slide_idx + 1}: {len(chart_dict)} chart images (IDs: {list(chart_dict.keys())})")
+                    else:
+                        print(f"[EXPORT] Slide {slide_idx + 1}: No chart images")
+                logger.info(
+                    "Using client-provided chart images",
+                    extra={"slides_with_charts": len([c for c in chart_images_per_slide if c]), "total_slides": len(chart_images_per_slide)}
+                )
+                print(f"[EXPORT] Using client-provided chart images for {len([c for c in chart_images_per_slide if c])} of {len(chart_images_per_slide)} slides")
+            else:
+                print(f"[EXPORT] No chart_images in request (request.chart_images is {request.chart_images})")
+            
             # Convert to PPTX
             await converter.convert_slide_deck(
                 slides=slides_html,
                 output_path=output_path,
                 use_screenshot=request.use_screenshot,
-                html_source_paths=html_files if request.use_screenshot else None
+                html_source_paths=html_files if request.use_screenshot and not request.chart_images else None,
+                chart_images_per_slide=chart_images_per_slide
             )
             
             # Generate filename
@@ -566,3 +594,211 @@ async def export_to_pptx(request: ExportPPTXRequest):
         raise HTTPException(status_code=500, detail=f"Export failed: {str(e)}")
 
 
+# =============================================================================
+# Async PPTX Export Endpoints (polling-based for large decks)
+# =============================================================================
+
+
+class ExportJobResponse(BaseModel):
+    """Response from async export endpoints."""
+    job_id: str
+    status: str  # pending, running, completed, error
+    progress: int = 0
+    total_slides: int = 0
+    error: Optional[str] = None
+
+
+@router.post("/pptx/async", response_model=ExportJobResponse)
+async def start_pptx_export_async(request: ExportPPTXRequest):
+    """Start async PPTX export for background processing.
+    
+    Use this endpoint for large slide decks that would timeout with the
+    synchronous /pptx endpoint.
+    
+    Flow:
+    1. POST /api/export/pptx/async -> returns job_id
+    2. Poll GET /api/export/pptx/poll/{job_id} until status is completed/error
+    3. GET /api/export/pptx/download/{job_id} to download the file
+    
+    Args:
+        request: Export request with session_id and chart_images
+    
+    Returns:
+        ExportJobResponse with job_id and initial status
+    
+    Raises:
+        HTTPException: 404 if no slides available
+    """
+    import asyncio
+    from src.api.services.export_job_queue import (
+        enqueue_export_job,
+        generate_job_id,
+    )
+    
+    import time
+    start_time = time.time()
+    
+    # Log immediately to confirm request was received and parsed
+    print(f"[EXPORT_ASYNC] Handler started at {start_time:.3f}")
+    
+    chart_count = len(request.chart_images) if request.chart_images else 0
+    chart_data_size = 0
+    if request.chart_images:
+        for slide_charts in request.chart_images:
+            for img in slide_charts:
+                chart_data_size += len(img.base64_data) if img.base64_data else 0
+    
+    logger.info(
+        f"Received async PPTX export request (chart_images: {chart_count} slides, ~{chart_data_size // 1024}KB)",
+        extra={"session_id": request.session_id},
+    )
+    print(f"[EXPORT_ASYNC] Request parsed: {chart_count} slides with chart images (~{chart_data_size // 1024}KB)")
+    
+    try:
+        # Get current slide deck - just validate it exists and get count
+        # Don't build HTML here - that happens in the background worker
+        # Use asyncio.to_thread to avoid blocking
+        chat_service = get_chat_service()
+        
+        db_start = time.time()
+        slide_deck = await asyncio.to_thread(chat_service.get_slides, request.session_id)
+        db_time = time.time() - db_start
+        print(f"[EXPORT_ASYNC] DB fetch took {db_time:.2f}s")
+        
+        if not slide_deck or not slide_deck.get("slides"):
+            raise HTTPException(status_code=404, detail="No slides available")
+        
+        slides = slide_deck.get("slides", [])
+        total_slides = len(slides)
+        
+        logger.info(
+            f"Queueing async PPTX export for {total_slides} slides (DB: {db_time:.2f}s)",
+            extra={
+                "session_id": request.session_id,
+                "total_slides": total_slides,
+            },
+        )
+        
+        # Prepare chart images per slide (if provided by client)
+        # This is just converting the pydantic models to dicts - fast operation
+        chart_images_per_slide = None
+        if request.chart_images:
+            chart_images_per_slide = [
+                {img.canvas_id: img.base64_data for img in slide_charts}
+                for slide_charts in request.chart_images
+            ]
+        
+        # Generate job ID and queue for processing
+        # Pass session_id - the worker will fetch and build HTML
+        job_id = generate_job_id()
+        
+        await enqueue_export_job(
+            job_id,
+            {
+                "session_id": request.session_id,
+                "chart_images_per_slide": chart_images_per_slide,
+                "title": slide_deck.get("title", "slides"),
+                "total_slides": total_slides,
+            },
+        )
+        
+        total_time = time.time() - start_time
+        print(f"[EXPORT_ASYNC] Job queued in {total_time:.2f}s, returning job_id={job_id}")
+        logger.info(f"Export job queued in {total_time:.2f}s", extra={"job_id": job_id})
+        
+        return ExportJobResponse(
+            job_id=job_id,
+            status="pending",
+            progress=0,
+            total_slides=total_slides,
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        total_time = time.time() - start_time
+        logger.error(f"Failed to start async export after {total_time:.2f}s: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/pptx/poll/{job_id}", response_model=ExportJobResponse)
+async def poll_pptx_export(job_id: str):
+    """Poll for PPTX export status and progress.
+    
+    Args:
+        job_id: Job ID from start_pptx_export_async
+    
+    Returns:
+        ExportJobResponse with current status and progress
+    
+    Raises:
+        HTTPException: 404 if job not found
+    """
+    from src.api.services.export_job_queue import get_export_job_status
+    
+    job = get_export_job_status(job_id)
+    
+    if not job:
+        raise HTTPException(status_code=404, detail="Export job not found")
+    
+    return ExportJobResponse(
+        job_id=job_id,
+        status=job["status"],
+        progress=job.get("progress", 0),
+        total_slides=job.get("total_slides", 0),
+        error=job.get("error"),
+    )
+
+
+@router.get("/pptx/download/{job_id}")
+async def download_pptx_export(job_id: str, background_tasks: BackgroundTasks):
+    """Download completed PPTX export.
+    
+    Args:
+        job_id: Job ID from start_pptx_export_async
+        background_tasks: FastAPI background tasks for cleanup
+    
+    Returns:
+        FileResponse with PPTX file
+    
+    Raises:
+        HTTPException: 404 if job not found, 400 if not completed
+    """
+    from src.api.services.export_job_queue import (
+        get_export_job_status,
+        cleanup_export_job,
+    )
+    
+    job = get_export_job_status(job_id)
+    
+    if not job:
+        raise HTTPException(status_code=404, detail="Export job not found")
+    
+    if job["status"] != "completed":
+        raise HTTPException(
+            status_code=400,
+            detail=f"Export not ready. Status: {job['status']}",
+        )
+    
+    output_path = job.get("output_path")
+    if not output_path or not Path(output_path).exists():
+        raise HTTPException(status_code=404, detail="Export file not found")
+    
+    # Generate filename
+    title = job.get("title", "slides")
+    safe_title = "".join(c if c.isalnum() or c in (' ', '-', '_') else '_' for c in title)
+    filename = f"{safe_title.replace(' ', '_')}.pptx"
+    
+    logger.info(
+        "Serving PPTX download",
+        extra={"job_id": job_id, "filename": filename},
+    )
+    
+    # Schedule cleanup after download
+    background_tasks.add_task(cleanup_export_job, job_id)
+    
+    return FileResponse(
+        path=output_path,
+        filename=filename,
+        media_type="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    )

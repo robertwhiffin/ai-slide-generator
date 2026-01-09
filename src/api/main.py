@@ -27,6 +27,7 @@ from src.api.routes.settings import (
     slide_styles_router,
 )
 from src.api.services.job_queue import recover_stuck_requests, start_worker
+from src.api.services.export_job_queue import start_export_worker
 
 logger = logging.getLogger(__name__)
 
@@ -34,14 +35,15 @@ logger = logging.getLogger(__name__)
 ENVIRONMENT = os.getenv("ENVIRONMENT", "development")
 IS_PRODUCTION = ENVIRONMENT == "production"
 
-# Worker task reference for cleanup
+# Worker task references for cleanup
 _worker_task = None
+_export_worker_task = None
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Lifespan context manager for startup/shutdown events."""
-    global _worker_task
+    global _worker_task, _export_worker_task
 
     # Startup
     logger.info(f"Starting AI Slide Generator API (environment: {ENVIRONMENT})")
@@ -50,7 +52,11 @@ async def lifespan(app: FastAPI):
 
     # Start the job queue worker for async chat processing
     _worker_task = await start_worker()
-    logger.info("Job queue worker started")
+    logger.info("Chat job queue worker started")
+
+    # Start the export worker for async PPTX export processing
+    _export_worker_task = await start_export_worker()
+    logger.info("Export job queue worker started")
 
     # Recover any stuck requests from previous crashes
     try:
@@ -65,14 +71,22 @@ async def lifespan(app: FastAPI):
     # Shutdown
     logger.info("Shutting down AI Slide Generator API")
 
-    # Cancel the worker task
+    # Cancel the worker tasks
     if _worker_task:
         _worker_task.cancel()
         try:
             await _worker_task
         except asyncio.CancelledError:
             pass
-        logger.info("Job queue worker stopped")
+        logger.info("Chat job queue worker stopped")
+
+    if _export_worker_task:
+        _export_worker_task.cancel()
+        try:
+            await _export_worker_task
+        except asyncio.CancelledError:
+            pass
+        logger.info("Export job queue worker stopped")
 
 
 # Initialize FastAPI app
