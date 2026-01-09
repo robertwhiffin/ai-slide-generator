@@ -21,12 +21,16 @@ load_dotenv()
 
 
 def _get_lakebase_token() -> str:
-    """Get OAuth token for Lakebase authentication using Databricks SDK."""
+    """Get OAuth token for Lakebase authentication using Databricks SDK.
+    
+    Uses the system client (service principal) for database authentication.
+    User tokens are not valid for Lakebase access.
+    """
     try:
-        from databricks.sdk import WorkspaceClient
+        from src.core.databricks_client import get_system_client
         import uuid
 
-        ws = WorkspaceClient()
+        ws = get_system_client()
 
         # Get instance name from env or try to derive it
         instance_name = os.getenv("LAKEBASE_INSTANCE")
