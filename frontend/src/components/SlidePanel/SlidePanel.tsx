@@ -48,6 +48,7 @@ export const SlidePanel: React.FC<SlidePanelProps> = ({ slideDeck, rawHtml, onSl
   const [viewMode, setViewMode] = useState<ViewMode>('tiles');
   const [isExportingPDF, setIsExportingPDF] = useState(false);
   const [isExportingPPTX, setIsExportingPPTX] = useState(false);
+  const [exportProgress, setExportProgress] = useState<{ current: number; total: number; status: string } | null>(null);
   const [showExportMenu, setShowExportMenu] = useState(false);
   const exportMenuRef = useRef<HTMLDivElement>(null);
   const [isPresentationMode, setIsPresentationMode] = useState(false);
@@ -234,9 +235,18 @@ export const SlidePanel: React.FC<SlidePanelProps> = ({ slideDeck, rawHtml, onSl
     
     setIsExportingPPTX(true);
     setShowExportMenu(false);
+    setExportProgress({ current: 0, total: slideDeck.slides.length, status: 'Starting...' });
     
     try {
-      const blob = await api.exportToPPTX(sessionId, true, slideDeck);
+      const blob = await api.exportToPPTX(
+        sessionId, 
+        true, 
+        slideDeck,
+        // Progress callback
+        (progress, total, status) => {
+          setExportProgress({ current: progress, total, status });
+        }
+      );
       
       // Create download link
       const url = window.URL.createObjectURL(blob);
@@ -256,6 +266,7 @@ export const SlidePanel: React.FC<SlidePanelProps> = ({ slideDeck, rawHtml, onSl
       alert(message);
     } finally {
       setIsExportingPPTX(false);
+      setExportProgress(null);
     }
   };
 
@@ -540,7 +551,8 @@ export const SlidePanel: React.FC<SlidePanelProps> = ({ slideDeck, rawHtml, onSl
               {slideDeck.slide_count} slide{slideDeck.slide_count !== 1 ? 's' : ''}
               {isReordering && ' • Reordering...'}
               {isExportingPDF && ' • Exporting PDF...'}
-              {isExportingPPTX && ' • Exporting PowerPoint...'}
+              {isExportingPPTX && exportProgress && ` • ${exportProgress.status}`}
+              {isExportingPPTX && !exportProgress && ' • Exporting PowerPoint...'}
               {isAutoVerifying && ` • Verifying ${verifyingSlides.size} slide${verifyingSlides.size !== 1 ? 's' : ''}...`}
             </p>
           </div>

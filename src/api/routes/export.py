@@ -594,3 +594,190 @@ async def export_to_pptx(request: ExportPPTXRequest):
         raise HTTPException(status_code=500, detail=f"Export failed: {str(e)}")
 
 
+# =============================================================================
+# Async PPTX Export Endpoints (polling-based for large decks)
+# =============================================================================
+
+
+class ExportJobResponse(BaseModel):
+    """Response from async export endpoints."""
+    job_id: str
+    status: str  # pending, running, completed, error
+    progress: int = 0
+    total_slides: int = 0
+    error: Optional[str] = None
+
+
+@router.post("/pptx/async", response_model=ExportJobResponse)
+async def start_pptx_export_async(request: ExportPPTXRequest):
+    """Start async PPTX export for background processing.
+    
+    Use this endpoint for large slide decks that would timeout with the
+    synchronous /pptx endpoint.
+    
+    Flow:
+    1. POST /api/export/pptx/async -> returns job_id
+    2. Poll GET /api/export/pptx/poll/{job_id} until status is completed/error
+    3. GET /api/export/pptx/download/{job_id} to download the file
+    
+    Args:
+        request: Export request with session_id and chart_images
+    
+    Returns:
+        ExportJobResponse with job_id and initial status
+    
+    Raises:
+        HTTPException: 404 if no slides available
+    """
+    from src.api.services.export_job_queue import (
+        enqueue_export_job,
+        generate_job_id,
+    )
+    
+    logger.info(
+        "Received async PPTX export request",
+        extra={"session_id": request.session_id},
+    )
+    
+    try:
+        # Get current slide deck
+        chat_service = get_chat_service()
+        slide_deck = chat_service.get_slides(request.session_id)
+        
+        if not slide_deck or not slide_deck.get("slides"):
+            raise HTTPException(status_code=404, detail="No slides available")
+        
+        slides = slide_deck.get("slides", [])
+        total_slides = len(slides)
+        
+        logger.info(
+            f"Starting async PPTX export for {total_slides} slides",
+            extra={
+                "session_id": request.session_id,
+                "total_slides": total_slides,
+            },
+        )
+        
+        # Build complete HTML for each slide
+        slides_html = []
+        for i, slide in enumerate(slides):
+            slide_html = build_slide_html(slide, slide_deck)
+            slides_html.append(slide_html)
+        
+        # Prepare chart images per slide (if provided by client)
+        chart_images_per_slide = None
+        if request.chart_images:
+            chart_images_per_slide = [
+                {img.canvas_id: img.base64_data for img in slide_charts}
+                for slide_charts in request.chart_images
+            ]
+        
+        # Generate job ID and queue for processing
+        job_id = generate_job_id()
+        
+        await enqueue_export_job(
+            job_id,
+            {
+                "session_id": request.session_id,
+                "slides_html": slides_html,
+                "chart_images_per_slide": chart_images_per_slide,
+                "title": slide_deck.get("title", "slides"),
+                "total_slides": total_slides,
+            },
+        )
+        
+        return ExportJobResponse(
+            job_id=job_id,
+            status="pending",
+            progress=0,
+            total_slides=total_slides,
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to start async export: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/pptx/poll/{job_id}", response_model=ExportJobResponse)
+async def poll_pptx_export(job_id: str):
+    """Poll for PPTX export status and progress.
+    
+    Args:
+        job_id: Job ID from start_pptx_export_async
+    
+    Returns:
+        ExportJobResponse with current status and progress
+    
+    Raises:
+        HTTPException: 404 if job not found
+    """
+    from src.api.services.export_job_queue import get_export_job_status
+    
+    job = get_export_job_status(job_id)
+    
+    if not job:
+        raise HTTPException(status_code=404, detail="Export job not found")
+    
+    return ExportJobResponse(
+        job_id=job_id,
+        status=job["status"],
+        progress=job.get("progress", 0),
+        total_slides=job.get("total_slides", 0),
+        error=job.get("error"),
+    )
+
+
+@router.get("/pptx/download/{job_id}")
+async def download_pptx_export(job_id: str, background_tasks: BackgroundTasks):
+    """Download completed PPTX export.
+    
+    Args:
+        job_id: Job ID from start_pptx_export_async
+        background_tasks: FastAPI background tasks for cleanup
+    
+    Returns:
+        FileResponse with PPTX file
+    
+    Raises:
+        HTTPException: 404 if job not found, 400 if not completed
+    """
+    from src.api.services.export_job_queue import (
+        get_export_job_status,
+        cleanup_export_job,
+    )
+    
+    job = get_export_job_status(job_id)
+    
+    if not job:
+        raise HTTPException(status_code=404, detail="Export job not found")
+    
+    if job["status"] != "completed":
+        raise HTTPException(
+            status_code=400,
+            detail=f"Export not ready. Status: {job['status']}",
+        )
+    
+    output_path = job.get("output_path")
+    if not output_path or not Path(output_path).exists():
+        raise HTTPException(status_code=404, detail="Export file not found")
+    
+    # Generate filename
+    title = job.get("title", "slides")
+    safe_title = "".join(c if c.isalnum() or c in (' ', '-', '_') else '_' for c in title)
+    filename = f"{safe_title.replace(' ', '_')}.pptx"
+    
+    logger.info(
+        "Serving PPTX download",
+        extra={"job_id": job_id, "filename": filename},
+    )
+    
+    # Schedule cleanup after download
+    background_tasks.add_task(cleanup_export_job, job_id)
+    
+    return FileResponse(
+        path=output_path,
+        filename=filename,
+        media_type="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    )
