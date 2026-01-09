@@ -19,6 +19,9 @@ Use the `deploy.sh` wrapper script from the project root (activates venv automat
 # Update with database reset (drop and recreate tables first)
 ./deploy.sh update --env development --profile <profile> --reset-db
 
+# Reset with Databricks-specific content (internal use)
+./deploy.sh update --env development --profile <profile> --reset-db --include-databricks-prompts
+
 # Validate without deploying
 ./deploy.sh create --env production --profile <profile> --dry-run
 ```
@@ -47,9 +50,12 @@ python -m db_app_deployment.deploy --create --env development --profile <profile
 | `--delete` | three | Delete app |
 | `--profile` | Yes | Databricks CLI profile from `~/.databrickscfg` |
 | `--reset-db` | No | Drop and recreate database tables before deploying |
+| `--include-databricks-prompts` | No | Include Databricks-specific deck prompts and brand style (requires `--reset-db`) |
 | `--dry-run` | No | Validate config without deploying |
 
 > **Warning:** `--reset-db` deletes all data, is blocked in production, and requires typing `RESET` to confirm.
+>
+> **Note:** `--include-databricks-prompts` requires `--reset-db` and will fail if used without it.
 
 ---
 
@@ -91,7 +97,25 @@ This will:
 1. Connect to Lakebase instance
 2. Drop all tables in the app schema
 3. Recreate tables from current SQLAlchemy models
-4. Deploy the updated application code
+4. Seed default data (see below)
+5. Deploy the updated application code
+
+### Database Seeding
+
+When resetting the database, the following content is seeded:
+
+**Default (external releases):**
+- Generic deck prompts: Quarterly Business Review, Executive Summary
+- System Default slide style
+
+**With `--include-databricks-prompts` (internal use):**
+- All generic deck prompts (above)
+- Databricks-specific deck prompts: Consumption Review, Use Case Analysis
+- Databricks Brand slide style
+
+> **Note:** No profiles are seeded during deployment. Users create their own profiles via the UI.
+>
+> For local development with pre-configured profiles, use `scripts/init_database.py` instead.
 
 ---
 
