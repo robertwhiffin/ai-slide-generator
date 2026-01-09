@@ -569,7 +569,7 @@ def reset_database_tables(
     schema: str,
 ) -> None:
     """
-    Drop and recreate all database tables.
+    Drop and recreate all database tables, then seed with default data.
 
     WARNING: This will delete all data in the schema!
 
@@ -584,6 +584,7 @@ def reset_database_tables(
 
     try:
         from sqlalchemy import create_engine, text
+        from sqlalchemy.orm import sessionmaker
 
         from src.core.database import Base
         from src.core.lakebase import get_lakebase_connection_url
@@ -611,10 +612,162 @@ def reset_database_tables(
         Base.metadata.create_all(bind=engine)
         print("  ✅ Tables recreated")
 
+        # Seed default data (deck prompts, slide styles, profiles)
+        print("  Seeding default data...")
+        _seed_default_data(engine, schema, workspace_client)
+        print("  ✅ Default data seeded")
+
         print("✅ Database reset complete")
 
     except Exception as e:
         raise DeploymentError(f"Database reset failed: {e}") from e
+
+
+def _seed_default_data(engine, schema: str, workspace_client: WorkspaceClient) -> None:
+    """Seed default deck prompts, slide styles, and profiles after reset."""
+    import os
+    from pathlib import Path
+
+    import yaml
+    from sqlalchemy import text
+    from sqlalchemy.orm import sessionmaker
+
+    from src.core.defaults import DEFAULT_CONFIG
+    from src.core.init_default_profile import DEFAULT_DECK_PROMPTS, DEFAULT_SLIDE_STYLES
+    from src.database.models import (
+        ConfigAIInfra,
+        ConfigGenieSpace,
+        ConfigMLflow,
+        ConfigProfile,
+        ConfigPrompts,
+        SlideDeckPromptLibrary,
+        SlideStyleLibrary,
+    )
+
+    Session = sessionmaker(bind=engine)
+    
+    with Session() as db:
+        # Set search path for this session
+        db.execute(text(f'SET search_path TO "{schema}"'))
+        
+        # Seed deck prompts
+        for prompt_data in DEFAULT_DECK_PROMPTS:
+            prompt = SlideDeckPromptLibrary(
+                name=prompt_data["name"],
+                description=prompt_data["description"],
+                category=prompt_data["category"],
+                prompt_content=prompt_data["prompt_content"],
+                is_active=True,
+                created_by="system",
+                updated_by="system",
+            )
+            db.add(prompt)
+        print(f"    ✓ Seeded {len(DEFAULT_DECK_PROMPTS)} deck prompts")
+
+        # Seed slide styles and track default
+        default_style_id = None
+        for style_data in DEFAULT_SLIDE_STYLES:
+            style = SlideStyleLibrary(
+                name=style_data["name"],
+                description=style_data["description"],
+                category=style_data["category"],
+                style_content=style_data["style_content"],
+                is_active=True,
+                is_system=style_data.get("is_system", False),
+                created_by="system",
+                updated_by="system",
+            )
+            db.add(style)
+            db.flush()
+            if style_data["name"] == "Databricks Brand":
+                default_style_id = style.id
+        print(f"    ✓ Seeded {len(DEFAULT_SLIDE_STYLES)} slide styles")
+
+        # Load and create seed profiles
+        seed_file = Path(__file__).parent.parent / "config" / "seed_profiles.yaml"
+        if not seed_file.exists():
+            print("    ⚠️  No seed_profiles.yaml found, skipping profile creation")
+            db.commit()
+            return
+
+        with open(seed_file, "r") as f:
+            data = yaml.safe_load(f)
+        seed_profiles = data.get("profiles", [])
+
+        if not seed_profiles:
+            print("    ⚠️  No profiles in seed_profiles.yaml")
+            db.commit()
+            return
+
+        # Get username for MLflow experiment
+        try:
+            username = workspace_client.current_user.me().user_name
+        except Exception:
+            username = os.getenv("USER", "default_user")
+
+        for seed in seed_profiles:
+            # Create profile
+            profile = ConfigProfile(
+                name=seed["name"],
+                description=seed["description"],
+                is_default=seed.get("is_default", False),
+                created_by=seed.get("created_by", "system"),
+            )
+            db.add(profile)
+            db.flush()
+
+            # Create AI infrastructure
+            ai_config = seed.get("ai_infra", {})
+            if ai_config:
+                ai_infra = ConfigAIInfra(
+                    profile_id=profile.id,
+                    llm_endpoint=ai_config["llm_endpoint"],
+                    llm_temperature=ai_config["llm_temperature"],
+                    llm_max_tokens=ai_config["llm_max_tokens"],
+                )
+                db.add(ai_infra)
+
+            # Create Genie space
+            genie_config = seed.get("genie_space", {})
+            if genie_config:
+                genie_space = ConfigGenieSpace(
+                    profile_id=profile.id,
+                    space_id=genie_config["space_id"],
+                    space_name=genie_config["space_name"],
+                    description=genie_config.get("description", ""),
+                )
+                db.add(genie_space)
+
+            # Create MLflow settings
+            mlflow_config = seed.get("mlflow", {})
+            if mlflow_config:
+                experiment_name = mlflow_config["experiment_name"].format(username=username)
+                mlflow = ConfigMLflow(
+                    profile_id=profile.id,
+                    experiment_name=experiment_name,
+                )
+                db.add(mlflow)
+
+            # Create prompts with default slide style
+            prompts_config = seed.get("prompts", {})
+            system_prompt = prompts_config.get("system_prompt", "USE_DEFAULT")
+            slide_editing = prompts_config.get("slide_editing_instructions", "USE_DEFAULT")
+
+            if system_prompt == "USE_DEFAULT":
+                system_prompt = DEFAULT_CONFIG["prompts"]["system_prompt"]
+            if slide_editing == "USE_DEFAULT":
+                slide_editing = DEFAULT_CONFIG["prompts"]["slide_editing_instructions"]
+
+            prompts = ConfigPrompts(
+                profile_id=profile.id,
+                selected_slide_style_id=default_style_id,
+                system_prompt=system_prompt,
+                slide_editing_instructions=slide_editing,
+            )
+            db.add(prompts)
+
+        db.commit()
+        print(f"    ✓ Created {len(seed_profiles)} profiles from seed_profiles.yaml")
 
 
 def deploy(
