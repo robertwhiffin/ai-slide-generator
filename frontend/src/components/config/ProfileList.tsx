@@ -41,16 +41,21 @@ export const ProfileList: React.FC<ProfileListProps> = ({ onProfileChange }) => 
     isOpen: boolean;
     title: string;
     message: string;
+    error?: string | null;
+    loading?: boolean;
     onConfirm: () => void;
   }>({
     isOpen: false,
     title: '',
     message: '',
+    error: null,
+    loading: false,
     onConfirm: () => {},
   });
   const [actionLoading, setActionLoading] = useState<number | null>(null);
   const [duplicateName, setDuplicateName] = useState('');
   const [showDuplicateInput, setShowDuplicateInput] = useState<number | null>(null);
+  const [duplicateError, setDuplicateError] = useState<string | null>(null);
   const [viewingProfileId, setViewingProfileId] = useState<number | null>(null);
   const [viewingProfileMode, setViewingProfileMode] = useState<'view' | 'edit'>('view');
 
@@ -83,15 +88,14 @@ export const ProfileList: React.FC<ProfileListProps> = ({ onProfileChange }) => 
   // Handle wizard success
   const handleWizardSuccess = async (profileId: number) => {
     setShowCreationWizard(false);
-    // Set as default and load the new profile
+    // Load the new profile (default is only set automatically for the first profile by the backend)
     try {
-      await setDefaultProfile(profileId);
       await loadProfile(profileId);
       if (onProfileChange) {
         onProfileChange();
       }
     } catch (err) {
-      console.error('Failed to activate new profile:', err);
+      console.error('Failed to load new profile:', err);
     }
   };
 
@@ -108,13 +112,19 @@ export const ProfileList: React.FC<ProfileListProps> = ({ onProfileChange }) => 
       isOpen: true,
       title: 'Delete Profile',
       message: `Are you sure you want to delete the profile "${profile.name}"?\n\nThis action cannot be undone and will delete all associated configurations.`,
+      error: null,
+      loading: false,
       onConfirm: async () => {
+        setConfirmDialog(prev => ({ ...prev, loading: true, error: null }));
         setActionLoading(profile.id);
         try {
           await deleteProfile(profile.id);
+          setConfirmDialog(prev => ({ ...prev, isOpen: false, loading: false }));
+        } catch (err) {
+          const message = err instanceof Error ? err.message : 'Failed to delete profile';
+          setConfirmDialog(prev => ({ ...prev, error: message, loading: false }));
         } finally {
           setActionLoading(null);
-          setConfirmDialog({ ...confirmDialog, isOpen: false });
         }
       },
     });
@@ -126,13 +136,19 @@ export const ProfileList: React.FC<ProfileListProps> = ({ onProfileChange }) => 
       isOpen: true,
       title: 'Set Default Profile',
       message: `Set "${profile.name}" as the default profile?\n\nThe default profile is loaded when the application starts.`,
+      error: null,
+      loading: false,
       onConfirm: async () => {
+        setConfirmDialog(prev => ({ ...prev, loading: true, error: null }));
         setActionLoading(profile.id);
         try {
           await setDefaultProfile(profile.id);
+          setConfirmDialog(prev => ({ ...prev, isOpen: false, loading: false }));
+        } catch (err) {
+          const message = err instanceof Error ? err.message : 'Failed to set default profile';
+          setConfirmDialog(prev => ({ ...prev, error: message, loading: false }));
         } finally {
           setActionLoading(null);
-          setConfirmDialog({ ...confirmDialog, isOpen: false });
         }
       },
     });
@@ -144,7 +160,10 @@ export const ProfileList: React.FC<ProfileListProps> = ({ onProfileChange }) => 
       isOpen: true,
       title: 'Load Profile',
       message: `Load "${profile.name}" and hot-reload the application configuration?\n\nCurrent sessions will be preserved.`,
+      error: null,
+      loading: false,
       onConfirm: async () => {
+        setConfirmDialog(prev => ({ ...prev, loading: true, error: null }));
         setActionLoading(profile.id);
         try {
           await loadProfile(profile.id);
@@ -152,9 +171,12 @@ export const ProfileList: React.FC<ProfileListProps> = ({ onProfileChange }) => 
           if (onProfileChange) {
             onProfileChange();
           }
+          setConfirmDialog(prev => ({ ...prev, isOpen: false, loading: false }));
+        } catch (err) {
+          const message = err instanceof Error ? err.message : 'Failed to load profile';
+          setConfirmDialog(prev => ({ ...prev, error: message, loading: false }));
         } finally {
           setActionLoading(null);
-          setConfirmDialog({ ...confirmDialog, isOpen: false });
         }
       },
     });
@@ -164,16 +186,36 @@ export const ProfileList: React.FC<ProfileListProps> = ({ onProfileChange }) => 
   const handleDuplicateClick = (profile: Profile) => {
     setDuplicateName(`${profile.name} (Copy)`);
     setShowDuplicateInput(profile.id);
+    setDuplicateError(null);
+  };
+
+  const handleDuplicateCancel = () => {
+    setShowDuplicateInput(null);
+    setDuplicateName('');
+    setDuplicateError(null);
   };
 
   const handleDuplicateSubmit = async (profileId: number) => {
-    if (!duplicateName.trim()) return;
+    const trimmedName = duplicateName.trim();
+    if (!trimmedName) return;
     
+    // Client-side check for duplicate name
+    const nameExists = profiles.some(p => p.name.toLowerCase() === trimmedName.toLowerCase());
+    if (nameExists) {
+      setDuplicateError(`A profile named "${trimmedName}" already exists. Please choose a different name.`);
+      return;
+    }
+    
+    setDuplicateError(null);
     setActionLoading(profileId);
     try {
-      await duplicateProfile(profileId, duplicateName.trim());
+      await duplicateProfile(profileId, trimmedName);
       setShowDuplicateInput(null);
       setDuplicateName('');
+    } catch (err) {
+      // Show error inline instead of letting it propagate
+      const message = err instanceof Error ? err.message : 'Failed to duplicate profile';
+      setDuplicateError(message);
     } finally {
       setActionLoading(null);
     }
@@ -334,35 +376,55 @@ export const ProfileList: React.FC<ProfileListProps> = ({ onProfileChange }) => 
                 {showDuplicateInput === profile.id && (
                   <tr>
                     <td colSpan={4} className="px-4 py-3 bg-gray-50">
-                      <div className="flex items-center gap-3">
-                        <label className="text-sm text-gray-700 font-medium">
-                          New name:
-                        </label>
-                        <input
-                          type="text"
-                          value={duplicateName}
-                          onChange={(e) => setDuplicateName(e.target.value)}
-                          className="flex-1 px-3 py-1 border border-gray-300 rounded text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-                          placeholder="Enter new profile name"
-                          maxLength={100}
-                          autoFocus
-                        />
-                        <button
-                          onClick={() => handleDuplicateSubmit(profile.id)}
-                          disabled={!duplicateName.trim() || actionLoading === profile.id}
-                          className="px-3 py-1 bg-green-500 hover:bg-green-600 text-white text-sm rounded transition-colors disabled:bg-gray-300"
-                        >
-                          Create
-                        </button>
-                        <button
-                          onClick={() => {
-                            setShowDuplicateInput(null);
-                            setDuplicateName('');
-                          }}
-                          className="px-3 py-1 bg-gray-300 hover:bg-gray-400 text-gray-800 text-sm rounded transition-colors"
-                        >
-                          Cancel
-                        </button>
+                      <div className="space-y-2">
+                        <div className="flex items-center gap-3">
+                          <label className="text-sm text-gray-700 font-medium">
+                            New name:
+                          </label>
+                          <input
+                            type="text"
+                            value={duplicateName}
+                            onChange={(e) => {
+                              setDuplicateName(e.target.value);
+                              setDuplicateError(null); // Clear error when user types
+                            }}
+                            onKeyDown={(e) => {
+                              if (e.key === 'Enter' && duplicateName.trim()) {
+                                handleDuplicateSubmit(profile.id);
+                              } else if (e.key === 'Escape') {
+                                handleDuplicateCancel();
+                              }
+                            }}
+                            className={`flex-1 px-3 py-1 border rounded text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 ${
+                              duplicateError ? 'border-red-400 bg-red-50' : 'border-gray-300'
+                            }`}
+                            placeholder="Enter new profile name"
+                            maxLength={100}
+                            autoFocus
+                          />
+                          <button
+                            onClick={() => handleDuplicateSubmit(profile.id)}
+                            disabled={!duplicateName.trim() || actionLoading === profile.id}
+                            className="px-3 py-1 bg-green-500 hover:bg-green-600 text-white text-sm rounded transition-colors disabled:bg-gray-300"
+                          >
+                            {actionLoading === profile.id ? 'Creating...' : 'Create'}
+                          </button>
+                          <button
+                            onClick={handleDuplicateCancel}
+                            className="px-3 py-1 bg-gray-300 hover:bg-gray-400 text-gray-800 text-sm rounded transition-colors"
+                          >
+                            Cancel
+                          </button>
+                        </div>
+                        {/* Error Message */}
+                        {duplicateError && (
+                          <div className="flex items-center gap-2 px-3 py-2 bg-red-50 border border-red-200 rounded text-sm text-red-700">
+                            <svg className="w-4 h-4 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20">
+                              <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.707 7.293a1 1 0 00-1.414 1.414L8.586 10l-1.293 1.293a1 1 0 101.414 1.414L10 11.414l1.293 1.293a1 1 0 001.414-1.414L11.414 10l1.293-1.293a1 1 0 00-1.414-1.414L10 8.586 8.707 7.293z" clipRule="evenodd" />
+                            </svg>
+                            <span>{duplicateError}</span>
+                          </div>
+                        )}
                       </div>
                     </td>
                   </tr>
@@ -404,8 +466,10 @@ export const ProfileList: React.FC<ProfileListProps> = ({ onProfileChange }) => 
         isOpen={confirmDialog.isOpen}
         title={confirmDialog.title}
         message={confirmDialog.message}
+        error={confirmDialog.error}
+        loading={confirmDialog.loading}
         onConfirm={confirmDialog.onConfirm}
-        onCancel={() => setConfirmDialog({ ...confirmDialog, isOpen: false })}
+        onCancel={() => setConfirmDialog({ ...confirmDialog, isOpen: false, error: null })}
       />
 
       {/* Profile Detail View */}

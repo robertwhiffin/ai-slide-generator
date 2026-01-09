@@ -1,0 +1,393 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>User Journey Catalog</title>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 20px;
+      background: #1a1a2e;
+      color: #eee;
+      line-height: 1.5;
+    }
+    h1 { color: #00d4aa; margin-bottom: 10px; }
+    h2 { color: #ffd700; border-bottom: 1px solid #333; padding-bottom: 8px; margin-top: 40px; }
+    h3 { color: #7dd3fc; margin-top: 30px; }
+    .stats {
+      background: #252545;
+      padding: 15px 20px;
+      border-radius: 8px;
+      margin-bottom: 30px;
+      display: flex;
+      gap: 30px;
+      flex-wrap: wrap;
+    }
+    .stat { font-size: 14px; }
+    .stat strong { color: #00d4aa; font-size: 18px; }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin: 15px 0;
+      font-size: 13px;
+    }
+    th, td {
+      border: 1px solid #333;
+      padding: 8px 10px;
+      text-align: left;
+      vertical-align: top;
+    }
+    th { background: #252545; color: #7dd3fc; font-weight: 600; }
+    tr:hover { background: #252545; }
+    .done-cell { width: 40px; text-align: center; }
+    .id-cell { width: 130px; font-family: monospace; color: #f0a; }
+    .desc-cell { width: 250px; }
+    input[type="checkbox"] {
+      width: 18px;
+      height: 18px;
+      cursor: pointer;
+      accent-color: #00d4aa;
+    }
+    .priority { margin-top: 40px; }
+    .priority td:first-child { font-weight: bold; }
+    .p0 { color: #ff6b6b; }
+    .p1 { color: #ffa94d; }
+    .p2 { color: #ffd43b; }
+    .p3 { color: #69db7c; }
+    .clear-btn {
+      background: #ff4757;
+      color: white;
+      border: none;
+      padding: 8px 16px;
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: 13px;
+    }
+    .clear-btn:hover { background: #ff6b81; }
+  </style>
+</head>
+<body>
+  <h1>User Journey Catalog</h1>
+  <p>E2E test coverage for Databricks Storyteller. Click checkboxes to track progress.</p>
+  
+  <div class="stats">
+    <div class="stat">Total: <strong id="total">0</strong></div>
+    <div class="stat">Done: <strong id="done">0</strong></div>
+    <div class="stat">Remaining: <strong id="remaining">0</strong></div>
+    <div class="stat">Progress: <strong id="progress">0%</strong></div>
+    <button class="clear-btn" onclick="clearAll()">Clear All</button>
+  </div>
+
+  <h2>1. PROFILE MANAGEMENT</h2>
+
+  <h3>1.1 Profile Creation</h3>
+  <table>
+    <tr><th class="done-cell">Done</th><th class="id-cell">ID</th><th class="desc-cell">Description</th><th>Steps</th><th>Expected</th></tr>
+    <tr><td class="done-cell"><input type="checkbox" data-id="PROF-CREATE-1"></td><td class="id-cell">PROF-CREATE-1</td><td>Create profile by searching Genie room by name</td><td>Create → Enter name/desc → Search room → Select → Complete</td><td>Profile created, in list</td></tr>
+    <tr><td class="done-cell"><input type="checkbox" data-id="PROF-CREATE-2"></td><td class="id-cell">PROF-CREATE-2</td><td>Create profile using Genie room ID</td><td>Create → Enter ID tab → Paste ID → Complete</td><td>Room auto-populates, profile created</td></tr>
+    <tr><td class="done-cell"><input type="checkbox" data-id="PROF-CREATE-3"></td><td class="id-cell">PROF-CREATE-3</td><td>Genie room with description auto-populates</td><td>Search room with desc → Select</td><td>Description field auto-fills</td></tr>
+    <tr><td class="done-cell"><input type="checkbox" data-id="PROF-CREATE-4"></td><td class="id-cell">PROF-CREATE-4</td><td>Genie room without description leaves field empty</td><td>Search room without desc → Select</td><td>Description field empty</td></tr>
+    <tr><td class="done-cell"><input type="checkbox" data-id="PROF-CREATE-5"></td><td class="id-cell">PROF-CREATE-5</td><td>Select slide style during creation</td><td>Reach style step → Select non-default</td><td>Style saved with profile</td></tr>
+    <tr><td class="done-cell"><input type="checkbox" data-id="PROF-CREATE-6"></td><td class="id-cell">PROF-CREATE-6</td><td>Select deck prompt during creation</td><td>Reach prompt step → Select prompt</td><td>Prompt saved with profile</td></tr>
+    <tr><td class="done-cell"><input type="checkbox" data-id="PROF-CREATE-7"></td><td class="id-cell">PROF-CREATE-7</td><td>Cancel profile creation mid-wizard</td><td>Click Cancel or close modal</td><td>No profile created</td></tr>
+    <tr><td class="done-cell"><input type="checkbox" data-id="PROF-CREATE-8"></td><td class="id-cell">PROF-CREATE-8</td><td>Validation: duplicate profile name</td><td>Create profile with existing name</td><td>Error shown, blocked</td></tr>
+    <tr><td class="done-cell"><input type="checkbox" data-id="PROF-CREATE-9"></td><td class="id-cell">PROF-CREATE-9</td><td>Validation: missing required fields</td><td>Leave name empty → Try proceed</td><td>Error indicator, Next disabled</td></tr>
+    <tr><td class="done-cell"><input type="checkbox" data-id="PROF-CREATE-10"></td><td class="id-cell">PROF-CREATE-10</td><td>Validation: invalid Genie room ID</td><td>Enter invalid ID → Try proceed</td><td>Error message shown</td></tr>
+  </table>
+
+  <h3>1.2 Profile Editing</h3>
+  <table>
+    <tr><th class="done-cell">Done</th><th class="id-cell">ID</th><th class="desc-cell">Description</th><th>Steps</th><th>Expected</th></tr>
+    <tr><td class="done-cell"><input type="checkbox" data-id="PROF-EDIT-1"></td><td class="id-cell">PROF-EDIT-1</td><td>Edit profile name and description</td><td>View profile → Edit → Change → Save</td><td>Changes persist</td></tr>
+    <tr><td class="done-cell"><input type="checkbox" data-id="PROF-EDIT-2"></td><td class="id-cell">PROF-EDIT-2</td><td>Change Genie room on existing profile</td><td>Edit → Search different room → Save</td><td>New room associated</td></tr>
+    <tr><td class="done-cell"><input type="checkbox" data-id="PROF-EDIT-3"></td><td class="id-cell">PROF-EDIT-3</td><td>Change slide style on profile</td><td>Edit → Select different style → Save</td><td>Style change persists</td></tr>
+    <tr><td class="done-cell"><input type="checkbox" data-id="PROF-EDIT-4"></td><td class="id-cell">PROF-EDIT-4</td><td>Change deck prompt on profile</td><td>Edit → Select different prompt → Save</td><td>Prompt change persists</td></tr>
+    <tr><td class="done-cell"><input type="checkbox" data-id="PROF-EDIT-5"></td><td class="id-cell">PROF-EDIT-5</td><td>Cancel edit without saving</td><td>Edit → Make changes → Cancel</td><td>Original values restored</td></tr>
+    <tr><td class="done-cell"><input type="checkbox" data-id="PROF-EDIT-6"></td><td class="id-cell">PROF-EDIT-6</td><td>Cannot edit system/protected profile</td><td>View system profile → Attempt edit</td><td>Edit disabled</td></tr>
+  </table>
+
+  <h3>1.3 Profile Selection & Switching</h3>
+  <table>
+    <tr><th class="done-cell">Done</th><th class="id-cell">ID</th><th class="desc-cell">Description</th><th>Steps</th><th>Expected</th></tr>
+    <tr><td class="done-cell"><input type="checkbox" data-id="PROF-SWITCH-1"></td><td class="id-cell">PROF-SWITCH-1</td><td>Switch profile via header dropdown</td><td>Click selector → Select different</td><td>Profile switches</td></tr>
+    <tr><td class="done-cell"><input type="checkbox" data-id="PROF-SWITCH-2"></td><td class="id-cell">PROF-SWITCH-2</td><td>Switch profile clears current session</td><td>With active session → Switch profile</td><td>Session resets, slides cleared</td></tr>
+    <tr><td class="done-cell"><input type="checkbox" data-id="PROF-SWITCH-3"></td><td class="id-cell">PROF-SWITCH-3</td><td>Default profile loads on app start</td><td>Open app fresh</td><td>Default profile selected</td></tr>
+    <tr><td class="done-cell"><input type="checkbox" data-id="PROF-SWITCH-4"></td><td class="id-cell">PROF-SWITCH-4</td><td>Profile selector shows all available</td><td>Open selector</td><td>All non-archived listed</td></tr>
+  </table>
+
+  <h3>1.4 Profile Deletion</h3>
+  <table>
+    <tr><th class="done-cell">Done</th><th class="id-cell">ID</th><th class="desc-cell">Description</th><th>Steps</th><th>Expected</th></tr>
+    <tr><td class="done-cell"><input type="checkbox" data-id="PROF-DELETE-1"></td><td class="id-cell">PROF-DELETE-1</td><td>Delete non-default profile</td><td>View → Delete → Confirm</td><td>Profile removed</td></tr>
+    <tr><td class="done-cell"><input type="checkbox" data-id="PROF-DELETE-2"></td><td class="id-cell">PROF-DELETE-2</td><td>Cannot delete default profile</td><td>View default → Attempt delete</td><td>Action blocked</td></tr>
+    <tr><td class="done-cell"><input type="checkbox" data-id="PROF-DELETE-3"></td><td class="id-cell">PROF-DELETE-3</td><td>Delete confirmation dialog</td><td>Click Delete</td><td>Confirmation appears</td></tr>
+    <tr><td class="done-cell"><input type="checkbox" data-id="PROF-DELETE-4"></td><td class="id-cell">PROF-DELETE-4</td><td>Cancel delete</td><td>In confirmation → Cancel</td><td>Profile not deleted</td></tr>
+  </table>
+
+  <h2>2. SLIDE GENERATION</h2>
+
+  <h3>2.1 Basic Generation</h3>
+  <table>
+    <tr><th class="done-cell">Done</th><th class="id-cell">ID</th><th class="desc-cell">Description</th><th>Steps</th><th>Expected</th></tr>
+    <tr><td class="done-cell"><input type="checkbox" data-id="GEN-BASIC-1"></td><td class="id-cell">GEN-BASIC-1</td><td>Generate slides from simple prompt</td><td>Type prompt → Send</td><td>Slides stream in</td></tr>
+    <tr><td class="done-cell"><input type="checkbox" data-id="GEN-BASIC-2"></td><td class="id-cell">GEN-BASIC-2</td><td>Generate slides with Genie data query</td><td>Ask data question → Send</td><td>Genie queried, data in slides</td></tr>
+    <tr><td class="done-cell"><input type="checkbox" data-id="GEN-BASIC-3"></td><td class="id-cell">GEN-BASIC-3</td><td>Generate with deck prompt applied</td><td>Send request with prompt selected</td><td>Output follows prompt structure</td></tr>
+    <tr><td class="done-cell"><input type="checkbox" data-id="GEN-BASIC-4"></td><td class="id-cell">GEN-BASIC-4</td><td>Generation shows progress indicators</td><td>Send request</td><td>Loading indicators visible</td></tr>
+    <tr><td class="done-cell"><input type="checkbox" data-id="GEN-BASIC-5"></td><td class="id-cell">GEN-BASIC-5</td><td>Generated slides use selected style</td><td>Generate with style</td><td>Correct CSS applied</td></tr>
+    <tr><td class="done-cell"><input type="checkbox" data-id="GEN-BASIC-6"></td><td class="id-cell">GEN-BASIC-6</td><td>Empty prompt blocked</td><td>Try send empty</td><td>Send disabled</td></tr>
+  </table>
+
+  <h3>2.2 Generation Interruption</h3>
+  <table>
+    <tr><th class="done-cell">Done</th><th class="id-cell">ID</th><th class="desc-cell">Description</th><th>Steps</th><th>Expected</th></tr>
+    <tr><td class="done-cell"><input type="checkbox" data-id="GEN-CANCEL-1"></td><td class="id-cell">GEN-CANCEL-1</td><td>Cancel generation mid-stream</td><td>Click Cancel during generation</td><td>Stops, partial shown/cleared</td></tr>
+    <tr><td class="done-cell"><input type="checkbox" data-id="GEN-CANCEL-2"></td><td class="id-cell">GEN-CANCEL-2</td><td>Navigation blocked during generation</td><td>Try nav during generation</td><td>Disabled or warning</td></tr>
+  </table>
+
+  <h3>2.3 Iterative Editing via Chat</h3>
+  <table>
+    <tr><th class="done-cell">Done</th><th class="id-cell">ID</th><th class="desc-cell">Description</th><th>Steps</th><th>Expected</th></tr>
+    <tr><td class="done-cell"><input type="checkbox" data-id="GEN-EDIT-1"></td><td class="id-cell">GEN-EDIT-1</td><td>Modify single slide via chat</td><td>"Change slide 2 title" → Send</td><td>Only slide 2 updates</td></tr>
+    <tr><td class="done-cell"><input type="checkbox" data-id="GEN-EDIT-2"></td><td class="id-cell">GEN-EDIT-2</td><td>Add new slide to deck</td><td>"Add summary slide" → Send</td><td>New slide appended</td></tr>
+    <tr><td class="done-cell"><input type="checkbox" data-id="GEN-EDIT-3"></td><td class="id-cell">GEN-EDIT-3</td><td>Insert slide at specific position</td><td>"Insert after slide 1" → Send</td><td>Slide inserted, indices update</td></tr>
+    <tr><td class="done-cell"><input type="checkbox" data-id="GEN-EDIT-4"></td><td class="id-cell">GEN-EDIT-4</td><td>Remove slide via chat</td><td>"Remove slide 3" → Send</td><td>Slide removed</td></tr>
+    <tr><td class="done-cell"><input type="checkbox" data-id="GEN-EDIT-5"></td><td class="id-cell">GEN-EDIT-5</td><td>Regenerate all slides</td><td>"Regenerate all" → Send</td><td>All replaced</td></tr>
+    <tr><td class="done-cell"><input type="checkbox" data-id="GEN-EDIT-6"></td><td class="id-cell">GEN-EDIT-6</td><td>Request more data</td><td>Follow-up data question</td><td>Additional Genie query</td></tr>
+  </table>
+
+  <h3>2.4 Slide Selection & Targeted Actions</h3>
+  <table>
+    <tr><th class="done-cell">Done</th><th class="id-cell">ID</th><th class="desc-cell">Description</th><th>Steps</th><th>Expected</th></tr>
+    <tr><td class="done-cell"><input type="checkbox" data-id="GEN-SELECT-1"></td><td class="id-cell">GEN-SELECT-1</td><td>Select single slide</td><td>Click checkbox</td><td>"1 selected" badge</td></tr>
+    <tr><td class="done-cell"><input type="checkbox" data-id="GEN-SELECT-2"></td><td class="id-cell">GEN-SELECT-2</td><td>Select multiple slides</td><td>Click multiple checkboxes</td><td>Count badge, ribbon</td></tr>
+    <tr><td class="done-cell"><input type="checkbox" data-id="GEN-SELECT-3"></td><td class="id-cell">GEN-SELECT-3</td><td>Select all slides</td><td>Click "Select All"</td><td>All selected</td></tr>
+    <tr><td class="done-cell"><input type="checkbox" data-id="GEN-SELECT-4"></td><td class="id-cell">GEN-SELECT-4</td><td>Deselect all</td><td>Click "Deselect All"</td><td>Selection cleared</td></tr>
+    <tr><td class="done-cell"><input type="checkbox" data-id="GEN-SELECT-5"></td><td class="id-cell">GEN-SELECT-5</td><td>Edit selected slides only</td><td>Select 2+ → Edit → Send</td><td>Only selected modified</td></tr>
+    <tr><td class="done-cell"><input type="checkbox" data-id="GEN-SELECT-6"></td><td class="id-cell">GEN-SELECT-6</td><td>Selection ribbon shows actions</td><td>Select slides</td><td>Action ribbon appears</td></tr>
+  </table>
+
+  <h2>3. SLIDE VERIFICATION</h2>
+  <table>
+    <tr><th class="done-cell">Done</th><th class="id-cell">ID</th><th class="desc-cell">Description</th><th>Steps</th><th>Expected</th></tr>
+    <tr><td class="done-cell"><input type="checkbox" data-id="VERIFY-1"></td><td class="id-cell">VERIFY-1</td><td>Verify slide with data claims</td><td>Click Verify on slide</td><td>Badge shows result</td></tr>
+    <tr><td class="done-cell"><input type="checkbox" data-id="VERIFY-2"></td><td class="id-cell">VERIFY-2</td><td>Verified status displayed</td><td>Slide verified successfully</td><td>Green "Verified" badge</td></tr>
+    <tr><td class="done-cell"><input type="checkbox" data-id="VERIFY-3"></td><td class="id-cell">VERIFY-3</td><td>Unable to verify status</td><td>Verify unverifiable content</td><td>"Unable to verify" badge</td></tr>
+    <tr><td class="done-cell"><input type="checkbox" data-id="VERIFY-4"></td><td class="id-cell">VERIFY-4</td><td>Failed verification</td><td>Verify incorrect data</td><td>"Failed" badge with details</td></tr>
+    <tr><td class="done-cell"><input type="checkbox" data-id="VERIFY-5"></td><td class="id-cell">VERIFY-5</td><td>Re-verify after slide edit</td><td>Edit verified slide</td><td>Status resets</td></tr>
+    <tr><td class="done-cell"><input type="checkbox" data-id="VERIFY-6"></td><td class="id-cell">VERIFY-6</td><td>Verify multiple slides</td><td>Select → Verify Selected</td><td>All selected verified</td></tr>
+  </table>
+
+  <h2>4. SESSION HISTORY</h2>
+
+  <h3>4.1 Session List</h3>
+  <table>
+    <tr><th class="done-cell">Done</th><th class="id-cell">ID</th><th class="desc-cell">Description</th><th>Steps</th><th>Expected</th></tr>
+    <tr><td class="done-cell"><input type="checkbox" data-id="HIST-LIST-1"></td><td class="id-cell">HIST-LIST-1</td><td>View session history</td><td>Click History nav</td><td>Sessions listed</td></tr>
+    <tr><td class="done-cell"><input type="checkbox" data-id="HIST-LIST-2"></td><td class="id-cell">HIST-LIST-2</td><td>Sessions show metadata</td><td>View history</td><td>Date, count, profile shown</td></tr>
+    <tr><td class="done-cell"><input type="checkbox" data-id="HIST-LIST-3"></td><td class="id-cell">HIST-LIST-3</td><td>Empty history state</td><td>View with no sessions</td><td>Empty state message</td></tr>
+    <tr><td class="done-cell"><input type="checkbox" data-id="HIST-LIST-4"></td><td class="id-cell">HIST-LIST-4</td><td>Sessions sorted by recency</td><td>View history</td><td>Most recent first</td></tr>
+  </table>
+
+  <h3>4.2 Session Restoration</h3>
+  <table>
+    <tr><th class="done-cell">Done</th><th class="id-cell">ID</th><th class="desc-cell">Description</th><th>Steps</th><th>Expected</th></tr>
+    <tr><td class="done-cell"><input type="checkbox" data-id="HIST-RESTORE-1"></td><td class="id-cell">HIST-RESTORE-1</td><td>Restore previous session</td><td>Click session in history</td><td>Slides and chat load</td></tr>
+    <tr><td class="done-cell"><input type="checkbox" data-id="HIST-RESTORE-2"></td><td class="id-cell">HIST-RESTORE-2</td><td>Restore from different profile</td><td>Click session from Profile B</td><td>Profile switches, then loads</td></tr>
+    <tr><td class="done-cell"><input type="checkbox" data-id="HIST-RESTORE-3"></td><td class="id-cell">HIST-RESTORE-3</td><td>Continue in restored session</td><td>Restore → Send new message</td><td>Conversation continues</td></tr>
+  </table>
+
+  <h3>4.3 Session Management</h3>
+  <table>
+    <tr><th class="done-cell">Done</th><th class="id-cell">ID</th><th class="desc-cell">Description</th><th>Steps</th><th>Expected</th></tr>
+    <tr><td class="done-cell"><input type="checkbox" data-id="HIST-RENAME-1"></td><td class="id-cell">HIST-RENAME-1</td><td>Rename current session</td><td>Click title → Edit → Save</td><td>New name persists</td></tr>
+    <tr><td class="done-cell"><input type="checkbox" data-id="HIST-SAVE-1"></td><td class="id-cell">HIST-SAVE-1</td><td>Save session with custom name</td><td>Save As → Enter name → Save</td><td>Saved with custom name</td></tr>
+    <tr><td class="done-cell"><input type="checkbox" data-id="HIST-DELETE-1"></td><td class="id-cell">HIST-DELETE-1</td><td>Delete session from history</td><td>Click Delete → Confirm</td><td>Session removed</td></tr>
+    <tr><td class="done-cell"><input type="checkbox" data-id="HIST-NEW-1"></td><td class="id-cell">HIST-NEW-1</td><td>Start new session</td><td>Click New Session</td><td>Fresh session, slides cleared</td></tr>
+  </table>
+
+  <h2>5. DECK PROMPTS</h2>
+
+  <h3>5.1 Deck Prompt CRUD</h3>
+  <table>
+    <tr><th class="done-cell">Done</th><th class="id-cell">ID</th><th class="desc-cell">Description</th><th>Steps</th><th>Expected</th></tr>
+    <tr><td class="done-cell"><input type="checkbox" data-id="PROMPT-CREATE-1"></td><td class="id-cell">PROMPT-CREATE-1</td><td>Create new deck prompt</td><td>Create → Enter fields → Save</td><td>Prompt in list</td></tr>
+    <tr><td class="done-cell"><input type="checkbox" data-id="PROMPT-EDIT-1"></td><td class="id-cell">PROMPT-EDIT-1</td><td>Edit existing deck prompt</td><td>Click → Edit → Save</td><td>Changes persist</td></tr>
+    <tr><td class="done-cell"><input type="checkbox" data-id="PROMPT-DELETE-1"></td><td class="id-cell">PROMPT-DELETE-1</td><td>Delete custom deck prompt</td><td>Delete → Confirm</td><td>Prompt removed</td></tr>
+    <tr><td class="done-cell"><input type="checkbox" data-id="PROMPT-VIEW-1"></td><td class="id-cell">PROMPT-VIEW-1</td><td>View prompt details</td><td>Click prompt</td><td>Details panel shows</td></tr>
+  </table>
+
+  <h3>5.2 System Prompts</h3>
+  <table>
+    <tr><th class="done-cell">Done</th><th class="id-cell">ID</th><th class="desc-cell">Description</th><th>Steps</th><th>Expected</th></tr>
+    <tr><td class="done-cell"><input type="checkbox" data-id="PROMPT-SYSTEM-1"></td><td class="id-cell">PROMPT-SYSTEM-1</td><td>Cannot delete system prompts</td><td>View system → Attempt delete</td><td>Delete disabled</td></tr>
+    <tr><td class="done-cell"><input type="checkbox" data-id="PROMPT-SYSTEM-2"></td><td class="id-cell">PROMPT-SYSTEM-2</td><td>Cannot edit system prompts</td><td>View system prompt</td><td>Edit disabled</td></tr>
+    <tr><td class="done-cell"><input type="checkbox" data-id="PROMPT-SYSTEM-3"></td><td class="id-cell">PROMPT-SYSTEM-3</td><td>Can duplicate system prompt</td><td>Click Duplicate</td><td>Editable copy created</td></tr>
+  </table>
+
+  <h3>5.3 Prompt Selection</h3>
+  <table>
+    <tr><th class="done-cell">Done</th><th class="id-cell">ID</th><th class="desc-cell">Description</th><th>Steps</th><th>Expected</th></tr>
+    <tr><td class="done-cell"><input type="checkbox" data-id="PROMPT-SELECT-1"></td><td class="id-cell">PROMPT-SELECT-1</td><td>Select prompt in profile wizard</td><td>Reach step → Select</td><td>Prompt associated</td></tr>
+    <tr><td class="done-cell"><input type="checkbox" data-id="PROMPT-SELECT-2"></td><td class="id-cell">PROMPT-SELECT-2</td><td>Change prompt on existing profile</td><td>Edit → Change → Save</td><td>New prompt saved</td></tr>
+  </table>
+
+  <h2>6. SLIDE STYLES</h2>
+
+  <h3>6.1 Slide Style CRUD</h3>
+  <table>
+    <tr><th class="done-cell">Done</th><th class="id-cell">ID</th><th class="desc-cell">Description</th><th>Steps</th><th>Expected</th></tr>
+    <tr><td class="done-cell"><input type="checkbox" data-id="STYLE-CREATE-1"></td><td class="id-cell">STYLE-CREATE-1</td><td>Create new slide style</td><td>Create → Enter fields → Save</td><td>Style in list</td></tr>
+    <tr><td class="done-cell"><input type="checkbox" data-id="STYLE-EDIT-1"></td><td class="id-cell">STYLE-EDIT-1</td><td>Edit existing style CSS</td><td>Click → Modify CSS → Save</td><td>Changes persist</td></tr>
+    <tr><td class="done-cell"><input type="checkbox" data-id="STYLE-DELETE-1"></td><td class="id-cell">STYLE-DELETE-1</td><td>Delete custom style</td><td>Delete → Confirm</td><td>Style removed</td></tr>
+    <tr><td class="done-cell"><input type="checkbox" data-id="STYLE-VIEW-1"></td><td class="id-cell">STYLE-VIEW-1</td><td>View style details</td><td>Click style</td><td>CSS displayed</td></tr>
+  </table>
+
+  <h3>6.2 System Styles</h3>
+  <table>
+    <tr><th class="done-cell">Done</th><th class="id-cell">ID</th><th class="desc-cell">Description</th><th>Steps</th><th>Expected</th></tr>
+    <tr><td class="done-cell"><input type="checkbox" data-id="STYLE-SYSTEM-1"></td><td class="id-cell">STYLE-SYSTEM-1</td><td>Cannot delete system styles</td><td>View system style</td><td>Delete disabled</td></tr>
+    <tr><td class="done-cell"><input type="checkbox" data-id="STYLE-SYSTEM-2"></td><td class="id-cell">STYLE-SYSTEM-2</td><td>Cannot edit system styles</td><td>View system style</td><td>Edit disabled</td></tr>
+    <tr><td class="done-cell"><input type="checkbox" data-id="STYLE-SYSTEM-3"></td><td class="id-cell">STYLE-SYSTEM-3</td><td>Can duplicate system style</td><td>Click Duplicate</td><td>Editable copy created</td></tr>
+  </table>
+
+  <h3>6.3 Style Preview</h3>
+  <table>
+    <tr><th class="done-cell">Done</th><th class="id-cell">ID</th><th class="desc-cell">Description</th><th>Steps</th><th>Expected</th></tr>
+    <tr><td class="done-cell"><input type="checkbox" data-id="STYLE-PREVIEW-1"></td><td class="id-cell">STYLE-PREVIEW-1</td><td>Preview style on sample slide</td><td>View with preview</td><td>Sample rendered</td></tr>
+    <tr><td class="done-cell"><input type="checkbox" data-id="STYLE-APPLY-1"></td><td class="id-cell">STYLE-APPLY-1</td><td>Style applies to generated slides</td><td>Generate with style</td><td>Correct CSS used</td></tr>
+  </table>
+
+  <h2>7. EXPORT & PRESENTATION</h2>
+
+  <h3>7.1 Export</h3>
+  <table>
+    <tr><th class="done-cell">Done</th><th class="id-cell">ID</th><th class="desc-cell">Description</th><th>Steps</th><th>Expected</th></tr>
+    <tr><td class="done-cell"><input type="checkbox" data-id="EXPORT-PPTX-1"></td><td class="id-cell">EXPORT-PPTX-1</td><td>Export slides to PowerPoint</td><td>Export → Select PowerPoint</td><td>.pptx downloads</td></tr>
+    <tr><td class="done-cell"><input type="checkbox" data-id="EXPORT-PDF-1"></td><td class="id-cell">EXPORT-PDF-1</td><td>Export slides to PDF</td><td>Export → Select PDF</td><td>.pdf downloads</td></tr>
+    <tr><td class="done-cell"><input type="checkbox" data-id="EXPORT-HTML-1"></td><td class="id-cell">EXPORT-HTML-1</td><td>Export raw HTML</td><td>Export → Select HTML</td><td>.html downloads</td></tr>
+    <tr><td class="done-cell"><input type="checkbox" data-id="EXPORT-SELECTED-1"></td><td class="id-cell">EXPORT-SELECTED-1</td><td>Export only selected slides</td><td>Select subset → Export</td><td>Only selected in export</td></tr>
+    <tr><td class="done-cell"><input type="checkbox" data-id="EXPORT-EMPTY-1"></td><td class="id-cell">EXPORT-EMPTY-1</td><td>Export disabled when no slides</td><td>View with no slides</td><td>Button disabled</td></tr>
+  </table>
+
+  <h3>7.2 Presentation Mode</h3>
+  <table>
+    <tr><th class="done-cell">Done</th><th class="id-cell">ID</th><th class="desc-cell">Description</th><th>Steps</th><th>Expected</th></tr>
+    <tr><td class="done-cell"><input type="checkbox" data-id="PRESENT-START-1"></td><td class="id-cell">PRESENT-START-1</td><td>Enter presentation mode</td><td>Click Present</td><td>Full-screen opens</td></tr>
+    <tr><td class="done-cell"><input type="checkbox" data-id="PRESENT-NAV-RIGHT-1"></td><td class="id-cell">PRESENT-NAV-RIGHT-1</td><td>Navigate forward with arrow</td><td>Press Right Arrow</td><td>Next slide shown</td></tr>
+    <tr><td class="done-cell"><input type="checkbox" data-id="PRESENT-NAV-LEFT-1"></td><td class="id-cell">PRESENT-NAV-LEFT-1</td><td>Navigate backward with arrow</td><td>Press Left Arrow</td><td>Previous slide shown</td></tr>
+    <tr><td class="done-cell"><input type="checkbox" data-id="PRESENT-NAV-CLICK-1"></td><td class="id-cell">PRESENT-NAV-CLICK-1</td><td>Navigate by clicking</td><td>Click right side</td><td>Next slide</td></tr>
+    <tr><td class="done-cell"><input type="checkbox" data-id="PRESENT-EXIT-1"></td><td class="id-cell">PRESENT-EXIT-1</td><td>Exit with Escape</td><td>Press Escape</td><td>Returns to normal</td></tr>
+    <tr><td class="done-cell"><input type="checkbox" data-id="PRESENT-EXIT-2"></td><td class="id-cell">PRESENT-EXIT-2</td><td>Exit with close button</td><td>Click X</td><td>Returns to normal</td></tr>
+    <tr><td class="done-cell"><input type="checkbox" data-id="PRESENT-INDICATOR-1"></td><td class="id-cell">PRESENT-INDICATOR-1</td><td>Slide indicator shown</td><td>In presentation</td><td>"Slide X of Y" shown</td></tr>
+  </table>
+
+  <h2>8. VISUAL EDITOR</h2>
+  <table>
+    <tr><th class="done-cell">Done</th><th class="id-cell">ID</th><th class="desc-cell">Description</th><th>Steps</th><th>Expected</th></tr>
+    <tr><td class="done-cell"><input type="checkbox" data-id="EDITOR-OPEN-1"></td><td class="id-cell">EDITOR-OPEN-1</td><td>Open HTML editor for slide</td><td>Click Edit HTML</td><td>Editor opens with HTML</td></tr>
+    <tr><td class="done-cell"><input type="checkbox" data-id="EDITOR-SAVE-1"></td><td class="id-cell">EDITOR-SAVE-1</td><td>Edit HTML and save</td><td>Modify → Save</td><td>Changes apply</td></tr>
+    <tr><td class="done-cell"><input type="checkbox" data-id="EDITOR-CANCEL-1"></td><td class="id-cell">EDITOR-CANCEL-1</td><td>Cancel HTML edit</td><td>Edit → Cancel</td><td>Changes discarded</td></tr>
+    <tr><td class="done-cell"><input type="checkbox" data-id="EDITOR-SYNTAX-1"></td><td class="id-cell">EDITOR-SYNTAX-1</td><td>Syntax highlighting in editor</td><td>Open editor</td><td>HTML highlighted</td></tr>
+    <tr><td class="done-cell"><input type="checkbox" data-id="EDITOR-TREE-1"></td><td class="id-cell">EDITOR-TREE-1</td><td>View element tree</td><td>Open tree view</td><td>DOM structure shown</td></tr>
+    <tr><td class="done-cell"><input type="checkbox" data-id="EDITOR-TREE-SELECT-1"></td><td class="id-cell">EDITOR-TREE-SELECT-1</td><td>Select element from tree</td><td>Click in tree</td><td>Element highlighted</td></tr>
+  </table>
+
+  <h2>9. NAVIGATION & LAYOUT</h2>
+  <table>
+    <tr><th class="done-cell">Done</th><th class="id-cell">ID</th><th class="desc-cell">Description</th><th>Steps</th><th>Expected</th></tr>
+    <tr><td class="done-cell"><input type="checkbox" data-id="NAV-GENERATOR-1"></td><td class="id-cell">NAV-GENERATOR-1</td><td>Navigate to Generator</td><td>Click Generator</td><td>Generator loads</td></tr>
+    <tr><td class="done-cell"><input type="checkbox" data-id="NAV-HISTORY-1"></td><td class="id-cell">NAV-HISTORY-1</td><td>Navigate to History</td><td>Click History</td><td>History loads</td></tr>
+    <tr><td class="done-cell"><input type="checkbox" data-id="NAV-PROFILES-1"></td><td class="id-cell">NAV-PROFILES-1</td><td>Navigate to Profiles</td><td>Click Profiles</td><td>Profiles loads</td></tr>
+    <tr><td class="done-cell"><input type="checkbox" data-id="NAV-PROMPTS-1"></td><td class="id-cell">NAV-PROMPTS-1</td><td>Navigate to Deck Prompts</td><td>Click Deck Prompts</td><td>Prompts loads</td></tr>
+    <tr><td class="done-cell"><input type="checkbox" data-id="NAV-STYLES-1"></td><td class="id-cell">NAV-STYLES-1</td><td>Navigate to Slide Styles</td><td>Click Slide Styles</td><td>Styles loads</td></tr>
+    <tr><td class="done-cell"><input type="checkbox" data-id="NAV-HELP-1"></td><td class="id-cell">NAV-HELP-1</td><td>Navigate to Help</td><td>Click Help</td><td>Help loads</td></tr>
+    <tr><td class="done-cell"><input type="checkbox" data-id="NAV-BLOCKED-1"></td><td class="id-cell">NAV-BLOCKED-1</td><td>Navigation blocked during generation</td><td>Click nav during gen</td><td>Ignored or warning</td></tr>
+  </table>
+
+  <h2>10. ERROR HANDLING</h2>
+  <table>
+    <tr><th class="done-cell">Done</th><th class="id-cell">ID</th><th class="desc-cell">Description</th><th>Steps</th><th>Expected</th></tr>
+    <tr><td class="done-cell"><input type="checkbox" data-id="ERR-NETWORK-1"></td><td class="id-cell">ERR-NETWORK-1</td><td>Handle API timeout</td><td>Backend slow</td><td>Timeout error, retry option</td></tr>
+    <tr><td class="done-cell"><input type="checkbox" data-id="ERR-GENIE-1"></td><td class="id-cell">ERR-GENIE-1</td><td>Handle Genie query failure</td><td>Invalid room</td><td>Error in chat</td></tr>
+    <tr><td class="done-cell"><input type="checkbox" data-id="ERR-GENIE-2"></td><td class="id-cell">ERR-GENIE-2</td><td>Handle Genie rate limit</td><td>Many rapid requests</td><td>Rate limit message</td></tr>
+    <tr><td class="done-cell"><input type="checkbox" data-id="ERR-LLM-1"></td><td class="id-cell">ERR-LLM-1</td><td>Handle LLM service error</td><td>LLM endpoint down</td><td>Graceful error</td></tr>
+    <tr><td class="done-cell"><input type="checkbox" data-id="ERR-SESSION-1"></td><td class="id-cell">ERR-SESSION-1</td><td>Handle session not found</td><td>Restore deleted session</td><td>Error, redirect</td></tr>
+    <tr><td class="done-cell"><input type="checkbox" data-id="ERR-PROFILE-1"></td><td class="id-cell">ERR-PROFILE-1</td><td>Handle profile not found</td><td>Use deleted profile</td><td>Falls back to default</td></tr>
+    <tr><td class="done-cell"><input type="checkbox" data-id="ERR-AUTH-1"></td><td class="id-cell">ERR-AUTH-1</td><td>Handle authentication expiry</td><td>Token expired</td><td>Redirect or refresh</td></tr>
+  </table>
+
+  <h2>11. ACCESSIBILITY</h2>
+  <table>
+    <tr><th class="done-cell">Done</th><th class="id-cell">ID</th><th class="desc-cell">Description</th><th>Steps</th><th>Expected</th></tr>
+    <tr><td class="done-cell"><input type="checkbox" data-id="A11Y-TAB-1"></td><td class="id-cell">A11Y-TAB-1</td><td>Tab navigation through UI</td><td>Tab through elements</td><td>Logical focus order</td></tr>
+    <tr><td class="done-cell"><input type="checkbox" data-id="A11Y-ENTER-1"></td><td class="id-cell">A11Y-ENTER-1</td><td>Activate buttons with Enter</td><td>Focus button → Enter</td><td>Button activates</td></tr>
+    <tr><td class="done-cell"><input type="checkbox" data-id="A11Y-ESC-1"></td><td class="id-cell">A11Y-ESC-1</td><td>Close modals with Escape</td><td>Modal open → Escape</td><td>Modal closes</td></tr>
+    <tr><td class="done-cell"><input type="checkbox" data-id="A11Y-ARIA-1"></td><td class="id-cell">A11Y-ARIA-1</td><td>Screen reader labels</td><td>Inspect with reader</td><td>Elements labeled</td></tr>
+  </table>
+
+  <h2 class="priority">Priority Matrix</h2>
+  <table>
+    <tr><th>Priority</th><th>Journey IDs</th><th>Rationale</th></tr>
+    <tr><td class="p0">P0 - Critical</td><td>GEN-BASIC-1, GEN-BASIC-2, PROF-CREATE-1, PROF-SWITCH-1, HIST-RESTORE-1</td><td>Core functionality</td></tr>
+    <tr><td class="p1">P1 - High</td><td>All VERIFY-*, EXPORT-PPTX-1, PRESENT-*, GEN-EDIT-*, PROF-CREATE-2</td><td>Key user value</td></tr>
+    <tr><td class="p2">P2 - Medium</td><td>All PROMPT-*, STYLE-*, HIST-*, remaining PROF-*</td><td>Configuration & management</td></tr>
+    <tr><td class="p3">P3 - Low</td><td>All ERR-*, A11Y-*, NAV-*</td><td>Edge cases & polish</td></tr>
+  </table>
+
+  <script>
+    const STORAGE_KEY = 'user-journeys-state';
+
+    function loadState() {
+      try {
+        return JSON.parse(localStorage.getItem(STORAGE_KEY)) || {};
+      } catch { return {}; }
+    }
+
+    function saveState(state) {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+    }
+
+    function updateStats() {
+      const checkboxes = document.querySelectorAll('input[type="checkbox"]');
+      const total = checkboxes.length;
+      const done = [...checkboxes].filter(c => c.checked).length;
+      document.getElementById('total').textContent = total;
+      document.getElementById('done').textContent = done;
+      document.getElementById('remaining').textContent = total - done;
+      document.getElementById('progress').textContent = Math.round(done / total * 100) + '%';
+    }
+
+    function init() {
+      const state = loadState();
+      const checkboxes = document.querySelectorAll('input[type="checkbox"]');
+      
+      checkboxes.forEach(cb => {
+        const id = cb.dataset.id;
+        if (state[id]) cb.checked = true;
+        
+        cb.addEventListener('change', () => {
+          const currentState = loadState();
+          currentState[id] = cb.checked;
+          saveState(currentState);
+          updateStats();
+        });
+      });
+      
+      updateStats();
+    }
+
+    function clearAll() {
+      if (!confirm('Clear all checkboxes?')) return;
+      localStorage.removeItem(STORAGE_KEY);
+      document.querySelectorAll('input[type="checkbox"]').forEach(c => c.checked = false);
+      updateStats();
+    }
+
+    init();
+  </script>
+</body>
+</html>
