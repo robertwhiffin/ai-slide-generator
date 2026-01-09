@@ -4,7 +4,7 @@
 
 The AI Slide Generator supports exporting slide decks in two formats:
 - **PDF**: Client-side generation using browser APIs
-- **PPTX**: Server-side generation using LLM-powered conversion
+- **PPTX**: Server-side async generation using LLM-powered conversion with polling
 
 Both export options are accessible through a unified dropdown menu in the slide panel.
 
@@ -26,15 +26,17 @@ Both export options are accessible through a unified dropdown menu in the slide 
 
 3. **Export as PowerPoint**
    - Click "Export as PowerPoint"
-   - The export is processed on the server
-   - Wait for the conversion to complete (may take 10-30 seconds depending on slide count)
-   - A PPTX file will be downloaded automatically
+   - Charts are captured client-side before sending to server
+   - The export runs asynchronously on the server with real-time progress updates
+   - Progress displays "Processing slide X of Y..." during conversion
+   - A PPTX file will be downloaded automatically when complete
    - Filename format: `{slide_deck_title}_{timestamp}.pptx`
 
 ### Export Status
 
-- The export button shows "Exporting..." with a spinner while processing
+- The export button shows "Exporting PowerPoint: Processing slide X of Y..." during PPTX export
 - The dropdown menu closes automatically when an export starts
+- Progress updates every 2 seconds via polling
 - If an error occurs, an alert will display the error message
 
 ## Technical Details
@@ -78,44 +80,53 @@ Both export options are accessible through a unified dropdown menu in the slide 
 - Requires modern browser with canvas support
 - Charts are rendered as images (not editable in PDF)
 
-### PPTX Export (Server-Side)
+### PPTX Export (Server-Side Async)
 
-**Location**: `src/services/html_to_pptx.py`
+**Location**: 
+- `src/api/routes/export.py` - API endpoints
+- `src/api/services/export_job_queue.py` - Background worker and job queue
+- `src/services/html_to_pptx.py` - LLM-powered converter
 
 **Technology Stack**:
 - `python-pptx`: Creates PowerPoint presentations
-- `playwright`: Captures screenshots of HTML slides
+- `asyncio`: Background job queue with thread pool execution
 - LLM (Databricks Claude Sonnet 4.5): Analyzes HTML and generates slide layouts
 
 **Process**:
-1. Backend receives export request with slide HTML
-2. For each slide:
-   - Optionally captures screenshot using Playwright (if `use_screenshot=True`)
-   - LLM analyzes HTML structure and content
-   - LLM generates Python code to create PowerPoint slide
+1. Frontend captures Chart.js charts as base64 images client-side
+2. Frontend calls `POST /api/export/pptx/async` to initiate export
+3. Backend validates request and queues job, returns job ID immediately
+4. Background worker (in thread pool) processes the export:
+   - Fetches slide deck from database
+   - Builds complete HTML for each slide
+   - For each slide, LLM generates Python code to create PowerPoint slide
    - Code is executed to add slide to presentation
-3. Presentation is saved and returned as file download
+   - Progress is updated after each slide
+5. Frontend polls `GET /api/export/pptx/poll/{job_id}` for status/progress
+6. When complete, frontend downloads via `GET /api/export/pptx/download/{job_id}`
 
 **Features**:
 - ✅ Native PowerPoint format (.pptx)
-- ✅ Editable charts (extracted from Chart.js data)
+- ✅ Async with polling (avoids proxy timeouts)
+- ✅ Real-time progress updates (slide X of Y)
+- ✅ Client-side chart capture for accurate chart images
 - ✅ Professional layouts with proper spacing
 - ✅ Preserves colors, fonts, and styling
 - ✅ No overlapping elements
-- ✅ Responsive to different slide layouts
+- ✅ Background worker runs in thread pool (non-blocking)
 
 **Configuration**:
 ```python
 {
-  use_screenshot: True  # Use Playwright screenshots for charts
+  use_screenshot: True  # Include client-captured chart images
 }
 ```
 
 **Limitations**:
-- Requires server processing (10-30 seconds per slide)
+- Requires server processing (5-15 seconds per slide)
 - Requires LLM API access (Databricks endpoint)
-- Requires Playwright installation for screenshots
-- Async operation (not instant)
+- Polling interval: 2 seconds
+- Maximum poll attempts: 300 (10 minute timeout)
 
 ## Architecture
 
@@ -134,23 +145,30 @@ Both export options are accessible through a unified dropdown menu in the slide 
 - Handles edge cases (first slide, canvas sizing)
 
 **API Client** (`frontend/src/services/api.ts`):
-- `exportToPPTX()` method for server-side export
-- Handles blob download
-- Error handling and API communication
+- `startPPTXExport()` - Initiates async export job
+- `pollPPTXExport()` - Polls for job status and progress
+- `downloadPPTX()` - Downloads completed PPTX file
+- `exportToPPTX()` - Orchestrates the full async flow with progress callback
+- Client-side chart capture before export
 
 ### Backend Components
 
 **Export Route** (`src/api/routes/export.py`):
-- `POST /api/export/pptx` endpoint
-- Validates slide deck availability
-- Builds HTML for each slide (includes scripts and styles)
-- Calls `HtmlToPptxConverterV3` service
-- Returns PPTX file as `FileResponse`
+- `POST /api/export/pptx/async` - Initiates export job, returns job ID immediately
+- `GET /api/export/pptx/poll/{job_id}` - Returns job status and progress
+- `GET /api/export/pptx/download/{job_id}` - Serves completed PPTX file
+- Validates slide deck availability before queuing
+
+**Export Job Queue** (`src/api/services/export_job_queue.py`):
+- In-memory job queue using `asyncio.Queue`
+- Background worker processes jobs in thread pool
+- Thread pool execution prevents blocking event loop during LLM calls
+- Progress tracking per job (slides completed / total)
+- Job cleanup after download
 
 **PPTX Converter Service** (`src/services/html_to_pptx.py`):
 - `HtmlToPptxConverterV3` class
 - LLM-powered HTML to PPTX conversion
-- Handles screenshot capture (Playwright)
 - Generates and executes Python code for slide creation
 - Ensures proper positioning and no overlaps
 
@@ -174,13 +192,11 @@ The PPTX converter uses strict positioning constraints to prevent overlapping el
 - Charts appear exactly as they do in the browser
 
 ### PPTX Export
-- **With Screenshot**: Chart area is captured as PNG image and inserted into slide
-- **Without Screenshot**: Chart data is extracted from JavaScript and converted to native PowerPoint charts using `CategoryChartData`
-- Chart.js data extraction looks for:
-  - `rawData` arrays
-  - `datasets` arrays
-  - `new Chart()` configurations
-  - `labels` and `data` variables
+- **Client-Side Capture**: Charts are captured as base64 PNG images in the browser before export
+- The frontend identifies all `<canvas>` elements within chart containers
+- Canvas images are sent to the server as part of the export request
+- Chart images are inserted into PowerPoint slides at appropriate positions
+- This approach ensures charts appear exactly as rendered in the browser
 
 ## File Naming
 
@@ -212,20 +228,26 @@ If the slide deck has no title, "slides" is used as the default.
 **Problem**: Export fails with "No slide deck available"
 - **Solution**: Ensure you have generated slides before attempting export. The export requires an active slide deck.
 
-**Problem**: Export takes too long
-- **Solution**: PPTX export processes each slide sequentially with LLM calls. For many slides, this can take 10-30 seconds per slide. This is expected behavior.
+**Problem**: Export times out (504 Gateway Timeout)
+- **Solution**: The async polling architecture handles long exports. If timeouts still occur:
+  - Check that the backend logs show "Export worker picked up job"
+  - Verify the export_worker is running (check startup logs)
+  - The 10-minute polling timeout may need extension for very large decks
+
+**Problem**: Progress stuck at 0
+- **Solution**: Check backend logs for errors in `process_export_job`. The worker may have encountered an error fetching slides or during LLM calls.
 
 **Problem**: Elements overlapping in PPTX
 - **Solution**: The LLM prompts include strict positioning constraints. If overlaps occur, the prompts may need adjustment in `src/services/html_to_pptx.py`.
 
 **Problem**: Charts not appearing in PPTX
 - **Solution**: 
-  - Ensure `use_screenshot=True` if you want chart images
-  - Check that Chart.js data exists in the HTML if using data extraction
-  - Verify Playwright is installed if using screenshots
+  - Ensure charts are visible on screen before exporting (client-side capture requires rendered charts)
+  - Check browser console for errors during chart capture
+  - Verify the chart container has a valid `<canvas>` element
 
 **Problem**: "ModuleNotFoundError: No module named 'pptx'"
-- **Solution**: Install dependencies: `pip install python-pptx playwright && playwright install`
+- **Solution**: Install dependencies: `pip install python-pptx`
 
 ## Best Practices
 
@@ -237,28 +259,29 @@ If the slide deck has no title, "slides" is used as the default.
 2. **For PPTX Export**:
    - Use when you need editable PowerPoint files
    - Best for presentations that need further editing
-   - Good for professional presentations with native charts
+   - Ensure charts are fully rendered before exporting (wait for animations to complete)
+   - Keep the browser tab active during export for reliable chart capture
 
 3. **Chart Considerations**:
    - PDF: Charts are images (not editable)
-   - PPTX: Charts can be editable if data extraction works, or images if using screenshots
+   - PPTX: Charts are captured as images from the browser, preserving exact appearance
 
 ## Future Enhancements
 
 Potential improvements for export features:
 
 - [ ] Batch export options (export multiple formats at once)
-- [ ] Export progress indicator for PPTX (showing slide-by-slide progress)
+- [x] Export progress indicator for PPTX (showing slide-by-slide progress) - **Implemented**
 - [ ] Custom export templates (different layouts/styles)
 - [ ] Export preview before download
 - [ ] Export scheduling/automation
 - [ ] Compression options for PDF
 - [ ] Export quality presets (high/medium/low)
+- [ ] Persistent job storage (survive server restarts)
 
 ## Related Documentation
 
 - [Backend Overview](../technical/backend-overview.md) - Backend architecture
 - [Frontend Overview](../technical/frontend-overview.md) - Frontend architecture
 - [Slide Parser & Script Management](../technical/slide-parser-and-script-management.md) - How slides are structured
-- [Export Implementation Guide](./export-pdf-pptx-implementation.md) - Detailed implementation plan
 

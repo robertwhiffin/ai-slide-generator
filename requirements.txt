@@ -1,5 +1,5 @@
 # Production dependencies with pinned versions for reproducibility
-# Generated from working environment: 2024-11-18
+# Generated from working environment: 2025-01-09
 
 # Core web framework
 fastapi==0.121.2
@@ -20,7 +20,6 @@ langchain-text-splitters==1.0.0
 
 # MLflow and observability
 mlflow==3.6.0
-litellm==1.80.0  # Required for MLflow judge with Databricks models
 opentelemetry-api==1.38.0
 opentelemetry-sdk==1.38.0
 
@@ -44,6 +43,8 @@ pandas==2.3.3
 # PowerPoint export
 python-pptx==0.6.23
 
-# Note: Development dependencies are in requirements-dev.txt
+# Browser automation (HTML to image rendering)
+playwright==1.48.0
+
 # Note: Development dependencies are in pyproject.toml [project.optional-dependencies.dev]
 # Install with: uv sync --all-extras
