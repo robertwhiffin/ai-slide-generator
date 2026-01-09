@@ -76,9 +76,10 @@ FONT SIZES (CRITICAL):
 - Set explicitly: title_frame.paragraphs[0].font.size = Pt(36) or Pt(16)
 
 CHARTS:
-- Check: chart_files = [f for f in os.listdir(assets_dir) if f.startswith("chart_") and f.endswith(".png")]
-- If exists: slide.shapes.add_picture(os.path.join(assets_dir, "chart_0.png"), left, top, width, height)
-- Match chart_N.png to Nth canvas. Position typically: left=1.0", top=4.0", width=8.0", height=3.5"
+- CRITICAL: Check for chart images in assets_dir. Chart image filenames may be like "chart_0.png", "chart_overallTrendChart.png", etc.
+- If chart images exist (check user prompt for exact filenames): Use slide.shapes.add_picture(os.path.join(assets_dir, filename), left, top, width, height) for EACH image
+- Match image filename to canvas element in HTML by canvas ID or position
+- Position images at canvas location in HTML. Typical position: left=1.0", top=3.5", width=8.0", height=3.5" (adjust based on HTML layout)
 - If no images: Extract Chart.js data from <script> tags.
 
 Return ONLY Python code."""
@@ -163,9 +164,10 @@ FONT SIZES (CRITICAL):
 - Set explicitly: title_frame.paragraphs[0].font.size = Pt(36) or Pt(16)
 
 CHARTS:
-- Check: chart_files = [f for f in os.listdir(assets_dir) if f.startswith("chart_") and f.endswith(".png")]
-- If exists: slide.shapes.add_picture(os.path.join(assets_dir, "chart_0.png"), left, top, width, height)
-- Match chart_N.png to Nth canvas. Position typically: left=1.0", top=4.0", width=8.0", height=3.5"
+- CRITICAL: Check for chart images in assets_dir. Chart image filenames may be like "chart_0.png", "chart_overallTrendChart.png", etc.
+- If chart images exist (check user prompt for exact filenames): Use slide.shapes.add_picture(os.path.join(assets_dir, filename), left, top, width, height) for EACH image
+- Match image filename to canvas element in HTML by canvas ID or position
+- Position images at canvas location in HTML. Typical position: left=1.0", top=3.5", width=8.0", height=3.5" (adjust based on HTML layout)
 - If no images: Extract Chart.js data from <script> tags.
 
 Return ONLY Python code."""

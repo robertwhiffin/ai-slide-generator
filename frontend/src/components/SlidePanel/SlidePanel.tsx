@@ -236,7 +236,7 @@ export const SlidePanel: React.FC<SlidePanelProps> = ({ slideDeck, rawHtml, onSl
     setShowExportMenu(false);
     
     try {
-      const blob = await api.exportToPPTX(sessionId, true);
+      const blob = await api.exportToPPTX(sessionId, true, slideDeck);
       
       // Create download link
       const url = window.URL.createObjectURL(blob);

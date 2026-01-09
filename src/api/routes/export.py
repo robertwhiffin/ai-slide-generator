@@ -17,10 +17,17 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/export", tags=["export"])
 
 
+class ChartImage(BaseModel):
+    """Chart image data from client-side capture."""
+    canvas_id: str  # Canvas ID or index (e.g., "chart_0", "my_chart")
+    base64_data: str  # Base64 PNG data URL (data:image/png;base64,...)
+
+
 class ExportPPTXRequest(BaseModel):
     """Request to export slides to PPTX."""
     session_id: str  # Session ID to get slides from
     use_screenshot: bool = True  # Whether to use screenshot for charts
+    chart_images: Optional[list[list[ChartImage]]] = None  # Chart images per slide (client-side captured)
 
 
 def build_slide_html(slide: dict, slide_deck: dict) -> str:
@@ -117,7 +124,7 @@ def build_slide_html(slide: dict, slide_deck: dict) -> str:
 <body>
 {raw_slide_html}
   <script>
-    // Optimized chart initialization for file:// protocol and Playwright
+    // Chart initialization (client-side capture now used instead of server-side)
     (function() {{
       function initCharts() {{
         console.log('[CHART_INIT] Starting chart initialization process...');
@@ -495,12 +502,33 @@ async def export_to_pptx(request: ExportPPTXRequest):
                 }
             )
             
+            # Prepare chart images per slide (if provided by client)
+            chart_images_per_slide = None
+            if request.chart_images:
+                # Convert ChartImage objects to dicts
+                chart_images_per_slide = []
+                for slide_idx, slide_charts in enumerate(request.chart_images):
+                    chart_dict = {img.canvas_id: img.base64_data for img in slide_charts}
+                    chart_images_per_slide.append(chart_dict)
+                    if chart_dict:
+                        print(f"[EXPORT] Slide {slide_idx + 1}: {len(chart_dict)} chart images (IDs: {list(chart_dict.keys())})")
+                    else:
+                        print(f"[EXPORT] Slide {slide_idx + 1}: No chart images")
+                logger.info(
+                    "Using client-provided chart images",
+                    extra={"slides_with_charts": len([c for c in chart_images_per_slide if c]), "total_slides": len(chart_images_per_slide)}
+                )
+                print(f"[EXPORT] Using client-provided chart images for {len([c for c in chart_images_per_slide if c])} of {len(chart_images_per_slide)} slides")
+            else:
+                print(f"[EXPORT] No chart_images in request (request.chart_images is {request.chart_images})")
+            
             # Convert to PPTX
             await converter.convert_slide_deck(
                 slides=slides_html,
                 output_path=output_path,
                 use_screenshot=request.use_screenshot,
-                html_source_paths=html_files if request.use_screenshot else None
+                html_source_paths=html_files if request.use_screenshot and not request.chart_images else None,
+                chart_images_per_slide=chart_images_per_slide
             )
             
             # Generate filename
