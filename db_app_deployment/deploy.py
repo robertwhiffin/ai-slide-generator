@@ -953,6 +953,13 @@ def main() -> None:
 
     args = parser.parse_args()
 
+    # Validate --include-databricks-prompts requires --reset-db
+    if args.include_databricks_prompts and not args.reset_db:
+        parser.error(
+            "--include-databricks-prompts requires --reset-db\n"
+            "The flag only affects database seeding, which requires a reset."
+        )
+
     deploy(
         env=args.env,
         action=args.action,
