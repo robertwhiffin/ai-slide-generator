@@ -18,7 +18,7 @@ cd "$PROJECT_ROOT"
 
 # Show usage
 usage() {
-    echo "Usage: $0 <action> --env <environment> --profile <databricks-profile> [--dry-run] [--reset-db]"
+    echo "Usage: $0 <action> --env <environment> --profile <databricks-profile> [--dry-run] [--reset-db] [--include-databricks-prompts]"
     echo ""
     echo "Actions:"
     echo "  create    Create a new Databricks App"
@@ -26,16 +26,18 @@ usage() {
     echo "  delete    Delete a Databricks App"
     echo ""
     echo "Arguments:"
-    echo "  --env        Environment: development, staging, or production"
-    echo "  --profile    Databricks CLI profile from ~/.databrickscfg"
-    echo "  --dry-run    Validate configuration without deploying"
-    echo "  --reset-db   Drop and recreate database tables (WARNING: deletes all data)"
+    echo "  --env                        Environment: development, staging, or production"
+    echo "  --profile                    Databricks CLI profile from ~/.databrickscfg"
+    echo "  --dry-run                    Validate configuration without deploying"
+    echo "  --reset-db                   Drop and recreate database tables (WARNING: deletes all data)"
+    echo "  --include-databricks-prompts Include Databricks-specific deck prompts and brand style (internal use)"
     echo ""
     echo "Examples:"
     echo "  $0 create --env development --profile my-profile"
     echo "  $0 update --env production --profile prod-profile"
     echo "  $0 create --env staging --profile my-profile --dry-run"
     echo "  $0 update --env development --profile my-profile --reset-db"
+    echo "  $0 create --env development --profile my-profile --include-databricks-prompts"
     exit 1
 }
 
@@ -45,6 +47,7 @@ ENV=""
 PROFILE=""
 DRY_RUN=""
 RESET_DB=""
+INCLUDE_DB_PROMPTS=""
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -66,6 +69,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --reset-db)
             RESET_DB="--reset-db"
+            shift
+            ;;
+        --include-databricks-prompts)
+            INCLUDE_DB_PROMPTS="--include-databricks-prompts"
             shift
             ;;
         -h|--help)
@@ -105,6 +112,15 @@ if [[ ! "$ENV" =~ ^(development|staging|production)$ ]]; then
     exit 1
 fi
 
+# Validate --include-databricks-prompts requires --reset-db
+if [ -n "$INCLUDE_DB_PROMPTS" ] && [ -z "$RESET_DB" ]; then
+    echo -e "${RED}❌ --include-databricks-prompts requires --reset-db${NC}"
+    echo "   The flag only affects database seeding, which requires a reset."
+    echo ""
+    echo "   Example: $0 $ACTION --env $ENV --profile $PROFILE --reset-db --include-databricks-prompts"
+    exit 1
+fi
+
 echo "🚀 AI Slide Generator Deployment"
 echo ""
 
@@ -125,8 +141,8 @@ echo -e "${GREEN}✅ Virtual environment activated${NC}"
 echo ""
 
 # Run the deployment
-echo -e "${BLUE}📦 Running deployment: $ACTION --env $ENV --profile $PROFILE $DRY_RUN $RESET_DB${NC}"
+echo -e "${BLUE}📦 Running deployment: $ACTION --env $ENV --profile $PROFILE $DRY_RUN $RESET_DB $INCLUDE_DB_PROMPTS${NC}"
 echo ""
 
-python -m db_app_deployment.deploy --$ACTION --env "$ENV" --profile "$PROFILE" $DRY_RUN $RESET_DB
+python -m db_app_deployment.deploy --$ACTION --env "$ENV" --profile "$PROFILE" $DRY_RUN $RESET_DB $INCLUDE_DB_PROMPTS
 
