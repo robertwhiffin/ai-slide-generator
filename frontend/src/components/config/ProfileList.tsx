@@ -88,15 +88,14 @@ export const ProfileList: React.FC<ProfileListProps> = ({ onProfileChange }) => 
   // Handle wizard success
   const handleWizardSuccess = async (profileId: number) => {
     setShowCreationWizard(false);
-    // Set as default and load the new profile
+    // Load the new profile (default is only set automatically for the first profile by the backend)
     try {
-      await setDefaultProfile(profileId);
       await loadProfile(profileId);
       if (onProfileChange) {
         onProfileChange();
       }
     } catch (err) {
-      console.error('Failed to activate new profile:', err);
+      console.error('Failed to load new profile:', err);
     }
   };
 
