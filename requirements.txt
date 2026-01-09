@@ -44,9 +44,6 @@ pandas==2.3.3
 # PowerPoint export
 python-pptx==0.6.23
 
-# Screenshot capture for PPTX
-playwright==1.48.0
-
 # Note: Development dependencies are in requirements-dev.txt
 # Note: Development dependencies are in pyproject.toml [project.optional-dependencies.dev]
 # Install with: uv sync --all-extras
