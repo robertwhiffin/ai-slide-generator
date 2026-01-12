@@ -1,8 +1,8 @@
 import React, { useState } from 'react';
-import { FiArrowLeft, FiMessageSquare, FiClock, FiSettings, FiInfo, FiShield, FiFileText } from 'react-icons/fi';
+import { FiArrowLeft, FiMessageSquare, FiClock, FiSettings, FiInfo, FiShield, FiFileText, FiLayout } from 'react-icons/fi';
 import { FaGavel } from 'react-icons/fa';
 
-type HelpTab = 'overview' | 'generator' | 'history' | 'settings' | 'deck_prompts' | 'verification';
+type HelpTab = 'overview' | 'generator' | 'history' | 'settings' | 'deck_prompts' | 'slide_styles' | 'verification';
 
 interface HelpPageProps {
   onBack: () => void;
@@ -56,6 +56,7 @@ export const HelpPage: React.FC<HelpPageProps> = ({ onBack }) => {
         <TabButton tab="history" label="History" icon={FiClock} />
         <TabButton tab="settings" label="Settings" icon={FiSettings} />
         <TabButton tab="deck_prompts" label="Deck Prompts" icon={FiFileText} />
+        <TabButton tab="slide_styles" label="Slide Styles" icon={FiLayout} />
       </div>
 
       {/* Content area */}
@@ -66,6 +67,7 @@ export const HelpPage: React.FC<HelpPageProps> = ({ onBack }) => {
         {activeTab === 'history' && <HistoryTab />}
         {activeTab === 'settings' && <SettingsTab />}
         {activeTab === 'deck_prompts' && <DeckPromptsTab />}
+        {activeTab === 'slide_styles' && <SlideStylesTab />}
       </div>
     </div>
   );
@@ -111,6 +113,7 @@ const OverviewTab: React.FC<{
         <QuickLinkButton tab="history" label="Learn about History →" />
         <QuickLinkButton tab="settings" label="Learn about Settings →" />
         <QuickLinkButton tab="deck_prompts" label="Learn about Deck Prompts →" />
+        <QuickLinkButton tab="slide_styles" label="Learn about Slide Styles →" />
       </div>
     </section>
   </div>
@@ -442,10 +445,8 @@ const DeckPromptsTab: React.FC = () => (
         The system comes with several pre-built templates:
       </p>
       <ul className="list-disc list-inside text-gray-600 space-y-1">
-        <li><span className="font-medium">Consumption Review:</span> Analyze usage trends and optimization opportunities</li>
         <li><span className="font-medium">Quarterly Business Review:</span> QBR structure with metrics, achievements, and outlook</li>
         <li><span className="font-medium">Executive Summary:</span> Concise 5-7 slide format for leadership</li>
-        <li><span className="font-medium">Use Case Analysis:</span> Portfolio overview with blocker identification</li>
       </ul>
     </section>
 
@@ -464,3 +465,123 @@ const DeckPromptsTab: React.FC = () => (
   </div>
 );
 
+// Slide Styles Tab Content
+const SlideStylesTab: React.FC = () => (
+  <div className="space-y-6">
+    <section>
+      <h2 className="text-lg font-semibold text-gray-800 mb-3">What are Slide Styles?</h2>
+      <p className="text-gray-600 mb-3">
+        Slide Styles control the visual appearance of your generated slides — typography, colors, spacing, and layout rules.
+        They define <em>how</em> slides look, separate from <em>what</em> content they contain.
+      </p>
+      <div className="bg-blue-50 rounded-lg p-4">
+        <p className="text-blue-800 text-sm">
+          <strong>Tip:</strong> Create styles that specify fonts, colors, and palettes matching your corporate 
+          guidelines for consistent, on-brand presentations.
+        </p>
+      </div>
+    </section>
+
+    <section>
+      <h2 className="text-lg font-semibold text-gray-800 mb-3">How They Work</h2>
+      <ol className="list-decimal list-inside text-gray-600 space-y-2">
+        <li>Create slide styles in the <strong>Slide Styles</strong> page (top navigation)</li>
+        <li>In a Profile, go to the <strong>Slide Style</strong> tab and select a style</li>
+        <li>When you generate slides, the AI follows the selected style's visual rules</li>
+        <li>Styles are applied consistently across all slides in the deck</li>
+      </ol>
+    </section>
+
+    <section>
+      <h2 className="text-lg font-semibold text-gray-800 mb-3">Managing Slide Styles</h2>
+      <div className="bg-gray-50 rounded-lg p-4">
+        <ul className="list-disc list-inside text-gray-700 space-y-2">
+          <li><span className="font-medium">Create:</span> Click "+ Create Style" to add a new visual style</li>
+          <li><span className="font-medium">Preview:</span> Expand any style to see its full configuration</li>
+          <li><span className="font-medium">Edit:</span> Modify name, description, category, or style rules</li>
+          <li><span className="font-medium">Delete:</span> Remove styles you no longer need</li>
+        </ul>
+      </div>
+    </section>
+
+    <section>
+      <h2 className="text-lg font-semibold text-gray-800 mb-3">What Styles Control</h2>
+      <div className="grid md:grid-cols-2 gap-4">
+        <div className="bg-purple-50 rounded-lg p-3">
+          <h4 className="font-medium text-purple-800 mb-2">Typography</h4>
+          <ul className="text-sm text-purple-700 space-y-1">
+            <li>• Font families for headings and body</li>
+            <li>• Font sizes and weights</li>
+            <li>• Line heights and letter spacing</li>
+          </ul>
+        </div>
+        <div className="bg-green-50 rounded-lg p-3">
+          <h4 className="font-medium text-green-800 mb-2">Colors</h4>
+          <ul className="text-sm text-green-700 space-y-1">
+            <li>• Primary and accent color palette</li>
+            <li>• Background colors and gradients</li>
+            <li>• Chart and visualization colors</li>
+          </ul>
+        </div>
+        <div className="bg-amber-50 rounded-lg p-3">
+          <h4 className="font-medium text-amber-800 mb-2">Layout</h4>
+          <ul className="text-sm text-amber-700 space-y-1">
+            <li>• Margins and padding rules</li>
+            <li>• Content alignment preferences</li>
+            <li>• Grid and spacing systems</li>
+          </ul>
+        </div>
+        <div className="bg-blue-50 rounded-lg p-3">
+          <h4 className="font-medium text-blue-800 mb-2">Components</h4>
+          <ul className="text-sm text-blue-700 space-y-1">
+            <li>• Table styling and borders</li>
+            <li>• List bullet and numbering styles</li>
+            <li>• Card and box shadow effects</li>
+          </ul>
+        </div>
+      </div>
+    </section>
+
+    <section>
+      <h2 className="text-lg font-semibold text-gray-800 mb-3">Writing Good Style Definitions</h2>
+      <div className="grid md:grid-cols-2 gap-4">
+        <div className="bg-green-50 rounded-lg p-3">
+          <h4 className="font-medium text-green-800 mb-2">✓ Include</h4>
+          <ul className="text-sm text-green-700 space-y-1">
+            <li>• Specific font names and sizes</li>
+            <li>• Hex or RGB color values</li>
+            <li>• Consistent spacing units</li>
+            <li>• Chart color sequences</li>
+            <li>• Visual hierarchy rules</li>
+          </ul>
+        </div>
+        <div className="bg-red-50 rounded-lg p-3">
+          <h4 className="font-medium text-red-800 mb-2">✗ Avoid</h4>
+          <ul className="text-sm text-red-700 space-y-1">
+            <li>• Content or data instructions</li>
+            <li>• Slide structure definitions</li>
+            <li>• Conflicting style rules</li>
+            <li>• Platform-specific features</li>
+          </ul>
+        </div>
+      </div>
+    </section>
+
+    <section>
+      <h2 className="text-lg font-semibold text-gray-800 mb-3">Slide Styles vs Deck Prompts</h2>
+      <div className="bg-amber-50 rounded-lg p-4">
+        <p className="text-gray-700 mb-2">
+          <strong>Slide Styles</strong> define <em>how</em> slides look (fonts, colors, spacing, visual rules).
+        </p>
+        <p className="text-gray-700">
+          <strong>Deck Prompts</strong> define <em>what</em> slides contain (sections, structure, data focus).
+        </p>
+        <p className="text-gray-600 text-sm mt-2">
+          You can combine any style with any prompt — a "QBR" deck prompt works with both "Databricks Brand" 
+          and "Minimal Dark" styles.
+        </p>
+      </div>
+    </section>
+
+  </div>
+);
