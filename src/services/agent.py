@@ -309,6 +309,10 @@ class SlideGeneratorAgent:
         
         full_system_prompt = "\n\n".join(prompt_parts)
 
+        # Escape curly braces to allow user prompts with HTML/JS/JSON content
+        # LangChain's f-string template format interprets {var} as variables
+        full_system_prompt = full_system_prompt.replace("{", "{{").replace("}", "}}")
+
         prompt = ChatPromptTemplate.from_messages(
             [
                 ("system", full_system_prompt),
