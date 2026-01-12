@@ -109,7 +109,8 @@ class ChatService:
                         "profile_id": new_settings.profile_id,
                         "profile_name": new_settings.profile_name,
                         "llm_endpoint": new_settings.llm.endpoint,
-                        "genie_space_id": new_settings.genie.space_id,
+                        "genie_space_id": new_settings.genie.space_id if new_settings.genie else None,
+                        "prompt_only_mode": new_settings.genie is None,
                     },
                 )
 
@@ -527,17 +528,27 @@ class ChatService:
             extra={"session_id": session_id, "genie_conversation_id": genie_conversation_id},
         )
 
+        from src.core.settings_db import get_settings
         from src.services.tools import initialize_genie_conversation
 
+        settings = get_settings()
+
         try:
-            # Use existing Genie conversation or create new one
+            # Use existing Genie conversation or create new one (only if Genie configured)
             if genie_conversation_id:
                 genie_conv_id = genie_conversation_id
-            else:
+            elif settings.genie:
                 genie_conv_id = initialize_genie_conversation()
                 # Save the new Genie conversation ID to database
                 session_manager = get_session_manager()
                 session_manager.set_genie_conversation_id(session_id, genie_conv_id)
+            else:
+                # Prompt-only mode - no Genie conversation needed
+                genie_conv_id = None
+                logger.info(
+                    "Prompt-only mode - skipping Genie conversation initialization",
+                    extra={"session_id": session_id},
+                )
 
             # Create chat history and hydrate from database
             chat_history = ChatMessageHistory()

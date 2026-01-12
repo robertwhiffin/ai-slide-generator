@@ -176,12 +176,23 @@ class SlideGeneratorAgent:
         This eliminates the race condition from using self.current_session_id
         by binding the session_id at tool creation time.
 
+        When no Genie space is configured, returns an empty list and the agent
+        runs in prompt-only mode without data query capabilities.
+
         Args:
             session_id: Session identifier to bind to the tool
 
         Returns:
-            List of StructuredTool instances for this session
+            List of StructuredTool instances for this session (empty if no Genie)
         """
+        # Return empty tools if no Genie configured (prompt-only mode)
+        if not self.settings.genie:
+            logger.info(
+                "No Genie configured, running without tools",
+                extra={"session_id": session_id},
+            )
+            return []
+
         # Get session reference for use in closure
         session = self.sessions.get(session_id)
         if session is None:
@@ -237,12 +248,18 @@ class SlideGeneratorAgent:
             func=_query_genie_wrapper,
             name="query_genie_space",
             description=(
-                "Query Databricks Genie for data using natural language. "
-                "Genie can understand natural language questions and convert them to SQL. "
-                "Use this tool to retrieve data needed for the presentation. "
-                "You can make multiple queries to gather comprehensive data. "
-                "The conversation context is automatically maintained across queries."
-                f"\n\nData available in the Genie space:\n{self.settings.genie.description}"
+                "Query Databricks Genie for data using natural language questions. "
+                "Genie understands natural language and converts it to SQL - do not write SQL yourself.\n\n"
+                "USAGE GUIDELINES:\n"
+                "- Make multiple queries to gather comprehensive data (typically 5-8 strategic queries)\n"
+                "- Use follow-up queries to drill deeper into interesting findings\n"
+                "- Conversation context is automatically maintained across queries\n"
+                "- If initial data is insufficient, query for more specific information\n\n"
+                "WHEN TO STOP:\n"
+                "- Once you have sufficient data, STOP calling this tool\n"
+                "- Transition immediately to generating the HTML presentation\n"
+                "- Do NOT make additional queries once you have enough information\n\n"
+                f"DATA AVAILABLE:\n{self.settings.genie.description}"
             ),
             args_schema=GenieQueryInput,
         )
@@ -258,6 +275,9 @@ class SlideGeneratorAgent:
         2. Slide style (from library) - defines visual appearance (HOW it should look)
         3. System prompt - defines technical generation rules (HOW to generate valid HTML/charts)
         4. Slide editing instructions - defines editing behavior
+        
+        The system prompt is tool-agnostic - the LLM discovers available tools
+        through the tool binding mechanism, not the prompt.
         """
         deck_prompt = self.settings.prompts.get("deck_prompt", "")
         slide_style = self.settings.prompts.get("slide_style", "")
@@ -356,29 +376,36 @@ class SlideGeneratorAgent:
 
         Each session maintains its own:
         - Chat message history
-        - Genie conversation_id (initialized immediately)
+        - Genie conversation_id (initialized if Genie configured, None otherwise)
         - Session metadata
         
-        Note: Genie conversation is initialized upfront to eliminate
-        the need for the LLM to track conversation IDs.
+        Note: Genie conversation is initialized upfront when configured.
+        Sessions without Genie run in prompt-only mode.
         """
         session_id = str(uuid.uuid4())
 
         logger.info("Creating new session", extra={"session_id": session_id})
 
-        # Initialize Genie conversation upfront
-        try:
-            genie_conversation_id = initialize_genie_conversation()
+        # Initialize Genie conversation only if configured
+        genie_conversation_id = None
+        if self.settings.genie:
+            try:
+                genie_conversation_id = initialize_genie_conversation()
+                logger.info(
+                    "Genie conversation initialized for session",
+                    extra={
+                        "session_id": session_id,
+                        "genie_conversation_id": genie_conversation_id,
+                    },
+                )
+            except Exception as e:
+                logger.error(f"Failed to initialize Genie conversation: {e}")
+                raise AgentError(f"Failed to initialize Genie conversation: {e}") from e
+        else:
             logger.info(
-                "Genie conversation initialized for session",
-                extra={
-                    "session_id": session_id,
-                    "genie_conversation_id": genie_conversation_id,
-                },
+                "No Genie configured, session will run in prompt-only mode",
+                extra={"session_id": session_id},
             )
-        except Exception as e:
-            logger.error(f"Failed to initialize Genie conversation: {e}")
-            raise AgentError(f"Failed to initialize Genie conversation: {e}") from e
 
         # Create chat history for this session
         chat_history = ChatMessageHistory()
@@ -386,7 +413,7 @@ class SlideGeneratorAgent:
         # Initialize session data
         self.sessions[session_id] = {
             "chat_history": chat_history,
-            "genie_conversation_id": genie_conversation_id,  # Set immediately
+            "genie_conversation_id": genie_conversation_id,  # None if no Genie
             "created_at": datetime.utcnow().isoformat(),
             "message_count": 0,
         }

@@ -14,13 +14,14 @@ The configuration validation feature tests all components of a profile configura
   - Model responds correctly
 - **Error Example**: "Failed to call LLM: Endpoint not found"
 
-### 2. Genie Space
+### 2. Genie Space (Optional)
 - **Test**: Executes query "Return a table of how many rows you have per table"
 - **Validates**:
   - Genie space exists and is accessible
   - User has permissions to query the space
   - Space contains data
 - **Error Example**: "Failed to query Genie: Permission denied"
+- **Prompt-only mode**: When no Genie space is configured, validation is skipped with success message "Genie not configured (prompt-only mode)"
 
 ### 3. MLflow Experiment
 - **Test**: Creates or accesses the configured MLflow experiment
@@ -121,7 +122,16 @@ class ConfigurationValidator:
     def validate_all(self) -> Dict[str, Any]:
         """Run all validation tests."""
         self._validate_llm()      # Test LLM endpoint
-        self._validate_genie()    # Test Genie query
+        # Genie validation is conditional
+        if self.settings.genie:
+            self._validate_genie()    # Test Genie query
+        else:
+            # Profile in prompt-only mode - Genie skipped
+            self.results.append(ValidationResult(
+                component="Genie",
+                success=True,
+                message="Genie not configured (prompt-only mode)",
+            ))
         self._validate_mlflow()   # Test MLflow experiment
         return results
 ```

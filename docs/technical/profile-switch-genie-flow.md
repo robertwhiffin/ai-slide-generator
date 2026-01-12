@@ -5,17 +5,18 @@ This document traces the complete flow of a profile switch and how it affects Ge
 ## Overview
 
 When a user switches profiles, the system:
-1. Loads new configuration from database (including new Genie space ID)
+1. Loads new configuration from database (including Genie space ID if configured)
 2. Reloads the agent with new settings
 3. **Preserves** existing Genie conversation IDs (each session tracks its `profile_id`)
-4. Initializes new Genie conversations only for new sessions in the new space
+4. Initializes new Genie conversations only for new sessions when Genie is configured
 
-### Key Behavior (Updated)
+### Key Behavior
 
 - **Sessions track their profile:** Each session stores `profile_id` and `profile_name`
 - **Genie IDs persist:** Switching profiles does NOT clear Genie conversation IDs
 - **Auto-switch on restore:** Restoring a session from a different profile auto-switches to that profile
 - **Profile shown in history:** Session history displays which profile each session belongs to
+- **Prompt-only mode:** Profiles without Genie run in prompt-only mode - sessions have no Genie conversation ID and the agent runs without tools
 
 ---
 

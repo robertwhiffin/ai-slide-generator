@@ -65,12 +65,15 @@ class ProfileCreateWithConfig(BaseModel):
     Request to create a profile with all configurations inline.
     
     Used by the creation wizard to create a complete profile in one request.
-    Genie space is required; other configurations have defaults.
+    Genie space is optional - profiles without Genie run in prompt-only mode.
     """
 
     name: str = Field(..., min_length=1, max_length=100, description="Profile name")
     description: Optional[str] = Field(None, description="Profile description")
-    genie_space: GenieSpaceCreateInline = Field(..., description="Genie space (required)")
+    genie_space: Optional[GenieSpaceCreateInline] = Field(
+        None, 
+        description="Genie space (optional - enables data queries)"
+    )
     ai_infra: Optional[AIInfraCreateInline] = Field(None, description="AI infrastructure")
     mlflow: Optional[MLflowCreateInline] = Field(None, description="MLflow configuration")
     prompts: Optional[PromptsCreateInline] = Field(None, description="Prompts configuration")

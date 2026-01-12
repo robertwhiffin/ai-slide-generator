@@ -359,6 +359,14 @@ async def get_genie_link(
         from src.core.settings_db import get_settings
 
         settings = get_settings()
+        
+        # Handle prompt-only mode (no Genie configured)
+        if not settings.genie:
+            return {
+                "has_genie_conversation": False,
+                "message": "Profile is in prompt-only mode (no Genie space configured)",
+            }
+        
         workspace_url = settings.databricks_host.rstrip("/")
         space_id = settings.genie.space_id
 

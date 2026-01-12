@@ -111,22 +111,28 @@ Parsed tiles, rendered raw HTML (`iframe`), and raw HTML text (`<pre>`). Users c
 
 ### 7. Profile Creation Wizard (`src/components/config/ProfileCreationWizard.tsx`)
 
-Profile creation uses a 4-step wizard that collects only essential configuration. LLM and MLflow settings use backend defaults.
+Profile creation uses a 5-step wizard that collects essential configuration. LLM and MLflow settings use backend defaults.
 
 **Wizard Steps:**
 1. **Basic Info** - Profile name and description
-2. **Genie Space** - Required data source selection with description (for AI context)
-3. **Deck Prompt** - Optional presentation template selection
-4. **Review** - Summary of settings before creation
+2. **Genie Space** - Optional data source selection with description (enables data queries)
+3. **Slide Style** - Required visual appearance selection
+4. **Deck Prompt** - Optional presentation template selection
+5. **Review** - Summary of settings before creation
+
+**Genie Space is Optional:**
+- Profiles without a Genie space run in **prompt-only mode**
+- The agent generates slides purely from conversation without data queries
+- A Genie space can be added later from the profile settings
 
 **Default Values (applied automatically by backend):**
 - **LLM**: `databricks-claude-sonnet-4-5`, temperature 0.7, max tokens 60000
 - **MLflow**: `/Workspace/Users/{username}/ai-slide-generator`
 
 **Key behaviors:**
-- The "Next" button is disabled until required fields are completed
+- The "Next" button is disabled until required fields are completed (Genie is skippable)
 - Profile is created with all configurations in a single transaction via `POST /api/settings/profiles/with-config`
-- LLM and MLflow settings can be customized after profile creation in the profile settings
+- LLM, MLflow, and Genie settings can be customized after profile creation in the profile settings
 - After creation, the new profile is automatically set as default and loaded
 
 ### 8. Deck Prompt Library (`src/components/config/DeckPromptList.tsx`)

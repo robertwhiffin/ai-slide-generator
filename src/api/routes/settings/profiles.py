@@ -195,7 +195,7 @@ def create_profile_with_config(
                 "space_id": request.genie_space.space_id,
                 "space_name": request.genie_space.space_name,
                 "description": request.genie_space.description,
-            },
+            } if request.genie_space else None,
             ai_infra={
                 "llm_endpoint": request.ai_infra.llm_endpoint,
                 "llm_temperature": request.ai_infra.llm_temperature,

@@ -76,7 +76,17 @@ class ConfigurationValidator:
 
         # Run validation tests
         self._validate_llm()
-        self._validate_genie()
+        # Genie validation is conditional - skip if not configured (prompt-only mode)
+        if self.settings.genie:
+            self._validate_genie()
+        else:
+            self.results.append(ValidationResult(
+                component="Genie",
+                success=True,
+                message="Genie not configured (prompt-only mode)",
+                details="Profile will generate slides from prompts without data queries",
+            ))
+            logger.info("Genie validation skipped - profile in prompt-only mode")
         self._validate_mlflow()
 
         # Compile results

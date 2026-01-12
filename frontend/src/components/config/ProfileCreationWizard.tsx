@@ -3,13 +3,16 @@
  * 
  * Steps:
  * 1. Basic Info (Name, Description)
- * 2. Genie Space (Required)
- * 3. Deck Prompt (Optional)
- * 4. Review & Create
+ * 2. Genie Space (Optional - enables data queries)
+ * 3. Slide Style (Required)
+ * 4. Deck Prompt (Optional)
+ * 5. Review & Create
  * 
  * LLM and MLflow use backend defaults:
  * - LLM: databricks-claude-sonnet-4-5
  * - MLflow: /Workspace/Users/{username}/ai-slide-generator
+ * 
+ * Profiles without Genie run in prompt-only mode.
  */
 
 import React, { useState, useEffect } from 'react';
@@ -19,7 +22,7 @@ import { configApi, type DeckPrompt, type SlideStyle, type AvailableGenieSpaces 
 // Wizard step definitions (5 steps - LLM and MLflow use backend defaults)
 const STEPS = [
   { id: 'basic', title: 'Basic Info', description: 'Name and description' },
-  { id: 'genie', title: 'Genie Space', description: 'Data source (required)' },
+  { id: 'genie', title: 'Genie Space', description: 'Data source (optional)' },
   { id: 'slide-style', title: 'Slide Style', description: 'Visual appearance' },
   { id: 'deck-prompt', title: 'Deck Prompt', description: 'Optional template' },
   { id: 'review', title: 'Review', description: 'Confirm and create' },
@@ -198,7 +201,12 @@ export const ProfileCreationWizard: React.FC<ProfileCreationWizardProps> = ({
       case 'basic':
         return formData.name.trim().length > 0;
       case 'genie':
-        return formData.genieSpaceId.trim().length > 0 && formData.genieDescription.trim().length > 0;
+        // Genie is optional - profiles without Genie run in prompt-only mode
+        // If a space is selected, description is required for AI context
+        if (formData.genieSpaceId.trim().length > 0) {
+          return formData.genieDescription.trim().length > 0;
+        }
+        return true; // Can skip Genie entirely
       case 'slide-style':
         return formData.selectedSlideStyleId !== null; // Required - must select a style
       case 'deck-prompt':
@@ -242,14 +250,17 @@ export const ProfileCreationWizard: React.FC<ProfileCreationWizardProps> = ({
         selected_slide_style_id: formData.selectedSlideStyleId,
       } : undefined;
       
+      // Build genie_space only if a space was selected
+      const genieSpaceConfig = formData.genieSpaceId.trim() ? {
+        space_id: formData.genieSpaceId,
+        space_name: formData.genieSpaceName,
+        description: formData.genieDescription,
+      } : undefined;
+      
       const response = await configApi.createProfileWithConfig({
         name: formData.name.trim(),
         description: formData.description.trim() || null,
-        genie_space: {
-          space_id: formData.genieSpaceId,
-          space_name: formData.genieSpaceName,
-          description: formData.genieDescription,
-        },
+        genie_space: genieSpaceConfig,
         // ai_infra omitted - backend uses default (databricks-claude-sonnet-4-5)
         // mlflow omitted - backend auto-sets based on user
         prompts: promptsConfig,
@@ -376,13 +387,16 @@ export const ProfileCreationWizard: React.FC<ProfileCreationWizardProps> = ({
             </div>
           )}
 
-          {/* Step 2: Genie Space */}
+          {/* Step 2: Genie Space (Optional) */}
           {currentStep === 'genie' && (
             <div className="space-y-4">
               <div>
                 <h3 className="text-lg font-medium text-gray-900 mb-2">Select Genie Space</h3>
                 <p className="text-sm text-gray-500 mb-4">
                   Choose the Genie space that contains the data for your presentations.
+                  <span className="block mt-1 text-purple-600 font-medium">
+                    This step is optional. Skip to create a prompt-only profile without data queries.
+                  </span>
                 </p>
               </div>
 
@@ -452,7 +466,8 @@ export const ProfileCreationWizard: React.FC<ProfileCreationWizardProps> = ({
                 </div>
               )}
 
-              {/* Description - required */}
+              {/* Description - required only when space is selected */}
+              {formData.genieSpaceId && (
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-1">
                   Data Description (for AI Agent) <span className="text-red-500">*</span>
@@ -475,6 +490,18 @@ export const ProfileCreationWizard: React.FC<ProfileCreationWizardProps> = ({
                   The AI agent uses this to understand what queries it can make.
                 </p>
               </div>
+              )}
+
+              {/* Prompt-only mode indicator when no space selected */}
+              {!formData.genieSpaceId && (
+                <div className="bg-blue-50 border border-blue-200 rounded-md p-4">
+                  <h4 className="font-medium text-blue-900">Prompt-Only Mode</h4>
+                  <p className="text-sm text-blue-700 mt-1">
+                    No Genie space selected. This profile will generate slides from prompts only, without data queries.
+                    You can add a Genie space later from the profile settings.
+                  </p>
+                </div>
+              )}
             </div>
           )}
 
@@ -634,14 +661,23 @@ export const ProfileCreationWizard: React.FC<ProfileCreationWizardProps> = ({
                 </div>
 
                 {/* Genie Space */}
-                <div className="bg-purple-50 rounded-md p-4">
-                  <h4 className="text-sm font-medium text-purple-700 mb-2">Genie Space</h4>
-                  <dl className="grid grid-cols-2 gap-2 text-sm">
-                    <dt className="text-purple-500">Space:</dt>
-                    <dd className="font-medium text-purple-900">{formData.genieSpaceName}</dd>
-                    <dt className="text-purple-500">Description:</dt>
-                    <dd className="font-medium text-purple-900 col-span-2 whitespace-pre-wrap">{formData.genieDescription}</dd>
-                  </dl>
+                <div className={`rounded-md p-4 ${formData.genieSpaceId ? 'bg-purple-50' : 'bg-blue-50'}`}>
+                  <h4 className={`text-sm font-medium mb-2 ${formData.genieSpaceId ? 'text-purple-700' : 'text-blue-700'}`}>
+                    Genie Space {!formData.genieSpaceId && '(Prompt-Only Mode)'}
+                  </h4>
+                  {formData.genieSpaceId ? (
+                    <dl className="grid grid-cols-2 gap-2 text-sm">
+                      <dt className="text-purple-500">Space:</dt>
+                      <dd className="font-medium text-purple-900">{formData.genieSpaceName}</dd>
+                      <dt className="text-purple-500">Description:</dt>
+                      <dd className="font-medium text-purple-900 col-span-2 whitespace-pre-wrap">{formData.genieDescription}</dd>
+                    </dl>
+                  ) : (
+                    <p className="text-sm text-blue-600">
+                      No Genie space configured. Slides will be generated from prompts only. 
+                      You can add a Genie space later from the profile settings.
+                    </p>
+                  )}
                 </div>
 
                 {/* Slide Style */}
