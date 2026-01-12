@@ -1,6 +1,6 @@
 # User Journey Catalog
 
-Exhaustive test coverage specification for Databricks Storyteller E2E tests.
+Exhaustive test coverage specification for databricks tellr E2E tests.
 
 ## Overview
 

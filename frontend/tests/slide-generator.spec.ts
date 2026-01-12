@@ -103,7 +103,7 @@ test.describe('Slide Generator App - Navigation', () => {
     await page.goto('/');
     
     // Check that the app header is visible
-    await expect(page.getByRole('heading', { name: 'Databricks Storyteller', exact: true })).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'databricks tellr', exact: true })).toBeVisible();
     
     // Check that navigation buttons are visible (scope to navigation element)
     const nav = page.getByRole('navigation');
