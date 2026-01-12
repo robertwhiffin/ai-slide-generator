@@ -144,19 +144,7 @@
   <h3>2.2 Generation Interruption</h3>
   <table>
     <tr><th class="done-cell">Done</th><th class="id-cell">ID</th><th class="desc-cell">Description</th><th>Steps</th><th>Expected</th></tr>
-    <tr><td class="done-cell"><input type="checkbox" data-id="GEN-CANCEL-1"></td><td class="id-cell">GEN-CANCEL-1</td><td>Cancel generation mid-stream</td><td>Click Cancel during generation</td><td>Stops, partial shown/cleared</td></tr>
-    <tr><td class="done-cell"><input type="checkbox" data-id="GEN-CANCEL-2"></td><td class="id-cell">GEN-CANCEL-2</td><td>Navigation blocked during generation</td><td>Try nav during generation</td><td>Disabled or warning</td></tr>
-  </table>
-
-  <h3>2.3 Iterative Editing via Chat</h3>
-  <table>
-    <tr><th class="done-cell">Done</th><th class="id-cell">ID</th><th class="desc-cell">Description</th><th>Steps</th><th>Expected</th></tr>
-    <tr><td class="done-cell"><input type="checkbox" data-id="GEN-EDIT-1"></td><td class="id-cell">GEN-EDIT-1</td><td>Modify single slide via chat</td><td>"Change slide 2 title" → Send</td><td>Only slide 2 updates</td></tr>
-    <tr><td class="done-cell"><input type="checkbox" data-id="GEN-EDIT-2"></td><td class="id-cell">GEN-EDIT-2</td><td>Add new slide to deck</td><td>"Add summary slide" → Send</td><td>New slide appended</td></tr>
-    <tr><td class="done-cell"><input type="checkbox" data-id="GEN-EDIT-3"></td><td class="id-cell">GEN-EDIT-3</td><td>Insert slide at specific position</td><td>"Insert after slide 1" → Send</td><td>Slide inserted, indices update</td></tr>
-    <tr><td class="done-cell"><input type="checkbox" data-id="GEN-EDIT-4"></td><td class="id-cell">GEN-EDIT-4</td><td>Remove slide via chat</td><td>"Remove slide 3" → Send</td><td>Slide removed</td></tr>
-    <tr><td class="done-cell"><input type="checkbox" data-id="GEN-EDIT-5"></td><td class="id-cell">GEN-EDIT-5</td><td>Regenerate all slides</td><td>"Regenerate all" → Send</td><td>All replaced</td></tr>
-    <tr><td class="done-cell"><input type="checkbox" data-id="GEN-EDIT-6"></td><td class="id-cell">GEN-EDIT-6</td><td>Request more data</td><td>Follow-up data question</td><td>Additional Genie query</td></tr>
+    <tr><td class="done-cell"><input type="checkbox" data-id="GEN-CANCEL-2"></td><td class="id-cell">GEN-CANCEL-1</td><td>Navigation blocked during generation</td><td>Try nav during generation</td><td>Disabled or warning</td></tr>
   </table>
 
   <h3>2.4 Slide Selection & Targeted Actions</h3>
@@ -164,8 +152,6 @@
     <tr><th class="done-cell">Done</th><th class="id-cell">ID</th><th class="desc-cell">Description</th><th>Steps</th><th>Expected</th></tr>
     <tr><td class="done-cell"><input type="checkbox" data-id="GEN-SELECT-1"></td><td class="id-cell">GEN-SELECT-1</td><td>Select single slide</td><td>Click checkbox</td><td>"1 selected" badge</td></tr>
     <tr><td class="done-cell"><input type="checkbox" data-id="GEN-SELECT-2"></td><td class="id-cell">GEN-SELECT-2</td><td>Select multiple slides</td><td>Click multiple checkboxes</td><td>Count badge, ribbon</td></tr>
-    <tr><td class="done-cell"><input type="checkbox" data-id="GEN-SELECT-3"></td><td class="id-cell">GEN-SELECT-3</td><td>Select all slides</td><td>Click "Select All"</td><td>All selected</td></tr>
-    <tr><td class="done-cell"><input type="checkbox" data-id="GEN-SELECT-4"></td><td class="id-cell">GEN-SELECT-4</td><td>Deselect all</td><td>Click "Deselect All"</td><td>Selection cleared</td></tr>
     <tr><td class="done-cell"><input type="checkbox" data-id="GEN-SELECT-5"></td><td class="id-cell">GEN-SELECT-5</td><td>Edit selected slides only</td><td>Select 2+ → Edit → Send</td><td>Only selected modified</td></tr>
     <tr><td class="done-cell"><input type="checkbox" data-id="GEN-SELECT-6"></td><td class="id-cell">GEN-SELECT-6</td><td>Selection ribbon shows actions</td><td>Select slides</td><td>Action ribbon appears</td></tr>
   </table>
@@ -220,13 +206,6 @@
     <tr><td class="done-cell"><input type="checkbox" data-id="PROMPT-VIEW-1"></td><td class="id-cell">PROMPT-VIEW-1</td><td>View prompt details</td><td>Click prompt</td><td>Details panel shows</td></tr>
   </table>
 
-  <h3>5.2 System Prompts</h3>
-  <table>
-    <tr><th class="done-cell">Done</th><th class="id-cell">ID</th><th class="desc-cell">Description</th><th>Steps</th><th>Expected</th></tr>
-    <tr><td class="done-cell"><input type="checkbox" data-id="PROMPT-SYSTEM-1"></td><td class="id-cell">PROMPT-SYSTEM-1</td><td>Cannot delete system prompts</td><td>View system → Attempt delete</td><td>Delete disabled</td></tr>
-    <tr><td class="done-cell"><input type="checkbox" data-id="PROMPT-SYSTEM-2"></td><td class="id-cell">PROMPT-SYSTEM-2</td><td>Cannot edit system prompts</td><td>View system prompt</td><td>Edit disabled</td></tr>
-    <tr><td class="done-cell"><input type="checkbox" data-id="PROMPT-SYSTEM-3"></td><td class="id-cell">PROMPT-SYSTEM-3</td><td>Can duplicate system prompt</td><td>Click Duplicate</td><td>Editable copy created</td></tr>
-  </table>
 
   <h3>5.3 Prompt Selection</h3>
   <table>
@@ -241,7 +220,7 @@
   <table>
     <tr><th class="done-cell">Done</th><th class="id-cell">ID</th><th class="desc-cell">Description</th><th>Steps</th><th>Expected</th></tr>
     <tr><td class="done-cell"><input type="checkbox" data-id="STYLE-CREATE-1"></td><td class="id-cell">STYLE-CREATE-1</td><td>Create new slide style</td><td>Create → Enter fields → Save</td><td>Style in list</td></tr>
-    <tr><td class="done-cell"><input type="checkbox" data-id="STYLE-EDIT-1"></td><td class="id-cell">STYLE-EDIT-1</td><td>Edit existing style CSS</td><td>Click → Modify CSS → Save</td><td>Changes persist</td></tr>
+    <tr><td class="done-cell"><input type="checkbox" data-id="STYLE-EDIT-1"></td><td class="id-cell">STYLE-EDIT-1</td><td>Edit existing style prompt</td><td>Click → Edit → Save</td><td>Changes persist</td></tr>
     <tr><td class="done-cell"><input type="checkbox" data-id="STYLE-DELETE-1"></td><td class="id-cell">STYLE-DELETE-1</td><td>Delete custom style</td><td>Delete → Confirm</td><td>Style removed</td></tr>
     <tr><td class="done-cell"><input type="checkbox" data-id="STYLE-VIEW-1"></td><td class="id-cell">STYLE-VIEW-1</td><td>View style details</td><td>Click style</td><td>CSS displayed</td></tr>
   </table>
@@ -254,12 +233,6 @@
     <tr><td class="done-cell"><input type="checkbox" data-id="STYLE-SYSTEM-3"></td><td class="id-cell">STYLE-SYSTEM-3</td><td>Can duplicate system style</td><td>Click Duplicate</td><td>Editable copy created</td></tr>
   </table>
 
-  <h3>6.3 Style Preview</h3>
-  <table>
-    <tr><th class="done-cell">Done</th><th class="id-cell">ID</th><th class="desc-cell">Description</th><th>Steps</th><th>Expected</th></tr>
-    <tr><td class="done-cell"><input type="checkbox" data-id="STYLE-PREVIEW-1"></td><td class="id-cell">STYLE-PREVIEW-1</td><td>Preview style on sample slide</td><td>View with preview</td><td>Sample rendered</td></tr>
-    <tr><td class="done-cell"><input type="checkbox" data-id="STYLE-APPLY-1"></td><td class="id-cell">STYLE-APPLY-1</td><td>Style applies to generated slides</td><td>Generate with style</td><td>Correct CSS used</td></tr>
-  </table>
 
   <h2>7. EXPORT & PRESENTATION</h2>
 
@@ -269,7 +242,6 @@
     <tr><td class="done-cell"><input type="checkbox" data-id="EXPORT-PPTX-1"></td><td class="id-cell">EXPORT-PPTX-1</td><td>Export slides to PowerPoint</td><td>Export → Select PowerPoint</td><td>.pptx downloads</td></tr>
     <tr><td class="done-cell"><input type="checkbox" data-id="EXPORT-PDF-1"></td><td class="id-cell">EXPORT-PDF-1</td><td>Export slides to PDF</td><td>Export → Select PDF</td><td>.pdf downloads</td></tr>
     <tr><td class="done-cell"><input type="checkbox" data-id="EXPORT-HTML-1"></td><td class="id-cell">EXPORT-HTML-1</td><td>Export raw HTML</td><td>Export → Select HTML</td><td>.html downloads</td></tr>
-    <tr><td class="done-cell"><input type="checkbox" data-id="EXPORT-SELECTED-1"></td><td class="id-cell">EXPORT-SELECTED-1</td><td>Export only selected slides</td><td>Select subset → Export</td><td>Only selected in export</td></tr>
     <tr><td class="done-cell"><input type="checkbox" data-id="EXPORT-EMPTY-1"></td><td class="id-cell">EXPORT-EMPTY-1</td><td>Export disabled when no slides</td><td>View with no slides</td><td>Button disabled</td></tr>
   </table>
 
