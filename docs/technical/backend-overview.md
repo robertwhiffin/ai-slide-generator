@@ -136,7 +136,8 @@ Mutation endpoints return **409 Conflict** if the session is already processing 
 4. **Agent execution**  
    - `SlideGeneratorAgent.generate_slides()` creates tools per-request with session ID bound via closure.
    - Stitches user prompt, optional `<slide-context>...</slide-context>` block, chat history, and passes to LangChain's `AgentExecutor`.  
-   - Genie tool calls automatically reuse the session's `conversation_id`, so the LLM never fabricates IDs.
+   - **Prompt-only mode:** When no Genie space is configured, the agent runs with an empty tools list. LangChain handles this gracefully - the LLM generates slides purely from conversation without data queries.
+   - **With Genie:** Genie tool calls automatically reuse the session's `conversation_id`, so the LLM never fabricates IDs.
 
 5. **Post-processing**  
    - **New deck:** Raw HTML is parsed into a `SlideDeck` (`SlideDeck.from_html_string`). Canvas/script integrity is checked before caching.  

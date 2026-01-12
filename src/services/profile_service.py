@@ -258,7 +258,7 @@ class ProfileService:
         self,
         name: str,
         description: Optional[str],
-        genie_space: dict,
+        genie_space: Optional[dict],
         ai_infra: Optional[dict],
         mlflow: Optional[dict],
         prompts: Optional[dict],
@@ -272,7 +272,7 @@ class ProfileService:
         Args:
             name: Profile name
             description: Profile description
-            genie_space: Genie space config (required)
+            genie_space: Genie space config (optional - enables data queries)
             ai_infra: AI infrastructure config (optional, uses defaults)
             mlflow: MLflow config (optional, auto-generated)
             prompts: Prompts config (optional, uses defaults)
@@ -310,14 +310,15 @@ class ProfileService:
         )
         self.db.add(ai_infra_record)
 
-        # Create Genie space (required)
-        genie_record = ConfigGenieSpace(
-            profile_id=profile.id,
-            space_id=genie_space["space_id"],
-            space_name=genie_space["space_name"],
-            description=genie_space.get("description"),
-        )
-        self.db.add(genie_record)
+        # Create Genie space (optional - profiles without Genie run in prompt-only mode)
+        if genie_space:
+            genie_record = ConfigGenieSpace(
+                profile_id=profile.id,
+                space_id=genie_space["space_id"],
+                space_name=genie_space["space_name"],
+                description=genie_space.get("description"),
+            )
+            self.db.add(genie_record)
 
         # Create MLflow (use provided or auto-generate)
         mlflow_config = mlflow or {}
@@ -345,7 +346,11 @@ class ProfileService:
             domain="profile",
             action="create_with_config",
             changed_by=user,
-            changes={"name": {"old": None, "new": name}, "genie_space": genie_space["space_id"]},
+            changes={
+                "name": {"old": None, "new": name}, 
+                "genie_space": genie_space["space_id"] if genie_space else None,
+                "prompt_only_mode": genie_space is None,
+            },
         )
         self.db.add(history)
 
