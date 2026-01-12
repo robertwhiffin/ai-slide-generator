@@ -43,7 +43,7 @@ export interface ProfileCreate {
 export interface ProfileCreateWithConfig {
   name: string;
   description?: string | null;
-  genie_space: {
+  genie_space?: {
     space_id: string;
     space_name: string;
     description?: string | null;

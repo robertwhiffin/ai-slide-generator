@@ -43,6 +43,10 @@ def initialize_genie_conversation() -> str:
     """
     client = get_user_client()
     settings = get_settings()
+    
+    if not settings.genie:
+        raise GenieToolError("Genie space not configured for this profile")
+    
     space_id = settings.genie.space_id
 
     # Log with safe attribute access
@@ -118,6 +122,10 @@ def query_genie_space(
     """
     client = get_user_client()
     settings = get_settings()
+    
+    if not settings.genie:
+        raise GenieToolError("Genie space not configured for this profile")
+    
     space_id = settings.genie.space_id
 
     # Log with safe attribute access
