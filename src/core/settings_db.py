@@ -197,7 +197,7 @@ class AppSettings(BaseSettings):
 
     # Configuration from database
     llm: LLMSettings
-    genie: GenieSettings
+    genie: Optional[GenieSettings] = None  # Optional - enables data queries when configured
     mlflow: MLFlowSettings
 
     # Prompts (from database)
@@ -271,12 +271,11 @@ def load_settings_from_database(profile_id: Optional[int] = None) -> AppSettings
             if not ai_infra:
                 raise ValueError(f"AI infra settings not found for profile {profile.id}")
 
-            # Get the Genie space for this profile (one per profile)
+            # Get the Genie space for this profile (optional - one per profile)
             genie_space = db.query(ConfigGenieSpace).filter_by(
                 profile_id=profile.id
             ).first()
-            if not genie_space:
-                raise ValueError(f"No Genie space found for profile {profile.id}")
+            # Genie space is optional - profiles without Genie run in prompt-only mode
 
             mlflow_config = db.query(ConfigMLflow).filter_by(profile_id=profile.id).first()
             if not mlflow_config:
@@ -339,10 +338,13 @@ def load_settings_from_database(profile_id: Optional[int] = None) -> AppSettings
                 timeout=600,  # Default value
             )
 
-            genie_settings = GenieSettings(
-                default_space_id=genie_space.space_id,
-                description=genie_space.description or "",
-            )
+            # Create Genie settings only if configured
+            genie_settings = None
+            if genie_space:
+                genie_settings = GenieSettings(
+                    default_space_id=genie_space.space_id,
+                    description=genie_space.description or "",
+                )
 
             mlflow_settings = MLFlowSettings(
                 experiment_name=experiment_name,
@@ -370,7 +372,8 @@ def load_settings_from_database(profile_id: Optional[int] = None) -> AppSettings
                     "profile_id": profile.id,
                     "profile_name": profile.name,
                     "llm_endpoint": ai_infra.llm_endpoint,
-                    "genie_space": genie_space.space_name,
+                    "genie_space": genie_space.space_name if genie_space else None,
+                    "prompt_only_mode": genie_space is None,
                 },
             )
 
@@ -441,7 +444,8 @@ def reload_settings(profile_id: Optional[int] = None) -> AppSettings:
             "profile_id": settings.profile_id,
             "profile_name": settings.profile_name,
             "llm_endpoint": settings.llm.endpoint,
-            "genie_space_id": settings.genie.space_id,
+            "genie_space_id": settings.genie.space_id if settings.genie else None,
+            "prompt_only_mode": settings.genie is None,
         },
     )
 

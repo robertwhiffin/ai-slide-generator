@@ -408,18 +408,24 @@ This creates:
 
 ### Profile Creation
 
-Profiles are created via a 4-step wizard that collects essential configuration. LLM and MLflow settings use backend defaults:
+Profiles are created via a 5-step wizard that collects essential configuration. LLM and MLflow settings use backend defaults:
 
 1. **Basic Info** - Name and description
-2. **Genie Space** - Required data source with AI description
-3. **Deck Prompt** - Optional template selection
-4. **Review** - Confirmation before creation
+2. **Genie Space** - Optional data source with AI description (enables data queries)
+3. **Slide Style** - Required visual appearance selection
+4. **Deck Prompt** - Optional template selection
+5. **Review** - Confirmation before creation
+
+**Genie Space is Optional:**
+- Profiles without a Genie space run in **prompt-only mode**
+- The agent generates slides purely from conversation without data queries
+- A Genie space can be added later from the profile settings
 
 **Backend Defaults Applied:**
 - **LLM**: `databricks-claude-sonnet-4-5`, temperature 0.7, max tokens 60000
 - **MLflow**: `/Workspace/Users/{username}/ai-slide-generator`
 
-The wizard creates the profile and all configurations in a single transaction via `ProfileService.create_profile_with_config()`. LLM and MLflow settings can be customized after profile creation in the profile settings.
+The wizard creates the profile and all configurations in a single transaction via `ProfileService.create_profile_with_config()`. LLM, MLflow, and Genie settings can be customized after profile creation in the profile settings.
 
 ### Default Values
 
@@ -440,7 +446,7 @@ DEFAULT_CONFIG = {
 }
 ```
 
-**Note:** Genie space must be explicitly configured for each profile. MLflow experiment name is auto-set based on the profile creator's username.
+**Note:** Genie space is optional - profiles without Genie run in prompt-only mode. MLflow experiment name is auto-set based on the profile creator's username.
 
 ### Default Deck Prompts
 
