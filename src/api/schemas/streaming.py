@@ -47,6 +47,7 @@ class StreamEvent(BaseModel):
         default=None, description="Slide replacement info"
     )
     metadata: Optional[Dict[str, Any]] = Field(default=None, description="Execution metadata")
+    experiment_url: Optional[str] = Field(default=None, description="MLflow experiment URL")
 
     def to_sse(self) -> str:
         """Format event as SSE data line.

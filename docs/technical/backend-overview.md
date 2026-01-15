@@ -191,9 +191,32 @@ Breaking these invariants (e.g., submitting non-contiguous indices, missing `.sl
 - **Model:** `ChatDatabricks` configured via database profiles and exposed through `get_settings().llm`.
 - **Prompting:** System prompt + slide-editing addendum loaded from database and injected via `ChatPromptTemplate`. Chat history pulled from `ChatMessageHistory`.
 - **Tools:** Created per-request via `_create_tools_for_session(session_id)`. The Genie wrapper captures the session dict via closure, eliminating race conditions from shared state. Automatically reuses the session's `conversation_id`.
-- **Sessions:** `SlideGeneratorAgent.sessions` holds `chat_history`, `genie_conversation_id`, `metadata`. Each user operates on their own session with isolated state.
+- **Sessions:** `SlideGeneratorAgent.sessions` holds `chat_history`, `genie_conversation_id`, `experiment_id`, `experiment_url`, `username`, and `metadata`. Each user operates on their own session with isolated state.
 - **Concurrency:** Tools and `AgentExecutor` are created fresh for each request. No shared mutable state between concurrent requests.
 - **Observability:** MLflow spans wrap each generation. Attributes include mode (`generate` vs `edit`), latency, tool call counts, Genie conversation ID, and replacement stats.
+
+### Per-Session MLflow Experiments
+
+Each session creates its own MLflow experiment for isolated tracing:
+
+1. **Experiment Path** (production with service principal):
+   ```
+   /Workspace/Users/{DATABRICKS_CLIENT_ID}/{username}/{profile_name}/{timestamp}
+   ```
+   
+2. **Experiment Path** (local development):
+   ```
+   /Workspace/Users/{username}/{profile_name}/{timestamp}
+   ```
+
+3. **Permission Granting:** When running as a Databricks App, the system client (service principal) creates the experiment in its folder and grants `CAN_MANAGE` permission to the user via `client.experiments.set_permissions()`.
+
+4. **Frontend Link:** The `experiment_url` is returned in the `ChatResponse` and displayed as a "Run Details" link in the header, allowing users to view traces for their session.
+
+Key helpers in `src/core/databricks_client.py`:
+- `get_service_principal_client_id()` - Returns `DATABRICKS_CLIENT_ID` env var
+- `get_service_principal_folder()` - Returns `/Workspace/Users/{client_id}` or `None` for local dev
+- `get_current_username()` - Gets username from the user client
 
 ---
 
@@ -233,7 +256,7 @@ If the agent's HTML has empty slides, out-of-range indices, or references canvas
 ## Logging, Tracing & Testing
 
 - **Logging:** `src/utils/logging_config.setup_logging()` sets JSON or text output, attaches rotating file handlers, and lowers noisy dependency log levels. Every router/service log call already uses structured `extra={...}` fields for easier filtering.
-- **MLflow traces:** Each agent turn runs inside `mlflow.start_span("generate_slides")`, recording latency, tool usage, session info, and (for edits) replacement counts. Ideal for operations dashboards.
+- **MLflow traces:** Each session creates its own experiment. Traces run inside `mlflow.start_span("generate_slides")`, recording latency, tool usage, session info, and (for edits) replacement counts. Users access their traces via the "Run Details" header link.
 - **Tests:** `tests/unit` and `tests/integration` target agents, config loaders, HTML utilities, and API-level interactions. When adding features, mirror new code with a matching test file (e.g., `tests/unit/test_<module>.py`).
 
 ---

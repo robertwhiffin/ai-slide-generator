@@ -15,17 +15,23 @@ from datetime import datetime
 from typing import Any, Dict, Generator, List, Optional
 
 from langchain_community.chat_message_histories import ChatMessageHistory
-from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
-
-from bs4 import BeautifulSoup
+from langchain_core.messages import AIMessage, HumanMessage
 
 from src.api.schemas.streaming import StreamEvent, StreamEventType
-from src.api.services.session_manager import get_session_manager, SessionNotFoundError
+from src.api.services.session_manager import SessionNotFoundError, get_session_manager
+from src.core.databricks_client import (
+    get_current_username,
+    get_service_principal_folder,
+    get_system_client,
+)
 from src.domain.slide import Slide
 from src.domain.slide_deck import SlideDeck
 from src.services.agent import create_agent
 from src.services.streaming_callback import StreamingCallbackHandler
-from src.utils.html_utils import extract_canvas_ids_from_html, extract_canvas_ids_from_script, split_script_by_canvas
+from src.utils.html_utils import (
+    extract_canvas_ids_from_html,
+    split_script_by_canvas,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -38,7 +44,7 @@ def _sanitize_replacement_info(replacement_info: Optional[Dict[str, Any]]) -> Op
     """
     if not replacement_info:
         return None
-    
+
     # Create a copy without replacement_slides (contains Slide objects)
     sanitized = {
         k: v for k, v in replacement_info.items()
@@ -188,13 +194,13 @@ class ChatService:
 
         # Get or create session in database (auto-create on first message)
         session_manager = get_session_manager()
-        
+
         # Get current profile info for session association
         from src.core.settings_db import get_settings
         settings = get_settings()
         profile_id = getattr(settings, 'profile_id', None)
         profile_name = getattr(settings, 'profile_name', None)
-        
+
         try:
             db_session = session_manager.get_session(session_id)
             # Update profile for existing session without one
@@ -216,7 +222,7 @@ class ChatService:
 
         # Ensure session is registered with the agent
         # The agent maintains its own in-memory session store for conversation state
-        self._ensure_agent_session(session_id, db_session.get("genie_conversation_id"))
+        experiment_url = self._ensure_agent_session(session_id, db_session.get("genie_conversation_id"))
 
         try:
             # Call agent to generate slides
@@ -291,6 +297,7 @@ class ChatService:
                 "metadata": result["metadata"],
                 "replacement_info": _sanitize_replacement_info(replacement_info),
                 "session_id": session_id,
+                "experiment_url": experiment_url or result.get("experiment_url"),
             }
 
             logger.info(
@@ -346,13 +353,13 @@ class ChatService:
 
         # Get or create session in database
         session_manager = get_session_manager()
-        
+
         # Get current profile info for session association
         from src.core.settings_db import get_settings
         settings = get_settings()
         profile_id = getattr(settings, 'profile_id', None)
         profile_name = getattr(settings, 'profile_name', None)
-        
+
         try:
             db_session = session_manager.get_session(session_id)
             # Update profile for existing session without one
@@ -385,7 +392,7 @@ class ChatService:
             )
 
         # Ensure session is registered with the agent (hydrates history)
-        self._ensure_agent_session(session_id, db_session.get("genie_conversation_id"))
+        experiment_url = self._ensure_agent_session(session_id, db_session.get("genie_conversation_id"))
 
         # Create event queue and callback handler
         event_queue: queue.Queue[StreamEvent] = queue.Queue()
@@ -489,6 +496,7 @@ class ChatService:
             raw_html=raw_html,
             replacement_info=_sanitize_replacement_info(replacement_info),
             metadata=result.get("metadata"),
+            experiment_url=experiment_url or result.get("experiment_url"),
         )
 
         logger.info(
@@ -501,17 +509,20 @@ class ChatService:
 
     def _ensure_agent_session(
         self, session_id: str, genie_conversation_id: Optional[str] = None
-    ) -> None:
+    ) -> Optional[str]:
         """Ensure the session is registered with the agent.
 
         The agent maintains its own in-memory session store for conversation
-        state (chat history, Genie conversation). This method ensures the
-        database session is registered with the agent and hydrates the
-        chat history from persisted messages.
+        state (chat history, Genie conversation, MLflow experiment). This method
+        ensures the database session is registered with the agent and hydrates
+        the chat history from persisted messages.
 
         Args:
             session_id: Session ID from database
             genie_conversation_id: Optional existing Genie conversation ID
+
+        Returns:
+            experiment_url for the session, or None if experiment creation failed
         """
         # Check if agent already has this session
         if session_id in self.agent.sessions:
@@ -525,7 +536,7 @@ class ChatService:
                     "Persisted existing genie_conversation_id to database",
                     extra={"session_id": session_id, "genie_conversation_id": agent_genie_id},
                 )
-            return
+            return self.agent.sessions[session_id].get("experiment_url")
 
         logger.info(
             "Registering session with agent",
@@ -538,6 +549,19 @@ class ChatService:
         settings = get_settings()
 
         try:
+            # Get current username for experiment path and permissions
+            try:
+                username = get_current_username()
+                logger.warning(f"ChatService: Got current username: {username}")
+            except Exception as e:
+                logger.warning(f"ChatService: Failed to get current username: {e}")
+                username = "unknown"
+
+            # Create per-session MLflow experiment
+            experiment_id, experiment_url = self._create_experiment_for_session(
+                session_id, username, settings.profile_name or "default"
+            )
+
             # Use existing Genie conversation or create new one (only if Genie configured)
             if genie_conversation_id:
                 genie_conv_id = genie_conversation_id
@@ -558,10 +582,13 @@ class ChatService:
             chat_history = ChatMessageHistory()
             message_count = self._hydrate_chat_history(session_id, chat_history)
 
-            # Initialize agent session data
+            # Initialize agent session data with experiment info
             self.agent.sessions[session_id] = {
                 "chat_history": chat_history,
                 "genie_conversation_id": genie_conv_id,
+                "experiment_id": experiment_id,
+                "experiment_url": experiment_url,
+                "username": username,
                 "created_at": datetime.utcnow().isoformat(),
                 "message_count": message_count,
             }
@@ -571,13 +598,150 @@ class ChatService:
                 extra={
                     "session_id": session_id,
                     "genie_conversation_id": genie_conv_id,
+                    "experiment_id": experiment_id,
+                    "experiment_url": experiment_url,
                     "hydrated_messages": message_count,
                 },
             )
 
+            return experiment_url
+
         except Exception as e:
             logger.error(f"Failed to register session with agent: {e}", exc_info=True)
             raise
+
+    def _create_experiment_for_session(
+        self, session_id: str, username: str, profile_name: str
+    ) -> tuple[Optional[str], Optional[str]]:
+        """Create a new MLflow experiment for this session.
+
+        Creates an experiment in either:
+        - Service principal's folder (production): /Workspace/Users/{SP_CLIENT_ID}/{username}/{profile}/{timestamp}
+        - User's folder (local dev): /Workspace/Users/{username}/{profile}/{timestamp}
+
+        Args:
+            session_id: Session identifier for logging
+            username: User's email/username for path and permissions
+            profile_name: Profile name for experiment path
+
+        Returns:
+            Tuple of (experiment_id, experiment_url) or (None, None) on failure
+        """
+        import os
+
+        import mlflow
+
+        timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+
+        # Determine experiment path based on environment
+        sp_folder = get_service_principal_folder()
+        
+        logger.warning(
+            f"ChatService experiment creation: sp_folder={sp_folder}, username={username}, profile={profile_name}"
+        )
+        
+        if sp_folder:
+            # Production: use service principal's folder
+            experiment_path = f"{sp_folder}/{username}/{profile_name}/{timestamp}"
+        else:
+            # Local development: use user's folder
+            experiment_path = f"/Workspace/Users/{username}/{profile_name}/{timestamp}"
+
+        logger.warning(
+            f"ChatService: Creating per-session MLflow experiment at path: {experiment_path}",
+            extra={
+                "session_id": session_id,
+                "username": username,
+                "profile_name": profile_name,
+                "experiment_path": experiment_path,
+                "using_sp_folder": sp_folder is not None,
+            },
+        )
+
+        try:
+            # Create the experiment
+            experiment_id = mlflow.create_experiment(experiment_path)
+
+            # Grant user CAN_MANAGE permission (only needed when using SP folder)
+            if sp_folder:
+                self._grant_experiment_permission(experiment_id, username, session_id)
+
+            # Construct experiment URL
+            host = os.getenv("DATABRICKS_HOST", "").rstrip("/")
+            experiment_url = f"{host}/ml/experiments/{experiment_id}"
+
+            logger.info(
+                "Created per-session MLflow experiment",
+                extra={
+                    "session_id": session_id,
+                    "experiment_id": experiment_id,
+                    "experiment_path": experiment_path,
+                    "experiment_url": experiment_url,
+                },
+            )
+
+            return experiment_id, experiment_url
+
+        except Exception as e:
+            logger.warning(
+                f"Failed to create per-session experiment, continuing without MLflow: {e}",
+                extra={
+                    "session_id": session_id,
+                    "experiment_path": experiment_path,
+                    "error": str(e),
+                },
+            )
+            return None, None
+
+    def _grant_experiment_permission(
+        self, experiment_id: str, username: str, session_id: str
+    ) -> None:
+        """Grant CAN_MANAGE permission on experiment to user.
+
+        Uses the Databricks SDK to set experiment permissions so users can
+        view and manage their session's experiment data.
+
+        Args:
+            experiment_id: MLflow experiment ID
+            username: User's email/username to grant permission to
+            session_id: Session ID for logging context
+        """
+        from databricks.sdk.service.ml import (
+            ExperimentAccessControlRequest,
+            ExperimentPermissionLevel,
+        )
+
+        try:
+            client = get_system_client()
+            client.experiments.set_permissions(
+                experiment_id=experiment_id,
+                access_control_list=[
+                    ExperimentAccessControlRequest(
+                        user_name=username,
+                        permission_level=ExperimentPermissionLevel.CAN_MANAGE,
+                    )
+                ],
+            )
+            logger.info(
+                "Granted experiment permission",
+                extra={
+                    "session_id": session_id,
+                    "experiment_id": experiment_id,
+                    "username": username,
+                    "permission": "CAN_MANAGE",
+                },
+            )
+        except Exception as e:
+            # Log warning but don't fail - user can still view via SP permissions
+            logger.warning(
+                f"Failed to grant experiment permission: {e}",
+                extra={
+                    "session_id": session_id,
+                    "experiment_id": experiment_id,
+                    "username": username,
+                    "error": str(e),
+                },
+            )
 
     def _hydrate_chat_history(
         self, session_id: str, chat_history: ChatMessageHistory
@@ -721,17 +885,17 @@ class ChatService:
         for idx, slide in enumerate(replacement_slides):
             # Update slide_id to reflect new position
             slide.slide_id = f"slide_{start_idx + idx}"
-            
+
             # Extract canvas IDs from replacement slide HTML
             replacement_canvas_ids = extract_canvas_ids_from_html(slide.html)
-            
+
             # Extract canvas IDs that replacement scripts reference
             replacement_script_canvas_ids = set()
             if slide.scripts:
                 script_segments = split_script_by_canvas(slide.scripts)
                 for _, segment_canvas_ids in script_segments:
                     replacement_script_canvas_ids.update(segment_canvas_ids)
-            
+
             # Preserve original scripts for canvas IDs that exist in replacement but aren't in replacement scripts
             preserved_count = 0
             for canvas_id in replacement_canvas_ids:
@@ -745,7 +909,7 @@ class ChatService:
                         "Preserved script for canvas",
                         extra={"canvas_id": canvas_id, "slide_index": start_idx + idx},
                     )
-            
+
             if preserved_count > 0:
                 logger.info(
                     "Preserved scripts for replacement slide",
@@ -754,7 +918,7 @@ class ChatService:
                         "preserved_count": preserved_count,
                     },
                 )
-            
+
             current_deck.insert_slide(slide, start_idx + idx)
 
         logger.info(
@@ -795,7 +959,7 @@ class ChatService:
             Slide deck dictionary with content_hash and verification, or None
         """
         from src.api.services.session_manager import get_session_manager
-        
+
         session_manager = get_session_manager()
         try:
             # Use session_manager to get deck with verification merged
@@ -804,7 +968,7 @@ class ChatService:
                 return deck_dict
         except Exception as e:
             logger.warning(f"Failed to load deck from session_manager: {e}")
-        
+
         # Fallback to internal cache (without verification/content_hash)
         deck = self._get_or_load_deck(session_id)
         if not deck:

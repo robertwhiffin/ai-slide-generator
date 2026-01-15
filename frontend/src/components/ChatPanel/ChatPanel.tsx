@@ -48,7 +48,7 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(({
     hasSelection,
     clearSelection,
   } = useSelection();
-  const { sessionId, isInitializing, error: sessionError } = useSession();
+  const { sessionId, isInitializing, error: sessionError, setExperimentUrl } = useSession();
   const { setIsGenerating } = useGeneration();
 
   useKeyboardShortcuts();
@@ -208,6 +208,11 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(({
           setIsGenerating(false);
 
           const nextRawHtml = event.raw_html ?? rawHtml ?? null;
+
+          // Capture experiment URL for Run Details link
+          if (event.experiment_url) {
+            setExperimentUrl(event.experiment_url);
+          }
 
           if (event.slides) {
             // Fetch slides from API to get content_hash for auto-verification

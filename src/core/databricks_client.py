@@ -188,7 +188,7 @@ def create_user_client(token: str) -> WorkspaceClient:
             token=token,
             auth_type="pat",  # Required for user token authentication
         )
-        
+
         logger.warning("create_user_client: client created successfully")
         return client
     except Exception as e:
@@ -239,3 +239,62 @@ def reset_user_client() -> None:
     Primarily useful for testing.
     """
     _user_client_var.set(None)
+
+
+# =============================================================================
+# Service Principal Helpers
+# =============================================================================
+
+
+def get_service_principal_client_id() -> Optional[str]:
+    """
+    Get the app service principal's client ID from environment.
+
+    Used for constructing experiment paths in the SP's workspace folder.
+    Returns None for local development (fallback to user-based paths).
+
+    Returns:
+        Client ID string or None if not set
+    """
+    return os.getenv("DATABRICKS_CLIENT_ID")
+
+
+def get_service_principal_folder() -> Optional[str]:
+    """
+    Get the workspace folder path for the app service principal.
+
+    Used as the root for per-session MLflow experiments when running
+    as a Databricks App with service principal authentication.
+
+    Returns:
+        Workspace folder path like "/Workspace/Users/{client_id}" or None if
+        DATABRICKS_CLIENT_ID is not set (local development)
+    """
+    client_id = get_service_principal_client_id()
+    if not client_id:
+        return None
+    return f"/Workspace/Users/{client_id}"
+
+
+def get_current_username() -> str:
+    """
+    Get the current user's username from the user client.
+
+    Uses the request-scoped user client if available, falls back to
+    system client for local development.
+
+    Returns:
+        Username string (email format)
+
+    Raises:
+        DatabricksClientError: If unable to get current user
+    """
+    try:
+        client = get_user_client()
+        current_user = client.current_user.me()
+        username = current_user.user_name
+        if not username:
+            raise DatabricksClientError("Current user has no username")
+        return username
+    except Exception as e:
+        raise DatabricksClientError(f"Failed to get current username: {e}") from e
