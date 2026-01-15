@@ -10,6 +10,7 @@ Supports:
 """
 
 import asyncio
+import contextvars
 import logging
 from typing import AsyncGenerator
 
@@ -22,6 +23,7 @@ from src.api.schemas.streaming import StreamEvent, StreamEventType
 from src.api.services.chat_service import get_chat_service
 from src.api.services.job_queue import enqueue_job
 from src.api.services.session_manager import SessionNotFoundError, get_session_manager
+from src.core.context_utils import run_in_thread_with_context
 
 logger = logging.getLogger(__name__)
 
@@ -68,8 +70,8 @@ async def send_message(request: ChatRequest) -> ChatResponse:
     try:
         chat_service = get_chat_service()
 
-        # Run blocking LLM call in thread pool
-        result = await asyncio.to_thread(
+        # Run blocking LLM call in thread pool with user context preserved
+        result = await run_in_thread_with_context(
             chat_service.send_message,
             request.session_id,
             request.message,
@@ -145,7 +147,10 @@ async def send_message_streaming(request: ChatRequest) -> StreamingResponse:
 
         event_queue: queue.Queue = queue.Queue()
         error_holder: list = []
-        
+
+        # Capture context BEFORE starting thread to preserve user auth
+        ctx = contextvars.copy_context()
+
         def run_streaming():
             """Run streaming in a separate thread, pushing events to queue."""
             try:
@@ -163,8 +168,8 @@ async def send_message_streaming(request: ChatRequest) -> StreamingResponse:
             finally:
                 event_queue.put(None)  # Signal completion
 
-        # Start streaming thread
-        thread = threading.Thread(target=run_streaming, daemon=True)
+        # Start streaming thread with context preserved
+        thread = threading.Thread(target=lambda: ctx.run(run_streaming), daemon=True)
         thread.start()
 
         try:

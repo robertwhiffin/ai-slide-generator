@@ -127,13 +127,33 @@ async def user_auth_middleware(request: Request, call_next):
     In local development (no token header), operations fall back to system client.
     """
     token = request.headers.get("x-forwarded-access-token")
+    client_id = os.getenv("DATABRICKS_CLIENT_ID", "")
+
     if token:
+        # Diagnostic logging: check if token is service principal ID
+        token_prefix = token[:20] if len(token) > 20 else token
+        is_sp_token = client_id and token.startswith(client_id)
+        logger.warning(
+            "OBO auth: extracted token from header",
+            extra={
+                "token_prefix": token_prefix,
+                "token_length": len(token),
+                "is_service_principal": is_sp_token,
+                "header_present": True,
+            },
+        )
+        if is_sp_token:
+            logger.warning(
+                "OBO auth: token appears to be service principal ID, not user token!"
+            )
         try:
             user_client = create_user_client(token)
             set_user_client(user_client)
-            logger.debug("User client set from forwarded token")
+            logger.warning("OBO auth: user client set successfully")
         except Exception as e:
             logger.warning(f"Failed to create user client from token: {e}")
+    else:
+        logger.warning("OBO auth: no x-forwarded-access-token header present")
     try:
         response = await call_next(request)
         return response

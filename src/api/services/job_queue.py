@@ -6,6 +6,7 @@ Databricks Apps' 60-second reverse proxy timeout.
 """
 
 import asyncio
+import contextvars
 import logging
 import queue
 from datetime import datetime, timedelta
@@ -23,10 +24,17 @@ job_queue: asyncio.Queue = asyncio.Queue()
 async def enqueue_job(request_id: str, payload: dict) -> None:
     """Add a job to the queue.
 
+    Captures the current context (including user auth token) so it can
+    be applied when the job is processed in the worker.
+
     Args:
         request_id: Unique request identifier
         payload: Job payload with session_id, message, slide_context
     """
+    # Capture context at enqueue time to preserve user auth
+    ctx = contextvars.copy_context()
+    payload["_context"] = ctx
+
     jobs[request_id] = {
         "status": "pending",
         "session_id": payload["session_id"],
@@ -65,6 +73,9 @@ async def process_chat_request(request_id: str, payload: dict) -> None:
     from src.api.services.session_manager import get_session_manager
     from src.services.streaming_callback import StreamingCallbackHandler
 
+    # Extract captured context (if available) for user auth propagation
+    ctx = payload.pop("_context", None)
+
     session_id = payload["session_id"]
     message = payload["message"]
     slide_context = payload.get("slide_context")
@@ -81,22 +92,42 @@ async def process_chat_request(request_id: str, payload: dict) -> None:
         session_manager.update_chat_request_status(request_id, "running")
 
         # Run blocking agent in thread pool via the generator-based streaming
+        # Use captured context if available to preserve user auth
         result = None
-        for event in await asyncio.to_thread(
-            _run_streaming_generator,
-            chat_service,
-            session_id,
-            message,
-            slide_context,
-            request_id,
-        ):
-            # Capture the final COMPLETE event
-            if event.type == StreamEventType.COMPLETE:
-                result = {
-                    "slides": event.slides,
-                    "raw_html": event.raw_html,
-                    "replacement_info": event.replacement_info,
-                }
+        if ctx:
+            for event in await asyncio.to_thread(
+                ctx.run,
+                _run_streaming_generator,
+                chat_service,
+                session_id,
+                message,
+                slide_context,
+                request_id,
+            ):
+                # Capture the final COMPLETE event
+                if event.type == StreamEventType.COMPLETE:
+                    result = {
+                        "slides": event.slides,
+                        "raw_html": event.raw_html,
+                        "replacement_info": event.replacement_info,
+                    }
+        else:
+            # Fallback for jobs without context (e.g., recovery)
+            for event in await asyncio.to_thread(
+                _run_streaming_generator,
+                chat_service,
+                session_id,
+                message,
+                slide_context,
+                request_id,
+            ):
+                # Capture the final COMPLETE event
+                if event.type == StreamEventType.COMPLETE:
+                    result = {
+                        "slides": event.slides,
+                        "raw_html": event.raw_html,
+                        "replacement_info": event.replacement_info,
+                    }
 
         session_manager.set_chat_request_result(request_id, result)
         session_manager.update_chat_request_status(request_id, "completed")

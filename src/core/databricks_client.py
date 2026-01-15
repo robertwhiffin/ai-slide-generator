@@ -162,13 +162,34 @@ def create_user_client(token: str) -> WorkspaceClient:
     if not host:
         raise DatabricksClientError("DATABRICKS_HOST environment variable not set")
 
+    # Diagnostic logging: check if token looks like service principal ID
+    client_id_env = os.getenv("DATABRICKS_CLIENT_ID", "")
+    token_prefix = token[:20] if len(token) > 20 else token
+    is_sp_token = client_id_env and token.startswith(client_id_env)
+
+    logger.warning(
+        "create_user_client: creating client",
+        extra={
+            "token_prefix": token_prefix,
+            "token_length": len(token),
+            "is_service_principal": is_sp_token,
+            "host": host,
+        },
+    )
+
+    if is_sp_token:
+        logger.warning(
+            "create_user_client: token appears to be service principal ID!"
+        )
+
     try:
         client = WorkspaceClient(
             host=host,
             token=token,
             auth_type="pat",  # Required for user token authentication
         )
-        logger.debug("Created user-scoped Databricks client")
+        
+        logger.warning("create_user_client: client created successfully")
         return client
     except Exception as e:
         raise DatabricksClientError(
@@ -201,10 +222,13 @@ def get_user_client() -> WorkspaceClient:
     """
     client = _user_client_var.get()
     if client is not None:
+        logger.warning("get_user_client: returning user-scoped client from ContextVar")
         return client
 
     # Fallback to system client for local development
-    logger.debug("No user client in context, falling back to system client")
+    logger.warning(
+        "get_user_client: ContextVar empty, falling back to system client"
+    )
     return get_system_client()
 
 

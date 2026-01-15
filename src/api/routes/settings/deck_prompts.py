@@ -197,8 +197,8 @@ def create_deck_prompt(
         
         # Get current user
         try:
-            from src.core.databricks_client import get_databricks_client
-            client = get_databricks_client()
+            from src.core.databricks_client import get_user_client
+            client = get_user_client()
             user = client.current_user.me().user_name
         except Exception:
             user = "system"
@@ -295,8 +295,8 @@ def update_deck_prompt(
         
         # Update the user
         try:
-            from src.core.databricks_client import get_databricks_client
-            client = get_databricks_client()
+            from src.core.databricks_client import get_user_client
+            client = get_user_client()
             prompt.updated_by = client.current_user.me().user_name
         except Exception:
             prompt.updated_by = "system"
@@ -362,8 +362,8 @@ def delete_deck_prompt(
         else:
             prompt.is_active = False
             try:
-                from src.core.databricks_client import get_databricks_client
-                client = get_databricks_client()
+                from src.core.databricks_client import get_user_client
+                client = get_user_client()
                 prompt.updated_by = client.current_user.me().user_name
             except Exception:
                 prompt.updated_by = "system"

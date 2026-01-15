@@ -17,6 +17,7 @@ langchain==1.0.5
 langchain-core==1.0.4
 langchain-community==0.4.1
 langchain-text-splitters==1.0.0
+litellm>=1.50.0
 
 # MLflow and observability
 mlflow==3.6.0
