@@ -7,8 +7,11 @@ CLI tool for deploying the AI Slide Generator to Databricks Apps.
 Use the `deploy.sh` wrapper script from the project root (activates venv automatically):
 
 ```bash
-# Create new app
+# Create new app (seeds generic prompts by default)
 ./deploy.sh create --env development --profile <profile>
+
+# Create with Databricks-specific content (internal use)
+./deploy.sh create --env development --profile <profile> --include-databricks-prompts
 
 # Update existing app
 ./deploy.sh update --env production --profile <profile>
@@ -50,12 +53,12 @@ python -m db_app_deployment.deploy --create --env development --profile <profile
 | `--delete` | three | Delete app |
 | `--profile` | Yes | Databricks CLI profile from `~/.databrickscfg` |
 | `--reset-db` | No | Drop and recreate database tables before deploying |
-| `--include-databricks-prompts` | No | Include Databricks-specific deck prompts and brand style (requires `--reset-db`) |
+| `--include-databricks-prompts` | No | Include Databricks-specific deck prompts and brand style (requires `--create` or `--reset-db`) |
 | `--dry-run` | No | Validate config without deploying |
 
 > **Warning:** `--reset-db` deletes all data, is blocked in production, and requires typing `RESET` to confirm.
 >
-> **Note:** `--include-databricks-prompts` requires `--reset-db` and will fail if used without it.
+> **Note:** `--include-databricks-prompts` requires `--create` or `--reset-db` and will fail if used without either.
 
 ---
 
@@ -81,6 +84,7 @@ python -m db_app_deployment.deploy --create --env development --profile <profile
    - Create/get Lakebase instance
    - Create schema and tables
    - Grant permissions
+   - Seed default data (on create)
 
 5. **Create/update Databricks App** with compute, env vars, and resources
 
@@ -102,7 +106,7 @@ This will:
 
 ### Database Seeding
 
-When resetting the database, the following content is seeded:
+When creating a new app or resetting the database, the following content is seeded:
 
 **Default (external releases):**
 - Generic deck prompts: Quarterly Business Review, Executive Summary
