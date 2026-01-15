@@ -104,6 +104,7 @@ async def evaluate_with_judge(
     slide_content: str,
     model: str = "databricks-claude-sonnet-4-5",
     trace_id: Optional[str] = None,
+    experiment_id: Optional[str] = None,
 ) -> LLMJudgeResult:
     """
     Run LLM judge evaluation on slide content using MLflow 3.x genai.evaluate().
@@ -119,6 +120,7 @@ async def evaluate_with_judge(
         slide_content: HTML + scripts from slide to verify
         model: Databricks model endpoint name
         trace_id: Optional trace ID to link feedback
+        experiment_id: Optional MLflow experiment ID to use (per-session experiment)
 
     Returns:
         LLMJudgeResult with score, explanation, issues, and metadata
@@ -132,35 +134,38 @@ async def evaluate_with_judge(
 
         # Set tracking URI to Databricks (not local ./mlruns)
         mlflow.set_tracking_uri("databricks")
-        logger.warning("LLM judge: set MLflow tracking URI to databricks")
+        logger.info("LLM judge: set MLflow tracking URI to databricks")
 
-        # Set the experiment (required for Databricks MLflow)
-        settings = get_settings()
-        experiment_name = settings.mlflow.experiment_name
-        
-        # Ensure experiment path has /Workspace prefix for Databricks
-        if experiment_name.startswith("/Users/"):
-            experiment_name = f"/Workspace{experiment_name}"
-            logger.warning(f"LLM judge: added /Workspace prefix to experiment path")
-        
-        logger.warning(
-            f"LLM judge: attempting to get/create experiment: {experiment_name}",
-            extra={
-                "experiment_name": experiment_name,
-                "profile_id": getattr(settings, 'profile_id', None),
-                "profile_name": getattr(settings, 'profile_name', None),
-            },
-        )
-        
-        experiment = mlflow.get_experiment_by_name(experiment_name)
-        if experiment is None:
-            logger.warning(f"LLM judge: experiment not found, creating: {experiment_name}")
-            experiment_id = mlflow.create_experiment(experiment_name)
-            logger.warning(f"LLM judge: created experiment with ID: {experiment_id}")
+        # Use passed experiment_id (per-session) or fall back to profile-based
+        if experiment_id:
+            logger.info(
+                f"LLM judge: using per-session experiment_id: {experiment_id}"
+            )
+            mlflow.set_experiment(experiment_id=experiment_id)
         else:
-            experiment_id = experiment.experiment_id
-            logger.warning(f"LLM judge: using existing experiment ID: {experiment_id}")
-        mlflow.set_experiment(experiment_id=experiment_id)
+            # Fallback to profile-based experiment (should rarely happen)
+            logger.warning("LLM judge: no experiment_id passed, falling back to profile-based experiment")
+            settings = get_settings()
+            experiment_name = settings.mlflow.experiment_name
+            
+            # Ensure experiment path has /Workspace prefix for Databricks
+            if experiment_name.startswith("/Users/"):
+                experiment_name = f"/Workspace{experiment_name}"
+                logger.warning(f"LLM judge: added /Workspace prefix to experiment path")
+            
+            logger.warning(
+                f"LLM judge: attempting to get/create experiment: {experiment_name}",
+            )
+            
+            experiment = mlflow.get_experiment_by_name(experiment_name)
+            if experiment is None:
+                logger.warning(f"LLM judge: experiment not found, creating: {experiment_name}")
+                experiment_id = mlflow.create_experiment(experiment_name)
+                logger.warning(f"LLM judge: created experiment with ID: {experiment_id}")
+            else:
+                experiment_id = experiment.experiment_id
+                logger.warning(f"LLM judge: using existing experiment ID: {experiment_id}")
+            mlflow.set_experiment(experiment_id=experiment_id)
 
         # Create judge using outputs and expectations
         accuracy_judge = make_judge(
