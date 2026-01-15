@@ -154,13 +154,16 @@ def agent_with_mocked_responses(mock_databricks_responses, mock_llm_response):
 
         agent = SlideGeneratorAgent()
         
-        # Pre-create test sessions with mocked Genie conversation ID
+        # Pre-create test sessions with mocked Genie conversation ID and new fields
         from langchain_community.chat_message_histories import ChatMessageHistory
         for i in range(1, 6):
             session_id = f"test-session-{i}"
             agent.sessions[session_id] = {
                 "chat_history": ChatMessageHistory(),
                 "genie_conversation_id": "conv-integration-123",
+                "experiment_id": f"exp-{i}",
+                "experiment_url": f"https://test.databricks.com/ml/experiments/exp-{i}",
+                "username": "test-user@example.com",
                 "created_at": "2024-01-01T00:00:00Z",
                 "message_count": 0,
             }
@@ -169,6 +172,9 @@ def agent_with_mocked_responses(mock_databricks_responses, mock_llm_response):
             agent.sessions[special_id] = {
                 "chat_history": ChatMessageHistory(),
                 "genie_conversation_id": "conv-integration-123",
+                "experiment_id": "exp-special",
+                "experiment_url": "https://test.databricks.com/ml/experiments/exp-special",
+                "username": "test-user@example.com",
                 "created_at": "2024-01-01T00:00:00Z",
                 "message_count": 0,
             }

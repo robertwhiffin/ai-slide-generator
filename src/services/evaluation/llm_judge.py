@@ -132,15 +132,34 @@ async def evaluate_with_judge(
 
         # Set tracking URI to Databricks (not local ./mlruns)
         mlflow.set_tracking_uri("databricks")
+        logger.warning("LLM judge: set MLflow tracking URI to databricks")
 
         # Set the experiment (required for Databricks MLflow)
         settings = get_settings()
         experiment_name = settings.mlflow.experiment_name
+        
+        # Ensure experiment path has /Workspace prefix for Databricks
+        if experiment_name.startswith("/Users/"):
+            experiment_name = f"/Workspace{experiment_name}"
+            logger.warning(f"LLM judge: added /Workspace prefix to experiment path")
+        
+        logger.warning(
+            f"LLM judge: attempting to get/create experiment: {experiment_name}",
+            extra={
+                "experiment_name": experiment_name,
+                "profile_id": getattr(settings, 'profile_id', None),
+                "profile_name": getattr(settings, 'profile_name', None),
+            },
+        )
+        
         experiment = mlflow.get_experiment_by_name(experiment_name)
         if experiment is None:
+            logger.warning(f"LLM judge: experiment not found, creating: {experiment_name}")
             experiment_id = mlflow.create_experiment(experiment_name)
+            logger.warning(f"LLM judge: created experiment with ID: {experiment_id}")
         else:
             experiment_id = experiment.experiment_id
+            logger.warning(f"LLM judge: using existing experiment ID: {experiment_id}")
         mlflow.set_experiment(experiment_id=experiment_id)
 
         # Create judge using outputs and expectations

@@ -27,7 +27,11 @@ def mock_settings():
     settings.llm.timeout = 120
     settings.mlflow.tracking_uri = "databricks"
     settings.mlflow.experiment_name = "/test/experiment"
-    settings.prompts = {"system_prompt": "You are a test assistant."}
+    settings.profile_name = "test-profile"
+    settings.prompts = {
+        "system_prompt": "You are a test assistant.",
+        "slide_style": "/* Test slide style */"
+    }
     return settings
 
 
@@ -78,10 +82,16 @@ def agent_with_mocks(
     """Create agent with all dependencies mocked."""
     with patch("src.services.agent.get_settings") as mock_get_settings, \
          patch("src.services.agent.get_databricks_client") as mock_get_client, \
-         patch("src.services.agent.initialize_genie_conversation") as mock_init_genie:
+         patch("src.services.agent.initialize_genie_conversation") as mock_init_genie, \
+         patch("src.services.agent.get_current_username") as mock_get_username, \
+         patch("src.services.agent.get_service_principal_folder") as mock_get_sp_folder, \
+         patch("src.services.agent.get_system_client") as mock_get_system:
         mock_get_settings.return_value = mock_settings
         mock_get_client.return_value = mock_client
         mock_init_genie.return_value = "test-genie-conv-id"
+        mock_get_username.return_value = "test-user@example.com"
+        mock_get_sp_folder.return_value = None  # Local dev mode
+        mock_get_system.return_value = mock_client
 
         agent = SlideGeneratorAgent()
         return agent
@@ -103,9 +113,8 @@ class TestSlideGeneratorAgent:
 
             agent = SlideGeneratorAgent()
 
-            # Verify MLflow setup called
+            # Verify MLflow tracking setup called (experiment creation moved to per-session)
             mock_mlflow.set_tracking_uri.assert_called_once_with("databricks")
-            mock_mlflow.set_experiment.assert_called_once()
 
             # Verify components created
             assert agent.settings == mock_settings
@@ -141,12 +150,17 @@ class TestSlideGeneratorAgent:
 
     def test_create_tools_for_session_valid(self, agent_with_mocks):
         """Test tool creation for a specific session."""
-        # Mock initialize_genie_conversation for create_session call
-        with patch("src.services.agent.initialize_genie_conversation") as mock_init:
+        # Mock dependencies for create_session call
+        with patch("src.services.agent.initialize_genie_conversation") as mock_init, \
+             patch("src.services.agent.get_current_username") as mock_username, \
+             patch("src.services.agent.get_service_principal_folder") as mock_sp_folder:
             mock_init.return_value = "test-genie-conv-id-session"
+            mock_username.return_value = "test-user@example.com"
+            mock_sp_folder.return_value = None  # Local dev mode
 
             # Create a session first (tools need a session to bind to)
-            session_id = agent_with_mocks.create_session()
+            result = agent_with_mocks.create_session()
+            session_id = result["session_id"]
 
             # Create tools for the session
             tools = agent_with_mocks._create_tools_for_session(session_id)
@@ -157,19 +171,29 @@ class TestSlideGeneratorAgent:
     
     def test_session_management(self, agent_with_mocks):
         """Test session creation, retrieval, and management."""
-        # Mock initialize_genie_conversation for create_session call
-        with patch("src.services.agent.initialize_genie_conversation") as mock_init:
+        # Mock dependencies for create_session call
+        with patch("src.services.agent.initialize_genie_conversation") as mock_init, \
+             patch("src.services.agent.get_current_username") as mock_username, \
+             patch("src.services.agent.get_service_principal_folder") as mock_sp_folder:
             mock_init.return_value = "test-genie-conv-id-session"
+            mock_username.return_value = "test-user@example.com"
+            mock_sp_folder.return_value = None  # Local dev mode
             
-            # Create session
-            session_id = agent_with_mocks.create_session()
-            assert session_id is not None
+            # Create session - now returns a dict with session_id and experiment_url
+            result = agent_with_mocks.create_session()
+            assert result is not None
+            assert "session_id" in result
+            assert "experiment_url" in result
+            session_id = result["session_id"]
             
-            # Verify session data
+            # Verify session data includes new fields
             session = agent_with_mocks.get_session(session_id)
             assert session["genie_conversation_id"] == "test-genie-conv-id-session"
             assert session["chat_history"] is not None
             assert session["message_count"] == 0
+            assert session["username"] == "test-user@example.com"
+            assert "experiment_id" in session
+            assert "experiment_url" in session
             
             # List sessions
             sessions = agent_with_mocks.list_sessions()

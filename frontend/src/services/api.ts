@@ -70,6 +70,7 @@ export interface StreamEvent {
   raw_html?: string;
   replacement_info?: ReplacementInfo;
   metadata?: Record<string, any>;
+  experiment_url?: string;
 }
 
 export interface SessionMessage {
