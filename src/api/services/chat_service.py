@@ -44,7 +44,7 @@ def _sanitize_replacement_info(replacement_info: Optional[Dict[str, Any]]) -> Op
     """
     if not replacement_info:
         return None
-
+    
     # Create a copy without replacement_slides (contains Slide objects)
     sanitized = {
         k: v for k, v in replacement_info.items()
@@ -194,13 +194,13 @@ class ChatService:
 
         # Get or create session in database (auto-create on first message)
         session_manager = get_session_manager()
-
+        
         # Get current profile info for session association
         from src.core.settings_db import get_settings
         settings = get_settings()
         profile_id = getattr(settings, 'profile_id', None)
         profile_name = getattr(settings, 'profile_name', None)
-
+        
         try:
             db_session = session_manager.get_session(session_id)
             # Update profile for existing session without one
@@ -353,13 +353,13 @@ class ChatService:
 
         # Get or create session in database
         session_manager = get_session_manager()
-
+        
         # Get current profile info for session association
         from src.core.settings_db import get_settings
         settings = get_settings()
         profile_id = getattr(settings, 'profile_id', None)
         profile_name = getattr(settings, 'profile_name', None)
-
+        
         try:
             db_session = session_manager.get_session(session_id)
             # Update profile for existing session without one
@@ -890,17 +890,17 @@ class ChatService:
         for idx, slide in enumerate(replacement_slides):
             # Update slide_id to reflect new position
             slide.slide_id = f"slide_{start_idx + idx}"
-
+            
             # Extract canvas IDs from replacement slide HTML
             replacement_canvas_ids = extract_canvas_ids_from_html(slide.html)
-
+            
             # Extract canvas IDs that replacement scripts reference
             replacement_script_canvas_ids = set()
             if slide.scripts:
                 script_segments = split_script_by_canvas(slide.scripts)
                 for _, segment_canvas_ids in script_segments:
                     replacement_script_canvas_ids.update(segment_canvas_ids)
-
+            
             # Preserve original scripts for canvas IDs that exist in replacement but aren't in replacement scripts
             preserved_count = 0
             for canvas_id in replacement_canvas_ids:
@@ -914,7 +914,7 @@ class ChatService:
                         "Preserved script for canvas",
                         extra={"canvas_id": canvas_id, "slide_index": start_idx + idx},
                     )
-
+            
             if preserved_count > 0:
                 logger.info(
                     "Preserved scripts for replacement slide",
@@ -923,7 +923,7 @@ class ChatService:
                         "preserved_count": preserved_count,
                     },
                 )
-
+            
             current_deck.insert_slide(slide, start_idx + idx)
 
         logger.info(
@@ -964,7 +964,7 @@ class ChatService:
             Slide deck dictionary with content_hash and verification, or None
         """
         from src.api.services.session_manager import get_session_manager
-
+        
         session_manager = get_session_manager()
         try:
             # Use session_manager to get deck with verification merged
@@ -973,7 +973,7 @@ class ChatService:
                 return deck_dict
         except Exception as e:
             logger.warning(f"Failed to load deck from session_manager: {e}")
-
+        
         # Fallback to internal cache (without verification/content_hash)
         deck = self._get_or_load_deck(session_id)
         if not deck:

@@ -110,6 +110,7 @@ async def process_chat_request(request_id: str, payload: dict) -> None:
                         "slides": event.slides,
                         "raw_html": event.raw_html,
                         "replacement_info": event.replacement_info,
+                        "experiment_url": event.experiment_url,
                     }
         else:
             # Fallback for jobs without context (e.g., recovery)
@@ -127,6 +128,7 @@ async def process_chat_request(request_id: str, payload: dict) -> None:
                         "slides": event.slides,
                         "raw_html": event.raw_html,
                         "replacement_info": event.replacement_info,
+                        "experiment_url": event.experiment_url,
                     }
 
         session_manager.set_chat_request_result(request_id, result)
