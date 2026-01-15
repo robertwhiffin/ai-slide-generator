@@ -7,6 +7,7 @@ Scripts are stored directly on Slide objects. When a slide is replaced,
 its scripts are automatically replaced with it - no separate cleanup needed.
 """
 
+import contextvars
 import logging
 import queue
 import threading
@@ -396,6 +397,9 @@ class ChatService:
         result_container: Dict[str, Any] = {}
         error_container: Dict[str, Exception] = {}
 
+        # Capture context BEFORE starting thread to preserve user auth
+        ctx = contextvars.copy_context()
+
         def run_agent():
             try:
                 result = self.agent.generate_slides_streaming(
@@ -414,8 +418,8 @@ class ChatService:
                 # Signal completion by putting None
                 event_queue.put(None)
 
-        # Start agent thread
-        agent_thread = threading.Thread(target=run_agent, daemon=True)
+        # Start agent thread with context preserved for user auth
+        agent_thread = threading.Thread(target=lambda: ctx.run(run_agent), daemon=True)
         agent_thread.start()
 
         # Yield events as they arrive
