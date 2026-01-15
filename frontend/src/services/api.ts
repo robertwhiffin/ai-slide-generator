@@ -113,6 +113,7 @@ interface PollResponse {
     slides?: SlideDeck;
     raw_html?: string;
     replacement_info?: ReplacementInfo;
+    experiment_url?: string;
   };
   error?: string;
 }
@@ -579,6 +580,7 @@ export const api = {
                   slides: response.result.slides,
                   raw_html: response.result.raw_html,
                   replacement_info: response.result.replacement_info,
+                  experiment_url: response.result.experiment_url,
                 });
               }
             }

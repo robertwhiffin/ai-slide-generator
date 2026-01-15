@@ -153,7 +153,7 @@ class SlideGeneratorAgent:
         if sp_folder:
             # Production: use service principal's folder
             experiment_path = f"{sp_folder}/{username}/{profile_name}/{timestamp}"
-        else:
+            else:
             # Local development: use user's folder
             experiment_path = f"/Workspace/Users/{username}/{profile_name}/{timestamp}"
 
@@ -242,7 +242,7 @@ class SlideGeneratorAgent:
                     "permission": "CAN_MANAGE",
                 },
             )
-        except Exception as e:
+            except Exception as e:
             # Log warning but don't fail - user can still view via SP permissions
             logger.warning(
                 f"Failed to grant experiment permission: {e}",
@@ -407,22 +407,22 @@ class SlideGeneratorAgent:
 
         # Build the complete system prompt
         prompt_parts = []
-
+        
         # Deck prompt comes first - sets context for what type of presentation to create
         if deck_prompt:
             prompt_parts.append(f"PRESENTATION CONTEXT:\n{deck_prompt.strip()}")
-
+        
         # Slide style defines visual appearance (user-controllable)
         if slide_style:
             prompt_parts.append(slide_style.strip())
-
+        
         # Core system prompt for technical slide generation (hidden from regular users)
         prompt_parts.append(system_prompt.rstrip())
-
+        
         # Editing instructions appended at the end
         if editing_prompt:
             prompt_parts.append(editing_prompt.strip())
-
+        
         full_system_prompt = "\n\n".join(prompt_parts)
 
         # Escape curly braces to allow user prompts with HTML/JS/JSON content

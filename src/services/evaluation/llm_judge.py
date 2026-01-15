@@ -145,8 +145,8 @@ async def evaluate_with_judge(
         else:
             # Fallback to profile-based experiment (should rarely happen)
             logger.warning("LLM judge: no experiment_id passed, falling back to profile-based experiment")
-            settings = get_settings()
-            experiment_name = settings.mlflow.experiment_name
+        settings = get_settings()
+        experiment_name = settings.mlflow.experiment_name
             
             # Ensure experiment path has /Workspace prefix for Databricks
             if experiment_name.startswith("/Users/"):
@@ -157,15 +157,15 @@ async def evaluate_with_judge(
                 f"LLM judge: attempting to get/create experiment: {experiment_name}",
             )
             
-            experiment = mlflow.get_experiment_by_name(experiment_name)
-            if experiment is None:
+        experiment = mlflow.get_experiment_by_name(experiment_name)
+        if experiment is None:
                 logger.warning(f"LLM judge: experiment not found, creating: {experiment_name}")
-                experiment_id = mlflow.create_experiment(experiment_name)
+            experiment_id = mlflow.create_experiment(experiment_name)
                 logger.warning(f"LLM judge: created experiment with ID: {experiment_id}")
-            else:
-                experiment_id = experiment.experiment_id
+        else:
+            experiment_id = experiment.experiment_id
                 logger.warning(f"LLM judge: using existing experiment ID: {experiment_id}")
-            mlflow.set_experiment(experiment_id=experiment_id)
+        mlflow.set_experiment(experiment_id=experiment_id)
 
         # Create judge using outputs and expectations
         accuracy_judge = make_judge(
