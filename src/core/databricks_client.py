@@ -167,7 +167,7 @@ def create_user_client(token: str) -> WorkspaceClient:
     token_prefix = token[:20] if len(token) > 20 else token
     is_sp_token = client_id_env and token.startswith(client_id_env)
 
-    logger.info(
+    logger.warning(
         "create_user_client: creating client",
         extra={
             "token_prefix": token_prefix,
@@ -188,7 +188,7 @@ def create_user_client(token: str) -> WorkspaceClient:
             token=token,
             auth_type="pat",  # Required for user token authentication
         )
-        logger.info("create_user_client: client created successfully")
+        logger.warning("create_user_client: client created successfully")
         return client
     except Exception as e:
         raise DatabricksClientError(
@@ -221,7 +221,7 @@ def get_user_client() -> WorkspaceClient:
     """
     client = _user_client_var.get()
     if client is not None:
-        logger.info("get_user_client: returning user-scoped client from ContextVar")
+        logger.warning("get_user_client: returning user-scoped client from ContextVar")
         return client
 
     # Fallback to system client for local development

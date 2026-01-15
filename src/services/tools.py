@@ -41,9 +41,9 @@ def initialize_genie_conversation() -> str:
         >>> conv_id = initialize_genie_conversation()
         >>> result = query_genie_space("show me data", conv_id)
     """
-    logger.info("Genie tool: initialize_genie_conversation called")
+    logger.warning("Genie tool: initialize_genie_conversation called")
     client = get_user_client()
-    logger.info(
+    logger.warning(
         "Genie tool: got client for conversation init",
         extra={"client_config_host": client.config.host},
     )
@@ -125,9 +125,9 @@ def query_genie_space(
         >>> print(result['message'])
         >>> print(result['data'])
     """
-    logger.info("Genie tool: query_genie_space called")
+    logger.warning("Genie tool: query_genie_space called")
     client = get_user_client()
-    logger.info(
+    logger.warning(
         "Genie tool: got client for query",
         extra={"client_config_host": client.config.host},
     )

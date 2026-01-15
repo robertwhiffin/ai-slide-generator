@@ -133,7 +133,7 @@ async def user_auth_middleware(request: Request, call_next):
         # Diagnostic logging: check if token is service principal ID
         token_prefix = token[:20] if len(token) > 20 else token
         is_sp_token = client_id and token.startswith(client_id)
-        logger.info(
+        logger.warning(
             "OBO auth: extracted token from header",
             extra={
                 "token_prefix": token_prefix,
@@ -149,11 +149,11 @@ async def user_auth_middleware(request: Request, call_next):
         try:
             user_client = create_user_client(token)
             set_user_client(user_client)
-            logger.info("OBO auth: user client set successfully")
+            logger.warning("OBO auth: user client set successfully")
         except Exception as e:
             logger.warning(f"Failed to create user client from token: {e}")
     else:
-        logger.info("OBO auth: no x-forwarded-access-token header present")
+        logger.warning("OBO auth: no x-forwarded-access-token header present")
     try:
         response = await call_next(request)
         return response
