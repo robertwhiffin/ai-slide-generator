@@ -10,7 +10,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
 from src.api.schemas.settings import GenieSpace, GenieSpaceCreate, GenieSpaceUpdate
-from src.core.databricks_client import get_databricks_client
+from src.core.databricks_client import get_user_client
 from src.core.database import get_db
 from src.services import GenieService
 from src.services.config_validator import ConfigurationValidator
@@ -47,7 +47,7 @@ def list_available_genie_spaces():
         }
     """
     try:
-        client = get_databricks_client()
+        client = get_user_client()
         spaces_data = {}
         page_num = 1
 
@@ -120,7 +120,7 @@ def lookup_genie_space(space_id: str):
         500: Failed to look up space
     """
     try:
-        client = get_databricks_client()
+        client = get_user_client()
         logger.info(f"Looking up Genie space: {space_id}")
         
         # Use the get_space method to fetch details for a specific space
