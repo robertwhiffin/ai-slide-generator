@@ -503,21 +503,24 @@ def setup_database_schema_and_tables(
     app: App,
     instance_name: str,
     schema: str,
+    include_databricks_prompts: bool = False,
 ) -> None:
     """
-    Set up database schema and initialize tables after app creation.
+    Set up database schema, initialize tables, and seed default data after app creation.
 
     This function:
     1. Gets the app's service principal client ID
     2. Creates the schema in Lakebase
     3. Grants permissions to the app's service principal
     4. Initializes SQLAlchemy tables
+    5. Seeds default data (deck prompts, slide styles)
 
     Args:
         workspace_client: Databricks workspace client
         app: Created App object
         instance_name: Lakebase instance name
         schema: Schema name for application tables
+        include_databricks_prompts: If True, include Databricks-specific deck prompts and brand style
     """
     print("📊 Setting up database schema and tables...")
 
@@ -557,6 +560,20 @@ def setup_database_schema_and_tables(
             client=workspace_client,
         )
         print("  ✅ Database tables initialized")
+
+        # Seed default data (deck prompts, slide styles)
+        print("  Seeding default data...")
+        from sqlalchemy import create_engine
+        from src.core.lakebase import get_lakebase_connection_url
+
+        connection_url = get_lakebase_connection_url(
+            instance_name=instance_name,
+            schema=schema,
+            client=workspace_client,
+        )
+        engine = create_engine(connection_url)
+        _seed_default_data(engine, schema, workspace_client, include_databricks_prompts)
+        print("  ✅ Default data seeded")
 
     except Exception as e:
         print(f"  ⚠️  Database setup failed: {e}")
@@ -870,6 +887,7 @@ def deploy(
                     app,
                     instance_name=config.lakebase.database_name,
                     schema=config.lakebase.schema,
+                    include_databricks_prompts=include_databricks_prompts,
                 )
 
             elif action == "update":
@@ -953,11 +971,11 @@ def main() -> None:
 
     args = parser.parse_args()
 
-    # Validate --include-databricks-prompts requires --reset-db
-    if args.include_databricks_prompts and not args.reset_db:
+    # Validate --include-databricks-prompts requires --create or --reset-db
+    if args.include_databricks_prompts and not (args.action == "create" or args.reset_db):
         parser.error(
-            "--include-databricks-prompts requires --reset-db\n"
-            "The flag only affects database seeding, which requires a reset."
+            "--include-databricks-prompts requires --create or --reset-db\n"
+            "The flag only affects database seeding during app creation or reset."
         )
 
     deploy(
