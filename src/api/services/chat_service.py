@@ -593,6 +593,11 @@ class ChatService:
                 "message_count": message_count,
             }
 
+            # Persist experiment_id to database for verification endpoint access
+            if experiment_id:
+                session_manager = get_session_manager()
+                session_manager.set_experiment_id(session_id, experiment_id)
+
             logger.info(
                 "Session registered with agent",
                 extra={

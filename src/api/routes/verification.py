@@ -149,10 +149,16 @@ async def verify_slide(slide_index: int, request: VerifySlideRequest):
             
             return VerifySlideResponse(**unknown_result)
 
-        # Run LLM judge evaluation
+        # Get session's experiment_id for LLM judge to use
+        experiment_id = await asyncio.to_thread(
+            session_manager.get_experiment_id, request.session_id
+        )
+
+        # Run LLM judge evaluation using session's experiment
         result = await evaluate_with_judge(
             genie_data=genie_data,
             slide_content=slide_html,
+            experiment_id=experiment_id,
         )
         
         # Build verification result dict

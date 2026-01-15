@@ -79,6 +79,9 @@ class UserSession(Base):
     # Genie conversation tracking (persists across profile switches)
     genie_conversation_id = Column(String(255), nullable=True)
 
+    # MLflow experiment tracking (per-session experiment for tracing)
+    experiment_id = Column(String(255), nullable=True)
+
     # Processing lock for concurrent request handling
     is_processing = Column(Boolean, default=False, nullable=False)
     processing_started_at = Column(DateTime, nullable=True)
