@@ -188,6 +188,7 @@ def create_user_client(token: str) -> WorkspaceClient:
             token=token,
             auth_type="pat",  # Required for user token authentication
         )
+        
         logger.warning("create_user_client: client created successfully")
         return client
     except Exception as e:

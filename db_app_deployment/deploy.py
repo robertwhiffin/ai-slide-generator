@@ -383,6 +383,14 @@ def create_app(
             compute_size=compute_size_enum,
             default_source_code_path=workspace_path,
             resources=resources,
+            user_api_scopes = [
+                'sql',
+                'dashboards.genie',
+                'catalog.tables:read',
+                'catalog.schemas:read',
+                'catalog.catalogs:read',
+                'serving.serving-endpoints'
+                ]
         )
 
         result = workspace_client.apps.create_and_wait(app)
