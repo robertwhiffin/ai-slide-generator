@@ -52,18 +52,6 @@ class GenieSpace(BaseModel):
     updated_at: datetime
 
 
-class MLflowConfig(BaseModel):
-    """MLflow configuration."""
-
-    model_config = ConfigDict(from_attributes=True)
-
-    id: int
-    profile_id: int
-    experiment_name: str
-    created_at: datetime
-    updated_at: datetime
-
-
 class PromptsConfig(BaseModel):
     """Prompts configuration."""
 
@@ -94,7 +82,6 @@ class ProfileDetail(BaseModel):
     updated_by: Optional[str]
     ai_infra: AIInfraConfig
     genie_spaces: List[GenieSpace]
-    mlflow: MLflowConfig
     prompts: PromptsConfig
 
 

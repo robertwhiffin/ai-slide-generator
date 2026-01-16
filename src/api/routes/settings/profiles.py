@@ -201,9 +201,6 @@ def create_profile_with_config(
                 "llm_temperature": request.ai_infra.llm_temperature,
                 "llm_max_tokens": request.ai_infra.llm_max_tokens,
             } if request.ai_infra else None,
-            mlflow={
-                "experiment_name": request.mlflow.experiment_name,
-            } if request.mlflow else None,
             prompts={
                 "selected_deck_prompt_id": request.prompts.selected_deck_prompt_id,
                 "selected_slide_style_id": request.prompts.selected_slide_style_id,

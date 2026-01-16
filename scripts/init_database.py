@@ -31,7 +31,6 @@ from src.core.defaults import DEFAULT_CONFIG
 from src.database.models import (
     ConfigAIInfra,
     ConfigGenieSpace,
-    ConfigMLflow,
     ConfigProfile,
     ConfigPrompts,
     SlideDeckPromptLibrary,
@@ -208,17 +207,6 @@ def initialize_database(reset: bool = False):
                 )
                 db.add(genie_space)
                 print(f"  ✓ Genie space: {genie_config['space_name']}")
-            
-            # Create MLflow settings
-            mlflow_config = seed.get('mlflow', {})
-            if mlflow_config:
-                experiment_name = mlflow_config['experiment_name'].format(username=username)
-                mlflow = ConfigMLflow(
-                    profile_id=profile.id,
-                    experiment_name=experiment_name,
-                )
-                db.add(mlflow)
-                print(f"  ✓ MLflow: {experiment_name}")
             
             # Create prompts with default slide style
             # Handle "USE_DEFAULT" values by substituting from defaults.py

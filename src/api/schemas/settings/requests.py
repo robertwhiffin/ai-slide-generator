@@ -35,22 +35,6 @@ class AIInfraCreateInline(BaseModel):
     llm_max_tokens: Optional[int] = Field(None, gt=0, description="Max tokens")
 
 
-class MLflowCreateInline(BaseModel):
-    """Inline MLflow configuration for profile creation wizard."""
-
-    experiment_name: str = Field(..., min_length=1, description="MLflow experiment name")
-
-    @field_validator("experiment_name")
-    @classmethod
-    def validate_experiment_name(cls, v: str) -> str:
-        """Validate experiment name."""
-        if not v.strip():
-            raise ValueError("Experiment name cannot be empty")
-        if not v.startswith("/"):
-            raise ValueError("Experiment name must start with /")
-        return v.strip()
-
-
 class PromptsCreateInline(BaseModel):
     """Inline prompts configuration for profile creation wizard."""
 
@@ -75,7 +59,6 @@ class ProfileCreateWithConfig(BaseModel):
         description="Genie space (optional - enables data queries)"
     )
     ai_infra: Optional[AIInfraCreateInline] = Field(None, description="AI infrastructure")
-    mlflow: Optional[MLflowCreateInline] = Field(None, description="MLflow configuration")
     prompts: Optional[PromptsCreateInline] = Field(None, description="Prompts configuration")
 
     @field_validator("name")
@@ -157,22 +140,6 @@ class GenieSpaceUpdate(BaseModel):
         if v is not None and not v.strip():
             raise ValueError("Space name cannot be empty")
         return v.strip() if v else None
-
-
-class MLflowConfigUpdate(BaseModel):
-    """Request to update MLflow configuration."""
-
-    experiment_name: str = Field(..., min_length=1, description="MLflow experiment name")
-
-    @field_validator("experiment_name")
-    @classmethod
-    def validate_experiment_name(cls, v: str) -> str:
-        """Validate experiment name."""
-        if not v.strip():
-            raise ValueError("Experiment name cannot be empty")
-        if not v.startswith("/"):
-            raise ValueError("Experiment name must start with /")
-        return v.strip()
 
 
 class PromptsConfigUpdate(BaseModel):

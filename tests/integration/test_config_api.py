@@ -13,7 +13,6 @@ from src.database.models import (  # noqa: F401
     ConfigAIInfra,
     ConfigGenieSpace,
     ConfigHistory,
-    ConfigMLflow,
     ConfigProfile,
     ConfigPrompts,
 )
