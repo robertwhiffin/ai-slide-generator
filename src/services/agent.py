@@ -6,10 +6,9 @@ capabilities with MLflow tracing integration.
 """
 
 import logging
-import queue
 import uuid
 from datetime import datetime
-from typing import Any, Optional
+from typing import Any
 
 import mlflow
 from bs4 import BeautifulSoup
@@ -22,8 +21,13 @@ from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.tools import StructuredTool
 from pydantic import BaseModel, Field
 
-from src.core.databricks_client import get_databricks_client, get_user_client
-
+from src.core.databricks_client import (
+    get_current_username,
+    get_databricks_client,
+    get_service_principal_folder,
+    get_system_client,
+    get_user_client,
+)
 from src.core.settings_db import get_settings
 from src.domain.slide import Slide
 from src.services.tools import initialize_genie_conversation, query_genie_space
@@ -88,55 +92,166 @@ class SlideGeneratorAgent:
         self.settings = get_settings()
         self.client = get_databricks_client()  # System client for non-user operations
 
-        # Set up MLflow
-        self._setup_mlflow()
-        self.experiment_id = None
+        # Set up MLflow tracking (experiment created per-session)
+        self._setup_mlflow_tracking()
 
         # Create LangChain prompt (model created per-request for user context)
         self.prompt = self._create_prompt()
 
         # Session storage for multi-turn conversations
-        # Structure: {session_id: {chat_history, genie_conversation_id, metadata}}
+        # Structure: {session_id: {chat_history, genie_conversation_id, experiment_id, experiment_url, username, metadata}}
         self.sessions: dict[str, dict[str, Any]] = {}
 
         logger.info("SlideGeneratorAgent initialized successfully")
 
-    def _setup_mlflow(self) -> None:
-        """Configure MLflow tracking and experiment."""
+    def _setup_mlflow_tracking(self) -> None:
+        """Configure MLflow tracking URI only.
+        
+        Experiments are created per-session in create_session() to provide
+        isolated tracking and user-specific permissions.
+        """
         try:
-            #mlflow.set_tracking_uri(self.settings.mlflow.tracking_uri)
-            # Use the Databricks workspace for tracking
             tracking_uri = "databricks"
             mlflow.set_tracking_uri(tracking_uri)
-            experiment = mlflow.get_experiment_by_name(self.settings.mlflow.experiment_name)
-            if experiment is None:
-                self.experiment_id = mlflow.create_experiment(self.settings.mlflow.experiment_name).experiment_id
-                logger.info("Created new MLflow experiment", extra={"experiment_name": self.settings.mlflow.experiment_name, "experiment_id": self.experiment_id})
-            else:
-                self.experiment_id = experiment.experiment_id
-                logger.info("MLflow experiment already exists", extra={"experiment_name": self.settings.mlflow.experiment_name, "experiment_id": self.experiment_id})
-            mlflow.set_experiment(experiment_id=self.experiment_id)
+            logger.info("MLflow tracking configured", extra={"tracking_uri": tracking_uri})
 
-            logger.info(
-                "MLflow configured",
-                extra={
-                    #"tracking_uri": self.settings.mlflow.tracking_uri,
-                    "tracking_uri": tracking_uri,
-                    "experiment_name": self.settings.mlflow.experiment_name,
-                    "experiment_id": self.experiment_id,
-                },
-            )
             # Enable LangChain autologging
             try:
                 mlflow.langchain.autolog()
                 logger.info("MLflow LangChain autologging enabled")
             except Exception as e:
-                logger.error(f"Failed to enable MLflow LangChain autologging: {e}")
-                pass
+                logger.warning(f"Failed to enable MLflow LangChain autologging: {e}")
         except Exception as e:
-            logger.warning(f"Failed to configure MLflow: {e}")
-            # Continue without MLflow if it fails
-            pass
+            logger.warning(f"Failed to configure MLflow tracking: {e}")
+
+    def _ensure_user_experiment(self, session_id: str, username: str) -> tuple[str, str]:
+        """Ensure MLflow experiment exists for this user (one experiment per user).
+        
+        Creates an experiment if it doesn't exist, or returns the existing one.
+        Experiment path:
+        - Production: /Workspace/Users/{SP_CLIENT_ID}/{username}/ai-slide-generator
+        - Local dev: /Workspace/Users/{username}/ai-slide-generator
+        
+        Args:
+            session_id: Session identifier for logging
+            username: User's email/username for path and permissions
+            
+        Returns:
+            Tuple of (experiment_id, experiment_url)
+        """
+        import os
+
+        # Determine experiment path based on environment
+        sp_folder = get_service_principal_folder()
+        
+        if sp_folder:
+            # Production: use service principal's folder
+            experiment_path = f"{sp_folder}/{username}/ai-slide-generator"
+        else:
+            # Local development: use user's folder
+            experiment_path = f"/Workspace/Users/{username}/ai-slide-generator"
+
+        logger.info(
+            f"Agent: Ensuring user MLflow experiment at path: {experiment_path}",
+            extra={
+                "session_id": session_id,
+                "username": username,
+                "experiment_path": experiment_path,
+                "using_sp_folder": sp_folder is not None,
+            },
+        )
+
+        try:
+            # Check if experiment already exists
+            experiment = mlflow.get_experiment_by_name(experiment_path)
+            
+            if experiment:
+                experiment_id = experiment.experiment_id
+                logger.info(
+                    f"Using existing user experiment: {experiment_id}",
+                    extra={"session_id": session_id, "experiment_path": experiment_path},
+                )
+            else:
+                # Create new experiment for user
+                experiment_id = mlflow.create_experiment(experiment_path)
+                logger.info(
+                    f"Created new user experiment: {experiment_id}",
+                    extra={"session_id": session_id, "experiment_path": experiment_path},
+                )
+
+                # Grant user CAN_MANAGE permission (only needed when using SP folder)
+                if sp_folder:
+                    self._grant_experiment_permission(experiment_id, username, session_id)
+
+            # Construct experiment URL (ensure https:// prefix for proper linking)
+            host = os.getenv("DATABRICKS_HOST", "").rstrip("/")
+            if host and not host.startswith("http"):
+                host = f"https://{host}"
+            experiment_url = f"{host}/ml/experiments/{experiment_id}"
+
+            return experiment_id, experiment_url
+
+        except Exception as e:
+            logger.error(
+                f"Failed to ensure user experiment: {e}",
+                extra={
+                    "session_id": session_id,
+                    "experiment_path": experiment_path,
+                    "error": str(e),
+                },
+                exc_info=True,
+            )
+            raise AgentError(f"Failed to create MLflow experiment: {e}") from e
+
+    def _grant_experiment_permission(
+        self, experiment_id: str, username: str, session_id: str
+    ) -> None:
+        """Grant CAN_MANAGE permission on experiment to user.
+        
+        Uses the Databricks SDK to set experiment permissions so users can
+        view and manage their session's experiment data.
+        
+        Args:
+            experiment_id: MLflow experiment ID
+            username: User's email/username to grant permission to
+            session_id: Session ID for logging context
+        """
+        from databricks.sdk.service.ml import (
+            ExperimentAccessControlRequest,
+            ExperimentPermissionLevel,
+        )
+
+        try:
+            client = get_system_client()
+            client.experiments.set_permissions(
+                experiment_id=experiment_id,
+                access_control_list=[
+                    ExperimentAccessControlRequest(
+                        user_name=username,
+                        permission_level=ExperimentPermissionLevel.CAN_MANAGE,
+                    )
+                ],
+            )
+            logger.info(
+                "Granted experiment permission",
+                extra={
+                    "session_id": session_id,
+                    "experiment_id": experiment_id,
+                    "username": username,
+                    "permission": "CAN_MANAGE",
+                },
+            )
+        except Exception as e:
+            # Log warning but don't fail - user can still view via SP permissions
+            logger.warning(
+                f"Failed to grant experiment permission: {e}",
+                extra={
+                    "session_id": session_id,
+                    "experiment_id": experiment_id,
+                    "username": username,
+                    "error": str(e),
+                },
+            )
 
     def _create_model(self) -> ChatDatabricks:
         """Create LangChain Databricks model with user context.
@@ -371,16 +486,19 @@ class SlideGeneratorAgent:
         except Exception as e:
             raise AgentError(f"Failed to create agent executor: {e}") from e
 
-    def create_session(self) -> str:
+    def create_session(self) -> dict[str, Any]:
         """
-        Create a new conversation session.
+        Create a new conversation session with per-session MLflow experiment.
 
         Returns:
-            Unique session ID
+            Dictionary containing:
+            - session_id: Unique session identifier
+            - experiment_url: URL to the MLflow experiment for this session
 
         Each session maintains its own:
         - Chat message history
         - Genie conversation_id (initialized if Genie configured, None otherwise)
+        - MLflow experiment (created in SP folder with user permissions)
         - Session metadata
         
         Note: Genie conversation is initialized upfront when configured.
@@ -389,6 +507,32 @@ class SlideGeneratorAgent:
         session_id = str(uuid.uuid4())
 
         logger.info("Creating new session", extra={"session_id": session_id})
+
+        # Get current username for experiment path and permissions
+        try:
+            username = get_current_username()
+            logger.info(
+                "Retrieved username for session",
+                extra={"session_id": session_id, "username": username},
+            )
+        except Exception as e:
+            logger.error(f"Failed to get current username: {e}")
+            raise AgentError(f"Failed to get current username: {e}") from e
+
+        # Ensure user's MLflow experiment exists (one per user)
+        experiment_id = None
+        experiment_url = None
+        try:
+            experiment_id, experiment_url = self._ensure_user_experiment(
+                session_id, username
+            )
+            # Set as active experiment for this session
+            mlflow.set_experiment(experiment_id=experiment_id)
+        except Exception as e:
+            logger.warning(
+                f"Failed to ensure user experiment, continuing without MLflow: {e}",
+                extra={"session_id": session_id, "error": str(e)},
+            )
 
         # Initialize Genie conversation only if configured
         genie_conversation_id = None
@@ -414,16 +558,33 @@ class SlideGeneratorAgent:
         # Create chat history for this session
         chat_history = ChatMessageHistory()
 
-        # Initialize session data
+        # Initialize session data with experiment info and metadata for MLflow tags
+        profile_name = self.settings.profile_name or "default"
+        session_timestamp = datetime.utcnow().isoformat()
         self.sessions[session_id] = {
             "chat_history": chat_history,
             "genie_conversation_id": genie_conversation_id,  # None if no Genie
-            "created_at": datetime.utcnow().isoformat(),
+            "experiment_id": experiment_id,
+            "experiment_url": experiment_url,
+            "username": username,
+            "profile_name": profile_name,
+            "created_at": session_timestamp,
             "message_count": 0,
         }
 
-        logger.info("Session created successfully", extra={"session_id": session_id})
-        return session_id
+        logger.info(
+            "Session created successfully",
+            extra={
+                "session_id": session_id,
+                "experiment_id": experiment_id,
+                "experiment_url": experiment_url,
+            },
+        )
+
+        return {
+            "session_id": session_id,
+            "experiment_url": experiment_url,
+        }
 
     def get_session(self, session_id: str) -> dict[str, Any]:
         """
@@ -775,11 +936,17 @@ class SlideGeneratorAgent:
             )
 
         try:
+            # Set session's experiment as active for tracing
+            if session.get("experiment_id"):
+                mlflow.set_experiment(experiment_id=session["experiment_id"])
+
             # Use mlflow.start_span for manual tracing
             with mlflow.start_span(name="generate_slides") as span:
-                # Set custom attributes
+                # Set custom attributes including session metadata for filtering
                 span.set_attribute("question", question)
                 span.set_attribute("session_id", session_id)
+                span.set_attribute("profile_name", session.get("profile_name", "unknown"))
+                span.set_attribute("session_timestamp", session.get("created_at", ""))
                 span.set_attribute("model_endpoint", self.settings.llm.endpoint)
                 span.set_attribute("message_count", session["message_count"])
                 span.set_attribute("mode", "edit" if editing_mode else "generate")
@@ -867,6 +1034,7 @@ class SlideGeneratorAgent:
                     "metadata": metadata,
                     "session_id": session_id,
                     "genie_conversation_id": session["genie_conversation_id"],
+                    "experiment_url": session.get("experiment_url"),
                     "replacement_info": replacement_info,
                     "parsed_output": parsed_output,
                 }
@@ -942,9 +1110,16 @@ class SlideGeneratorAgent:
             )
 
         try:
+            # Set session's experiment as active for tracing
+            if session.get("experiment_id"):
+                mlflow.set_experiment(experiment_id=session["experiment_id"])
+
             with mlflow.start_span(name="generate_slides_streaming") as span:
+                # Set custom attributes including session metadata for filtering
                 span.set_attribute("question", question)
                 span.set_attribute("session_id", session_id)
+                span.set_attribute("profile_name", session.get("profile_name", "unknown"))
+                span.set_attribute("session_timestamp", session.get("created_at", ""))
                 span.set_attribute("model_endpoint", self.settings.llm.endpoint)
                 span.set_attribute("message_count", session["message_count"])
                 span.set_attribute("mode", "edit" if editing_mode else "generate")
@@ -1017,6 +1192,7 @@ class SlideGeneratorAgent:
                     "metadata": metadata,
                     "session_id": session_id,
                     "genie_conversation_id": session["genie_conversation_id"],
+                    "experiment_url": session.get("experiment_url"),
                     "replacement_info": replacement_info,
                 }
 

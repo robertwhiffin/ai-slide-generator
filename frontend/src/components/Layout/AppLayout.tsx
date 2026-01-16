@@ -27,7 +27,7 @@ export const AppLayout: React.FC = () => {
   // Track which slide to scroll to in the main panel (uses key to allow re-scroll to same index)
   const [scrollTarget, setScrollTarget] = useState<{ index: number; key: number } | null>(null);
   const chatPanelRef = useRef<ChatPanelHandle>(null);
-  const { sessionTitle, createNewSession, switchSession, renameSession } = useSession();
+  const { sessionTitle, experimentUrl, createNewSession, switchSession, renameSession } = useSession();
   const { isGenerating } = useGeneration();
   const { currentProfile, loadProfile } = useProfiles();
 
@@ -110,6 +110,20 @@ export const AppLayout: React.FC = () => {
                 </>
               )}
               {slideDeck ? `${slideDeck.slide_count} slides` : 'No slides'}
+              {experimentUrl && (
+                <>
+                  <span className="text-blue-300">•</span>
+                  <a
+                    href={experimentUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="hover:text-white underline"
+                    title="View MLflow experiment traces"
+                  >
+                    Run Details
+                  </a>
+                </>
+              )}
             </p>
           </div>
           

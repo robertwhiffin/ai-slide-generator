@@ -72,6 +72,10 @@ class ChatResponse(BaseModel):
         default=None,
         description="Information about slide replacements performed during editing",
     )
+    experiment_url: Optional[str] = Field(
+        default=None,
+        description="URL to the MLflow experiment for this session",
+    )
 
     class Config:
         """Pydantic model configuration."""
