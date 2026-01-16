@@ -626,13 +626,28 @@ def reset_database_tables(
         # Create engine
         engine = create_engine(connection_url)
 
-        # Set search path and drop all tables
+        # Set search path and drop all tables using CASCADE
+        # We use raw SQL with CASCADE to handle foreign key dependencies
+        # and tables that may no longer be in the current codebase
         with engine.connect() as conn:
             conn.execute(text(f'SET search_path TO "{schema}"'))
             conn.commit()
 
         print("  Dropping all tables...")
-        Base.metadata.drop_all(bind=engine)
+        
+        # Get all table names from the schema and drop with CASCADE
+        with engine.connect() as conn:
+            result = conn.execute(text(f"""
+                SELECT tablename FROM pg_tables 
+                WHERE schemaname = '{schema}'
+            """))
+            tables = [row[0] for row in result.fetchall()]
+            
+            for table_name in tables:
+                print(f"    Dropping {table_name}...")
+                conn.execute(text(f'DROP TABLE IF EXISTS "{schema}"."{table_name}" CASCADE'))
+            conn.commit()
+        
         print("  ✅ All tables dropped")
 
         print("  Recreating tables...")

@@ -10,7 +10,6 @@ from src.core.settings_db import get_settings, load_settings_from_database, relo
 from src.database.models import (
     ConfigAIInfra,
     ConfigGenieSpace,
-    ConfigMLflow,
     ConfigProfile,
     ConfigPrompts,
 )
@@ -104,13 +103,6 @@ def test_profile(test_db):
         description="Test data space",
     )
     test_db.add(genie_space)
-    
-    # Add MLflow settings
-    mlflow = ConfigMLflow(
-        profile_id=profile.id,
-        experiment_name="/test/experiment",
-    )
-    test_db.add(mlflow)
     
     # Add prompts
     prompts = ConfigPrompts(

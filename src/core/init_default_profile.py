@@ -20,7 +20,6 @@ from src.core.config_loader import load_config
 from src.database.models import (
     ConfigAIInfra,
     ConfigGenieSpace,
-    ConfigMLflow,
     ConfigProfile,
     ConfigPrompts,
     SlideDeckPromptLibrary,
@@ -344,28 +343,6 @@ def init_default_profile() -> None:
             db.add(genie_space)
             logger.info("Created Genie space settings")
 
-            # Create MLflow settings
-            # Get username from Databricks client singleton
-            try:
-                from src.core.databricks_client import get_databricks_client
-                client = get_databricks_client()
-                username = client.current_user.me().user_name
-            except Exception as e:
-                # Fallback to environment variable if Databricks not available
-                logger.warning(f"Could not get Databricks username: {e}")
-                username = os.getenv("USER", "default_user")
-
-            experiment_name = "/Users/{username}/slide-generator-experiments"
-            if "{username}" in experiment_name:
-                experiment_name = experiment_name.format(username=username)
-
-            mlflow_config = ConfigMLflow(
-                profile_id=profile.id,
-                experiment_name=experiment_name,
-            )
-            db.add(mlflow_config)
-            logger.info("Created MLflow settings")
-
             # Seed deck prompt library (global, not per-profile)
             _seed_deck_prompts(db)
 
@@ -398,7 +375,6 @@ def init_default_profile() -> None:
             print(f"  Profile Name: {profile.name}")
             print(f"  LLM Endpoint: {ai_infra.llm_endpoint}")
             print(f"  Genie Space: {genie_space.space_name}")
-            print(f"  MLflow Experiment: {mlflow_config.experiment_name}")
             print("\nYou can now start the application with database-backed configuration.")
 
     except Exception as e:

@@ -83,31 +83,6 @@ class ConfigValidator:
 
         return ValidationResult(valid=True)
 
-    def validate_mlflow(self, experiment_name: str) -> ValidationResult:
-        """
-        Validate MLflow configuration.
-        
-        Args:
-            experiment_name: Experiment name
-            
-        Returns:
-            ValidationResult
-        """
-        if not experiment_name or not experiment_name.strip():
-            return ValidationResult(
-                valid=False,
-                error="Experiment name cannot be empty",
-            )
-
-        # Validate format (should be a valid path)
-        if not experiment_name.startswith("/"):
-            return ValidationResult(
-                valid=False,
-                error="Experiment name must start with /",
-            )
-
-        return ValidationResult(valid=True)
-
     def validate_prompts(
         self,
         system_prompt: str = None,

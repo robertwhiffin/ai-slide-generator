@@ -526,6 +526,17 @@ class ChatService:
         """
         # Check if agent already has this session
         if session_id in self.agent.sessions:
+            # Update profile_name if settings have changed (handles profile switching)
+            from src.core.settings_db import get_settings
+            current_settings = get_settings()
+            current_profile = current_settings.profile_name or "default"
+            if self.agent.sessions[session_id].get("profile_name") != current_profile:
+                self.agent.sessions[session_id]["profile_name"] = current_profile
+                logger.info(
+                    "Updated session profile after switch",
+                    extra={"session_id": session_id, "profile_name": current_profile},
+                )
+            
             # Agent session exists - ensure genie_conversation_id is persisted to DB
             agent_genie_id = self.agent.sessions[session_id].get("genie_conversation_id")
             if agent_genie_id and not genie_conversation_id:
@@ -672,6 +683,18 @@ class ChatService:
                     extra={"session_id": session_id, "experiment_path": experiment_path},
                 )
             else:
+                # Ensure parent folder exists before creating experiment
+                # The folder structure is: {sp_folder}/{username}/ai-slide-generator
+                # We need to create {sp_folder}/{username}/ first
+                if sp_folder:
+                    from src.core.databricks_client import ensure_workspace_folder
+                    parent_folder = f"{sp_folder}/{username}"
+                    try:
+                        ensure_workspace_folder(parent_folder)
+                    except Exception as e:
+                        logger.warning(f"Failed to create parent folder {parent_folder}: {e}")
+                        # Continue anyway - experiment creation might still work
+                
                 # Create new experiment for user
                 experiment_id = mlflow.create_experiment(experiment_path)
                 logger.info(

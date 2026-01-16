@@ -8,7 +8,6 @@ from src.core.database import Base
 from src.database.models import (
     ConfigAIInfra,
     ConfigGenieSpace,
-    ConfigMLflow,
     ConfigProfile,
     ConfigPrompts,
 )
@@ -137,24 +136,6 @@ def test_genie_space_creation(db_session):
     assert profile.genie_spaces[0].space_name == "Space 1"
 
 
-def test_mlflow_config(db_session):
-    """Test MLflow configuration."""
-    profile = ConfigProfile(name="test", created_by="test")
-    db_session.add(profile)
-    db_session.flush()
-    
-    mlflow = ConfigMLflow(
-        profile_id=profile.id,
-        experiment_name="/Users/test/experiment",
-    )
-    db_session.add(mlflow)
-    db_session.commit()
-    
-    # Test relationship
-    assert profile.mlflow.experiment_name == "/Users/test/experiment"
-    assert mlflow.profile.name == "test"
-
-
 def test_prompts_config(db_session):
     """Test prompts configuration."""
     profile = ConfigProfile(name="test", created_by="test")
@@ -239,13 +220,6 @@ def test_complete_profile_with_all_configs(db_session):
     )
     db_session.add(genie_space)
     
-    # Add MLflow settings
-    mlflow = ConfigMLflow(
-        profile_id=profile.id,
-        experiment_name="/Users/test/experiment",
-    )
-    db_session.add(mlflow)
-    
     # Add prompts
     prompts = ConfigPrompts(
         profile_id=profile.id,
@@ -260,12 +234,10 @@ def test_complete_profile_with_all_configs(db_session):
     # Verify all relationships
     assert profile.ai_infra is not None
     assert len(profile.genie_spaces) == 1
-    assert profile.mlflow is not None
     assert profile.prompts is not None
     
     # Verify data
     assert profile.ai_infra.llm_endpoint == "databricks-claude"
     assert profile.genie_spaces[0].space_name == "Test Space"
-    assert profile.mlflow.experiment_name == "/Users/test/experiment"
     assert profile.prompts.system_prompt == "Test system prompt"
 
