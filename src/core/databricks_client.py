@@ -298,3 +298,39 @@ def get_current_username() -> str:
         return username
     except Exception as e:
         raise DatabricksClientError(f"Failed to get current username: {e}") from e
+
+
+def ensure_workspace_folder(folder_path: str) -> None:
+    """
+    Ensure a workspace folder exists, creating parent directories as needed.
+
+    Uses the system client (service principal) to create folders, which is
+    required when creating folders under the SP's home directory.
+
+    Args:
+        folder_path: Full workspace path like "/Workspace/Users/{client_id}/{username}"
+
+    Raises:
+        DatabricksClientError: If folder creation fails
+    """
+    from databricks.sdk.service.workspace import ImportFormat
+
+    try:
+        client = get_system_client()
+
+        # Check if folder already exists
+        try:
+            client.workspace.get_status(folder_path)
+            logger.debug(f"Workspace folder already exists: {folder_path}")
+            return
+        except Exception:
+            # Folder doesn't exist, need to create it
+            pass
+
+        # Create the folder (mkdirs creates parent directories too)
+        logger.info(f"Creating workspace folder: {folder_path}")
+        client.workspace.mkdirs(folder_path)
+        logger.info(f"Created workspace folder: {folder_path}")
+
+    except Exception as e:
+        raise DatabricksClientError(f"Failed to create workspace folder {folder_path}: {e}") from e
