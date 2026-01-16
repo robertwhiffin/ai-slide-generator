@@ -683,6 +683,18 @@ class ChatService:
                     extra={"session_id": session_id, "experiment_path": experiment_path},
                 )
             else:
+                # Ensure parent folder exists before creating experiment
+                # The folder structure is: {sp_folder}/{username}/ai-slide-generator
+                # We need to create {sp_folder}/{username}/ first
+                if sp_folder:
+                    from src.core.databricks_client import ensure_workspace_folder
+                    parent_folder = f"{sp_folder}/{username}"
+                    try:
+                        ensure_workspace_folder(parent_folder)
+                    except Exception as e:
+                        logger.warning(f"Failed to create parent folder {parent_folder}: {e}")
+                        # Continue anyway - experiment creation might still work
+                
                 # Create new experiment for user
                 experiment_id = mlflow.create_experiment(experiment_path)
                 logger.info(

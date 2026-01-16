@@ -163,6 +163,17 @@ async def evaluate_with_judge(
             experiment = mlflow.get_experiment_by_name(experiment_name)
             if experiment is None:
                 logger.warning(f"LLM judge: experiment not found, creating: {experiment_name}")
+                
+                # Ensure parent folder exists before creating experiment
+                if sp_folder:
+                    from src.core.databricks_client import ensure_workspace_folder
+                    parent_folder = f"{sp_folder}/{username}"
+                    try:
+                        ensure_workspace_folder(parent_folder)
+                    except Exception as e:
+                        logger.warning(f"LLM judge: failed to create parent folder {parent_folder}: {e}")
+                        # Continue anyway - experiment creation might still work
+                
                 experiment_id = mlflow.create_experiment(experiment_name)
                 logger.info(f"LLM judge: created experiment with ID: {experiment_id}")
             else:
