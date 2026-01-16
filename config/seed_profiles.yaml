@@ -21,10 +21,6 @@ profiles:
       space_name: "kpmg workspace analysis"
       description: "Databricks spend data for KPMG UK. Data is available at a per-workspace, per-month level with an inferred line of business."
     
-    # MLflow Configuration
-    mlflow:
-      experiment_name: "/Workspace/Users/{username}/ai-slide-generator"
-    
     # Prompts Configuration
     # NOTE: system_prompt and slide_editing_instructions use defaults from src/core/defaults.py
     # Visual styling comes from selected_slide_style_id (set automatically to Databricks Brand)
@@ -47,9 +43,6 @@ profiles:
       space_id: "01f0ae91105818cf83eec00a66924416"
       space_name: "01f0ae91105818cf83eec00a66924416"
       description: "Explore use case details from a progression standpoint, dive into any BU, vertical, and account to understand what is causing use cases to slow down and what can be done to speed them up. Try asking 'for the HLS business unit what is slowing down migrations, and what can be done to get the stuck ones moving, and the ones moving slow to move faster?'"
-    
-    mlflow:
-      experiment_name: "/Workspace/Users/{username}/ai-slide-generator"
     
     # Prompts use defaults from src/core/defaults.py
     prompts:
