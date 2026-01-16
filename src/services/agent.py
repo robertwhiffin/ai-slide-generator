@@ -183,8 +183,10 @@ class SlideGeneratorAgent:
                 if sp_folder:
                     self._grant_experiment_permission(experiment_id, username, session_id)
 
-            # Construct experiment URL
+            # Construct experiment URL (ensure https:// prefix for proper linking)
             host = os.getenv("DATABRICKS_HOST", "").rstrip("/")
+            if host and not host.startswith("http"):
+                host = f"https://{host}"
             experiment_url = f"{host}/ml/experiments/{experiment_id}"
 
             return experiment_id, experiment_url
