@@ -557,9 +557,10 @@ class ChatService:
                 logger.warning(f"ChatService: Failed to get current username: {e}")
                 username = "unknown"
 
-            # Create per-session MLflow experiment
-            experiment_id, experiment_url = self._create_experiment_for_session(
-                session_id, username, settings.profile_name or "default"
+            # Ensure user's MLflow experiment exists (one per user)
+            profile_name = settings.profile_name or "default"
+            experiment_id, experiment_url = self._ensure_user_experiment(
+                session_id, username
             )
 
             # Use existing Genie conversation or create new one (only if Genie configured)
@@ -582,14 +583,16 @@ class ChatService:
             chat_history = ChatMessageHistory()
             message_count = self._hydrate_chat_history(session_id, chat_history)
 
-            # Initialize agent session data with experiment info
+            # Initialize agent session data with experiment info and session metadata
+            session_timestamp = datetime.utcnow().isoformat()
             self.agent.sessions[session_id] = {
                 "chat_history": chat_history,
                 "genie_conversation_id": genie_conv_id,
                 "experiment_id": experiment_id,
                 "experiment_url": experiment_url,
                 "username": username,
-                "created_at": datetime.utcnow().isoformat(),
+                "profile_name": profile_name,
+                "created_at": session_timestamp,
                 "message_count": message_count,
             }
 
@@ -615,19 +618,19 @@ class ChatService:
             logger.error(f"Failed to register session with agent: {e}", exc_info=True)
             raise
 
-    def _create_experiment_for_session(
-        self, session_id: str, username: str, profile_name: str
+    def _ensure_user_experiment(
+        self, session_id: str, username: str
     ) -> tuple[Optional[str], Optional[str]]:
-        """Create a new MLflow experiment for this session.
+        """Ensure MLflow experiment exists for this user (one experiment per user).
 
-        Creates an experiment in either:
-        - Service principal's folder (production): /Workspace/Users/{SP_CLIENT_ID}/{username}/{profile}/{timestamp}
-        - User's folder (local dev): /Workspace/Users/{username}/{profile}/{timestamp}
+        Creates an experiment if it doesn't exist, or returns the existing one.
+        Experiment path:
+        - Production: /Workspace/Users/{SP_CLIENT_ID}/{username}/ai-slide-generator
+        - Local dev: /Workspace/Users/{username}/ai-slide-generator
 
         Args:
             session_id: Session identifier for logging
             username: User's email/username for path and permissions
-            profile_name: Profile name for experiment path
 
         Returns:
             Tuple of (experiment_id, experiment_url) or (None, None) on failure
@@ -636,60 +639,59 @@ class ChatService:
 
         import mlflow
 
-        timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
-
         # Determine experiment path based on environment
         sp_folder = get_service_principal_folder()
         
-        logger.warning(
-            f"ChatService experiment creation: sp_folder={sp_folder}, username={username}, profile={profile_name}"
-        )
-        
         if sp_folder:
             # Production: use service principal's folder
-            experiment_path = f"{sp_folder}/{username}/{profile_name}/{timestamp}"
+            experiment_path = f"{sp_folder}/{username}/ai-slide-generator"
         else:
             # Local development: use user's folder
-            experiment_path = f"/Workspace/Users/{username}/{profile_name}/{timestamp}"
+            experiment_path = f"/Workspace/Users/{username}/ai-slide-generator"
 
-        logger.warning(
-            f"ChatService: Creating per-session MLflow experiment at path: {experiment_path}",
+        logger.info(
+            f"ChatService: Ensuring user MLflow experiment at path: {experiment_path}",
             extra={
                 "session_id": session_id,
                 "username": username,
-                "profile_name": profile_name,
                 "experiment_path": experiment_path,
                 "using_sp_folder": sp_folder is not None,
             },
         )
 
         try:
-            # Create the experiment
-            experiment_id = mlflow.create_experiment(experiment_path)
+            mlflow.set_tracking_uri("databricks")
+            
+            # Check if experiment already exists
+            experiment = mlflow.get_experiment_by_name(experiment_path)
+            
+            if experiment:
+                experiment_id = experiment.experiment_id
+                logger.info(
+                    f"Using existing user experiment: {experiment_id}",
+                    extra={"session_id": session_id, "experiment_path": experiment_path},
+                )
+            else:
+                # Create new experiment for user
+                experiment_id = mlflow.create_experiment(experiment_path)
+                logger.info(
+                    f"Created new user experiment: {experiment_id}",
+                    extra={"session_id": session_id, "experiment_path": experiment_path},
+                )
 
-            # Grant user CAN_MANAGE permission (only needed when using SP folder)
-            if sp_folder:
-                self._grant_experiment_permission(experiment_id, username, session_id)
+                # Grant user CAN_MANAGE permission (only needed when using SP folder)
+                if sp_folder:
+                    self._grant_experiment_permission(experiment_id, username, session_id)
 
             # Construct experiment URL
             host = os.getenv("DATABRICKS_HOST", "").rstrip("/")
             experiment_url = f"{host}/ml/experiments/{experiment_id}"
 
-            logger.info(
-                "Created per-session MLflow experiment",
-                extra={
-                    "session_id": session_id,
-                    "experiment_id": experiment_id,
-                    "experiment_path": experiment_path,
-                    "experiment_url": experiment_url,
-                },
-            )
-
             return experiment_id, experiment_url
 
         except Exception as e:
             logger.warning(
-                f"Failed to create per-session experiment, continuing without MLflow: {e}",
+                f"Failed to ensure user experiment, continuing without MLflow: {e}",
                 extra={
                     "session_id": session_id,
                     "experiment_path": experiment_path,
