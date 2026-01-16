@@ -130,41 +130,44 @@ async def evaluate_with_judge(
     try:
         import mlflow
         from mlflow.genai import make_judge
-        from src.core.settings_db import get_settings
 
         # Set tracking URI to Databricks (not local ./mlruns)
         mlflow.set_tracking_uri("databricks")
         logger.info("LLM judge: set MLflow tracking URI to databricks")
 
-        # Use passed experiment_id (per-session) or fall back to profile-based
+        # Use passed experiment_id (per-session) or compute user experiment path
         if experiment_id:
             logger.info(
                 f"LLM judge: using per-session experiment_id: {experiment_id}"
             )
             mlflow.set_experiment(experiment_id=experiment_id)
         else:
-            # Fallback to profile-based experiment (should rarely happen)
-            logger.warning("LLM judge: no experiment_id passed, falling back to profile-based experiment")
-            settings = get_settings()
-            experiment_name = settings.mlflow.experiment_name
+            # Fallback: dynamically compute user's experiment path
+            logger.warning("LLM judge: no experiment_id passed, computing user experiment path")
+            from src.core.databricks_client import get_service_principal_folder, get_current_username
             
-            # Ensure experiment path has /Workspace prefix for Databricks
-            if experiment_name.startswith("/Users/"):
-                experiment_name = f"/Workspace{experiment_name}"
-                logger.warning("LLM judge: added /Workspace prefix to experiment path")
-            
-            logger.warning(
-                f"LLM judge: attempting to get/create experiment: {experiment_name}",
-            )
+            try:
+                username = get_current_username()
+                sp_folder = get_service_principal_folder()
+                
+                if sp_folder:
+                    experiment_name = f"{sp_folder}/{username}/ai-slide-generator"
+                else:
+                    experiment_name = f"/Workspace/Users/{username}/ai-slide-generator"
+                
+                logger.info(f"LLM judge: computed experiment path: {experiment_name}")
+            except Exception as e:
+                logger.error(f"LLM judge: failed to get username for experiment: {e}")
+                raise
             
             experiment = mlflow.get_experiment_by_name(experiment_name)
             if experiment is None:
                 logger.warning(f"LLM judge: experiment not found, creating: {experiment_name}")
                 experiment_id = mlflow.create_experiment(experiment_name)
-                logger.warning(f"LLM judge: created experiment with ID: {experiment_id}")
+                logger.info(f"LLM judge: created experiment with ID: {experiment_id}")
             else:
                 experiment_id = experiment.experiment_id
-                logger.warning(f"LLM judge: using existing experiment ID: {experiment_id}")
+                logger.info(f"LLM judge: using existing experiment ID: {experiment_id}")
             mlflow.set_experiment(experiment_id=experiment_id)
 
         # Create judge using outputs and expectations

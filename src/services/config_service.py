@@ -7,7 +7,6 @@ from src.core.databricks_client import get_databricks_client
 from src.database.models import (
     ConfigAIInfra,
     ConfigHistory,
-    ConfigMLflow,
     ConfigPrompts,
 )
 
@@ -86,45 +85,6 @@ class ConfigService:
             # Log error but don't fail
             print(f"Warning: Could not list endpoints: {e}")
             return []
-
-    # MLflow
-
-    def get_mlflow_config(self, profile_id: int) -> ConfigMLflow:
-        """Get MLflow settings for specific profile."""
-        config = self.db.query(ConfigMLflow).filter_by(profile_id=profile_id).first()
-        if not config:
-            raise ValueError(f"MLflow settings not found for profile {profile_id}")
-        return config
-
-    def update_mlflow_config(
-        self,
-        profile_id: int,
-        experiment_name: str,
-        user: str,
-    ) -> ConfigMLflow:
-        """Update MLflow configuration (experiment name only)."""
-        config = self.get_mlflow_config(profile_id)
-
-        changes = {}
-
-        if experiment_name != config.experiment_name:
-            changes["experiment_name"] = {"old": config.experiment_name, "new": experiment_name}
-            config.experiment_name = experiment_name
-
-        if changes:
-            history = ConfigHistory(
-                profile_id=profile_id,
-                domain="mlflow",
-                action="update",
-                changed_by=user,
-                changes=changes,
-            )
-            self.db.add(history)
-
-        self.db.commit()
-        self.db.refresh(config)
-
-        return config
 
     # Prompts
 

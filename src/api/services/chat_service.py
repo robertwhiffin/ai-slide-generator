@@ -526,6 +526,17 @@ class ChatService:
         """
         # Check if agent already has this session
         if session_id in self.agent.sessions:
+            # Update profile_name if settings have changed (handles profile switching)
+            from src.core.settings_db import get_settings
+            current_settings = get_settings()
+            current_profile = current_settings.profile_name or "default"
+            if self.agent.sessions[session_id].get("profile_name") != current_profile:
+                self.agent.sessions[session_id]["profile_name"] = current_profile
+                logger.info(
+                    "Updated session profile after switch",
+                    extra={"session_id": session_id, "profile_name": current_profile},
+                )
+            
             # Agent session exists - ensure genie_conversation_id is persisted to DB
             agent_genie_id = self.agent.sessions[session_id].get("genie_conversation_id")
             if agent_genie_id and not genie_conversation_id:

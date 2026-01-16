@@ -8,7 +8,6 @@ from src.database.models import (
     ConfigAIInfra,
     ConfigGenieSpace,
     ConfigHistory,
-    ConfigMLflow,
     ConfigProfile,
     ConfigPrompts,
 )
@@ -39,7 +38,6 @@ class ProfileService:
             .options(
                 joinedload(ConfigProfile.ai_infra),
                 joinedload(ConfigProfile.genie_spaces),
-                joinedload(ConfigProfile.mlflow),
                 joinedload(ConfigProfile.prompts),
             )
             .filter(ConfigProfile.id == profile_id)
@@ -53,7 +51,6 @@ class ProfileService:
             .options(
                 joinedload(ConfigProfile.ai_infra),
                 joinedload(ConfigProfile.genie_spaces),
-                joinedload(ConfigProfile.mlflow),
                 joinedload(ConfigProfile.prompts),
             )
             .filter(ConfigProfile.is_default == True)
@@ -71,7 +68,6 @@ class ProfileService:
         
         If no default profile exists, the new profile will be set as default.
         New profiles require explicit Genie space configuration - no default is created.
-        MLflow experiment name is auto-set based on creator's username.
         
         Args:
             name: Profile name
@@ -110,14 +106,6 @@ class ProfileService:
         self.db.add(ai_infra)
 
         # NO default Genie space - user must explicitly configure one
-
-        # Auto-set MLflow experiment name based on creator's username
-        experiment_name = f"/Workspace/Users/{user}/ai-slide-generator"
-        mlflow = ConfigMLflow(
-            profile_id=profile.id,
-            experiment_name=experiment_name,
-        )
-        self.db.add(mlflow)
 
         # Use default prompts
         prompts = ConfigPrompts(
@@ -260,7 +248,6 @@ class ProfileService:
         description: Optional[str],
         genie_space: Optional[dict],
         ai_infra: Optional[dict],
-        mlflow: Optional[dict],
         prompts: Optional[dict],
         user: str,
     ) -> ConfigProfile:
@@ -274,7 +261,6 @@ class ProfileService:
             description: Profile description
             genie_space: Genie space config (optional - enables data queries)
             ai_infra: AI infrastructure config (optional, uses defaults)
-            mlflow: MLflow config (optional, auto-generated)
             prompts: Prompts config (optional, uses defaults)
             user: User creating the profile
             
@@ -319,15 +305,6 @@ class ProfileService:
                 description=genie_space.get("description"),
             )
             self.db.add(genie_record)
-
-        # Create MLflow (use provided or auto-generate)
-        mlflow_config = mlflow or {}
-        experiment_name = mlflow_config.get("experiment_name") or f"/Workspace/Users/{user}/ai-slide-generator"
-        mlflow_record = ConfigMLflow(
-            profile_id=profile.id,
-            experiment_name=experiment_name,
-        )
-        self.db.add(mlflow_record)
 
         # Create prompts (use provided or defaults)
         prompts_config = prompts or {}
@@ -421,13 +398,6 @@ class ProfileService:
                 description=space.description,
             )
             self.db.add(new_space)
-
-        # Copy MLflow config
-        mlflow = ConfigMLflow(
-            profile_id=profile.id,
-            experiment_name=source_profile.mlflow.experiment_name,
-        )
-        self.db.add(mlflow)
 
         # Copy prompts
         prompts = ConfigPrompts(

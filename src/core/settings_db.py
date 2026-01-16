@@ -18,7 +18,6 @@ from src.core.database import get_db_session
 from src.database.models import (
     ConfigAIInfra,
     ConfigGenieSpace,
-    ConfigMLflow,
     ConfigProfile,
     ConfigPrompts,
 )
@@ -106,69 +105,6 @@ class FeatureFlags(BaseSettings):
     enable_batch_processing: bool = False
 
 
-class MLFlowTracingSettings(BaseSettings):
-    """MLFlow tracing configuration."""
-
-    enabled: bool = True
-    backend: str = "databricks"
-    sample_rate: float = 1.0
-    capture_input_output: bool = True
-    capture_model_config: bool = True
-    max_trace_depth: int = 10
-
-
-class MLFlowServingEnvironment(BaseSettings):
-    """MLFlow serving configuration for an environment."""
-
-    endpoint_name: str
-    workload_size: str = "Small"
-    scale_to_zero_enabled: bool = True
-    min_scale: int = 0
-    max_scale: int = 3
-
-
-class MLFlowSettings(BaseSettings):
-    """MLFlow configuration."""
-
-    model_config = SettingsConfigDict(extra="allow")
-
-    # Tracking
-    tracking_uri: str = "databricks-uc"
-    experiment_name: str
-
-    # Tracing
-    tracing: MLFlowTracingSettings = Field(default_factory=MLFlowTracingSettings)
-
-    # Registry
-    registry_uri: str = "databricks-uc"
-    model_name: str = "slide_generator"
-    dev_model_name: str = "slide_generator_dev"
-
-    # Serving environments
-    serving_dev: MLFlowServingEnvironment = Field(default_factory=lambda: MLFlowServingEnvironment(
-        endpoint_name="slide-generator-dev"
-    ))
-    serving_prod: MLFlowServingEnvironment = Field(default_factory=lambda: MLFlowServingEnvironment(
-        endpoint_name="slide-generator-prod"
-    ))
-
-    # Logging options
-    log_models: bool = True
-    log_input_examples: bool = True
-    log_model_signatures: bool = True
-    log_system_metrics: bool = True
-    log_artifacts: bool = True
-
-    # Metrics tracking
-    track_latency: bool = True
-    track_token_usage: bool = True
-    track_cost: bool = True
-
-    # Cost estimation (USD per 1M tokens)
-    cost_per_million_input_tokens: float = 1.0
-    cost_per_million_output_tokens: float = 3.0
-
-
 class AppSettings(BaseSettings):
     """
     Main application settings loaded from database.
@@ -198,7 +134,6 @@ class AppSettings(BaseSettings):
     # Configuration from database
     llm: LLMSettings
     genie: Optional[GenieSettings] = None  # Optional - enables data queries when configured
-    mlflow: MLFlowSettings
 
     # Prompts (from database)
     prompts: dict[str, Any] = Field(default_factory=dict)
@@ -277,10 +212,6 @@ def load_settings_from_database(profile_id: Optional[int] = None) -> AppSettings
             ).first()
             # Genie space is optional - profiles without Genie run in prompt-only mode
 
-            mlflow_config = db.query(ConfigMLflow).filter_by(profile_id=profile.id).first()
-            if not mlflow_config:
-                raise ValueError(f"MLflow settings not found for profile {profile.id}")
-
             prompts = db.query(ConfigPrompts).filter_by(profile_id=profile.id).first()
             if not prompts:
                 raise ValueError(f"Prompts settings not found for profile {profile.id}")
@@ -315,20 +246,6 @@ def load_settings_from_database(profile_id: Optional[int] = None) -> AppSettings
                         extra={"slide_style_name": slide_style.name, "slide_style_id": slide_style.id}
                     )
 
-            # Get username for MLflow experiment name formatting
-            try:
-                from src.core.databricks_client import get_databricks_client
-                client = get_databricks_client()
-                username = client.current_user.me().user_name
-            except Exception:
-                # Fallback to environment variable if Databricks not available
-                username = os.getenv("USER", "default_user")
-
-            # Format experiment name
-            experiment_name = mlflow_config.experiment_name
-            if "{username}" in experiment_name:
-                experiment_name = experiment_name.format(username=username)
-
             # Create settings
             llm_settings = LLMSettings(
                 endpoint=ai_infra.llm_endpoint,
@@ -346,17 +263,12 @@ def load_settings_from_database(profile_id: Optional[int] = None) -> AppSettings
                     description=genie_space.description or "",
                 )
 
-            mlflow_settings = MLFlowSettings(
-                experiment_name=experiment_name,
-            )
-
             settings = AppSettings(
                 database_url=os.getenv("DATABASE_URL", ""),
                 profile_id=profile.id,
                 profile_name=profile.name,
                 llm=llm_settings,
                 genie=genie_settings,
-                mlflow=mlflow_settings,
                 prompts={
                     "deck_prompt": deck_prompt_content or "",
                     "slide_style": slide_style_content or "",

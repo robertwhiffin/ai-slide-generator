@@ -7,7 +7,6 @@ Tests all components of a configuration profile to ensure they are working corre
 import logging
 from typing import Any, Dict, List
 
-import mlflow
 from databricks_langchain import ChatDatabricks
 from langchain_core.messages import HumanMessage
 
@@ -87,7 +86,6 @@ class ConfigurationValidator:
                 details="Profile will generate slides from prompts without data queries",
             ))
             logger.info("Genie validation skipped - profile in prompt-only mode")
-        self._validate_mlflow()
 
         # Compile results
         all_success = all(r.success for r in self.results)
@@ -222,49 +220,6 @@ class ConfigurationValidator:
                 except Exception as e:
                     logger.warning(f"Failed to clean up test conversation: {e}")
 
-    def _validate_mlflow(self) -> None:
-        """Test MLflow experiment creation/write permissions."""
-        logger.info("Validating MLflow experiment")
-
-        try:
-            # Set tracking URI
-            mlflow.set_tracking_uri("databricks")
-
-            # Try to get or create experiment
-            experiment_name = self.settings.mlflow.experiment_name
-            experiment = mlflow.get_experiment_by_name(experiment_name)
-
-            if experiment is None:
-                # Try to create experiment
-                experiment_id = mlflow.create_experiment(experiment_name)
-                self.results.append(ValidationResult(
-                    component="MLflow",
-                    success=True,
-                    message=f"Successfully created MLflow experiment: {experiment_name}",
-                    details=f"Experiment ID: {experiment_id}"
-                ))
-                logger.info(f"MLflow validation successful: created experiment {experiment_id}")
-            else:
-                # Experiment exists - try to set it (tests permissions)
-                mlflow.set_experiment(experiment_name=experiment_name)
-                self.results.append(ValidationResult(
-                    component="MLflow",
-                    success=True,
-                    message=f"Successfully accessed MLflow experiment: {experiment_name}",
-                    details=f"Experiment ID: {experiment.experiment_id}"
-                ))
-                logger.info(f"MLflow validation successful: accessed experiment {experiment.experiment_id}")
-
-        except Exception as e:
-            error_msg = str(e)
-            self.results.append(ValidationResult(
-                component="MLflow",
-                success=False,
-                message=f"Failed to create MLflow experiment: {error_msg}",
-                details=f"Experiment name: {self.settings.mlflow.experiment_name}"
-            ))
-            logger.error(f"MLflow validation failed: {e}", exc_info=True)
-
     def validate_llm_endpoint(self, endpoint: str) -> ValidationResult:
         """
         Validate a specific LLM endpoint.
@@ -369,63 +324,6 @@ class ConfigurationValidator:
                 success=False,
                 message=f"Failed to validate Genie space: {error_msg}",
                 details=f"Space ID: {space_id}"
-            )
-
-    def validate_mlflow_experiment(self, experiment_name: str) -> ValidationResult:
-        """
-        Validate a specific MLflow experiment.
-        
-        Args:
-            experiment_name: MLflow experiment path to test
-            
-        Returns:
-            ValidationResult with success status and details
-        """
-        logger.info(f"Validating MLflow experiment: {experiment_name}")
-
-        try:
-            # Set tracking URI
-            mlflow.set_tracking_uri("databricks")
-
-            # Try to get or create experiment
-            experiment = mlflow.get_experiment_by_name(experiment_name)
-
-            if experiment:
-                logger.info(f"MLflow experiment {experiment_name} found")
-                return ValidationResult(
-                    component="MLflow",
-                    success=True,
-                    message=f"Successfully accessed MLflow experiment: {experiment_name}",
-                    details=f"Experiment ID: {experiment.experiment_id}"
-                )
-            else:
-                # Try to create it to test permissions
-                try:
-                    experiment_id = mlflow.create_experiment(experiment_name)
-                    logger.info(f"MLflow experiment {experiment_name} created successfully")
-                    return ValidationResult(
-                        component="MLflow",
-                        success=True,
-                        message=f"Successfully created MLflow experiment: {experiment_name}",
-                        details=f"Experiment ID: {experiment_id}"
-                    )
-                except Exception as create_error:
-                    logger.error(f"Failed to create experiment: {create_error}")
-                    return ValidationResult(
-                        component="MLflow",
-                        success=False,
-                        message=f"Failed to access or create experiment: {str(create_error)}",
-                        details=f"Experiment: {experiment_name}"
-                    )
-
-        except Exception as e:
-            error_msg = str(e)
-            logger.error(f"MLflow experiment {experiment_name} validation failed: {e}", exc_info=True)
-            return ValidationResult(
-                component="MLflow",
-                success=False,
-                message=f"Failed to validate MLflow experiment: {error_msg}",
-                details=f"Experiment: {experiment_name}"
             )
 
 
