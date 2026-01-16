@@ -124,12 +124,13 @@ class SlideGeneratorAgent:
         except Exception as e:
             logger.warning(f"Failed to configure MLflow tracking: {e}")
 
-    def _create_experiment_for_session(self, session_id: str, username: str) -> tuple[str, str]:
-        """Create a new MLflow experiment for this session with user permissions.
+    def _ensure_user_experiment(self, session_id: str, username: str) -> tuple[str, str]:
+        """Ensure MLflow experiment exists for this user (one experiment per user).
         
-        Creates an experiment in either:
-        - Service principal's folder (production): /Workspace/Users/{SP_CLIENT_ID}/{username}/{profile}/{timestamp}
-        - User's folder (local dev): /Workspace/Users/{username}/{profile}/{timestamp}
+        Creates an experiment if it doesn't exist, or returns the existing one.
+        Experiment path:
+        - Production: /Workspace/Users/{SP_CLIENT_ID}/{username}/ai-slide-generator
+        - Local dev: /Workspace/Users/{username}/ai-slide-generator
         
         Args:
             session_id: Session identifier for logging
@@ -140,61 +141,57 @@ class SlideGeneratorAgent:
         """
         import os
 
-        timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
-        profile_name = self.settings.profile_name or "default"
-
         # Determine experiment path based on environment
         sp_folder = get_service_principal_folder()
         
-        logger.warning(
-            f"Agent experiment creation: sp_folder={sp_folder}, username={username}, profile={profile_name}"
-        )
-        
         if sp_folder:
             # Production: use service principal's folder
-            experiment_path = f"{sp_folder}/{username}/{profile_name}/{timestamp}"
-            else:
+            experiment_path = f"{sp_folder}/{username}/ai-slide-generator"
+        else:
             # Local development: use user's folder
-            experiment_path = f"/Workspace/Users/{username}/{profile_name}/{timestamp}"
+            experiment_path = f"/Workspace/Users/{username}/ai-slide-generator"
 
-        logger.warning(
-            f"Agent: Creating per-session MLflow experiment at path: {experiment_path}",
+        logger.info(
+            f"Agent: Ensuring user MLflow experiment at path: {experiment_path}",
             extra={
                 "session_id": session_id,
                 "username": username,
-                "profile_name": profile_name,
                 "experiment_path": experiment_path,
                 "using_sp_folder": sp_folder is not None,
             },
         )
 
         try:
-            # Create the experiment
-            experiment_id = mlflow.create_experiment(experiment_path)
+            # Check if experiment already exists
+            experiment = mlflow.get_experiment_by_name(experiment_path)
+            
+            if experiment:
+                experiment_id = experiment.experiment_id
+                logger.info(
+                    f"Using existing user experiment: {experiment_id}",
+                    extra={"session_id": session_id, "experiment_path": experiment_path},
+                )
+            else:
+                # Create new experiment for user
+                experiment_id = mlflow.create_experiment(experiment_path)
+                logger.info(
+                    f"Created new user experiment: {experiment_id}",
+                    extra={"session_id": session_id, "experiment_path": experiment_path},
+                )
 
-            # Grant user CAN_MANAGE permission (only needed when using SP folder)
-            if sp_folder:
-                self._grant_experiment_permission(experiment_id, username, session_id)
+                # Grant user CAN_MANAGE permission (only needed when using SP folder)
+                if sp_folder:
+                    self._grant_experiment_permission(experiment_id, username, session_id)
 
             # Construct experiment URL
             host = os.getenv("DATABRICKS_HOST", "").rstrip("/")
             experiment_url = f"{host}/ml/experiments/{experiment_id}"
 
-            logger.info(
-                "Created per-session MLflow experiment",
-                extra={
-                    "session_id": session_id,
-                    "experiment_id": experiment_id,
-                    "experiment_path": experiment_path,
-                    "experiment_url": experiment_url,
-                },
-            )
-
             return experiment_id, experiment_url
 
         except Exception as e:
             logger.error(
-                f"Failed to create per-session experiment: {e}",
+                f"Failed to ensure user experiment: {e}",
                 extra={
                     "session_id": session_id,
                     "experiment_path": experiment_path,
@@ -242,7 +239,7 @@ class SlideGeneratorAgent:
                     "permission": "CAN_MANAGE",
                 },
             )
-            except Exception as e:
+        except Exception as e:
             # Log warning but don't fail - user can still view via SP permissions
             logger.warning(
                 f"Failed to grant experiment permission: {e}",
@@ -520,18 +517,18 @@ class SlideGeneratorAgent:
             logger.error(f"Failed to get current username: {e}")
             raise AgentError(f"Failed to get current username: {e}") from e
 
-        # Create per-session MLflow experiment
+        # Ensure user's MLflow experiment exists (one per user)
         experiment_id = None
         experiment_url = None
         try:
-            experiment_id, experiment_url = self._create_experiment_for_session(
+            experiment_id, experiment_url = self._ensure_user_experiment(
                 session_id, username
             )
             # Set as active experiment for this session
             mlflow.set_experiment(experiment_id=experiment_id)
         except Exception as e:
             logger.warning(
-                f"Failed to create per-session experiment, continuing without MLflow: {e}",
+                f"Failed to ensure user experiment, continuing without MLflow: {e}",
                 extra={"session_id": session_id, "error": str(e)},
             )
 
@@ -559,14 +556,17 @@ class SlideGeneratorAgent:
         # Create chat history for this session
         chat_history = ChatMessageHistory()
 
-        # Initialize session data with experiment info
+        # Initialize session data with experiment info and metadata for MLflow tags
+        profile_name = self.settings.profile_name or "default"
+        session_timestamp = datetime.utcnow().isoformat()
         self.sessions[session_id] = {
             "chat_history": chat_history,
             "genie_conversation_id": genie_conversation_id,  # None if no Genie
             "experiment_id": experiment_id,
             "experiment_url": experiment_url,
             "username": username,
-            "created_at": datetime.utcnow().isoformat(),
+            "profile_name": profile_name,
+            "created_at": session_timestamp,
             "message_count": 0,
         }
 
@@ -940,9 +940,11 @@ class SlideGeneratorAgent:
 
             # Use mlflow.start_span for manual tracing
             with mlflow.start_span(name="generate_slides") as span:
-                # Set custom attributes
+                # Set custom attributes including session metadata for filtering
                 span.set_attribute("question", question)
                 span.set_attribute("session_id", session_id)
+                span.set_attribute("profile_name", session.get("profile_name", "unknown"))
+                span.set_attribute("session_timestamp", session.get("created_at", ""))
                 span.set_attribute("model_endpoint", self.settings.llm.endpoint)
                 span.set_attribute("message_count", session["message_count"])
                 span.set_attribute("mode", "edit" if editing_mode else "generate")
@@ -1111,8 +1113,11 @@ class SlideGeneratorAgent:
                 mlflow.set_experiment(experiment_id=session["experiment_id"])
 
             with mlflow.start_span(name="generate_slides_streaming") as span:
+                # Set custom attributes including session metadata for filtering
                 span.set_attribute("question", question)
                 span.set_attribute("session_id", session_id)
+                span.set_attribute("profile_name", session.get("profile_name", "unknown"))
+                span.set_attribute("session_timestamp", session.get("created_at", ""))
                 span.set_attribute("model_endpoint", self.settings.llm.endpoint)
                 span.set_attribute("message_count", session["message_count"])
                 span.set_attribute("mode", "edit" if editing_mode else "generate")
