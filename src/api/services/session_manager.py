@@ -272,6 +272,37 @@ class SessionManager:
                     },
                 )
 
+    def set_experiment_id(self, session_id: str, experiment_id: str) -> None:
+        """Set the MLflow experiment ID for a session.
+
+        Used to track per-session MLflow experiments for tracing.
+
+        Args:
+            session_id: Session to update
+            experiment_id: MLflow experiment ID
+        """
+        with get_db_session() as db:
+            session = self._get_session_or_raise(db, session_id)
+            session.experiment_id = experiment_id
+
+            logger.info(
+                "Set session experiment_id",
+                extra={"session_id": session_id, "experiment_id": experiment_id},
+            )
+
+    def get_experiment_id(self, session_id: str) -> Optional[str]:
+        """Get the MLflow experiment ID for a session.
+
+        Args:
+            session_id: Session to get experiment for
+
+        Returns:
+            Experiment ID or None if not set
+        """
+        with get_db_session() as db:
+            session = self._get_session_or_raise(db, session_id)
+            return session.experiment_id
+
     # Message operations
     def add_message(
         self,

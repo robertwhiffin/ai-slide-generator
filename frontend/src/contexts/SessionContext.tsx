@@ -18,11 +18,13 @@ interface SessionRestoreResult {
 interface SessionContextType {
   sessionId: string | null;
   sessionTitle: string | null;
+  experimentUrl: string | null;
   isInitializing: boolean;
   error: string | null;
   createNewSession: () => void;
   switchSession: (sessionId: string) => Promise<SessionRestoreResult>;
   renameSession: (title: string) => Promise<void>;
+  setExperimentUrl: (url: string | null) => void;
 }
 
 const SessionContext = createContext<SessionContextType | undefined>(undefined);
@@ -31,6 +33,7 @@ export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ child
   // Generate local session ID immediately - no API call needed
   const [sessionId, setSessionId] = useState<string | null>(() => generateLocalSessionId());
   const [sessionTitle, setSessionTitle] = useState<string | null>(null);
+  const [experimentUrl, setExperimentUrl] = useState<string | null>(null);
   const [isInitializing, setIsInitializing] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -49,6 +52,7 @@ export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ child
     const newSessionId = generateLocalSessionId();
     setSessionId(newSessionId);
     setSessionTitle(null);
+    setExperimentUrl(null);
     setError(null);
     api.setCurrentSessionId(newSessionId);
   }, []);
@@ -112,11 +116,13 @@ export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ child
       value={{
         sessionId,
         sessionTitle,
+        experimentUrl,
         isInitializing,
         error,
         createNewSession,
         switchSession,
         renameSession,
+        setExperimentUrl,
       }}
     >
       {children}
