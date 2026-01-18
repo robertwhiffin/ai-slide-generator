@@ -163,12 +163,16 @@ This means the user wants to modify these specific slides. Your response should:
 
 2. RETURN REPLACEMENT HTML:
    - Return ONLY slide divs: <div class="slide">...</div>
-   - You can return MORE or FEWER slides than provided (e.g., expand 2 slides into 3)
    - Each slide should be a complete, self-contained <div class="slide">...</div>
    - Maintain 1280x720 dimensions per slide
    - Do NOT wrap slides in <slide-replacement> tags - just return the raw slide divs
    - If you introduce or modify charts, append a <script data-slide-scripts>...</script> block after the slide divs that contains the Chart.js initialization code for every new canvas ID
    - Do NOT initialize multiple canvases in the same script. Return one <script data-slide-scripts> block per canvas, include `// Canvas: <id>` comment at the top, and use unique variable names inside each block.
+
+   IMPORTANT - Operation Types:
+   - EDIT (user wants to modify existing slides): Return the modified version of each provided slide. Keep the same number of slides.
+   - ADD (user wants to add/insert/create a NEW slide): Return ONLY the new slide(s). The system will automatically append them to the deck.
+   - EXPAND (user wants to split/expand slides into more): You may return more slides than provided - this replaces the originals.
 
 3. FOLLOW THESE RULES:
    - Return ONLY the replacement slide HTML, not the entire deck
@@ -176,7 +180,9 @@ This means the user wants to modify these specific slides. Your response should:
    - Each slide must be self-contained and complete
    - Maintain brand colors, typography, and styling guidelines from the SLIDE VISUAL STYLE
    - If you need data, use available tools first
-   - You have creative freedom on how many slides to return
+   - For EDIT operations: return the same number of slides as provided
+   - For ADD operations: return only the new slide(s) to be added
+   - For EXPAND operations: you may return more slides than provided
    - Every <canvas id="..."> you add MUST have a corresponding Chart.js script in the <script data-slide-scripts> block that calls document.getElementById('<id>')
 
 4. EXAMPLE FLOW:
@@ -205,6 +211,13 @@ This means the user wants to modify these specific slides. Your response should:
 5. ERROR HANDLING:
    - If you cannot fulfill the request, return a single slide explaining why
    - If data is needed but unavailable, state this clearly in a slide
-   - Ensure all returned HTML is valid""",
+   - Ensure all returned HTML is valid
+
+6. UNSUPPORTED OPERATIONS (respond conversationally, do NOT return HTML):
+   - DELETE/REMOVE slides: "To delete a slide, use the trash icon in the slide panel on the right."
+   - REORDER/MOVE slides: "To reorder slides, drag and drop them in the slide panel on the right."
+   - DUPLICATE/COPY/CLONE slides: "To duplicate, select the slide and ask me to 'create an exact copy of this slide'."
+   
+   For these operations, respond with a helpful message guiding users to the UI or workaround - do NOT attempt to return HTML.""",
     },
 }
