@@ -5,7 +5,10 @@ All blocking database calls are wrapped with asyncio.to_thread to avoid blocking
 """
 
 import asyncio
+import json
 import logging
+from datetime import datetime
+from pathlib import Path
 from typing import List, Optional
 
 from fastapi import APIRouter, HTTPException, Query
@@ -285,5 +288,80 @@ async def cleanup_expired_sessions():
         raise HTTPException(
             status_code=500,
             detail=f"Cleanup failed: {str(e)}",
+        ) from e
+
+
+@router.post("/{session_id}/export")
+async def export_session(session_id: str):
+    """Export full session data to logs/sessions/{session_id}.json for debugging.
+    
+    Exports:
+    - Session info (id, timestamps, profile)
+    - All chat messages (user + AI responses with full content)
+    - Full slide deck (HTML, scripts, slide count)
+    
+    Args:
+        session_id: Session to export
+        
+    Returns:
+        Export confirmation with file path
+    """
+    try:
+        session_manager = get_session_manager()
+        
+        # Get all session data
+        session = await asyncio.to_thread(session_manager.get_session, session_id)
+        messages = await asyncio.to_thread(session_manager.get_messages, session_id)
+        slide_deck = await asyncio.to_thread(session_manager.get_slide_deck, session_id)
+        
+        # Build export data
+        export_data = {
+            "exported_at": datetime.utcnow().isoformat(),
+            "session": session,
+            "messages": messages,
+            "slide_deck": slide_deck,
+            "summary": {
+                "message_count": len(messages),
+                "slide_count": slide_deck.get("slide_count", 0) if slide_deck else 0,
+                "user_messages": sum(1 for m in messages if m.get("role") == "user"),
+                "ai_messages": sum(1 for m in messages if m.get("role") == "assistant"),
+            }
+        }
+        
+        # Ensure logs/sessions directory exists
+        sessions_dir = Path("logs/sessions")
+        sessions_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Write to file
+        export_path = sessions_dir / f"{session_id}.json"
+        with open(export_path, "w", encoding="utf-8") as f:
+            json.dump(export_data, f, indent=2, default=str)
+        
+        logger.info(
+            "Session exported",
+            extra={
+                "session_id": session_id,
+                "export_path": str(export_path),
+                "message_count": len(messages),
+            },
+        )
+        
+        return {
+            "status": "exported",
+            "session_id": session_id,
+            "export_path": str(export_path),
+            "summary": export_data["summary"],
+        }
+        
+    except SessionNotFoundError:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Session not found: {session_id}",
+        )
+    except Exception as e:
+        logger.error(f"Failed to export session: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Export failed: {str(e)}",
         ) from e
 
