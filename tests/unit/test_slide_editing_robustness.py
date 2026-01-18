@@ -613,7 +613,7 @@ class TestSlideEditingIntegration:
         # With add operation
         context_add = agent._format_slide_context(slide_context, is_add_operation=True)
         assert "IMPORTANT: The user wants to ADD" in context_add
-        assert "include them in your response" in context_add
+        assert "Return ONLY the new slide" in context_add
 
 
 # =============================================================================
