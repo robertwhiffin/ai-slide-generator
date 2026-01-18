@@ -347,3 +347,11 @@ ${slideDeck.scripts}  // IIFE-wrapped, safe for shared scope
 - Global scripts: add a `SlideDeck.global_scripts` field for truly shared utility functions.
 
 With these pieces, contributors can trace exactly how HTML is parsed, transformed, and rendered across the stack. For deeper dives, start with `Slide` and `SlideDeck`, then follow the API responses into `ChatPanel` and `SlidePanel`. See the companion overview docs for broader context on how the UI and API are structured around this pipeline.
+
+---
+
+### 9. Cross-References
+
+- [Backend Overview](backend-overview.md) – FastAPI/LangChain architecture, agent details
+- [Frontend Overview](frontend-overview.md) – UI/state patterns and API usage
+- [Slide Editing Robustness](slide-editing-robustness-fixes.md) – Deck preservation, LLM validation, canvas deduplication, JS validation

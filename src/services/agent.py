@@ -6,9 +6,11 @@ capabilities with MLflow tracing integration.
 """
 
 import logging
+import queue
+import re
 import uuid
 from datetime import datetime
-from typing import Any
+from typing import Any, Optional, Tuple
 
 import mlflow
 from bs4 import BeautifulSoup
@@ -32,6 +34,7 @@ from src.core.settings_db import get_settings
 from src.domain.slide import Slide
 from src.services.tools import initialize_genie_conversation, query_genie_space
 from src.utils.html_utils import extract_canvas_ids_from_script, split_script_by_canvas
+from src.utils.js_validator import validate_and_fix_javascript
 
 logger = logging.getLogger(__name__)
 
@@ -639,12 +642,15 @@ class SlideGeneratorAgent:
         """
         return list(self.sessions.keys())
 
-    def _format_slide_context(self, slide_context: dict[str, Any]) -> str:
+    def _format_slide_context(
+        self, slide_context: dict[str, Any], is_add_operation: bool = False
+    ) -> str:
         """
         Format slide context for injection into the user message.
 
         Args:
             slide_context: Dict with 'indices' and 'slide_htmls' keys
+            is_add_operation: Whether this is an "add slide" operation (RC2)
 
         Returns:
             Formatted string wrapped with slide-context markers
@@ -653,7 +659,150 @@ class SlideGeneratorAgent:
         for html in slide_context.get("slide_htmls", []):
             context_parts.append(html)
         context_parts.append("</slide-context>")
+
+        # RC2: Add explicit instruction for "add" operations
+        if is_add_operation:
+            context_parts.append(
+                "\n\nIMPORTANT: The user wants to ADD a new slide. "
+                "Return ONLY the new slide(s) to be added - the system will automatically append them to the deck. "
+                "Do NOT return the existing slides shown above - just the new slide content."
+            )
+
         return "\n\n".join(context_parts)
+
+    def _detect_add_intent(self, message: str) -> bool:
+        """
+        RC2: Detect if user wants to add a new slide rather than edit existing ones.
+
+        Returns:
+            True if message indicates adding/inserting a new slide
+        """
+        add_patterns = [
+            r"\badd\b.*\bslide\b",
+            r"\binsert\b.*\bslide\b",
+            r"\bappend\b.*\bslide\b",
+            r"\bnew\s+slide\b",
+            r"\bcreate\b.*\bslide\b",
+            r"\badd\b.*\bat\s+the\s+(bottom|end|top|beginning)\b",
+            r"\bslide\b.*\bat\s+the\s+(bottom|end|top|beginning)\b",
+            r"\badd\b.*\b(summary|conclusion|key\s*takeaway)",
+        ]
+
+        lower_message = message.lower()
+        for pattern in add_patterns:
+            if re.search(pattern, lower_message):
+                logger.info(
+                    "Detected add slide intent",
+                    extra={"message": message[:50], "matched_pattern": pattern},
+                )
+                return True
+        return False
+
+    def _validate_editing_response(self, llm_response: str) -> Tuple[bool, str]:
+        """
+        RC1: Validate that LLM response contains valid slide HTML.
+
+        Returns:
+            (is_valid, error_message)
+        """
+        if not llm_response or not llm_response.strip():
+            return False, "Empty response"
+
+        # Check for conversational text patterns (LLM confusion)
+        confusion_patterns = [
+            "I understand",
+            "I cannot",
+            "I'm sorry",
+            "I don't",
+            "There are no slides",
+            "slides have been deleted",
+            "no slides to display",
+            "I've removed",
+            "I've deleted",
+            "cannot be displayed",
+        ]
+
+        lower_response = llm_response.lower()
+        for pattern in confusion_patterns:
+            if (
+                pattern.lower() in lower_response
+                and '<div class="slide"' not in llm_response
+            ):
+                return (
+                    False,
+                    f"LLM returned conversational text instead of HTML: {pattern}",
+                )
+
+        # Check for at least one slide div
+        soup = BeautifulSoup(llm_response, "html.parser")
+        slide_divs = soup.find_all("div", class_="slide")
+        if not slide_divs:
+            return False, "No <div class='slide'> elements found in response"
+
+        return True, ""
+
+    def _deduplicate_canvas_ids(
+        self, html_content: str, scripts: str
+    ) -> Tuple[str, str]:
+        """
+        RC4: Generate unique canvas IDs to prevent collisions.
+
+        Appends a short unique suffix to all canvas IDs in HTML and scripts.
+
+        Returns:
+            (updated_html, updated_scripts)
+        """
+        soup = BeautifulSoup(html_content, "html.parser")
+        canvases = soup.find_all("canvas")
+
+        if not canvases:
+            return html_content, scripts
+
+        suffix = uuid.uuid4().hex[:6]
+        id_mapping: dict[str, str] = {}
+
+        # Update canvas IDs in HTML
+        for canvas in canvases:
+            old_id = canvas.get("id")
+            if old_id:
+                new_id = f"{old_id}_{suffix}"
+                id_mapping[old_id] = new_id
+                canvas["id"] = new_id
+
+        updated_html = str(soup)
+        updated_scripts = scripts or ""
+
+        # Update references in scripts
+        for old_id, new_id in id_mapping.items():
+            # Update getElementById calls
+            updated_scripts = re.sub(
+                rf"getElementById\s*\(\s*['\"]({re.escape(old_id)})['\"]\s*\)",
+                f"getElementById('{new_id}')",
+                updated_scripts,
+            )
+            # Update querySelector calls
+            updated_scripts = re.sub(
+                rf"querySelector\s*\(\s*['\"]#({re.escape(old_id)})['\"]\s*\)",
+                f"querySelector('#{new_id}')",
+                updated_scripts,
+            )
+            # Update Canvas comments
+            updated_scripts = re.sub(
+                rf"//\s*Canvas:\s*{re.escape(old_id)}\b",
+                f"// Canvas: {new_id}",
+                updated_scripts,
+                flags=re.IGNORECASE,
+            )
+
+        logger.info(
+            "Deduplicated canvas IDs",
+            extra={
+                "original_ids": list(id_mapping.keys()),
+                "suffix": suffix,
+            },
+        )
+
+        return updated_html, updated_scripts
 
     def _parse_slide_replacements(
         self,
@@ -738,9 +887,46 @@ class SlideGeneratorAgent:
                 if not assigned and replacement_slides:
                     replacement_slides[-1].scripts += segment_text.strip() + "\n"
 
+        # RC4: Deduplicate canvas IDs to prevent collisions
+        for slide in replacement_slides:
+            if "<canvas" in slide.html:
+                slide.html, slide.scripts = self._deduplicate_canvas_ids(
+                    slide.html, slide.scripts
+                )
+
+        # RC5: Validate and fix JavaScript syntax
+        for idx, slide in enumerate(replacement_slides):
+            if slide.scripts:
+                fixed_script, was_fixed, error = validate_and_fix_javascript(
+                    slide.scripts
+                )
+                if was_fixed:
+                    slide.scripts = fixed_script
+                    logger.info(
+                        f"Fixed JavaScript syntax in slide {idx}",
+                        extra={"slide_index": idx},
+                    )
+                elif error:
+                    logger.warning(
+                        f"JavaScript syntax error in slide {idx} could not be fixed: {error}",
+                        extra={"slide_index": idx, "error": error},
+                    )
+
         original_count = len(original_indices)
         replacement_count = len(replacement_slides)
         start_index = original_indices[0] if original_indices else 0
+
+        # RC2: Log warning if replacement results in slide loss
+        if replacement_count < original_count:
+            net_loss = original_count - replacement_count
+            logger.warning(
+                f"Slide replacement results in net loss of {net_loss} slides",
+                extra={
+                    "original_count": original_count,
+                    "replacement_count": replacement_count,
+                    "net_loss": net_loss,
+                },
+            )
 
         logger.info(
             "Parsed slide replacements",
@@ -922,9 +1108,14 @@ class SlideGeneratorAgent:
         agent_executor = self._create_agent_executor(tools)
 
         editing_mode = slide_context is not None
+        is_add_operation = False
 
         if slide_context:
-            context_str = self._format_slide_context(slide_context)
+            # RC2: Detect if this is an "add slide" operation
+            is_add_operation = self._detect_add_intent(question)
+            context_str = self._format_slide_context(
+                slide_context, is_add_operation=is_add_operation
+            )
             full_question = f"{context_str}\n\n{question}"
             logger.info(
                 "Slide editing mode",
@@ -932,6 +1123,7 @@ class SlideGeneratorAgent:
                     "session_id": session_id,
                     "selected_indices": slide_context.get("indices", []),
                     "slide_count": len(slide_context.get("indices", [])),
+                    "is_add_operation": is_add_operation,
                 },
             )
         else:
@@ -974,6 +1166,48 @@ class SlideGeneratorAgent:
                 html_output = result["output"]
                 intermediate_steps = result.get("intermediate_steps", [])
 
+                # RC1: Validate response in editing mode and retry if invalid
+                if editing_mode:
+                    is_valid, error_msg = self._validate_editing_response(html_output)
+
+                    if not is_valid:
+                        logger.warning(
+                            f"Invalid editing response, retrying: {error_msg}",
+                            extra={"session_id": session_id},
+                        )
+
+                        # Retry with stronger prompt
+                        retry_prompt = (
+                            f"{full_question}\n\n"
+                            "IMPORTANT: You MUST respond with valid HTML slide divs. "
+                            "Do NOT respond with conversational text. "
+                            "Return ONLY <div class='slide'>...</div> elements with their content."
+                        )
+
+                        retry_result = agent_executor.invoke(
+                            {
+                                "input": retry_prompt,
+                                "chat_history": chat_history.messages,
+                            }
+                        )
+                        html_output = retry_result["output"]
+                        intermediate_steps = retry_result.get(
+                            "intermediate_steps", intermediate_steps
+                        )
+
+                        # Validate retry
+                        is_valid, error_msg = self._validate_editing_response(
+                            html_output
+                        )
+                        if not is_valid:
+                            logger.error(
+                                f"LLM failed to return valid slide HTML after retry: {error_msg}",
+                                extra={"session_id": session_id},
+                            )
+                            raise AgentError(
+                                f"LLM failed to return valid slide HTML after retry: {error_msg}"
+                            )
+
                 # Note: genie_conversation_id already stored in session during create_session()
                 # No need to extract from tool responses anymore
 
@@ -1005,6 +1239,9 @@ class SlideGeneratorAgent:
                         llm_response=html_output,
                         original_indices=slide_context.get("indices", []),
                     )
+                    # RC2: Pass is_add_operation flag for backend handling
+                    if replacement_info:
+                        replacement_info["is_add_operation"] = is_add_operation
                     parsed_output = replacement_info
                 else:
                     self._validate_canvas_scripts_in_html(html_output)
@@ -1096,9 +1333,14 @@ class SlideGeneratorAgent:
         )
 
         editing_mode = slide_context is not None
+        is_add_operation = False
 
         if slide_context:
-            context_str = self._format_slide_context(slide_context)
+            # RC2: Detect if this is an "add slide" operation
+            is_add_operation = self._detect_add_intent(question)
+            context_str = self._format_slide_context(
+                slide_context, is_add_operation=is_add_operation
+            )
             full_question = f"{context_str}\n\n{question}"
             logger.info(
                 "Slide editing mode (streaming)",
@@ -1106,6 +1348,7 @@ class SlideGeneratorAgent:
                     "session_id": session_id,
                     "selected_indices": slide_context.get("indices", []),
                     "slide_count": len(slide_context.get("indices", [])),
+                    "is_add_operation": is_add_operation,
                 },
             )
         else:
@@ -1149,6 +1392,49 @@ class SlideGeneratorAgent:
                 html_output = result["output"]
                 intermediate_steps = result.get("intermediate_steps", [])
 
+                # RC1: Validate response in editing mode and retry if invalid
+                if editing_mode:
+                    is_valid, error_msg = self._validate_editing_response(html_output)
+
+                    if not is_valid:
+                        logger.warning(
+                            f"Invalid editing response, retrying: {error_msg}",
+                            extra={"session_id": session_id},
+                        )
+
+                        # Retry with stronger prompt
+                        retry_prompt = (
+                            f"{full_question}\n\n"
+                            "IMPORTANT: You MUST respond with valid HTML slide divs. "
+                            "Do NOT respond with conversational text. "
+                            "Return ONLY <div class='slide'>...</div> elements with their content."
+                        )
+
+                        retry_result = agent_executor.invoke(
+                            {
+                                "input": retry_prompt,
+                                "chat_history": chat_history.messages,
+                            },
+                            config={"callbacks": [callback_handler]},
+                        )
+                        html_output = retry_result["output"]
+                        intermediate_steps = retry_result.get(
+                            "intermediate_steps", intermediate_steps
+                        )
+
+                        # Validate retry
+                        is_valid, error_msg = self._validate_editing_response(
+                            html_output
+                        )
+                        if not is_valid:
+                            logger.error(
+                                f"LLM failed to return valid slide HTML after retry: {error_msg}",
+                                extra={"session_id": session_id},
+                            )
+                            raise AgentError(
+                                f"LLM failed to return valid slide HTML after retry: {error_msg}"
+                            )
+
                 # Update chat history
                 chat_history.add_message(HumanMessage(content=full_question))
                 chat_history.add_message(AIMessage(content=html_output))
@@ -1169,6 +1455,9 @@ class SlideGeneratorAgent:
                         llm_response=html_output,
                         original_indices=slide_context.get("indices", []),
                     )
+                    # RC2: Pass is_add_operation flag for backend handling
+                    if replacement_info:
+                        replacement_info["is_add_operation"] = is_add_operation
                 else:
                     self._validate_canvas_scripts_in_html(html_output)
 
