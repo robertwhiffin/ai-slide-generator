@@ -256,6 +256,7 @@ ai-slide-generator/
 | [Real-Time Streaming](docs/technical/real-time-streaming.md) | SSE events, conversation persistence |
 | [Databricks Deployment](docs/technical/databricks-app-deployment.md) | Deployment CLI, environments |
 | [Slide Parser](docs/technical/slide-parser-and-script-management.md) | HTML parsing, CSS merging, script handling |
+| [Slide Editing Robustness](docs/technical/slide-editing-robustness-fixes.md) | Deck preservation, validation, clarification guards, canvas deduplication |
 | [Database Config](docs/technical/database-configuration.md) | PostgreSQL/Lakebase schema |
 
 ---

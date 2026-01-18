@@ -194,6 +194,22 @@ Breaking these invariants (e.g., submitting non-contiguous indices, missing `.sl
 - **Sessions:** `SlideGeneratorAgent.sessions` holds `chat_history`, `genie_conversation_id`, `experiment_id`, `experiment_url`, `username`, and `metadata`. Each user operates on their own session with isolated state.
 - **Concurrency:** Tools and `AgentExecutor` are created fresh for each request. No shared mutable state between concurrent requests.
 - **Observability:** MLflow spans wrap each generation. Attributes include mode (`generate` vs `edit`), latency, tool call counts, Genie conversation ID, and replacement stats.
+- **Robustness:** Multiple safeguards prevent slide data loss during edits (see [Slide Editing Robustness](slide-editing-robustness-fixes.md)):
+  - Response validation with automatic retry if LLM returns text instead of HTML
+  - Add vs edit intent detection to preserve existing slides when adding new ones
+  - Deck preservation guard to prevent deck destruction on parsing failures
+  - Canvas ID deduplication to prevent chart conflicts
+  - JavaScript syntax validation and auto-fix
+  - **Clarification guards** (ask before proceeding on ambiguous requests):
+    - "Edit slide 8" without selection → auto-creates slide context, applies to correct slide (RC13)
+    - "Add after slide 3" → positions correctly based on reference
+    - Ambiguous edit without slide number → asks "which slide?"
+    - "Create 5 slides" with existing deck → asks "add or replace?"
+    - Selection/text conflict → uses selection, shows note to user
+  - **Unsupported operations** (RC14) - LLM guides users:
+    - Delete/remove → "Use the trash icon in the slide panel on the right"
+    - Reorder/move → "Drag and drop in the slide panel on the right"
+    - Duplicate/copy → "Select the slide and ask 'create an exact copy'"
 
 ### Per-Session MLflow Experiments
 
@@ -280,4 +296,5 @@ Keep this doc synchronized whenever you add new modules, features (e.g., streami
 - [Real-Time Streaming](real-time-streaming.md) – SSE events and conversation persistence
 - [Multi-User Concurrency](multi-user-concurrency.md) – session locking and async handling
 - [Slide Parser & Script Management](slide-parser-and-script-management.md) – HTML parsing flow
+- [Slide Editing Robustness](slide-editing-robustness-fixes.md) – Deck preservation, LLM validation, canvas deduplication, JS validation
 

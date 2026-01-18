@@ -10,12 +10,13 @@ its scripts are automatically replaced with it - no separate cleanup needed.
 import contextvars
 import logging
 import queue
+import re
 import threading
 from datetime import datetime
 from typing import Any, Dict, Generator, List, Optional
 
 from langchain_community.chat_message_histories import ChatMessageHistory
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 from src.api.schemas.streaming import StreamEvent, StreamEventType
 from src.api.services.session_manager import SessionNotFoundError, get_session_manager
@@ -224,6 +225,92 @@ class ChatService:
         # The agent maintains its own in-memory session store for conversation state
         experiment_url = self._ensure_agent_session(session_id, db_session.get("genie_conversation_id"))
 
+        # Issue 2 FIX: Detect intent ONCE and store for reuse (sync path)
+        _is_edit = self._detect_edit_intent(message)
+        _is_generation = self._detect_generation_intent(message)
+        _is_add = self._detect_add_intent(message)
+        _slide_refs, _ref_position = self._parse_slide_references(message)
+        _is_explicit_replace = self._detect_explicit_replace_intent(message)
+
+        # RC10/RC12: Early clarification check BEFORE calling LLM (sync path)
+        if not slide_context:
+            existing_deck = self._get_or_load_deck(session_id)
+            if existing_deck and len(existing_deck.slides) > 0:
+                # RC12: Generation intent with existing deck - ask add or replace
+                if _is_generation and not _is_add and not _is_explicit_replace:
+                    logger.info(
+                        "RC12: Clarification needed - generation intent with existing deck (sync)",
+                        extra={"session_id": session_id, "existing_slides": len(existing_deck.slides)},
+                    )
+                    clarification_msg = (
+                        f"You have {len(existing_deck.slides)} slides in this session. "
+                        "Would you like to:\n"
+                        "- Add new slides to the existing deck?\n"
+                        "- Replace the entire deck with a new presentation?\n\n"
+                        "Please reply with your full request, e.g., 'add 3 slides about X' or 'replace with new slides about X'."
+                    )
+                    session_manager.add_message(
+                        session_id=session_id,
+                        role="assistant",
+                        content=clarification_msg,
+                        message_type="clarification",
+                    )
+                    return {
+                        "messages": [{"role": "assistant", "content": clarification_msg}],
+                        "slide_deck": existing_deck.to_dict(),
+                        "raw_html": existing_deck.knit(),
+                        "metadata": {"clarification_needed": True},
+                        "replacement_info": None,
+                        "session_id": session_id,
+                    }
+                
+                # RC10: Edit intent without clear target - ask for clarification
+                if _is_edit and not _slide_refs and not _is_generation:
+                    logger.info(
+                        "RC10: Clarification needed - edit intent without slide reference (sync)",
+                        extra={"session_id": session_id},
+                    )
+                    clarification_msg = (
+                        "I'd like to help edit your slides. Could you please specify which slide? "
+                        "You can either:\n"
+                        "- Say the slide number (e.g., 'change slide 3 background to blue')\n"
+                        "- Or select the slide from the panel on the left"
+                    )
+                    session_manager.add_message(
+                        session_id=session_id,
+                        role="assistant",
+                        content=clarification_msg,
+                        message_type="clarification",
+                    )
+                    return {
+                        "messages": [{"role": "assistant", "content": clarification_msg}],
+                        "slide_deck": existing_deck.to_dict(),
+                        "raw_html": existing_deck.knit(),
+                        "metadata": {"clarification_needed": True},
+                        "replacement_info": None,
+                        "session_id": session_id,
+                    }
+
+        # RC13: Auto-create slide_context from text reference (sync path)
+        if _is_edit and _slide_refs and not slide_context:
+            existing_deck = self._get_or_load_deck(session_id)
+            if existing_deck and len(existing_deck.slides) > 0:
+                valid_refs = [i for i in _slide_refs if 0 <= i < len(existing_deck.slides)]
+                if valid_refs:
+                    slide_htmls = [existing_deck.slides[i].html for i in valid_refs]
+                    slide_context = {
+                        "indices": valid_refs,
+                        "slide_htmls": slide_htmls
+                    }
+                    logger.info(
+                        "RC13: Auto-created slide_context from text reference (sync)",
+                        extra={
+                            "session_id": session_id,
+                            "parsed_refs": _slide_refs,
+                            "valid_refs": valid_refs,
+                        },
+                    )
+
         try:
             # Call agent to generate slides
             result = self.agent.generate_slides(
@@ -235,11 +322,13 @@ class ChatService:
             html_output = result.get("html")
             replacement_info = result.get("replacement_info")
 
-            # Get cached deck for this session (thread-safe)
-            with self._cache_lock:
-                current_deck = self._deck_cache.get(session_id)
+            # Get deck from cache or restore from database (RC6: survive backend restarts)
+            current_deck = self._get_or_load_deck(session_id)
 
             if slide_context and replacement_info:
+                # Add position intent for add operations
+                if replacement_info.get("is_add_operation"):
+                    replacement_info["add_position"] = self._detect_add_position(message)
                 slide_deck_dict = self._apply_slide_replacements(
                     replacement_info=result["parsed_output"],
                     session_id=session_id,
@@ -247,11 +336,93 @@ class ChatService:
                 with self._cache_lock:
                     current_deck = self._deck_cache.get(session_id)
                 raw_html = current_deck.knit() if current_deck else None
+            elif slide_context and not replacement_info:
+                # RC3 GUARD: slide_context was provided but parsing failed
+                # Preserve existing deck, return error instead of destroying the deck
+                logger.error(
+                    "Slide replacement parsing failed, preserving existing deck",
+                    extra={
+                        "session_id": session_id,
+                        "slide_context_indices": slide_context.get("indices", []),
+                    },
+                )
+                # Get existing deck to return
+                with self._cache_lock:
+                    current_deck = self._deck_cache.get(session_id)
+                if current_deck:
+                    slide_deck_dict = current_deck.to_dict()
+                    raw_html = current_deck.knit()
+                else:
+                    slide_deck_dict = None
+                    raw_html = None
+                raise ValueError(
+                    "Failed to parse LLM response as slide replacements. "
+                    "The existing deck has been preserved."
+                )
             elif html_output and html_output.strip():
                 raw_html = html_output
 
                 try:
-                    current_deck = SlideDeck.from_html_string(html_output)
+                    new_deck = SlideDeck.from_html_string(html_output)
+                    
+                    # RC2 FIX: Reuse _is_add from early detection (Issue 2 optimization)
+                    existing_deck = self._get_or_load_deck(session_id)
+                    
+                    if _is_add and existing_deck and len(existing_deck.slides) > 0:
+                        # ADD new slides to existing deck (at beginning or end)
+                        position_type, absolute_position = self._detect_add_position(message)
+                        
+                        # RC7: Log script status for debugging
+                        existing_scripts_info = [
+                            {"idx": i, "has_script": bool(s.scripts), "script_len": len(s.scripts or "")}
+                            for i, s in enumerate(existing_deck.slides)
+                        ]
+                        
+                        # Determine insert position based on user intent
+                        if position_type in ("beginning", "before"):
+                            insert_position = 0  # Beginning of deck
+                        else:
+                            insert_position = len(existing_deck.slides)  # End of deck
+                        
+                        logger.info(
+                            "Add intent detected without slide_context - inserting into deck",
+                            extra={
+                                "session_id": session_id,
+                                "existing_slides": len(existing_deck.slides),
+                                "existing_slides_with_scripts": sum(1 for s in existing_deck.slides if s.scripts),
+                                "existing_scripts_detail": existing_scripts_info,
+                                "new_slides": len(new_deck.slides),
+                                "new_slides_with_scripts": sum(1 for s in new_deck.slides if s.scripts),
+                                "position_type": position_type,
+                                "insert_position": insert_position,
+                            },
+                        )
+                        
+                        for idx, slide in enumerate(new_deck.slides):
+                            slide.slide_id = f"slide_{insert_position + idx}"
+                            existing_deck.insert_slide(slide, insert_position + idx)
+                        
+                        if new_deck.css:
+                            existing_deck.css = existing_deck.css + "\n" + new_deck.css
+                        
+                        current_deck = existing_deck
+                        # RC7: Log final script status
+                        final_scripts_info = [
+                            {"idx": i, "has_script": bool(s.scripts), "script_len": len(s.scripts or "")}
+                            for i, s in enumerate(current_deck.slides)
+                        ]
+                        logger.info(
+                            "Added slides to existing deck",
+                            extra={
+                                "session_id": session_id,
+                                "final_slide_count": len(current_deck.slides),
+                                "final_slides_with_scripts": sum(1 for s in current_deck.slides if s.scripts),
+                                "final_scripts_detail": final_scripts_info,
+                            },
+                        )
+                    else:
+                        current_deck = new_deck
+                    
                     with self._cache_lock:
                         self._deck_cache[session_id] = current_deck
                     slide_deck_dict = current_deck.to_dict()
@@ -289,9 +460,37 @@ class ChatService:
             # Update session activity
             session_manager.update_last_activity(session_id)
 
+            # RC11: Check for conflict between selection and text reference (sync path)
+            conflict_note = None
+            if slide_context:
+                text_refs, _ = self._parse_slide_references(message)
+                if text_refs:
+                    selected_indices = slide_context.get("indices", [])
+                    if set(text_refs) != set(selected_indices):
+                        selected_display = [i + 1 for i in selected_indices]
+                        text_display = [i + 1 for i in text_refs]
+                        conflict_note = (
+                            f"📝 Applied changes to slide {', '.join(map(str, selected_display))} (your selection). "
+                            f"Note: you mentioned slide {', '.join(map(str, text_display))} in your message."
+                        )
+                        logger.info(
+                            "RC11: Selection/text conflict detected (sync)",
+                            extra={"session_id": session_id, "selected": selected_indices, "text_refs": text_refs},
+                        )
+                        session_manager.add_message(
+                            session_id=session_id,
+                            role="assistant",
+                            content=conflict_note,
+                            message_type="info",
+                        )
+
             # Build response
+            messages = result["messages"]
+            if conflict_note:
+                messages = messages + [{"role": "assistant", "content": conflict_note}]
+            
             response = {
-                "messages": result["messages"],
+                "messages": messages,
                 "slide_deck": slide_deck_dict,
                 "raw_html": raw_html,
                 "metadata": result["metadata"],
@@ -306,6 +505,7 @@ class ChatService:
                     "message_count": len(response["messages"]),
                     "has_slide_deck": response["slide_deck"] is not None,
                     "session_id": session_id,
+                    "had_conflict_note": conflict_note is not None,
                 },
             )
 
@@ -394,6 +594,134 @@ class ChatService:
         # Ensure session is registered with the agent (hydrates history)
         experiment_url = self._ensure_agent_session(session_id, db_session.get("genie_conversation_id"))
 
+        # Issue 2 FIX: Detect intent ONCE and store for reuse throughout the function
+        # This avoids running regex patterns twice on every request
+        _is_edit = self._detect_edit_intent(message)
+        _is_generation = self._detect_generation_intent(message)
+        _is_add = self._detect_add_intent(message)
+        _slide_refs, _ref_position = self._parse_slide_references(message)
+        _is_explicit_replace = self._detect_explicit_replace_intent(message)
+
+        # RC10: Early clarification check BEFORE calling LLM
+        # If user seems to want to edit but didn't specify which slide, ask for clarification
+        if not slide_context:
+            existing_deck = self._get_or_load_deck(session_id)
+            if existing_deck and len(existing_deck.slides) > 0:
+                # Generation intent with existing deck - ask add or replace
+                # Skip if user explicitly said "add" or "replace"
+                if _is_generation and not _is_add and not _is_explicit_replace:
+                    logger.info(
+                        "RC12: Clarification - generation intent with existing deck",
+                        extra={
+                            "session_id": session_id,
+                            "existing_slides": len(existing_deck.slides),
+                            "message_preview": message[:50],
+                        },
+                    )
+                    clarification_msg = (
+                        f"You have {len(existing_deck.slides)} slides in this session. "
+                        "Would you like to:\n"
+                        "- Add new slides to the existing deck?\n"
+                        "- Replace the entire deck with a new presentation?\n\n"
+                        "Please reply with your full request, e.g., 'add 3 slides about X' or 'replace with new slides about X'."
+                    )
+                    # Persist clarification as assistant message
+                    session_manager.add_message(
+                        session_id=session_id,
+                        role="assistant",
+                        content=clarification_msg,
+                        message_type="clarification",
+                    )
+                    # Return clarification without calling LLM
+                    yield StreamEvent(
+                        type=StreamEventType.ASSISTANT,
+                        content=clarification_msg,
+                    )
+                    yield StreamEvent(
+                        type=StreamEventType.COMPLETE,
+                        slides=existing_deck.to_dict(),
+                    )
+                    return
+                
+                # Edit intent without clear target - ask for clarification
+                if _is_edit and not _slide_refs and not _is_generation:
+                    logger.info(
+                        "RC10: Early clarification - edit intent without slide reference",
+                        extra={"session_id": session_id, "message_preview": message[:50]},
+                    )
+                    clarification_msg = (
+                        "I'd like to help edit your slides. Could you please specify which slide? "
+                        "You can either:\n"
+                        "- Say the slide number (e.g., 'change slide 3 background to blue')\n"
+                        "- Or select the slide from the panel on the left"
+                    )
+                    # Persist clarification as assistant message
+                    session_manager.add_message(
+                        session_id=session_id,
+                        role="assistant",
+                        content=clarification_msg,
+                        message_type="clarification",
+                    )
+                    # Return clarification without calling LLM
+                    yield StreamEvent(
+                        type=StreamEventType.ASSISTANT,
+                        content=clarification_msg,
+                    )
+                    yield StreamEvent(
+                        type=StreamEventType.COMPLETE,
+                        slides=existing_deck.to_dict(),
+                    )
+                    return
+
+        # RC11: Detect conflict between selection and text reference
+        conflict_note = None
+        if slide_context:
+            # Reuse _slide_refs from early detection (Issue 2 optimization)
+            if _slide_refs:
+                selected_indices = slide_context.get("indices", [])
+                # Check if text references differ from selection
+                if set(_slide_refs) != set(selected_indices):
+                    # Convert to 1-based for user display
+                    selected_display = [i + 1 for i in selected_indices]
+                    text_display = [i + 1 for i in _slide_refs]
+                    conflict_note = (
+                        f"📝 Applied changes to slide {', '.join(map(str, selected_display))} (your selection). "
+                        f"Note: you mentioned slide {', '.join(map(str, text_display))} in your message."
+                    )
+                    logger.info(
+                        "RC11: Selection/text reference conflict detected",
+                        extra={
+                            "session_id": session_id,
+                            "selected_indices": selected_indices,
+                            "text_refs": _slide_refs,
+                        },
+                    )
+
+        # RC13: Auto-create slide_context from text reference (e.g., "edit slide 7")
+        # If user mentioned a slide number but didn't select in panel, look up the slide
+        if _is_edit and _slide_refs and not slide_context:
+            existing_deck = self._get_or_load_deck(session_id)
+            if existing_deck and len(existing_deck.slides) > 0:
+                # Validate indices are in range
+                valid_refs = [i for i in _slide_refs if 0 <= i < len(existing_deck.slides)]
+                if valid_refs:
+                    # Look up the actual slide HTML(s)
+                    slide_htmls = [existing_deck.slides[i].html for i in valid_refs]
+                    # Create context in same format as frontend selection
+                    slide_context = {
+                        "indices": valid_refs,
+                        "slide_htmls": slide_htmls
+                    }
+                    logger.info(
+                        "RC13: Auto-created slide_context from text reference",
+                        extra={
+                            "session_id": session_id,
+                            "parsed_refs": _slide_refs,
+                            "valid_refs": valid_refs,
+                            "deck_size": len(existing_deck.slides),
+                        },
+                    )
+
         # Create event queue and callback handler
         event_queue: queue.Queue[StreamEvent] = queue.Queue()
         callback_handler = StreamingCallbackHandler(
@@ -448,14 +776,16 @@ class ChatService:
         html_output = result.get("html")
         replacement_info = result.get("replacement_info")
 
-        # Get cached deck for this session (thread-safe)
-        with self._cache_lock:
-            current_deck = self._deck_cache.get(session_id)
+        # Get deck from cache or restore from database (RC6: survive backend restarts)
+        current_deck = self._get_or_load_deck(session_id)
 
         slide_deck_dict = None
         raw_html = None
 
         if slide_context and replacement_info:
+            # Add position intent for add operations
+            if replacement_info.get("is_add_operation"):
+                replacement_info["add_position"] = self._detect_add_position(message)
             slide_deck_dict = self._apply_slide_replacements(
                 replacement_info=replacement_info,
                 session_id=session_id,
@@ -463,10 +793,209 @@ class ChatService:
             with self._cache_lock:
                 current_deck = self._deck_cache.get(session_id)
             raw_html = current_deck.knit() if current_deck else None
+        elif slide_context and not replacement_info:
+            # RC3 GUARD: slide_context was provided but parsing failed (streaming path)
+            # Preserve existing deck, return error instead of destroying the deck
+            logger.error(
+                "Slide replacement parsing failed (streaming), preserving existing deck",
+                extra={
+                    "session_id": session_id,
+                    "slide_context_indices": slide_context.get("indices", []),
+                },
+            )
+            with self._cache_lock:
+                current_deck = self._deck_cache.get(session_id)
+            if current_deck:
+                slide_deck_dict = current_deck.to_dict()
+                raw_html = current_deck.knit()
+            else:
+                slide_deck_dict = None
+                raw_html = None
+            raise ValueError(
+                "Failed to parse LLM response as slide replacements. "
+                "The existing deck has been preserved."
+            )
         elif html_output and html_output.strip():
             raw_html = html_output
             try:
-                current_deck = SlideDeck.from_html_string(html_output)
+                new_deck = SlideDeck.from_html_string(html_output)
+                existing_deck = self._get_or_load_deck(session_id)
+                
+                # RC8/RC9/RC10: Reuse intent from early detection (Issue 2 optimization)
+                # No need to re-detect - use _is_edit, _is_generation, _is_add, _slide_refs, _ref_position
+                
+                # RC10 GUARD: Edit intent without clear target - ask for clarification
+                if _is_edit and not slide_context and existing_deck and len(existing_deck.slides) > 0:
+                    if _slide_refs:
+                        # RC8: User said "edit slide 8" - create synthetic context
+                        # Validate indices
+                        valid_refs = [i for i in _slide_refs if 0 <= i < len(existing_deck.slides)]
+                        if valid_refs:
+                            logger.info(
+                                "RC8: Creating synthetic slide_context from parsed reference",
+                                extra={
+                                    "session_id": session_id,
+                                    "parsed_refs": _slide_refs,
+                                    "valid_refs": valid_refs,
+                                },
+                            )
+                            # Apply the edit to referenced slides
+                            # For now, replace the referenced slides with LLM output
+                            for idx, slide_idx in enumerate(valid_refs):
+                                if idx < len(new_deck.slides):
+                                    existing_deck.slides[slide_idx] = new_deck.slides[idx]
+                            current_deck = existing_deck
+                            with self._cache_lock:
+                                self._deck_cache[session_id] = current_deck
+                            slide_deck_dict = current_deck.to_dict()
+                            # Skip the rest of the elif block
+                            logger.info(
+                                "RC8: Applied edit to referenced slides",
+                                extra={
+                                    "session_id": session_id,
+                                    "edited_indices": valid_refs,
+                                    "final_count": len(current_deck.slides),
+                                },
+                            )
+                        else:
+                            # Invalid slide reference
+                            logger.warning(
+                                "RC8: Invalid slide reference - indices out of range",
+                                extra={
+                                    "session_id": session_id,
+                                    "parsed_refs": _slide_refs,
+                                    "deck_size": len(existing_deck.slides),
+                                },
+                            )
+                            # Preserve deck, don't apply changes
+                            current_deck = existing_deck
+                            slide_deck_dict = current_deck.to_dict()
+                    else:
+                        # RC10: Edit intent but no slide reference - preserve deck
+                        logger.warning(
+                            "RC10: Edit intent without slide reference - preserving deck",
+                            extra={
+                                "session_id": session_id,
+                                "message_preview": message[:50],
+                            },
+                        )
+                        # Keep existing deck, don't replace
+                        current_deck = existing_deck
+                        slide_deck_dict = current_deck.to_dict()
+                
+                # RC9: Add with slide reference (e.g., "add after slide 3")
+                elif _is_add and _slide_refs and _ref_position and existing_deck and len(existing_deck.slides) > 0:
+                    valid_ref = _slide_refs[0] if _slide_refs else -1
+                    if 0 <= valid_ref < len(existing_deck.slides):
+                        # Calculate insert position
+                        if _ref_position == "after":
+                            insert_position = valid_ref + 1
+                        else:  # "before"
+                            insert_position = valid_ref
+                        
+                        logger.info(
+                            "RC9: Adding slide at parsed reference position",
+                            extra={
+                                "session_id": session_id,
+                                "ref_slide": valid_ref + 1,  # 1-based for logging
+                                "position": _ref_position,
+                                "insert_at": insert_position,
+                            },
+                        )
+                        
+                        for idx, slide in enumerate(new_deck.slides):
+                            slide.slide_id = f"slide_{insert_position + idx}"
+                            existing_deck.insert_slide(slide, insert_position + idx)
+                        
+                        if new_deck.css:
+                            existing_deck.css = existing_deck.css + "\n" + new_deck.css
+                        
+                        current_deck = existing_deck
+                        with self._cache_lock:
+                            self._deck_cache[session_id] = current_deck
+                        slide_deck_dict = current_deck.to_dict()
+                
+                # Standard add intent (at beginning/end) - only if not already handled above
+                elif _is_add and existing_deck and len(existing_deck.slides) > 0:
+                    # ADD new slides to existing deck (at beginning or end)
+                    position_type, absolute_position = self._detect_add_position(message)
+                    
+                    # RC7: Log script status for debugging
+                    existing_scripts_info = [
+                        {"idx": i, "has_script": bool(s.scripts), "script_len": len(s.scripts or "")}
+                        for i, s in enumerate(existing_deck.slides)
+                    ]
+                    
+                    # Determine insert position based on user intent
+                    if position_type in ("beginning", "before"):
+                        insert_position = 0  # Beginning of deck
+                    else:
+                        insert_position = len(existing_deck.slides)  # End of deck
+                    
+                    logger.info(
+                        "Add intent detected without slide_context - inserting into deck",
+                        extra={
+                            "session_id": session_id,
+                            "existing_slides": len(existing_deck.slides),
+                            "existing_slides_with_scripts": sum(1 for s in existing_deck.slides if s.scripts),
+                            "existing_scripts_detail": existing_scripts_info,
+                            "new_slides": len(new_deck.slides),
+                            "new_slides_with_scripts": sum(1 for s in new_deck.slides if s.scripts),
+                            "position_type": position_type,
+                            "insert_position": insert_position,
+                        },
+                    )
+                    
+                    for idx, slide in enumerate(new_deck.slides):
+                        slide.slide_id = f"slide_{insert_position + idx}"
+                        existing_deck.insert_slide(slide, insert_position + idx)
+                    
+                    # Merge CSS if new deck has any
+                    if new_deck.css:
+                        existing_deck.css = existing_deck.css + "\n" + new_deck.css
+                    
+                    current_deck = existing_deck
+                    # RC7: Log final script status
+                    final_scripts_info = [
+                        {"idx": i, "has_script": bool(s.scripts), "script_len": len(s.scripts or "")}
+                        for i, s in enumerate(current_deck.slides)
+                    ]
+                    logger.info(
+                        "Added slides to existing deck",
+                        extra={
+                            "session_id": session_id,
+                            "final_slide_count": len(current_deck.slides),
+                            "final_slides_with_scripts": sum(1 for s in current_deck.slides if s.scripts),
+                            "final_scripts_detail": final_scripts_info,
+                        },
+                    )
+                else:
+                    # RC10 GUARD: Only replace deck for explicit generation intent
+                    if _is_generation or not existing_deck or len(existing_deck.slides) == 0:
+                        # Explicit generation or no existing deck - replace is OK
+                        current_deck = new_deck
+                        logger.info(
+                            "Replacing deck (generation intent or no existing deck)",
+                            extra={
+                                "session_id": session_id,
+                                "is_generation": _is_generation,
+                                "had_existing_deck": existing_deck is not None,
+                            },
+                        )
+                    else:
+                        # GUARD: Not a clear generation, edit, or add - preserve deck
+                        logger.warning(
+                            "RC10 GUARD: Ambiguous request - preserving existing deck",
+                            extra={
+                                "session_id": session_id,
+                                "message_preview": message[:50],
+                                "is_edit": _is_edit,
+                                "is_add": _is_add,
+                                "is_generation": _is_generation,
+                            },
+                        )
+                        current_deck = existing_deck
+                
                 with self._cache_lock:
                     self._deck_cache[session_id] = current_deck
                 slide_deck_dict = current_deck.to_dict()
@@ -489,6 +1018,20 @@ class ChatService:
         # Update session activity
         session_manager.update_last_activity(session_id)
 
+        # RC11: Yield conflict note if selection differed from text reference
+        if conflict_note:
+            yield StreamEvent(
+                type=StreamEventType.ASSISTANT,
+                content=conflict_note,
+            )
+            # Persist the note
+            session_manager.add_message(
+                session_id=session_id,
+                role="assistant",
+                content=conflict_note,
+                message_type="info",
+            )
+
         # Yield final complete event (sanitize replacement_info for JSON serialization)
         yield StreamEvent(
             type=StreamEventType.COMPLETE,
@@ -504,6 +1047,7 @@ class ChatService:
             extra={
                 "session_id": session_id,
                 "has_slide_deck": slide_deck_dict is not None,
+                "had_conflict_note": conflict_note is not None,
             },
         )
 
@@ -824,10 +1368,226 @@ class ChatService:
 
         return count
 
+    def _detect_add_intent(self, message: str) -> bool:
+        """Detect if user wants to add a new slide (RC2 fix).
+        
+        This is used when no slide_context is provided to determine
+        if we should append to existing deck vs replace it.
+        
+        Args:
+            message: User's message
+            
+        Returns:
+            True if message indicates adding/inserting a new slide
+        """
+        add_patterns = [
+            r"\badd\b.*\bslide\b",
+            r"\binsert\b.*\bslide\b",
+            r"\bappend\b.*\bslide\b",
+            r"\bnew\s+slide\b",
+            r"\bcreate\b.*\bslide\b",
+            r"\badd\b.*\bat\s+the\s+(bottom|end|top|beginning)\b",
+            r"\bslide\b.*\bat\s+the\s+(bottom|end|top|beginning)\b",
+            r"\badd\b.*\b(summary|conclusion|key\s*takeaway|thank\s*you)",
+        ]
+        
+        lower_message = message.lower()
+        for pattern in add_patterns:
+            if re.search(pattern, lower_message):
+                logger.info(
+                    "Detected add slide intent in message",
+                    extra={"message": message[:50], "matched_pattern": pattern},
+                )
+                return True
+        return False
+    
+    def _detect_add_position(self, message: str) -> tuple:
+        """Detect where the user wants to add the slide.
+        
+        Returns:
+            tuple of (position_type, absolute_position)
+            - ("beginning", 0) - Always insert at position 0
+            - ("before", None) - Insert before selected slide
+            - ("after", None) - Insert after selected slide or at end (default)
+        """
+        lower_message = message.lower()
+        
+        # Check for ABSOLUTE beginning (always position 0, ignores selection)
+        beginning_patterns = [
+            r"\bat\s+the\s+(top|beginning|start|first)\b",
+            r"\b(top|beginning|start|first)\s+of\b",
+            r"\btitle\s+slide\b.*\b(beginning|start|first)\b",
+            r"\b(beginning|start|first)\b.*\btitle\s+slide\b",
+        ]
+        
+        for pattern in beginning_patterns:
+            if re.search(pattern, lower_message):
+                logger.info(
+                    "Detected 'beginning' position intent - absolute position 0",
+                    extra={"message": message[:50], "matched_pattern": pattern},
+                )
+                return ("beginning", 0)
+        
+        # Check for RELATIVE "before" (before selected slide)
+        before_patterns = [
+            r"\bbefore\b.*\bslide\b",
+            r"\bslide\b.*\bbefore\b",
+            r"\bbefore\s+this\b",
+        ]
+        
+        for pattern in before_patterns:
+            if re.search(pattern, lower_message):
+                logger.info(
+                    "Detected 'before' position intent - relative to selection",
+                    extra={"message": message[:50], "matched_pattern": pattern},
+                )
+                return ("before", None)
+        
+        return ("after", None)
+
+    def _detect_generation_intent(self, message: str) -> bool:
+        """Detect if user wants to generate NEW slides (replace deck).
+        
+        Only explicit generation requests should replace the entire deck.
+        
+        Returns:
+            True if user wants to create new slides from scratch
+        """
+        generation_patterns = [
+            r"\bgenerate\b.*\bslides?\b",
+            r"\bcreate\b.*\b(presentation|deck)\b",
+            r"\bmake\s+me\b.*\bslides?\b",
+            r"\b\d+\s+slides?\s+(about|on|for)\b",  # "5 slides about X"
+            r"\bcreate\b.*\b\d+\s+slides?\b",  # "create 3 slides"
+            # Removed overly broad pattern r"\b\d+\s+slides?\b" to prevent false positives
+            # e.g., "edit slide 5 slides look broken" would incorrectly match
+            r"\bnew\s+(presentation|deck)\b",
+            r"\bbuild\b.*\b(presentation|deck|slides)\b",
+            r"\bprepare\b.*\bslides?\b",
+        ]
+        
+        lower_message = message.lower()
+        for pattern in generation_patterns:
+            if re.search(pattern, lower_message):
+                logger.info(
+                    "Detected generation intent",
+                    extra={"message": message[:50], "matched_pattern": pattern},
+                )
+                return True
+        return False
+
+    def _detect_explicit_replace_intent(self, message: str) -> bool:
+        """Detect if user explicitly wants to replace the deck.
+        
+        Used after clarification to allow deck replacement.
+        
+        Returns:
+            True if user explicitly confirms replacement
+        """
+        replace_patterns = [
+            r"\breplace\b.*\b(deck|slides?|presentation)\b",
+            r"\b(deck|slides?|presentation)\b.*\breplace\b",
+            r"\bstart\s+fresh\b",
+            r"\bstart\s+over\b",
+            r"\bnew\s+deck\b",
+            r"\bfrom\s+scratch\b",
+            r"\byes,?\s*replace\b",
+        ]
+        
+        lower_message = message.lower()
+        for pattern in replace_patterns:
+            if re.search(pattern, lower_message):
+                logger.info(
+                    "Detected explicit replace intent",
+                    extra={"message": message[:50], "matched_pattern": pattern},
+                )
+                return True
+        return False
+
+    def _detect_edit_intent(self, message: str) -> bool:
+        """Detect if user wants to edit/modify existing slides.
+        
+        Returns:
+            True if message indicates editing existing content
+        """
+        edit_patterns = [
+            r"\b(change|edit|modify|update|fix|adjust|replace)\b.*\bslide\b",
+            r"\bslide\b.*\b(change|edit|modify|update|fix|adjust|replace)\b",
+            r"\b(change|update|modify|fix|replace)\b.*(color|background|title|text|chart|font)",
+            r"\bmake\s+slide\b.*\b(bigger|smaller|darker|lighter|brighter)",
+            r"\b(change|update|replace)\b.*\bslide\s*\d+",
+            r"\bslide\s*\d+\b.*\b(change|edit|modify|update|replace)\b",
+        ]
+        
+        lower_message = message.lower()
+        for pattern in edit_patterns:
+            if re.search(pattern, lower_message):
+                logger.info(
+                    "Detected edit intent",
+                    extra={"message": message[:50], "matched_pattern": pattern},
+                )
+                return True
+        return False
+
+    def _parse_slide_references(self, message: str) -> tuple:
+        """Parse slide number references from message.
+        
+        Returns:
+            tuple of (indices, position)
+            - indices: List of 0-based slide indices, or empty list if none found
+            - position: 'before', 'after', or None for direct reference
+        
+        Examples:
+            "slide 8" → ([7], None)
+            "slides 2-4" → ([1, 2, 3], None)
+            "after slide 3" → ([2], "after")
+            "before slide 5" → ([4], "before")
+        """
+        lower_message = message.lower()
+        indices = []
+        position = None
+        
+        # Check for "after slide X" pattern
+        after_match = re.search(r"\bafter\s+slide\s*#?(\d+)\b", lower_message)
+        if after_match:
+            slide_num = int(after_match.group(1))
+            return ([slide_num - 1], "after")  # Convert to 0-based
+        
+        # Check for "before slide X" pattern
+        before_match = re.search(r"\bbefore\s+slide\s*#?(\d+)\b", lower_message)
+        if before_match:
+            slide_num = int(before_match.group(1))
+            return ([slide_num - 1], "before")  # Convert to 0-based
+        
+        # Check for range "slides 2-4" or "slides 2 to 4"
+        range_match = re.search(r"\bslides?\s*(\d+)\s*[-–to]+\s*(\d+)\b", lower_message)
+        if range_match:
+            start = int(range_match.group(1))
+            end = int(range_match.group(2))
+            indices = [i - 1 for i in range(start, end + 1)]  # Convert to 0-based
+            return (indices, None)
+        
+        # Check for single "slide 8" or "slide #8"
+        single_match = re.search(r"\bslide\s*#?(\d+)\b", lower_message)
+        if single_match:
+            slide_num = int(single_match.group(1))
+            return ([slide_num - 1], None)  # Convert to 0-based
+        
+        # Check for ordinal "8th slide"
+        ordinal_match = re.search(r"\b(\d+)(?:st|nd|rd|th)\s+slide\b", lower_message)
+        if ordinal_match:
+            slide_num = int(ordinal_match.group(1))
+            return ([slide_num - 1], None)  # Convert to 0-based
+        
+        return ([], None)
+
     def _get_or_load_deck(self, session_id: str) -> Optional[SlideDeck]:
         """Get deck from cache or load from database.
 
         Thread-safe access to deck cache using _cache_lock.
+        
+        Uses deck_dict (slides array with individual scripts) when available,
+        falling back to from_html_string for legacy data.
         """
         # Check cache first (with lock)
         with self._cache_lock:
@@ -838,17 +1598,65 @@ class ChatService:
         session_manager = get_session_manager()
         deck_data = session_manager.get_slide_deck(session_id)
 
-        if deck_data and deck_data.get("html_content"):
-            try:
+        if not deck_data:
+            return None
+            
+        try:
+            # Prefer reconstructing from slides array (preserves individual scripts)
+            if deck_data.get("slides"):
+                deck = self._reconstruct_deck_from_dict(deck_data)
+                logger.info(
+                    "Loaded deck from database using slides array",
+                    extra={
+                        "session_id": session_id,
+                        "slide_count": len(deck.slides),
+                        "slides_with_scripts": sum(1 for s in deck.slides if s.scripts),
+                    },
+                )
+            elif deck_data.get("html_content"):
+                # Fallback: parse from raw HTML (may lose scripts due to IIFE parsing)
                 deck = SlideDeck.from_html_string(deck_data["html_content"])
-                # Store in cache (with lock)
-                with self._cache_lock:
-                    self._deck_cache[session_id] = deck
-                return deck
-            except Exception as e:
-                logger.warning(f"Failed to load deck from database: {e}")
+                logger.warning(
+                    "Loaded deck from database using HTML fallback (scripts may be lost)",
+                    extra={"session_id": session_id},
+                )
+            else:
+                return None
+                
+            # Store in cache (with lock)
+            with self._cache_lock:
+                self._deck_cache[session_id] = deck
+            return deck
+        except Exception as e:
+            logger.warning(f"Failed to load deck from database: {e}")
 
         return None
+    
+    def _reconstruct_deck_from_dict(self, deck_data: Dict[str, Any]) -> SlideDeck:
+        """Reconstruct SlideDeck from stored dict (preserves individual slide scripts).
+        
+        Args:
+            deck_data: Dictionary from get_slide_deck with slides array
+            
+        Returns:
+            Reconstructed SlideDeck with proper per-slide scripts
+        """
+        slides = []
+        for slide_data in deck_data.get("slides", []):
+            slide = Slide(
+                html=slide_data.get("html", ""),
+                slide_id=slide_data.get("slide_id", f"slide_{len(slides)}"),
+                scripts=slide_data.get("scripts", ""),
+            )
+            slides.append(slide)
+        
+        deck = SlideDeck(
+            slides=slides,
+            css=deck_data.get("css", ""),
+            external_scripts=deck_data.get("external_scripts", []),
+            title=deck_data.get("title"),
+        )
+        return deck
 
     def _apply_slide_replacements(
         self,
@@ -861,6 +1669,8 @@ class ChatService:
         Handles variable-length replacements by removing the original block
         and inserting the new Slide objects at the same start index.
         
+        For add operations (RC2), new slides are appended without removing originals.
+        
         Scripts are attached directly to Slide objects, so when a slide
         is removed its scripts go with it automatically.
 
@@ -869,6 +1679,7 @@ class ChatService:
                 - replacement_slides: List of Slide objects (with scripts attached)
                 - replacement_css: Optional CSS to merge
                 - start_index, original_count: Position info
+                - is_add_operation: (RC2) Whether this is an add operation
             session_id: Session ID
         """
         current_deck = self._get_or_load_deck(session_id)
@@ -879,7 +1690,78 @@ class ChatService:
         start_idx = replacement_info["start_index"]
         original_count = replacement_info["original_count"]
         replacement_slides: List[Slide] = replacement_info["replacement_slides"]
+        is_add_operation = replacement_info.get("is_add_operation", False)
 
+        # RC2: For add operations, insert at appropriate position
+        if is_add_operation:
+            # Get position intent from replacement_info
+            # Format: (position_type, absolute_position) or legacy string
+            add_position_info = replacement_info.get("add_position", ("after", None))
+            
+            # Handle legacy string format for backward compatibility
+            if isinstance(add_position_info, str):
+                add_position_info = (add_position_info, None)
+            
+            position_type, absolute_position = add_position_info
+            
+            if position_type == "beginning":
+                # ABSOLUTE position 0 (ignores selection)
+                insert_position = 0
+            elif position_type == "before":
+                # Insert BEFORE selected slide, or at beginning if no selection
+                if start_idx >= 0 and start_idx < len(current_deck.slides):
+                    insert_position = start_idx
+                else:
+                    insert_position = 0  # Beginning of deck
+            else:
+                # Insert AFTER selected slide, or at end if no selection
+                if start_idx >= 0 and start_idx < len(current_deck.slides):
+                    insert_position = start_idx + max(original_count, 1)
+                else:
+                    insert_position = len(current_deck.slides)  # End of deck
+            
+            logger.info(
+                "Add operation detected - inserting slides",
+                extra={
+                    "session_id": session_id,
+                    "current_slide_count": len(current_deck.slides),
+                    "new_slides_count": len(replacement_slides),
+                    "insert_position": insert_position,
+                    "position_type": position_type,
+                    "selected_start_idx": start_idx,
+                    "original_count": original_count,
+                },
+            )
+            
+            # Insert new slides at the calculated position
+            for idx, slide in enumerate(replacement_slides):
+                slide.slide_id = f"slide_{insert_position + idx}"
+                current_deck.insert_slide(slide, insert_position + idx)
+                logger.info(
+                    "Inserted new slide (add operation)",
+                    extra={"slide_index": insert_position + idx, "session_id": session_id},
+                )
+            
+            # Merge CSS if provided
+            new_css = replacement_info.get("replacement_css", "")
+            if new_css:
+                current_deck.css = current_deck.css + "\n" + new_css
+            
+            # Update cache and return
+            with self._cache_lock:
+                self._deck_cache[session_id] = current_deck
+            
+            logger.info(
+                "Add operation completed successfully",
+                extra={
+                    "session_id": session_id,
+                    "final_slide_count": len(current_deck.slides),
+                },
+            )
+            
+            return current_deck.to_dict()
+
+        # Standard replacement logic (non-add operations)
         # Validate replacement range
         if start_idx < 0 or start_idx >= len(current_deck.slides):
             raise ValueError(f"Start index {start_idx} out of range")
@@ -929,17 +1811,57 @@ class ChatService:
                     replacement_script_canvas_ids.update(segment_canvas_ids)
             
             # Preserve original scripts for canvas IDs that exist in replacement but aren't in replacement scripts
+            # RC15: Handle RC4 dedup suffix - try exact match first, then base ID fallback
             preserved_count = 0
             for canvas_id in replacement_canvas_ids:
-                if canvas_id in canvas_id_to_script and canvas_id not in replacement_script_canvas_ids:
-                    # Canvas exists in replacement but no script provided - preserve original
+                if canvas_id in replacement_script_canvas_ids:
+                    # Script already provided for this canvas - skip preservation
+                    continue
+                
+                script_to_preserve = None
+                matched_id = None
+                old_canvas_id = None  # Track the old ID for script update
+                
+                # 1. Try exact match first (normal case)
+                if canvas_id in canvas_id_to_script:
+                    script_to_preserve = canvas_id_to_script[canvas_id]
+                    matched_id = canvas_id
+                else:
+                    # 2. Fallback: try without RC4 dedup suffix (optimize case)
+                    # RC4 adds suffix like _a1b2c3 (6 hex chars)
+                    base_id = re.sub(r'_[a-f0-9]{6}$', '', canvas_id)
+                    if base_id != canvas_id and base_id in canvas_id_to_script:
+                        script_to_preserve = canvas_id_to_script[base_id]
+                        matched_id = f"{base_id} (base of {canvas_id})"
+                        old_canvas_id = base_id  # Need to update script references
+                
+                if script_to_preserve:
+                    # RC15: Update canvas ID references in script if they changed
+                    if old_canvas_id and old_canvas_id != canvas_id:
+                        # Update getElementById calls
+                        script_to_preserve = re.sub(
+                            rf"getElementById\s*\(\s*['\"]({re.escape(old_canvas_id)})['\"]\s*\)",
+                            f"getElementById('{canvas_id}')",
+                            script_to_preserve,
+                        )
+                        # Update querySelector calls
+                        script_to_preserve = re.sub(
+                            rf"querySelector\s*\(\s*['\"]#({re.escape(old_canvas_id)})['\"]\s*\)",
+                            f"querySelector('#{canvas_id}')",
+                            script_to_preserve,
+                        )
+                        logger.info(
+                            "Updated canvas ID references in preserved script",
+                            extra={"old_id": old_canvas_id, "new_id": canvas_id},
+                        )
+                    
                     if not slide.scripts:
                         slide.scripts = ""
-                    slide.scripts += canvas_id_to_script[canvas_id]
+                    slide.scripts += script_to_preserve
                     preserved_count += 1
                     logger.info(
                         "Preserved script for canvas",
-                        extra={"canvas_id": canvas_id, "slide_index": start_idx + idx},
+                        extra={"canvas_id": matched_id, "slide_index": start_idx + idx},
                     )
             
             if preserved_count > 0:
@@ -1024,12 +1946,35 @@ class ChatService:
         if not current_deck:
             raise ValueError("No slide deck available")
 
-        # Validate indices
+        # Validate indices with detailed logging
+        expected_indices = set(range(len(current_deck.slides)))
+        received_indices = set(new_order)
+        
         if len(new_order) != len(current_deck.slides):
-            raise ValueError("Invalid reorder: wrong number of indices")
+            logger.warning(
+                "Reorder validation failed: wrong count",
+                extra={
+                    "session_id": session_id,
+                    "deck_slide_count": len(current_deck.slides),
+                    "new_order_count": len(new_order),
+                    "new_order": new_order,
+                },
+            )
+            raise ValueError(f"Invalid reorder: wrong number of indices (got {len(new_order)}, expected {len(current_deck.slides)})")
 
-        if set(new_order) != set(range(len(current_deck.slides))):
-            raise ValueError("Invalid reorder: invalid indices")
+        if received_indices != expected_indices:
+            logger.warning(
+                "Reorder validation failed: invalid indices",
+                extra={
+                    "session_id": session_id,
+                    "deck_slide_count": len(current_deck.slides),
+                    "expected_indices": list(expected_indices),
+                    "received_indices": list(received_indices),
+                    "missing": list(expected_indices - received_indices),
+                    "extra": list(received_indices - expected_indices),
+                },
+            )
+            raise ValueError(f"Invalid reorder: invalid indices (missing: {expected_indices - received_indices}, extra: {received_indices - expected_indices})")
 
         # Reorder slides
         new_slides = [current_deck.slides[i] for i in new_order]

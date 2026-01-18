@@ -211,15 +211,11 @@ fi
 
 if [ "$NODE_OK" = false ]; then
     echo ""
-    read -p "Install Node.js 20 via Homebrew? (y/N): " -n 1 -r
+    read -p "Install Node.js via Homebrew? (y/N): " -n 1 -r
     echo
     if [[ $REPLY =~ ^[Yy]$ ]]; then
-        echo -e "${BLUE}→ Installing Node.js 20...${NC}"
-        brew install node@20
-        
-        # Add to PATH
-        echo 'export PATH="/opt/homebrew/opt/node@20/bin:$PATH"' >> ~/.zshrc
-        export PATH="/opt/homebrew/opt/node@20/bin:$PATH"
+        echo -e "${BLUE}→ Installing Node.js...${NC}"
+        brew install node
         
         # Verify installation
         if command -v node &> /dev/null; then
