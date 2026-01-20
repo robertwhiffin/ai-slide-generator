@@ -121,6 +121,109 @@ def create(
         DeploymentError: If deployment fails
         ValueError: If required arguments are missing or config_yaml_path used with other args
     """
+    return _create_databricks(
+        lakebase_name=lakebase_name,
+        schema_name=schema_name,
+        app_name=app_name,
+        app_file_workspace_path=app_file_workspace_path,
+        lakebase_compute=lakebase_compute,
+        app_compute=app_compute,
+        app_version=app_version,
+        description=description,
+        client=client,
+        profile=profile,
+        config_yaml_path=config_yaml_path,
+        seed_databricks_defaults=False,
+    )
+
+
+def update(
+    app_name: str,
+    app_file_workspace_path: str,
+    lakebase_name: str,
+    schema_name: str,
+    app_version: Optional[str] = None,
+    reset_database: bool = False,
+    client: WorkspaceClient | None = None,
+    profile: str | None = None,
+) -> dict[str, Any]:
+    """Deploy a new version of an existing Tellr app.
+
+    Updates the app files and triggers a new deployment.
+
+    Args:
+        app_name: Name of the existing Databricks App
+        app_file_workspace_path: Workspace path with app files
+        lakebase_name: Lakebase instance name
+        schema_name: Schema name
+        app_version: Specific databricks-tellr-app version (default: latest)
+        reset_database: If True, drop and recreate the schema (tables recreated on app startup)
+        client: External WorkspaceClient (optional)
+        profile: Databricks CLI profile name (optional)
+
+    Returns:
+        Dictionary with deployment info
+
+    Raises:
+        DeploymentError: If update fails
+    """
+    return _update_databricks(
+        app_name=app_name,
+        app_file_workspace_path=app_file_workspace_path,
+        lakebase_name=lakebase_name,
+        schema_name=schema_name,
+        app_version=app_version,
+        reset_database=reset_database,
+        client=client,
+        profile=profile,
+        seed_databricks_defaults=False,
+    )
+
+
+# -----------------------------------------------------------------------------
+# Internal Databricks Functions (full implementations with seeding control)
+# -----------------------------------------------------------------------------
+
+
+def _create_databricks(
+    lakebase_name: str | None = None,
+    schema_name: str | None = None,
+    app_name: str | None = None,
+    app_file_workspace_path: str | None = None,
+    lakebase_compute: str = "CU_1",
+    app_compute: str = "MEDIUM",
+    app_version: Optional[str] = None,
+    description: str = "Tellr AI Slide Generator",
+    client: WorkspaceClient | None = None,
+    profile: str | None = None,
+    config_yaml_path: str | None = None,
+    seed_databricks_defaults: bool = True,
+) -> dict[str, Any]:
+    """Deploy Tellr to Databricks Apps with configurable seeding.
+    
+    Internal function with full control over seeding behavior.
+    
+    Args:
+        lakebase_name: Name for the Lakebase database instance
+        schema_name: PostgreSQL schema name for app tables
+        app_name: Name for the Databricks App
+        app_file_workspace_path: Workspace path to upload app files
+        lakebase_compute: Lakebase capacity (CU_1, CU_2, CU_4, CU_8)
+        app_compute: App compute size (MEDIUM, LARGE, LIQUID)
+        app_version: Specific databricks-tellr-app version (default: latest)
+        description: App description
+        client: External WorkspaceClient (optional)
+        profile: Databricks CLI profile name (optional)
+        config_yaml_path: Path to deployment config YAML (mutually exclusive with other args)
+        seed_databricks_defaults: If True, seed Databricks-specific content on startup
+
+    Returns:
+        Dictionary with deployment info
+
+    Raises:
+        DeploymentError: If deployment fails
+        ValueError: If required arguments are missing or config_yaml_path used with other args
+    """
     ws = _get_workspace_client(client, profile)
 
     # Handle YAML config loading
@@ -161,7 +264,12 @@ def create(
             _write_requirements(staging, app_version)
             print("   Generated requirements.txt")
 
-            _write_app_yaml(staging, lakebase_name, schema_name)
+            _write_app_yaml(
+                staging,
+                lakebase_name,
+                schema_name,
+                seed_databricks_defaults=seed_databricks_defaults,
+            )
             print("   Generated app.yaml")
 
             print(f"Uploading to: {app_file_workspace_path}")
@@ -169,7 +277,7 @@ def create(
             print("   Files uploaded")
         print()
 
-        # Step 3: Create app
+        # Step 3: Create app (without deploying yet)
         print(f"Creating Databricks App: {app_name}")
         app = _create_app(
             ws,
@@ -179,15 +287,22 @@ def create(
             compute_size=app_compute,
             lakebase_name=lakebase_name,
         )
-        print("   App created")
-        if app.url:
-            print(f"   URL: {app.url}")
+        print("   App registered")
         print()
 
-        # Step 4: Set up database schema
+        # Step 4: Set up database schema (before deployment)
+        # This ensures the schema and permissions are ready before the app starts
         print("Setting up database schema...")
         _setup_database_schema(ws, app, lakebase_name, schema_name)
         print(f"   Schema '{schema_name}' configured")
+        print()
+
+        # Step 5: Deploy the app (now that schema is ready)
+        print("Deploying app...")
+        app = _deploy_app(ws, app_name, app_file_workspace_path)
+        print("   App deployed")
+        if app.url:
+            print(f"   URL: {app.url}")
         print()
 
         print("Deployment complete!")
@@ -203,7 +318,7 @@ def create(
         raise DeploymentError(f"Deployment failed: {e}") from e
 
 
-def update(
+def _update_databricks(
     app_name: str,
     app_file_workspace_path: str,
     lakebase_name: str,
@@ -212,10 +327,11 @@ def update(
     reset_database: bool = False,
     client: WorkspaceClient | None = None,
     profile: str | None = None,
+    seed_databricks_defaults: bool = True,
 ) -> dict[str, Any]:
-    """Deploy a new version of an existing Tellr app.
-
-    Updates the app files and triggers a new deployment.
+    """Deploy a new version of an existing Tellr app with configurable seeding.
+    
+    Internal function with full control over seeding behavior.
 
     Args:
         app_name: Name of the existing Databricks App
@@ -226,6 +342,7 @@ def update(
         reset_database: If True, drop and recreate the schema (tables recreated on app startup)
         client: External WorkspaceClient (optional)
         profile: Databricks CLI profile name (optional)
+        seed_databricks_defaults: If True, seed Databricks-specific content on startup
 
     Returns:
         Dictionary with deployment info
@@ -249,7 +366,12 @@ def update(
         # Generate and upload updated files
         with _staging_dir() as staging:
             _write_requirements(staging, app_version)
-            _write_app_yaml(staging, lakebase_name, schema_name)
+            _write_app_yaml(
+                staging,
+                lakebase_name,
+                schema_name,
+                seed_databricks_defaults=seed_databricks_defaults,
+            )
             _upload_files(ws, staging, app_file_workspace_path)
             print("   Files updated")
 
@@ -431,12 +553,31 @@ def _resolve_installed_app_version() -> str | None:
         return None
 
 
-def _write_app_yaml(staging_dir: Path, lakebase_name: str, schema_name: str) -> None:
-    """Generate app.yaml with environment variables."""
+def _write_app_yaml(
+    staging_dir: Path,
+    lakebase_name: str,
+    schema_name: str,
+    seed_databricks_defaults: bool = False,
+) -> None:
+    """Generate app.yaml with environment variables.
+    
+    Args:
+        staging_dir: Directory to write the app.yaml file
+        lakebase_name: Lakebase instance name
+        schema_name: Schema name
+        seed_databricks_defaults: If True, include Databricks-specific content seeding
+    """
+    # Build init_database call - only show seed_databricks_defaults when True
+    if seed_databricks_defaults:
+        init_call = "init_database(seed_databricks_defaults=True)"
+    else:
+        init_call = "init_database()"
+    
     template_content = _load_template("app.yaml.template")
     content = Template(template_content).substitute(
         LAKEBASE_INSTANCE=lakebase_name,
         LAKEBASE_SCHEMA=schema_name,
+        INIT_DATABASE_CALL=init_call,
     )
     (staging_dir / "app.yaml").write_text(content)
 
@@ -507,7 +648,12 @@ def _create_app(
     compute_size: str,
     lakebase_name: str,
 ) -> App:
-    """Create Databricks App with database resource."""
+    """Create Databricks App with database resource (without deploying).
+    
+    This creates the app and waits for it to be ready, but does NOT deploy.
+    The app's service principal is available after creation, which is needed
+    for setting up database schema permissions before deployment.
+    """
     compute_size_enum = ComputeSize(compute_size)
 
     app_resources = [
@@ -539,9 +685,22 @@ def _create_app(
 
     ws.apps.create_and_wait(app)
 
+    return ws.apps.get(name=app_name)
+
+
+def _deploy_app(ws: WorkspaceClient, app_name: str, workspace_path: str) -> App:
+    """Deploy an existing Databricks App.
+    
+    Args:
+        ws: WorkspaceClient
+        app_name: Name of the app to deploy
+        workspace_path: Source code path in workspace
+        
+    Returns:
+        The updated App object after deployment
+    """
     deployment = AppDeployment(source_code_path=workspace_path)
     ws.apps.deploy_and_wait(app_name=app_name, app_deployment=deployment)
-
     return ws.apps.get(name=app_name)
 
 

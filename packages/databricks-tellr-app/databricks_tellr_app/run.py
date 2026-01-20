@@ -10,12 +10,18 @@ import uvicorn
 logger = logging.getLogger(__name__)
 
 
-def init_database() -> None:
-    """Initialize database tables.
+def init_database(seed_databricks_defaults: bool = False) -> None:
+    """Initialize database tables and seed default content.
     
     This should be run once before starting the app to ensure all required
-    tables exist. Safe to run multiple times - only creates tables that
-    don't already exist.
+    tables exist and default content is seeded. Safe to run multiple times -
+    only creates tables that don't already exist, and seeding is skipped if
+    content already exists.
+    
+    Args:
+        seed_databricks_defaults: If True, also seed Databricks-specific content
+                                  (DATABRICKS_DECK_PROMPTS, DATABRICKS_SLIDE_STYLES).
+                                  If False, only seed generic content.
     """
     logging.basicConfig(
         level=logging.INFO,
@@ -30,6 +36,16 @@ def init_database() -> None:
         logger.info("Database tables initialized successfully")
     except Exception as e:
         logger.error(f"Failed to initialize database tables: {e}")
+        raise SystemExit(1) from e
+    
+    # Seed default content
+    logger.info(f"Seeding defaults (include_databricks={seed_databricks_defaults})...")
+    try:
+        from src.core.init_default_profile import seed_defaults
+        seed_defaults(include_databricks=seed_databricks_defaults)
+        logger.info("Default content seeded successfully")
+    except Exception as e:
+        logger.error(f"Failed to seed defaults: {e}")
         raise SystemExit(1) from e
 
 

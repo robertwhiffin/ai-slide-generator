@@ -53,7 +53,20 @@ echo "Building packages..."
 rm -rf "$TELLR_DIR/dist" "$APP_DIR/dist"
 
 python -m build --sdist --wheel "$TELLR_DIR"
+
+# Copy src/ to APP_DIR before building (find_packages runs at import time,
+# before BuildWithFrontend.run() copies it, so we need it present earlier)
+cp -r "$ROOT_DIR/src" "$APP_DIR/src"
+cleanup_src() {
+  rm -rf "$APP_DIR/src"
+}
+trap cleanup_src EXIT
+
 python -m build --sdist --wheel "$APP_DIR"
+
+# Clean up copied src/ directory
+rm -rf "$APP_DIR/src"
+trap - EXIT
 
 echo "Uploading packages..."
 
