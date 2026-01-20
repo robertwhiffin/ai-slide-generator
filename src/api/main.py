@@ -7,8 +7,9 @@ In production, also serves the React frontend as static files.
 import asyncio
 import logging
 import os
-from contextlib import asynccontextmanager
+from contextlib import ExitStack, asynccontextmanager
 from pathlib import Path
+from importlib import resources
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -37,17 +38,24 @@ IS_PRODUCTION = ENVIRONMENT == "production"
 # Worker task references for cleanup
 _worker_task = None
 _export_worker_task = None
+_frontend_assets_stack: ExitStack | None = None
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Lifespan context manager for startup/shutdown events."""
-    global _worker_task, _export_worker_task
+    global _worker_task, _export_worker_task, _frontend_assets_stack
 
     # Startup
     logger.info(f"Starting AI Slide Generator API (environment: {ENVIRONMENT})")
     if IS_PRODUCTION:
-        logger.info("Production mode: serving frontend from static files")
+        logger.info("Production mode: serving frontend from package assets")
+        frontend_result = _resolve_frontend_dist()
+        if frontend_result:
+            _frontend_assets_stack, frontend_dist = frontend_result
+            _mount_frontend(app, frontend_dist)
+        else:
+            logger.warning("Frontend assets not found in package")
 
     # Start the job queue worker for async chat processing
     _worker_task = await start_worker()
@@ -87,6 +95,10 @@ async def lifespan(app: FastAPI):
             pass
         logger.info("Export job queue worker stopped")
 
+    if _frontend_assets_stack:
+        _frontend_assets_stack.close()
+        _frontend_assets_stack = None
+
 
 # Initialize FastAPI app
 app = FastAPI(
@@ -95,6 +107,54 @@ app = FastAPI(
     version="0.3.0 (Phase 3 - Databricks Apps)",
     lifespan=lifespan,
 )
+
+
+def _resolve_frontend_dist() -> tuple[ExitStack, Path] | None:
+    """Resolve frontend assets bundled in the app package."""
+    try:
+        assets_root = resources.files("databricks_tellr_app") / "_assets" / "frontend"
+    except ModuleNotFoundError:
+        return None
+
+    if not assets_root.is_dir():
+        return None
+
+    stack = ExitStack()
+    resolved_path = stack.enter_context(resources.as_file(assets_root))
+    return stack, Path(resolved_path)
+
+
+def _mount_frontend(app: FastAPI, frontend_dist: Path) -> None:
+    """Mount static assets and SPA routes from the packaged frontend."""
+    logger.info(f"Serving frontend from: {frontend_dist}")
+
+    app.mount(
+        "/assets",
+        StaticFiles(directory=str(frontend_dist / "assets")),
+        name="assets",
+    )
+
+    @app.get("/favicon.svg")
+    async def serve_favicon():
+        """Serve favicon."""
+        favicon_path = frontend_dist / "favicon.svg"
+        if favicon_path.exists():
+            return FileResponse(str(favicon_path), media_type="image/svg+xml")
+        raise HTTPException(status_code=404, detail="Favicon not found")
+
+    @app.get("/{full_path:path}")
+    async def serve_spa(full_path: str):
+        """Serve React SPA for all non-API routes."""
+        if full_path.startswith("api/"):
+            raise HTTPException(status_code=404, detail="Not found")
+
+        index_path = frontend_dist / "index.html"
+        if not index_path.exists():
+            raise HTTPException(
+                status_code=500, detail="Frontend not bundled in package"
+            )
+
+        return FileResponse(str(index_path))
 
 # Configure CORS only for development
 if not IS_PRODUCTION:
@@ -210,61 +270,8 @@ async def get_current_user():
         }
 
 
-# Production: Serve frontend static files
-if IS_PRODUCTION:
-    # Get path to frontend dist directory
-    # In Databricks Apps, the source code path is the working directory
-    # Try workspace location first, then fall back to relative path
-    frontend_dist = Path.cwd() / "frontend" / "dist"
-    if not frontend_dist.exists():
-        # Fallback to relative path (for local testing)
-        frontend_dist = Path(__file__).parent.parent.parent / "frontend" / "dist"
-
-    if frontend_dist.exists():
-        logger.info(f"Serving frontend from: {frontend_dist}")
-
-        # Mount static assets (JS, CSS, images)
-        app.mount(
-            "/assets",
-            StaticFiles(directory=str(frontend_dist / "assets")),
-            name="assets",
-        )
-
-        # Serve favicon from dist root
-        @app.get("/favicon.svg")
-        async def serve_favicon():
-            """Serve favicon."""
-            favicon_path = frontend_dist / "favicon.svg"
-            if favicon_path.exists():
-                return FileResponse(str(favicon_path), media_type="image/svg+xml")
-            raise HTTPException(status_code=404, detail="Favicon not found")
-
-        # Serve index.html for all other routes (SPA routing)
-        @app.get("/{full_path:path}")
-        async def serve_spa(full_path: str):
-            """Serve React SPA for all non-API routes."""
-            # API routes are already handled by routers
-            if full_path.startswith("api/"):
-                raise HTTPException(status_code=404, detail="Not found")
-
-            # Serve index.html for all other routes
-            index_path = frontend_dist / "index.html"
-            if not index_path.exists():
-                raise HTTPException(
-                    status_code=500, detail="Frontend not built. Run: npm run build"
-                )
-
-            return FileResponse(str(index_path))
-
-    else:
-        logger.warning(
-            f"Frontend dist directory not found: {frontend_dist}. "
-            "Frontend will not be served. Run 'npm run build' in frontend directory."
-        )
-
-
 # Development: API info at root
-else:
+if not IS_PRODUCTION:
 
     @app.get("/")
     async def root():

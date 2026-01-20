@@ -1,0 +1,42 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "databricks-tellr-app"
+version = "0.1.4"
+description = "Tellr application package for Databricks Apps"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "fastapi==0.121.2",
+    "uvicorn==0.38.0",
+    "python-multipart==0.0.20",
+    "pydantic==2.12.4",
+    "pydantic-settings==2.12.0",
+    "databricks-sdk==0.73.0",
+    "databricks-langchain==0.9.0",
+    "langchain==1.0.5",
+    "langchain-core==1.0.4",
+    "langchain-community==0.4.1",
+    "langchain-text-splitters==1.0.0",
+    "litellm>=1.50.0",
+    "mlflow==3.6.0",
+    "opentelemetry-api==1.38.0",
+    "opentelemetry-sdk==1.38.0",
+    "beautifulsoup4==4.14.2",
+    "lxml==6.0.2",
+    "tinycss2==1.3.0",
+    "esprima==4.0.1",
+    "sqlalchemy==2.0.36",
+    "psycopg2-binary==2.9.10",
+    "databricks-sql-connector>=3.0.0",
+    "httpx==0.28.1",
+    "jinja2==3.1.2",
+    "python-dotenv==1.2.1",
+    "pyyaml==6.0.1",
+    "pandas==2.3.3",
+    "python-pptx==0.6.23",
+    "playwright==1.48.0",
+]
+

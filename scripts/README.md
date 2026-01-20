@@ -50,3 +50,31 @@ profiles:
 ```
 
 The `{username}` placeholder is replaced with the current Databricks user.
+
+---
+
+## `publish_pypi.sh`
+
+Build and upload both packages to PyPI or TestPyPI.
+
+```bash
+source .venv/bin/activate
+./scripts/publish_pypi.sh
+```
+
+**TestPyPI:**
+```bash
+source .venv/bin/activate
+./scripts/publish_pypi.sh --test
+```
+
+**Credentials (recommended env vars):**
+```bash
+export TWINE_USERNAME="__token__"
+export TWINE_PASSWORD="pypi-<your-token>"
+```
+
+**Credentials via `~/.pypirc`:**
+```bash
+export TWINE_REPOSITORY="pypi"      # or "testpypi"
+```
