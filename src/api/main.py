@@ -48,6 +48,7 @@ async def lifespan(app: FastAPI):
 
     # Startup
     logger.info(f"Starting AI Slide Generator API (environment: {ENVIRONMENT})")
+
     if IS_PRODUCTION:
         logger.info("Production mode: serving frontend from package assets")
         frontend_result = _resolve_frontend_dist()
