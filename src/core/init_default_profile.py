@@ -185,14 +185,26 @@ Use funnel charts for progression and bar charts for blocker analysis.""",
 DEFAULT_DECK_PROMPTS = GENERIC_DECK_PROMPTS + DATABRICKS_DECK_PROMPTS
 
 
-def _seed_deck_prompts(db) -> None:
-    """Seed the deck prompt library with default templates."""
+def _seed_deck_prompts(db, include_databricks: bool = False) -> None:
+    """Seed the deck prompt library with default templates.
+    
+    Args:
+        db: Database session
+        include_databricks: If True, also seed Databricks-specific prompts
+    """
     existing_count = db.query(SlideDeckPromptLibrary).count()
     if existing_count > 0:
         logger.info(f"Deck prompt library already has {existing_count} prompts, skipping seed")
         return
 
-    for prompt_data in DEFAULT_DECK_PROMPTS:
+    # Always seed generic prompts
+    prompts_to_seed = list(GENERIC_DECK_PROMPTS)
+    
+    # Optionally add Databricks-specific prompts
+    if include_databricks:
+        prompts_to_seed.extend(DATABRICKS_DECK_PROMPTS)
+
+    for prompt_data in prompts_to_seed:
         prompt = SlideDeckPromptLibrary(
             name=prompt_data["name"],
             description=prompt_data["description"],
@@ -205,8 +217,8 @@ def _seed_deck_prompts(db) -> None:
         db.add(prompt)
         logger.info(f"Created deck prompt: {prompt_data['name']}")
 
-    logger.info(f"Seeded {len(DEFAULT_DECK_PROMPTS)} deck prompts")
-    print(f"  ✓ Seeded {len(DEFAULT_DECK_PROMPTS)} deck prompts in library")
+    logger.info(f"Seeded {len(prompts_to_seed)} deck prompts")
+    print(f"  ✓ Seeded {len(prompts_to_seed)} deck prompts in library")
 
 
 # System slide styles (always deployed)
@@ -235,21 +247,36 @@ DATABRICKS_SLIDE_STYLES = [
 DEFAULT_SLIDE_STYLES = SYSTEM_SLIDE_STYLES + DATABRICKS_SLIDE_STYLES
 
 
-def _seed_slide_styles(db) -> int | None:
+def _seed_slide_styles(db, include_databricks: bool = False) -> int | None:
     """Seed the slide style library with default styles.
     
+    Args:
+        db: Database session
+        include_databricks: If True, also seed Databricks-specific styles
+    
     Returns:
-        ID of the default style (Databricks Brand) if created, None otherwise
+        ID of the default style if created, None otherwise.
+        Prefers Databricks Brand if include_databricks=True, else System Default.
     """
     existing_count = db.query(SlideStyleLibrary).count()
     if existing_count > 0:
         logger.info(f"Slide style library already has {existing_count} styles, skipping seed")
-        # Return the ID of Databricks Brand if it exists
-        default_style = db.query(SlideStyleLibrary).filter_by(name="Databricks Brand").first()
+        # Return the ID of preferred default style if it exists
+        if include_databricks:
+            default_style = db.query(SlideStyleLibrary).filter_by(name="Databricks Brand").first()
+        else:
+            default_style = db.query(SlideStyleLibrary).filter_by(name="System Default").first()
         return default_style.id if default_style else None
 
+    # Always seed system styles
+    styles_to_seed = list(SYSTEM_SLIDE_STYLES)
+    
+    # Optionally add Databricks-specific styles
+    if include_databricks:
+        styles_to_seed.extend(DATABRICKS_SLIDE_STYLES)
+
     default_style_id = None
-    for style_data in DEFAULT_SLIDE_STYLES:
+    for style_data in styles_to_seed:
         style = SlideStyleLibrary(
             name=style_data["name"],
             description=style_data["description"],
@@ -264,13 +291,47 @@ def _seed_slide_styles(db) -> int | None:
         db.flush()  # Get the ID
         logger.info(f"Created slide style: {style_data['name']} (is_system={style.is_system})")
         
-        # Track the default style ID (prefer Databricks Brand for new profiles)
-        if style_data["name"] == "Databricks Brand":
+        # Track the default style ID
+        # Prefer Databricks Brand if available, else use System Default
+        if include_databricks and style_data["name"] == "Databricks Brand":
+            default_style_id = style.id
+        elif not include_databricks and style_data["name"] == "System Default":
             default_style_id = style.id
 
-    logger.info(f"Seeded {len(DEFAULT_SLIDE_STYLES)} slide styles")
-    print(f"  ✓ Seeded {len(DEFAULT_SLIDE_STYLES)} slide styles in library")
+    logger.info(f"Seeded {len(styles_to_seed)} slide styles")
+    print(f"  ✓ Seeded {len(styles_to_seed)} slide styles in library")
     return default_style_id
+
+
+def seed_defaults(include_databricks: bool = False) -> None:
+    """Seed default deck prompts and slide styles into the database.
+    
+    This function is called by init_database() in run.py to populate the
+    library tables with default content. It's safe to call multiple times -
+    seeding is skipped if content already exists.
+    
+    Args:
+        include_databricks: If True, also seed Databricks-specific content
+                           (DATABRICKS_DECK_PROMPTS, DATABRICKS_SLIDE_STYLES).
+                           If False, only seed generic content.
+    """
+    logger.info(f"Seeding defaults (include_databricks={include_databricks})")
+    
+    try:
+        with get_db_session() as db:
+            # Seed deck prompt library
+            _seed_deck_prompts(db, include_databricks=include_databricks)
+            
+            # Seed slide style library
+            _seed_slide_styles(db, include_databricks=include_databricks)
+            
+            db.commit()
+            
+        logger.info("Default seeding completed successfully")
+        
+    except Exception as e:
+        logger.error(f"Failed to seed defaults: {e}", exc_info=True)
+        raise
 
 
 def init_default_profile() -> None:
@@ -344,10 +405,12 @@ def init_default_profile() -> None:
             logger.info("Created Genie space settings")
 
             # Seed deck prompt library (global, not per-profile)
-            _seed_deck_prompts(db)
+            # For local dev, include Databricks-specific content for backward compatibility
+            _seed_deck_prompts(db, include_databricks=True)
 
             # Seed slide style library (global, not per-profile)
-            default_style_id = _seed_slide_styles(db)
+            # For local dev, include Databricks-specific styles for backward compatibility
+            default_style_id = _seed_slide_styles(db, include_databricks=True)
 
             # Create prompts settings with default slide style
             prompts_config = ConfigPrompts(
