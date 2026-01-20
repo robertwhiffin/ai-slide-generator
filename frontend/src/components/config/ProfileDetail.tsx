@@ -344,6 +344,7 @@ export const ProfileDetailView: React.FC<ProfileDetailProps> = ({
           </div>
 
           {/* MLflow */}
+          {profile.mlflow && (
           <div className="mb-6">
             <h3 className="text-lg font-semibold text-gray-900 mb-3 flex items-center gap-2">
               <span className="text-green-600">📊</span> MLflow
@@ -353,6 +354,7 @@ export const ProfileDetailView: React.FC<ProfileDetailProps> = ({
               <p className="text-sm text-gray-900 mt-1 font-mono">{profile.mlflow.experiment_name}</p>
             </div>
           </div>
+          )}
 
           {/* Metadata */}
           <div className="border-t pt-4">

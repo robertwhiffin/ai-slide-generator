@@ -27,7 +27,7 @@ export interface Profile {
 export interface ProfileDetail extends Profile {
   ai_infra: AIInfraConfig;
   genie_spaces: GenieSpace[];
-  mlflow: MLflowConfig;
+  mlflow?: MLflowConfig;
   prompts: PromptsConfig;
 }
 

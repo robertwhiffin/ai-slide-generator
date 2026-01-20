@@ -61,11 +61,17 @@ export const ConfigTabs: React.FC<ConfigTabsProps> = ({ profileId, profileName }
     reload,
   } = useConfig(profileId);
 
-  // Filter tabs based on debug mode
+  // Filter tabs based on debug mode and available config
   const tabs = useMemo(() => {
     const debugMode = isDebugMode();
-    return allTabs.filter(tab => !tab.debugOnly || debugMode);
-  }, []);
+    return allTabs.filter(tab => {
+      // Hide debug-only tabs unless in debug mode
+      if (tab.debugOnly && !debugMode) return false;
+      // Hide MLflow tab if MLflow is not configured
+      if (tab.id === 'mlflow' && !config.mlflow) return false;
+      return true;
+    });
+  }, [config.mlflow]);
 
   if (loading) {
     return (
