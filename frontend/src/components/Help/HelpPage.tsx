@@ -2,7 +2,7 @@ import React, { useState } from 'react';
 import { FiArrowLeft, FiMessageSquare, FiClock, FiSettings, FiInfo, FiShield, FiFileText, FiLayout } from 'react-icons/fi';
 import { FaGavel } from 'react-icons/fa';
 
-type HelpTab = 'overview' | 'generator' | 'history' | 'settings' | 'deck_prompts' | 'slide_styles' | 'verification';
+type HelpTab = 'overview' | 'generator' | 'history' | 'profiles' | 'deck_prompts' | 'slide_styles' | 'verification';
 
 interface HelpPageProps {
   onBack: () => void;
@@ -54,7 +54,7 @@ export const HelpPage: React.FC<HelpPageProps> = ({ onBack }) => {
         <TabButton tab="generator" label="Generator" icon={FiMessageSquare} />
         <TabButton tab="verification" label="Verification" icon={FiShield} />
         <TabButton tab="history" label="History" icon={FiClock} />
-        <TabButton tab="settings" label="Settings" icon={FiSettings} />
+        <TabButton tab="profiles" label="Profiles" icon={FiSettings} />
         <TabButton tab="deck_prompts" label="Deck Prompts" icon={FiFileText} />
         <TabButton tab="slide_styles" label="Slide Styles" icon={FiLayout} />
       </div>
@@ -65,7 +65,7 @@ export const HelpPage: React.FC<HelpPageProps> = ({ onBack }) => {
         {activeTab === 'generator' && <GeneratorTab />}
         {activeTab === 'verification' && <VerificationTab />}
         {activeTab === 'history' && <HistoryTab />}
-        {activeTab === 'settings' && <SettingsTab />}
+        {activeTab === 'profiles' && <ProfilesTab />}
         {activeTab === 'deck_prompts' && <DeckPromptsTab />}
         {activeTab === 'slide_styles' && <SlideStylesTab />}
       </div>
@@ -111,7 +111,7 @@ const OverviewTab: React.FC<{
         <QuickLinkButton tab="generator" label="Learn about Generator →" />
         <QuickLinkButton tab="verification" label="Learn about Verification →" />
         <QuickLinkButton tab="history" label="Learn about History →" />
-        <QuickLinkButton tab="settings" label="Learn about Settings →" />
+        <QuickLinkButton tab="profiles" label="Learn about Profiles →" />
         <QuickLinkButton tab="deck_prompts" label="Learn about Deck Prompts →" />
         <QuickLinkButton tab="slide_styles" label="Learn about Slide Styles →" />
       </div>
@@ -329,13 +329,13 @@ const VerificationTab: React.FC = () => (
   </div>
 );
 
-// Settings Tab Content
-const SettingsTab: React.FC = () => (
+// Profiles Tab Content
+const ProfilesTab: React.FC = () => (
   <div className="space-y-6">
     <section>
-      <h2 className="text-lg font-semibold text-gray-800 mb-3">Profiles</h2>
+      <h2 className="text-lg font-semibold text-gray-800 mb-3">What are Profiles?</h2>
       <p className="text-gray-600">
-        Profiles store your configuration for LLM settings, Genie space connections, MLflow experiment tracking, and custom prompts.
+        Profiles store your configuration for LLM settings, Genie space connections, and custom prompts.
       </p>
     </section>
 
@@ -344,8 +344,8 @@ const SettingsTab: React.FC = () => (
       <ul className="list-disc list-inside text-gray-600 space-y-2">
         <li><span className="font-medium">AI Infrastructure:</span> LLM endpoint, temperature, and token limits</li>
         <li><span className="font-medium">Genie Spaces:</span> Connect to your Databricks Genie data source</li>
-        <li><span className="font-medium">MLflow:</span> Experiment tracking configuration</li>
         <li><span className="font-medium">Deck Prompt:</span> Select a presentation template from the library</li>
+        <li><span className="font-medium">Slide Style:</span> Select a visual style for your slides</li>
         <li><span className="font-medium">Advanced:</span> System prompts for power users (rarely modified)</li>
       </ul>
     </section>

@@ -12,8 +12,6 @@ import type {
   GenieSpace,
   GenieSpaceCreate,
   GenieSpaceUpdate,
-  MLflowConfig,
-  MLflowConfigUpdate,
   PromptsConfig,
   PromptsConfigUpdate,
 } from '../api/config';
@@ -22,7 +20,6 @@ import { configApi, ConfigApiError } from '../api/config';
 interface ConfigState {
   ai_infra: AIInfraConfig | null;
   genie_space: GenieSpace | null;
-  mlflow: MLflowConfig | null;
   prompts: PromptsConfig | null;
 }
 
@@ -37,7 +34,6 @@ interface UseConfigReturn {
   addGenieSpace: (data: GenieSpaceCreate) => Promise<void>;
   updateGenieSpace: (spaceId: number, data: GenieSpaceUpdate) => Promise<void>;
   deleteGenieSpace: (spaceId: number) => Promise<void>;
-  updateMLflow: (data: MLflowConfigUpdate) => Promise<void>;
   updatePrompts: (data: PromptsConfigUpdate) => Promise<void>;
 }
 
@@ -45,7 +41,6 @@ export const useConfig = (profileId: number): UseConfigReturn => {
   const [config, setConfig] = useState<ConfigState>({
     ai_infra: null,
     genie_space: null,
-    mlflow: null,
     prompts: null,
   });
   const [loading, setLoading] = useState(true);
@@ -65,15 +60,13 @@ export const useConfig = (profileId: number): UseConfigReturn => {
       const results = await Promise.allSettled([
         configApi.getAIInfraConfig(profileId),
         configApi.getGenieSpace(profileId),
-        configApi.getMLflowConfig(profileId),
         configApi.getPromptsConfig(profileId),
       ]);
 
       setConfig({
         ai_infra: results[0].status === 'fulfilled' ? results[0].value : null,
         genie_space: results[1].status === 'fulfilled' ? results[1].value : null,
-        mlflow: results[2].status === 'fulfilled' ? results[2].value : null,
-        prompts: results[3].status === 'fulfilled' ? results[3].value : null,
+        prompts: results[2].status === 'fulfilled' ? results[2].value : null,
       });
       setDirty(false);
     } catch (err) {
@@ -189,27 +182,6 @@ export const useConfig = (profileId: number): UseConfigReturn => {
   }, []);
 
   /**
-   * Update MLflow configuration
-   */
-  const updateMLflow = useCallback(async (data: MLflowConfigUpdate) => {
-    try {
-      setSaving(true);
-      setError(null);
-      const updated = await configApi.updateMLflowConfig(profileId, data);
-      setConfig(prev => ({ ...prev, mlflow: updated }));
-      setDirty(false);
-    } catch (err) {
-      const message = err instanceof ConfigApiError 
-        ? err.message 
-        : 'Failed to update MLflow configuration';
-      setError(message);
-      throw err;
-    } finally {
-      setSaving(false);
-    }
-  }, [profileId]);
-
-  /**
    * Update Prompts configuration
    */
   const updatePrompts = useCallback(async (data: PromptsConfigUpdate) => {
@@ -241,7 +213,6 @@ export const useConfig = (profileId: number): UseConfigReturn => {
     addGenieSpace,
     updateGenieSpace,
     deleteGenieSpace,
-    updateMLflow,
     updatePrompts,
   };
 };

@@ -6,7 +6,6 @@
  * - Genie Spaces
  * - Deck Prompt
  * - AI Infrastructure (endpoint, temperature, max tokens)
- * - MLflow configuration
  */
 
 import React, { useEffect, useState } from 'react';
@@ -340,17 +339,6 @@ export const ProfileDetailView: React.FC<ProfileDetailProps> = ({
                   <p className="text-sm text-gray-900 mt-1">{profile.ai_infra.llm_max_tokens}</p>
                 </div>
               </div>
-            </div>
-          </div>
-
-          {/* MLflow */}
-          <div className="mb-6">
-            <h3 className="text-lg font-semibold text-gray-900 mb-3 flex items-center gap-2">
-              <span className="text-green-600">📊</span> MLflow
-            </h3>
-            <div className="bg-gray-50 rounded p-4">
-              <label className="text-xs font-medium text-gray-500 uppercase">Experiment Name</label>
-              <p className="text-sm text-gray-900 mt-1 font-mono">{profile.mlflow.experiment_name}</p>
             </div>
           </div>
 
