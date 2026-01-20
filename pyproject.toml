@@ -53,6 +53,7 @@ dev = [
     # Build tools for deployment
     "build>=1.0.0",
     "setuptools-scm>=8.0.0",
+    "twine>=6.2.0",
 ]
 
 [tool.ruff]

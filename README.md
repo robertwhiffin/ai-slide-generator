@@ -77,11 +77,53 @@ Deploy the app as a Databricks App with Lakebase for persistence.
 ### Prerequisites
 
 - Databricks workspace with Apps enabled
-- Permission to create a Lakebase, or ability to create schema on an existing one.
+- Permission to create a Lakebase, or ability to create schema on an existing one
 - Genie space configured with your data
-- Access to a chat model foundation model (Databricks Foundation Model APIs are easiest for quick setup, but the App is compatitible with any Databricks model serving endpoint.)
+- Access to a chat model foundation model (Databricks Foundation Model APIs are easiest for quick setup, but the app is compatible with any Databricks model serving endpoint)
 
-### Deploy
+### Option 1: Deploy via Python Package (Recommended for Production)
+
+Install the deployment package and deploy from a notebook or Python script:
+
+```bash
+pip install --upgrade databricks-tellr databricks-sdk==0.73.0
+```
+
+**From a Databricks Notebook:**
+
+```python
+import databricks_tellr as tellr
+
+# Create a new app
+tellr.create(
+    lakebase_name="ai-slide-generator-db",
+    schema_name="app_data",
+    app_name="ai-slide-generator",
+    app_file_workspace_path="/Workspace/Users/you@example.com/.apps/ai-slide-generator"
+)
+
+# Update an existing app
+tellr.update(
+    app_name="ai-slide-generator",
+    app_file_workspace_path="/Workspace/Users/you@example.com/.apps/ai-slide-generator",
+    lakebase_name="ai-slide-generator-db",
+    schema_name="app_data",
+    reset_database=False,          # Set True to drop and recreate schema
+)
+
+# Delete an app
+tellr.delete(
+    app_name="ai-slide-generator",
+    lakebase_name="ai-slide-generator-db",
+    schema_name="app_data",
+    reset_database=True,           # Drop schema before deleting
+)
+```
+
+
+### Option 2: Deploy from Local Source (Development)
+
+For testing local code changes before publishing, use the local deployment script:
 
 ```bash
 # 1. Clone and enter the repo
@@ -92,18 +134,30 @@ cd ai-slide-generator
 cp config/deployment.example.yaml config/deployment.yaml
 
 # 3. Edit deployment.yaml with your workspace details
-#    - Replace {username} with your Databricks username
-#    - Set appropriate permissions
 
-# 4. Deploy to development environment
-./deploy.sh create --env development --profile my-profile
+# 4. Create a new app with local code
+./scripts/deploy_local.sh create --env development --profile my-profile
 
-# Or update an existing deployment
-./deploy.sh update --env development --profile my-profile
+# Update with your latest local changes
+./scripts/deploy_local.sh update --env development --profile my-profile
 
-# Validate config without deploying
-./deploy.sh create --env staging --profile my-profile --dry-run
+# Update and reset database (WARNING: deletes all data)
+./scripts/deploy_local.sh update --env development --profile my-profile --reset-db
+
+# Include Databricks-specific prompts when seeding
+./scripts/deploy_local.sh create --env development --profile my-profile --include-databricks-prompts
+
+# Skip wheel rebuild (use existing wheels)
+./scripts/deploy_local.sh update --env development --profile my-profile --skip-build
+
+# Delete an app
+./scripts/deploy_local.sh delete --env development --profile my-profile
 ```
+
+The local deployment script:
+1. Builds Python wheels for both `databricks-tellr` and `databricks-tellr-app`
+2. Uploads the app wheel to your Databricks workspace
+3. Creates/updates the Databricks App to use the uploaded wheel
 
 ### Deployment Environments
 
@@ -113,24 +167,25 @@ cp config/deployment.example.yaml config/deployment.yaml
 | `staging` | Team testing | MEDIUM |
 | `production` | End users | MEDIUM |
 
-NB - Compute is an option of MEDIUM or LARGE. This is a lightweight app - it is unlikely to need a LARGE. 
+Compute options are MEDIUM or LARGE. This is a lightweight app - MEDIUM is typically sufficient.
 
 ### Configuration
 
-Edit `config/deployment.yaml` to customize:
+Edit `config/deployment.yaml` to customize environments:
 
 ```yaml
 environments:
   development:
     app_name: "ai-slide-generator-dev"
-    workspace_path: "/Workspace/Users/you@example.com/apps/dev/ai-slide-generator"
+    workspace_path: "/Workspace/Users/you@example.com/.apps/dev/ai-slide-generator"
     permissions:
       - user_name: "you@example.com"
         permission_level: "CAN_MANAGE"
     compute_size: "MEDIUM"
     lakebase:
-      database_name: "ai-slide-generator-dev-db"
-      schema: "app_data"
+      database_name: "ai-slide-generator-db-dev"
+      schema: "app_data_dev"
+      capacity: "CU_1"
 ```
 
 ### Verify Deployment
@@ -231,15 +286,21 @@ tail -f logs/backend.log
 
 ```
 ai-slide-generator/
-├── src/
+├── src/                  # Application source code
 │   ├── api/              # FastAPI routes and services
 │   ├── core/             # Settings, database, Databricks client
-│   ├── models/           # Slide and SlideDeck classes
-│   ├── services/         # Agent and Genie tools
+│   ├── domain/           # Slide and SlideDeck classes
+│   ├── services/         # Agent, Genie tools, evaluation
 │   └── utils/            # HTML parsing, logging
 ├── frontend/             # React + Vite + TypeScript
+├── packages/             # Distributable Python packages
+│   ├── databricks-tellr/       # Deployment tooling (pip install databricks-tellr)
+│   └── databricks-tellr-app/   # App package for Databricks Apps
+├── scripts/              # Development and deployment scripts
+│   ├── deploy_local.sh   # Local wheel deployment to Databricks
+│   ├── build_wheels.sh   # Build packages locally
+│   └── publish_pypi.sh   # Publish to PyPI
 ├── config/               # YAML configuration files
-├── db_app_deployment/    # Databricks deployment CLI
 ├── docs/technical/       # Architecture documentation
 ├── tests/                # Unit and integration tests
 └── quickstart/           # Setup scripts

@@ -1,0 +1,23 @@
+# Databricks App Configuration
+name: "tellr"
+description: "Tellr - AI Slide Generator"
+
+command:
+  - "sh"
+  - "-c"
+  - |
+    pip install --upgrade --no-cache-dir -r requirements.txt && \
+    python -c "from databricks_tellr_app.run import init_database; ${INIT_DATABASE_CALL}" && \
+    python -m databricks_tellr_app.run
+
+env:
+  - name: ENVIRONMENT
+    value: "production"
+  - name: LAKEBASE_INSTANCE
+    value: "${LAKEBASE_INSTANCE}"
+  - name: LAKEBASE_SCHEMA
+    value: "${LAKEBASE_SCHEMA}"
+  - name: DATABRICKS_HOST
+    valueFrom: "system.databricks_host"
+  - name: DATABRICKS_TOKEN
+    valueFrom: "system.databricks_token"
