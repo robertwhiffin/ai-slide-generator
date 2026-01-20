@@ -185,5 +185,28 @@ def get_db_session() -> Generator[Session, None, None]:
 
 
 def init_db():
-    """Create all tables in the database."""
-    Base.metadata.create_all(bind=get_engine())
+    """Create all tables in the database.
+    
+    For Lakebase deployments, ensures the schema is set correctly before
+    creating tables. The schema is read from LAKEBASE_SCHEMA env var.
+    """
+    engine = get_engine()
+    schema = os.getenv("LAKEBASE_SCHEMA")
+    
+    if schema:
+        # For Lakebase: set schema on all tables that don't have one
+        # This ensures CREATE TABLE uses the correct schema
+        logger.info(f"Setting schema '{schema}' for table creation")
+        
+        # Execute SET search_path before creating tables
+        from sqlalchemy import text
+        with engine.connect() as conn:
+            conn.execute(text(f'SET search_path TO "{schema}"'))
+            conn.commit()
+        
+        # Also set schema on metadata for table creation
+        for table in Base.metadata.tables.values():
+            if table.schema is None:
+                table.schema = schema
+    
+    Base.metadata.create_all(bind=engine)

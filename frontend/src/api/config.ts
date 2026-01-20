@@ -27,7 +27,6 @@ export interface Profile {
 export interface ProfileDetail extends Profile {
   ai_infra: AIInfraConfig;
   genie_spaces: GenieSpace[];
-  mlflow: MLflowConfig;
   prompts: PromptsConfig;
 }
 
@@ -52,9 +51,6 @@ export interface ProfileCreateWithConfig {
     llm_endpoint?: string;
     llm_temperature?: number;
     llm_max_tokens?: number;
-  };
-  mlflow?: {
-    experiment_name: string;
   };
   prompts?: {
     selected_deck_prompt_id?: number | null;
@@ -111,18 +107,6 @@ export interface GenieSpaceCreate {
 export interface GenieSpaceUpdate {
   space_name?: string;
   description?: string | null;
-}
-
-export interface MLflowConfig {
-  id: number;
-  profile_id: number;
-  experiment_name: string;
-  created_at: string;
-  updated_at: string;
-}
-
-export interface MLflowConfigUpdate {
-  experiment_name: string;
 }
 
 export interface PromptsConfig {
@@ -395,18 +379,6 @@ export const configApi = {
       method: 'DELETE',
     }),
   
-  // MLflow
-  
-  getMLflowConfig: (profileId: number): Promise<MLflowConfig> =>
-    fetchJson(`${API_BASE}/mlflow/${profileId}`),
-  
-  updateMLflowConfig: (profileId: number, data: MLflowConfigUpdate): Promise<MLflowConfig> =>
-    fetchJson(`${API_BASE}/mlflow/${profileId}`, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(data),
-    }),
-  
   // Prompts
   
   getPromptsConfig: (profileId: number): Promise<PromptsConfig> =>
@@ -491,11 +463,6 @@ export const configApi = {
 
   validateGenie: (spaceId: string): Promise<{ success: boolean; message: string; details?: any }> =>
     fetchJson(`${API_BASE}/genie/validate?space_id=${encodeURIComponent(spaceId)}`, {
-      method: 'POST',
-    }),
-
-  validateMLflow: (experimentName: string): Promise<{ success: boolean; message: string; details?: any }> =>
-    fetchJson(`${API_BASE}/mlflow/validate?experiment_name=${encodeURIComponent(experimentName)}`, {
       method: 'POST',
     }),
 };
