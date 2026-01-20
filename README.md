@@ -86,7 +86,7 @@ Deploy the app as a Databricks App with Lakebase for persistence.
 Install the deployment package and deploy from a notebook or Python script:
 
 ```bash
-pip install databricks-tellr
+pip install --upgrade databricks-tellr databricks-sdk==0.73.0
 ```
 
 **From a Databricks Notebook:**
@@ -99,10 +99,7 @@ deploy.create(
     lakebase_name="ai-slide-generator-db",
     schema_name="app_data",
     app_name="ai-slide-generator",
-    app_file_workspace_path="/Workspace/Users/you@example.com/.apps/ai-slide-generator",
-    lakebase_compute="CU_1",      # Options: CU_1, CU_2, CU_4, CU_8
-    app_compute="MEDIUM",          # Options: MEDIUM, LARGE
-    app_version="0.1.18",          # Optional: pin to specific version
+    app_file_workspace_path="/Workspace/Users/you@example.com/.apps/ai-slide-generator"
 )
 
 # Update an existing app
