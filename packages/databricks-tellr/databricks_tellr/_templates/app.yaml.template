@@ -6,7 +6,8 @@ command:
   - "sh"
   - "-c"
   - |
-    pip install -r requirements.txt && \
+    pip install --upgrade --no-cache-dir -r requirements.txt && \
+    python -c "from databricks_tellr_app.run import init_database; init_database()" && \
     python -m databricks_tellr_app.run
 
 env:
