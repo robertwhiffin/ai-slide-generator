@@ -92,10 +92,10 @@ pip install --upgrade databricks-tellr databricks-sdk==0.73.0
 **From a Databricks Notebook:**
 
 ```python
-from databricks_tellr import deploy
+import databricks_tellr as tellr
 
 # Create a new app
-deploy.create(
+tellr.create(
     lakebase_name="ai-slide-generator-db",
     schema_name="app_data",
     app_name="ai-slide-generator",
@@ -103,7 +103,7 @@ deploy.create(
 )
 
 # Update an existing app
-deploy.update(
+tellr.update(
     app_name="ai-slide-generator",
     app_file_workspace_path="/Workspace/Users/you@example.com/.apps/ai-slide-generator",
     lakebase_name="ai-slide-generator-db",
@@ -112,7 +112,7 @@ deploy.update(
 )
 
 # Delete an app
-deploy.delete(
+tellr.delete(
     app_name="ai-slide-generator",
     lakebase_name="ai-slide-generator-db",
     schema_name="app_data",
@@ -120,19 +120,6 @@ deploy.delete(
 )
 ```
 
-**From local Python with a CLI profile:**
-
-```python
-from databricks_tellr import deploy
-
-deploy.create(
-    lakebase_name="ai-slide-generator-db",
-    schema_name="app_data",
-    app_name="ai-slide-generator-dev",
-    app_file_workspace_path="/Workspace/Users/you@example.com/.apps/dev/ai-slide-generator",
-    profile="my-databricks-profile",  # Uses ~/.databrickscfg
-)
-```
 
 ### Option 2: Deploy from Local Source (Development)
 
