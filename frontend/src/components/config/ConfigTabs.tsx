@@ -6,7 +6,6 @@
  * - Deck Prompt (presentation templates)
  * - Slide Style (visual appearance)
  * - AI Infrastructure
- * - MLflow
  * - Advanced (system prompts - debug mode only)
  */
 
@@ -14,12 +13,11 @@ import React, { useState, useMemo } from 'react';
 import { useConfig } from '../../hooks/useConfig';
 import { AIInfraForm } from './AIInfraForm';
 import { GenieForm } from './GenieForm';
-import { MLflowForm } from './MLflowForm';
 import { DeckPromptSelector } from './DeckPromptSelector';
 import { SlideStyleSelector } from './SlideStyleSelector';
 import { AdvancedSettingsEditor } from './AdvancedSettingsEditor';
 
-type TabId = 'ai_infra' | 'genie' | 'mlflow' | 'deck_prompt' | 'slide_style' | 'advanced';
+type TabId = 'ai_infra' | 'genie' | 'deck_prompt' | 'slide_style' | 'advanced';
 
 interface Tab {
   id: TabId;
@@ -38,7 +36,6 @@ const allTabs: Tab[] = [
   { id: 'deck_prompt', label: 'Deck Prompt', icon: '📋' },
   { id: 'slide_style', label: 'Slide Style', icon: '🎨' },
   { id: 'ai_infra', label: 'AI Infrastructure', icon: '🤖' },
-  { id: 'mlflow', label: 'MLflow', icon: '📊' },
   { id: 'advanced', label: 'Advanced', icon: '⚙️', debugOnly: true },
 ];
 
@@ -56,7 +53,6 @@ export const ConfigTabs: React.FC<ConfigTabsProps> = ({ profileId, profileName }
     error,
     saving,
     updateAIInfra,
-    updateMLflow,
     updatePrompts,
     reload,
   } = useConfig(profileId);
@@ -127,14 +123,6 @@ export const ConfigTabs: React.FC<ConfigTabsProps> = ({ profileId, profileName }
           <GenieForm
             profileId={profileId}
             onSave={reload}
-            saving={saving}
-          />
-        )}
-
-        {activeTab === 'mlflow' && config.mlflow && (
-          <MLflowForm
-            config={config.mlflow}
-            onSave={updateMLflow}
             saving={saving}
           />
         )}

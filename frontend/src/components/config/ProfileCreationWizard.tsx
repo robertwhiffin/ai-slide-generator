@@ -8,10 +8,7 @@
  * 4. Deck Prompt (Optional)
  * 5. Review & Create
  * 
- * LLM and MLflow use backend defaults:
- * - LLM: databricks-claude-sonnet-4-5
- * - MLflow: /Workspace/Users/{username}/ai-slide-generator
- * 
+ * LLM settings use backend defaults (databricks-claude-sonnet-4-5).
  * Profiles without Genie run in prompt-only mode.
  */
 
@@ -19,7 +16,7 @@ import React, { useState, useEffect } from 'react';
 import { FiCheck, FiChevronLeft, FiChevronRight, FiX, FiInfo } from 'react-icons/fi';
 import { configApi, type DeckPrompt, type SlideStyle, type AvailableGenieSpaces } from '../../api/config';
 
-// Wizard step definitions (5 steps - LLM and MLflow use backend defaults)
+// Wizard step definitions (5 steps - LLM uses backend defaults)
 const STEPS = [
   { id: 'basic', title: 'Basic Info', description: 'Name and description' },
   { id: 'genie', title: 'Genie Space', description: 'Data source (optional)' },
@@ -244,7 +241,7 @@ export const ProfileCreationWizard: React.FC<ProfileCreationWizardProps> = ({
     
     try {
       // Create profile with inline configurations
-      // ai_infra and mlflow are omitted - backend uses defaults
+      // ai_infra is omitted - backend uses defaults
       const promptsConfig = (formData.selectedDeckPromptId || formData.selectedSlideStyleId) ? {
         selected_deck_prompt_id: formData.selectedDeckPromptId,
         selected_slide_style_id: formData.selectedSlideStyleId,
@@ -262,7 +259,6 @@ export const ProfileCreationWizard: React.FC<ProfileCreationWizardProps> = ({
         description: formData.description.trim() || null,
         genie_space: genieSpaceConfig,
         // ai_infra omitted - backend uses default (databricks-claude-sonnet-4-5)
-        // mlflow omitted - backend auto-sets based on user
         prompts: promptsConfig,
       });
       
@@ -706,7 +702,7 @@ export const ProfileCreationWizard: React.FC<ProfileCreationWizardProps> = ({
                 <div className="bg-blue-50 rounded-md p-4">
                   <h4 className="text-sm font-medium text-blue-700 mb-2">Defaults Applied</h4>
                   <p className="text-sm text-blue-600">
-                    LLM and MLflow settings will use system defaults. You can customize these after profile creation in the profile settings.
+                    LLM settings will use system defaults. You can customize these after profile creation in the profile settings.
                   </p>
                 </div>
               </div>
