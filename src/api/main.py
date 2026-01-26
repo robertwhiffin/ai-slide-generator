@@ -16,7 +16,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from src.api.routes import chat, slides, export, sessions, verification
+from src.api.routes import chat, slides, export, sessions, verification, version
 from src.core.databricks_client import create_user_client, set_user_client
 from src.core.database import (
     is_lakebase_environment,
@@ -245,6 +245,7 @@ app.include_router(slides.router)
 app.include_router(export.router)
 app.include_router(sessions.router)
 app.include_router(verification.router)
+app.include_router(version.router)
 
 # Configuration management routers
 app.include_router(profiles_router, prefix="/api/settings", tags=["settings"])
