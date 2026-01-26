@@ -2,7 +2,7 @@
 # This file defines deployment targets for different environments (dev, staging, production)
 
 environments:
-  development:
+  staging:
     app_name: "ai-slide-generator-dev"
     description: "AI Slide Generator - Development Environment"
     workspace_path: "/Workspace/Users/robert.whiffin@databricks.com/.apps/databricks-tellr/dev"
@@ -20,24 +20,22 @@ environments:
       schema: "app_data_dev"
       capacity: "CU_1"  # Options: CU_1, CU_2, CU_4, CU_8
 
-  staging:
-    app_name: "ai-slide-generator-staging"
-    description: "AI Slide Generator - Staging Environment"
-    workspace_path: "/Workspace/Users/robert.whiffin@databricks.com/.apps/staging/ai-slide-generator"
+  development:
+    app_name: "ai-slide-generator-dev-2"
+    description: "AI Slide Generator - dev Environment"
+    workspace_path: "/Workspace/Users/robert.whiffin@databricks.com/.apps/databricks-tellr/dev2"
     permissions:
-      - group_name: "developers"
-        permission_level: "CAN_USE"
-      - user_name: "robert.whiffin@databrickks.com"
+      - user_name: "robert.whiffin@databricks.com"
         permission_level: "CAN_MANAGE"
     compute_size: "MEDIUM"  # Options: MEDIUM, LARGE, LIQUID
     env_vars:
-      ENVIRONMENT: "staging"
-      LOG_LEVEL: "INFO"
+      ENVIRONMENT: "development"
+      LOG_LEVEL: "DEBUG"
       LAKEBASE_INSTANCE: "ai-slide-generator-db-dev"
       LAKEBASE_SCHEMA: "app_data_staging"
     lakebase:
-      database_name: "ai-slide-generator-db-dev"
-      schema: "app_data_staging"
+      database_name: "db-tellr-dev"
+      schema: "app_data_dev2"
       capacity: "CU_1"  # Options: CU_1, CU_2, CU_4, CU_8
 
   production:

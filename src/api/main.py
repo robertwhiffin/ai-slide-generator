@@ -16,8 +16,13 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from src.api.routes import chat, slides, export, sessions, verification
+from src.api.routes import chat, slides, export, sessions, verification, version
 from src.core.databricks_client import create_user_client, set_user_client
+from src.core.database import (
+    is_lakebase_environment,
+    start_token_refresh,
+    stop_token_refresh,
+)
 from src.api.routes.settings import (
     ai_infra_router,
     deck_prompts_router,
@@ -49,6 +54,15 @@ async def lifespan(app: FastAPI):
     # Startup
     logger.info(f"Starting AI Slide Generator API (environment: {ENVIRONMENT})")
 
+    # Start Lakebase token refresh if running in Databricks Apps
+    if is_lakebase_environment():
+        try:
+            await start_token_refresh()
+            logger.info("Lakebase token refresh started")
+        except Exception as e:
+            logger.error(f"Failed to start Lakebase token refresh: {e}")
+            raise
+
     if IS_PRODUCTION:
         logger.info("Production mode: serving frontend from package assets")
         frontend_result = _resolve_frontend_dist()
@@ -78,6 +92,9 @@ async def lifespan(app: FastAPI):
 
     # Shutdown
     logger.info("Shutting down AI Slide Generator API")
+
+    # Stop Lakebase token refresh
+    await stop_token_refresh()
 
     # Cancel the worker tasks
     if _worker_task:
@@ -228,6 +245,7 @@ app.include_router(slides.router)
 app.include_router(export.router)
 app.include_router(sessions.router)
 app.include_router(verification.router)
+app.include_router(version.router)
 
 # Configuration management routers
 app.include_router(profiles_router, prefix="/api/settings", tags=["settings"])
