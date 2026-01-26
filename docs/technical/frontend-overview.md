@@ -100,6 +100,23 @@ Slides are HTML snippets embedded in iframes for preview. The optional `verifica
 - Set by `ChatPanel` during streaming, consumed by `AppLayout`
 - Disables navigation buttons, profile selector, and session actions during generation
 
+### 5. Version Check (`src/hooks/useVersionCheck.ts`)
+
+Checks for app updates on load and displays a banner if a newer version is available on PyPI:
+
+```typescript
+const { updateAvailable, latestVersion, updateType, dismiss } = useVersionCheck();
+```
+
+- **Checks once on app load** - calls `/api/version/check` (backend caches PyPI responses for 1 hour)
+- **Classifies update type:**
+  - `patch`: Only patch version changed (e.g., 0.1.19 → 0.1.20) - redeploy the app
+  - `major`: Minor or major version changed (e.g., 0.1.x → 0.2.x) - run `tellr.update()`
+- **Dismissable per session** - uses sessionStorage so banner reappears on next visit
+- **Fails silently** - version check is non-critical, errors don't affect app functionality
+
+The `UpdateBanner` component displays at the top of the app with different messaging based on update type.
+
 ### 5. Chat Responses (`src/types/message.ts`)
 
 - `ChatResponse` includes messages, `slide_deck`, `raw_html`, and optional `replacement_info`
@@ -215,6 +232,8 @@ interface SlideStyle {
 | `src/components/config/SlideStyleForm.tsx` | Modal form for creating/editing slide styles with Monaco editor | None (callback props) |
 | `src/components/config/SlideStyleSelector.tsx` | Profile configuration tab for selecting a slide style from the library | `configApi.listSlideStyles`, `configApi.updatePromptsConfig` |
 | `src/components/config/AdvancedSettingsEditor.tsx` | Power-user interface for editing system prompts (debug mode only) | `configApi.updatePromptsConfig` |
+| `src/components/UpdateBanner/UpdateBanner.tsx` | Displays update notification when new version available; different messaging for patch vs major updates | None (props only) |
+| `src/hooks/useVersionCheck.ts` | Checks PyPI for new versions on app load; returns update availability and type | `GET /api/version/check` |
 
 ---
 
@@ -326,6 +345,14 @@ The optimization prompt explicitly instructs the agent to:
 | `verifySlide` | POST | `/api/verification/{index}` | `{ session_id }` | `VerificationResult` |
 | `submitVerificationFeedback` | POST | `/api/verification/{index}/feedback` | `{ session_id, is_positive, rationale?, trace_id? }` | `{ status, message, linked_to_trace }` |
 | `getGenieLink` | GET | `/api/verification/genie-link` | query: `session_id` | `{ has_genie_conversation, url?, ... }` |
+
+### Version Check Endpoint
+
+| Method | HTTP | Path | Request | Returns |
+|--------|------|------|---------|---------|
+| `checkVersion` | GET | `/api/version/check` | – | `{ installed_version, latest_version, update_available, update_type }` |
+
+The version check endpoint compares the installed `databricks-tellr-app` version against PyPI. The `update_type` is either `"patch"` (redeploy the app) or `"major"` (run `tellr.update()`). Backend caches PyPI responses for 1 hour.
 
 ### Error Handling
 
