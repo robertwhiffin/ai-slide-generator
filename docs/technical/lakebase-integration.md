@@ -90,6 +90,52 @@ cred = ws.database.generate_database_credential(
 password = cred.token  # Use as PostgreSQL password
 ```
 
+### Automatic Token Refresh
+
+OAuth tokens expire after 1 hour. To maintain continuous database connectivity, the application implements automatic token refresh:
+
+1. **Background Task**: An asyncio task refreshes tokens every 50 minutes (10-minute buffer before expiry)
+2. **Event-Based Injection**: SQLAlchemy's `do_connect` event injects fresh tokens for each new connection
+3. **Lifecycle Integration**: Token refresh starts/stops with FastAPI's lifespan
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                     Token Refresh Flow                          │
+│                                                                 │
+│  FastAPI Startup                                                │
+│       │                                                         │
+│       ▼                                                         │
+│  start_token_refresh()                                          │
+│       │                                                         │
+│       ├──► Generate initial OAuth token                         │
+│       │                                                         │
+│       └──► Start background task ─────────────────────┐         │
+│                                                       │         │
+│            ┌──────────────────────────────────────────┘         │
+│            │                                                    │
+│            ▼                                                    │
+│       ┌─────────────────────────────────────────┐               │
+│       │  Every 50 minutes:                      │               │
+│       │  1. Generate fresh token                │               │
+│       │  2. Update global _postgres_token       │               │
+│       └─────────────────────────────────────────┘               │
+│                                                                 │
+│  Connection Request                                             │
+│       │                                                         │
+│       ▼                                                         │
+│  do_connect event ──► Inject current token ──► Connect          │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+**Key Functions** (in `src/core/database.py`):
+- `start_token_refresh()` - Start background refresh task (called in lifespan startup)
+- `stop_token_refresh()` - Stop background task (called in lifespan shutdown)
+- `is_lakebase_environment()` - Check if running in Lakebase environment
+- `_refresh_token_background()` - Async task that refreshes every 50 minutes
+
+**Reference**: [Databricks Apps Cookbook - Lakebase Connection](https://apps-cookbook.dev/docs/fastapi/getting_started/lakebase_connection/)
+
 ---
 
 ## Component Responsibilities
@@ -103,6 +149,9 @@ password = cred.token  # Use as PostgreSQL password
 | `setup_lakebase_schema()` | Create schema + grant perms | Direct SQL via psycopg2 |
 | `initialize_lakebase_tables()` | Create SQLAlchemy tables | `Base.metadata.create_all()` |
 | `_get_database_url()` (database.py) | Auto-detect environment | Checks `PGHOST` env var |
+| `start_token_refresh()` (database.py) | Start background token refresh | asyncio task |
+| `stop_token_refresh()` (database.py) | Stop background token refresh | asyncio task cancellation |
+| `is_lakebase_environment()` (database.py) | Check for Lakebase env | Environment variables |
 
 ---
 
@@ -221,6 +270,8 @@ ALTER DEFAULT PRIVILEGES IN SCHEMA "app_data"
 | `Failed to decode token for role` | Missing `LAKEBASE_INSTANCE` | Check app.yaml has instance injected |
 | `permission denied for sequence` | Missing sequence grants | Redeploy to apply sequence permissions |
 | `schema does not exist` | Schema not created | Run deployment with `--create` |
+| `Background token refresh failed` | Token generation error | Check service principal credentials and network |
+| `password authentication failed` | Expired or invalid token | Verify token refresh task is running (check logs) |
 
 ---
 
