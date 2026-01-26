@@ -1,7 +1,7 @@
 /**
  * Hook for checking if a new app version is available on PyPI.
  * 
- * Checks on app load and caches the result to avoid repeated API calls.
+ * Checks once on app load (no caching - backend caches PyPI responses).
  * Returns update info including whether it's a patch (redeploy) or major (run tellr.update()).
  */
 
@@ -11,9 +11,7 @@ const API_BASE_URL = import.meta.env.VITE_API_URL || (
   import.meta.env.MODE === 'production' ? '' : 'http://localhost:8000'
 );
 
-// Cache key for session storage
-const CACHE_KEY = 'version_check_cache';
-const CACHE_TTL_MS = 60 * 60 * 1000; // 1 hour
+// Session storage key for dismiss state (persists until tab closes)
 const DISMISSED_KEY = 'version_check_dismissed';
 
 interface VersionCheckResponse {
@@ -22,11 +20,6 @@ interface VersionCheckResponse {
   update_available: boolean;
   update_type: 'patch' | 'major' | null;
   package_name: string;
-}
-
-interface CachedVersionCheck {
-  data: VersionCheckResponse;
-  timestamp: number;
 }
 
 interface UseVersionCheckReturn {
@@ -56,23 +49,6 @@ export const useVersionCheck = (): UseVersionCheckReturn => {
 
   useEffect(() => {
     const checkVersion = async () => {
-      // Check cache first
-      try {
-        const cached = localStorage.getItem(CACHE_KEY);
-        if (cached) {
-          const parsedCache: CachedVersionCheck = JSON.parse(cached);
-          const age = Date.now() - parsedCache.timestamp;
-          if (age < CACHE_TTL_MS) {
-            setData(parsedCache.data);
-            setLoading(false);
-            return;
-          }
-        }
-      } catch {
-        // Ignore cache errors
-      }
-
-      // Fetch from API
       try {
         const response = await fetch(`${API_BASE_URL}/api/version/check`);
         if (!response.ok) {
@@ -80,16 +56,6 @@ export const useVersionCheck = (): UseVersionCheckReturn => {
         }
         const result: VersionCheckResponse = await response.json();
         setData(result);
-
-        // Cache the result
-        try {
-          localStorage.setItem(CACHE_KEY, JSON.stringify({
-            data: result,
-            timestamp: Date.now(),
-          }));
-        } catch {
-          // Ignore cache errors
-        }
       } catch (err) {
         // Fail silently - version check is non-critical
         console.warn('Version check failed:', err);
