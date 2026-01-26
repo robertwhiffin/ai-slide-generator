@@ -10,9 +10,11 @@ import { SlideStyleList } from '../config/SlideStyleList';
 import { SessionHistory } from '../History/SessionHistory';
 import { SaveAsDialog } from '../History/SaveAsDialog';
 import { HelpPage } from '../Help';
+import { UpdateBanner } from '../UpdateBanner';
 import { useSession } from '../../contexts/SessionContext';
 import { useGeneration } from '../../contexts/GenerationContext';
 import { useProfiles } from '../../contexts/ProfileContext';
+import { useVersionCheck } from '../../hooks/useVersionCheck';
 import { api } from '../../services/api';
 
 type ViewMode = 'main' | 'profiles' | 'deck_prompts' | 'slide_styles' | 'history' | 'help';
@@ -30,6 +32,7 @@ export const AppLayout: React.FC = () => {
   const { sessionTitle, experimentUrl, createNewSession, switchSession, renameSession } = useSession();
   const { isGenerating } = useGeneration();
   const { currentProfile, loadProfile } = useProfiles();
+  const { updateAvailable, latestVersion, updateType, dismissed, dismiss } = useVersionCheck();
 
   // Handle navigation from ribbon to main slide panel
   const handleSlideNavigate = useCallback((index: number) => {
@@ -256,6 +259,15 @@ export const AppLayout: React.FC = () => {
           </div>
         </div>
       </header>
+
+      {/* Update Banner */}
+      {updateAvailable && !dismissed && latestVersion && updateType && (
+        <UpdateBanner
+          latestVersion={latestVersion}
+          updateType={updateType}
+          onDismiss={dismiss}
+        />
+      )}
 
       {/* Main Content */}
       {viewMode === 'main' && (

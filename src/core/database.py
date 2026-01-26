@@ -3,15 +3,23 @@
 Supports multiple database backends:
 - PostgreSQL: Local development and staging
 - Databricks Lakebase: Production on Databricks Apps (detected via PGHOST env var)
+
+For Lakebase connections, implements automatic OAuth token refresh to handle
+token expiration (tokens expire after 1 hour). Uses SQLAlchemy's do_connect
+event to inject fresh tokens for new connections.
+
+See: https://apps-cookbook.dev/docs/fastapi/getting_started/lakebase_connection/
 """
+import asyncio
 import logging
 import os
+import time
+import uuid
 from contextlib import contextmanager
-from typing import Generator
-from urllib.parse import quote_plus
+from typing import Generator, Optional
 
 from dotenv import load_dotenv
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, event, URL
 from sqlalchemy.orm import Session, declarative_base, sessionmaker
 
 logger = logging.getLogger(__name__)
@@ -19,39 +27,153 @@ logger = logging.getLogger(__name__)
 # Load environment variables from .env file
 load_dotenv()
 
+# =============================================================================
+# Lakebase Token Management
+# =============================================================================
 
-def _get_lakebase_token() -> str:
-    """Get OAuth token for Lakebase authentication using Databricks SDK.
+# Global token storage for Lakebase OAuth authentication
+_postgres_token: Optional[str] = None
+_last_token_refresh: float = 0
+_token_refresh_task: Optional[asyncio.Task] = None
+
+# Refresh interval: 50 minutes (tokens expire after 1 hour)
+TOKEN_REFRESH_INTERVAL_SECONDS = 50 * 60
+
+
+def is_lakebase_environment() -> bool:
+    """Check if running in a Lakebase environment (Databricks Apps).
+    
+    Returns:
+        True if PGHOST and PGUSER are set (auto-injected by Databricks Apps)
+    """
+    return bool(os.getenv("PGHOST") and os.getenv("PGUSER"))
+
+
+def _generate_lakebase_token() -> str:
+    """Generate a fresh OAuth token for Lakebase authentication.
     
     Uses the system client (service principal) for database authentication.
     User tokens are not valid for Lakebase access.
+    
+    Returns:
+        OAuth token string to use as PostgreSQL password
+        
+    Raises:
+        Exception: If token generation fails
     """
+    from src.core.databricks_client import get_system_client
+
+    ws = get_system_client()
+    instance_name = os.getenv("LAKEBASE_INSTANCE")
+
+    if instance_name:
+        # Generate credential for specific instance
+        cred = ws.database.generate_database_credential(
+            request_id=str(uuid.uuid4()),
+            instance_names=[instance_name],
+        )
+        return cred.token
+    else:
+        # Fallback: use workspace authentication token
+        # This works when the app has database resource attached
+        token = ws.config.authenticate()
+        if hasattr(token, "token"):
+            return token.token
+        return str(token)
+
+
+def _get_lakebase_token() -> str:
+    """Get the current OAuth token for Lakebase authentication.
+    
+    Returns the cached token if available, otherwise generates a new one.
+    For production use, the token is refreshed by the background task.
+    
+    Returns:
+        OAuth token string
+    """
+    global _postgres_token, _last_token_refresh
+    
+    # If we have a cached token, return it
+    if _postgres_token is not None:
+        return _postgres_token
+    
+    # Generate initial token
     try:
-        from src.core.databricks_client import get_system_client
-        import uuid
-
-        ws = get_system_client()
-
-        # Get instance name from env or try to derive it
-        instance_name = os.getenv("LAKEBASE_INSTANCE")
-
-        if instance_name:
-            # Generate credential for specific instance
-            cred = ws.database.generate_database_credential(
-                request_id=str(uuid.uuid4()),
-                instance_names=[instance_name],
-            )
-            return cred.token
-        else:
-            # Fallback: use workspace authentication token
-            # This works when the app has database resource attached
-            token = ws.config.authenticate()
-            if hasattr(token, "token"):
-                return token.token
-            return str(token)
+        _postgres_token = _generate_lakebase_token()
+        _last_token_refresh = time.time()
+        logger.info("Generated initial Lakebase OAuth token")
+        return _postgres_token
     except Exception as e:
         logger.error(f"Failed to get Lakebase token: {e}")
         raise
+
+
+async def _refresh_token_background() -> None:
+    """Background task to refresh Lakebase OAuth tokens every 50 minutes.
+    
+    Tokens expire after 1 hour, so we refresh at 50 minutes to ensure
+    continuous connectivity with a 10-minute buffer.
+    """
+    global _postgres_token, _last_token_refresh
+
+    while True:
+        try:
+            await asyncio.sleep(TOKEN_REFRESH_INTERVAL_SECONDS)
+            logger.info("Background token refresh: Generating fresh Lakebase OAuth token")
+
+            _postgres_token = _generate_lakebase_token()
+            _last_token_refresh = time.time()
+            logger.info("Background token refresh: Token updated successfully")
+
+        except asyncio.CancelledError:
+            logger.info("Background token refresh task cancelled")
+            raise
+        except Exception as e:
+            logger.error(f"Background token refresh failed: {e}")
+            # Continue running - will retry on next interval
+
+
+async def start_token_refresh() -> None:
+    """Start the background token refresh task.
+    
+    Should be called during FastAPI lifespan startup when running
+    in a Lakebase environment.
+    """
+    global _token_refresh_task, _postgres_token, _last_token_refresh
+
+    if not is_lakebase_environment():
+        logger.debug("Not a Lakebase environment, skipping token refresh setup")
+        return
+
+    # Generate initial token before starting background refresh
+    try:
+        _postgres_token = _generate_lakebase_token()
+        _last_token_refresh = time.time()
+        logger.info("Initial Lakebase OAuth token generated")
+    except Exception as e:
+        logger.error(f"Failed to generate initial Lakebase token: {e}")
+        raise
+
+    # Start background refresh task
+    if _token_refresh_task is None or _token_refresh_task.done():
+        _token_refresh_task = asyncio.create_task(_refresh_token_background())
+        logger.info("Background token refresh task started (50-minute interval)")
+
+
+async def stop_token_refresh() -> None:
+    """Stop the background token refresh task.
+    
+    Should be called during FastAPI lifespan shutdown.
+    """
+    global _token_refresh_task
+
+    if _token_refresh_task and not _token_refresh_task.done():
+        _token_refresh_task.cancel()
+        try:
+            await _token_refresh_task
+        except asyncio.CancelledError:
+            pass
+        logger.info("Background token refresh task stopped")
 
 
 def _get_database_url() -> str:
@@ -62,6 +184,9 @@ def _get_database_url() -> str:
     1. DATABASE_URL environment variable (explicit override)
     2. PGHOST (Lakebase on Databricks Apps - auto-set when database resource attached)
     3. Default local PostgreSQL
+
+    For Lakebase, returns URL without password - the password is injected
+    dynamically via the do_connect event to support token refresh.
 
     Returns:
         Database connection URL string
@@ -79,15 +204,12 @@ def _get_database_url() -> str:
         # Running on Databricks Apps with Lakebase
         logger.info(f"Detected Lakebase environment (PGHOST: {pg_host})")
 
-        # Get OAuth token for authentication
-        token = _get_lakebase_token()
-        encoded_token = quote_plus(token)
-
-        # Build PostgreSQL connection URL
+        # Build PostgreSQL connection URL WITHOUT password
+        # Password is injected dynamically via do_connect event for token refresh
         database = "databricks_postgres"
         schema = os.getenv("LAKEBASE_SCHEMA", "app_data")
 
-        url = f"postgresql://{pg_user}:{encoded_token}@{pg_host}:5432/{database}?sslmode=require"
+        url = f"postgresql://{pg_user}@{pg_host}:5432/{database}?sslmode=require"
 
         # Add schema to search path
         if schema:
@@ -102,23 +224,41 @@ def _get_database_url() -> str:
 def _create_engine():
     """Create SQLAlchemy engine based on database configuration.
 
+    For Lakebase environments, registers a do_connect event listener to inject
+    fresh OAuth tokens for each new connection. This supports automatic token
+    refresh without recreating the engine.
+
     Returns:
         Engine configured for the appropriate database backend
     """
     database_url = _get_database_url()
     sql_echo = os.getenv("SQL_ECHO", "false").lower() == "true"
 
-    # All backends use PostgreSQL-compatible connections
-    # (Lakebase is PostgreSQL-compatible)
     logger.info("Configuring database connection")
 
-    return create_engine(
+    # Create engine with connection pooling
+    engine = create_engine(
         database_url,
         pool_pre_ping=True,
         pool_size=10,
         max_overflow=20,
         echo=sql_echo,
     )
+
+    # For Lakebase: register event listener to inject fresh tokens
+    if is_lakebase_environment():
+        @event.listens_for(engine, "do_connect")
+        def provide_token(dialect, conn_rec, cargs, cparams):
+            """Inject current OAuth token for new database connections."""
+            global _postgres_token
+            
+            # Get token (generates if not yet available)
+            token = _postgres_token if _postgres_token else _get_lakebase_token()
+            cparams["password"] = token
+
+        logger.info("Registered do_connect event for Lakebase token injection")
+
+    return engine
 
 
 # Create engine (lazy initialization to allow environment setup)

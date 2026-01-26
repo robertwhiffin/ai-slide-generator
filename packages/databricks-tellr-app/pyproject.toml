@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "databricks-tellr-app"
-version = "0.1.19"
+version = "0.1.21"
 description = "Tellr application package for Databricks Apps"
 readme = "README.md"
 requires-python = ">=3.10"
