@@ -87,7 +87,7 @@ test.describe('User Guide: Advanced Configuration', () => {
       await page.waitForTimeout(200);
 
       // Step 07: View an existing prompt
-      const promptCard = page.getByRole('heading', { name: 'Consumption Review' }).first();
+      const promptCard = page.getByRole('heading', { name: 'Monthly Review' }).first();
       if (await promptCard.isVisible()) {
         await promptCard.click();
         await page.waitForTimeout(300);
@@ -180,8 +180,8 @@ test.describe('User Guide: Advanced Configuration', () => {
         });
       }
 
-      // Step 15: Databricks Brand style
-      const brandStyle = page.getByRole('heading', { name: 'Databricks Brand' }).first();
+      // Step 15: Corporate Theme style
+      const brandStyle = page.getByRole('heading', { name: 'Corporate Theme' }).first();
       if (await brandStyle.isVisible()) {
         await brandStyle.click();
         await page.waitForTimeout(300);
@@ -189,7 +189,7 @@ test.describe('User Guide: Advanced Configuration', () => {
         await capture.capture({
           step: '15',
           name: 'brand-style-details',
-          description: 'The Databricks Brand style applies official colors and typography',
+          description: 'The Corporate Theme style applies official colors and typography',
         });
       }
 
