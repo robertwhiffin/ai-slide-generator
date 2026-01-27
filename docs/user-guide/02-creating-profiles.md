@@ -22,90 +22,73 @@ Creating profiles for different use cases (e.g., "Quarterly Reviews", "Customer 
 ### Step 01: Navigate to Profiles
 
 Click "Profiles" in the navigation bar to open the profile management page.
+The page displays all available profiles with their descriptions and settings.
 
 ![Profiles page](images/02-creating-profiles/01-profiles-page.png)
 
-### Step 02: View Existing Profiles
 
-The page displays all available profiles with their descriptions and settings.
 
-![Profiles list](images/02-creating-profiles/02-profiles-list.png)
-
-### Step 03: Create New Profile
+### Step 02: Create New Profile
 
 Click the "+ Create Profile" button to start the creation wizard.
 
 ![Create Profile button](images/02-creating-profiles/03-create-profile-button.png)
 
-### Step 04: Enter Basic Information
+### Step 03: Enter Basic Information
 
 In Step 1 of the wizard, enter:
 - **Name** - A unique, descriptive name (required)
-- **Description** - What this profile is used for
+- **Description** - What this profile is used for (optional)
 
 ![Wizard Step 1](images/02-creating-profiles/04-wizard-step1-basics.png)
 
-### Step 05: Complete Basic Details
-
 Fill in both fields with clear, descriptive text.
 
-![Wizard Step 1 filled](images/02-creating-profiles/05-wizard-step1-filled.png)
+![Wizard Step 1 Filled](images/02-creating-profiles/05-wizard-step1-filled.png)
 
-### Step 06: Connect a Genie Room
+### Step 04: Genie Space (Optional)
 
-In Step 2, connect a Genie room for data access. You have two options:
+Genie Space is optional. Skip to create a prompt-only profile, or connect a Genie room for data queries.
 
-**Option A: Search by name**
-- Type part of the room name
-- Select from matching results
+![Genie Space Step](images/02-creating-profiles/06-wizard-step2-genie.png)
 
-![Genie room step](images/02-creating-profiles/06-wizard-step2-genie.png)
+### Step 05: Select Slide Style (Required)
 
-### Step 07: Search for Genie Room
+Choose a slide style that matches your presentation needs. This is required to proceed.
 
-Start typing to search for available rooms.
+![Style Selection](images/02-creating-profiles/07-wizard-step3-style.png)
 
-![Genie search](images/02-creating-profiles/07-wizard-genie-search.png)
+Select a style to define the visual appearance of your slides.
 
-### Step 08: Use Room ID (Alternative)
+![Style Selected](images/02-creating-profiles/08-wizard-step3-style-selected.png)
 
-Switch to the "Enter ID" tab to paste a Genie room ID directly.
-
-![Genie ID tab](images/02-creating-profiles/08-wizard-genie-id-tab.png)
-
-### Step 09: Select Slide Style
-
-Choose a slide style that matches your presentation needs.
-
-![Style selection](images/02-creating-profiles/09-wizard-step3-style.png)
-
-### Step 10: Select Deck Prompt
+### Step 06: Deck Prompt (Optional)
 
 Optionally select a deck prompt template to guide slide structure.
 
-![Prompt selection](images/02-creating-profiles/10-wizard-step4-prompt.png)
+![Prompt Selection](images/02-creating-profiles/09-wizard-step4-prompt.png)
 
-### Step 11: Complete or Cancel
+### Step 07: Review & Create
 
-Click the final action button to create the profile, or Cancel to exit without saving.
+Review your settings and click "Create Profile" to finish.
 
-![Cancel option](images/02-creating-profiles/11-wizard-cancel.png)
+![Review Step](images/02-creating-profiles/10-wizard-step5-review.png)
 
 ## Editing Profiles
 
-### Step 12: Open Profile Details
+### Open Profile Details
 
 Click on any profile card to view its details.
 
 ![Profile card](images/02-creating-profiles/12-profile-card.png)
 
-### Step 13: View Details
+### View Details
 
 The detail view shows all profile settings.
 
 ![Profile details](images/02-creating-profiles/13-profile-details.png)
 
-### Step 14: Edit Profile
+### Edit Profile
 
 Click the Edit button to modify settings.
 
