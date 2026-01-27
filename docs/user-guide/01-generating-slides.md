@@ -64,29 +64,22 @@ Click the Send button or press Enter to start generation.
 
 ![Send button](images/01-generating-slides/07-send-button-enabled.png)
 
-### Step 08: View Generated Slides
-
-Slides appear in the right panel as they are generated. You can see progress in the chat panel.
-
-![Slides generated](images/01-generating-slides/08-slides-generated.png)
-
 ## Iterating on Your Slides
 
-After initial generation, you can refine your slides through conversation:
+After slides are generated, they appear in the right panel. You can see progress in the chat panel as slides stream in.
+
+After initial generation, you can refine selected slides through conversation:
 
 | Action | Example Prompt |
 |--------|----------------|
-| Edit a specific slide | "Change slide 2 title to 'Q4 Results'" |
-| Add a slide | "Add a summary slide at the end" |
-| Insert a slide | "Insert a slide about methodology after slide 1" |
-| Remove a slide | "Remove slide 3" |
+| Edit a slide contents | "Change title to 'Q4 Results'" |
+| Add a slide | "Add a new slide about {X} after this one" |
 | Regenerate all | "Regenerate all slides with more data" |
 
 ## Selecting Specific Slides
 
 Click the checkbox on individual slides to select them. Selected slides can be:
 - Edited as a group
-- Exported separately
 - Verified for data accuracy
 
 ## Tips

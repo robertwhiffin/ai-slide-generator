@@ -54,23 +54,15 @@ Enter clear, descriptive information.
 
 ![Prompt form filled](images/03-advanced-configuration/05-create-prompt-filled.png)
 
-### Step 06: Write Prompt Content
+The prompt content should include what type of presentation to create, required sections, tone guidance, and data requirements.
 
-The prompt content should include:
-- What type of presentation to create
-- Required sections or slides
-- Tone and style guidance
-- Data requirements
-
-![Prompt content editor](images/03-advanced-configuration/06-prompt-content-editor.png)
-
-### Step 07: View Prompt Details
+### Step 06: View Prompt Details
 
 Click any prompt to view its full content.
 
 ![Prompt details](images/03-advanced-configuration/07-prompt-details.png)
 
-### Step 08: System Prompts
+### Step 07: System Prompts
 
 System prompts are protected and cannot be edited. Use them as templates by duplicating.
 
@@ -92,47 +84,47 @@ System prompts are protected and cannot be edited. Use them as templates by dupl
 
 Slide styles are CSS definitions that control how slides look.
 
-### Step 09: Navigate to Slide Styles
+### Step 08: Navigate to Slide Styles
 
 Click "Slide Styles" in the navigation bar.
 
 ![Slide Styles page](images/03-advanced-configuration/09-slide-styles-page.png)
 
-### Step 10: Browse Available Styles
+### Step 09: Browse Available Styles
 
 View existing styles with previews.
 
 ![Slide Styles list](images/03-advanced-configuration/10-slide-styles-list.png)
 
-### Step 11: Create New Style
+### Step 10: Create New Style
 
 Click "+ Create Style" to add a custom style.
 
 ![Create Style button](images/03-advanced-configuration/11-create-style-button.png)
 
-### Step 12: Style Creation Form
+### Step 11: Style Creation Form
 
 Enter style metadata and CSS content.
 
 ![Create Style modal](images/03-advanced-configuration/12-create-style-modal.png)
 
-### Step 13: Fill In Style Details
+### Step 12: Fill In Style Details
 
 Provide a descriptive name and category.
 
 ![Style form filled](images/03-advanced-configuration/13-create-style-filled.png)
 
-### Step 14: View System Styles
+### Step 13: View System Styles
 
 System styles serve as reference implementations.
 
 ![System style details](images/03-advanced-configuration/14-system-style-details.png)
 
-### Step 15: Databricks Brand Style
+### Step 14: Corporate Theme Style
 
-The Databricks Brand style applies official colors and typography.
+The Corporate Theme style applies professional styling and typography.
 
-![Brand style details](images/03-advanced-configuration/15-brand-style-details.png)
+![Corporate Theme details](images/03-advanced-configuration/15-brand-style-details.png)
 
 ### CSS Style Guidelines
 
@@ -160,7 +152,7 @@ li { margin-bottom: 8px; }
 
 ---
 
-## Step 16: Configuration Overview
+## Step 15: Configuration Overview
 
 All configuration pages are accessible from the main navigation.
 
