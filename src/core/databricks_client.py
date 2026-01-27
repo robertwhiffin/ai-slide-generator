@@ -65,7 +65,12 @@ def get_system_client(force_new: bool = False) -> WorkspaceClient:
             logger.info("Initializing system Databricks client from environment")
             _system_client = WorkspaceClient()
 
-            # Verify connection
+            # Skip verification in development mode - allows local dev without valid token
+            if os.getenv("ENVIRONMENT") == "development":
+                logger.info("Development mode: skipping Databricks connection verification")
+                return _system_client
+
+            # Verify connection (production/staging only)
             try:
                 current_user = _system_client.current_user.me()
                 logger.info(
