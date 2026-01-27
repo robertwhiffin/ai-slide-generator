@@ -8,6 +8,12 @@
 import { Page, expect } from '@playwright/test';
 import * as path from 'path';
 import * as fs from 'fs';
+import { fileURLToPath } from 'url';
+import { dirname } from 'path';
+
+// ESM-compatible __dirname equivalent
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
 
 // Base path for user guide images (relative to project root)
 const DOCS_IMAGE_BASE = path.join(__dirname, '..', '..', '..', 'docs', 'user-guide', 'images');
@@ -85,15 +91,25 @@ export class UserGuideCapture {
 
   /**
    * Add a visual highlight to an element (red border).
+   * Accepts Playwright-style selectors (text=, :has-text(), etc.)
    */
   private async highlightElement(selector: string): Promise<void> {
-    await this.page.evaluate((sel) => {
-      const element = document.querySelector(sel);
-      if (element) {
-        (element as HTMLElement).style.outline = '3px solid #FF3621';
-        (element as HTMLElement).style.outlineOffset = '2px';
+    try {
+      // Use Playwright's locator to find the element
+      const locator = this.page.locator(selector).first();
+      
+      // Check if element exists and is visible
+      if (await locator.isVisible({ timeout: 2000 })) {
+        // Add highlight via evaluate on the specific element
+        await locator.evaluate((el) => {
+          (el as HTMLElement).style.outline = '3px solid #FF3621';
+          (el as HTMLElement).style.outlineOffset = '2px';
+        });
       }
-    }, selector);
+    } catch {
+      // If element not found, continue without highlight
+      console.log(`Could not highlight element: ${selector}`);
+    }
     // Brief pause for render
     await this.page.waitForTimeout(100);
   }

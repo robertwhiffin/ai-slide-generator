@@ -7,8 +7,8 @@
 export const mockProfiles = [
   {
     id: 1,
-    name: "KPMG UK Consumption",
-    description: "Claude 4.5 and kpmg uk consumption data",
+    name: "Sales Analytics",
+    description: "Analytics profile for sales data insights",
     is_default: true,
     created_at: "2026-01-08T20:10:29.720015",
     created_by: "system",
@@ -17,8 +17,8 @@ export const mockProfiles = [
   },
   {
     id: 2,
-    name: "use cases",
-    description: "Use case analysis and progression tracking",
+    name: "Marketing Reports",
+    description: "Marketing campaign performance reports",
     is_default: false,
     created_at: "2026-01-08T20:10:29.724407",
     created_by: "system",
@@ -32,7 +32,7 @@ export const mockDeckPrompts = {
   prompts: [
     {
       id: 1,
-      name: "Consumption Review",
+      name: "Monthly Review",
       description: "Template for consumption review meetings. Analyzes usage trends, identifies key drivers, and highlights areas for optimization.",
       category: "Review",
       prompt_content: "Create a consumption review presentation...",
@@ -100,8 +100,8 @@ export const mockSlideStyles = {
     },
     {
       id: 2,
-      name: "Databricks Brand",
-      description: "Official Databricks brand colors and typography. Navy headers, Lava red accents, clean modern layout.",
+      name: "Corporate Theme",
+      description: "Professional corporate styling with clean typography and modern layout.",
       category: "Brand",
       style_content: "/* Databricks brand style CSS */",
       is_active: true,
@@ -127,7 +127,7 @@ export const mockSessions = {
       message_count: 4,
       has_slide_deck: true,
       profile_id: 1,
-      profile_name: "KPMG UK Consumption"
+      profile_name: "Sales Analytics"
     },
     {
       session_id: "a2c5f1d9-8ef7-48dc-be69-0ead7be316dd",
@@ -138,7 +138,7 @@ export const mockSessions = {
       message_count: 4,
       has_slide_deck: true,
       profile_id: 2,
-      profile_name: "use cases"
+      profile_name: "Marketing Reports"
     }
   ],
   count: 2
