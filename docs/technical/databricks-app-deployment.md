@@ -1,28 +1,28 @@
 # Databricks App Deployment System
 
-**One-line summary**: Packaging, configuration, and deployment automation for hosting the AI Slide Generator as a Databricks App with environment-specific settings and authentication.
+**One-line summary**: Two-package pip distribution enabling one-command deployment of Tellr to Databricks Apps with bundled frontend and runtime dependencies.
 
 ---
 
 ## Stack / Entry Points
 
 **Technologies:**
-- **Deployment CLI**: `infra/deploy.py` (Python, uses Databricks SDK)
-- **Build tools**: `python -m build` (setuptools-scm for wheels), `npm run build` (Vite for frontend)
-- **Databricks SDK**: `WorkspaceClient` for Files API and Apps API
-- **Configuration**: YAML files (`deployment.yaml`, `app.yaml`)
+- **Deployment Package**: `databricks-tellr` (PyPI) — deployment orchestration from notebooks
+- **Application Package**: `databricks-tellr-app` (PyPI) — bundled runtime with backend + frontend
+- **Build Tools**: `python -m build`, `npm run build` (Vite), custom `setup.py` for asset bundling
+- **Databricks SDK**: `WorkspaceClient` for Apps API, Files API, Database API
+- **Runtime**: FastAPI + uvicorn serving React SPA
 
 **Key files:**
-- `infra/deploy.py` – Main deployment orchestrator (CLI entry point)
-- `infra/config.py` – Parses `deployment.yaml` into dataclasses
-- `config/deployment.yaml` – Environment definitions (dev, staging, prod)
-- `app.yaml` – Databricks Apps runtime manifest
-- `src/config/client.py` – Runtime Databricks authentication (env vars only)
+- `packages/databricks-tellr/` — Deployment CLI package
+- `packages/databricks-tellr-app/` — Application runtime package
+- `scripts/publish_pypi.sh` — Build and publish both packages
+- `src/api/main.py` — FastAPI app with frontend serving
 
 **Environment assumptions:**
-- Deployment requires `DATABRICKS_HOST` + `DATABRICKS_TOKEN` or `~/.databrickscfg` profile
-- Runtime app automatically receives workspace credentials from Databricks Apps platform
-- Python 3.11+, Node.js for frontend builds
+- Deployment: Databricks notebook with `%pip install databricks-tellr`
+- Runtime: Databricks Apps platform with auto-injected credentials
+- Python 3.10+, Node.js for frontend builds (development only)
 
 ---
 
@@ -30,385 +30,513 @@
 
 ```
 ┌──────────────────────────────────────────────────────────────┐
-│ Local Development Machine                                    │
+│ Databricks Notebook                                          │
 │                                                               │
-│  infra/deploy.py (CLI)                                       │
-│    ├─ Build: wheel + frontend bundle                         │
-│    ├─ Stage: temp dir with structured layout                 │
-│    └─ Upload: Files API → workspace path                     │
+│  %pip install databricks-tellr databricks-sdk==0.73.0        │
 │                                                               │
-│  Authentication: --profile or env vars (deployment time)     │
+│  tellr.create(                                                │
+│      lakebase_name="tellr-db",                               │
+│      schema_name="app_data",                                 │
+│      app_name="tellr",                                       │
+│      app_file_workspace_path="/Workspace/.../tellr"          │
+│  )                                                            │
+│                                                               │
+│  Generates:                                                   │
+│    ├─ requirements.txt  → "databricks-tellr-app==0.1.21"     │
+│    └─ app.yaml          → startup command + env vars          │
 └───────────────────────┬──────────────────────────────────────┘
                         │ Files API + Apps API
                         ↓
 ┌──────────────────────────────────────────────────────────────┐
-│ Databricks Workspace                                         │
+│ Databricks Apps Runtime                                       │
 │                                                               │
-│  /Workspace/Users/.../ai-slide-generator/                    │
-│    ├─ wheels/ai_slide_generator-*.whl                        │
-│    ├─ config/*.yaml                                          │
-│    ├─ frontend/dist/                                         │
-│    └─ app.yaml (entrypoint)                                  │
+│  1. pip install -r requirements.txt                           │
+│     └─ Installs databricks-tellr-app from PyPI               │
+│        ├─ src/         (backend)                              │
+│        └─ _assets/     (frontend bundle)                      │
 │                                                               │
-│  Databricks App Runtime                                      │
-│    • Runs: sh run_app.sh → pip install wheel → uvicorn      │
-│    • Env: DATABRICKS_HOST, DATABRICKS_TOKEN (auto-injected) │
-│    • Auth: Service principal (not personal token)            │
+│  2. python -c "from databricks_tellr_app.run import          │
+│                 init_database; init_database()"               │
+│     └─ Creates tables + seeds defaults                        │
+│                                                               │
+│  3. python -m databricks_tellr_app.run                        │
+│     └─ Starts uvicorn on port 8000                           │
+│        ├─ API routes: /api/*                                  │
+│        └─ Frontend SPA: / (from bundled assets)               │
 └──────────────────────────────────────────────────────────────┘
 ```
 
-**Critical separation**: Deployment uses optional profiles for multi-workspace management. Runtime uses only environment variables (12-factor app pattern).
+---
+
+## Two-Package Structure
+
+The distribution splits into two complementary PyPI packages:
+
+### 1. databricks-tellr (Deployment Package)
+
+**Purpose:** Lightweight CLI for deploying Tellr from notebooks.
+
+**Location:** `packages/databricks-tellr/`
+
+**Contents:**
+
+| File/Directory | Description |
+|----------------|-------------|
+| `databricks_tellr/__init__.py` | Exports `create`, `update`, `delete` functions |
+| `databricks_tellr/deploy.py` | Deployment orchestration (Lakebase, file upload, app creation) |
+| `databricks_tellr/_templates/app.yaml.template` | App manifest template |
+| `databricks_tellr/_templates/requirements.txt.template` | Requirements template |
+
+**Dependencies (minimal):**
+```toml
+dependencies = [
+    "databricks-sdk>=0.20.0",
+    "psycopg2-binary>=2.9.0",
+    "pyyaml>=6.0.0",
+]
+```
+
+**PyPI:** `pip install databricks-tellr`
+
+### 2. databricks-tellr-app (Application Package)
+
+**Purpose:** Complete runtime — backend code + bundled frontend + all dependencies.
+
+**Location:** `packages/databricks-tellr-app/`
+
+**Contents at Build Time:**
+
+| Component | Source | Destination in Package |
+|-----------|--------|------------------------|
+| Backend | `src/` | `src/` (Python modules) |
+| Frontend | `frontend/dist/` | `databricks_tellr_app/_assets/frontend/` |
+| Entrypoint | `databricks_tellr_app/run.py` | Runtime startup script |
+
+**Dependencies (full runtime):**
+- FastAPI, uvicorn, pydantic
+- LangChain, databricks-langchain, litellm
+- SQLAlchemy, psycopg2-binary
+- BeautifulSoup, lxml (HTML processing)
+- MLflow, OpenTelemetry
+- python-pptx, Playwright (export)
+- Full list in `packages/databricks-tellr-app/pyproject.toml`
+
+**PyPI:** Installed automatically via generated `requirements.txt`
+
+---
+
+## Build Process (scripts/publish_pypi.sh)
+
+The publish script builds and uploads both packages to PyPI:
+
+```bash
+./scripts/publish_pypi.sh          # Upload to PyPI
+./scripts/publish_pypi.sh --test   # Upload to TestPyPI
+```
+
+### Build Steps
+
+1. **Build databricks-tellr** (simple):
+   ```bash
+   python -m build --sdist --wheel packages/databricks-tellr/
+   ```
+   - Packages `deploy.py` and templates
+   - No special processing required
+
+2. **Build databricks-tellr-app** (custom):
+   ```bash
+   # Copy src/ before build (find_packages needs it)
+   cp -r src/ packages/databricks-tellr-app/src/
+   
+   python -m build --sdist --wheel packages/databricks-tellr-app/
+   
+   # Cleanup after build
+   rm -rf packages/databricks-tellr-app/src/
+   ```
+
+3. **Custom setup.py (BuildWithFrontend)**:
+
+   The `packages/databricks-tellr-app/setup.py` extends `build_py`:
+
+   ```python
+   class BuildWithFrontend(build_py):
+       def run(self):
+           # 1. Build frontend (npm install && npm run build)
+           subprocess.run(["npm", "install"], cwd=frontend_dir)
+           subprocess.run(["npm", "run", "build"], cwd=frontend_dir)
+           
+           # 2. Copy dist/ to package _assets/frontend/
+           shutil.copytree(frontend_dir / "dist", assets_root / "frontend")
+           
+           # 3. Copy src/ to package (backend code)
+           shutil.copytree(repo_root / "src", package_root / "src")
+           
+           # 4. Run standard build
+           super().run()
+           
+           # 5. Cleanup copied directories
+   ```
+
+4. **Upload both packages**:
+   ```bash
+   python -m twine upload packages/databricks-tellr/dist/* \
+                          packages/databricks-tellr-app/dist/*
+   ```
+
+---
+
+## Frontend Serving in Production
+
+When deployed, FastAPI serves the bundled frontend as static files.
+
+### Resolution Path
+
+```python
+# src/api/main.py
+
+def _resolve_frontend_dist():
+    """Resolve frontend assets bundled in the app package."""
+    # Uses importlib.resources to access package data
+    assets_root = resources.files("databricks_tellr_app") / "_assets" / "frontend"
+    
+    if assets_root.is_dir():
+        return resources.as_file(assets_root)  # Returns filesystem path
+    return None
+```
+
+### Mounting Strategy
+
+```python
+def _mount_frontend(app: FastAPI, frontend_dist: Path):
+    # Static assets (JS, CSS, images)
+    app.mount("/assets", StaticFiles(directory=frontend_dist / "assets"))
+    
+    # Favicon
+    @app.get("/favicon.svg")
+    async def serve_favicon():
+        return FileResponse(frontend_dist / "favicon.svg")
+    
+    # SPA catch-all (all non-API routes serve index.html)
+    @app.get("/{full_path:path}")
+    async def serve_spa(full_path: str):
+        if full_path.startswith("api/"):
+            raise HTTPException(404)
+        return FileResponse(frontend_dist / "index.html")
+```
+
+### Development vs Production
+
+| Aspect | Development | Production |
+|--------|-------------|------------|
+| Frontend | Vite dev server (port 5173) | Bundled in pip package |
+| CORS | Enabled (localhost origins) | Disabled |
+| Serving | Separate processes | Single FastAPI process |
+
+---
+
+## Deployment Flow
+
+### tellr.create()
+
+Creates all infrastructure and deploys the app:
+
+1. **Lakebase Setup**
+   - Get or create Lakebase database instance
+   - Wait for instance to be running
+
+2. **Generate Deployment Files**
+   ```
+   staging_dir/
+   ├── requirements.txt  → "databricks-tellr-app==0.1.21"
+   └── app.yaml          → startup command + env vars
+   ```
+
+3. **Upload to Workspace**
+   - Create workspace directory
+   - Upload requirements.txt and app.yaml
+
+4. **Create Databricks App**
+   - Register app with Apps API
+   - Attach database resource with CAN_CONNECT_AND_CREATE permission
+   - Configure user API scopes (sql, genie, catalog, serving-endpoints)
+
+5. **Setup Database Schema**
+   - Create PostgreSQL schema
+   - Grant permissions to app service principal
+
+6. **Deploy App**
+   - Trigger deployment
+   - Wait for app to be running
+
+### Generated app.yaml
+
+```yaml
+name: "tellr"
+description: "Tellr - AI Slide Generator"
+
+command:
+  - "sh"
+  - "-c"
+  - |
+    pip install --upgrade --no-cache-dir -r requirements.txt && \
+    python -c "from databricks_tellr_app.run import init_database; init_database()" && \
+    python -m databricks_tellr_app.run
+
+env:
+  - name: ENVIRONMENT
+    value: "production"
+  - name: LAKEBASE_INSTANCE
+    value: "tellr-db"
+  - name: LAKEBASE_SCHEMA
+    value: "app_data"
+  - name: DATABRICKS_HOST
+    valueFrom: "system.databricks_host"
+  - name: DATABRICKS_TOKEN
+    valueFrom: "system.databricks_token"
+```
+
+### Generated requirements.txt
+
+```
+# Generated by databricks-tellr
+databricks-tellr-app==0.1.21
+```
 
 ---
 
 ## Key Concepts / Data Contracts
 
-### DeploymentConfig
+### Deployment Function Signatures
 
 ```python
-@dataclass
-class DeploymentConfig:
-    app_name: str                      # Unique Databricks App identifier
-    description: str                   # Human-readable description
-    workspace_path: str                # Where files are uploaded
-    permissions: List[Dict[str, str]]  # ACLs (CAN_USE, CAN_MANAGE)
-    compute_size: str                  # MEDIUM, LARGE, or LIQUID
-    env_vars: Dict[str, str]           # Injected into app container
-    exclude_patterns: List[str]        # Build exclusions
-    timeout_seconds: int               # Deployment timeout
-    poll_interval_seconds: int         # Status polling interval
+def create(
+    lakebase_name: str,           # Lakebase instance name
+    schema_name: str,             # PostgreSQL schema
+    app_name: str,                # Databricks App name
+    app_file_workspace_path: str, # Where to upload files
+    lakebase_compute: str = "CU_1",  # CU_1, CU_2, CU_4, CU_8
+    app_compute: str = "MEDIUM",     # MEDIUM, LARGE, LIQUID
+    app_version: Optional[str] = None,  # Pin specific version
+    description: str = "Tellr AI Slide Generator",
+    client: WorkspaceClient | None = None,
+    profile: str | None = None,
+) -> dict[str, Any]
+
+def update(
+    app_name: str,
+    app_file_workspace_path: str,
+    lakebase_name: str,
+    schema_name: str,
+    app_version: Optional[str] = None,
+    reset_database: bool = False,  # Drop and recreate schema
+    client: WorkspaceClient | None = None,
+    profile: str | None = None,
+) -> dict[str, Any]
+
+def delete(
+    app_name: str,
+    lakebase_name: str | None = None,
+    schema_name: str | None = None,
+    reset_database: bool = False,
+    client: WorkspaceClient | None = None,
+    profile: str | None = None,
+) -> dict[str, Any]
 ```
 
-### deployment.yaml Structure
+### Return Values
 
-```yaml
-environments:
-  development:
-    app_name: "ai-slide-generator-dev"
-    workspace_path: "/Workspace/Users/{username}/apps/dev/..."
-    permissions:
-      - user_name: "user@example.com"
-        permission_level: "CAN_MANAGE"
-    compute_size: "MEDIUM"
-    env_vars:
-      ENVIRONMENT: "development"
-      LOG_LEVEL: "DEBUG"
+```python
+# create() returns:
+{
+    "url": "https://workspace.cloud.databricks.com/apps/tellr",
+    "app_name": "tellr",
+    "lakebase_name": "tellr-db",
+    "schema_name": "app_data",
+    "status": "created"
+}
 
-common:
-  build:
-    exclude_patterns: ["tests", "*.md", "__pycache__"]
-  deployment:
-    timeout_seconds: 300
+# update() returns:
+{
+    "url": "...",
+    "app_name": "tellr",
+    "deployment_id": "d-abc123",
+    "status": "updated",
+    "database_reset": False
+}
+
+# delete() returns:
+{
+    "app_name": "tellr",
+    "status": "deleted",
+    "database_reset": True
+}
 ```
-
-**No secrets**: `deployment.yaml` is version controlled. Contains paths, permissions, compute settings only.
-
-### Authentication Contracts
-
-| Context | Method | Source |
-|---------|--------|--------|
-| **Deployment** (infra/deploy.py) | Profile OR env vars | `--profile logfood` or `DATABRICKS_HOST`/`TOKEN` |
-| **Runtime** (src/config/client.py) | Env vars only | Platform-injected credentials |
-
-**Why different?** Deployment manages multiple workspaces; runtime follows 12-factor principles.
 
 ---
 
 ## Component Responsibilities
 
-| Module | Responsibility | Key Functions/Classes |
-|--------|---------------|----------------------|
-| `infra/deploy.py` | CLI orchestration, build pipeline, upload, app lifecycle | `deploy()`, `build_python_wheel()`, `upload_files_to_workspace()`, `create_app()`, `update_app()` |
-| `infra/config.py` | Parse YAML, validate environments | `load_deployment_config()`, `DeploymentConfig` |
-| `config/deployment.yaml` | Environment definitions | N/A (data file) |
-| `config/deployment.example.yaml` | Template/documentation | N/A (reference) |
-| `app.yaml` | Databricks Apps manifest | Defines entrypoint, compute |
-| `src/core/databricks_client.py` | Runtime auth (env vars) | `get_databricks_client()` |
-| `src/core/settings_db.py` | Load settings from database | `get_settings()`, `AppSettings` |
+| Module | Responsibility |
+|--------|---------------|
+| `databricks_tellr.deploy` | Orchestrates Lakebase, file upload, app lifecycle |
+| `databricks_tellr._templates/` | app.yaml and requirements.txt templates |
+| `databricks_tellr_app.run` | `init_database()` and `main()` entrypoints |
+| `src/api/main.py` | FastAPI app, frontend mounting, middleware |
+| `src/core/database.py` | SQLAlchemy engine, Lakebase token refresh |
+| `src/core/init_default_profile.py` | Seeds default profiles, prompts, styles |
 
 ---
 
 ## State/Data Flow
 
-### Deployment Flow (Create/Update)
+### App Startup Sequence
 
-1. **Load config**: Parse `deployment.yaml` for specified environment (dev/staging/prod)
-2. **Validate**: Check environment exists, required fields present
-3. **Build artifacts**:
-   - Python wheel: `python -m build --wheel` → `dist/ai_slide_generator-*.whl`
-   - Frontend bundle: `cd frontend && npm run build` → `frontend/dist/`
-4. **Stage directory**: Assemble temp dir with structured layout:
-   ```
-   /tmp/ai-slide-generator-deploy-xxxxx/
-   ├── wheels/*.whl
-   ├── config/*.yaml (excludes deployment.yaml)
-   ├── frontend/dist/
-   └── app.yaml
-   ```
-5. **Upload files**: Use Databricks Files API to copy to workspace path
-   - Clean old wheels (keep only latest)
-   - Overwrite config files
-   - Replace frontend assets
-6. **Create/Update app**: Call Apps API with:
-   - `name`, `description`, `source_code_path`
-   - Compute config (MEDIUM/LARGE/LIQUID)
-   - Environment variables from `deployment.yaml`
-7. **Set permissions**: Apply ACLs (user/group permissions)
-8. **Cleanup**: Remove temp staging directory
+1. **Databricks Apps runs command** from app.yaml
+2. **pip install** fetches `databricks-tellr-app` from PyPI
+3. **init_database()** runs:
+   - Creates SQLAlchemy tables (if not exist)
+   - Seeds default profile, deck prompts, slide styles
+4. **uvicorn starts** FastAPI on port 8000
+5. **Lifespan startup**:
+   - Starts Lakebase token refresh (if applicable)
+   - Mounts frontend assets (production mode)
+   - Starts chat job queue worker
+   - Starts export job queue worker
+6. **App serves requests**:
+   - API routes under `/api/*`
+   - Frontend SPA at all other routes
 
-### Runtime Startup
+### Request Flow
 
-1. Databricks Apps runs `sh run_app.sh` (defined in `app.yaml`)
-2. Script installs wheel: `pip install wheels/*.whl`
-3. Starts FastAPI: `uvicorn src.api.main:app --host 0.0.0.0 --port 8080`
-4. `src/core/settings_db.py` loads config from database:
-   - Reads profile settings from PostgreSQL/Lakebase
-   - Merges env var overrides (`LOG_LEVEL`, `ENVIRONMENT`)
-5. `src/core/databricks_client.py` creates `WorkspaceClient()` using env vars:
-   - `DATABRICKS_HOST` and `DATABRICKS_TOKEN` auto-injected by platform
-6. Application serves on port 8080 (Databricks Apps standard)
-
----
-
-## Deployment CLI Interface
-
-### Commands
-
-Use the `deploy.sh` wrapper script from the project root (activates venv automatically):
-
-```bash
-# Create new app
-./deploy.sh create --env development --profile <name>
-
-# Update existing app (code + settings changes)
-./deploy.sh update --env production --profile <name>
-
-# Delete app (workspace files remain)
-./deploy.sh delete --env staging --profile <name>
-
-# Validate settings without deploying
-./deploy.sh create --env production --profile <name> --dry-run
 ```
-
-<details>
-<summary>Alternative: Direct Python invocation (requires activated venv)</summary>
-
-```bash
-source .venv/bin/activate
-python -m db_app_deployment.deploy --create --env development --profile <name>
+User Browser
+    │
+    ├─ GET /             → index.html (React SPA)
+    ├─ GET /assets/*     → Static JS/CSS/images
+    ├─ POST /api/chat    → Chat processing (agent)
+    ├─ GET /api/sessions → Session management
+    └─ GET /api/health   → Health check
 ```
-
-</details>
-
-### Arguments
-
-| Flag | Required | Description |
-|------|----------|-------------|
-| `--env` | Yes | Environment name (development, staging, production) |
-| `--create` | One of | Create new Databricks App |
-| `--update` | create/update/delete | Update existing app |
-| `--delete` | required | Delete app registration |
-| `--profile` | No | Databricks profile from `~/.databrickscfg` |
-| `--dry-run` | No | Validate without deploying |
-
-### Authentication Priority
-
-1. `--profile` flag (if provided)
-2. Environment variables (`DATABRICKS_HOST`, `DATABRICKS_TOKEN`)
-3. Default Databricks SDK auth chain (config file, Azure CLI, etc.)
 
 ---
 
 ## Operational Notes
 
+### Version Pinning
+
+By default, `tellr.create()` resolves the installed version of `databricks-tellr-app`:
+
+```python
+# If databricks-tellr-app is installed alongside databricks-tellr
+version = metadata.version("databricks-tellr-app")  # e.g., "0.1.21"
+# requirements.txt: databricks-tellr-app==0.1.21
+```
+
+To pin a specific version:
+```python
+tellr.create(..., app_version="0.1.20")
+```
+
+To use latest from PyPI:
+```python
+# Don't install databricks-tellr-app locally
+# requirements.txt will just be: databricks-tellr-app
+```
+
+### Database Reset
+
+To reset all app data (drop and recreate schema):
+
+```python
+tellr.update(
+    app_name="tellr",
+    app_file_workspace_path="/Workspace/.../tellr",
+    lakebase_name="tellr-db",
+    schema_name="app_data",
+    reset_database=True  # Drops schema, tables recreated on startup
+)
+```
+
 ### Error Handling
 
-**Common failures:**
-- **"App already exists"**: Use `--update` instead of `--create`
-- **"Permission denied"**: Deployment identity needs workspace file access
-- **"Connection failed"**: Verify `DATABRICKS_HOST` includes `https://`
-- **Build failures**: Check `python -m build` and `npm run build` work locally
+Common deployment errors:
 
-**Debugging workflow:**
-```bash
-# 1. Validate settings
-./deploy.sh create --env development --profile <name> --dry-run
-
-# 2. Test auth separately
-source .venv/bin/activate
-python -c "from databricks.sdk import WorkspaceClient; print(WorkspaceClient().current_user.me())"
-
-# 3. Check app status in Databricks UI
-# Navigate to: Apps → [app-name] → Logs
-```
+| Error | Cause | Resolution |
+|-------|-------|------------|
+| `DeploymentError: Lakebase not found` | Instance doesn't exist | Will be auto-created |
+| `App already exists` | Name collision | Use `update()` or different name |
+| `Permission denied` | Insufficient workspace access | Check notebook permissions |
+| `psycopg2 import error` | Missing dependency | Included in databricks-tellr deps |
 
 ### Logging
 
-- Deployment script outputs structured steps (emoji prefixes for scanning)
-- Runtime logs go to Databricks Apps logging (view in UI)
-- MLflow traces capture agent interactions (see `backend-overview.md`)
-
-### Configuration Overrides
-
-**Deployment-time** (in `deployment.yaml`):
-```yaml
-env_vars:
-  ENVIRONMENT: "production"
-  LOG_LEVEL: "INFO"
-  CUSTOM_SETTING: "value"
-```
-
-**Runtime precedence**:
-1. Platform-injected variables
-2. `deployment.yaml` → `env_vars`
-3. `config.yaml` defaults
-
-### Monitoring
-
-**Health checks:**
-```bash
-curl https://<app-url>/health
-# Expected: {"status": "ok"}
-
-curl https://<app-url>/api/health
-# Full health endpoint
-```
-
-**App status**: Databricks UI → Apps → `ai-slide-generator-{env}` → Status/Logs
+- Deployment: Structured output with step-by-step progress
+- Runtime: Standard Python logging to Databricks Apps logs
+- MLflow: Agent traces logged to workspace experiment
 
 ---
 
 ## Extension Guidance
 
-### Add a New Environment
+### Add New Environment Variables
 
-1. **Edit `config/deployment.yaml`**:
+1. Edit `_templates/app.yaml.template`:
    ```yaml
-   environments:
-     qa:
-       app_name: "ai-slide-generator-qa"
-       workspace_path: "/Workspace/Shared/apps/qa/..."
-       permissions:
-         - group_name: "qa-team"
-           permission_level: "CAN_USE"
-       compute_size: "MEDIUM"
-       env_vars:
-         ENVIRONMENT: "qa"
+   env:
+     - name: MY_NEW_VAR
+       value: "${MY_NEW_VAR}"
    ```
 
-2. **Update `infra/deploy.py` choices** (optional enforcement):
-   ```python
-   parser.add_argument("--env", choices=["development", "staging", "production", "qa"])
-   ```
+2. Update `_write_app_yaml()` in deploy.py to substitute the value
 
-3. **Deploy**:
-   ```bash
-   ./deploy.sh create --env qa --profile qa-workspace
-   ```
+3. Republish packages
 
-### Add Pre-Deployment Validation
+### Test with Local Wheel
+
+For development testing before publishing:
 
 ```python
-# db_app_deployment/deploy.py :: deploy()
-def validate_before_deploy(config: DeploymentConfig):
-    """Run checks before uploading."""
-    # Verify builds succeed
-    wheel_path = build_python_wheel(project_root)
-    assert wheel_path.exists()
-
-    # Test settings validity
-    from src.core.settings_db import get_settings
-    settings = get_settings()
-
-    # Check workspace path accessible
-    try:
-        workspace_client.workspace.get_status(config.workspace_path)
-    except NotFound:
-        print("⚠️  Path will be created")
+# In deploy.py, _write_requirements supports local wheel path
+_write_requirements(
+    staging_dir,
+    app_version=None,
+    local_wheel_path="./wheels/databricks_tellr_app-0.1.21-py3-none-any.whl"
+)
 ```
 
-### Implement CI/CD
+### Add New API Scopes
 
-**GitHub Actions example**:
-```yaml
-name: Deploy to Databricks
-on:
-  push:
-    branches: [main]
-
-jobs:
-  deploy:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v3
-      - name: Setup Python
-        uses: actions/setup-python@v4
-        with:
-          python-version: '3.11'
-      - name: Deploy to staging
-        env:
-          DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST_STAGING }}
-          DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN_STAGING }}
-        run: |
-          python -m venv .venv
-          source .venv/bin/activate
-          pip install -e ".[dev]"
-          ./deploy.sh update --env staging --profile staging
-```
-
-**Best practices:**
-- Store credentials as GitHub Secrets
-- Use `--update` for idempotent deployments
-- Run tests before deploying (`pytest tests/`)
-- Add approval gates for production
-
-### Blue-Green Deployment
-
-**Current limitation**: Single app name = single instance.
-
-**Workaround**:
-1. Deploy new version with different name: `ai-slide-generator-v2`
-2. Test new version
-3. Update external routing (if applicable)
-4. Delete old version
-
-**Future**: Use Databricks Apps deployment slots or versioned paths.
-
-### Add Environment-Specific Config
-
-**Option 1: Use `env_vars` in deployment.yaml**
-```yaml
-env_vars:
-  FEATURE_FLAG_X: "true"
-  EXTERNAL_API: "https://api.example.com"
-```
-
-**Option 2: Load different runtime configs**
+Edit `_create_app()` in deploy.py:
 ```python
-# src/settings/config_loader.py
-env = os.getenv("ENVIRONMENT", "development")
-config_path = f"settings/settings.{env}.yaml"  # settings.production.yaml
+app = App(
+    ...,
+    user_api_scopes=[
+        "sql",
+        "dashboards.genie",
+        "catalog.tables:read",
+        "my.new.scope",  # Add new scope
+    ],
+)
 ```
 
 ---
 
 ## Key Invariants
 
-**Must hold for successful deployments:**
-- `deployment.yaml` must exist and be valid YAML
-- Specified environment must be defined in `deployment.yaml`
-- Workspace path must be accessible to deployment identity
-- App name must be unique per workspace
-- `app.yaml` must define valid command entrypoint
-- Frontend build must succeed (`frontend/dist/index.html` exists)
-- Python wheel must build successfully
+**Package build requirements:**
+- Frontend must build successfully (`npm run build` produces `frontend/dist/index.html`)
+- `src/` must be a valid Python package
+- Version numbers must match between packages (coordinated in pyproject.toml files)
+
+**Deployment requirements:**
+- Notebook must have workspace write access to `app_file_workspace_path`
+- User must have permission to create Apps and Lakebase instances
+- `databricks-sdk>=0.73.0` for Apps API compatibility
 
 **Runtime requirements:**
-- `DATABRICKS_HOST` and `DATABRICKS_TOKEN` must be set (platform provides)
-- `DATABASE_URL` must point to valid PostgreSQL/Lakebase database
-- Database must have at least one default configuration profile (`is_default=true`)
-- Database must have polling support tables (see `scripts/migrate_polling_support.sql`)
-- Port 8080 must be available (Databricks Apps standard)
+- Databricks Apps platform provides `DATABRICKS_HOST` and `DATABRICKS_TOKEN`
+- Lakebase instance must be running (auto-provisioned credentials via database resource)
+- Port 8000 available (Databricks Apps standard)
 
 ---
 
@@ -416,111 +544,13 @@ config_path = f"settings/settings.{env}.yaml"  # settings.production.yaml
 
 | File | Purpose | Edit When |
 |------|---------|-----------|
-| `infra/deploy.py` | Deployment orchestration | Add validations, new operations |
-| `infra/config.py` | Parse deployment.yaml | Add config fields, validation |
-| `config/deployment.yaml` | Environment definitions | Add environments, change paths/compute |
-| `config/deployment.example.yaml` | Template/docs | Schema changes |
-| `app.yaml` | App entrypoint | Change startup command (rare) |
-| `src/core/databricks_client.py` | Runtime auth | Modify auth strategy (discouraged) |
-| `src/core/settings_db.py` | Database settings loader | Add config sections, profile handling |
-
----
-
-## Integration with Other Systems
-
-### Frontend Build
-
-- **Source**: `frontend/src/` (React + Vite + TypeScript)
-- **Build**: `npm run build` → `frontend/dist/`
-- **Deployment**: Copied to workspace → served by FastAPI static files
-- **See**: `docs/technical/frontend-overview.md` for UI architecture
-
-### Backend Runtime
-
-- **Entry**: `src/api/main.py` (FastAPI app)
-- **Config**: Loads from database via `settings_db.py`
-- **Auth**: `get_databricks_client()` uses platform credentials
-- **See**: `docs/technical/backend-overview.md` for API/agent architecture
-
-### MLflow Integration
-
-- **Config**: Experiment name stored in database (per profile)
-- **Runtime**: Agent automatically logs traces to Databricks MLflow
-- **Observability**: View traces in workspace MLflow UI
-- **See**: `backend-overview.md` → "MLflow traces" section
-
----
-
-## Comparison: Deployment vs Runtime Auth
-
-| Aspect | Deployment (infra/deploy.py) | Runtime (src/config/client.py) |
-|--------|----------------------------|--------------------------------|
-| **Method** | Profile OR env vars | Env vars only |
-| **Source** | `--profile` or `DATABRICKS_HOST`/`TOKEN` | Platform-injected |
-| **Identity** | Personal or service account | App service principal |
-| **Use case** | Manage multiple workspaces | Running application |
-| **Configured in** | CLI args or local env | `deployment.yaml` → `env_vars` |
-
-**Rationale**: Deployment tooling needs flexibility for multi-workspace management. Runtime follows 12-factor app principles (config via environment).
-
----
-
-## Troubleshooting Checklist
-
-**Before deploying:**
-- [ ] Tests pass (`pytest tests/`)
-- [ ] `deployment.yaml` is valid YAML
-- [ ] Environment exists in `deployment.yaml`
-- [ ] Databricks credentials configured (env vars or profile)
-- [ ] Frontend builds locally (`cd frontend && npm run build`)
-- [ ] Python wheel builds (`python -m build`)
-
-**After deployment:**
-- [ ] App shows "Running" in Databricks UI
-- [ ] `/health` endpoint returns 200
-- [ ] Logs show FastAPI startup
-- [ ] Can send chat message and generate slides
-- [ ] MLflow traces appear in experiment
-
-**If deployment fails:**
-1. Run `./deploy.sh <action> --env <env> --profile <name> --dry-run` to validate config
-2. Test auth: `databricks workspace list /`
-3. Check workspace path is accessible
-4. Review deployment script output for errors
-5. Inspect app logs in Databricks UI
-
-**If app starts but chat fails:**
-1. Check database has a default profile: `SELECT * FROM config_profiles WHERE is_default = true;`
-2. Run polling migration: `scripts/migrate_polling_support.sql`
-3. Check `chat_requests` table exists
-4. Verify `session_messages.request_id` column exists
-
----
-
-## Best Practices
-
-**Configuration:**
-- Keep secrets out of YAML (use env vars)
-- Version control `deployment.yaml` (no secrets)
-- Use `deployment.example.yaml` as documentation
-- Override with env vars for runtime customization
-
-**Deployment Strategy:**
-- **Dev**: Deploy frequently, single-user, use `--update`
-- **Staging**: Deploy on merge to main, team testing
-- **Prod**: Manual approval, full test suite, larger compute
-
-**Security:**
-- Rotate tokens regularly
-- Principle of least privilege in permissions
-- Separate workspaces for environments (not just paths)
-- Review app access logs
-
-**Monitoring:**
-- Set up health check probes (`/health`)
-- Monitor app logs for errors
-- Track MLflow traces for agent performance
-- Alert on app downtime
+| `packages/databricks-tellr/pyproject.toml` | Deployment package metadata | Bump version, add dependencies |
+| `packages/databricks-tellr/databricks_tellr/deploy.py` | Deployment orchestration | Add features, fix bugs |
+| `packages/databricks-tellr/databricks_tellr/_templates/*` | app.yaml/requirements templates | Change startup behavior |
+| `packages/databricks-tellr-app/pyproject.toml` | App package metadata | Bump version, add runtime deps |
+| `packages/databricks-tellr-app/setup.py` | Custom build with frontend | Change asset bundling |
+| `packages/databricks-tellr-app/databricks_tellr_app/run.py` | Runtime entrypoints | Change startup sequence |
+| `scripts/publish_pypi.sh` | Build and publish script | Change build process |
 
 ---
 
@@ -529,13 +559,17 @@ config_path = f"settings/settings.{env}.yaml"  # settings.production.yaml
 Related documentation:
 - `docs/technical/backend-overview.md` – FastAPI architecture, ChatService, agent lifecycle
 - `docs/technical/frontend-overview.md` – React components, API client, state management
-- `docs/technical/real-time-streaming.md` – SSE vs polling modes (60s proxy timeout workaround)
-- `docs/technical/slide-parser-and-script-management.md` – HTML parsing, script handling
-- `DEPLOYMENT_SETUP.md` – Quick-start deployment guide
+- `docs/technical/database-configuration.md` – Lakebase schema, SQLAlchemy models
+- `docs/technical/real-time-streaming.md` – SSE vs polling modes
 
-This document covers deployment mechanics. For runtime behavior (how the app processes requests, generates slides, manages sessions), see the backend and frontend overviews.
+For user-facing deployment instructions, see the main `README.md`.
 
 ---
 
-**Maintenance note**: Update this doc when deployment process changes (new environments, authentication methods, or build steps). Keep synchronized with `deployment.yaml` schema and `infra/deploy.py` implementation.
+**Maintenance note**: Update this doc when:
+- Package versions are bumped
+- New environment variables are added
+- Build process changes
+- Deployment API signatures change
 
+Keep package versions synchronized between `databricks-tellr` and `databricks-tellr-app`.
