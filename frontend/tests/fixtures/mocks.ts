@@ -194,6 +194,103 @@ export const mockVerificationResponse = {
   details: null
 };
 
+// ============================================
+// Profile Operation Mocks
+// ============================================
+
+// Profile load/switch response
+export const mockProfileLoadResponse = {
+  status: "reloaded",
+  profile_id: 1
+};
+
+// Profile creation response
+export const mockProfileCreateResponse = {
+  id: 3,
+  name: "New Test Profile",
+  description: "A test profile created via wizard",
+  is_default: false,
+  created_at: "2026-01-30T10:00:00.000000",
+  created_by: "test",
+  updated_at: "2026-01-30T10:00:00.000000",
+  updated_by: null
+};
+
+// Profile update response
+export const mockProfileUpdateResponse = {
+  id: 1,
+  name: "Updated Profile Name",
+  description: "Updated description",
+  is_default: true,
+  created_at: "2026-01-08T20:10:29.720015",
+  created_by: "system",
+  updated_at: "2026-01-30T10:00:00.000000",
+  updated_by: "test"
+};
+
+// Duplicate name error response (409 Conflict)
+export const mockDuplicateNameError = {
+  detail: "Profile with this name already exists"
+};
+
+// Delete last profile error response (400 Bad Request)
+export const mockDeleteLastProfileError = {
+  detail: "Cannot delete the last profile"
+};
+
+// Mock Genie spaces for wizard step 2
+export const mockGenieSpaces = {
+  spaces: [
+    {
+      space_id: "01JGKX5N2PWQV8ABC123DEF456",
+      space_name: "Sales Data Space",
+      description: "Contains sales and revenue data"
+    },
+    {
+      space_id: "01JGKX5N2PWQV8XYZ789GHI012",
+      space_name: "Marketing Analytics Space",
+      description: "Marketing campaign metrics"
+    }
+  ],
+  total: 2
+};
+
+// Mock single Genie space lookup response
+export const mockGenieSpaceLookup = {
+  space_id: "01JGKX5N2PWQV8ABC123DEF456",
+  space_name: "Sales Data Space",
+  description: "Contains sales and revenue data"
+};
+
+// Mock profile with full details (for ProfileDetailView)
+export const mockProfileDetail = {
+  id: 1,
+  name: "Sales Analytics",
+  description: "Analytics profile for sales data insights",
+  is_default: true,
+  created_at: "2026-01-08T20:10:29.720015",
+  created_by: "system",
+  updated_at: "2026-01-08T20:10:29.720025",
+  updated_by: null,
+  genie_spaces: [
+    {
+      space_id: "01JGKX5N2PWQV8ABC123DEF456",
+      space_name: "Sales Data Space",
+      description: "Contains sales and revenue data"
+    }
+  ],
+  slide_style: {
+    id: 1,
+    name: "System Default",
+    category: "System"
+  },
+  deck_prompt: {
+    id: 1,
+    name: "Monthly Review",
+    category: "Review"
+  }
+};
+
 /**
  * Create a streaming response for slide generation.
  * Simulates SSE (Server-Sent Events) format.
