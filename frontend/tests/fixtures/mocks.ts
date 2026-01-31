@@ -291,26 +291,107 @@ export const mockProfileDetail = {
   }
 };
 
+// ============================================
+// Slide Style Operation Mocks
+// ============================================
+
+// Slide style creation response
+export const mockStyleCreateResponse = {
+  id: 99,
+  name: "New Test Style",
+  description: "Test style created via E2E",
+  category: "Custom",
+  style_content: "/* test CSS */",
+  is_active: true,
+  is_system: false,
+  created_by: "test",
+  created_at: "2026-01-31T10:00:00.000000",
+  updated_by: null,
+  updated_at: "2026-01-31T10:00:00.000000"
+};
+
+// Slide style update response
+export const mockStyleUpdateResponse = {
+  id: 2,
+  name: "Updated Style Name",
+  description: "Updated description",
+  category: "Custom",
+  style_content: "/* updated CSS */",
+  is_active: true,
+  is_system: false,
+  created_by: "system",
+  created_at: "2026-01-08T20:10:28.695640",
+  updated_by: "test",
+  updated_at: "2026-01-31T10:00:00.000000"
+};
+
+// Duplicate style name error response (409 Conflict)
+export const mockStyleDuplicateError = {
+  detail: "Style with this name already exists"
+};
+
+// Cannot delete system style error response (400 Bad Request)
+export const mockDeleteSystemStyleError = {
+  detail: "Cannot delete system style"
+};
+
+// ============================================
+// Deck Prompt Operation Mocks
+// ============================================
+
+// Deck prompt creation response
+export const mockPromptCreateResponse = {
+  id: 99,
+  name: "New Test Prompt",
+  description: "Test prompt created via E2E",
+  category: "Test",
+  prompt_content: "This is test prompt content for E2E testing.",
+  is_active: true,
+  created_by: "test",
+  created_at: "2026-01-31T10:00:00.000000",
+  updated_by: null,
+  updated_at: "2026-01-31T10:00:00.000000"
+};
+
+// Deck prompt update response
+export const mockPromptUpdateResponse = {
+  id: 1,
+  name: "Updated Prompt Name",
+  description: "Updated description",
+  category: "Review",
+  prompt_content: "Updated prompt content...",
+  is_active: true,
+  created_by: "system",
+  created_at: "2026-01-08T20:10:28.689395",
+  updated_by: "test",
+  updated_at: "2026-01-31T10:00:00.000000"
+};
+
+// Duplicate prompt name error response (409 Conflict)
+export const mockPromptDuplicateError = {
+  detail: "Prompt with this name already exists"
+};
+
 /**
  * Create a streaming response for slide generation.
  * Simulates SSE (Server-Sent Events) format.
  */
 export function createStreamingResponse(slides: typeof mockSlides): string {
   const events: string[] = [];
-  
+
   // Start event
   events.push('data: {"type": "start", "message": "Starting slide generation..."}\n\n');
-  
+
   // Progress events
   events.push('data: {"type": "progress", "message": "Generating slide 1..."}\n\n');
-  
+
   // Slide events
   for (const slide of slides) {
     events.push(`data: {"type": "slide", "slide": ${JSON.stringify(slide)}}\n\n`);
   }
-  
+
   // Complete event
   events.push('data: {"type": "complete", "message": "Generation complete"}\n\n');
-  
+
   return events.join('');
 }
