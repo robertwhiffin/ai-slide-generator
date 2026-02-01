@@ -6,11 +6,13 @@ import { SlideSelection } from './SlideSelection';
 interface SelectionRibbonProps {
   slideDeck: SlideDeck | null;
   onSlideNavigate?: (index: number) => void;
+  versionKey?: string;  // Used to force re-render when switching save point versions
 }
 
 export const SelectionRibbon: React.FC<SelectionRibbonProps> = ({
   slideDeck,
   onSlideNavigate,
+  versionKey,
 }) => {
   const { selectedIndices, setSelection, clearSelection } = useSelection();
   const [warning, setWarning] = useState<string | null>(null);
@@ -62,6 +64,7 @@ export const SelectionRibbon: React.FC<SelectionRibbonProps> = ({
         onSelectionChange={handleSelectionChange}
         onNonContiguousSelection={handleNonContiguousSelection}
         onSlideNavigate={onSlideNavigate}
+        versionKey={versionKey}
       />
     );
   };
