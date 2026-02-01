@@ -99,6 +99,12 @@ class UserSession(Base):
         uselist=False,
         cascade="all, delete-orphan",
     )
+    versions = relationship(
+        "SlideDeckVersion",
+        back_populates="session",
+        cascade="all, delete-orphan",
+        order_by="SlideDeckVersion.version_number.desc()",
+    )
 
     # Indexes for common queries
     __table_args__ = (
@@ -185,4 +191,45 @@ class SessionSlideDeck(Base):
 
     def __repr__(self):
         return f"<SessionSlideDeck(session_id={self.session_id}, title='{self.title}')>"
+
+
+class SlideDeckVersion(Base):
+    """Save point for slide deck versioning.
+
+    Stores complete snapshots of the slide deck at specific points in time,
+    allowing users to preview and rollback to previous states.
+    Limited to 40 versions per session (oldest deleted when exceeded).
+    """
+
+    __tablename__ = "slide_deck_versions"
+
+    id = Column(Integer, primary_key=True)
+    session_id = Column(
+        Integer,
+        ForeignKey("user_sessions.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+
+    # Version tracking
+    version_number = Column(Integer, nullable=False)
+    description = Column(String(255), nullable=False)  # Auto-generated description
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    # Complete deck snapshot (JSON format)
+    deck_json = Column(Text, nullable=False)
+
+    # Verification results at time of snapshot
+    verification_map_json = Column(Text, nullable=True)
+
+    # Relationship
+    session = relationship("UserSession", back_populates="versions")
+
+    # Indexes for efficient queries
+    __table_args__ = (
+        Index("ix_deck_versions_session_version", "session_id", "version_number"),
+        Index("ix_deck_versions_session_created", "session_id", "created_at"),
+    )
+
+    def __repr__(self):
+        return f"<SlideDeckVersion(session_id={self.session_id}, version={self.version_number}, desc='{self.description}')>"
 
