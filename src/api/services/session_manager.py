@@ -586,6 +586,7 @@ class SessionManager:
         description: str,
         deck_dict: Dict[str, Any],
         verification_map: Optional[Dict[str, Any]] = None,
+        chat_history: Optional[List[Dict[str, Any]]] = None,
     ) -> Dict[str, Any]:
         """Create a new save point (version) for the slide deck.
 
@@ -597,6 +598,7 @@ class SessionManager:
             description: Auto-generated description of the change
             deck_dict: Complete deck snapshot
             verification_map: Verification results at time of snapshot
+            chat_history: Chat messages up to this point (auto-captured if not provided)
 
         Returns:
             Version info dictionary
@@ -637,6 +639,19 @@ class SessionManager:
                         },
                     )
 
+            # Capture chat history if not provided
+            if chat_history is None:
+                chat_history = [
+                    {
+                        "id": m.id,
+                        "role": m.role,
+                        "content": m.content,
+                        "message_type": m.message_type,
+                        "created_at": m.created_at.isoformat(),
+                    }
+                    for m in session.messages
+                ]
+
             # Create new version
             version = SlideDeckVersion(
                 session_id=session.id,
@@ -644,6 +659,7 @@ class SessionManager:
                 description=description,
                 deck_json=json.dumps(deck_dict),
                 verification_map_json=json.dumps(verification_map) if verification_map else None,
+                chat_history_json=json.dumps(chat_history) if chat_history else None,
             )
             db.add(version)
             db.flush()
@@ -654,6 +670,7 @@ class SessionManager:
                     "session_id": session_id,
                     "version_number": next_version,
                     "description": description,
+                    "message_count": len(chat_history) if chat_history else 0,
                 },
             )
 
@@ -662,6 +679,7 @@ class SessionManager:
                 "description": version.description,
                 "created_at": version.created_at.isoformat(),
                 "slide_count": deck_dict.get("slide_count", len(deck_dict.get("slides", []))),
+                "message_count": len(chat_history) if chat_history else 0,
             }
 
     def list_versions(self, session_id: str) -> List[Dict[str, Any]]:
@@ -736,12 +754,20 @@ class SessionManager:
                     slide["verification"] = verification_map.get(content_hash)
                     slide["content_hash"] = content_hash
 
+            # Parse chat history for preview
+            chat_history = (
+                json.loads(version.chat_history_json)
+                if version.chat_history_json
+                else []
+            )
+
             return {
                 "version_number": version.version_number,
                 "description": version.description,
                 "created_at": version.created_at.isoformat(),
                 "deck": deck_dict,
                 "verification_map": verification_map,
+                "chat_history": chat_history,
             }
 
     def restore_version(self, session_id: str, version_number: int) -> Dict[str, Any]:
@@ -790,6 +816,32 @@ class SessionManager:
                 if version.verification_map_json
                 else {}
             )
+            chat_history = (
+                json.loads(version.chat_history_json)
+                if version.chat_history_json
+                else []
+            )
+
+            # Merge verification into slides by content hash
+            from src.utils.slide_hash import compute_slide_hash
+
+            for slide in deck_dict.get("slides", []):
+                if slide.get("html"):
+                    content_hash = compute_slide_hash(slide["html"])
+                    slide["verification"] = verification_map.get(content_hash)
+                    slide["content_hash"] = content_hash
+
+            # Delete messages created after this save point
+            deleted_messages = 0
+            if version.created_at:
+                deleted_messages = (
+                    db.query(SessionMessage)
+                    .filter(
+                        SessionMessage.session_id == session.id,
+                        SessionMessage.created_at > version.created_at,
+                    )
+                    .delete()
+                )
 
             # Update the current slide deck in database
             if session.slide_deck:
@@ -805,6 +857,7 @@ class SessionManager:
                     "session_id": session_id,
                     "version_number": version_number,
                     "deleted_newer_versions": deleted_count,
+                    "deleted_messages": deleted_messages,
                 },
             )
 
@@ -813,7 +866,9 @@ class SessionManager:
                 "description": version.description,
                 "deck": deck_dict,
                 "verification_map": verification_map,
+                "chat_history": chat_history,
                 "deleted_versions": deleted_count,
+                "deleted_messages": deleted_messages,
             }
 
     def get_current_version_number(self, session_id: str) -> Optional[int]:

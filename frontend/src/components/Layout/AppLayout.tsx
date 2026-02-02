@@ -1,5 +1,6 @@
 import React, { useState, useCallback, useRef, useEffect } from 'react';
 import type { SlideDeck } from '../../types/slide';
+import type { Message } from '../../types/message';
 import { ChatPanel, type ChatPanelHandle } from '../ChatPanel/ChatPanel';
 import { SlidePanel } from '../SlidePanel/SlidePanel';
 import { SelectionRibbon } from '../SlidePanel/SelectionRibbon';
@@ -41,6 +42,7 @@ export const AppLayout: React.FC = () => {
   const [previewVersion, setPreviewVersion] = useState<number | null>(null);
   const [previewDeck, setPreviewDeck] = useState<SlideDeck | null>(null);
   const [previewDescription, setPreviewDescription] = useState<string>('');
+  const [previewMessages, setPreviewMessages] = useState<Message[] | null>(null);
   const [showRevertModal, setShowRevertModal] = useState(false);
   const [revertTargetVersion, setRevertTargetVersion] = useState<number | null>(null);
   // Pending save point - created after verification completes
@@ -138,10 +140,30 @@ export const AppLayout: React.FC = () => {
     if (!sessionId) return;
 
     try {
-      const { deck, description } = await api.previewVersion(sessionId, versionNumber);
+      const { deck, description, chat_history } = await api.previewVersion(sessionId, versionNumber);
       setPreviewVersion(versionNumber);
       setPreviewDeck(deck as SlideDeck);
       setPreviewDescription(description);
+      
+      // Convert chat history to Message format for preview
+      if (chat_history && Array.isArray(chat_history)) {
+        const previewMsgs: Message[] = chat_history.map((msg: Record<string, unknown>) => ({
+          role: msg.role as 'user' | 'assistant' | 'tool',
+          content: msg.content as string,
+          timestamp: msg.created_at as string,
+          tool_call: (msg as { metadata?: { tool_name?: string; tool_input?: Record<string, unknown> } }).metadata?.tool_name ? {
+            name: (msg as { metadata: { tool_name: string } }).metadata.tool_name,
+            arguments: (msg as { metadata: { tool_input?: Record<string, unknown> } }).metadata?.tool_input || {},
+          } : undefined,
+          tool_result: msg.message_type === 'tool_result' ? {
+            name: (msg as { metadata?: { tool_name?: string } }).metadata?.tool_name || 'tool',
+            content: msg.content as string,
+          } : undefined,
+        }));
+        setPreviewMessages(previewMsgs);
+      } else {
+        setPreviewMessages([]);
+      }
     } catch (err) {
       console.error('Failed to preview version:', err);
     }
@@ -152,6 +174,7 @@ export const AppLayout: React.FC = () => {
     setPreviewVersion(null);
     setPreviewDeck(null);
     setPreviewDescription('');
+    setPreviewMessages(null);
   }, []);
 
   // Open revert confirmation modal
@@ -173,6 +196,7 @@ export const AppLayout: React.FC = () => {
       setPreviewVersion(null);
       setPreviewDeck(null);
       setPreviewDescription('');
+      setPreviewMessages(null);
       setShowRevertModal(false);
       setRevertTargetVersion(null);
       
@@ -180,6 +204,9 @@ export const AppLayout: React.FC = () => {
       const { versions: loadedVersions, current_version } = await api.listVersions(sessionId);
       setVersions(loadedVersions);
       setCurrentVersion(current_version);
+      
+      // Force ChatPanel to remount and reload messages (which are now restored)
+      setChatKey(prev => prev + 1);
     } catch (err) {
       console.error('Failed to restore version:', err);
       alert('Failed to restore version');
@@ -432,6 +459,7 @@ export const AppLayout: React.FC = () => {
                 }
               }}
               disabled={!!previewVersion}
+              previewMessages={previewMessages}
             />
           </div>
 

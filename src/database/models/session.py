@@ -221,6 +221,9 @@ class SlideDeckVersion(Base):
     # Verification results at time of snapshot
     verification_map_json = Column(Text, nullable=True)
 
+    # Chat history snapshot (JSON array of messages up to this point)
+    chat_history_json = Column(Text, nullable=True)
+
     # Relationship
     session = relationship("UserSession", back_populates="versions")
 
