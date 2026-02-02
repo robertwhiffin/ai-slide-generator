@@ -139,10 +139,28 @@ jobs:
           python -m pip install --upgrade pip
           pip install -e ".[dev]"
 
+      - name: Start backend server
+        run: |
+          # Start backend with test database in background
+          DATABASE_URL="sqlite:///./test.db" \
+          DATABRICKS_HOST="https://test.databricks.com" \
+          DATABRICKS_TOKEN="test-token" \
+          python -m uvicorn src.api.main:app --host 0.0.0.0 --port 8000 &
+          # Wait for backend to be ready
+          for i in {1..30}; do
+            if curl -s http://localhost:8000/api/health > /dev/null 2>&1; then
+              echo "Backend is ready"
+              break
+            fi
+            echo "Waiting for backend... ($i/30)"
+            sleep 1
+          done
+
       - name: Run E2E tests
         working-directory: frontend
         env:
           CI: true
+          VITE_API_URL: http://localhost:8000
         run: npx playwright test --project=chromium
 
       - name: Upload Playwright report
