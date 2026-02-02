@@ -33,7 +33,7 @@ jobs:
 
       - name: Run unit tests
         run: |
-          pytest tests/unit -v --tb=short \
+          pytest tests/unit -v --tb=short -n auto \
             --junitxml=test-results/unit-results.xml \
             --cov=src --cov-report=xml --cov-report=term-missing
 
@@ -93,7 +93,7 @@ jobs:
           DATABRICKS_HOST: https://test.cloud.databricks.com
           DATABRICKS_TOKEN: test-token
         run: |
-          pytest tests/integration -v --tb=short \
+          pytest tests/integration -v --tb=short -n auto \
             --junitxml=test-results/integration-results.xml \
             -m "not live"
 
@@ -202,7 +202,7 @@ jobs:
 
       - name: Run deck integrity tests
         run: |
-          pytest tests/unit/test_deck_integrity.py tests/unit/test_llm_edit_responses.py -v \
+          pytest tests/unit/test_deck_integrity.py tests/unit/test_llm_edit_responses.py -v -n auto \
             --tb=long \
             --junitxml=test-results/integrity-results.xml
 
@@ -233,7 +233,7 @@ jobs:
 
       - name: Run persistence tests
         run: |
-          pytest tests/unit/test_deck_persistence.py tests/unit/test_chat_persistence.py -v \
+          pytest tests/unit/test_deck_persistence.py tests/unit/test_chat_persistence.py -v -n auto \
             --tb=long \
             --junitxml=test-results/persistence-results.xml
 
