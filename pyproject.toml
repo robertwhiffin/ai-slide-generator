@@ -81,6 +81,7 @@ python_files = ["test_*.py"]
 python_functions = ["test_*"]
 markers = [
     "integration: marks tests as integration tests (require Databricks connection)",
+    "live: marks tests that require a live Databricks connection (excluded in CI with -m 'not live')",
     "slow: marks tests as slow running",
 ]
 
