@@ -142,7 +142,13 @@ def collect_stream_events(
 
 @pytest.fixture
 def client():
-    """Create test client."""
+    """Create test client.
+    
+    Note: Most streaming tests mock get_session_manager and get_chat_service,
+    so they don't actually use the database. Tests that need request validation
+    (like TestRequestValidation) use the mocked session manager which bypasses
+    database access.
+    """
     with TestClient(app) as test_client:
         yield test_client
 
@@ -452,10 +458,9 @@ class TestStreamingErrors:
 
         def generate_session_error():
             raise SessionNotFoundError("test-123")
+            yield  # Make this a generator (never reached, but needed for generator protocol)
 
-        mock_chat_service.send_message_streaming.return_value = (
-            generate_session_error()
-        )
+        mock_chat_service.send_message_streaming.return_value = generate_session_error()
 
         events = collect_stream_events(client, standard_request_body)
 

@@ -23,13 +23,15 @@ def validate_javascript(script: str) -> Tuple[bool, str]:
     
     try:
         import esprima
+    except ImportError:
+        logger.warning("esprima not installed, skipping JS validation")
+        return True, ""  # Be permissive if esprima not available
+    
+    try:
         esprima.parseScript(script, tolerant=True)
         return True, ""
     except esprima.Error as e:
         return False, f"JavaScript syntax error: {e}"
-    except ImportError:
-        logger.warning("esprima not installed, skipping JS validation")
-        return True, ""  # Be permissive if esprima not available
     except Exception as e:
         logger.warning(f"JS validation failed with unexpected error: {e}")
         # Be permissive on unexpected errors - don't block

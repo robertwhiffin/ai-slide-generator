@@ -19,6 +19,7 @@ from fastapi.staticfiles import StaticFiles
 from src.api.routes import chat, slides, export, sessions, verification, version
 from src.core.databricks_client import create_user_client, set_user_client
 from src.core.database import (
+    init_db,
     is_lakebase_environment,
     start_token_refresh,
     stop_token_refresh,
@@ -56,6 +57,7 @@ async def lifespan(app: FastAPI):
     logger.info(f"Starting AI Slide Generator API (environment: {ENVIRONMENT})")
 
     # Start Lakebase token refresh if running in Databricks Apps
+    # Must happen before init_db() so OAuth token is ready for database connections
     if is_lakebase_environment():
         try:
             await start_token_refresh()
@@ -63,6 +65,14 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             logger.error(f"Failed to start Lakebase token refresh: {e}")
             raise
+
+    # Initialize database tables (idempotent - only creates tables that don't exist)
+    try:
+        init_db()
+        logger.info("Database tables initialized")
+    except Exception as e:
+        logger.error(f"Failed to initialize database: {e}")
+        raise
 
     if IS_PRODUCTION:
         logger.info("Production mode: serving frontend from package assets")

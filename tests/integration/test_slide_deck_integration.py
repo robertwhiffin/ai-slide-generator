@@ -139,7 +139,11 @@ class TestWebFrontendScenarios:
             assert "<!DOCTYPE html>" in html
             assert "<html" in html
             assert deck.css in html
-            assert deck.scripts in html
+            
+            # Individual slide renders include only that slide's scripts (no IIFE wrapping)
+            slide = deck.slides[i]
+            if slide.scripts and slide.scripts.strip():
+                assert slide.scripts.strip() in html
             
             # Should only contain the specified slide
             slide_content = deck.slides[i].html

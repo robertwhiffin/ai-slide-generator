@@ -326,10 +326,14 @@ def get_db_session() -> Generator[Session, None, None]:
 
 def init_db():
     """Create all tables in the database.
-    
+
     For Lakebase deployments, ensures the schema is set correctly before
     creating tables. The schema is read from LAKEBASE_SCHEMA env var.
     """
+    # Import all models to ensure they're registered with Base.metadata
+    # This is necessary for create_all() to create all tables
+    import src.database.models  # noqa: F401
+
     engine = get_engine()
     schema = os.getenv("LAKEBASE_SCHEMA")
     
