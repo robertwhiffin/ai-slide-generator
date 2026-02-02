@@ -39,6 +39,7 @@ logger = logging.getLogger(__name__)
 # Detect environment
 ENVIRONMENT = os.getenv("ENVIRONMENT", "development")
 IS_PRODUCTION = ENVIRONMENT == "production"
+IS_TESTING = ENVIRONMENT == "test"
 
 # Worker task references for cleanup
 _worker_task = None
@@ -72,21 +73,25 @@ async def lifespan(app: FastAPI):
         else:
             logger.warning("Frontend assets not found in package")
 
-    # Start the job queue worker for async chat processing
-    _worker_task = await start_worker()
-    logger.info("Chat job queue worker started")
+    # Skip background workers and recovery in test mode
+    if not IS_TESTING:
+        # Start the job queue worker for async chat processing
+        _worker_task = await start_worker()
+        logger.info("Chat job queue worker started")
 
-    # Start the export worker for async PPTX export processing
-    _export_worker_task = await start_export_worker()
-    logger.info("Export job queue worker started")
+        # Start the export worker for async PPTX export processing
+        _export_worker_task = await start_export_worker()
+        logger.info("Export job queue worker started")
 
-    # Recover any stuck requests from previous crashes
-    try:
-        recovered = await recover_stuck_requests()
-        if recovered > 0:
-            logger.info(f"Recovered {recovered} stuck chat requests")
-    except Exception as e:
-        logger.warning(f"Failed to recover stuck requests: {e}")
+        # Recover any stuck requests from previous crashes
+        try:
+            recovered = await recover_stuck_requests()
+            if recovered > 0:
+                logger.info(f"Recovered {recovered} stuck chat requests")
+        except Exception as e:
+            logger.warning(f"Failed to recover stuck requests: {e}")
+    else:
+        logger.info("Test mode: skipping background workers and recovery")
 
     yield
 
