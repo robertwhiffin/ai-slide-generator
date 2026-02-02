@@ -109,7 +109,6 @@ def test_profile(test_db):
         profile_id=profile.id,
         system_prompt=DEFAULT_CONFIG["prompts"]["system_prompt"],
         slide_editing_instructions=DEFAULT_CONFIG["prompts"]["slide_editing_instructions"],
-        user_prompt_template=DEFAULT_CONFIG["prompts"]["user_prompt_template"],
     )
     test_db.add(prompts)
     
@@ -142,7 +141,6 @@ def test_load_settings_from_database(test_db, test_profile, monkeypatch):
     assert settings.llm.temperature == 0.7
     assert settings.llm.max_tokens == 4096
     assert settings.genie.space_id == "test-space-id"
-    assert settings.mlflow.experiment_name == "/test/experiment"
     assert "system_prompt" in settings.prompts
 
 

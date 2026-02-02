@@ -62,50 +62,45 @@ def db_session():
 def test_create_profile_with_defaults(db_session):
     """Test creating profile with default configs."""
     service = ProfileService(db_session)
-    
+
     profile = service.create_profile(
         name="test-profile",
         description="Test",
-        copy_from_id=None,
         user="test_user",
     )
-    
+
     assert profile.id is not None
     assert profile.name == "test-profile"
     assert profile.ai_infra is not None
-    assert len(profile.genie_spaces) == 1
-    assert profile.mlflow is not None
     assert profile.prompts is not None
 
 
 def test_create_profile_copy(db_session):
     """Test creating profile by copying another."""
     service = ProfileService(db_session)
-    
+
     # Create source profile
-    source = service.create_profile("source", None, None, "test")
-    
-    # Copy it
-    copy = service.create_profile("copy", "Copy of source", source.id, "test")
-    
+    source = service.create_profile("source", None, "test")
+
+    # Copy it using duplicate_profile
+    copy = service.duplicate_profile(source.id, "copy", "test")
+
     assert copy.id != source.id
     assert copy.ai_infra.llm_endpoint == source.ai_infra.llm_endpoint
-    assert len(copy.genie_spaces) == len(source.genie_spaces)
 
 
 def test_set_default_profile(db_session):
     """Test setting default profile."""
     service = ProfileService(db_session)
-    
-    profile1 = service.create_profile("profile1", None, None, "test")
-    profile1.is_default = True
-    db_session.commit()
-    
-    profile2 = service.create_profile("profile2", None, None, "test")
-    
+
+    profile1 = service.create_profile("profile1", None, "test")
+    # First profile is automatically default
+
+    profile2 = service.create_profile("profile2", None, "test")
+
     # Set profile2 as default
     service.set_default_profile(profile2.id, "test")
-    
+
     db_session.refresh(profile1)
     assert not profile1.is_default
     assert profile2.is_default
@@ -114,9 +109,9 @@ def test_set_default_profile(db_session):
 def test_update_profile(db_session):
     """Test updating profile metadata."""
     service = ProfileService(db_session)
-    
-    profile = service.create_profile("original", "Original desc", None, "test")
-    
+
+    profile = service.create_profile("original", "Original desc", "test")
+
     # Update profile
     updated = service.update_profile(
         profile_id=profile.id,
@@ -124,7 +119,7 @@ def test_update_profile(db_session):
         description="Updated desc",
         user="test",
     )
-    
+
     assert updated.name == "updated"
     assert updated.description == "Updated desc"
 
@@ -132,13 +127,15 @@ def test_update_profile(db_session):
 def test_delete_profile(db_session):
     """Test deleting profile."""
     service = ProfileService(db_session)
-    
-    profile = service.create_profile("to-delete", None, None, "test")
+
+    # Create two profiles so we can delete the non-default one
+    service.create_profile("default-profile", None, "test")  # This becomes default
+    profile = service.create_profile("to-delete", None, "test")
     profile_id = profile.id
-    
+
     # Delete it
     service.delete_profile(profile_id, "test")
-    
+
     # Should not exist
     assert service.get_profile(profile_id) is None
 
@@ -146,11 +143,10 @@ def test_delete_profile(db_session):
 def test_cannot_delete_default_profile(db_session):
     """Test that default profile cannot be deleted."""
     service = ProfileService(db_session)
-    
-    profile = service.create_profile("default", None, None, "test")
-    profile.is_default = True
-    db_session.commit()
-    
+
+    # First profile is automatically default
+    profile = service.create_profile("default", None, "test")
+
     # Should raise error
     with pytest.raises(ValueError, match="Cannot delete default profile"):
         service.delete_profile(profile.id, "test")
@@ -159,12 +155,12 @@ def test_cannot_delete_default_profile(db_session):
 def test_duplicate_profile(db_session):
     """Test duplicating profile."""
     service = ProfileService(db_session)
-    
-    original = service.create_profile("original", "Original", None, "test")
-    
+
+    original = service.create_profile("original", "Original", "test")
+
     # Duplicate it
     duplicate = service.duplicate_profile(original.id, "duplicate", "test")
-    
+
     assert duplicate.id != original.id
     assert duplicate.name == "duplicate"
     assert duplicate.ai_infra.llm_endpoint == original.ai_infra.llm_endpoint
@@ -173,11 +169,11 @@ def test_duplicate_profile(db_session):
 def test_list_profiles(db_session):
     """Test listing all profiles."""
     service = ProfileService(db_session)
-    
-    service.create_profile("profile1", None, None, "test")
-    service.create_profile("profile2", None, None, "test")
-    service.create_profile("profile3", None, None, "test")
-    
+
+    service.create_profile("profile1", None, "test")
+    service.create_profile("profile2", None, "test")
+    service.create_profile("profile3", None, "test")
+
     profiles = service.list_profiles()
     assert len(profiles) == 3
     assert profiles[0].name == "profile1"  # Should be sorted by name
@@ -187,68 +183,45 @@ def test_update_ai_infra(db_session):
     """Test updating AI db_app_deployment settings."""
     profile_service = ProfileService(db_session)
     config_service = ConfigService(db_session)
-    
-    profile = profile_service.create_profile("test", None, None, "test")
-    
+
+    profile = profile_service.create_profile("test", None, "test")
+
     updated = config_service.update_ai_infra_config(
         profile_id=profile.id,
         llm_temperature=0.8,
         user="test",
     )
-    
+
     assert float(updated.llm_temperature) == 0.8
-
-
-def test_update_mlflow_config(db_session):
-    """Test updating MLflow settings."""
-    profile_service = ProfileService(db_session)
-    config_service = ConfigService(db_session)
-    
-    profile = profile_service.create_profile("test", None, None, "test")
-    
-    updated = config_service.update_mlflow_config(
-        profile_id=profile.id,
-        experiment_name="/New/Experiment",
-        user="test",
-    )
-    
-    assert updated.experiment_name == "/New/Experiment"
 
 
 def test_update_prompts_config(db_session):
     """Test updating prompts settings."""
     profile_service = ProfileService(db_session)
     config_service = ConfigService(db_session)
-    
-    profile = profile_service.create_profile("test", None, None, "test")
-    
+
+    profile = profile_service.create_profile("test", None, "test")
+
     updated = config_service.update_prompts_config(
         profile_id=profile.id,
-        user_prompt_template="{question} - updated",
+        system_prompt="Updated system prompt",
         user="test",
     )
-    
-    assert updated.user_prompt_template == "{question} - updated"
+
+    assert updated.system_prompt == "Updated system prompt"
 
 
 def test_genie_space_management(db_session):
     """Test Genie space CRUD - one space per profile."""
     profile_service = ProfileService(db_session)
     genie_service = GenieService(db_session)
-    
-    profile = profile_service.create_profile("test", None, None, "test")
-    
-    # Profile is created with a default Genie space
+
+    profile = profile_service.create_profile("test", None, "test")
+
+    # Profile is created without a default Genie space
     space = genie_service.get_genie_space(profile.id)
-    assert space is not None  # Default space exists
-    
-    # Delete the default space
-    genie_service.delete_genie_space(space.id, "test")
-    
-    # Now no space
-    space = genie_service.get_genie_space(profile.id)
-    assert space is None
-    
+    assert space is None  # No default space
+
     # Add new space
     space = genie_service.add_genie_space(
         profile_id=profile.id,
@@ -257,35 +230,47 @@ def test_genie_space_management(db_session):
         description="Test",
         user="test",
     )
-    
+
     assert space.id is not None
     assert space.space_name == "Test Space"
-    
+
     # Get space
     retrieved = genie_service.get_genie_space(profile.id)
     assert retrieved is not None
     assert retrieved.space_id == "space123"
+
+    # Delete the space
+    genie_service.delete_genie_space(space.id, "test")
+
+    # Now no space
+    space = genie_service.get_genie_space(profile.id)
+    assert space is None
 
 
 def test_update_genie_space(db_session):
     """Test updating Genie space metadata."""
     profile_service = ProfileService(db_session)
     genie_service = GenieService(db_session)
-    
-    profile = profile_service.create_profile("test", None, None, "test")
-    
-    # Profile already has a default Genie space
-    space = genie_service.get_genie_space(profile.id)
-    assert space is not None
-    
-    # Update the existing space
+
+    profile = profile_service.create_profile("test", None, "test")
+
+    # Create a Genie space first
+    space = genie_service.add_genie_space(
+        profile_id=profile.id,
+        space_id="space123",
+        space_name="Original Name",
+        description="Original description",
+        user="test",
+    )
+
+    # Update the space
     updated = genie_service.update_genie_space(
         space_id=space.id,
         space_name="Updated Name",
         description="New description",
         user="test",
     )
-    
+
     assert updated.space_name == "Updated Name"
     assert updated.description == "New description"
 
@@ -294,16 +279,21 @@ def test_delete_genie_space(db_session):
     """Test deleting Genie space."""
     profile_service = ProfileService(db_session)
     genie_service = GenieService(db_session)
-    
-    profile = profile_service.create_profile("test", None, None, "test")
-    
-    # Profile has default Genie space
-    space = genie_service.get_genie_space(profile.id)
-    assert space is not None
-    
+
+    profile = profile_service.create_profile("test", None, "test")
+
+    # Create a Genie space
+    space = genie_service.add_genie_space(
+        profile_id=profile.id,
+        space_id="space123",
+        space_name="Test Space",
+        description="Test",
+        user="test",
+    )
+
     # Delete it
     genie_service.delete_genie_space(space.id, "test")
-    
+
     # No space left
     space = genie_service.get_genie_space(profile.id)
     assert space is None
@@ -361,55 +351,26 @@ def test_validator_genie_space_empty(db_session):
     assert "empty" in result.error
 
 
-def test_validator_mlflow_valid(db_session):
-    """Test MLflow validation with valid values."""
-    validator = ConfigValidator()
-    
-    result = validator.validate_mlflow("/Users/test/experiment")
-    assert result.valid
-
-
-def test_validator_mlflow_invalid_path(db_session):
-    """Test MLflow validation with invalid path."""
-    validator = ConfigValidator()
-    
-    result = validator.validate_mlflow("invalid_path")
-    assert not result.valid
-    assert "must start with /" in result.error
-
-
 def test_validator_prompts_valid(db_session):
     """Test prompts validation with valid values."""
     validator = ConfigValidator()
-    
+
     result = validator.validate_prompts(
         system_prompt="Test system prompt",
-        user_prompt_template="{question}",
     )
     assert result.valid
-
-
-def test_validator_prompts_missing_question(db_session):
-    """Test prompts validation with missing question placeholder."""
-    validator = ConfigValidator()
-    
-    result = validator.validate_prompts(
-        user_prompt_template="No placeholder here",
-    )
-    assert not result.valid
-    assert "question" in result.error
 
 
 def test_get_default_profile(db_session):
     """Test getting default profile."""
     service = ProfileService(db_session)
-    
-    profile1 = service.create_profile("profile1", None, None, "test")
-    profile2 = service.create_profile("profile2", None, None, "test")
-    
+
+    profile1 = service.create_profile("profile1", None, "test")
+    profile2 = service.create_profile("profile2", None, "test")
+
     # Set profile2 as default
     service.set_default_profile(profile2.id, "test")
-    
+
     # Get default
     default = service.get_default_profile()
     assert default.id == profile2.id
