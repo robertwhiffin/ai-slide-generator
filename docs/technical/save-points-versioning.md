@@ -9,9 +9,10 @@
 Save Points provide version control for slide decks within a session. Each save point captures:
 - Complete slide deck state (all slides, CSS, scripts)
 - Verification results (LLM as Judge scores) at time of snapshot
+- Chat history up to that point
 - Auto-generated description of the change
 
-Users can preview any save point without committing, then either revert (deleting newer versions) or cancel to return to the current state.
+Users can preview any save point without committing, then either revert (deleting newer versions and chat messages) or cancel to return to the current state.
 
 ---
 
@@ -70,6 +71,7 @@ class SlideDeckVersion(Base):
     
     deck_json = Column(Text, nullable=False)           # Complete deck snapshot
     verification_map_json = Column(Text, nullable=True) # Verification at time of snapshot
+    chat_history_json = Column(Text, nullable=True)    # Chat messages up to this point
     
     session = relationship("UserSession", back_populates="versions")
 ```
@@ -122,7 +124,8 @@ Response:
   "description": "Generated 4 slide(s)",
   "created_at": "...",
   "deck": { "title": "...", "slides": [...], "css": "...", ... },
-  "verification_map": { "hash1": { "score": 95, "rating": "excellent" }, ... }
+  "verification_map": { "hash1": { "score": 95, "rating": "excellent" }, ... },
+  "chat_history": [{ "role": "user", "content": "..." }, ...]
 }
 ```
 
@@ -146,7 +149,9 @@ Response:
   "description": "Generated 4 slide(s)",
   "deck": { ... },
   "verification_map": { ... },
-  "deleted_versions": 2  // v5 and v6 were deleted
+  "chat_history": [...],
+  "deleted_versions": 2,   // v5 and v6 were deleted
+  "deleted_messages": 5    // Messages after save point deleted
 }
 ```
 
@@ -168,6 +173,7 @@ const [versions, setVersions] = useState<SavePointVersion[]>([]);
 const [currentVersion, setCurrentVersion] = useState<number | null>(null);
 const [previewVersion, setPreviewVersion] = useState<number | null>(null);
 const [previewDeck, setPreviewDeck] = useState<SlideDeck | null>(null);
+const [previewMessages, setPreviewMessages] = useState<Message[] | null>(null);
 
 // Version key for forcing re-render when switching versions
 const versionKey = previewVersion 
@@ -178,7 +184,8 @@ const versionKey = previewVersion
 const displayDeck = previewVersion ? previewDeck : slideDeck;
 ```
 
-The `versionKey` is passed to slide rendering components to force React to recreate elements when switching between versions, preventing stale state from persisting.
+- `versionKey` is passed to slide rendering components to force React to recreate elements when switching between versions
+- `previewMessages` is passed to ChatPanel to show historical chat during preview
 
 ---
 
@@ -191,7 +198,9 @@ User has 10 save points, viewing Save Point 10 (current)
 
 Step 1: User selects Save Point 5 from dropdown
 Step 2: Frontend calls GET /versions/5/preview
-Step 3: Slides panel shows Save Point 5's deck (PREVIEW MODE)
+Step 3: App shows Save Point 5's state (PREVIEW MODE)
+        - Slides panel shows that version's deck
+        - Chat panel shows that version's messages
         - PreviewBanner appears (indigo theme)
         - "Revert to This Version" and "Cancel Preview" buttons
         - Chat input disabled
@@ -203,6 +212,8 @@ Step 4a: User clicks "Revert to This Version"
          → User confirms
          → POST /versions/5/restore
          → Save Point 5 becomes current, SP 6-10 deleted
+         → Chat messages after SP 5 deleted
+         → ChatPanel remounts to show restored chat history
          → Dropdown shows SP 1-5 only
 
 Step 4b: User clicks "Cancel Preview"
@@ -232,7 +243,30 @@ Each save point captures the `verification_map` at the time of creation:
 
 ---
 
-## 9. Implementation Notes
+## 9. Chat History Versioning
+
+Each save point captures the chat history at the time of creation:
+
+- **Storage:** Chat messages are serialized as JSON array in `chat_history_json`
+- **Capture:** Auto-captured during save point creation (all messages up to that point)
+- **Preview:** ChatPanel displays historical messages via `previewMessages` prop (read-only)
+- **Restore:** Messages created after the save point are deleted from the database
+- **UI Refresh:** ChatPanel remounts via `chatKey` increment to reload restored messages
+
+```python
+# On restore, delete messages created after the save point
+if version.created_at:
+    deleted_messages = db.query(SessionMessage).filter(
+        SessionMessage.session_id == session.id,
+        SessionMessage.created_at > version.created_at,
+    ).delete()
+```
+
+This ensures both slides and chat history stay in sync when previewing or reverting.
+
+---
+
+## 10. Implementation Notes
 
 ### Slide ID Consistency
 
@@ -260,7 +294,7 @@ def restore_version(self, session_id: str, version_number: int):
 
 ---
 
-## 10. Cross-References
+## 11. Cross-References
 
 - [Backend Overview](backend-overview.md) - API surface and session management
 - [Frontend Overview](frontend-overview.md) - UI components and state management

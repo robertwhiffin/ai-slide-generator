@@ -27,12 +27,14 @@ interface ChatPanelProps {
   rawHtml: string | null;
   onSlidesGenerated: (slideDeck: SlideDeck, rawHtml: string | null, actionDescription?: string) => void;
   disabled?: boolean;
+  previewMessages?: Message[] | null;  // When provided, show these instead of live messages
 }
 
 export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(({
   rawHtml,
   onSlidesGenerated,
   disabled = false,
+  previewMessages = null,
 }, ref) => {
   const [messages, setMessages] = useState<Message[]>([]);
   const [isLoading, setIsLoading] = useState(false);
@@ -304,7 +306,7 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(({
       </div>
 
       <div className="flex-1 overflow-y-auto">
-        <MessageList messages={messages} isLoading={isLoading} />
+        <MessageList messages={previewMessages ?? messages} isLoading={isLoading && !previewMessages} />
       </div>
 
       {error && (
