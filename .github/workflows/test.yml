@@ -143,6 +143,7 @@ jobs:
         run: |
           # Start backend with test database in background
           DATABASE_URL="sqlite:///./test.db" \
+          ENVIRONMENT="test" \
           DATABRICKS_HOST="https://test.databricks.com" \
           DATABRICKS_TOKEN="test-token" \
           python -m uvicorn src.api.main:app --host 0.0.0.0 --port 8000 &
@@ -151,6 +152,10 @@ jobs:
             if curl -s http://localhost:8000/api/health > /dev/null 2>&1; then
               echo "Backend is ready"
               break
+            fi
+            if [ $i -eq 30 ]; then
+              echo "Backend failed to start"
+              exit 1
             fi
             echo "Waiting for backend... ($i/30)"
             sleep 1
