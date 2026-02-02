@@ -513,8 +513,8 @@ class TestAsyncPPTXExport:
         """POST /api/export/pptx/async starts an export job."""
         mock_chat_service.get_slides.return_value = create_mock_slide_deck(3)
 
-        with patch("src.api.routes.export.enqueue_export_job") as mock_enqueue:
-            with patch("src.api.routes.export.generate_job_id", return_value="test-job-123"):
+        with patch("src.api.services.export_job_queue.enqueue_export_job") as mock_enqueue:
+            with patch("src.api.services.export_job_queue.generate_job_id", return_value="test-job-123"):
                 mock_enqueue.return_value = None
 
                 response = client.post(
@@ -529,7 +529,7 @@ class TestAsyncPPTXExport:
 
     def test_poll_export_job_not_found(self, client):
         """GET /api/export/pptx/poll/{job_id} returns 404 for missing job."""
-        with patch("src.api.routes.export.get_export_job_status", return_value=None):
+        with patch("src.api.services.export_job_queue.get_export_job_status", return_value=None):
             response = client.get("/api/export/pptx/poll/nonexistent-job")
             assert response.status_code == 404
 
@@ -543,7 +543,7 @@ class TestAsyncPPTXExport:
         }
 
         with patch(
-            "src.api.routes.export.get_export_job_status", return_value=job_status
+            "src.api.services.export_job_queue.get_export_job_status", return_value=job_status
         ):
             response = client.get("/api/export/pptx/poll/test-job-123")
 
@@ -555,7 +555,7 @@ class TestAsyncPPTXExport:
 
     def test_download_export_job_not_found(self, client):
         """GET /api/export/pptx/download/{job_id} returns 404 for missing job."""
-        with patch("src.api.routes.export.get_export_job_status", return_value=None):
+        with patch("src.api.services.export_job_queue.get_export_job_status", return_value=None):
             response = client.get("/api/export/pptx/download/nonexistent-job")
             assert response.status_code == 404
 
@@ -569,7 +569,7 @@ class TestAsyncPPTXExport:
         }
 
         with patch(
-            "src.api.routes.export.get_export_job_status", return_value=job_status
+            "src.api.services.export_job_queue.get_export_job_status", return_value=job_status
         ):
             response = client.get("/api/export/pptx/download/test-job-123")
 

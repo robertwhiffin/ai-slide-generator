@@ -12,6 +12,10 @@ from unittest.mock import MagicMock, Mock, patch
 import pytest
 from databricks.sdk import WorkspaceClient
 
+# Set ENVIRONMENT=test before importing app modules to ensure test mode is enabled.
+# This must happen before any app imports that read ENVIRONMENT at module level.
+os.environ.setdefault("ENVIRONMENT", "test")
+
 from src.core.databricks_client import reset_client, reset_user_client
 
 
