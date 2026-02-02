@@ -25,12 +25,16 @@ export interface ChatPanelHandle {
 
 interface ChatPanelProps {
   rawHtml: string | null;
-  onSlidesGenerated: (slideDeck: SlideDeck, rawHtml: string | null) => void;
+  onSlidesGenerated: (slideDeck: SlideDeck, rawHtml: string | null, actionDescription?: string) => void;
+  disabled?: boolean;
+  previewMessages?: Message[] | null;  // When provided, show these instead of live messages
 }
 
 export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(({
   rawHtml,
   onSlidesGenerated,
+  disabled = false,
+  previewMessages = null,
 }, ref) => {
   const [messages, setMessages] = useState<Message[]>([]);
   const [isLoading, setIsLoading] = useState(false);
@@ -215,18 +219,31 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(({
           }
 
           if (event.slides) {
+            // Generate action description for save point
+            let actionDescription: string;
+            if (slideContext) {
+              const slideNums = slideContext.indices.map(i => i + 1);
+              if (event.replacement_info?.is_add_operation) {
+                actionDescription = `Added ${event.slides.slides?.length || 1} slide(s)`;
+              } else {
+                actionDescription = `Edited slide ${slideNums.join(', ')}`;
+              }
+            } else {
+              actionDescription = `Generated ${event.slides.slides?.length || event.slides.slide_count || 0} slide(s)`;
+            }
+
             // Fetch slides from API to get content_hash for auto-verification
             // The API returns slides with content_hash computed and verification merged
             api.getSlides(sessionId).then(result => {
               if (result.slide_deck) {
-                onSlidesGenerated(result.slide_deck, nextRawHtml);
+                onSlidesGenerated(result.slide_deck, nextRawHtml, actionDescription);
               } else {
                 // Fallback to event.slides if API fails
-                onSlidesGenerated(event.slides!, nextRawHtml);
+                onSlidesGenerated(event.slides!, nextRawHtml, actionDescription);
               }
             }).catch(() => {
               // Fallback to event.slides if API fails
-              onSlidesGenerated(event.slides!, nextRawHtml);
+              onSlidesGenerated(event.slides!, nextRawHtml, actionDescription);
             });
             clearSelection();
           }
@@ -289,7 +306,7 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(({
       </div>
 
       <div className="flex-1 overflow-y-auto">
-        <MessageList messages={messages} isLoading={isLoading} />
+        <MessageList messages={previewMessages ?? messages} isLoading={isLoading && !previewMessages} />
       </div>
 
       {error && (
@@ -300,9 +317,11 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(({
 
       <ChatInput
         onSend={handleSendMessage}
-        disabled={isLoading || isInitializing || !sessionId}
+        disabled={isLoading || isInitializing || !sessionId || disabled}
         placeholder={
-          isInitializing
+          disabled
+            ? 'Exit preview mode to send messages...'
+            : isInitializing
             ? 'Initializing session...'
             : hasSelection
             ? 'Describe changes to selected slides...'

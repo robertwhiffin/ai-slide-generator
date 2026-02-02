@@ -1685,6 +1685,7 @@ if old_canvas_id != canvas_id:
 - [Backend Overview](./backend-overview.md) - Agent and chat service architecture
 - [Slide Parser and Script Management](./slide-parser-and-script-management.md) - HTML parsing details
 - [Frontend Overview](./frontend-overview.md) - UI handling of slides
+- [Save Points / Versioning](./save-points-versioning.md) - Complete deck state snapshots with preview and restore
 
 ---
 

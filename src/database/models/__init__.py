@@ -9,6 +9,7 @@ from src.database.models.session import (
     ChatRequest,
     SessionMessage,
     SessionSlideDeck,
+    SlideDeckVersion,
     UserSession,
 )
 from src.database.models.slide_deck_prompt import SlideDeckPromptLibrary
@@ -24,6 +25,7 @@ __all__ = [
     "SessionMessage",
     "SessionSlideDeck",
     "SlideDeckPromptLibrary",
+    "SlideDeckVersion",
     "SlideStyleLibrary",
     "UserSession",
 ]

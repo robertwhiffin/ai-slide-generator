@@ -144,7 +144,7 @@ test.describe('Slide Generator App - Navigation', () => {
     await expect(page.getByRole('heading', { name: 'Deck Prompt Library' })).toBeVisible();
     
     // Check that deck prompts are listed
-    await expect(page.getByRole('heading', { name: 'Consumption Review' })).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'Monthly Review' })).toBeVisible();
   });
 
   test('should navigate to Slide Styles section', async ({ page }) => {
@@ -157,7 +157,7 @@ test.describe('Slide Generator App - Navigation', () => {
     await expect(page.getByRole('heading', { name: 'Slide Style Library' })).toBeVisible();
     
     // Check that styles are listed
-    await expect(page.getByRole('heading', { name: 'Databricks Brand' })).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'Corporate Theme' })).toBeVisible();
     await expect(page.getByRole('heading', { name: 'System Default' })).toBeVisible();
     
     // Check that Create Style button is visible

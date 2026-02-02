@@ -1,5 +1,6 @@
-import React, { useState, useCallback, useRef } from 'react';
+import React, { useState, useCallback, useRef, useEffect } from 'react';
 import type { SlideDeck } from '../../types/slide';
+import type { Message } from '../../types/message';
 import { ChatPanel, type ChatPanelHandle } from '../ChatPanel/ChatPanel';
 import { SlidePanel } from '../SlidePanel/SlidePanel';
 import { SelectionRibbon } from '../SlidePanel/SelectionRibbon';
@@ -11,6 +12,7 @@ import { SessionHistory } from '../History/SessionHistory';
 import { SaveAsDialog } from '../History/SaveAsDialog';
 import { HelpPage } from '../Help';
 import { UpdateBanner } from '../UpdateBanner';
+import { SavePointDropdown, PreviewBanner, RevertConfirmModal, type SavePointVersion } from '../SavePoints';
 import { useSession } from '../../contexts/SessionContext';
 import { useGeneration } from '../../contexts/GenerationContext';
 import { useProfiles } from '../../contexts/ProfileContext';
@@ -29,10 +31,22 @@ export const AppLayout: React.FC = () => {
   // Track which slide to scroll to in the main panel (uses key to allow re-scroll to same index)
   const [scrollTarget, setScrollTarget] = useState<{ index: number; key: number } | null>(null);
   const chatPanelRef = useRef<ChatPanelHandle>(null);
-  const { sessionTitle, experimentUrl, createNewSession, switchSession, renameSession } = useSession();
+  const { sessionId, sessionTitle, experimentUrl, createNewSession, switchSession, renameSession } = useSession();
   const { isGenerating } = useGeneration();
   const { currentProfile, loadProfile } = useProfiles();
   const { updateAvailable, latestVersion, updateType, dismissed, dismiss } = useVersionCheck();
+
+  // Save Points / Versioning state
+  const [versions, setVersions] = useState<SavePointVersion[]>([]);
+  const [currentVersion, setCurrentVersion] = useState<number | null>(null);
+  const [previewVersion, setPreviewVersion] = useState<number | null>(null);
+  const [previewDeck, setPreviewDeck] = useState<SlideDeck | null>(null);
+  const [previewDescription, setPreviewDescription] = useState<string>('');
+  const [previewMessages, setPreviewMessages] = useState<Message[] | null>(null);
+  const [showRevertModal, setShowRevertModal] = useState(false);
+  const [revertTargetVersion, setRevertTargetVersion] = useState<number | null>(null);
+  // Pending save point - created after verification completes
+  const [pendingSavePointDescription, setPendingSavePointDescription] = useState<string | null>(null);
 
   // Handle navigation from ribbon to main slide panel
   const handleSlideNavigate = useCallback((index: number) => {
@@ -93,8 +107,145 @@ export const AppLayout: React.FC = () => {
     setSlideDeck(null);
     setRawHtml(null);
     setChatKey(prev => prev + 1);
+    setVersions([]);
+    setCurrentVersion(null);
+    setPreviewVersion(null);
+    setPreviewDeck(null);
     createNewSession();
   }, [createNewSession]);
+
+  // Load versions when session or slideDeck changes
+  useEffect(() => {
+    const loadVersions = async () => {
+      if (!sessionId) {
+        setVersions([]);
+        setCurrentVersion(null);
+        return;
+      }
+
+      try {
+        const { versions: loadedVersions, current_version } = await api.listVersions(sessionId);
+        setVersions(loadedVersions);
+        setCurrentVersion(current_version);
+      } catch (err) {
+        console.error('Failed to load versions:', err);
+      }
+    };
+
+    loadVersions();
+  }, [sessionId, slideDeck]); // Reload when slideDeck changes (new save point created)
+
+  // Handle previewing a version
+  const handlePreviewVersion = useCallback(async (versionNumber: number) => {
+    if (!sessionId) return;
+
+    try {
+      const { deck, description, chat_history } = await api.previewVersion(sessionId, versionNumber);
+      setPreviewVersion(versionNumber);
+      setPreviewDeck(deck as SlideDeck);
+      setPreviewDescription(description);
+      
+      // Convert chat history to Message format for preview
+      if (chat_history && Array.isArray(chat_history)) {
+        const previewMsgs: Message[] = chat_history.map((msg: Record<string, unknown>) => ({
+          role: msg.role as 'user' | 'assistant' | 'tool',
+          content: msg.content as string,
+          timestamp: msg.created_at as string,
+          tool_call: (msg as { metadata?: { tool_name?: string; tool_input?: Record<string, unknown> } }).metadata?.tool_name ? {
+            name: (msg as { metadata: { tool_name: string } }).metadata.tool_name,
+            arguments: (msg as { metadata: { tool_input?: Record<string, unknown> } }).metadata?.tool_input || {},
+          } : undefined,
+          tool_result: msg.message_type === 'tool_result' ? {
+            name: (msg as { metadata?: { tool_name?: string } }).metadata?.tool_name || 'tool',
+            content: msg.content as string,
+          } : undefined,
+        }));
+        setPreviewMessages(previewMsgs);
+      } else {
+        setPreviewMessages([]);
+      }
+    } catch (err) {
+      console.error('Failed to preview version:', err);
+    }
+  }, [sessionId]);
+
+  // Cancel preview - return to current version
+  const handleCancelPreview = useCallback(() => {
+    setPreviewVersion(null);
+    setPreviewDeck(null);
+    setPreviewDescription('');
+    setPreviewMessages(null);
+  }, []);
+
+  // Open revert confirmation modal
+  const handleRevertClick = useCallback((versionNumber?: number) => {
+    const targetVersion = versionNumber ?? previewVersion;
+    if (targetVersion) {
+      setRevertTargetVersion(targetVersion);
+      setShowRevertModal(true);
+    }
+  }, [previewVersion]);
+
+  // Confirm and execute revert
+  const handleRevertConfirm = useCallback(async () => {
+    if (!sessionId || !revertTargetVersion) return;
+
+    try {
+      const { deck } = await api.restoreVersion(sessionId, revertTargetVersion);
+      setSlideDeck(deck as SlideDeck);
+      setPreviewVersion(null);
+      setPreviewDeck(null);
+      setPreviewDescription('');
+      setPreviewMessages(null);
+      setShowRevertModal(false);
+      setRevertTargetVersion(null);
+      
+      // Reload versions to reflect the changes
+      const { versions: loadedVersions, current_version } = await api.listVersions(sessionId);
+      setVersions(loadedVersions);
+      setCurrentVersion(current_version);
+      
+      // Force ChatPanel to remount and reload messages (which are now restored)
+      setChatKey(prev => prev + 1);
+    } catch (err) {
+      console.error('Failed to restore version:', err);
+      alert('Failed to restore version');
+    }
+  }, [sessionId, revertTargetVersion]);
+
+  // Handle verification complete - create save point with captured verification
+  const handleVerificationComplete = useCallback(async (panelEditDescription?: string) => {
+    // Use panel edit description if provided, otherwise use pending description from chat
+    const description = panelEditDescription || pendingSavePointDescription;
+    
+    if (!sessionId || !description) return;
+
+    try {
+      console.log(`[SavePoint] Creating save point after verification: "${description}"`);
+      await api.createSavePoint(sessionId, description);
+      
+      // Clear pending description
+      setPendingSavePointDescription(null);
+      
+      // Reload versions to show the new save point
+      const { versions: loadedVersions, current_version } = await api.listVersions(sessionId);
+      setVersions(loadedVersions);
+      setCurrentVersion(current_version);
+      
+      console.log(`[SavePoint] Created save point v${current_version}`);
+    } catch (err) {
+      console.error('Failed to create save point:', err);
+      // Clear pending to prevent retry loops
+      setPendingSavePointDescription(null);
+    }
+  }, [sessionId, pendingSavePointDescription]);
+
+  // Determine which deck to display
+  const displayDeck = previewVersion ? previewDeck : slideDeck;
+  
+  // Version key for forcing re-render when switching save point versions
+  // This prevents React from reusing DOM elements with identical slide_id keys
+  const versionKey = previewVersion ? `preview-v${previewVersion}` : `current-v${currentVersion || 'live'}`;
 
   return (
     <div className="h-screen flex flex-col">
@@ -134,27 +285,38 @@ export const AppLayout: React.FC = () => {
             {/* Session Actions */}
             {viewMode === 'main' && (
               <div className="flex items-center gap-2">
+                {/* Save Points Dropdown */}
+                {versions.length > 0 && (
+                  <SavePointDropdown
+                    versions={versions}
+                    currentVersion={currentVersion}
+                    previewVersion={previewVersion}
+                    onPreview={handlePreviewVersion}
+                    onRevert={handleRevertClick}
+                    disabled={isGenerating}
+                  />
+                )}
                 <button
                   onClick={() => setShowSaveDialog(true)}
-                  disabled={isGenerating}
+                  disabled={isGenerating || !!previewVersion}
                   className={`px-3 py-1.5 rounded text-sm transition-colors ${
-                    isGenerating
+                    isGenerating || previewVersion
                       ? 'bg-blue-400 text-blue-200 cursor-not-allowed opacity-50'
                       : 'bg-blue-500 hover:bg-blue-700 text-blue-100'
                   }`}
-                  title={isGenerating ? 'Disabled during generation' : 'Save session with a custom name'}
+                  title={isGenerating ? 'Disabled during generation' : previewVersion ? 'Exit preview to save' : 'Save session with a custom name'}
                 >
                   Save As
                 </button>
                 <button
                   onClick={handleNewSession}
-                  disabled={isGenerating}
+                  disabled={isGenerating || !!previewVersion}
                   className={`px-3 py-1.5 rounded text-sm transition-colors ${
-                    isGenerating
+                    isGenerating || previewVersion
                       ? 'bg-blue-400 text-blue-200 cursor-not-allowed opacity-50'
                       : 'bg-blue-500 hover:bg-blue-700 text-blue-100'
                   }`}
-                  title={isGenerating ? 'Disabled during generation' : 'Start a new session'}
+                  title={isGenerating ? 'Disabled during generation' : previewVersion ? 'Exit preview first' : 'Start a new session'}
                 >
                   New
                 </button>
@@ -269,6 +431,16 @@ export const AppLayout: React.FC = () => {
         />
       )}
 
+      {/* Preview Banner */}
+      {previewVersion && (
+        <PreviewBanner
+          versionNumber={previewVersion}
+          description={previewDescription}
+          onRevert={() => handleRevertClick()}
+          onCancel={handleCancelPreview}
+        />
+      )}
+
       {/* Main Content */}
       {viewMode === 'main' && (
         <div className="flex-1 flex overflow-hidden">
@@ -278,24 +450,33 @@ export const AppLayout: React.FC = () => {
               key={chatKey}
               ref={chatPanelRef}
               rawHtml={rawHtml}
-              onSlidesGenerated={(deck, raw) => {
+              onSlidesGenerated={(deck, raw, actionDescription) => {
                 setSlideDeck(deck);
                 setRawHtml(raw);
+                // Set pending save point description - will be created after verification
+                if (actionDescription) {
+                  setPendingSavePointDescription(actionDescription);
+                }
               }}
+              disabled={!!previewVersion}
+              previewMessages={previewMessages}
             />
           </div>
 
           {/* Selection Ribbon */}
-          <SelectionRibbon slideDeck={slideDeck} onSlideNavigate={handleSlideNavigate} />
+          <SelectionRibbon slideDeck={displayDeck} onSlideNavigate={handleSlideNavigate} versionKey={versionKey} />
 
           {/* Slide Panel */}
           <div className="flex-1">
             <SlidePanel
-              slideDeck={slideDeck}
+              slideDeck={displayDeck}
               rawHtml={rawHtml}
-              onSlideChange={setSlideDeck}
+              onSlideChange={previewVersion ? undefined : setSlideDeck}
               scrollToSlide={scrollTarget}
-              onSendMessage={handleSendMessage}
+              onSendMessage={previewVersion ? undefined : handleSendMessage}
+              readOnly={!!previewVersion}
+              onVerificationComplete={handleVerificationComplete}
+              versionKey={versionKey}
             />
           </div>
         </div>
@@ -350,6 +531,19 @@ export const AppLayout: React.FC = () => {
         currentTitle={sessionTitle || ''}
         onSave={handleSaveAs}
         onCancel={() => setShowSaveDialog(false)}
+      />
+
+      {/* Revert Confirmation Modal */}
+      <RevertConfirmModal
+        isOpen={showRevertModal}
+        versionNumber={revertTargetVersion || 0}
+        description={versions.find(v => v.version_number === revertTargetVersion)?.description || ''}
+        currentVersion={currentVersion || 0}
+        onConfirm={handleRevertConfirm}
+        onCancel={() => {
+          setShowRevertModal(false);
+          setRevertTargetVersion(null);
+        }}
       />
     </div>
   );

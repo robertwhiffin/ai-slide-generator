@@ -10,6 +10,7 @@ interface SlideSelectionProps {
   onSelectionChange: (indices: number[]) => void;
   onNonContiguousSelection?: (attemptedIndices: number[]) => void;
   onSlideNavigate?: (index: number) => void;
+  versionKey?: string;  // Used to force re-render when switching save point versions
 }
 
 export const SlideSelection: React.FC<SlideSelectionProps> = ({
@@ -19,6 +20,7 @@ export const SlideSelection: React.FC<SlideSelectionProps> = ({
   onSelectionChange,
   onNonContiguousSelection,
   onSlideNavigate,
+  versionKey,
 }) => {
   const toggleSelection = (index: number) => {
     const isSelected = selectedIndices.includes(index);
@@ -89,9 +91,11 @@ export const SlideSelection: React.FC<SlideSelectionProps> = ({
     <div className="slide-selection">
       {slides.map((slide, index) => {
         const isSelected = selectedIndices.includes(index);
+        // Include versionKey in key to force re-render when switching save point versions
+        const elementKey = versionKey ? `${versionKey}-${slide.slide_id}` : slide.slide_id;
         return (
           <div
-            key={slide.slide_id}
+            key={elementKey}
             className={`slide-thumbnail ${isSelected ? 'selected' : ''}`}
             onClick={() => handleCardClick(index)}
             role="button"

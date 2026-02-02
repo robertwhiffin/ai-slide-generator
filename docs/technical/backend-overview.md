@@ -75,6 +75,17 @@ Frontend fetch -> FastAPI router ->   │ ChatService (singleton)│
 | `POST` | `/api/verification/{slide_index}/feedback` | Submit human feedback on verification (logged to MLflow) | `routes/verification.submit_feedback` |
 | `GET` | `/api/verification/genie-link` | Get Genie conversation URL for source data review | `routes/verification.get_genie_link` |
 
+### Version / Save Points Endpoints
+
+| Method | Path | Purpose | Backend handler |
+| --- | --- | --- | --- |
+| `GET` | `/api/slides/versions` | List all save points for session | `routes/slides.list_versions` |
+| `GET` | `/api/slides/versions/{n}` | Preview specific version (no state change) | `routes/slides.preview_version` |
+| `POST` | `/api/slides/versions/create` | Create new save point | `routes/slides.create_version` |
+| `POST` | `/api/slides/versions/{n}/restore` | Restore version, delete newer versions | `routes/slides.restore_version` |
+
+Save points capture complete deck state plus verification results. Maximum 40 per session; oldest deleted on overflow. See [Save Points / Versioning](save-points-versioning.md).
+
 ### Settings & Configuration Endpoints
 
 | Method | Path | Purpose | Backend handler |
@@ -297,4 +308,5 @@ Keep this doc synchronized whenever you add new modules, features (e.g., streami
 - [Multi-User Concurrency](multi-user-concurrency.md) – session locking and async handling
 - [Slide Parser & Script Management](slide-parser-and-script-management.md) – HTML parsing flow
 - [Slide Editing Robustness](slide-editing-robustness-fixes.md) – Deck preservation, LLM validation, canvas deduplication, JS validation
+- [Save Points / Versioning](save-points-versioning.md) – Complete deck state snapshots with preview and restore
 
