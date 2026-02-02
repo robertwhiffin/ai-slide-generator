@@ -13,10 +13,64 @@ env:
   NODE_VERSION: '20'
 
 jobs:
-  # Fast unit tests - run first for quick feedback
+  # Determine which test suites to run based on changed files
+  changes:
+    name: Detect Changes
+    runs-on: ubuntu-latest
+    outputs:
+      backend: ${{ steps.filter.outputs.backend }}
+      frontend: ${{ steps.filter.outputs.frontend }}
+      api: ${{ steps.filter.outputs.api }}
+      export: ${{ steps.filter.outputs.export }}
+      streaming: ${{ steps.filter.outputs.streaming }}
+      config: ${{ steps.filter.outputs.config }}
+      slides: ${{ steps.filter.outputs.slides }}
+      genie: ${{ steps.filter.outputs.genie }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            backend:
+              - 'src/**'
+              - 'tests/**'
+              - 'pyproject.toml'
+            frontend:
+              - 'frontend/**'
+            api:
+              - 'src/api/**'
+              - 'tests/integration/test_api_routes.py'
+            export:
+              - 'src/api/routes/export.py'
+              - 'src/api/services/export*.py'
+              - 'src/core/pptx_export.py'
+              - 'tests/integration/test_export.py'
+            streaming:
+              - 'src/api/routes/chat.py'
+              - 'src/api/services/chat*.py'
+              - 'src/core/agent*.py'
+              - 'tests/integration/test_streaming.py'
+            config:
+              - 'src/api/routes/settings/**'
+              - 'src/services/config*.py'
+              - 'src/database/**'
+              - 'tests/integration/test_config_api.py'
+            slides:
+              - 'src/core/slide*.py'
+              - 'src/api/routes/slides.py'
+              - 'tests/integration/test_slide*.py'
+            genie:
+              - 'src/core/genie*.py'
+              - 'src/tools/genie*.py'
+              - 'tests/integration/test_genie*.py'
+
+  # Fast unit tests - always run, gate for other tests
   unit-tests:
     name: Unit Tests
     runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.backend == 'true'
     steps:
       - uses: actions/checkout@v4
 
@@ -51,12 +105,15 @@ jobs:
           name: coverage-report
           path: coverage.xml
 
-  # Integration tests with real database
-  integration-tests:
-    name: Integration Tests
+  # Integration test: API Routes
+  integration-api-routes:
+    name: "Integration: API Routes"
     runs-on: ubuntu-latest
-    needs: unit-tests  # Only run if unit tests pass
-
+    needs: [changes, unit-tests]
+    if: |
+      always() &&
+      (needs.unit-tests.result == 'success' || needs.unit-tests.result == 'skipped') &&
+      (needs.changes.outputs.api == 'true' || needs.changes.outputs.backend == 'true')
     services:
       postgres:
         image: postgres:15
@@ -71,45 +128,262 @@ jobs:
           --health-retries 5
         ports:
           - 5432:5432
-
     steps:
       - uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: 'pip'
-
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -e ".[dev]"
-
-      - name: Run integration tests
+      - run: pip install -e ".[dev]"
+      - name: Run API routes tests
         env:
           DATABASE_URL: postgresql://test:test@localhost:5432/test_db
           ENVIRONMENT: test
           DATABRICKS_HOST: https://test.cloud.databricks.com
           DATABRICKS_TOKEN: test-token
         run: |
-          pytest tests/integration -v --tb=short -n auto \
-            --junitxml=test-results/integration-results.xml \
-            -m "not live"
-
-      - name: Upload integration test results
-        uses: actions/upload-artifact@v4
+          pytest tests/integration/test_api_routes.py -v --tb=short \
+            --junitxml=test-results/api-routes-results.xml -m "not live"
+      - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: integration-test-results
+          name: integration-api-routes-results
+          path: test-results/
+
+  # Integration test: Config API
+  integration-config-api:
+    name: "Integration: Config API"
+    runs-on: ubuntu-latest
+    needs: [changes, unit-tests]
+    if: |
+      always() &&
+      (needs.unit-tests.result == 'success' || needs.unit-tests.result == 'skipped') &&
+      (needs.changes.outputs.config == 'true' || needs.changes.outputs.backend == 'true')
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_USER: test
+          POSTGRES_PASSWORD: test
+          POSTGRES_DB: test_db
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+      - run: pip install -e ".[dev]"
+      - name: Run config API tests
+        env:
+          DATABASE_URL: postgresql://test:test@localhost:5432/test_db
+          ENVIRONMENT: test
+          DATABRICKS_HOST: https://test.cloud.databricks.com
+          DATABRICKS_TOKEN: test-token
+        run: |
+          pytest tests/integration/test_config_api.py -v --tb=short \
+            --junitxml=test-results/config-api-results.xml -m "not live"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: integration-config-api-results
+          path: test-results/
+
+  # Integration test: Export
+  integration-export:
+    name: "Integration: Export"
+    runs-on: ubuntu-latest
+    needs: [changes, unit-tests]
+    if: |
+      always() &&
+      (needs.unit-tests.result == 'success' || needs.unit-tests.result == 'skipped') &&
+      (needs.changes.outputs.export == 'true' || needs.changes.outputs.backend == 'true')
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_USER: test
+          POSTGRES_PASSWORD: test
+          POSTGRES_DB: test_db
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+      - run: pip install -e ".[dev]"
+      - name: Run export tests
+        env:
+          DATABASE_URL: postgresql://test:test@localhost:5432/test_db
+          ENVIRONMENT: test
+          DATABRICKS_HOST: https://test.cloud.databricks.com
+          DATABRICKS_TOKEN: test-token
+        run: |
+          pytest tests/integration/test_export.py -v --tb=short \
+            --junitxml=test-results/export-results.xml -m "not live"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: integration-export-results
+          path: test-results/
+
+  # Integration test: Streaming
+  integration-streaming:
+    name: "Integration: Streaming"
+    runs-on: ubuntu-latest
+    needs: [changes, unit-tests]
+    if: |
+      always() &&
+      (needs.unit-tests.result == 'success' || needs.unit-tests.result == 'skipped') &&
+      (needs.changes.outputs.streaming == 'true' || needs.changes.outputs.backend == 'true')
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_USER: test
+          POSTGRES_PASSWORD: test
+          POSTGRES_DB: test_db
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+      - run: pip install -e ".[dev]"
+      - name: Run streaming tests
+        env:
+          DATABASE_URL: postgresql://test:test@localhost:5432/test_db
+          ENVIRONMENT: test
+          DATABRICKS_HOST: https://test.cloud.databricks.com
+          DATABRICKS_TOKEN: test-token
+        run: |
+          pytest tests/integration/test_streaming.py -v --tb=short \
+            --junitxml=test-results/streaming-results.xml -m "not live"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: integration-streaming-results
+          path: test-results/
+
+  # Integration test: Slides
+  integration-slides:
+    name: "Integration: Slides"
+    runs-on: ubuntu-latest
+    needs: [changes, unit-tests]
+    if: |
+      always() &&
+      (needs.unit-tests.result == 'success' || needs.unit-tests.result == 'skipped') &&
+      (needs.changes.outputs.slides == 'true' || needs.changes.outputs.backend == 'true')
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_USER: test
+          POSTGRES_PASSWORD: test
+          POSTGRES_DB: test_db
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+      - run: pip install -e ".[dev]"
+      - name: Run slide tests
+        env:
+          DATABASE_URL: postgresql://test:test@localhost:5432/test_db
+          ENVIRONMENT: test
+          DATABRICKS_HOST: https://test.cloud.databricks.com
+          DATABRICKS_TOKEN: test-token
+        run: |
+          pytest tests/integration/test_slide_deck_integration.py tests/integration/test_slide_replacement_flow.py \
+            -v --tb=short --junitxml=test-results/slides-results.xml -m "not live"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: integration-slides-results
+          path: test-results/
+
+  # Integration test: Genie
+  integration-genie:
+    name: "Integration: Genie"
+    runs-on: ubuntu-latest
+    needs: [changes, unit-tests]
+    if: |
+      always() &&
+      (needs.unit-tests.result == 'success' || needs.unit-tests.result == 'skipped') &&
+      (needs.changes.outputs.genie == 'true' || needs.changes.outputs.backend == 'true')
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_USER: test
+          POSTGRES_PASSWORD: test
+          POSTGRES_DB: test_db
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+      - run: pip install -e ".[dev]"
+      - name: Run Genie tests
+        env:
+          DATABASE_URL: postgresql://test:test@localhost:5432/test_db
+          ENVIRONMENT: test
+          DATABRICKS_HOST: https://test.cloud.databricks.com
+          DATABRICKS_TOKEN: test-token
+        run: |
+          pytest tests/integration/test_genie_integration.py tests/integration/test_client_integration.py \
+            -v --tb=short --junitxml=test-results/genie-results.xml -m "not live"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: integration-genie-results
           path: test-results/
 
   # E2E tests with Playwright
   e2e-tests:
     name: E2E Tests (Playwright)
     runs-on: ubuntu-latest
-    needs: unit-tests  # Only run if unit tests pass
-
+    needs: [changes, unit-tests]
+    if: |
+      always() &&
+      (needs.unit-tests.result == 'success' || needs.unit-tests.result == 'skipped') &&
+      needs.changes.outputs.frontend == 'true'
     steps:
       - uses: actions/checkout@v4
 
@@ -141,13 +415,11 @@ jobs:
 
       - name: Start backend server
         run: |
-          # Start backend with test database in background
           DATABASE_URL="sqlite:///./test.db" \
           ENVIRONMENT="test" \
           DATABRICKS_HOST="https://test.databricks.com" \
           DATABRICKS_TOKEN="test-token" \
           python -m uvicorn src.api.main:app --host 0.0.0.0 --port 8000 &
-          # Wait for backend to be ready
           for i in {1..30}; do
             if curl -s http://localhost:8000/api/health > /dev/null 2>&1; then
               echo "Backend is ready"
@@ -182,83 +454,50 @@ jobs:
           name: playwright-results
           path: frontend/test-results/
 
-  # Validation tests - focused on deck integrity
-  validation-tests:
-    name: Deck Integrity Validation
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: ${{ env.PYTHON_VERSION }}
-          cache: 'pip'
-
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -e ".[dev]"
-
-      - name: Run deck integrity tests
-        run: |
-          pytest tests/unit/test_deck_integrity.py tests/unit/test_llm_edit_responses.py -v -n auto \
-            --tb=long \
-            --junitxml=test-results/integrity-results.xml
-
-      - name: Upload validation results
-        uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: validation-test-results
-          path: test-results/
-
-  # Persistence tests - verify all operations save to database
-  persistence-tests:
-    name: Deck Persistence Validation
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: ${{ env.PYTHON_VERSION }}
-          cache: 'pip'
-
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -e ".[dev]"
-
-      - name: Run persistence tests
-        run: |
-          pytest tests/unit/test_deck_persistence.py tests/unit/test_chat_persistence.py -v -n auto \
-            --tb=long \
-            --junitxml=test-results/persistence-results.xml
-
-      - name: Upload persistence test results
-        uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: persistence-test-results
-          path: test-results/
-
   # Summary job - runs after all tests
   test-summary:
     name: Test Summary
     runs-on: ubuntu-latest
-    needs: [unit-tests, integration-tests, e2e-tests, validation-tests, persistence-tests]
+    needs:
+      - unit-tests
+      - integration-api-routes
+      - integration-config-api
+      - integration-export
+      - integration-streaming
+      - integration-slides
+      - integration-genie
+      - e2e-tests
     if: always()
     steps:
       - name: Check test results
         run: |
-          if [ "${{ needs.unit-tests.result }}" == "failure" ] || \
-             [ "${{ needs.integration-tests.result }}" == "failure" ] || \
-             [ "${{ needs.e2e-tests.result }}" == "failure" ] || \
-             [ "${{ needs.validation-tests.result }}" == "failure" ] || \
-             [ "${{ needs.persistence-tests.result }}" == "failure" ]; then
+          echo "Unit Tests: ${{ needs.unit-tests.result }}"
+          echo "API Routes: ${{ needs.integration-api-routes.result }}"
+          echo "Config API: ${{ needs.integration-config-api.result }}"
+          echo "Export: ${{ needs.integration-export.result }}"
+          echo "Streaming: ${{ needs.integration-streaming.result }}"
+          echo "Slides: ${{ needs.integration-slides.result }}"
+          echo "Genie: ${{ needs.integration-genie.result }}"
+          echo "E2E: ${{ needs.e2e-tests.result }}"
+
+          # Fail if any required job failed (not skipped)
+          failed=false
+          for result in "${{ needs.unit-tests.result }}" \
+                        "${{ needs.integration-api-routes.result }}" \
+                        "${{ needs.integration-config-api.result }}" \
+                        "${{ needs.integration-export.result }}" \
+                        "${{ needs.integration-streaming.result }}" \
+                        "${{ needs.integration-slides.result }}" \
+                        "${{ needs.integration-genie.result }}" \
+                        "${{ needs.e2e-tests.result }}"; do
+            if [ "$result" == "failure" ]; then
+              failed=true
+              break
+            fi
+          done
+
+          if [ "$failed" == "true" ]; then
             echo "One or more test jobs failed"
             exit 1
           fi
-          echo "All tests passed!"
+          echo "All tests passed or were skipped!"
