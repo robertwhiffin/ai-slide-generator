@@ -12,8 +12,9 @@ import pytest
 from src.core.databricks_client import get_databricks_client
 from src.services.tools import GenieToolError, query_genie_space
 
-# Mark all tests in this module as integration tests
-pytestmark = pytest.mark.integration
+# Mark all tests in this module as integration tests requiring live Databricks connection
+# Use 'pytest -m live' to run these, or they're excluded by '-m "not live"' in CI
+pytestmark = [pytest.mark.integration, pytest.mark.live]
 
 
 @pytest.fixture(scope="module")
