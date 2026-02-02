@@ -146,7 +146,6 @@ def test_create_profile_valid(client):
     assert data["description"] == "Test description"
     assert "ai_infra" in data
     assert "genie_spaces" in data
-    assert "mlflow" in data
     assert "prompts" in data
 
 
@@ -300,33 +299,64 @@ def test_get_genie_space_404_for_nonexistent_profile(client, test_db):
     assert response.status_code == 404
 
 
-def test_profile_has_default_genie_space(client, test_db):
-    """Test that creating a profile includes a default genie space."""
+def test_profile_has_no_default_genie_space(client, test_db):
+    """Test that creating a profile does NOT include a default genie space."""
     # Create profile via API
     response = client.post(
         "/api/settings/profiles",
         json={
             "name": "test_default_genie",
-            "description": "Profile should have default genie space",
+            "description": "Profile should NOT have default genie space",
             "copy_from_profile_id": None,
         }
     )
     assert response.status_code == 201
     profile = response.json()
-    
-    # Profile should have genie space by default
+
+    # Profile should NOT have genie space by default
     assert "genie_spaces" in profile
-    assert len(profile["genie_spaces"]) == 1
-    
-    # Also verify via genie endpoint
+    assert len(profile["genie_spaces"]) == 0
+
+    # Also verify via genie endpoint - should return 404
     response = client.get(f"/api/settings/genie/{profile['id']}")
-    assert response.status_code == 200
+    assert response.status_code == 404
+
+
+def test_add_genie_space_valid(client, default_profile):
+    """Test adding a Genie space to a profile."""
+    # Profile should not have a Genie space by default
+    response = client.get(f"/api/settings/genie/{default_profile['id']}")
+    assert response.status_code == 404
+
+    # Add a Genie space
+    response = client.post(
+        f"/api/settings/genie/{default_profile['id']}",
+        json={
+            "space_id": "test-space-123",
+            "space_name": "Test Space",
+            "description": "Test description",
+        }
+    )
+    assert response.status_code == 201
     data = response.json()
-    assert "space_id" in data
+    assert data["space_id"] == "test-space-123"
+    assert data["space_name"] == "Test Space"
 
 
 def test_get_genie_space_valid(client, default_profile):
     """Test getting the Genie space for a profile."""
+    # First add a Genie space
+    response = client.post(
+        f"/api/settings/genie/{default_profile['id']}",
+        json={
+            "space_id": "test-space-456",
+            "space_name": "Test Space for Get",
+            "description": "Test",
+        }
+    )
+    assert response.status_code == 201
+
+    # Now get it
     response = client.get(f"/api/settings/genie/{default_profile['id']}")
     assert response.status_code == 200
     data = response.json()
@@ -336,11 +366,18 @@ def test_get_genie_space_valid(client, default_profile):
 
 def test_update_genie_space_valid(client, default_profile):
     """Test updating the Genie space."""
-    # Get existing space
-    response = client.get(f"/api/settings/genie/{default_profile['id']}")
-    space = response.json()
-    space_id = space["id"]
-    
+    # First add a Genie space
+    response = client.post(
+        f"/api/settings/genie/{default_profile['id']}",
+        json={
+            "space_id": "test-space-789",
+            "space_name": "Original Name",
+            "description": "Original",
+        }
+    )
+    assert response.status_code == 201
+    space_id = response.json()["id"]
+
     # Update it
     response = client.put(
         f"/api/settings/genie/space/{space_id}",
@@ -356,48 +393,25 @@ def test_update_genie_space_valid(client, default_profile):
 
 def test_delete_genie_space_valid(client, default_profile):
     """Test deleting the Genie space."""
-    # Get existing space
-    response = client.get(f"/api/settings/genie/{default_profile['id']}")
-    space = response.json()
-    space_id = space["id"]
-    
+    # First add a Genie space
+    response = client.post(
+        f"/api/settings/genie/{default_profile['id']}",
+        json={
+            "space_id": "test-space-delete",
+            "space_name": "To Delete",
+            "description": "Will be deleted",
+        }
+    )
+    assert response.status_code == 201
+    space_id = response.json()["id"]
+
     # Delete it
     response = client.delete(f"/api/settings/genie/space/{space_id}")
     assert response.status_code == 204
-    
+
     # Verify it's gone
     response = client.get(f"/api/settings/genie/{default_profile['id']}")
     assert response.status_code == 404
-
-
-# MLflow Tests
-
-def test_get_mlflow_config_valid(client, default_profile):
-    """Test getting MLflow settings."""
-    response = client.get(f"/api/settings/mlflow/{default_profile['id']}")
-    assert response.status_code == 200
-    data = response.json()
-    assert "experiment_name" in data
-
-
-def test_update_mlflow_config_valid(client, default_profile):
-    """Test updating MLflow settings."""
-    response = client.put(
-        f"/api/settings/mlflow/{default_profile['id']}",
-        json={"experiment_name": "/new/experiment"}
-    )
-    assert response.status_code == 200
-    data = response.json()
-    assert data["experiment_name"] == "/new/experiment"
-
-
-def test_update_mlflow_config_invalid(client, default_profile):
-    """Test updating MLflow settings with invalid name."""
-    response = client.put(
-        f"/api/settings/mlflow/{default_profile['id']}",
-        json={"experiment_name": "no-leading-slash"}
-    )
-    assert response.status_code == 422  # Pydantic validation error
 
 
 # Prompts Tests
@@ -409,7 +423,6 @@ def test_get_prompts_config_valid(client, default_profile):
     data = response.json()
     assert "system_prompt" in data
     assert "slide_editing_instructions" in data
-    assert "user_prompt_template" in data
 
 
 def test_update_prompts_config_valid(client, default_profile):
@@ -419,20 +432,10 @@ def test_update_prompts_config_valid(client, default_profile):
         json={
             "system_prompt": "Updated system prompt",
             "slide_editing_instructions": "Updated instructions",
-            "user_prompt_template": "Updated template with {question}",
         }
     )
     assert response.status_code == 200
     data = response.json()
     assert "Updated system prompt" in data["system_prompt"]
     assert "Updated instructions" in data["slide_editing_instructions"]
-
-
-def test_update_prompts_config_missing_placeholder(client, default_profile):
-    """Test updating prompts with missing required placeholder."""
-    response = client.put(
-        f"/api/settings/prompts/{default_profile['id']}",
-        json={"user_prompt_template": "No placeholder here"}
-    )
-    assert response.status_code == 422  # Pydantic validation error
 
