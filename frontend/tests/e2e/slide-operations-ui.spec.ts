@@ -181,12 +181,12 @@ async function setupWithSlides(page: Page) {
       status: 200,
       contentType: 'application/json',
       body: JSON.stringify({
-        status: 'verified',
-        rating: 'green',
         score: 0.95,
+        rating: 'green',
         explanation: 'Slide content verified successfully',
         issues: [],
         duration_ms: 150,
+        error: false,
       }),
     });
   });
@@ -558,12 +558,12 @@ test.describe('SlideVerification', () => {
         status: 200,
         contentType: 'application/json',
         body: JSON.stringify({
-          status: 'verified',
-          rating: 'green',
           score: 0.95,
+          rating: 'green',
           explanation: 'Slide content verified successfully',
           issues: [],
           duration_ms: 150,
+          error: false,
         }),
       });
     });

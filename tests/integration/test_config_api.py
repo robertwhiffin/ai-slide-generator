@@ -23,11 +23,33 @@ from src.database.models import (  # noqa: F401
 @pytest.fixture(scope="module", autouse=True)
 def mock_databricks_client():
     """Mock Databricks client for entire module to avoid slow SDK initialization."""
+    # Reset the singleton before tests to ensure mock is used
+    import src.core.databricks_client as db_client
+    db_client._system_client = None
+    
     mock_client = MagicMock()
     mock_client.current_user.me.return_value = MagicMock(user_name="test@example.com")
     
+    # Mock serving_endpoints.list() for get_available_endpoints and validate_ai_infra
+    mock_endpoint = MagicMock()
+    mock_endpoint.name = "databricks-meta-llama"
+    mock_client.serving_endpoints.list.return_value = [mock_endpoint]
+    
+    # Mock genie.list_spaces() for validate_genie_space
+    mock_space = MagicMock()
+    mock_space.space_id = "test-space-123"
+    mock_space.title = "Test Space"
+    mock_space.description = "Test description"
+    mock_spaces_response = MagicMock()
+    mock_spaces_response.spaces = [mock_space]
+    mock_spaces_response.next_page_token = None
+    mock_client.genie.list_spaces.return_value = mock_spaces_response
+    
     with patch("src.core.databricks_client.WorkspaceClient", return_value=mock_client):
         yield mock_client
+    
+    # Reset singleton after tests
+    db_client._system_client = None
 
 
 @pytest.fixture(scope="module")
@@ -262,7 +284,7 @@ def test_delete_default_profile_forbidden(client, default_profile):
 
 def test_get_ai_infra_config_valid(client, default_profile):
     """Test getting AI infrastructure settings."""
-    response = client.get(f"/api/settings/ai-db_app_deployment/{default_profile['id']}")
+    response = client.get(f"/api/settings/ai-infra/{default_profile['id']}")
     assert response.status_code == 200
     data = response.json()
     assert "llm_endpoint" in data
@@ -286,7 +308,7 @@ def test_update_ai_infra_config_valid(client, default_profile, monkeypatch):
     )
     
     response = client.put(
-        f"/api/settings/ai-db_app_deployment/{default_profile['id']}",
+        f"/api/settings/ai-infra/{default_profile['id']}",
         json={
             "llm_endpoint": "new-endpoint",
             "llm_temperature": 0.8,
@@ -303,7 +325,7 @@ def test_update_ai_infra_config_valid(client, default_profile, monkeypatch):
 def test_update_ai_infra_config_invalid_temperature(client, default_profile):
     """Test updating with invalid temperature."""
     response = client.put(
-        f"/api/settings/ai-db_app_deployment/{default_profile['id']}",
+        f"/api/settings/ai-infra/{default_profile['id']}",
         json={"llm_temperature": 1.5}  # Invalid: > 1.0
     )
     assert response.status_code == 422  # Pydantic validation error
@@ -319,7 +341,7 @@ def test_get_available_endpoints(client, monkeypatch):
     
     monkeypatch.setattr(ConfigService, "get_available_endpoints", mock_get_endpoints)
     
-    response = client.get("/api/settings/ai-db_app_deployment/endpoints/available")
+    response = client.get("/api/settings/ai-infra/endpoints/available")
     assert response.status_code == 200
     data = response.json()
     assert "endpoints" in data
