@@ -426,6 +426,7 @@ jobs:
         run: |
           echo "Initializing database tables and seeding default data..."
           python -c "
+          import sqlite3
           from src.core.database import init_db, get_db_session
           from src.core.init_default_profile import seed_defaults
           from src.database.models import ConfigProfile, ConfigAIInfra, ConfigPrompts, SlideStyleLibrary
@@ -433,6 +434,13 @@ jobs:
           # Create tables
           init_db()
           print('Tables created')
+          
+          # Enable WAL mode for SQLite (better concurrency for parallel tests)
+          conn = sqlite3.connect('./test.db')
+          conn.execute('PRAGMA journal_mode=WAL')
+          conn.execute('PRAGMA busy_timeout=30000')
+          conn.close()
+          print('SQLite WAL mode enabled')
           
           # Seed deck prompts and slide styles (no Genie config required)
           seed_defaults()
@@ -482,6 +490,7 @@ jobs:
 
       - name: Start backend server
         run: |
+          # WAL mode was enabled during seeding step for better concurrency
           DATABASE_URL="sqlite:///./test.db" \
           ENVIRONMENT="test" \
           DATABRICKS_HOST="https://test.databricks.com" \
@@ -505,7 +514,9 @@ jobs:
         env:
           CI: true
           VITE_API_URL: http://localhost:8000
-        run: npx playwright test --project=chromium
+        # Use 2 workers to reduce SQLite database contention
+        # Integration tests share a single database file
+        run: npx playwright test --project=chromium --workers=2
 
       - name: Upload Playwright report
         uses: actions/upload-artifact@v4
