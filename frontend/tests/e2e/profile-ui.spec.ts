@@ -529,7 +529,7 @@ test.describe('Profile Form Validation', () => {
     // Should show error - look for error text (not buttons)
     // The wizard should show an error message in a text element
     await expect(
-      page.locator('p, span, div').filter({ hasText: /already exists|failed|error creating/i }).first()
+      page.getByText('Failed to create profile')
     ).toBeVisible({ timeout: 10000 });
   });
 
