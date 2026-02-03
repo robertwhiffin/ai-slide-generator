@@ -36,12 +36,17 @@ def mock_databricks_client():
     mock_client.serving_endpoints.list.return_value = [mock_endpoint]
     
     # Mock genie.list_spaces() for validate_genie_space
-    mock_space = MagicMock()
-    mock_space.space_id = "test-space-123"
-    mock_space.title = "Test Space"
-    mock_space.description = "Test description"
+    # Include all space IDs used in tests so validation passes
+    test_space_ids = ["test-space-123", "test-space-456", "test-space-789", "test-space-delete"]
+    mock_spaces = []
+    for space_id in test_space_ids:
+        mock_space = MagicMock()
+        mock_space.space_id = space_id
+        mock_space.title = f"Test Space {space_id}"
+        mock_space.description = "Test description"
+        mock_spaces.append(mock_space)
     mock_spaces_response = MagicMock()
-    mock_spaces_response.spaces = [mock_space]
+    mock_spaces_response.spaces = mock_spaces
     mock_spaces_response.next_page_token = None
     mock_client.genie.list_spaces.return_value = mock_spaces_response
     
@@ -259,8 +264,9 @@ def test_duplicate_profile_valid(client, default_profile):
     assert data["ai_infra"]["llm_endpoint"] == default_profile["ai_infra"]["llm_endpoint"]
 
 
-def test_delete_profile_valid(client):
+def test_delete_profile_valid(client, default_profile):
     """Test deleting a non-default profile."""
+    # default_profile fixture ensures a default exists, so new profile won't become default
     # Create profile
     response = client.post(
         "/api/settings/profiles",
