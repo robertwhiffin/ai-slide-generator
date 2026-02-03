@@ -18,16 +18,16 @@ import {
 // ============================================
 
 async function setupMocks(page: Page) {
-  await page.route('http://localhost:8000/api/settings/profiles', (route) => {
+  await page.route('http://127.0.0.1:8000/api/settings/profiles', (route) => {
     route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(mockProfiles) });
   });
-  await page.route('http://localhost:8000/api/settings/deck-prompts', (route) => {
+  await page.route('http://127.0.0.1:8000/api/settings/deck-prompts', (route) => {
     route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(mockDeckPrompts) });
   });
-  await page.route('http://localhost:8000/api/settings/slide-styles', (route) => {
+  await page.route('http://127.0.0.1:8000/api/settings/slide-styles', (route) => {
     route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(mockSlideStyles) });
   });
-  await page.route('http://localhost:8000/api/sessions**', (route) => {
+  await page.route('http://127.0.0.1:8000/api/sessions**', (route) => {
     route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(mockSessions) });
   });
   await page.route('**/api/version**', (route) => {

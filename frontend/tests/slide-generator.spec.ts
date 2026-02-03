@@ -15,7 +15,7 @@ import {
  */
 async function setupMocks(page: Page) {
   // Mock profiles endpoint
-  await page.route('http://localhost:8000/api/settings/profiles', (route) => {
+  await page.route('http://127.0.0.1:8000/api/settings/profiles', (route) => {
     route.fulfill({
       status: 200,
       contentType: 'application/json',
@@ -24,7 +24,7 @@ async function setupMocks(page: Page) {
   });
 
   // Mock deck prompts endpoint
-  await page.route('http://localhost:8000/api/settings/deck-prompts', (route) => {
+  await page.route('http://127.0.0.1:8000/api/settings/deck-prompts', (route) => {
     route.fulfill({
       status: 200,
       contentType: 'application/json',
@@ -33,7 +33,7 @@ async function setupMocks(page: Page) {
   });
 
   // Mock slide styles endpoint
-  await page.route('http://localhost:8000/api/settings/slide-styles', (route) => {
+  await page.route('http://127.0.0.1:8000/api/settings/slide-styles', (route) => {
     route.fulfill({
       status: 200,
       contentType: 'application/json',
@@ -42,7 +42,7 @@ async function setupMocks(page: Page) {
   });
 
   // Mock sessions endpoints
-  await page.route('http://localhost:8000/api/sessions**', (route, request) => {
+  await page.route('http://127.0.0.1:8000/api/sessions**', (route, request) => {
     const url = request.url();
     
     if (url.includes('limit=')) {
@@ -66,7 +66,7 @@ async function setupMocks(page: Page) {
   });
 
   // Mock verification endpoint
-  await page.route('http://localhost:8000/api/verification/**', (route) => {
+  await page.route('http://127.0.0.1:8000/api/verification/**', (route) => {
     route.fulfill({
       status: 200,
       contentType: 'application/json',
@@ -75,7 +75,7 @@ async function setupMocks(page: Page) {
   });
 
   // Mock chat stream endpoint
-  await page.route('http://localhost:8000/api/chat/stream', (route) => {
+  await page.route('http://127.0.0.1:8000/api/chat/stream', (route) => {
     route.fulfill({
       status: 200,
       contentType: 'text/event-stream',

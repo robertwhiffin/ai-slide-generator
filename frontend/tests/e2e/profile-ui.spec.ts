@@ -28,7 +28,7 @@ import {
 
 async function setupProfileMocks(page: Page) {
   // Mock profiles endpoint
-  await page.route('http://localhost:8000/api/settings/profiles', (route, request) => {
+  await page.route('http://127.0.0.1:8000/api/settings/profiles', (route, request) => {
     if (request.method() === 'GET') {
       route.fulfill({
         status: 200,
@@ -47,7 +47,7 @@ async function setupProfileMocks(page: Page) {
   });
 
   // Mock individual profile endpoints
-  await page.route(/http:\/\/localhost:8000\/api\/settings\/profiles\/\d+$/, (route, request) => {
+  await page.route(/http:\/\/127.0.0.1:8000\/api\/settings\/profiles\/\d+$/, (route, request) => {
     if (request.method() === 'GET') {
       const id = parseInt(request.url().split('/').pop() || '1');
       const profile = mockProfiles.find((p) => p.id === id) || mockProfiles[0];
@@ -70,7 +70,7 @@ async function setupProfileMocks(page: Page) {
   });
 
   // Mock profile load endpoint
-  await page.route(/http:\/\/localhost:8000\/api\/settings\/profiles\/\d+\/load/, (route) => {
+  await page.route(/http:\/\/127.0.0.1:8000\/api\/settings\/profiles\/\d+\/load/, (route) => {
     route.fulfill({
       status: 200,
       contentType: 'application/json',
@@ -79,7 +79,7 @@ async function setupProfileMocks(page: Page) {
   });
 
   // Mock profile duplicate endpoint
-  await page.route(/http:\/\/localhost:8000\/api\/settings\/profiles\/\d+\/duplicate/, (route) => {
+  await page.route(/http:\/\/127.0.0.1:8000\/api\/settings\/profiles\/\d+\/duplicate/, (route) => {
     route.fulfill({
       status: 201,
       contentType: 'application/json',
@@ -92,7 +92,7 @@ async function setupProfileMocks(page: Page) {
   });
 
   // Mock profile set-default endpoint
-  await page.route(/http:\/\/localhost:8000\/api\/settings\/profiles\/\d+\/set-default/, (route) => {
+  await page.route(/http:\/\/127.0.0.1:8000\/api\/settings\/profiles\/\d+\/set-default/, (route) => {
     route.fulfill({
       status: 200,
       contentType: 'application/json',
@@ -101,7 +101,7 @@ async function setupProfileMocks(page: Page) {
   });
 
   // Mock deck prompts
-  await page.route('http://localhost:8000/api/settings/deck-prompts', (route) => {
+  await page.route('http://127.0.0.1:8000/api/settings/deck-prompts', (route) => {
     route.fulfill({
       status: 200,
       contentType: 'application/json',
@@ -110,7 +110,7 @@ async function setupProfileMocks(page: Page) {
   });
 
   // Mock slide styles
-  await page.route('http://localhost:8000/api/settings/slide-styles', (route) => {
+  await page.route('http://127.0.0.1:8000/api/settings/slide-styles', (route) => {
     route.fulfill({
       status: 200,
       contentType: 'application/json',
@@ -119,7 +119,7 @@ async function setupProfileMocks(page: Page) {
   });
 
   // Mock sessions
-  await page.route('http://localhost:8000/api/sessions**', (route, request) => {
+  await page.route('http://127.0.0.1:8000/api/sessions**', (route, request) => {
     const url = request.url();
     if (url.includes('limit=')) {
       route.fulfill({
@@ -133,7 +133,7 @@ async function setupProfileMocks(page: Page) {
   });
 
   // Mock Genie spaces
-  await page.route('http://localhost:8000/api/genie/spaces', (route) => {
+  await page.route('http://127.0.0.1:8000/api/genie/spaces', (route) => {
     route.fulfill({
       status: 200,
       contentType: 'application/json',
@@ -496,7 +496,7 @@ test.describe('Profile Form Validation', () => {
     await setupProfileMocks(page);
 
     // Override the profile creation to return duplicate error
-    await page.route('http://localhost:8000/api/settings/profiles', async (route, request) => {
+    await page.route('http://127.0.0.1:8000/api/settings/profiles', async (route, request) => {
       if (request.method() === 'POST') {
         await route.fulfill({
           status: 409,

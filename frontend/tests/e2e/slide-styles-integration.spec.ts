@@ -7,13 +7,13 @@ import { test, expect, Page, APIRequestContext } from '@playwright/test';
  * Each test creates its own test data and cleans up after itself.
  *
  * Prerequisites:
- * - Backend must be running at http://localhost:8000
+ * - Backend must be running at http://127.0.0.1:8000
  * - Database must be accessible
  *
  * Run with: npx playwright test tests/e2e/slide-styles-integration.spec.ts
  */
 
-const API_BASE = 'http://localhost:8000/api/settings';
+const API_BASE = 'http://127.0.0.1:8000/api/settings';
 
 // ============================================
 // Type Definitions
