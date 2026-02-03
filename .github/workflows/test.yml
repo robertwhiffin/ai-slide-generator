@@ -599,7 +599,7 @@ jobs:
           echo "=== End pre-flight check ==="
           echo ""
           echo "Running test: ${{ matrix.test }}.spec.ts"
-          npx playwright test tests/e2e/${{ matrix.test }}.spec.ts --project=chromium
+          npx playwright test tests/e2e/${{ matrix.test }}.spec.ts --project=chromium --workers=1
 
       - name: Upload Playwright report
         uses: actions/upload-artifact@v4
