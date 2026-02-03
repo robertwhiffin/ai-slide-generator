@@ -417,6 +417,27 @@ jobs:
           python -m pip install --upgrade pip
           pip install -e ".[dev]"
 
+      - name: Seed database with default data
+        env:
+          DATABASE_URL: sqlite:///./test.db
+          ENVIRONMENT: test
+          DATABRICKS_HOST: https://test.databricks.com
+          DATABRICKS_TOKEN: test-token
+        run: |
+          echo "Initializing database tables and seeding default data..."
+          python -c "
+          from src.core.database import init_db
+          from src.core.init_default_profile import init_default_profile
+          
+          # Create tables
+          init_db()
+          print('Tables created')
+          
+          # Seed default profile, deck prompts, and slide styles
+          init_default_profile()
+          print('Default data seeded')
+          "
+
       - name: Start backend server
         run: |
           DATABASE_URL="sqlite:///./test.db" \
