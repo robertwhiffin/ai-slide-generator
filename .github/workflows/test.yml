@@ -426,16 +426,58 @@ jobs:
         run: |
           echo "Initializing database tables and seeding default data..."
           python -c "
-          from src.core.database import init_db
-          from src.core.init_default_profile import init_default_profile
+          from src.core.database import init_db, get_db_session
+          from src.core.init_default_profile import seed_defaults
+          from src.database.models import ConfigProfile, ConfigAIInfra, ConfigPrompts, SlideStyleLibrary
           
           # Create tables
           init_db()
           print('Tables created')
           
-          # Seed default profile, deck prompts, and slide styles
-          init_default_profile()
-          print('Default data seeded')
+          # Seed deck prompts and slide styles (no Genie config required)
+          seed_defaults()
+          print('Default deck prompts and slide styles seeded')
+          
+          # Create a minimal default profile for E2E tests
+          with get_db_session() as db:
+              # Check if profile already exists
+              existing = db.query(ConfigProfile).filter_by(name='default').first()
+              if not existing:
+                  # Get the first slide style
+                  style = db.query(SlideStyleLibrary).first()
+                  style_id = style.id if style else None
+                  
+                  # Create profile
+                  profile = ConfigProfile(
+                      name='default',
+                      description='Default test profile',
+                      is_default=True
+                  )
+                  db.add(profile)
+                  db.flush()
+                  
+                  # Create AI infra config
+                  ai_infra = ConfigAIInfra(
+                      profile_id=profile.id,
+                      llm_endpoint='databricks-claude-sonnet',
+                      llm_temperature=0.7,
+                      llm_max_tokens=4096
+                  )
+                  db.add(ai_infra)
+                  
+                  # Create prompts config
+                  prompts = ConfigPrompts(
+                      profile_id=profile.id,
+                      selected_slide_style_id=style_id,
+                      system_prompt='You are a helpful assistant.',
+                      slide_editing_instructions='Edit slides as requested.'
+                  )
+                  db.add(prompts)
+                  
+                  db.commit()
+                  print(f'Created default profile (id={profile.id})')
+              else:
+                  print('Default profile already exists')
           "
 
       - name: Start backend server
