@@ -7,7 +7,7 @@ import { test, expect, Page, APIRequestContext } from '@playwright/test';
  * Unlike CRUD tests, sessions are created via the Generator, not this page.
  *
  * Prerequisites:
- * - Backend must be running at http://localhost:8000
+ * - Backend must be running at http://127.0.0.1:8000
  * - Database must be accessible
  *
  * Key differences from other integration tests:
@@ -18,7 +18,7 @@ import { test, expect, Page, APIRequestContext } from '@playwright/test';
  * Run with: npx playwright test tests/e2e/history-integration.spec.ts
  */
 
-const API_BASE = 'http://localhost:8000/api';
+const API_BASE = 'http://127.0.0.1:8000/api';
 
 // ============================================
 // Test Data Helpers

@@ -60,7 +60,7 @@ function createStreamingResponseWithDeck(slideDeck: typeof mockSlideDeck): strin
 
 async function setupWithSlides(page: Page) {
   // Mock profiles endpoint
-  await page.route('http://localhost:8000/api/settings/profiles', (route, request) => {
+  await page.route('http://127.0.0.1:8000/api/settings/profiles', (route, request) => {
     if (request.method() === 'GET') {
       route.fulfill({
         status: 200,
@@ -73,7 +73,7 @@ async function setupWithSlides(page: Page) {
   });
 
   // Mock individual profile endpoints
-  await page.route(/http:\/\/localhost:8000\/api\/settings\/profiles\/\d+$/, (route, request) => {
+  await page.route(/http:\/\/127.0.0.1:8000\/api\/settings\/profiles\/\d+$/, (route, request) => {
     if (request.method() === 'GET') {
       const id = parseInt(request.url().split('/').pop() || '1');
       const profile = mockProfiles.find((p) => p.id === id) || mockProfiles[0];
@@ -88,7 +88,7 @@ async function setupWithSlides(page: Page) {
   });
 
   // Mock deck prompts
-  await page.route('http://localhost:8000/api/settings/deck-prompts', (route) => {
+  await page.route('http://127.0.0.1:8000/api/settings/deck-prompts', (route) => {
     route.fulfill({
       status: 200,
       contentType: 'application/json',
@@ -97,7 +97,7 @@ async function setupWithSlides(page: Page) {
   });
 
   // Mock slide styles
-  await page.route('http://localhost:8000/api/settings/slide-styles', (route) => {
+  await page.route('http://127.0.0.1:8000/api/settings/slide-styles', (route) => {
     route.fulfill({
       status: 200,
       contentType: 'application/json',
@@ -106,7 +106,7 @@ async function setupWithSlides(page: Page) {
   });
 
   // Mock sessions endpoints
-  await page.route('http://localhost:8000/api/sessions**', (route, request) => {
+  await page.route('http://127.0.0.1:8000/api/sessions**', (route, request) => {
     const url = request.url();
     if (url.includes('limit=')) {
       // Sessions list
@@ -148,7 +148,7 @@ async function setupWithSlides(page: Page) {
   });
 
   // Mock chat stream to generate slides
-  await page.route('http://localhost:8000/api/chat/stream', (route) => {
+  await page.route('http://127.0.0.1:8000/api/chat/stream', (route) => {
     route.fulfill({
       status: 200,
       contentType: 'text/event-stream',
@@ -157,7 +157,7 @@ async function setupWithSlides(page: Page) {
   });
 
   // Mock slide operations (DELETE, PUT)
-  await page.route(/http:\/\/localhost:8000\/api\/slides\/\d+$/, (route, request) => {
+  await page.route(/http:\/\/127.0.0.1:8000\/api\/slides\/\d+$/, (route, request) => {
     if (request.method() === 'DELETE') {
       route.fulfill({
         status: 200,
@@ -176,7 +176,7 @@ async function setupWithSlides(page: Page) {
   });
 
   // Mock verification endpoint
-  await page.route(/http:\/\/localhost:8000\/api\/verification/, (route) => {
+  await page.route(/http:\/\/127.0.0.1:8000\/api\/verification/, (route) => {
     route.fulfill({
       status: 200,
       contentType: 'application/json',
@@ -192,7 +192,7 @@ async function setupWithSlides(page: Page) {
   });
 
   // Mock Genie spaces
-  await page.route('http://localhost:8000/api/genie/spaces', (route) => {
+  await page.route('http://127.0.0.1:8000/api/genie/spaces', (route) => {
     route.fulfill({
       status: 200,
       contentType: 'application/json',
@@ -201,7 +201,7 @@ async function setupWithSlides(page: Page) {
   });
 
   // Mock Genie link
-  await page.route(/http:\/\/localhost:8000\/api\/genie\/.*\/link/, (route) => {
+  await page.route(/http:\/\/127.0.0.1:8000\/api\/genie\/.*\/link/, (route) => {
     route.fulfill({
       status: 200,
       contentType: 'application/json',
@@ -210,7 +210,7 @@ async function setupWithSlides(page: Page) {
   });
 
   // Mock reorder endpoint
-  await page.route('http://localhost:8000/api/slides/reorder**', (route) => {
+  await page.route('http://127.0.0.1:8000/api/slides/reorder**', (route) => {
     route.fulfill({
       status: 200,
       contentType: 'application/json',
@@ -389,7 +389,7 @@ test.describe('DeleteSlide', () => {
 
     // Set up a mock for getSlides that returns 2 slides after deletion
     const slidesAfterDelete = mockSlides.slice(1);
-    await page.route(/http:\/\/localhost:8000\/api\/sessions\/.*\/slides/, (route) => {
+    await page.route(/http:\/\/127.0.0.1:8000\/api\/sessions\/.*\/slides/, (route) => {
       route.fulfill({
         status: 200,
         contentType: 'application/json',
@@ -552,7 +552,7 @@ test.describe('SlideVerification', () => {
 
   test('clicking verify shows verifying state', async ({ page }) => {
     // Delay the verification response to see the verifying state
-    await page.route(/http:\/\/localhost:8000\/api\/verification/, async (route) => {
+    await page.route(/http:\/\/127.0.0.1:8000\/api\/verification/, async (route) => {
       await new Promise(resolve => setTimeout(resolve, 500));
       route.fulfill({
         status: 200,

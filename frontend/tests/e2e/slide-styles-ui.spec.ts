@@ -27,7 +27,7 @@ import {
 
 async function setupMocks(page: Page) {
   // Mock slide styles endpoint
-  await page.route('http://localhost:8000/api/settings/slide-styles', (route, request) => {
+  await page.route('http://127.0.0.1:8000/api/settings/slide-styles', (route, request) => {
     if (request.method() === 'GET') {
       route.fulfill({
         status: 200,
@@ -58,7 +58,7 @@ async function setupMocks(page: Page) {
   });
 
   // Mock individual slide style endpoints
-  await page.route(/http:\/\/localhost:8000\/api\/settings\/slide-styles\/\d+$/, (route, request) => {
+  await page.route(/http:\/\/127.0.0.1:8000\/api\/settings\/slide-styles\/\d+$/, (route, request) => {
     if (request.method() === 'DELETE') {
       route.fulfill({ status: 204 });
     } else if (request.method() === 'PUT') {
@@ -84,7 +84,7 @@ async function setupMocks(page: Page) {
   });
 
   // Mock profiles endpoint
-  await page.route('http://localhost:8000/api/settings/profiles', (route) => {
+  await page.route('http://127.0.0.1:8000/api/settings/profiles', (route) => {
     route.fulfill({
       status: 200,
       contentType: 'application/json',
@@ -93,7 +93,7 @@ async function setupMocks(page: Page) {
   });
 
   // Mock individual profile endpoints
-  await page.route(/http:\/\/localhost:8000\/api\/settings\/profiles\/\d+$/, (route, request) => {
+  await page.route(/http:\/\/127.0.0.1:8000\/api\/settings\/profiles\/\d+$/, (route, request) => {
     if (request.method() === 'GET') {
       const id = parseInt(request.url().split('/').pop() || '1');
       const profile = mockProfiles.find((p) => p.id === id) || mockProfiles[0];
@@ -108,7 +108,7 @@ async function setupMocks(page: Page) {
   });
 
   // Mock profile load endpoint
-  await page.route(/http:\/\/localhost:8000\/api\/settings\/profiles\/\d+\/load/, (route) => {
+  await page.route(/http:\/\/127.0.0.1:8000\/api\/settings\/profiles\/\d+\/load/, (route) => {
     route.fulfill({
       status: 200,
       contentType: 'application/json',
@@ -117,7 +117,7 @@ async function setupMocks(page: Page) {
   });
 
   // Mock deck prompts
-  await page.route('http://localhost:8000/api/settings/deck-prompts', (route) => {
+  await page.route('http://127.0.0.1:8000/api/settings/deck-prompts', (route) => {
     route.fulfill({
       status: 200,
       contentType: 'application/json',
@@ -126,7 +126,7 @@ async function setupMocks(page: Page) {
   });
 
   // Mock sessions
-  await page.route('http://localhost:8000/api/sessions**', (route) => {
+  await page.route('http://127.0.0.1:8000/api/sessions**', (route) => {
     route.fulfill({
       status: 200,
       contentType: 'application/json',
@@ -135,7 +135,7 @@ async function setupMocks(page: Page) {
   });
 
   // Mock Genie spaces
-  await page.route('http://localhost:8000/api/genie/spaces', (route) => {
+  await page.route('http://127.0.0.1:8000/api/genie/spaces', (route) => {
     route.fulfill({
       status: 200,
       contentType: 'application/json',
@@ -515,7 +515,7 @@ test.describe('Form Validation', () => {
 
   test('error for duplicate name on create', async ({ page }) => {
     // Override POST to return duplicate error
-    await page.route('http://localhost:8000/api/settings/slide-styles', async (route, request) => {
+    await page.route('http://127.0.0.1:8000/api/settings/slide-styles', async (route, request) => {
       if (request.method() === 'POST') {
         await route.fulfill({
           status: 409,
@@ -575,7 +575,7 @@ test.describe('Form Validation', () => {
 test.describe('Empty State', () => {
   test('shows empty message when no styles exist', async ({ page }) => {
     // Setup other mocks first (except slide-styles)
-    await page.route('http://localhost:8000/api/settings/profiles', (route) => {
+    await page.route('http://127.0.0.1:8000/api/settings/profiles', (route) => {
       route.fulfill({
         status: 200,
         contentType: 'application/json',
@@ -583,7 +583,7 @@ test.describe('Empty State', () => {
       });
     });
 
-    await page.route(/http:\/\/localhost:8000\/api\/settings\/profiles\/\d+$/, (route, request) => {
+    await page.route(/http:\/\/127.0.0.1:8000\/api\/settings\/profiles\/\d+$/, (route, request) => {
       if (request.method() === 'GET') {
         route.fulfill({
           status: 200,
@@ -595,7 +595,7 @@ test.describe('Empty State', () => {
       }
     });
 
-    await page.route(/http:\/\/localhost:8000\/api\/settings\/profiles\/\d+\/load/, (route) => {
+    await page.route(/http:\/\/127.0.0.1:8000\/api\/settings\/profiles\/\d+\/load/, (route) => {
       route.fulfill({
         status: 200,
         contentType: 'application/json',
@@ -603,7 +603,7 @@ test.describe('Empty State', () => {
       });
     });
 
-    await page.route('http://localhost:8000/api/settings/deck-prompts', (route) => {
+    await page.route('http://127.0.0.1:8000/api/settings/deck-prompts', (route) => {
       route.fulfill({
         status: 200,
         contentType: 'application/json',
@@ -611,7 +611,7 @@ test.describe('Empty State', () => {
       });
     });
 
-    await page.route('http://localhost:8000/api/sessions**', (route) => {
+    await page.route('http://127.0.0.1:8000/api/sessions**', (route) => {
       route.fulfill({
         status: 200,
         contentType: 'application/json',
@@ -619,7 +619,7 @@ test.describe('Empty State', () => {
       });
     });
 
-    await page.route('http://localhost:8000/api/genie/spaces', (route) => {
+    await page.route('http://127.0.0.1:8000/api/genie/spaces', (route) => {
       route.fulfill({
         status: 200,
         contentType: 'application/json',
@@ -636,7 +636,7 @@ test.describe('Empty State', () => {
     });
 
     // Override slide-styles to return empty (this MUST be after the above routes)
-    await page.route('http://localhost:8000/api/settings/slide-styles', (route, request) => {
+    await page.route('http://127.0.0.1:8000/api/settings/slide-styles', (route, request) => {
       if (request.method() === 'GET') {
         route.fulfill({
           status: 200,

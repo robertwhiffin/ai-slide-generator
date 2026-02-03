@@ -7,13 +7,13 @@ import { test, expect, Page, APIRequestContext } from '@playwright/test';
  * Each test creates its own test data and cleans up after itself.
  *
  * Prerequisites:
- * - Backend must be running at http://localhost:8000
+ * - Backend must be running at http://127.0.0.1:8000
  * - Database must be accessible
  *
  * Run with: npx playwright test e2e/profile-integration.spec.ts
  */
 
-const API_BASE = 'http://localhost:8000/api/settings';
+const API_BASE = 'http://127.0.0.1:8000/api/settings';
 
 // ============================================
 // Test Data Helpers
@@ -682,7 +682,7 @@ test.describe('Session-Profile Association', () => {
   }) => {
     // This test requires pre-existing sessions with different profiles
     // Skip if no sessions exist
-    const sessionsResponse = await request.get('http://localhost:8000/api/sessions?limit=10');
+    const sessionsResponse = await request.get('http://127.0.0.1:8000/api/sessions?limit=10');
     const sessionsData = await sessionsResponse.json();
 
     if (!sessionsData.sessions || sessionsData.sessions.length < 2) {

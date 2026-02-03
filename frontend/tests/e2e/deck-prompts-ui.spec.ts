@@ -25,7 +25,7 @@ import {
 
 async function setupMocks(page: Page) {
   // Mock deck prompts endpoint
-  await page.route('http://localhost:8000/api/settings/deck-prompts', (route, request) => {
+  await page.route('http://127.0.0.1:8000/api/settings/deck-prompts', (route, request) => {
     if (request.method() === 'GET') {
       route.fulfill({
         status: 200,
@@ -55,7 +55,7 @@ async function setupMocks(page: Page) {
   });
 
   // Mock individual prompt endpoints
-  await page.route(/http:\/\/localhost:8000\/api\/settings\/deck-prompts\/\d+$/, (route, request) => {
+  await page.route(/http:\/\/127.0.0.1:8000\/api\/settings\/deck-prompts\/\d+$/, (route, request) => {
     if (request.method() === 'DELETE') {
       route.fulfill({ status: 204 });
     } else if (request.method() === 'PUT') {
@@ -76,7 +76,7 @@ async function setupMocks(page: Page) {
   });
 
   // Mock profiles
-  await page.route('http://localhost:8000/api/settings/profiles', (route) => {
+  await page.route('http://127.0.0.1:8000/api/settings/profiles', (route) => {
     route.fulfill({
       status: 200,
       contentType: 'application/json',
@@ -85,7 +85,7 @@ async function setupMocks(page: Page) {
   });
 
   // Mock individual profile endpoints
-  await page.route(/http:\/\/localhost:8000\/api\/settings\/profiles\/\d+/, (route) => {
+  await page.route(/http:\/\/127.0.0.1:8000\/api\/settings\/profiles\/\d+/, (route) => {
     route.fulfill({
       status: 200,
       contentType: 'application/json',
@@ -94,7 +94,7 @@ async function setupMocks(page: Page) {
   });
 
   // Mock slide styles
-  await page.route('http://localhost:8000/api/settings/slide-styles', (route) => {
+  await page.route('http://127.0.0.1:8000/api/settings/slide-styles', (route) => {
     route.fulfill({
       status: 200,
       contentType: 'application/json',
@@ -103,7 +103,7 @@ async function setupMocks(page: Page) {
   });
 
   // Mock sessions
-  await page.route('http://localhost:8000/api/sessions**', (route) => {
+  await page.route('http://127.0.0.1:8000/api/sessions**', (route) => {
     route.fulfill({
       status: 200,
       contentType: 'application/json',
@@ -112,7 +112,7 @@ async function setupMocks(page: Page) {
   });
 
   // Mock Genie spaces
-  await page.route('http://localhost:8000/api/genie/spaces', (route) => {
+  await page.route('http://127.0.0.1:8000/api/genie/spaces', (route) => {
     route.fulfill({
       status: 200,
       contentType: 'application/json',
@@ -397,7 +397,7 @@ test.describe('Form Submission', () => {
 
   test('shows error message on API failure', async ({ page }) => {
     // Override the POST mock to return an error
-    await page.route('http://localhost:8000/api/settings/deck-prompts', async (route, request) => {
+    await page.route('http://127.0.0.1:8000/api/settings/deck-prompts', async (route, request) => {
       if (request.method() === 'POST') {
         await route.fulfill({
           status: 409,
@@ -414,19 +414,19 @@ test.describe('Form Submission', () => {
     });
 
     // Also set up other mocks
-    await page.route('http://localhost:8000/api/settings/profiles', (route) => {
+    await page.route('http://127.0.0.1:8000/api/settings/profiles', (route) => {
       route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(mockProfiles) });
     });
-    await page.route(/http:\/\/localhost:8000\/api\/settings\/profiles\/\d+/, (route) => {
+    await page.route(/http:\/\/127.0.0.1:8000\/api\/settings\/profiles\/\d+/, (route) => {
       route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(mockProfiles[0]) });
     });
-    await page.route('http://localhost:8000/api/settings/slide-styles', (route) => {
+    await page.route('http://127.0.0.1:8000/api/settings/slide-styles', (route) => {
       route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(mockSlideStyles) });
     });
-    await page.route('http://localhost:8000/api/sessions**', (route) => {
+    await page.route('http://127.0.0.1:8000/api/sessions**', (route) => {
       route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(mockSessions) });
     });
-    await page.route('http://localhost:8000/api/genie/spaces', (route) => {
+    await page.route('http://127.0.0.1:8000/api/genie/spaces', (route) => {
       route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ spaces: [], total: 0 }) });
     });
     await page.route('**/api/version**', (route) => {
@@ -457,7 +457,7 @@ test.describe('Form Submission', () => {
 test.describe('Empty State', () => {
   test('shows empty state message when no prompts', async ({ page }) => {
     // Override to return empty prompts
-    await page.route('http://localhost:8000/api/settings/deck-prompts', (route) => {
+    await page.route('http://127.0.0.1:8000/api/settings/deck-prompts', (route) => {
       route.fulfill({
         status: 200,
         contentType: 'application/json',
@@ -466,19 +466,19 @@ test.describe('Empty State', () => {
     });
 
     // Set up other mocks
-    await page.route('http://localhost:8000/api/settings/profiles', (route) => {
+    await page.route('http://127.0.0.1:8000/api/settings/profiles', (route) => {
       route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(mockProfiles) });
     });
-    await page.route(/http:\/\/localhost:8000\/api\/settings\/profiles\/\d+/, (route) => {
+    await page.route(/http:\/\/127.0.0.1:8000\/api\/settings\/profiles\/\d+/, (route) => {
       route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(mockProfiles[0]) });
     });
-    await page.route('http://localhost:8000/api/settings/slide-styles', (route) => {
+    await page.route('http://127.0.0.1:8000/api/settings/slide-styles', (route) => {
       route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(mockSlideStyles) });
     });
-    await page.route('http://localhost:8000/api/sessions**', (route) => {
+    await page.route('http://127.0.0.1:8000/api/sessions**', (route) => {
       route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(mockSessions) });
     });
-    await page.route('http://localhost:8000/api/genie/spaces', (route) => {
+    await page.route('http://127.0.0.1:8000/api/genie/spaces', (route) => {
       route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ spaces: [], total: 0 }) });
     });
     await page.route('**/api/version**', (route) => {

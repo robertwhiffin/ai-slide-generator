@@ -570,7 +570,7 @@ jobs:
         working-directory: frontend
         env:
           CI: true
-          VITE_API_URL: http://localhost:8000
+          VITE_API_URL: http://127.0.0.1:8000
         run: npx playwright test --project=chromium
 
       - name: Upload Playwright report

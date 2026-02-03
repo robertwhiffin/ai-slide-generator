@@ -60,7 +60,7 @@ function createStreamingResponseWithDeck(slideDeck: typeof mockSlideDeck): strin
 
 async function setupMocks(page: Page) {
   // Mock profiles endpoint
-  await page.route('http://localhost:8000/api/settings/profiles', (route) => {
+  await page.route('http://127.0.0.1:8000/api/settings/profiles', (route) => {
     route.fulfill({
       status: 200,
       contentType: 'application/json',
@@ -69,7 +69,7 @@ async function setupMocks(page: Page) {
   });
 
   // Mock individual profile endpoints
-  await page.route(/http:\/\/localhost:8000\/api\/settings\/profiles\/\d+$/, (route, request) => {
+  await page.route(/http:\/\/127.0.0.1:8000\/api\/settings\/profiles\/\d+$/, (route, request) => {
     if (request.method() === 'GET') {
       const id = parseInt(request.url().split('/').pop() || '1');
       const profile = mockProfiles.find((p) => p.id === id) || mockProfiles[0];
@@ -84,7 +84,7 @@ async function setupMocks(page: Page) {
   });
 
   // Mock deck prompts
-  await page.route('http://localhost:8000/api/settings/deck-prompts', (route) => {
+  await page.route('http://127.0.0.1:8000/api/settings/deck-prompts', (route) => {
     route.fulfill({
       status: 200,
       contentType: 'application/json',
@@ -93,7 +93,7 @@ async function setupMocks(page: Page) {
   });
 
   // Mock slide styles
-  await page.route('http://localhost:8000/api/settings/slide-styles', (route) => {
+  await page.route('http://127.0.0.1:8000/api/settings/slide-styles', (route) => {
     route.fulfill({
       status: 200,
       contentType: 'application/json',
@@ -102,7 +102,7 @@ async function setupMocks(page: Page) {
   });
 
   // Mock sessions and slides
-  await page.route('http://localhost:8000/api/sessions**', (route, request) => {
+  await page.route('http://127.0.0.1:8000/api/sessions**', (route, request) => {
     const url = request.url();
     if (url.includes('limit=')) {
       // Sessions list
@@ -144,7 +144,7 @@ async function setupMocks(page: Page) {
   });
 
   // Mock Genie spaces
-  await page.route('http://localhost:8000/api/genie/spaces', (route) => {
+  await page.route('http://127.0.0.1:8000/api/genie/spaces', (route) => {
     route.fulfill({
       status: 200,
       contentType: 'application/json',
@@ -153,7 +153,7 @@ async function setupMocks(page: Page) {
   });
 
   // Mock verification endpoint
-  await page.route('http://localhost:8000/api/verification/**', (route) => {
+  await page.route('http://127.0.0.1:8000/api/verification/**', (route) => {
     route.fulfill({
       status: 200,
       contentType: 'application/json',
@@ -163,7 +163,7 @@ async function setupMocks(page: Page) {
 }
 
 async function setupStreamMock(page: Page, slideDeck = mockSlideDeck) {
-  await page.route('http://localhost:8000/api/chat/stream', (route) => {
+  await page.route('http://127.0.0.1:8000/api/chat/stream', (route) => {
     route.fulfill({
       status: 200,
       contentType: 'text/event-stream',
@@ -315,7 +315,7 @@ test.describe('LoadingStates', () => {
 
   test('shows loading indicator while generating', async ({ page }) => {
     // Mock a slow response to observe loading state
-    await page.route('http://localhost:8000/api/chat/stream', async (route) => {
+    await page.route('http://127.0.0.1:8000/api/chat/stream', async (route) => {
       await new Promise(resolve => setTimeout(resolve, 2000));
       route.fulfill({
         status: 200,
@@ -334,7 +334,7 @@ test.describe('LoadingStates', () => {
 
   test('Send button is disabled while generating', async ({ page }) => {
     // Mock a slow response
-    await page.route('http://localhost:8000/api/chat/stream', async (route) => {
+    await page.route('http://127.0.0.1:8000/api/chat/stream', async (route) => {
       await new Promise(resolve => setTimeout(resolve, 3000));
       route.fulfill({
         status: 200,
@@ -367,7 +367,7 @@ test.describe('LoadingStates', () => {
 
   test('shows rotating loading messages', async ({ page }) => {
     // Mock a slow response to observe loading messages
-    await page.route('http://localhost:8000/api/chat/stream', async (route) => {
+    await page.route('http://127.0.0.1:8000/api/chat/stream', async (route) => {
       await new Promise(resolve => setTimeout(resolve, 5000));
       route.fulfill({
         status: 200,
@@ -471,7 +471,7 @@ test.describe('ErrorHandling', () => {
   });
 
   test('shows error message on stream failure', async ({ page }) => {
-    await page.route('http://localhost:8000/api/chat/stream', (route) => {
+    await page.route('http://127.0.0.1:8000/api/chat/stream', (route) => {
       route.fulfill({
         status: 500,
         contentType: 'application/json',
@@ -488,7 +488,7 @@ test.describe('ErrorHandling', () => {
   });
 
   test('error can be dismissed', async ({ page }) => {
-    await page.route('http://localhost:8000/api/chat/stream', (route) => {
+    await page.route('http://127.0.0.1:8000/api/chat/stream', (route) => {
       route.fulfill({
         status: 500,
         contentType: 'application/json',
@@ -513,7 +513,7 @@ test.describe('ErrorHandling', () => {
   test('can send new message after error', async ({ page }) => {
     let requestCount = 0;
 
-    await page.route('http://localhost:8000/api/chat/stream', (route) => {
+    await page.route('http://127.0.0.1:8000/api/chat/stream', (route) => {
       requestCount++;
       if (requestCount === 1) {
         // First request fails
@@ -553,7 +553,7 @@ test.describe('ErrorHandling', () => {
   });
 
   test('input is re-enabled after error', async ({ page }) => {
-    await page.route('http://localhost:8000/api/chat/stream', (route) => {
+    await page.route('http://127.0.0.1:8000/api/chat/stream', (route) => {
       route.fulfill({
         status: 500,
         contentType: 'application/json',

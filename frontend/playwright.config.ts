@@ -32,7 +32,7 @@ export default defineConfig({
     timeout: process.env.CI ? 120000 : 60000,
     // Explicitly pass API URL to ensure frontend connects to backend
     env: {
-      VITE_API_URL: process.env.VITE_API_URL || 'http://localhost:8000',
+      VITE_API_URL: process.env.VITE_API_URL || 'http://127.0.0.1:8000',
     },
   },
 });
