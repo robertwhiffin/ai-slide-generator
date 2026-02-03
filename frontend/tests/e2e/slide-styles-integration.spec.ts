@@ -159,7 +159,7 @@ test.describe('Slide Style CRUD Operations', () => {
       await page.keyboard.type('/* E2E Test CSS */\n.slide { background: #fff; }');
 
       // Submit
-      await page.getByRole('button', { name: 'Create Style' }).click();
+      await page.getByRole('button', { name: 'Create Style', exact: true }).click();
 
       // Wait for modal to close
       await expect(page.getByRole('heading', { name: 'Create Slide Style' })).not.toBeVisible({
@@ -445,7 +445,7 @@ test.describe('Slide Style Validation', () => {
       await page.keyboard.type('/* duplicate test */');
 
       // Submit
-      await page.getByRole('button', { name: 'Create Style' }).click();
+      await page.getByRole('button', { name: 'Create Style', exact: true }).click();
 
       // Should show error (API returns 409 for duplicate)
       await expect(page.getByText(/already exists|duplicate|failed/i).first()).toBeVisible({
@@ -495,7 +495,7 @@ test.describe('Slide Style Validation', () => {
     await page.getByRole('button', { name: '+ Create Style' }).click();
 
     // Try to submit without name
-    await page.getByRole('button', { name: 'Create Style' }).click();
+    await page.getByRole('button', { name: 'Create Style', exact: true }).click();
 
     // Should show validation error
     await expect(page.getByText('Name is required')).toBeVisible();
@@ -510,7 +510,7 @@ test.describe('Slide Style Validation', () => {
     await page.getByLabel(/Name/i).fill('Test Style');
 
     // Submit without style content
-    await page.getByRole('button', { name: 'Create Style' }).click();
+    await page.getByRole('button', { name: 'Create Style', exact: true }).click();
 
     // Should show validation error
     await expect(page.getByText('Style content is required')).toBeVisible();
@@ -540,7 +540,7 @@ test.describe('Slide Style Edge Cases', () => {
       await editor.click();
       await page.keyboard.type('/* special chars test <>&"\' */');
 
-      await page.getByRole('button', { name: 'Create Style' }).click();
+      await page.getByRole('button', { name: 'Create Style', exact: true }).click();
 
       // Wait for modal to close
       await expect(page.getByRole('heading', { name: 'Create Slide Style' })).not.toBeVisible({
@@ -576,7 +576,7 @@ test.describe('Slide Style Edge Cases', () => {
       await editor.click();
       await page.keyboard.type('/* unicode test */');
 
-      await page.getByRole('button', { name: 'Create Style' }).click();
+      await page.getByRole('button', { name: 'Create Style', exact: true }).click();
 
       // Wait for modal to close
       await expect(page.getByRole('heading', { name: 'Create Slide Style' })).not.toBeVisible({
@@ -612,7 +612,7 @@ test.describe('Slide Style Edge Cases', () => {
       await editor.click();
       await page.keyboard.type('/* long description test */');
 
-      await page.getByRole('button', { name: 'Create Style' }).click();
+      await page.getByRole('button', { name: 'Create Style', exact: true }).click();
 
       // Wait for modal to close
       await expect(page.getByRole('heading', { name: 'Create Slide Style' })).not.toBeVisible({
