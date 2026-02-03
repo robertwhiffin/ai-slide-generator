@@ -497,6 +497,41 @@ jobs:
                   print('Default profile already exists')
           "
 
+      - name: Verify database seeding
+        env:
+          DATABASE_URL: postgresql://test:test@localhost:5432/test_db
+          ENVIRONMENT: test
+          DATABRICKS_HOST: https://test.databricks.com
+          DATABRICKS_TOKEN: test-token
+        run: |
+          echo "Verifying database state..."
+          python -c "
+          from src.core.database import get_db_session
+          from src.database.models import ConfigProfile, SlideStyleLibrary, SlideDeckPromptLibrary
+          
+          with get_db_session() as db:
+              profiles = db.query(ConfigProfile).all()
+              styles = db.query(SlideStyleLibrary).all()
+              prompts = db.query(SlideDeckPromptLibrary).all()
+              
+              print(f'Profiles: {len(profiles)}')
+              for p in profiles:
+                  print(f'  - {p.name} (id={p.id}, is_default={p.is_default})')
+              
+              print(f'Slide Styles: {len(styles)}')
+              for s in styles:
+                  print(f'  - {s.name} (id={s.id})')
+              
+              print(f'Deck Prompts: {len(prompts)}')
+              for d in prompts:
+                  print(f'  - {d.name} (id={d.id})')
+              
+              if len(profiles) == 0:
+                  raise Exception('No profiles found - seeding failed!')
+              if len(styles) == 0:
+                  raise Exception('No slide styles found - seeding failed!')
+          "
+
       - name: Start backend server
         run: |
           DATABASE_URL="postgresql://test:test@localhost:5432/test_db" \
@@ -516,6 +551,20 @@ jobs:
             echo "Waiting for backend... ($i/30)"
             sleep 1
           done
+
+      - name: Verify API endpoints work
+        run: |
+          echo "Testing API endpoints..."
+          echo "--- Health check ---"
+          curl -s http://localhost:8000/api/health | head -c 200
+          echo ""
+          echo "--- Profiles API ---"
+          curl -s --max-time 10 http://localhost:8000/api/settings/profiles | head -c 500
+          echo ""
+          echo "--- Deck Prompts API ---"
+          curl -s --max-time 10 http://localhost:8000/api/settings/deck-prompts | head -c 500
+          echo ""
+          echo "API verification complete"
 
       - name: Run E2E tests
         working-directory: frontend
