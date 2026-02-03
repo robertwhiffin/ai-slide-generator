@@ -70,6 +70,10 @@ async def lifespan(app: FastAPI):
     # Skip only when running under pytest (pytest sets PYTEST_CURRENT_TEST automatically).
     # E2E tests run the app as a real server and need init_db() to create tables.
     is_pytest = os.getenv("PYTEST_CURRENT_TEST") is not None
+    logger.warning(
+        f"LIFESPAN DEBUG: PYTEST_CURRENT_TEST={os.getenv('PYTEST_CURRENT_TEST')}, "
+        f"ENVIRONMENT={ENVIRONMENT}, IS_TESTING={IS_TESTING}, is_pytest={is_pytest}"
+    )
     if not is_pytest:
         try:
             init_db()
