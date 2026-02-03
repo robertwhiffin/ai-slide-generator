@@ -45,12 +45,14 @@ class TestSystemClient:
     def test_get_system_client_error_handling(self, mock_config_loader, mock_env_vars):
         """Test system client error handling."""
         # Test connection verification failure
+        # Must set ENVIRONMENT to non-test value to trigger verification code path
         mock_client = MagicMock()
         mock_client.current_user.me.side_effect = Exception("Auth failed")
 
-        with patch("src.core.databricks_client.WorkspaceClient", return_value=mock_client):
-            with pytest.raises(DatabricksClientError, match="Failed to verify"):
-                get_system_client()
+        with patch.dict("os.environ", {"ENVIRONMENT": "production"}):
+            with patch("src.core.databricks_client.WorkspaceClient", return_value=mock_client):
+                with pytest.raises(DatabricksClientError, match="Failed to verify"):
+                    get_system_client()
 
         # Reset for next test
         reset_client()
