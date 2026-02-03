@@ -18,9 +18,9 @@ from src.database.models import (  # noqa: F401
 )
 
 
-@pytest.fixture(scope="function")
+@pytest.fixture(scope="module")
 def test_db_engine():
-    """Create test database engine with SQLite in-memory."""
+    """Create test database engine with SQLite in-memory (shared across all tests in module)."""
     # Use StaticPool to ensure all connections use the same in-memory database
     # check_same_thread=False allows SQLite to work with FastAPI TestClient threading
     engine = create_engine(
@@ -57,7 +57,7 @@ def test_db_engine():
     
     yield engine
     
-    # Cleanup
+    # Cleanup at end of module
     for table in reversed(tables_to_create):
         table.drop(bind=engine, checkfirst=True)
     with engine.connect() as conn:
@@ -66,15 +66,32 @@ def test_db_engine():
     engine.dispose()
 
 
+@pytest.fixture(scope="module")
+def _session_factory(test_db_engine):
+    """Create session factory (shared across module)."""
+    return sessionmaker(autocommit=False, autoflush=False, bind=test_db_engine)
+
+
 @pytest.fixture(scope="function")
-def test_db(test_db_engine):
-    """Create test database session."""
-    SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=test_db_engine)
-    db = SessionLocal()
+def test_db(_session_factory, test_db_engine):
+    """Create test database session and clean up data after each test."""
+    db = _session_factory()
     
     yield db
     
+    # Rollback any uncommitted changes and close session
+    db.rollback()
     db.close()
+    
+    # Clean up all data between tests (but keep tables)
+    with test_db_engine.connect() as conn:
+        # Delete in correct order to respect foreign keys
+        conn.execute(text("DELETE FROM config_history"))
+        conn.execute(text("DELETE FROM config_genie_spaces"))
+        conn.execute(text("DELETE FROM config_prompts"))
+        conn.execute(text("DELETE FROM config_ai_infra"))
+        conn.execute(text("DELETE FROM config_profiles"))
+        conn.commit()
 
 
 @pytest.fixture(scope="function")
@@ -83,14 +100,15 @@ def db_session(test_db):
     return test_db
 
 
-@pytest.fixture(scope="function")
-def client(test_db):
-    """Create test client with dependency override."""
+@pytest.fixture(scope="module")
+def _test_client(test_db_engine, _session_factory):
+    """Create test client (shared across module)."""
     def override_get_db():
+        db = _session_factory()
         try:
-            yield test_db
+            yield db
         finally:
-            pass  # Don't close here, let test_db fixture handle it
+            db.close()
     
     app.dependency_overrides[get_db] = override_get_db
     
@@ -98,6 +116,13 @@ def client(test_db):
         yield test_client
     
     app.dependency_overrides.clear()
+
+
+@pytest.fixture(scope="function")
+def client(_test_client, test_db):
+    """Get the shared test client (test_db ensures data cleanup between tests)."""
+    # test_db fixture handles per-test cleanup
+    return _test_client
 
 
 @pytest.fixture(scope="function")
