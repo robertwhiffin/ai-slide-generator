@@ -1,4 +1,6 @@
 """Integration tests for configuration API endpoints."""
+from unittest.mock import MagicMock, patch
+
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, text
@@ -16,6 +18,16 @@ from src.database.models import (  # noqa: F401
     ConfigProfile,
     ConfigPrompts,
 )
+
+
+@pytest.fixture(scope="module", autouse=True)
+def mock_databricks_client():
+    """Mock Databricks client for entire module to avoid slow SDK initialization."""
+    mock_client = MagicMock()
+    mock_client.current_user.me.return_value = MagicMock(user_name="test@example.com")
+    
+    with patch("src.core.databricks_client.WorkspaceClient", return_value=mock_client):
+        yield mock_client
 
 
 @pytest.fixture(scope="module")
