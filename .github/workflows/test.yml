@@ -367,8 +367,11 @@ jobs:
           DATABRICKS_HOST: https://test.cloud.databricks.com
           DATABRICKS_TOKEN: test-token
         run: |
+          # Exit code 5 means no tests collected (all deselected) - treat as success
+          # These files currently only contain 'live' tests requiring real Databricks
           pytest tests/integration/test_genie_integration.py tests/integration/test_client_integration.py \
-            -v --tb=short --junitxml=test-results/genie-results.xml -m "not live"
+            -v --tb=short --junitxml=test-results/genie-results.xml -m "not live" \
+            || test $? -eq 5
       - uses: actions/upload-artifact@v4
         if: always()
         with:

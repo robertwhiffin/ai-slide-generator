@@ -67,12 +67,17 @@ async def lifespan(app: FastAPI):
             raise
 
     # Initialize database tables (idempotent - only creates tables that don't exist)
-    try:
-        init_db()
-        logger.info("Database tables initialized")
-    except Exception as e:
-        logger.error(f"Failed to initialize database: {e}")
-        raise
+    # Skip in test mode - tests manage their own database setup
+    if not IS_TESTING:
+        try:
+            init_db()
+            logger.info("Database tables initialized")
+        except Exception as e:
+            logger.error(f"Failed to initialize database: {e}")
+            raise
+    else:
+        logger.info("Test mode: skipping database initialization (tests manage their own)")
+
 
     if IS_PRODUCTION:
         logger.info("Production mode: serving frontend from package assets")
