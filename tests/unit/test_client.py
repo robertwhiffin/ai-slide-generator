@@ -94,21 +94,41 @@ class TestUserClient:
         assert client == mock_workspace_client
 
     def test_create_user_client_valid_scenarios(self, mock_env_vars):
-        """Test user client creation with valid inputs."""
-        mock_user_client = MagicMock()
+        """Test user client creation with valid inputs (two-stage creation)."""
+        mock_initial_client = MagicMock()
+        mock_initial_client.current_user.me.return_value = MagicMock(
+            user_name="test.user@company.com"
+        )
+        mock_final_client = MagicMock()
 
         with patch(
-            "src.core.databricks_client.WorkspaceClient", return_value=mock_user_client
+            "src.core.databricks_client.WorkspaceClient",
+            side_effect=[mock_initial_client, mock_final_client],
         ) as mock_ws:
-            client = create_user_client("test-user-token-123")
+            with patch(
+                "src.core.databricks_client._get_package_version", return_value="1.0.0"
+            ):
+                client = create_user_client("test-user-token-123")
 
-            # Verify WorkspaceClient was called with correct args
-            mock_ws.assert_called_once_with(
-                host="https://test.cloud.databricks.com",
-                token="test-user-token-123",
-                auth_type="pat",
-            )
-            assert client is mock_user_client
+                # Verify two-stage creation: initial client then final with product tracking
+                assert mock_ws.call_count == 2
+
+                # Stage 1: Initial client to get username
+                mock_ws.assert_any_call(
+                    host="https://test.cloud.databricks.com",
+                    token="test-user-token-123",
+                    auth_type="pat",
+                )
+
+                # Stage 2: Final client with product tracking (hashed "test.user")
+                mock_ws.assert_any_call(
+                    host="https://test.cloud.databricks.com",
+                    token="test-user-token-123",
+                    auth_type="pat",
+                    product="tellr-app-07460583da32",  # SHA-256 of "test.user"[:12]
+                    product_version="1.0.0",
+                )
+                assert client is mock_final_client
 
     def test_create_user_client_error_handling(self):
         """Test user client creation error handling."""
