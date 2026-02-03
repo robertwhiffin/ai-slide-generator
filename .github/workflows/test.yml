@@ -379,15 +379,33 @@ jobs:
           name: integration-genie-results
           path: test-results/
 
-  # E2E tests with Playwright
+  # E2E tests with Playwright - run each test file in isolation
   e2e-tests:
-    name: E2E Tests (Playwright)
+    name: E2E - ${{ matrix.test }}
     runs-on: ubuntu-latest
     needs: [changes, unit-tests]
     if: |
       always() &&
       (needs.unit-tests.result == 'success' || needs.unit-tests.result == 'skipped') &&
       needs.changes.outputs.frontend == 'true'
+    
+    strategy:
+      fail-fast: false
+      matrix:
+        test:
+          - chat-ui
+          - deck-integrity
+          - deck-prompts-integration
+          - deck-prompts-ui
+          - export-ui
+          - help-ui
+          - history-integration
+          - history-ui
+          - profile-integration
+          - profile-ui
+          - slide-operations-ui
+          - slide-styles-integration
+          - slide-styles-ui
     
     # Use PostgreSQL for E2E tests - matches production and handles concurrency well
     services:
@@ -566,41 +584,35 @@ jobs:
           echo ""
           echo "API verification complete"
 
-      - name: Run E2E tests
+      - name: Run E2E tests - ${{ matrix.test }}
         working-directory: frontend
         env:
           CI: true
           VITE_API_URL: http://127.0.0.1:8000
         run: |
           echo "=== Pre-flight backend check ==="
-          echo "Checking localhost:8000..."
-          curl -v --max-time 5 http://localhost:8000/api/health || echo "localhost:8000 FAILED"
-          echo ""
           echo "Checking 127.0.0.1:8000..."
-          curl -v --max-time 5 http://127.0.0.1:8000/api/health || echo "127.0.0.1:8000 FAILED"
+          curl -s --max-time 5 http://127.0.0.1:8000/api/health || echo "127.0.0.1:8000 FAILED"
           echo ""
           echo "Checking backend process..."
-          ps aux | grep -E "(uvicorn|python.*main)" | grep -v grep || echo "No uvicorn process found"
-          echo ""
-          echo "Checking port 8000..."
-          netstat -tlnp 2>/dev/null | grep 8000 || ss -tlnp | grep 8000 || echo "Port 8000 not listening"
+          ps aux | grep uvicorn | grep -v grep || echo "No uvicorn process found"
           echo "=== End pre-flight check ==="
           echo ""
-          echo "Starting Playwright tests..."
-          npx playwright test --project=chromium
+          echo "Running test: ${{ matrix.test }}.spec.ts"
+          npx playwright test tests/e2e/${{ matrix.test }}.spec.ts --project=chromium
 
       - name: Upload Playwright report
         uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: playwright-report
+          name: playwright-report-${{ matrix.test }}
           path: frontend/playwright-report/
 
       - name: Upload Playwright test results
         uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: playwright-results
+          name: playwright-results-${{ matrix.test }}
           path: frontend/test-results/
 
   # Summary job - runs after all tests
