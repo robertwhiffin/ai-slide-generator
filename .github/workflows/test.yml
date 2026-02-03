@@ -188,6 +188,7 @@ jobs:
           DATABRICKS_TOKEN: test-token
         run: |
           pytest tests/integration/test_config_api.py -v --tb=short \
+            --log-cli-level=WARNING -s \
             --junitxml=test-results/config-api-results.xml -m "not live"
       - uses: actions/upload-artifact@v4
         if: always()
