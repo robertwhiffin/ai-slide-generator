@@ -230,7 +230,7 @@ export const mockProfileUpdateResponse = {
 
 // Duplicate name error response (409 Conflict)
 export const mockDuplicateNameError = {
-  detail: "Profile with this name already exists"
+  detail: "Failed to create profile"
 };
 
 // Delete last profile error response (400 Bad Request)
