@@ -139,7 +139,7 @@ test.describe('Deck Prompt CRUD Operations', () => {
       await page.keyboard.type('This is test prompt content for E2E testing.');
 
       // Submit
-      await page.getByRole('button', { name: 'Create Prompt' }).click();
+      await page.getByRole('button', { name: 'Create Prompt', exact: true }).click();
 
       // Wait for modal to close
       await expect(page.getByRole('heading', { name: 'Create Deck Prompt' })).not.toBeVisible({
@@ -328,7 +328,7 @@ test.describe('Deck Prompt Validation', () => {
       await page.keyboard.type('Some content');
 
       // Submit
-      await page.getByRole('button', { name: 'Create Prompt' }).click();
+      await page.getByRole('button', { name: 'Create Prompt', exact: true }).click();
 
       // Should show error
       await expect(page.getByText(/already exists|duplicate/i)).toBeVisible({ timeout: 5000 });
@@ -375,7 +375,7 @@ test.describe('Deck Prompt Validation', () => {
     await expect(page.getByRole('heading', { name: 'Create Deck Prompt' })).toBeVisible();
 
     // Try to submit without filling required fields
-    await page.getByRole('button', { name: 'Create Prompt' }).click();
+    await page.getByRole('button', { name: 'Create Prompt', exact: true }).click();
 
     // Should show validation error
     await expect(page.getByText(/Name is required/i)).toBeVisible();
@@ -403,7 +403,7 @@ test.describe('Deck Prompt Edge Cases', () => {
       await editor.click();
       await page.keyboard.type('Test content with special chars: <>&"');
 
-      await page.getByRole('button', { name: 'Create Prompt' }).click();
+      await page.getByRole('button', { name: 'Create Prompt', exact: true }).click();
 
       // Wait for modal to close
       await expect(page.getByRole('heading', { name: 'Create Deck Prompt' })).not.toBeVisible({
@@ -437,7 +437,7 @@ test.describe('Deck Prompt Edge Cases', () => {
       await editor.click();
       await page.keyboard.type('Test content with unicode');
 
-      await page.getByRole('button', { name: 'Create Prompt' }).click();
+      await page.getByRole('button', { name: 'Create Prompt', exact: true }).click();
 
       // Wait for modal to close
       await expect(page.getByRole('heading', { name: 'Create Deck Prompt' })).not.toBeVisible({
@@ -474,7 +474,7 @@ test.describe('Deck Prompt Edge Cases', () => {
       // Type a shorter version since typing is slow
       await page.keyboard.type('Long content test: ' + 'repeat '.repeat(100));
 
-      await page.getByRole('button', { name: 'Create Prompt' }).click();
+      await page.getByRole('button', { name: 'Create Prompt', exact: true }).click();
 
       // Wait for modal to close
       await expect(page.getByRole('heading', { name: 'Create Deck Prompt' })).not.toBeVisible({
