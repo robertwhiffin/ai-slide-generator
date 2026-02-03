@@ -30,5 +30,9 @@ export default defineConfig({
     reuseExistingServer: !process.env.CI,
     // Give more time for dev server to start in CI
     timeout: process.env.CI ? 120000 : 60000,
+    // Explicitly pass API URL to ensure frontend connects to backend
+    env: {
+      VITE_API_URL: process.env.VITE_API_URL || 'http://localhost:8000',
+    },
   },
 });
