@@ -490,8 +490,8 @@ test.describe('System Style Protection', () => {
     // Find the System Default style card
     const systemCard = page.locator('div.border.rounded-lg').filter({ hasText: 'System Default' }).filter({ hasText: 'Protected system style' });
 
-    // Should have System badge
-    await expect(systemCard.locator('span').filter({ hasText: 'System' })).toBeVisible();
+    // Should have System badge (use .first() since 'System' appears in both badge and category)
+    await expect(systemCard.locator('span').filter({ hasText: 'System' }).first()).toBeVisible();
   });
 });
 
