@@ -257,7 +257,7 @@ The container div has `tabIndex={-1}` and receives focus to capture keyboard eve
 ### Present Flow
 
 1. User clicks "Present" button in `SlidePanel`
-2. `setIsPresentationMode(true)` renders `<PresentationMode>` via React portal to `document.body`
+2. `setIsPresentationMode(true)` renders `&lt;PresentationMode&gt;` via React portal to `document.body`
 3. Component calculates initial scale factor based on viewport dimensions
 4. Component requests fullscreen (with fallback if denied)
 5. `useMemo` generates HTML for current slide (index 0 initially)
