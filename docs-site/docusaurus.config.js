@@ -12,15 +12,15 @@ const config = {
 
   // Set the production url of your site here
   // Replace 'your-username' with your actual GitHub username or organization name
-  url: 'https://tellr.github.io',
+  url: 'https://robertwhiffin.github.io',
   // Set the /<baseUrl>/ pathname under which your site is served
   // For GitHub pages deployment, it is often '/<projectName>/'
-  baseUrl: '/tellr/',
+  baseUrl: '/ai-slide-generator/',
 
   // GitHub pages deployment config.
   // Replace 'your-username' with your actual GitHub username or organization name
-  organizationName: 'tellr', // Your GitHub username or org (e.g., 'databricks' or 'puneetjain')
-  projectName: 'tellr', // Your repository name
+  organizationName: '/ai-slide-generator', // Your GitHub username or org (e.g., 'databricks' or 'puneetjain')
+  projectName: '/ai-slide-generator', // Your repository name
 
   onBrokenLinks: 'throw',
   markdown: {
