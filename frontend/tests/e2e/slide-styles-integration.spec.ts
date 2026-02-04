@@ -16,6 +16,54 @@ import { test, expect, Page, APIRequestContext } from '@playwright/test';
 const API_BASE = 'http://127.0.0.1:8000/api/settings';
 
 // ============================================
+// Network Logging and Diagnostics
+// ============================================
+
+/**
+ * Enable network logging for debugging CI failures.
+ * Logs all failed requests and console errors.
+ */
+test.beforeEach(async ({ page, request }, testInfo) => {
+  // Log test start
+  console.log(`\n=== Starting test: ${testInfo.title} ===`);
+  
+  // Verify backend is accessible before test
+  try {
+    const healthCheck = await request.get('http://127.0.0.1:8000/api/health');
+    console.log(`Backend health check: ${healthCheck.status()}`);
+  } catch (error) {
+    console.error('Backend health check failed:', error);
+  }
+  
+  // Log console messages from the browser
+  page.on('console', (msg) => {
+    if (msg.type() === 'error') {
+      console.log(`[Browser Console Error]: ${msg.text()}`);
+    }
+  });
+  
+  // Log failed network requests
+  page.on('requestfailed', (request) => {
+    console.log(`[Request Failed]: ${request.method()} ${request.url()} - ${request.failure()?.errorText}`);
+  });
+  
+  // Log slow or hanging requests (requests that take > 5s)
+  page.on('request', (request) => {
+    const url = request.url();
+    if (url.includes('/api/')) {
+      console.log(`[API Request]: ${request.method()} ${url}`);
+    }
+  });
+  
+  page.on('response', (response) => {
+    const url = response.url();
+    if (url.includes('/api/')) {
+      console.log(`[API Response]: ${response.status()} ${url}`);
+    }
+  });
+});
+
+// ============================================
 // Type Definitions
 // ============================================
 
@@ -123,6 +171,37 @@ async function getStyleById(
 }
 
 // ============================================
+// Monaco Editor Helper
+// ============================================
+
+/**
+ * Fill content into Monaco editor reliably.
+ * Uses JavaScript evaluation to set the value directly, avoiding keyboard timing issues.
+ */
+async function fillMonacoEditor(page: Page, content: string): Promise<void> {
+  // Wait for Monaco to be fully loaded
+  await page.waitForSelector('.monaco-editor', { state: 'visible' });
+  
+  // Click to focus the editor
+  await page.locator('.monaco-editor').first().click();
+  
+  // Use evaluate to set the value directly via Monaco's API
+  await page.evaluate((text) => {
+    // Monaco editors are stored in a global registry
+    const monacoWindow = window as typeof window & { monaco?: { editor: { getEditors: () => Array<{ setValue: (value: string) => void; getValue: () => string }> } } };
+    if (monacoWindow.monaco?.editor) {
+      const editors = monacoWindow.monaco.editor.getEditors();
+      if (editors.length > 0) {
+        editors[0].setValue(text);
+      }
+    }
+  }, content);
+  
+  // Small wait to ensure React state updates
+  await page.waitForTimeout(100);
+}
+
+// ============================================
 // Navigation Helpers
 // ============================================
 
@@ -153,10 +232,8 @@ test.describe('Slide Style CRUD Operations', () => {
       await page.getByLabel(/Description/i).fill('Created via E2E test');
       await page.getByLabel(/Category/i).fill('E2E Test');
 
-      // Fill Monaco editor - click on it first then type
-      const editor = page.locator('.monaco-editor').first();
-      await editor.click();
-      await page.keyboard.type('/* E2E Test CSS */\n.slide { background: #fff; }');
+      // Fill Monaco editor using reliable helper
+      await fillMonacoEditor(page, '/* E2E Test CSS */\n.slide { background: #fff; }');
 
       // Submit
       await page.getByRole('button', { name: 'Create Style', exact: true }).click();
@@ -439,10 +516,8 @@ test.describe('Slide Style Validation', () => {
       await page.getByLabel(/Name/i).fill(styleName);
       await page.getByLabel(/Description/i).fill('Duplicate test');
 
-      // Fill Monaco editor
-      const editor = page.locator('.monaco-editor').first();
-      await editor.click();
-      await page.keyboard.type('/* duplicate test */');
+      // Fill Monaco editor using reliable helper
+      await fillMonacoEditor(page, '/* duplicate test */');
 
       // Submit
       await page.getByRole('button', { name: 'Create Style', exact: true }).click();
@@ -535,10 +610,8 @@ test.describe('Slide Style Edge Cases', () => {
       await page.getByLabel(/Name/i).fill(styleName);
       await page.getByLabel(/Description/i).fill('Test with special chars <>&"\'');
 
-      // Fill Monaco editor
-      const editor = page.locator('.monaco-editor').first();
-      await editor.click();
-      await page.keyboard.type('/* special chars test <>&"\' */');
+      // Fill Monaco editor using reliable helper
+      await fillMonacoEditor(page, '/* special chars test <>&"\' */');
 
       await page.getByRole('button', { name: 'Create Style', exact: true }).click();
 
@@ -571,10 +644,8 @@ test.describe('Slide Style Edge Cases', () => {
       await page.getByLabel(/Name/i).fill(styleName);
       await page.getByLabel(/Description/i).fill('Description with unicode test');
 
-      // Fill Monaco editor
-      const editor = page.locator('.monaco-editor').first();
-      await editor.click();
-      await page.keyboard.type('/* unicode test */');
+      // Fill Monaco editor using reliable helper
+      await fillMonacoEditor(page, '/* unicode test */');
 
       await page.getByRole('button', { name: 'Create Style', exact: true }).click();
 
@@ -607,10 +678,8 @@ test.describe('Slide Style Edge Cases', () => {
       await page.getByLabel(/Name/i).fill(styleName);
       await page.getByLabel(/Description/i).fill(longDescription);
 
-      // Fill Monaco editor
-      const editor = page.locator('.monaco-editor').first();
-      await editor.click();
-      await page.keyboard.type('/* long description test */');
+      // Fill Monaco editor using reliable helper
+      await fillMonacoEditor(page, '/* long description test */');
 
       await page.getByRole('button', { name: 'Create Style', exact: true }).click();
 

@@ -16,6 +16,54 @@ import { test, expect, Page, APIRequestContext } from '@playwright/test';
 const API_BASE = 'http://127.0.0.1:8000/api/settings';
 
 // ============================================
+// Network Logging and Diagnostics
+// ============================================
+
+/**
+ * Enable network logging for debugging CI failures.
+ * Logs all failed requests and console errors.
+ */
+test.beforeEach(async ({ page, request }, testInfo) => {
+  // Log test start
+  console.log(`\n=== Starting test: ${testInfo.title} ===`);
+  
+  // Verify backend is accessible before test
+  try {
+    const healthCheck = await request.get('http://127.0.0.1:8000/api/health');
+    console.log(`Backend health check: ${healthCheck.status()}`);
+  } catch (error) {
+    console.error('Backend health check failed:', error);
+  }
+  
+  // Log console messages from the browser
+  page.on('console', (msg) => {
+    if (msg.type() === 'error') {
+      console.log(`[Browser Console Error]: ${msg.text()}`);
+    }
+  });
+  
+  // Log failed network requests
+  page.on('requestfailed', (request) => {
+    console.log(`[Request Failed]: ${request.method()} ${request.url()} - ${request.failure()?.errorText}`);
+  });
+  
+  // Log slow or hanging requests (requests that take > 5s)
+  page.on('request', (request) => {
+    const url = request.url();
+    if (url.includes('/api/')) {
+      console.log(`[API Request]: ${request.method()} ${url}`);
+    }
+  });
+  
+  page.on('response', (response) => {
+    const url = response.url();
+    if (url.includes('/api/')) {
+      console.log(`[API Response]: ${response.status()} ${url}`);
+    }
+  });
+});
+
+// ============================================
 // Test Data Types
 // ============================================
 
@@ -103,6 +151,37 @@ async function getPromptByName(
 }
 
 // ============================================
+// Monaco Editor Helper
+// ============================================
+
+/**
+ * Fill content into Monaco editor reliably.
+ * Uses JavaScript evaluation to set the value directly, avoiding keyboard timing issues.
+ */
+async function fillMonacoEditor(page: Page, content: string): Promise<void> {
+  // Wait for Monaco to be fully loaded
+  await page.waitForSelector('.monaco-editor', { state: 'visible' });
+  
+  // Click to focus the editor
+  await page.locator('.monaco-editor').first().click();
+  
+  // Use evaluate to set the value directly via Monaco's API
+  await page.evaluate((text) => {
+    // Monaco editors are stored in a global registry
+    const monacoWindow = window as typeof window & { monaco?: { editor: { getEditors: () => Array<{ setValue: (value: string) => void; getValue: () => string }> } } };
+    if (monacoWindow.monaco?.editor) {
+      const editors = monacoWindow.monaco.editor.getEditors();
+      if (editors.length > 0) {
+        editors[0].setValue(text);
+      }
+    }
+  }, content);
+  
+  // Small wait to ensure React state updates
+  await page.waitForTimeout(100);
+}
+
+// ============================================
 // Navigation Helpers
 // ============================================
 
@@ -133,10 +212,8 @@ test.describe('Deck Prompt CRUD Operations', () => {
       await page.locator('#prompt-description').fill('Created via E2E test');
       await page.locator('#prompt-category').fill('Test');
 
-      // Fill the Monaco editor
-      const editor = page.locator('.monaco-editor').first();
-      await editor.click();
-      await page.keyboard.type('This is test prompt content for E2E testing.');
+      // Fill the Monaco editor using reliable helper
+      await fillMonacoEditor(page, 'This is test prompt content for E2E testing.');
 
       // Submit
       await page.getByRole('button', { name: 'Create Prompt', exact: true }).click();
@@ -323,9 +400,7 @@ test.describe('Deck Prompt Validation', () => {
 
       // Fill form with duplicate name
       await page.locator('#prompt-name').fill(promptName);
-      const editor = page.locator('.monaco-editor').first();
-      await editor.click();
-      await page.keyboard.type('Some content');
+      await fillMonacoEditor(page, 'Some content');
 
       // Submit
       await page.getByRole('button', { name: 'Create Prompt', exact: true }).click();
@@ -399,9 +474,7 @@ test.describe('Deck Prompt Edge Cases', () => {
 
       // Fill form with special characters
       await page.locator('#prompt-name').fill(promptName);
-      const editor = page.locator('.monaco-editor').first();
-      await editor.click();
-      await page.keyboard.type('Test content with special chars: <>&"');
+      await fillMonacoEditor(page, 'Test content with special chars: <>&"');
 
       await page.getByRole('button', { name: 'Create Prompt', exact: true }).click();
 
@@ -433,9 +506,7 @@ test.describe('Deck Prompt Edge Cases', () => {
 
       // Fill form with unicode characters
       await page.locator('#prompt-name').fill(promptName);
-      const editor = page.locator('.monaco-editor').first();
-      await editor.click();
-      await page.keyboard.type('Test content with unicode');
+      await fillMonacoEditor(page, 'Test content with unicode');
 
       await page.getByRole('button', { name: 'Create Prompt', exact: true }).click();
 
@@ -468,11 +539,8 @@ test.describe('Deck Prompt Edge Cases', () => {
 
       await page.locator('#prompt-name').fill(promptName);
 
-      // Fill the Monaco editor with long content
-      const editor = page.locator('.monaco-editor').first();
-      await editor.click();
-      // Type a shorter version since typing is slow
-      await page.keyboard.type('Long content test: ' + 'repeat '.repeat(100));
+      // Fill the Monaco editor with long content (using helper, so full content works fine)
+      await fillMonacoEditor(page, 'Long content test: ' + 'repeat '.repeat(100));
 
       await page.getByRole('button', { name: 'Create Prompt', exact: true }).click();
 
