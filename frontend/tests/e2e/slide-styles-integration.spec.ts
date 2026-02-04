@@ -295,8 +295,8 @@ test.describe('Slide Style CRUD Operations', () => {
     try {
       await goToSlideStyles(page);
 
-      // Click Edit on the style
-      const styleCard = page.locator('div.border.rounded-lg').filter({ hasText: styleName });
+      // Click Edit on the style (use .first() to avoid matching nested divs)
+      const styleCard = page.locator('div.border.rounded-lg').filter({ hasText: styleName }).first();
       await styleCard.getByRole('button', { name: 'Edit' }).click();
 
       await expect(page.getByRole('heading', { name: 'Edit Slide Style' })).toBeVisible();
@@ -336,8 +336,8 @@ test.describe('Slide Style CRUD Operations', () => {
     try {
       await goToSlideStyles(page);
 
-      // Click Edit on the style
-      const styleCard = page.locator('div.border.rounded-lg').filter({ hasText: styleName });
+      // Click Edit on the style (use .first() to avoid matching nested divs)
+      const styleCard = page.locator('div.border.rounded-lg').filter({ hasText: styleName }).first();
       await styleCard.getByRole('button', { name: 'Edit' }).click();
 
       await expect(page.getByRole('heading', { name: 'Edit Slide Style' })).toBeVisible();
@@ -373,8 +373,8 @@ test.describe('Slide Style CRUD Operations', () => {
     try {
       await goToSlideStyles(page);
 
-      // Click Edit on the style
-      const styleCard = page.locator('div.border.rounded-lg').filter({ hasText: styleName });
+      // Click Edit on the style (use .first() to avoid matching nested divs)
+      const styleCard = page.locator('div.border.rounded-lg').filter({ hasText: styleName }).first();
       await styleCard.getByRole('button', { name: 'Edit' }).click();
 
       await expect(page.getByRole('heading', { name: 'Edit Slide Style' })).toBeVisible();
@@ -411,8 +411,8 @@ test.describe('Slide Style CRUD Operations', () => {
     // Verify visible
     await expect(page.getByRole('heading', { name: styleName, level: 3 })).toBeVisible();
 
-    // Click Delete
-    const styleCard = page.locator('div.border.rounded-lg').filter({ hasText: styleName });
+    // Click Delete (use .first() to avoid matching nested divs)
+    const styleCard = page.locator('div.border.rounded-lg').filter({ hasText: styleName }).first();
     await styleCard.getByRole('button', { name: 'Delete' }).click();
 
     // Confirm deletion
@@ -707,8 +707,8 @@ test.describe('Slide Style Edge Cases', () => {
     try {
       await goToSlideStyles(page);
 
-      // Find the style card
-      const styleCard = page.locator('div.border.rounded-lg').filter({ hasText: styleName });
+      // Find the style card (use .first() to avoid matching nested divs)
+      const styleCard = page.locator('div.border.rounded-lg').filter({ hasText: styleName }).first();
 
       // Click Preview
       await styleCard.getByRole('button', { name: 'Preview' }).click();
@@ -769,8 +769,8 @@ test.describe('Slide Style Data Persistence', () => {
     try {
       await goToSlideStyles(page);
 
-      // Edit the style
-      const styleCard = page.locator('div.border.rounded-lg').filter({ hasText: styleName });
+      // Edit the style (use .first() to avoid matching nested divs)
+      const styleCard = page.locator('div.border.rounded-lg').filter({ hasText: styleName }).first();
       await styleCard.getByRole('button', { name: 'Edit' }).click();
 
       const nameInput = page.getByLabel(/Name/i);
