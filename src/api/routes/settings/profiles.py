@@ -1,5 +1,6 @@
 """Profile management API endpoints."""
 import logging
+import os
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -132,12 +133,16 @@ def create_profile(
     """
     try:
         # Get the current user from Databricks for MLflow experiment path
-        try:
-            from src.core.databricks_client import get_user_client
-            client = get_user_client()
-            user = client.current_user.me().user_name
-        except Exception:
+        # (skip Databricks call in test/dev to avoid network timeout)
+        if os.getenv("ENVIRONMENT") in ("development", "test"):
             user = "system"
+        else:
+            try:
+                from src.core.databricks_client import get_user_client
+                client = get_user_client()
+                user = client.current_user.me().user_name
+            except Exception:
+                user = "system"
 
         profile = service.create_profile(
             name=request.name,
@@ -181,12 +186,16 @@ def create_profile_with_config(
     """
     try:
         # Get the current user from Databricks
-        try:
-            from src.core.databricks_client import get_user_client
-            client = get_user_client()
-            user = client.current_user.me().user_name
-        except Exception:
+        # (skip Databricks call in test/dev to avoid network timeout)
+        if os.getenv("ENVIRONMENT") in ("development", "test"):
             user = "system"
+        else:
+            try:
+                from src.core.databricks_client import get_user_client
+                client = get_user_client()
+                user = client.current_user.me().user_name
+            except Exception:
+                user = "system"
 
         profile = service.create_profile_with_config(
             name=request.name,

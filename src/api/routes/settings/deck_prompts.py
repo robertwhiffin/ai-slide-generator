@@ -5,6 +5,7 @@ CRUD operations for the global library of slide deck prompts.
 These prompts guide the agent in creating specific presentation types.
 """
 import logging
+import os
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -195,13 +196,16 @@ def create_deck_prompt(
                 detail=f"Deck prompt with name '{request.name}' already exists",
             )
         
-        # Get current user
-        try:
-            from src.core.databricks_client import get_user_client
-            client = get_user_client()
-            user = client.current_user.me().user_name
-        except Exception:
+        # Get current user (skip Databricks call in test/dev to avoid network timeout)
+        if os.getenv("ENVIRONMENT") in ("development", "test"):
             user = "system"
+        else:
+            try:
+                from src.core.databricks_client import get_user_client
+                client = get_user_client()
+                user = client.current_user.me().user_name
+            except Exception:
+                user = "system"
         
         prompt = SlideDeckPromptLibrary(
             name=request.name,
@@ -293,13 +297,16 @@ def update_deck_prompt(
         if request.prompt_content is not None:
             prompt.prompt_content = request.prompt_content
         
-        # Update the user
-        try:
-            from src.core.databricks_client import get_user_client
-            client = get_user_client()
-            prompt.updated_by = client.current_user.me().user_name
-        except Exception:
+        # Update the user (skip Databricks call in test/dev to avoid network timeout)
+        if os.getenv("ENVIRONMENT") in ("development", "test"):
             prompt.updated_by = "system"
+        else:
+            try:
+                from src.core.databricks_client import get_user_client
+                client = get_user_client()
+                prompt.updated_by = client.current_user.me().user_name
+            except Exception:
+                prompt.updated_by = "system"
         
         db.commit()
         db.refresh(prompt)
@@ -361,12 +368,16 @@ def delete_deck_prompt(
             logger.info(f"Hard deleted deck prompt: {prompt.name} (id={prompt.id})")
         else:
             prompt.is_active = False
-            try:
-                from src.core.databricks_client import get_user_client
-                client = get_user_client()
-                prompt.updated_by = client.current_user.me().user_name
-            except Exception:
+            # Update the user (skip Databricks call in test/dev to avoid network timeout)
+            if os.getenv("ENVIRONMENT") in ("development", "test"):
                 prompt.updated_by = "system"
+            else:
+                try:
+                    from src.core.databricks_client import get_user_client
+                    client = get_user_client()
+                    prompt.updated_by = client.current_user.me().user_name
+                except Exception:
+                    prompt.updated_by = "system"
             logger.info(f"Soft deleted deck prompt: {prompt.name} (id={prompt.id})")
         
         db.commit()
