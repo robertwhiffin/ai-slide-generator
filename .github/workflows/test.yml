@@ -582,7 +582,37 @@ jobs:
           echo "--- Deck Prompts API ---"
           curl -s --max-time 10 http://localhost:8000/api/settings/deck-prompts | head -c 500
           echo ""
+          echo "--- Slide Styles API ---"
+          curl -s --max-time 10 http://localhost:8000/api/settings/slide-styles | head -c 500
+          echo ""
+          echo "--- Sessions API ---"
+          curl -s --max-time 10 http://localhost:8000/api/sessions | head -c 500
+          echo ""
           echo "API verification complete"
+
+      - name: Debug API from frontend context
+        working-directory: frontend
+        env:
+          VITE_API_URL: http://127.0.0.1:8000
+        run: |
+          echo "=== Debug: Testing API connectivity from frontend dev server context ==="
+          echo ""
+          echo "--- Test 1: Direct curl to 127.0.0.1:8000 ---"
+          curl -v --max-time 10 http://127.0.0.1:8000/api/settings/profiles 2>&1 | head -50
+          echo ""
+          echo "--- Test 2: Direct curl to localhost:8000 ---"
+          curl -v --max-time 10 http://localhost:8000/api/settings/profiles 2>&1 | head -50
+          echo ""
+          echo "--- Test 3: Check sessions API (known working) ---"
+          curl -v --max-time 10 http://127.0.0.1:8000/api/sessions 2>&1 | head -50
+          echo ""
+          echo "--- Test 4: Network interfaces ---"
+          ip addr 2>/dev/null || ifconfig 2>/dev/null || echo "Cannot get network info"
+          echo ""
+          echo "--- Test 5: Port 8000 listeners ---"
+          ss -tlnp 2>/dev/null | grep 8000 || netstat -tlnp 2>/dev/null | grep 8000 || echo "Cannot get port info"
+          echo ""
+          echo "=== End Debug ==="
 
       - name: Run E2E tests - ${{ matrix.test }}
         working-directory: frontend
