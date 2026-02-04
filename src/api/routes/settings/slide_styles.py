@@ -6,6 +6,7 @@ These styles control the visual appearance of generated slides
 (typography, colors, layout, etc.).
 """
 import logging
+import os
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -199,13 +200,16 @@ def create_slide_style(
                 detail=f"Slide style with name '{request.name}' already exists",
             )
         
-        # Get current user
-        try:
-            from src.core.databricks_client import get_user_client
-            client = get_user_client()
-            user = client.current_user.me().user_name
-        except Exception:
+        # Get current user (skip Databricks call in test/dev to avoid network timeout)
+        if os.getenv("ENVIRONMENT") in ("development", "test"):
             user = "system"
+        else:
+            try:
+                from src.core.databricks_client import get_user_client
+                client = get_user_client()
+                user = client.current_user.me().user_name
+            except Exception:
+                user = "system"
         
         style = SlideStyleLibrary(
             name=request.name,
@@ -305,13 +309,16 @@ def update_slide_style(
         if request.style_content is not None:
             style.style_content = request.style_content
         
-        # Update the user
-        try:
-            from src.core.databricks_client import get_user_client
-            client = get_user_client()
-            style.updated_by = client.current_user.me().user_name
-        except Exception:
+        # Update the user (skip Databricks call in test/dev to avoid network timeout)
+        if os.getenv("ENVIRONMENT") in ("development", "test"):
             style.updated_by = "system"
+        else:
+            try:
+                from src.core.databricks_client import get_user_client
+                client = get_user_client()
+                style.updated_by = client.current_user.me().user_name
+            except Exception:
+                style.updated_by = "system"
         
         db.commit()
         db.refresh(style)
@@ -381,12 +388,16 @@ def delete_slide_style(
             logger.info(f"Hard deleted slide style: {style.name} (id={style.id})")
         else:
             style.is_active = False
-            try:
-                from src.core.databricks_client import get_user_client
-                client = get_user_client()
-                style.updated_by = client.current_user.me().user_name
-            except Exception:
+            # Update the user (skip Databricks call in test/dev to avoid network timeout)
+            if os.getenv("ENVIRONMENT") in ("development", "test"):
                 style.updated_by = "system"
+            else:
+                try:
+                    from src.core.databricks_client import get_user_client
+                    client = get_user_client()
+                    style.updated_by = client.current_user.me().user_name
+                except Exception:
+                    style.updated_by = "system"
             logger.info(f"Soft deleted slide style: {style.name} (id={style.id})")
         
         db.commit()
