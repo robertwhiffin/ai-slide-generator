@@ -7,5 +7,5 @@
 4. Send — watch slides stream in
 5. Refine through conversation
 
-For detailed step-by-step instructions, see the [User Guide](../user-guide/01-generating-slides).
+For detailed step-by-step instructions, see the [User Guide](../user-guide/generating-slides).
 
