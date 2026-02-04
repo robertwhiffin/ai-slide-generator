@@ -21,6 +21,54 @@ import { test, expect, Page, APIRequestContext } from '@playwright/test';
 const API_BASE = 'http://127.0.0.1:8000/api';
 
 // ============================================
+// Network Logging and Diagnostics
+// ============================================
+
+/**
+ * Enable network logging for debugging CI failures.
+ * Logs all failed requests and console errors.
+ */
+test.beforeEach(async ({ page, request }, testInfo) => {
+  // Log test start
+  console.log(`\n=== Starting test: ${testInfo.title} ===`);
+  
+  // Verify backend is accessible before test
+  try {
+    const healthCheck = await request.get('http://127.0.0.1:8000/api/health');
+    console.log(`Backend health check: ${healthCheck.status()}`);
+  } catch (error) {
+    console.error('Backend health check failed:', error);
+  }
+  
+  // Log console messages from the browser
+  page.on('console', (msg) => {
+    if (msg.type() === 'error') {
+      console.log(`[Browser Console Error]: ${msg.text()}`);
+    }
+  });
+  
+  // Log failed network requests
+  page.on('requestfailed', (request) => {
+    console.log(`[Request Failed]: ${request.method()} ${request.url()} - ${request.failure()?.errorText}`);
+  });
+  
+  // Log slow or hanging requests (requests that take > 5s)
+  page.on('request', (request) => {
+    const url = request.url();
+    if (url.includes('/api/')) {
+      console.log(`[API Request]: ${request.method()} ${url}`);
+    }
+  });
+  
+  page.on('response', (response) => {
+    const url = response.url();
+    if (url.includes('/api/')) {
+      console.log(`[API Response]: ${response.status()} ${url}`);
+    }
+  });
+});
+
+// ============================================
 // Test Data Helpers
 // ============================================
 
