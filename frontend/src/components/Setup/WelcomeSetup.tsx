@@ -58,13 +58,7 @@ export function WelcomeSetup({ onSetupComplete }: WelcomeSetupProps) {
   };
 
   const handleOpenAuth = () => {
-    // Open authentication in a popup window
-    const width = 500;
-    const height = 700;
-    const left = window.screenX + (window.outerWidth - width) / 2;
-    const top = window.screenY + (window.outerHeight - height) / 2;
-    
-    // Trigger the OAuth flow - this opens Databricks auth
+    // Trigger the OAuth flow - this opens Databricks auth in browser
     fetch('/api/setup/test-connection', { method: 'POST' })
       .then(response => {
         if (response.ok) {
