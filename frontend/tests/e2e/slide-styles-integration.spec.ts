@@ -297,7 +297,7 @@ test.describe('Slide Style CRUD Operations', () => {
 
       // Click Edit on the style (use .first() to avoid matching nested divs)
       const styleCard = page.locator('div.border.rounded-lg').filter({ hasText: styleName }).first();
-      await styleCard.getByRole('button', { name: 'Edit' }).click();
+      await styleCard.getByRole('button', { name: 'Edit' }).first().click();
 
       await expect(page.getByRole('heading', { name: 'Edit Slide Style' })).toBeVisible();
 
@@ -338,7 +338,7 @@ test.describe('Slide Style CRUD Operations', () => {
 
       // Click Edit on the style (use .first() to avoid matching nested divs)
       const styleCard = page.locator('div.border.rounded-lg').filter({ hasText: styleName }).first();
-      await styleCard.getByRole('button', { name: 'Edit' }).click();
+      await styleCard.getByRole('button', { name: 'Edit' }).first().click();
 
       await expect(page.getByRole('heading', { name: 'Edit Slide Style' })).toBeVisible();
 
@@ -375,7 +375,7 @@ test.describe('Slide Style CRUD Operations', () => {
 
       // Click Edit on the style (use .first() to avoid matching nested divs)
       const styleCard = page.locator('div.border.rounded-lg').filter({ hasText: styleName }).first();
-      await styleCard.getByRole('button', { name: 'Edit' }).click();
+      await styleCard.getByRole('button', { name: 'Edit' }).first().click();
 
       await expect(page.getByRole('heading', { name: 'Edit Slide Style' })).toBeVisible();
 
@@ -413,7 +413,7 @@ test.describe('Slide Style CRUD Operations', () => {
 
     // Click Delete (use .first() to avoid matching nested divs)
     const styleCard = page.locator('div.border.rounded-lg').filter({ hasText: styleName }).first();
-    await styleCard.getByRole('button', { name: 'Delete' }).click();
+    await styleCard.getByRole('button', { name: 'Delete' }).first().click();
 
     // Confirm deletion
     await expect(page.getByRole('heading', { name: 'Delete Slide Style' })).toBeVisible();
@@ -711,20 +711,20 @@ test.describe('Slide Style Edge Cases', () => {
       const styleCard = page.locator('div.border.rounded-lg').filter({ hasText: styleName }).first();
 
       // Click Preview
-      await styleCard.getByRole('button', { name: 'Preview' }).click();
+      await styleCard.getByRole('button', { name: 'Preview' }).first().click();
 
       // Should show content
       await expect(page.getByText('Style Content').first()).toBeVisible();
       await expect(page.locator('pre').filter({ hasText: 'E2E test CSS' })).toBeVisible();
 
       // Button should now say Hide
-      await expect(styleCard.getByRole('button', { name: 'Hide' })).toBeVisible();
+      await expect(styleCard.getByRole('button', { name: 'Hide' }).first()).toBeVisible();
 
       // Click Hide
-      await styleCard.getByRole('button', { name: 'Hide' }).click();
+      await styleCard.getByRole('button', { name: 'Hide' }).first().click();
 
       // Content should be hidden, button back to Preview
-      await expect(styleCard.getByRole('button', { name: 'Preview' })).toBeVisible();
+      await expect(styleCard.getByRole('button', { name: 'Preview' }).first()).toBeVisible();
     } finally {
       await deleteTestStyleViaAPI(request, style.id);
     }
@@ -771,7 +771,7 @@ test.describe('Slide Style Data Persistence', () => {
 
       // Edit the style (use .first() to avoid matching nested divs)
       const styleCard = page.locator('div.border.rounded-lg').filter({ hasText: styleName }).first();
-      await styleCard.getByRole('button', { name: 'Edit' }).click();
+      await styleCard.getByRole('button', { name: 'Edit' }).first().click();
 
       const nameInput = page.getByLabel(/Name/i);
       await nameInput.clear();
