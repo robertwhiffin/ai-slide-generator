@@ -298,7 +298,16 @@ async def get_current_user():
 
     Uses user-scoped client when running as Databricks App (user's identity),
     falls back to system client in local development (service principal).
+    
+    In test/development mode, returns a default user to avoid network timeouts.
     """
+    # Skip Databricks call in test/dev to avoid network timeout
+    if ENVIRONMENT in ("development", "test"):
+        return {
+            "username": "user",
+            "display_name": "User",
+        }
+    
     try:
         from src.core.databricks_client import get_user_client
         client = get_user_client()
