@@ -2,6 +2,8 @@
 
 This service handles CRUD operations for sessions stored in the database,
 supporting both local PostgreSQL and Databricks Lakebase deployments.
+
+Enforces access control based on session ownership and permissions.
 """
 import json
 import logging
@@ -12,12 +14,15 @@ from typing import Any, Dict, List, Optional
 from sqlalchemy.orm import Session
 
 from src.core.database import get_db_session
+from src.core.user_context import get_current_user
+from src.database.models.permissions import PermissionLevel, SessionVisibility
 from src.database.models.session import (
     ChatRequest,
     SessionMessage,
     SessionSlideDeck,
     UserSession,
 )
+from src.services.permission_service import PermissionDeniedError, PermissionService
 
 logger = logging.getLogger(__name__)
 
@@ -53,26 +58,40 @@ class SessionManager:
         session_id: Optional[str] = None,
         profile_id: Optional[int] = None,
         profile_name: Optional[str] = None,
+        created_by: Optional[str] = None,
+        visibility: SessionVisibility = SessionVisibility.PRIVATE,
     ) -> Dict[str, Any]:
         """Create a new session.
 
         Args:
-            user_id: Optional user identifier for session isolation
+            user_id: Optional user identifier (deprecated, use created_by)
             title: Optional session title
             session_id: Optional session ID (if not provided, one is generated)
             profile_id: Optional profile ID this session belongs to
             profile_name: Optional profile name (cached for display)
+            created_by: Session owner (defaults to current user from context)
+            visibility: Session visibility level (default: private)
 
         Returns:
             Dictionary with session info including session_id
         """
         if session_id is None:
             session_id = secrets.token_urlsafe(32)
+        
+        # Default owner to current user from context
+        if created_by is None:
+            created_by = get_current_user()
+        
+        # Fallback to user_id for backward compatibility
+        if created_by is None and user_id:
+            created_by = user_id
 
         with get_db_session() as db:
             session = UserSession(
                 session_id=session_id,
-                user_id=user_id,
+                user_id=user_id or created_by,  # Keep user_id for backward compatibility
+                created_by=created_by,
+                visibility=visibility.value if isinstance(visibility, SessionVisibility) else visibility,
                 title=title or f"Session {datetime.utcnow().strftime('%Y-%m-%d %H:%M')}",
                 profile_id=profile_id,
                 profile_name=profile_name,
@@ -82,36 +101,58 @@ class SessionManager:
 
             logger.info(
                 "Created new session",
-                extra={"session_id": session_id, "user_id": user_id, "profile_id": profile_id},
+                extra={
+                    "session_id": session_id,
+                    "created_by": created_by,
+                    "visibility": session.visibility,
+                    "profile_id": profile_id,
+                },
             )
 
             return {
                 "session_id": session_id,
-                "user_id": user_id,
+                "user_id": user_id or created_by,
+                "created_by": created_by,
+                "visibility": session.visibility,
                 "title": session.title,
                 "created_at": session.created_at.isoformat(),
                 "profile_id": profile_id,
                 "profile_name": profile_name,
             }
 
-    def get_session(self, session_id: str) -> Dict[str, Any]:
+    def get_session(
+        self,
+        session_id: str,
+        check_permission: bool = True,
+        required_permission: PermissionLevel = PermissionLevel.READ,
+    ) -> Dict[str, Any]:
         """Get session by ID.
 
         Args:
             session_id: Session identifier
+            check_permission: Whether to enforce permission check (default: True)
+            required_permission: Minimum permission level required
 
         Returns:
             Session information dictionary
 
         Raises:
             SessionNotFoundError: If session doesn't exist
+            PermissionDeniedError: If user lacks required permission
         """
         with get_db_session() as db:
             session = self._get_session_or_raise(db, session_id)
+            
+            # Check permissions
+            if check_permission:
+                perm_service = PermissionService(db)
+                perm_service.require_permission(session, required_permission)
 
             return {
                 "session_id": session.session_id,
                 "user_id": session.user_id,
+                "created_by": session.created_by,
+                "visibility": session.visibility,
                 "title": session.title,
                 "created_at": session.created_at.isoformat(),
                 "last_activity": session.last_activity.isoformat(),
@@ -126,32 +167,49 @@ class SessionManager:
         self,
         user_id: Optional[str] = None,
         limit: int = 50,
+        current_user: Optional[str] = None,
+        min_permission: PermissionLevel = PermissionLevel.READ,
     ) -> List[Dict[str, Any]]:
-        """List sessions, optionally filtered by user.
+        """List sessions accessible to the current user.
+
+        Returns only sessions where the user has at least the minimum permission.
+        Filters based on ownership, explicit grants, and group memberships.
 
         Args:
-            user_id: Optional user filter
+            user_id: Optional filter by owner (for backward compatibility)
             limit: Maximum number of sessions to return
+            current_user: User to check (defaults to context user)
+            min_permission: Minimum permission level required
 
         Returns:
             List of session info dictionaries
         """
+        if current_user is None:
+            current_user = get_current_user()
+        
         with get_db_session() as db:
-            query = db.query(UserSession)
-
-            if user_id:
-                query = query.filter(UserSession.user_id == user_id)
-
-            sessions = (
-                query.order_by(UserSession.last_activity.desc())
-                .limit(limit)
-                .all()
+            perm_service = PermissionService(db)
+            
+            # Get all accessible sessions
+            accessible = perm_service.list_accessible_sessions(
+                current_user=current_user,
+                permission=min_permission,
             )
+            
+            # Apply user_id filter if provided (for backward compatibility)
+            if user_id:
+                accessible = [s for s in accessible if s.created_by == user_id or s.user_id == user_id]
+            
+            # Sort by last activity and limit
+            accessible.sort(key=lambda s: s.last_activity, reverse=True)
+            accessible = accessible[:limit]
 
             return [
                 {
                     "session_id": s.session_id,
                     "user_id": s.user_id,
+                    "created_by": s.created_by,
+                    "visibility": s.visibility,
                     "title": s.title,
                     "created_at": s.created_at.isoformat(),
                     "last_activity": s.last_activity.isoformat(),
@@ -160,43 +218,68 @@ class SessionManager:
                     "profile_id": s.profile_id,
                     "profile_name": s.profile_name,
                 }
-                for s in sessions
+                for s in accessible
             ]
 
-    def delete_session(self, session_id: str) -> bool:
+    def delete_session(self, session_id: str, check_permission: bool = True) -> bool:
         """Delete a session and all associated data.
+
+        Requires edit permission (typically owner only).
 
         Args:
             session_id: Session to delete
+            check_permission: Whether to enforce permission check (default: True)
 
         Returns:
             True if session was deleted
 
         Raises:
             SessionNotFoundError: If session doesn't exist
+            PermissionDeniedError: If user lacks edit permission
         """
         with get_db_session() as db:
             session = self._get_session_or_raise(db, session_id)
+            
+            # Check permissions - only owners/editors can delete
+            if check_permission:
+                perm_service = PermissionService(db)
+                perm_service.require_permission(session, PermissionLevel.EDIT)
+            
             db.delete(session)
 
             logger.info("Deleted session", extra={"session_id": session_id})
             return True
 
-    def rename_session(self, session_id: str, title: str) -> Dict[str, Any]:
+    def rename_session(
+        self,
+        session_id: str,
+        title: str,
+        check_permission: bool = True,
+    ) -> Dict[str, Any]:
         """Rename a session.
+
+        Requires edit permission.
 
         Args:
             session_id: Session to rename
             title: New title for the session
+            check_permission: Whether to enforce permission check (default: True)
 
         Returns:
             Updated session info
 
         Raises:
             SessionNotFoundError: If session doesn't exist
+            PermissionDeniedError: If user lacks edit permission
         """
         with get_db_session() as db:
             session = self._get_session_or_raise(db, session_id)
+            
+            # Check permissions
+            if check_permission:
+                perm_service = PermissionService(db)
+                perm_service.require_permission(session, PermissionLevel.EDIT)
+            
             session.title = title
             session.last_activity = datetime.utcnow()
 
@@ -975,6 +1058,169 @@ class SessionManager:
             raise SessionNotFoundError(f"Session not found: {session_id}")
 
         return session
+    
+    # Permission management methods
+    
+    def grant_session_permission(
+        self,
+        session_id: str,
+        principal_type: str,
+        principal_id: str,
+        permission: str,
+        granted_by: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Grant permission to a user or group on a session.
+        
+        Only session owners can grant permissions.
+        
+        Args:
+            session_id: Session to grant permission on
+            principal_type: 'user' or 'group'
+            principal_id: User email or group name
+            permission: 'read' or 'edit'
+            granted_by: User granting permission (defaults to context user)
+            
+        Returns:
+            Created permission info
+            
+        Raises:
+            SessionNotFoundError: If session doesn't exist
+            PermissionDeniedError: If granter is not the owner
+        """
+        from src.database.models.permissions import PermissionLevel, PrincipalType
+        
+        with get_db_session() as db:
+            session = self._get_session_or_raise(db, session_id)
+            perm_service = PermissionService(db)
+            
+            perm = perm_service.grant_permission(
+                session=session,
+                principal_type=PrincipalType(principal_type),
+                principal_id=principal_id,
+                permission=PermissionLevel(permission),
+                granted_by=granted_by,
+            )
+            
+            return {
+                "session_id": session_id,
+                "principal_type": perm.principal_type,
+                "principal_id": perm.principal_id,
+                "permission": perm.permission,
+                "granted_by": perm.granted_by,
+                "granted_at": perm.granted_at.isoformat(),
+            }
+    
+    def revoke_session_permission(
+        self,
+        session_id: str,
+        principal_type: str,
+        principal_id: str,
+        revoked_by: Optional[str] = None,
+    ) -> bool:
+        """Revoke permission from a user or group on a session.
+        
+        Only session owners can revoke permissions.
+        
+        Args:
+            session_id: Session to revoke permission on
+            principal_type: 'user' or 'group'
+            principal_id: User email or group name
+            revoked_by: User revoking permission (defaults to context user)
+            
+        Returns:
+            True if permission was revoked, False if it didn't exist
+            
+        Raises:
+            SessionNotFoundError: If session doesn't exist
+            PermissionDeniedError: If revoker is not the owner
+        """
+        from src.database.models.permissions import PrincipalType
+        
+        with get_db_session() as db:
+            session = self._get_session_or_raise(db, session_id)
+            perm_service = PermissionService(db)
+            
+            return perm_service.revoke_permission(
+                session=session,
+                principal_type=PrincipalType(principal_type),
+                principal_id=principal_id,
+                revoked_by=revoked_by,
+            )
+    
+    def list_session_permissions(self, session_id: str) -> List[Dict[str, Any]]:
+        """List all permissions for a session.
+        
+        Requires read permission on the session.
+        
+        Args:
+            session_id: Session to list permissions for
+            
+        Returns:
+            List of permission dictionaries
+            
+        Raises:
+            SessionNotFoundError: If session doesn't exist
+            PermissionDeniedError: If user lacks read permission
+        """
+        with get_db_session() as db:
+            session = self._get_session_or_raise(db, session_id)
+            perm_service = PermissionService(db)
+            
+            # Require at least read permission to view permissions
+            perm_service.require_permission(session, PermissionLevel.READ)
+            
+            permissions = perm_service.list_permissions(session)
+            
+            return [
+                {
+                    "principal_type": p.principal_type,
+                    "principal_id": p.principal_id,
+                    "permission": p.permission,
+                    "granted_by": p.granted_by,
+                    "granted_at": p.granted_at.isoformat(),
+                }
+                for p in permissions
+            ]
+    
+    def set_session_visibility(
+        self,
+        session_id: str,
+        visibility: str,
+        changed_by: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Change session visibility level.
+        
+        Only session owners can change visibility.
+        
+        Args:
+            session_id: Session to update
+            visibility: New visibility: 'private', 'shared', or 'workspace'
+            changed_by: User making the change (defaults to context user)
+            
+        Returns:
+            Updated session info
+            
+        Raises:
+            SessionNotFoundError: If session doesn't exist
+            PermissionDeniedError: If user is not the owner
+        """
+        from src.database.models.permissions import SessionVisibility
+        
+        with get_db_session() as db:
+            session = self._get_session_or_raise(db, session_id)
+            perm_service = PermissionService(db)
+            
+            perm_service.set_visibility(
+                session=session,
+                visibility=SessionVisibility(visibility),
+                changed_by=changed_by,
+            )
+            
+            return {
+                "session_id": session_id,
+                "visibility": session.visibility,
+                "updated_at": session.last_activity.isoformat(),
+            }
 
 
 # Global session manager instance
