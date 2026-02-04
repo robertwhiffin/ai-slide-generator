@@ -218,8 +218,8 @@ async function skipWizardStep4(page: Page): Promise<void> {
 }
 
 async function submitWizard(page: Page): Promise<void> {
-  // Step 5: Review - click Create Profile
-  await page.getByRole('button', { name: /Create Profile/i }).click();
+  // Step 5: Review - click Create Profile (exact match to avoid matching "+ Create Profile" button)
+  await page.getByRole('button', { name: 'Create Profile', exact: true }).click();
 }
 
 // ============================================
@@ -232,8 +232,8 @@ test.describe('Profile CRUD Operations', () => {
 
     await goToProfiles(page);
 
-    // Open wizard
-    await page.getByRole('button', { name: /Create Profile/i }).click();
+    // Open wizard (use specific button text to avoid matching wizard submit button)
+    await page.getByRole('button', { name: '+ Create Profile' }).click();
     await expect(page.getByRole('heading', { name: /Create New Profile/i })).toBeVisible();
 
     // Complete wizard
@@ -291,8 +291,8 @@ test.describe('Profile CRUD Operations', () => {
       const row = page.locator('tr', { hasText: profileName });
       await row.getByRole('button', { name: /View and Edit/i }).click();
 
-      // Switch to Edit mode
-      await page.getByRole('button', { name: 'Edit' }).click();
+      // Switch to Edit mode (use exact match to avoid matching "View and Edit" buttons)
+      await page.getByRole('button', { name: 'Edit', exact: true }).click();
 
       // Update name
       const nameInput = page.locator('input').first();
@@ -333,8 +333,8 @@ test.describe('Profile CRUD Operations', () => {
       const row = page.locator('tr', { hasText: profileName });
       await row.getByRole('button', { name: /View and Edit/i }).click();
 
-      // Switch to Edit mode
-      await page.getByRole('button', { name: 'Edit' }).click();
+      // Switch to Edit mode (use exact match to avoid matching "View and Edit" buttons)
+      await page.getByRole('button', { name: 'Edit', exact: true }).click();
 
       // Update description
       const descInput = page.locator('textarea').first();
@@ -455,7 +455,7 @@ test.describe('Profile Validation', () => {
       await goToProfiles(page);
 
       // Try to create another with same name
-      await page.getByRole('button', { name: /Create Profile/i }).click();
+      await page.getByRole('button', { name: '+ Create Profile' }).click();
 
       await completeWizardStep1(page, profileName);
       await skipWizardStep2(page);
@@ -485,7 +485,8 @@ test.describe('Profile Validation', () => {
       const row = page.locator('tr', { hasText: profileName2 });
       await row.getByRole('button', { name: /View and Edit/i }).click();
 
-      await page.getByRole('button', { name: 'Edit' }).click();
+      // Use exact match to avoid matching "View and Edit" buttons
+      await page.getByRole('button', { name: 'Edit', exact: true }).click();
 
       const nameInput = page.locator('input').first();
       await nameInput.clear();
@@ -504,7 +505,7 @@ test.describe('Profile Validation', () => {
   test('wizard requires name to proceed past step 1', async ({ page }) => {
     await goToProfiles(page);
 
-    await page.getByRole('button', { name: /Create Profile/i }).click();
+    await page.getByRole('button', { name: '+ Create Profile' }).click();
 
     // Next button should be disabled with empty name
     const nextButton = page.getByRole('button', { name: /Next/i });
@@ -519,7 +520,7 @@ test.describe('Profile Validation', () => {
   test('wizard requires slide style selection', async ({ page }) => {
     await goToProfiles(page);
 
-    await page.getByRole('button', { name: /Create Profile/i }).click();
+    await page.getByRole('button', { name: '+ Create Profile' }).click();
 
     // Navigate to step 3
     await page.getByPlaceholder(/Production Analytics/i).fill('Test Profile');
@@ -813,7 +814,7 @@ test.describe('Profile Edge Cases', () => {
     await goToProfiles(page);
 
     // Open wizard
-    await page.getByRole('button', { name: /Create Profile/i }).click();
+    await page.getByRole('button', { name: '+ Create Profile' }).click();
 
     // Complete wizard with special characters
     await completeWizardStep1(page, profileName);
@@ -843,7 +844,7 @@ test.describe('Profile Edge Cases', () => {
     await goToProfiles(page);
 
     // Open wizard
-    await page.getByRole('button', { name: /Create Profile/i }).click();
+    await page.getByRole('button', { name: '+ Create Profile' }).click();
 
     // Complete wizard with unicode characters
     await completeWizardStep1(page, profileName);
