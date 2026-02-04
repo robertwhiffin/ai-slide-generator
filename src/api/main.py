@@ -16,13 +16,14 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from src.api.routes import chat, slides, export, sessions, verification, version
+from src.api.routes import chat, slides, export, sessions, verification, version, permissions
 from src.core.databricks_client import create_user_client, set_user_client
 from src.core.database import (
     is_lakebase_environment,
     start_token_refresh,
     stop_token_refresh,
 )
+from src.core.user_context import set_current_user, get_current_user_from_client
 from src.api.routes.settings import (
     ai_infra_router,
     deck_prompts_router,
@@ -195,15 +196,20 @@ if not IS_PRODUCTION:
 @app.middleware("http")
 async def user_auth_middleware(request: Request, call_next):
     """
-    Extract user token from Databricks Apps proxy and create user-scoped client.
+    Extract user token and identity from Databricks Apps proxy.
 
-    When running as a Databricks App, the proxy forwards the authenticated user's
-    token in the x-forwarded-access-token header. This middleware extracts that
-    token and creates a request-scoped WorkspaceClient for Genie/LLM/MLflow calls.
+    When running as a Databricks App, the proxy forwards:
+    - x-forwarded-access-token: User's OAuth token for API calls
+    - x-forwarded-user: User's email/username (optional)
+
+    This middleware:
+    1. Creates a user-scoped WorkspaceClient for Genie/LLM/MLflow
+    2. Extracts and stores current user identity for access control
 
     In local development (no token header), operations fall back to system client.
     """
     token = request.headers.get("x-forwarded-access-token")
+    forwarded_user = request.headers.get("x-forwarded-user")
     client_id = os.getenv("DATABRICKS_CLIENT_ID", "")
 
     if token:
@@ -217,6 +223,7 @@ async def user_auth_middleware(request: Request, call_next):
                 "token_length": len(token),
                 "is_service_principal": is_sp_token,
                 "header_present": True,
+                "forwarded_user": forwarded_user,
             },
         )
         if is_sp_token:
@@ -227,16 +234,32 @@ async def user_auth_middleware(request: Request, call_next):
             user_client = create_user_client(token)
             set_user_client(user_client)
             logger.warning("OBO auth: user client set successfully")
+            
+            # Extract user identity for access control
+            # Priority: 1) x-forwarded-user header, 2) Query Databricks API
+            if forwarded_user:
+                set_current_user(forwarded_user)
+                logger.info(f"Set current user from header: {forwarded_user}")
+            else:
+                # Fallback: query Databricks API for user identity
+                username = get_current_user_from_client()
+                if username:
+                    set_current_user(username)
+                else:
+                    logger.warning("Could not determine user identity")
+                    
         except Exception as e:
             logger.warning(f"Failed to create user client from token: {e}")
     else:
         logger.warning("OBO auth: no x-forwarded-access-token header present")
+    
     try:
         response = await call_next(request)
         return response
     finally:
-        # Always clean up the user client after request
+        # Always clean up after request
         set_user_client(None)
+        set_current_user(None)
 
 
 # Include API routers
@@ -244,6 +267,7 @@ app.include_router(chat.router)
 app.include_router(slides.router)
 app.include_router(export.router)
 app.include_router(sessions.router)
+app.include_router(permissions.router)
 app.include_router(verification.router)
 app.include_router(version.router)
 

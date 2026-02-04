@@ -65,7 +65,11 @@ class UserSession(Base):
 
     id = Column(Integer, primary_key=True)
     session_id = Column(String(64), unique=True, nullable=False, index=True)
-    user_id = Column(String(255), nullable=True, index=True)  # Optional user identification
+    user_id = Column(String(255), nullable=True, index=True)  # Optional user identification (deprecated, use created_by)
+    
+    # Ownership and visibility
+    created_by = Column(String(255), nullable=True, index=True)  # Owner's email/username
+    visibility = Column(String(20), default="private", nullable=False)  # 'private', 'shared', 'workspace'
 
     # Session metadata
     title = Column(String(255))  # Optional session title/name
@@ -97,6 +101,11 @@ class UserSession(Base):
         "SessionSlideDeck",
         back_populates="session",
         uselist=False,
+        cascade="all, delete-orphan",
+    )
+    permissions = relationship(
+        "SessionPermission",
+        back_populates="session",
         cascade="all, delete-orphan",
     )
 
