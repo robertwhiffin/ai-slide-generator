@@ -264,8 +264,8 @@ test.describe('Deck Prompt CRUD Operations', () => {
     try {
       await goToDeckPrompts(page);
 
-      // Find the prompt and click Edit
-      const promptCard = page.locator('div', { has: page.getByRole('heading', { name: promptName, level: 3 }) });
+      // Find the prompt and click Edit (use .first() to avoid matching nested divs)
+      const promptCard = page.locator('div', { has: page.getByRole('heading', { name: promptName, level: 3 }) }).first();
       await promptCard.getByRole('button', { name: 'Edit' }).click();
 
       // Wait for edit modal
@@ -304,8 +304,8 @@ test.describe('Deck Prompt CRUD Operations', () => {
     try {
       await goToDeckPrompts(page);
 
-      // Find the prompt and click Edit
-      const promptCard = page.locator('div', { has: page.getByRole('heading', { name: promptName, level: 3 }) });
+      // Find the prompt and click Edit (use .first() to avoid matching nested divs)
+      const promptCard = page.locator('div', { has: page.getByRole('heading', { name: promptName, level: 3 }) }).first();
       await promptCard.getByRole('button', { name: 'Edit' }).click();
 
       // Wait for edit modal
@@ -341,8 +341,8 @@ test.describe('Deck Prompt CRUD Operations', () => {
 
     await goToDeckPrompts(page);
 
-    // Find the prompt and click Delete
-    const promptCard = page.locator('div', { has: page.getByRole('heading', { name: promptName, level: 3 }) });
+    // Find the prompt and click Delete (use .first() to avoid matching nested divs)
+    const promptCard = page.locator('div', { has: page.getByRole('heading', { name: promptName, level: 3 }) }).first();
     await promptCard.getByRole('button', { name: 'Delete' }).click();
 
     // Confirm deletion
@@ -423,8 +423,8 @@ test.describe('Deck Prompt Validation', () => {
     try {
       await goToDeckPrompts(page);
 
-      // Try to rename prompt2 to prompt1's name
-      const promptCard = page.locator('div', { has: page.getByRole('heading', { name: promptName2, level: 3 }) });
+      // Try to rename prompt2 to prompt1's name (use .first() to avoid matching nested divs)
+      const promptCard = page.locator('div', { has: page.getByRole('heading', { name: promptName2, level: 3 }) }).first();
       await promptCard.getByRole('button', { name: 'Edit' }).click();
 
       await expect(page.getByRole('heading', { name: 'Edit Deck Prompt' })).toBeVisible();
@@ -580,8 +580,8 @@ test.describe('Deck Prompt Edge Cases', () => {
 
       await goToDeckPrompts(page);
 
-      // Edit only the name
-      const promptCard = page.locator('div', { has: page.getByRole('heading', { name: promptName, level: 3 }) });
+      // Edit only the name (use .first() to avoid matching nested divs)
+      const promptCard = page.locator('div', { has: page.getByRole('heading', { name: promptName, level: 3 }) }).first();
       await promptCard.getByRole('button', { name: 'Edit' }).click();
 
       await expect(page.getByRole('heading', { name: 'Edit Deck Prompt' })).toBeVisible();
@@ -633,8 +633,8 @@ test.describe('Deck Prompt Preview', () => {
     try {
       await goToDeckPrompts(page);
 
-      // Find the prompt and click Preview
-      const promptCard = page.locator('div', { has: page.getByRole('heading', { name: promptName, level: 3 }) });
+      // Find the prompt and click Preview (use .first() to avoid matching nested divs)
+      const promptCard = page.locator('div', { has: page.getByRole('heading', { name: promptName, level: 3 }) }).first();
       await promptCard.getByRole('button', { name: 'Preview' }).click();
 
       // Should show the content section
