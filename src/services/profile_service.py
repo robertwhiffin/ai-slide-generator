@@ -10,6 +10,7 @@ from src.database.models import (
     ConfigHistory,
     ConfigProfile,
     ConfigPrompts,
+    SlideStyleLibrary,
 )
 
 
@@ -107,11 +108,15 @@ class ProfileService:
 
         # NO default Genie space - user must explicitly configure one
 
-        # Use default prompts
+        # Get the first active slide style as default (required for agent to function)
+        default_style = self.db.query(SlideStyleLibrary).filter_by(is_active=True).first()
+
+        # Use default prompts with default slide style
         prompts = ConfigPrompts(
             profile_id=profile.id,
             system_prompt=DEFAULT_CONFIG["prompts"]["system_prompt"],
             slide_editing_instructions=DEFAULT_CONFIG["prompts"]["slide_editing_instructions"],
+            selected_slide_style_id=default_style.id if default_style else None,
         )
         self.db.add(prompts)
 
