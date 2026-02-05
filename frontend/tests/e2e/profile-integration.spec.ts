@@ -595,10 +595,6 @@ test.describe('Profile Switching', () => {
       // Wait for load
       await page.waitForTimeout(1000);
 
-      // Reload and navigate back to profiles to see updated badges
-      await page.reload();
-      await goToProfiles(page);
-
       // Row should now show Loaded badge
       const updatedRow = page.locator('tr', { hasText: profileName });
       await expect(updatedRow.getByText('Loaded')).toBeVisible();
@@ -626,9 +622,6 @@ test.describe('Profile Switching', () => {
       // Wait for update
       await page.waitForTimeout(1000);
 
-      // Reload and navigate back to profiles to see updated badges
-      await page.reload();
-      await goToProfiles(page);
 
       // Row should now show Default badge
       const updatedRow = page.locator('tr', { hasText: profileName });
