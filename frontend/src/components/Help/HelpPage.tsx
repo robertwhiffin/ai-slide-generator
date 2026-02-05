@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { FiArrowLeft, FiMessageSquare, FiClock, FiSettings, FiInfo, FiShield, FiFileText, FiLayout } from 'react-icons/fi';
+import { FiArrowLeft, FiMessageSquare, FiClock, FiSettings, FiInfo, FiShield, FiFileText, FiLayout, FiExternalLink } from 'react-icons/fi';
 import { FaGavel } from 'react-icons/fa';
 
 type HelpTab = 'overview' | 'generator' | 'history' | 'profiles' | 'deck_prompts' | 'slide_styles' | 'verification';
@@ -115,6 +115,22 @@ const OverviewTab: React.FC<{
         <QuickLinkButton tab="deck_prompts" label="Learn about Deck Prompts →" />
         <QuickLinkButton tab="slide_styles" label="Learn about Slide Styles →" />
       </div>
+    </section>
+
+    <section>
+      <h2 className="text-lg font-semibold text-gray-800 mb-3">Full Documentation</h2>
+      <p className="text-gray-600 mb-3">
+        For detailed guides, API reference, and technical documentation:
+      </p>
+      <a
+        href="https://robertwhiffin.github.io/ai-slide-generator/"
+        target="_blank"
+        rel="noopener noreferrer"
+        className="inline-flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors"
+      >
+        <FiExternalLink size={16} />
+        View Full Documentation
+      </a>
     </section>
   </div>
 );
