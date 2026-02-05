@@ -4,9 +4,10 @@
  * Provides methods to interact with the database-backed configuration system.
  */
 
-// Use relative URLs in production, localhost in development
+// Use relative URLs in production, explicit IPv4 in development
+// Note: Using 127.0.0.1 instead of localhost to avoid IPv6 resolution issues in CI
 const API_BASE_URL = import.meta.env.VITE_API_URL || (
-  import.meta.env.MODE === 'production' ? '' : 'http://localhost:8000'
+  import.meta.env.MODE === 'production' ? '' : 'http://127.0.0.1:8000'
 );
 
 const API_BASE = `${API_BASE_URL}/api/settings`;

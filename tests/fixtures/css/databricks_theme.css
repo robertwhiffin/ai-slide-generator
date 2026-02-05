@@ -1,0 +1,333 @@
+/* Databricks Presentation Theme CSS */
+
+:root {
+  /* Color palette - Databricks brand colors */
+  --databricks-red: #FF3621;
+  --databricks-dark: #1B1B1D;
+  --databricks-gray: #37373A;
+  --databricks-light-gray: #E8E8E8;
+  --databricks-white: #FFFFFF;
+  --text-primary: #1B1B1D;
+  --text-secondary: #5F5F5F;
+  --text-supporting: #8C8C8C;
+
+  /* Typography */
+  --font-primary: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --font-title: var(--font-primary);
+
+  /* Spacing */
+  --slide-padding: 60px;
+  --content-gap: 40px;
+  --card-padding: 32px;
+}
+
+/* Base presentation styles */
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  padding: 0;
+  font-family: var(--font-primary);
+  background: var(--databricks-dark);
+  color: var(--text-primary);
+  overflow-x: hidden;
+}
+
+.presentation {
+  width: 100%;
+}
+
+/* Individual slide */
+.slide {
+  width: 1280px;
+  height: 720px;
+  display: flex;
+  flex-direction: column;
+  padding: var(--slide-padding);
+  background: var(--databricks-white);
+  position: relative;
+  page-break-after: always;
+}
+
+/* Title slide variants */
+.slide.title-slide {
+  background: var(--databricks-dark);
+  color: var(--databricks-white);
+  justify-content: center;
+}
+
+.slide.title-slide h1 {
+  font-size: 72px;
+  font-weight: 700;
+  line-height: 1.2;
+  margin: 0 0 40px 0;
+  max-width: 800px;
+}
+
+.slide.title-slide .author {
+  font-size: 24px;
+  color: var(--databricks-light-gray);
+  margin: 20px 0 8px 0;
+}
+
+.slide.title-slide .date {
+  font-size: 20px;
+  color: var(--databricks-light-gray);
+  opacity: 0.7;
+}
+
+/* Section divider slides */
+.slide.section-slide {
+  background: var(--databricks-red);
+  color: var(--databricks-white);
+  justify-content: center;
+}
+
+.slide.section-slide h2 {
+  font-size: 64px;
+  font-weight: 700;
+  line-height: 1.2;
+  margin: 0 0 20px 0;
+}
+
+.slide.section-slide .supporting-text {
+  font-size: 24px;
+  opacity: 0.9;
+  text-transform: uppercase;
+  letter-spacing: 2px;
+  font-weight: 600;
+}
+
+/* Content slide header */
+.slide-header {
+  margin-bottom: 40px;
+}
+
+.slide-header h2 {
+  font-size: 48px;
+  font-weight: 700;
+  margin: 0 0 12px 0;
+  line-height: 1.2;
+  color: var(--text-primary);
+}
+
+.slide-header .subtitle {
+  font-size: 20px;
+  color: var(--text-secondary);
+  font-weight: 400;
+}
+
+/* Layout: Two columns */
+.two-column {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--content-gap);
+  flex: 1;
+}
+
+.column h3 {
+  font-size: 28px;
+  font-weight: 600;
+  margin: 0 0 20px 0;
+  color: var(--text-primary);
+}
+
+.column p {
+  font-size: 18px;
+  line-height: 1.6;
+  margin-bottom: 16px;
+  color: var(--text-primary);
+}
+
+.column ul {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+
+.column li {
+  font-size: 18px;
+  line-height: 1.6;
+  margin-bottom: 12px;
+  padding-left: 24px;
+  position: relative;
+  color: var(--text-primary);
+}
+
+.column li::before {
+  content: "•";
+  position: absolute;
+  left: 0;
+  color: var(--databricks-red);
+  font-weight: bold;
+  font-size: 20px;
+}
+
+/* Layout: Three columns */
+.three-column {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr;
+  gap: var(--content-gap);
+  flex: 1;
+}
+
+/* Card layouts */
+.card {
+  background: #F7F7F7;
+  border-radius: 12px;
+  padding: var(--card-padding);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
+}
+
+.card h3 {
+  font-size: 24px;
+  font-weight: 600;
+  margin: 0 0 16px 0;
+  color: var(--text-primary);
+}
+
+.card p, .card ul {
+  font-size: 16px;
+  line-height: 1.6;
+  color: var(--text-primary);
+}
+
+.card ul {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+
+.card li {
+  margin-bottom: 8px;
+  padding-left: 20px;
+  position: relative;
+}
+
+.card li::before {
+  content: "•";
+  position: absolute;
+  left: 0;
+  color: var(--databricks-red);
+  font-weight: bold;
+}
+
+/* Three card layout */
+.three-card {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr;
+  gap: 30px;
+  flex: 1;
+}
+
+/* Split card layouts */
+.split-card {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--content-gap);
+  flex: 1;
+  align-items: center;
+}
+
+.split-card .content {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+}
+
+.split-card .visual {
+  background: #F7F7F7;
+  border-radius: 12px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 400px;
+  color: var(--text-supporting);
+  font-size: 18px;
+}
+
+/* Chart container */
+.chart-container {
+  position: relative;
+  background: white;
+  border-radius: 12px;
+  padding: 20px;
+  flex: 1;
+}
+
+.chart-container canvas {
+  max-width: 100%;
+  max-height: 100%;
+}
+
+/* Quote slide */
+.slide.quote-slide {
+  justify-content: center;
+  align-items: center;
+  text-align: center;
+  padding: 80px 120px;
+}
+
+.slide.quote-slide blockquote {
+  font-size: 42px;
+  font-weight: 300;
+  line-height: 1.4;
+  margin: 0 0 40px 0;
+  color: var(--text-primary);
+  font-style: italic;
+}
+
+.slide.quote-slide blockquote::before {
+  content: '"';
+}
+
+.slide.quote-slide blockquote::after {
+  content: '"';
+}
+
+.slide.quote-slide cite {
+  font-size: 20px;
+  font-style: normal;
+  color: var(--text-secondary);
+  display: block;
+}
+
+/* Slide numbers */
+.slide-number {
+  position: absolute;
+  bottom: 40px;
+  right: 60px;
+  font-size: 16px;
+  color: var(--text-supporting);
+  font-weight: 500;
+}
+
+/* Responsive adjustments */
+@media (max-width: 1200px) {
+  .slide {
+    padding: 40px;
+  }
+
+  .slide-header h2 {
+    font-size: 36px;
+  }
+
+  .three-column,
+  .three-card {
+    grid-template-columns: 1fr;
+  }
+
+  .two-column,
+  .split-card {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* Print styles */
+@media print {
+  .slide {
+    page-break-after: always;
+  }
+}

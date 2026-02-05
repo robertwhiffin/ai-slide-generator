@@ -673,6 +673,47 @@ class ChatService:
                     )
                     return
 
+        # RC14: Validate slide_context indices against current backend deck state
+        # This catches state mismatches where frontend and backend are out of sync
+        if slide_context:
+            selected_indices = slide_context.get("indices", [])
+            existing_deck = self._get_or_load_deck(session_id)
+            if existing_deck and selected_indices:
+                max_index = max(selected_indices)
+                if max_index >= len(existing_deck.slides):
+                    # State mismatch detected - frontend shows more slides than backend has
+                    logger.error(
+                        "RC14: Frontend/backend deck state mismatch detected",
+                        extra={
+                            "session_id": session_id,
+                            "selected_indices": selected_indices,
+                            "backend_slide_count": len(existing_deck.slides),
+                            "max_selected_index": max_index,
+                        },
+                    )
+                    # Return error to user with instructions to refresh
+                    error_msg = (
+                        f"⚠️ Deck sync error: You selected slide {max_index + 1}, but only "
+                        f"{len(existing_deck.slides)} slide(s) exist in the saved deck. "
+                        "This can happen if a previous save failed. "
+                        "Please refresh the page to resync your session."
+                    )
+                    session_manager.add_message(
+                        session_id=session_id,
+                        role="assistant",
+                        content=error_msg,
+                        message_type="error",
+                    )
+                    yield StreamEvent(
+                        type=StreamEventType.ASSISTANT,
+                        content=error_msg,
+                    )
+                    yield StreamEvent(
+                        type=StreamEventType.COMPLETE,
+                        slides=existing_deck.to_dict() if existing_deck else None,
+                    )
+                    return
+
         # RC11: Detect conflict between selection and text reference
         conflict_note = None
         if slide_context:
@@ -1697,28 +1738,64 @@ class ChatService:
             # Get position intent from replacement_info
             # Format: (position_type, absolute_position) or legacy string
             add_position_info = replacement_info.get("add_position", ("after", None))
-            
+
             # Handle legacy string format for backward compatibility
             if isinstance(add_position_info, str):
                 add_position_info = (add_position_info, None)
-            
+
             position_type, absolute_position = add_position_info
-            
+
+            # STATE MISMATCH DETECTION: Check if frontend selection is valid for backend deck
+            # This can happen if a previous save failed and frontend/backend are out of sync
+            state_mismatch = start_idx >= len(current_deck.slides)
+            if state_mismatch and start_idx >= 0:
+                logger.warning(
+                    "DECK STATE MISMATCH: Frontend selected index exceeds backend deck size",
+                    extra={
+                        "session_id": session_id,
+                        "frontend_selected_index": start_idx,
+                        "backend_slide_count": len(current_deck.slides),
+                        "position_type": position_type,
+                        "recommendation": "Frontend and backend decks may be out of sync. "
+                                          "User should refresh to resync state.",
+                    },
+                )
+
             if position_type == "beginning":
                 # ABSOLUTE position 0 (ignores selection)
                 insert_position = 0
             elif position_type == "before":
-                # Insert BEFORE selected slide, or at beginning if no selection
+                # Insert BEFORE selected slide, or at beginning if no selection/invalid index
                 if start_idx >= 0 and start_idx < len(current_deck.slides):
                     insert_position = start_idx
                 else:
-                    insert_position = 0  # Beginning of deck
+                    # Fallback: insert at beginning, but log this as unexpected
+                    insert_position = 0
+                    if start_idx > 0:  # User had selected a slide but it's out of range
+                        logger.warning(
+                            "Add 'before' fallback to position 0 due to invalid start_index",
+                            extra={
+                                "session_id": session_id,
+                                "start_idx": start_idx,
+                                "deck_size": len(current_deck.slides),
+                            },
+                        )
             else:
-                # Insert AFTER selected slide, or at end if no selection
+                # Insert AFTER selected slide, or at end if no selection/invalid index
                 if start_idx >= 0 and start_idx < len(current_deck.slides):
                     insert_position = start_idx + max(original_count, 1)
                 else:
-                    insert_position = len(current_deck.slides)  # End of deck
+                    # Fallback: insert at end, but log this as unexpected
+                    insert_position = len(current_deck.slides)
+                    if start_idx > 0:  # User had selected a slide but it's out of range
+                        logger.warning(
+                            "Add 'after' fallback to end of deck due to invalid start_index",
+                            extra={
+                                "session_id": session_id,
+                                "start_idx": start_idx,
+                                "deck_size": len(current_deck.slides),
+                            },
+                        )
             
             logger.info(
                 "Add operation detected - inserting slides",

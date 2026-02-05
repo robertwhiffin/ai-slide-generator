@@ -32,11 +32,15 @@ def _has_databricks_credentials() -> bool:
     return os.path.exists(profile_path)
 
 
-# Skip all tests in this module if no credentials available
-pytestmark = pytest.mark.skipif(
-    not _has_databricks_credentials(),
-    reason="No Databricks credentials available (no ~/.databrickscfg or env vars)"
-)
+# Mark as live tests (require real Databricks connection) and skip if no credentials
+# Use 'pytest -m live' to run these, or they're excluded by '-m "not live"' in CI
+pytestmark = [
+    pytest.mark.live,
+    pytest.mark.skipif(
+        not _has_databricks_credentials(),
+        reason="No Databricks credentials available (no ~/.databrickscfg or env vars)"
+    ),
+]
 
 
 @pytest.fixture(autouse=True)

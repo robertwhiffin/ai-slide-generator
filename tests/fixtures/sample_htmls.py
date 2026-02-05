@@ -6,6 +6,7 @@ This module provides:
 - HTML normalization helper for exact-match comparison
 """
 
+import re
 from pathlib import Path
 from typing import Dict
 
@@ -69,10 +70,11 @@ def normalize_html(html: str) -> str:
     """Normalize HTML for exact-match comparison.
     
     Normalization steps:
-    1. Parse with BeautifulSoup
-    2. Remove whitespace-only text nodes
-    3. Sort attributes alphabetically on each element
-    4. Re-serialize with consistent formatting
+    1. Normalize canvas IDs (strip deduplication suffixes)
+    2. Parse with BeautifulSoup
+    3. Remove whitespace-only text nodes
+    4. Sort attributes alphabetically on each element
+    5. Re-serialize with consistent formatting
     
     Args:
         html: Raw HTML string
@@ -80,6 +82,10 @@ def normalize_html(html: str) -> str:
     Returns:
         Normalized HTML string suitable for comparison
     """
+    # Normalize canvas IDs - strip deduplication suffixes (e.g., _b4baf1)
+    # Matches canvas ID patterns like "historicalSpendChart_abc123" and normalizes to "historicalSpendChart"
+    html = _normalize_canvas_ids(html)
+    
     soup = BeautifulSoup(html, "html.parser")
     
     # Remove whitespace-only text nodes
@@ -90,6 +96,22 @@ def normalize_html(html: str) -> str:
     
     # Serialize with consistent formatting
     return soup.prettify()
+
+
+def _normalize_canvas_ids(html: str) -> str:
+    """Normalize canvas IDs by stripping deduplication suffixes.
+    
+    The agent's RC4 deduplication adds random suffixes like _abc123 to canvas IDs.
+    This function strips those suffixes for comparison purposes.
+    
+    Known canvas IDs in the test fixtures:
+    - historicalSpendChart, lobPieChart, lobTrendChart, financialServicesChart
+    - retailChart, manufacturingChart, healthcareChart
+    - oneYearForecastChart, threeYearForecastChart, lobForecastChart
+    """
+    # Pattern matches known canvas IDs followed by underscore and hex suffix
+    canvas_id_pattern = r"(historicalSpendChart|lobPieChart|lobTrendChart|financialServicesChart|retailChart|manufacturingChart|healthcareChart|oneYearForecastChart|threeYearForecastChart|lobForecastChart)_[a-f0-9]+"
+    return re.sub(canvas_id_pattern, r"\1", html)
 
 
 def _remove_whitespace_nodes(soup: BeautifulSoup) -> None:

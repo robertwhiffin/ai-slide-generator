@@ -171,7 +171,7 @@ export async function setupUserGuideMocks(page: Page): Promise<void> {
   } = await import('../fixtures/mocks');
 
   // Mock profiles
-  await page.route('http://localhost:8000/api/settings/profiles', (route) => {
+  await page.route('http://127.0.0.1:8000/api/settings/profiles', (route) => {
     route.fulfill({
       status: 200,
       contentType: 'application/json',
@@ -180,7 +180,7 @@ export async function setupUserGuideMocks(page: Page): Promise<void> {
   });
 
   // Mock deck prompts
-  await page.route('http://localhost:8000/api/settings/deck-prompts', (route) => {
+  await page.route('http://127.0.0.1:8000/api/settings/deck-prompts', (route) => {
     route.fulfill({
       status: 200,
       contentType: 'application/json',
@@ -189,7 +189,7 @@ export async function setupUserGuideMocks(page: Page): Promise<void> {
   });
 
   // Mock slide styles
-  await page.route('http://localhost:8000/api/settings/slide-styles', (route) => {
+  await page.route('http://127.0.0.1:8000/api/settings/slide-styles', (route) => {
     route.fulfill({
       status: 200,
       contentType: 'application/json',
@@ -198,7 +198,7 @@ export async function setupUserGuideMocks(page: Page): Promise<void> {
   });
 
   // Mock sessions
-  await page.route('http://localhost:8000/api/sessions**', (route, request) => {
+  await page.route('http://127.0.0.1:8000/api/sessions**', (route, request) => {
     const url = request.url();
     if (url.includes('limit=')) {
       route.fulfill({

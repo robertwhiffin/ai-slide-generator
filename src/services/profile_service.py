@@ -10,6 +10,7 @@ from src.database.models import (
     ConfigHistory,
     ConfigProfile,
     ConfigPrompts,
+    SlideStyleLibrary,
 )
 
 
@@ -76,7 +77,19 @@ class ProfileService:
             
         Returns:
             Created profile
+            
+        Raises:
+            ValueError: If profile name already exists
         """
+        # Check for duplicate name
+        existing = (
+            self.db.query(ConfigProfile)
+            .filter(ConfigProfile.name == name)
+            .first()
+        )
+        if existing:
+            raise ValueError(f"Profile with name '{name}' already exists")
+        
         # Check if a default profile already exists
         has_default = (
             self.db.query(ConfigProfile)
@@ -107,11 +120,15 @@ class ProfileService:
 
         # NO default Genie space - user must explicitly configure one
 
-        # Use default prompts
+        # Get the first active slide style as default (required for agent to function)
+        default_style = self.db.query(SlideStyleLibrary).filter_by(is_active=True).first()
+
+        # Use default prompts with default slide style
         prompts = ConfigPrompts(
             profile_id=profile.id,
             system_prompt=DEFAULT_CONFIG["prompts"]["system_prompt"],
             slide_editing_instructions=DEFAULT_CONFIG["prompts"]["slide_editing_instructions"],
+            selected_slide_style_id=default_style.id if default_style else None,
         )
         self.db.add(prompts)
 
@@ -137,7 +154,12 @@ class ProfileService:
         description: Optional[str],
         user: str,
     ) -> ConfigProfile:
-        """Update profile metadata."""
+        """
+        Update profile metadata.
+        
+        Raises:
+            ValueError: If profile not found or new name already exists
+        """
         profile = self.get_profile(profile_id)
         if not profile:
             raise ValueError(f"Profile {profile_id} not found")
@@ -145,6 +167,15 @@ class ProfileService:
         changes = {}
 
         if name and name != profile.name:
+            # Check for duplicate name
+            existing = (
+                self.db.query(ConfigProfile)
+                .filter(ConfigProfile.name == name, ConfigProfile.id != profile_id)
+                .first()
+            )
+            if existing:
+                raise ValueError(f"Profile with name '{name}' already exists")
+            
             changes["name"] = {"old": profile.name, "new": name}
             profile.name = name
 
@@ -266,7 +297,19 @@ class ProfileService:
             
         Returns:
             Created profile with all configurations
+            
+        Raises:
+            ValueError: If profile name already exists
         """
+        # Check for duplicate name
+        existing = (
+            self.db.query(ConfigProfile)
+            .filter(ConfigProfile.name == name)
+            .first()
+        )
+        if existing:
+            raise ValueError(f"Profile with name '{name}' already exists")
+        
         # Check if a default profile already exists
         has_default = (
             self.db.query(ConfigProfile)
@@ -355,10 +398,22 @@ class ProfileService:
             
         Returns:
             New profile
+            
+        Raises:
+            ValueError: If source profile not found or new name already exists
         """
         source_profile = self.get_profile(profile_id)
         if not source_profile:
             raise ValueError(f"Source profile {profile_id} not found")
+        
+        # Check for duplicate name
+        existing = (
+            self.db.query(ConfigProfile)
+            .filter(ConfigProfile.name == new_name)
+            .first()
+        )
+        if existing:
+            raise ValueError(f"Profile with name '{new_name}' already exists")
 
         # Check if a default profile already exists
         has_default = (

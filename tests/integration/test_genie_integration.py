@@ -12,8 +12,9 @@ import pytest
 from src.core.databricks_client import get_databricks_client
 from src.services.tools import GenieToolError, query_genie_space
 
-# Mark all tests in this module as integration tests
-pytestmark = pytest.mark.integration
+# Mark all tests in this module as integration tests requiring live Databricks connection
+# Use 'pytest -m live' to run these, or they're excluded by '-m "not live"' in CI
+pytestmark = [pytest.mark.integration, pytest.mark.live]
 
 
 @pytest.fixture(scope="module")
@@ -52,10 +53,12 @@ def check_genie_config():
 
     try:
         settings = get_settings()
-        space_id = settings.genie_space_id
+        if not settings.genie or not settings.genie.space_id:
+            pytest.skip("Genie space not configured. Create a profile with Genie space.")
 
-        if not space_id or space_id == "01234567-89ab-cdef-0123-456789abcdef":
-            pytest.skip("Genie space not configured. Set GENIE_SPACE_ID or create a profile")
+        space_id = settings.genie.space_id
+        if space_id == "01234567-89ab-cdef-0123-456789abcdef":
+            pytest.skip("Genie space not configured. Set a real Genie space ID.")
 
         return space_id
 

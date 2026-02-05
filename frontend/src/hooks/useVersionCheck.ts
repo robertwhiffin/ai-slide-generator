@@ -7,8 +7,10 @@
 
 import { useState, useEffect, useCallback } from 'react';
 
+// Use relative URLs in production, explicit IPv4 in development
+// Note: Using 127.0.0.1 instead of localhost to avoid IPv6 resolution issues in CI
 const API_BASE_URL = import.meta.env.VITE_API_URL || (
-  import.meta.env.MODE === 'production' ? '' : 'http://localhost:8000'
+  import.meta.env.MODE === 'production' ? '' : 'http://127.0.0.1:8000'
 );
 
 // Session storage key for dismiss state (persists until tab closes)
