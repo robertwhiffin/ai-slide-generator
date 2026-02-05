@@ -444,9 +444,9 @@ test.describe('Slide Style CRUD Operations', () => {
     // Delete via API
     await deleteTestStyleViaAPI(request, style.id);
 
-    // Refresh page
+    // Reload and navigate back to slide styles to get fresh data
     await page.reload();
-    await expect(page.getByRole('heading', { name: 'Slide Style Library' })).toBeVisible();
+    await goToSlideStyles(page);
 
     // Should no longer be visible
     await expect(page.getByRole('heading', { name: styleName, level: 3 })).not.toBeVisible();
@@ -748,9 +748,9 @@ test.describe('Slide Style Data Persistence', () => {
       // Verify visible
       await expect(page.getByRole('heading', { name: styleName, level: 3 })).toBeVisible();
 
-      // Reload page
+      // Reload and navigate back to slide styles to verify persistence
       await page.reload();
-      await expect(page.getByRole('heading', { name: 'Slide Style Library' })).toBeVisible();
+      await goToSlideStyles(page);
 
       // Should still be visible
       await expect(page.getByRole('heading', { name: styleName, level: 3 })).toBeVisible();
@@ -784,9 +784,9 @@ test.describe('Slide Style Data Persistence', () => {
         timeout: 10000,
       });
 
-      // Reload page
+      // Reload and navigate back to slide styles to verify persistence
       await page.reload();
-      await expect(page.getByRole('heading', { name: 'Slide Style Library' })).toBeVisible();
+      await goToSlideStyles(page);
 
       // Should show updated name
       await expect(page.getByRole('heading', { name: updatedName, level: 3 })).toBeVisible();
