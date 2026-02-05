@@ -178,7 +178,7 @@ environments:
 | `Port already in use` | Run `./stop_app.sh` first |
 | Deployment fails | Run with `--dry-run` to validate config |
 
-For more troubleshooting information, see the troubleshooting guide in the quickstart directory at the project root.
+For more troubleshooting information, see the project's quickstart documentation.
 
 ## Tech Stack
 

@@ -1,0 +1,260 @@
+/**
+ * CSS files with the .module.css suffix will be treated as CSS modules
+ * and scoped locally.
+ */
+
+.heroBanner {
+  padding: 6rem 0 4rem;
+  text-align: center;
+  position: relative;
+  overflow: hidden;
+  background: linear-gradient(135deg, var(--tellr-navy-dark) 0%, var(--tellr-navy-medium) 100%);
+  color: white;
+}
+
+.heroContent {
+  max-width: 800px;
+  margin: 0 auto;
+}
+
+.heroTitle {
+  font-size: 3.5rem;
+  font-weight: 700;
+  margin-bottom: 1.5rem;
+  color: white;
+  line-height: 1.2;
+}
+
+.heroSubtitle {
+  font-size: 1.75rem;
+  font-weight: 400;
+  margin-bottom: 1rem;
+  color: rgba(255, 255, 255, 0.95);
+  line-height: 1.4;
+}
+
+.heroDescription {
+  font-size: 1.125rem;
+  margin-bottom: 2.5rem;
+  color: rgba(255, 255, 255, 0.9);
+  line-height: 1.6;
+  max-width: 700px;
+  margin-left: auto;
+  margin-right: auto;
+}
+
+.buttons {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 1rem;
+}
+
+.buttons .button {
+  min-width: 160px;
+}
+
+@media screen and (max-width: 996px) {
+  .heroBanner {
+    padding: 4rem 0 3rem;
+  }
+
+  .heroTitle {
+    font-size: 2.5rem;
+  }
+
+  .heroSubtitle {
+    font-size: 1.5rem;
+  }
+
+  .heroDescription {
+    font-size: 1rem;
+    padding: 0 1rem;
+  }
+
+  .buttons {
+    flex-direction: column;
+    width: 100%;
+  }
+
+  .buttons .button {
+    width: 100%;
+    margin-left: 0 !important;
+  }
+}
+
+/* Features Section */
+.features {
+  padding: 5rem 0;
+  background-color: var(--ifm-background-color);
+}
+
+.sectionHeader {
+  text-align: center;
+  margin-bottom: 3rem;
+}
+
+.sectionHeader h2 {
+  font-size: 2.5rem;
+  font-weight: 700;
+  margin-bottom: 1rem;
+  color: var(--ifm-heading-color);
+}
+
+.sectionHeader p {
+  font-size: 1.125rem;
+  color: var(--ifm-color-content-secondary);
+  max-width: 600px;
+  margin: 0 auto;
+}
+
+.featureCard {
+  text-align: center;
+  padding: 2rem 1.5rem;
+  height: 100%;
+  border-radius: 8px;
+  transition: transform 0.2s ease, box-shadow 0.2s ease;
+  background: var(--ifm-card-background-color);
+  border: 1px solid var(--ifm-color-emphasis-200);
+}
+
+.featureCard:hover {
+  transform: translateY(-4px);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.12);
+}
+
+.featureIcon {
+  font-size: 3rem;
+  margin-bottom: 1rem;
+  display: block;
+}
+
+.featureCard h3 {
+  font-size: 1.5rem;
+  font-weight: 600;
+  margin-bottom: 1rem;
+  color: var(--ifm-heading-color);
+}
+
+.featureCard p {
+  color: var(--ifm-color-content-secondary);
+  line-height: 1.6;
+  margin: 0;
+}
+
+/* Quick Start Section */
+.quickStart {
+  padding: 5rem 0;
+  background: linear-gradient(to bottom, var(--tellr-bg-oat), var(--ifm-color-emphasis-50));
+}
+
+.quickStartCard {
+  height: 100%;
+  border: 1px solid var(--ifm-color-emphasis-200);
+  transition: transform 0.2s ease, box-shadow 0.2s ease;
+}
+
+.quickStartCard:hover {
+  transform: translateY(-4px);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.12);
+  border-color: var(--tellr-accent-lava);
+}
+
+.quickStartCard .button--primary {
+  background-color: var(--tellr-accent-lava);
+  border-color: var(--tellr-accent-lava);
+}
+
+.quickStartCard .button--primary:hover {
+  background-color: #d43d28;
+  border-color: #d43d28;
+}
+
+.quickStartCard .card__header h3 {
+  font-size: 1.5rem;
+  font-weight: 600;
+  margin: 0;
+}
+
+.quickStartCard .card__body p {
+  color: var(--ifm-color-content-secondary);
+  margin-bottom: 0;
+}
+
+/* Documentation Section */
+.documentation {
+  padding: 5rem 0;
+  background-color: var(--ifm-background-color);
+}
+
+.docSection {
+  padding: 2rem;
+  background: var(--ifm-card-background-color);
+  border-radius: 8px;
+  border: 1px solid var(--ifm-color-emphasis-200);
+  height: 100%;
+}
+
+.docSection h3 {
+  font-size: 1.75rem;
+  font-weight: 600;
+  margin-bottom: 0.75rem;
+  color: var(--ifm-heading-color);
+}
+
+.docDescription {
+  color: var(--ifm-color-content-secondary);
+  margin-bottom: 1.5rem;
+  font-size: 0.95rem;
+}
+
+.docList {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+
+.docList li {
+  margin-bottom: 0.75rem;
+  padding-left: 1.5rem;
+  position: relative;
+}
+
+.docList li::before {
+  content: '→';
+  position: absolute;
+  left: 0;
+  color: var(--tellr-accent-lava);
+  font-weight: bold;
+}
+
+.docList li a {
+  color: var(--ifm-color-content);
+  text-decoration: none;
+  font-weight: 500;
+  transition: color 0.2s ease;
+}
+
+.docList li a:hover {
+  color: var(--tellr-accent-lava);
+  text-decoration: none;
+}
+
+/* Responsive adjustments */
+@media screen and (max-width: 996px) {
+  .features,
+  .quickStart,
+  .documentation {
+    padding: 3rem 0;
+  }
+
+  .sectionHeader h2 {
+    font-size: 2rem;
+  }
+
+  .featureCard,
+  .docSection {
+    margin-bottom: 1.5rem;
+  }
+}

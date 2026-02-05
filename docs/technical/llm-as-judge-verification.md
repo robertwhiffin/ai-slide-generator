@@ -85,13 +85,13 @@ The verification uses a simple RAG (Red/Amber/Green) indicator system:
 RATING_SCORES = {
     "green": 85,   # No issues detected (≥80%)
     "amber": 65,   # Review suggested (50-79%)
-    "red": 25,     # Review required (<50%)
+    "red": 25,     # Review required (&lt;50%)
 }
 
 # Rating thresholds:
 # - green: ≥80% — All data correctly represents source
 # - amber: 50-79% — Some concerns, review suggested
-# - red: <50% — Significant issues, review required
+# - red: &lt;50% — Significant issues, review required
 # - unknown: No source data available (title slides, etc.)
 ```
 
@@ -99,7 +99,7 @@ RATING_SCORES = {
 |--------|-------------|-------------|-------------|
 | 🟢 Green | ≥80% | No issues | Proceed with confidence |
 | 🟡 Amber | 50-79% | Review suggested | Quick review recommended |
-| 🔴 Red | <50% | Review required | Must review before using |
+| 🔴 Red | &lt;50% | Review required | Must review before using |
 | ⚪ Unknown | N/A | Unable to verify | No source data available |
 
 ### 3. Content Hash Persistence
@@ -317,7 +317,7 @@ Backward compatible – NULL treated as empty dict `{}`.
 The RAG system uses these thresholds:
 - **Green**: ≥80% (judge returns "green")
 - **Amber**: 50-79% (judge returns "amber")  
-- **Red**: <50% (judge returns "red")
+- **Red**: &lt;50% (judge returns "red")
 
 To modify:
 1. Update `RATING_SCORES` dict in `llm_judge.py`

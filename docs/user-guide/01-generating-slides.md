@@ -73,7 +73,7 @@ After initial generation, you can refine selected slides through conversation:
 | Action | Example Prompt |
 |--------|----------------|
 | Edit a slide contents | "Change title to 'Q4 Results'" |
-| Add a slide | "Add a new slide about {X} after this one" |
+| Add a slide | "Add a new slide about \{X\} after this one" |
 | Regenerate all | "Regenerate all slides with more data" |
 
 ## Selecting Specific Slides
