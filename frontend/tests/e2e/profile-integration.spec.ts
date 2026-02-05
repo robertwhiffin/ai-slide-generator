@@ -412,17 +412,27 @@ test.describe('Profile CRUD Operations', () => {
     try {
       await goToProfiles(page);
 
-      // Click Duplicate
+      // Wait for profile row to be visible
       const row = page.locator('tr', { hasText: profileName });
+      await expect(row).toBeVisible();
+
+      // Click Duplicate button in this specific row
       await row.getByRole('button', { name: /Duplicate/i }).click();
 
-      // Fill in copy name
-      const nameInput = page.getByPlaceholder(/name/i).last();
+      // Wait for the duplicate input with the expected default value
+      // The input should appear with "(Profile Name) (Copy)" pre-filled
+      const defaultCopyName = `${profileName} (Copy)`;
+      const nameInput = page.getByPlaceholder('Enter new profile name');
+      await expect(nameInput).toHaveValue(defaultCopyName);
+
+      // Clear and fill with our copy name (same in this case but good practice)
       await nameInput.clear();
       await nameInput.fill(copyName);
 
-      // Submit
-      await page.getByRole('button', { name: /Create|Duplicate/i }).last().click();
+      // Click the Create button that's in the same row as the input
+      // Find the input's parent row and click Create within it
+      const inputRow = page.locator('tr').filter({ has: nameInput });
+      await inputRow.getByRole('button', { name: 'Create' }).click();
 
       // Wait for creation
       await page.waitForTimeout(1000);
@@ -692,6 +702,38 @@ test.describe('Session-Profile Association', () => {
     const profile = await createTestProfileViaAPI(request, profileName);
 
     try {
+      // Mock the chat stream endpoint to return a simple presentation
+      const mockSlideDeck = {
+        title: 'Test Presentation',
+        slide_count: 1,
+        css: '',
+        scripts: '',
+        external_scripts: [],
+        slides: [
+          {
+            slide_id: 'slide-0',
+            title: 'Test Slide',
+            html: '<div class="slide"><h1>Test Slide</h1><p>This is a test presentation.</p></div>',
+            content_hash: 'abc123',
+            scripts: '',
+            verification: null,
+          },
+        ],
+      };
+      const streamResponse = [
+        'data: {"type": "start", "message": "Starting..."}\n\n',
+        'data: {"type": "progress", "message": "Generating..."}\n\n',
+        `data: {"type": "complete", "message": "Done", "slides": ${JSON.stringify(mockSlideDeck)}}\n\n`,
+      ].join('');
+
+      await page.route('http://127.0.0.1:8000/api/chat/stream', (route) => {
+        route.fulfill({
+          status: 200,
+          contentType: 'text/event-stream',
+          body: streamResponse,
+        });
+      });
+
       await page.goto('/');
 
       // Load the profile
