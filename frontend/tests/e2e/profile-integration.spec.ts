@@ -393,9 +393,9 @@ test.describe('Profile CRUD Operations', () => {
     // Delete via API
     await deleteTestProfileViaAPI(request, profile.id);
 
-    // Refresh page
+    // Reload and navigate back to profiles to get fresh data
     await page.reload();
-    await expect(page.getByRole('heading', { name: 'Configuration Profiles' })).toBeVisible();
+    await goToProfiles(page);
 
     // Should no longer be visible
     await expect(page.getByText(profileName)).not.toBeVisible();
@@ -595,9 +595,9 @@ test.describe('Profile Switching', () => {
       // Wait for load
       await page.waitForTimeout(1000);
 
-      // Refresh to see updated badges
+      // Reload and navigate back to profiles to see updated badges
       await page.reload();
-      await expect(page.getByRole('heading', { name: 'Configuration Profiles' })).toBeVisible();
+      await goToProfiles(page);
 
       // Row should now show Loaded badge
       const updatedRow = page.locator('tr', { hasText: profileName });
@@ -626,9 +626,9 @@ test.describe('Profile Switching', () => {
       // Wait for update
       await page.waitForTimeout(1000);
 
-      // Refresh to see updated badges
+      // Reload and navigate back to profiles to see updated badges
       await page.reload();
-      await expect(page.getByRole('heading', { name: 'Configuration Profiles' })).toBeVisible();
+      await goToProfiles(page);
 
       // Row should now show Default badge
       const updatedRow = page.locator('tr', { hasText: profileName });
