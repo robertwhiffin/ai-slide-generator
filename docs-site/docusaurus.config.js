@@ -8,7 +8,7 @@ const path = require('path');
 const config = {
   title: 'Databricks tellr',
   tagline: 'Turn hours of slide work into minutes',
-  favicon: 'img/favicon.ico',
+  favicon: 'img/databricks-tellr.png',
 
   // Set the production url of your site here
   // Replace 'your-username' with your actual GitHub username or organization name
@@ -57,13 +57,13 @@ const config = {
   themeConfig:
     /** @type {import('@docusaurus/preset-classic').ThemeConfig} */
     ({
-      // Replace with your project's social card
-      image: 'img/docusaurus-social-card.jpg',
+      // Project social card and logo
+      image: 'img/databricks-tellr.png',
       navbar: {
         title: 'Databricks tellr',
         logo: {
-          alt: 'tellr Logo',
-          src: 'img/logo.svg',
+          alt: 'Databricks tellr Logo',
+          src: 'img/databricks-tellr.png',
         },
         hideOnScroll: true,
         items: [
