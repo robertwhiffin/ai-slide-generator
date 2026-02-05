@@ -463,7 +463,8 @@ jobs:
           python -c "
           from src.core.database import init_db, get_db_session
           from src.core.init_default_profile import seed_defaults
-          from src.database.models import ConfigProfile, ConfigAIInfra, ConfigPrompts, SlideStyleLibrary
+          from src.database.models import ConfigProfile, ConfigAIInfra, ConfigPrompts, SlideStyleLibrary, UserSession
+          import uuid
           
           # Create tables
           init_db()
@@ -512,7 +513,24 @@ jobs:
                   db.commit()
                   print(f'Created default profile (id={profile.id})')
               else:
+                  profile = existing
                   print('Default profile already exists')
+              
+              # Create a test session for history tests
+              existing_session = db.query(UserSession).first()
+              if not existing_session:
+                  session = UserSession(
+                      session_id=str(uuid.uuid4()),
+                      user_id='system',
+                      title='Seeded Test Session',
+                      profile_id=profile.id,
+                      profile_name=profile.name
+                  )
+                  db.add(session)
+                  db.commit()
+                  print(f'Created test session (id={session.session_id})')
+              else:
+                  print('Test session already exists')
           "
 
       - name: Verify database seeding
@@ -525,12 +543,13 @@ jobs:
           echo "Verifying database state..."
           python -c "
           from src.core.database import get_db_session
-          from src.database.models import ConfigProfile, SlideStyleLibrary, SlideDeckPromptLibrary
+          from src.database.models import ConfigProfile, SlideStyleLibrary, SlideDeckPromptLibrary, UserSession
           
           with get_db_session() as db:
               profiles = db.query(ConfigProfile).all()
               styles = db.query(SlideStyleLibrary).all()
               prompts = db.query(SlideDeckPromptLibrary).all()
+              sessions = db.query(UserSession).all()
               
               print(f'Profiles: {len(profiles)}')
               for p in profiles:
@@ -544,10 +563,16 @@ jobs:
               for d in prompts:
                   print(f'  - {d.name} (id={d.id})')
               
+              print(f'Sessions: {len(sessions)}')
+              for s in sessions:
+                  print(f'  - {s.title} (session_id={s.session_id}, profile={s.profile_name})')
+              
               if len(profiles) == 0:
                   raise Exception('No profiles found - seeding failed!')
               if len(styles) == 0:
                   raise Exception('No slide styles found - seeding failed!')
+              if len(sessions) == 0:
+                  raise Exception('No sessions found - seeding failed!')
           "
 
       - name: Start backend server
