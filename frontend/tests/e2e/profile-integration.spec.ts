@@ -299,8 +299,8 @@ test.describe('Profile CRUD Operations', () => {
       await nameInput.clear();
       await nameInput.fill(updatedName);
 
-      // Save
-      await page.getByRole('button', { name: /Save/i }).click();
+      // Save - use exact text to avoid matching "Save Genie Configuration"
+      await page.getByRole('button', { name: 'Save Profile Info' }).click();
 
       // Wait for save
       await page.waitForTimeout(1000);
@@ -341,8 +341,8 @@ test.describe('Profile CRUD Operations', () => {
       await descInput.clear();
       await descInput.fill(updatedDescription);
 
-      // Save
-      await page.getByRole('button', { name: /Save/i }).click();
+      // Save - use exact text to avoid matching "Save Genie Configuration"
+      await page.getByRole('button', { name: 'Save Profile Info' }).click();
 
       // Wait for save
       await page.waitForTimeout(1000);
@@ -371,8 +371,8 @@ test.describe('Profile CRUD Operations', () => {
     // Confirm deletion
     await page.getByRole('button', { name: /Confirm|Delete/i }).last().click();
 
-    // Wait for deletion
-    await expect(page.getByText(profileName)).not.toBeVisible({ timeout: 5000 });
+    // Wait for deletion - use table cell selector to avoid matching confirmation dialog
+    await expect(page.getByRole('cell', { name: profileName })).not.toBeVisible({ timeout: 5000 });
 
     // Verify removed from database
     const deleted = await getProfileByName(request, profileName);
@@ -463,8 +463,10 @@ test.describe('Profile Validation', () => {
       await skipWizardStep4(page);
       await submitWizard(page);
 
-      // Should show error
-      await expect(page.getByText(/already exists|duplicate/i)).toBeVisible({ timeout: 5000 });
+      // Should show error - use more specific selector to avoid matching "Duplicate" buttons
+      await expect(
+        page.getByText(/already exists/i).or(page.locator('.text-red-500, .text-red-600, [role="alert"]'))
+      ).toBeVisible({ timeout: 5000 });
     } finally {
       await deleteTestProfileViaAPI(request, profile.id);
     }
@@ -492,10 +494,13 @@ test.describe('Profile Validation', () => {
       await nameInput.clear();
       await nameInput.fill(profileName1);
 
-      await page.getByRole('button', { name: /Save/i }).click();
+      // Save - use exact text to avoid matching "Save Genie Configuration"
+      await page.getByRole('button', { name: 'Save Profile Info' }).click();
 
-      // Should show error
-      await expect(page.getByText(/already exists|duplicate/i)).toBeVisible({ timeout: 5000 });
+      // Should show error - use more specific selector to avoid matching "Duplicate" buttons
+      await expect(
+        page.getByText(/already exists/i).or(page.locator('.text-red-500, .text-red-600, [role="alert"]'))
+      ).toBeVisible({ timeout: 5000 });
     } finally {
       await deleteTestProfileViaAPI(request, profile1.id);
       await deleteTestProfileViaAPI(request, profile2.id);
@@ -767,8 +772,8 @@ test.describe('Session-Profile Association', () => {
     // Go to History and restore session2
     await goToHistory(page);
 
-    // Click on session2 to restore it
-    const sessionRow = page.locator('tr', { hasText: session2.title || session2.session_id });
+    // Click on session2 to restore it - use session_id for unique matching
+    const sessionRow = page.locator('tr').filter({ has: page.getByText(session2.session_id) }).first();
     await sessionRow.click();
 
     // Wait for potential profile switch
