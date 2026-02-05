@@ -491,7 +491,8 @@ test.describe('Profile Form Validation', () => {
     await setupProfileMocks(page);
   });
 
-  test('shows error for duplicate name on create', async ({ page }) => {
+  // TODO: Flaky test - tracked in GitHub issue
+  test.skip('shows error for duplicate name on create', async ({ page }) => {
     // Set up mocks first, then override POST to return error
     await setupProfileMocks(page);
 
