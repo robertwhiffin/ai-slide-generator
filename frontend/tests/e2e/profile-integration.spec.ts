@@ -597,7 +597,7 @@ test.describe('Profile Switching', () => {
 
       // Row should now show Loaded badge
       const updatedRow = page.locator('tr', { hasText: profileName });
-      await expect(updatedRow.getByText('Loaded')).toBeVisible();
+      await expect(updatedRow.getByText('Loaded', { exact: true })).toBeVisible();
     } finally {
       await deleteTestProfileViaAPI(request, profile.id);
     }
@@ -625,7 +625,7 @@ test.describe('Profile Switching', () => {
 
       // Row should now show Default badge
       const updatedRow = page.locator('tr', { hasText: profileName });
-      await expect(updatedRow.getByText('Default')).toBeVisible();
+      await expect(updatedRow.getByText('Default', { exact: true })).toBeVisible();
     } finally {
       // Note: We need to set another profile as default before deleting
       // or the delete might fail
