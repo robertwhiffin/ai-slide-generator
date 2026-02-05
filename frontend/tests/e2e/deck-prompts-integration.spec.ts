@@ -371,9 +371,9 @@ test.describe('Deck Prompt CRUD Operations', () => {
     // Delete via API
     await deleteTestPromptViaAPI(request, prompt.id);
 
-    // Refresh page
+    // Reload and navigate back to deck prompts to get fresh data
     await page.reload();
-    await expect(page.getByRole('heading', { name: 'Deck Prompt Library' })).toBeVisible();
+    await goToDeckPrompts(page);
 
     // Should no longer be visible
     await expect(page.getByRole('heading', { name: promptName, level: 3 })).not.toBeVisible();
