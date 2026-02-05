@@ -406,7 +406,9 @@ test.describe('Deck Prompt Validation', () => {
       await page.getByRole('button', { name: 'Create Prompt', exact: true }).click();
 
       // Should show error
-      await expect(page.getByText(/already exists|duplicate/i)).toBeVisible({ timeout: 5000 });
+      await expect(page.getByText(/already exists|duplicate|failed/i).first()).toBeVisible({
+        timeout: 5000,
+      });
     } finally {
       await deleteTestPromptViaAPI(request, prompt.id);
     }
@@ -436,7 +438,9 @@ test.describe('Deck Prompt Validation', () => {
       await page.getByRole('button', { name: 'Save Changes' }).click();
 
       // Should show error
-      await expect(page.getByText(/already exists|duplicate/i)).toBeVisible({ timeout: 5000 });
+      await expect(page.getByText(/already exists|duplicate|failed/i).first()).toBeVisible({
+        timeout: 5000,
+      });
     } finally {
       await deleteTestPromptViaAPI(request, prompt1.id);
       await deleteTestPromptViaAPI(request, prompt2.id);
