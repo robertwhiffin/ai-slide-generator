@@ -12,7 +12,7 @@ from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 
 from src.api.services.chat_service import get_chat_service
-from src.api.services.session_manager import get_session_manager
+from src.api.services.session_manager import SessionNotFoundError, get_session_manager
 
 logger = logging.getLogger(__name__)
 
@@ -477,6 +477,9 @@ async def list_versions(session_id: str = Query(..., description="Session ID")):
         )
         return {"versions": versions, "current_version": versions[0]["version_number"] if versions else None}
 
+    except SessionNotFoundError:
+        # Session hasn't been persisted yet (local UUID) - return empty list
+        return {"versions": [], "current_version": None}
     except Exception as e:
         logger.error(f"Failed to list versions: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
@@ -623,6 +626,9 @@ async def get_current_version(session_id: str = Query(..., description="Session 
 
         return {"current_version": version_number}
 
+    except SessionNotFoundError:
+        # Session hasn't been persisted yet (local UUID) - no versions
+        return {"current_version": None}
     except Exception as e:
         logger.error(f"Failed to get current version: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
