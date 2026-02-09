@@ -98,6 +98,27 @@ class MockSessionManager:
     def add_message(self, session_id: str, role: str, content: str, message_type: str = "text"):
         pass
 
+    def get_verification_map(self, session_id: str) -> Dict[str, Any]:
+        """Get verification map for a session."""
+        return {}
+
+    def create_version(
+        self,
+        session_id: str,
+        description: str,
+        deck_dict: Dict[str, Any],
+        verification_map: Optional[Dict[str, Any]] = None,
+        chat_history: Optional[list] = None,
+    ) -> Dict[str, Any]:
+        """Simulate creating a save point version."""
+        return {
+            "version_number": 1,
+            "description": description,
+            "created_at": "2026-01-01T00:00:00",
+            "slide_count": len(deck_dict.get("slides", [])),
+            "message_count": 0,
+        }
+
     def was_save_called(self) -> bool:
         """Check if save was called at least once."""
         return len(self.save_calls) > 0
