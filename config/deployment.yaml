@@ -39,9 +39,9 @@ environments:
       capacity: "CU_1"  # Options: CU_1, CU_2, CU_4, CU_8
 
   production:
-    app_name: "ai-slide-generator"
-    description: "AI Slide Generator - Production"
-    workspace_path: "/Workspace/Shared/apps/production/ai-slide-generator"
+    app_name: "db-tellr-prod"
+    description: "Databricks tellr AI Slide Generator - Production"
+    workspace_path: "/Workspace/Users/robert.whiffin@databricks.com/.apps/prod/tellr"
     permissions:
       - group_name: "users"
         permission_level: "CAN_USE"
@@ -51,11 +51,11 @@ environments:
     env_vars:
       ENVIRONMENT: "production"
       LOG_LEVEL: "INFO"
-      LAKEBASE_INSTANCE: "ai-slide-generator-db"
-      LAKEBASE_SCHEMA: "app_data"
+      LAKEBASE_INSTANCE: "db-tellr"
+      LAKEBASE_SCHEMA: "app_data_prod"
     lakebase:
-      database_name: "ai-slide-generator-db"
-      schema: "app_data"
+      database_name: "db-tellr"
+      schema: "app_data_prod"
       capacity: "CU_1"  # Options: CU_1, CU_2, CU_4, CU_8
 
 # Common settings across all environments
