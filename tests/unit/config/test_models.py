@@ -141,16 +141,15 @@ def test_prompts_config(db_session):
     profile = ConfigProfile(name="test", created_by="test")
     db_session.add(profile)
     db_session.flush()
-    
+
     prompts = ConfigPrompts(
         profile_id=profile.id,
         system_prompt="System prompt",
         slide_editing_instructions="Editing instructions",
-        user_prompt_template="{question}",
     )
     db_session.add(prompts)
     db_session.commit()
-    
+
     # Test relationship
     assert profile.prompts.system_prompt == "System prompt"
     assert prompts.profile.name == "test"
@@ -225,7 +224,6 @@ def test_complete_profile_with_all_configs(db_session):
         profile_id=profile.id,
         system_prompt="Test system prompt",
         slide_editing_instructions="Test editing instructions",
-        user_prompt_template="{question}",
     )
     db_session.add(prompts)
     
