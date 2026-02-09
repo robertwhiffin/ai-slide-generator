@@ -63,9 +63,9 @@ export const ProfileList: React.FC<ProfileListProps> = ({ onProfileChange }) => 
   useEffect(() => {
     const fetchUsername = async () => {
       try {
-        // Use environment-aware URL
+        // Use environment-aware URL (127.0.0.1 to avoid IPv6 issues in CI)
         const apiBase = import.meta.env.VITE_API_URL || (
-          import.meta.env.MODE === 'production' ? '' : 'http://localhost:8000'
+          import.meta.env.MODE === 'production' ? '' : 'http://127.0.0.1:8000'
         );
         const response = await fetch(`${apiBase}/api/user/current`);
         if (response.ok) {
