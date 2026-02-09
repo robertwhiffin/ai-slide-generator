@@ -67,3 +67,4 @@ frontend/dist/
 frontend/playwright-report/
 frontend/test-results/
 
+config/deployment.yaml
