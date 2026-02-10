@@ -883,4 +883,133 @@ export const api = {
 
     throw new ApiError(408, 'Export timed out');
   },
+
+  // =========================================================================
+  // Version / Save Point API
+  // =========================================================================
+
+  /**
+   * List all save points for a session.
+   */
+  async listVersions(sessionId: string): Promise<{
+    versions: Array<{
+      version_number: number;
+      description: string;
+      created_at: string;
+      slide_count: number;
+    }>;
+    current_version: number | null;
+  }> {
+    const response = await fetch(
+      `${API_BASE_URL}/api/slides/versions?session_id=${encodeURIComponent(sessionId)}`
+    );
+
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({ detail: 'Failed to list versions' }));
+      throw new ApiError(response.status, error.detail || 'Failed to list versions');
+    }
+
+    return response.json();
+  },
+
+  /**
+   * Preview a specific save point (returns full deck snapshot).
+   */
+  async previewVersion(
+    sessionId: string,
+    versionNumber: number
+  ): Promise<{
+    version_number: number;
+    description: string;
+    created_at: string;
+    deck: SlideDeck;
+    verification_map: Record<string, unknown>;
+  }> {
+    const response = await fetch(
+      `${API_BASE_URL}/api/slides/versions/${versionNumber}?session_id=${encodeURIComponent(sessionId)}`
+    );
+
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({ detail: 'Failed to preview version' }));
+      throw new ApiError(response.status, error.detail || 'Failed to preview version');
+    }
+
+    return response.json();
+  },
+
+  /**
+   * Restore to a specific save point (deletes newer versions).
+   */
+  async restoreVersion(
+    sessionId: string,
+    versionNumber: number
+  ): Promise<{
+    version_number: number;
+    description: string;
+    deck: SlideDeck;
+    verification_map: Record<string, unknown>;
+    deleted_versions: number;
+  }> {
+    const response = await fetch(
+      `${API_BASE_URL}/api/slides/versions/${versionNumber}/restore`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ session_id: sessionId }),
+      }
+    );
+
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({ detail: 'Failed to restore version' }));
+      throw new ApiError(response.status, error.detail || 'Failed to restore version');
+    }
+
+    return response.json();
+  },
+
+  /**
+   * Get the current (latest) version number.
+   */
+  async getCurrentVersion(sessionId: string): Promise<{ current_version: number | null }> {
+    const response = await fetch(
+      `${API_BASE_URL}/api/slides/versions/current?session_id=${encodeURIComponent(sessionId)}`
+    );
+
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({ detail: 'Failed to get current version' }));
+      throw new ApiError(response.status, error.detail || 'Failed to get current version');
+    }
+
+    return response.json();
+  },
+
+  /**
+   * Create a save point for the current deck state.
+   * Called after auto-verification completes to capture verification results.
+   */
+  async createSavePoint(
+    sessionId: string,
+    description: string
+  ): Promise<{
+    version_number: number;
+    description: string;
+    created_at: string;
+    slide_count: number;
+  }> {
+    const response = await fetch(
+      `${API_BASE_URL}/api/slides/versions/create`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ session_id: sessionId, description }),
+      }
+    );
+
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({ detail: 'Failed to create save point' }));
+      throw new ApiError(response.status, error.detail || 'Failed to create save point');
+    }
+
+    return response.json();
+  },
 };

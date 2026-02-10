@@ -113,6 +113,27 @@ class MockSessionManager:
         """Release session lock."""
         self._lock_held[session_id] = False
 
+    def get_verification_map(self, session_id: str) -> Dict[str, Any]:
+        """Get verification map for a session."""
+        return {}
+
+    def create_version(
+        self,
+        session_id: str,
+        description: str,
+        deck_dict: Dict[str, Any],
+        verification_map: Optional[Dict[str, Any]] = None,
+        chat_history: Optional[list] = None,
+    ) -> Dict[str, Any]:
+        """Simulate creating a save point version."""
+        return {
+            "version_number": 1,
+            "description": description,
+            "created_at": "2026-01-01T00:00:00",
+            "slide_count": len(deck_dict.get("slides", [])),
+            "message_count": 0,
+        }
+
     def clear_saved_data(self):
         """Clear all saved data (simulate fresh database)."""
         self.saved_decks.clear()
@@ -519,6 +540,58 @@ class TestScriptPersistence:
             # Original at scripted_idx, duplicate at scripted_idx + 1
             assert saved_slides[scripted_idx].get("scripts") is not None
             assert saved_slides[scripted_idx + 1].get("scripts") is not None
+
+    def test_chart_scripts_survive_html_edit(self):
+        """Chart.js scripts should survive when editing a slide's HTML content."""
+        service = self._create_chat_service_with_mock()
+
+        # Manually create a deck with chart slides that have scripts
+        chart_html, chart_script = generate_chart_slide(
+            title="Revenue", canvas_id="revenueChart"
+        )
+        content_html = generate_content_slide(title="Summary")
+
+        slide_0 = Slide(html=chart_html, slide_id="slide_0", scripts=chart_script)
+        slide_1 = Slide(html=content_html, slide_id="slide_1")
+        deck = SlideDeck(slides=[slide_0, slide_1], css="")
+        service._deck_cache[self.session_id] = deck
+
+        # Edit the content slide (should not affect chart scripts)
+        new_html = '<div class="slide"><h1>Updated Summary</h1></div>'
+
+        with patch('src.api.services.chat_service.get_session_manager', return_value=self.mock_session_manager):
+            service.update_slide(self.session_id, 1, new_html)
+
+        saved = self.mock_session_manager.get_last_save()
+        saved_slides = saved["deck_dict"]["slides"]
+
+        # Chart slide script should be preserved
+        assert saved_slides[0].get("scripts") is not None
+        assert "revenueChart" in saved_slides[0]["scripts"]
+
+    def test_reconstruct_from_dict_preserves_scripts(self):
+        """Saving to dict then reconstructing should preserve all scripts."""
+        service = self._create_chat_service_with_mock()
+
+        # Create deck with chart
+        chart_html, chart_script = generate_chart_slide(
+            title="Growth", canvas_id="growthChart"
+        )
+        slide = Slide(html=chart_html, slide_id="slide_0", scripts=chart_script)
+        deck = SlideDeck(slides=[slide], css=".test { }")
+
+        # Save to dict
+        deck_dict = deck.to_dict()
+
+        # Verify scripts are in the dict
+        assert deck_dict["slides"][0].get("scripts") is not None
+        assert "growthChart" in deck_dict["slides"][0]["scripts"]
+
+        # Reconstruct from dict
+        reconstructed = service._reconstruct_deck_from_dict(deck_dict)
+
+        # Scripts should match
+        assert reconstructed.slides[0].scripts == chart_script
 
 
 class TestCSSPersistence:
