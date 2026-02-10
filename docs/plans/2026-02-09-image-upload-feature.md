@@ -1177,90 +1177,1272 @@ Base64-embedded images work with the existing PPTX export pipeline because:
 
 ---
 
-## Testing Strategy
+## Testing Strategy (TDD)
 
-### Backend Unit Tests: `tests/unit/test_image_service.py`
+**Approach**: Tests are written FIRST, before implementation code. Each phase begins by
+writing failing tests that define the expected behaviour, then implementing code to make
+them pass.
 
+### Codebase Test Conventions
+
+The implementing agent MUST follow these exact patterns (observed from existing tests):
+
+**Database test sessions** use in-memory SQLite with `StaticPool`:
 ```python
-# Test upload validation
-def test_upload_rejects_invalid_mime_type()
-def test_upload_rejects_oversized_file()
-def test_upload_accepts_valid_png()
-def test_upload_accepts_valid_gif()
+from sqlalchemy import create_engine, text
+from sqlalchemy.orm import sessionmaker
+from sqlalchemy.pool import StaticPool
+from src.core.database import Base
 
-# Test thumbnail generation
-def test_thumbnail_generates_for_png()
-def test_thumbnail_generates_for_jpeg()
-def test_thumbnail_extracts_gif_first_frame()
-def test_thumbnail_returns_none_for_svg()
-
-# Test search
-def test_search_by_category()
-def test_search_by_tags()
-def test_search_by_query_text()
-def test_search_excludes_inactive()
-
-# Test base64 retrieval
-def test_get_base64_from_cache()
-def test_get_base64_from_storage()
-
-# Test soft delete
-def test_delete_sets_inactive()
-def test_deleted_images_hidden_from_search()
-
-# Test image placeholder substitution
-def test_substitute_single_placeholder()
-def test_substitute_multiple_placeholders()
-def test_substitute_preserves_unresolved_placeholders()
-def test_substitute_handles_missing_image_gracefully()
-```
-
-### Backend Integration Tests: `tests/integration/test_image_api.py`
-
-```python
-@pytest.mark.integration
-def test_upload_and_retrieve_image()
-def test_list_images_with_filters()
-def test_delete_image_soft()
-def test_get_image_data_returns_base64()
-```
-
-### Frontend E2E Tests: `frontend/tests/e2e/image-upload.spec.ts`
-
-```typescript
-test('upload image and verify in library')
-test('search images by name')
-test('insert image into slide editor')
-test('delete image from library')
-```
-
-### Mocking Strategy
-
-For unit tests, mock the storage backend:
-
-```python
-@pytest.fixture
-def mock_storage(monkeypatch):
-    storage = {}
-
-    class MockStorage:
-        def write(self, path, content):
-            storage[path] = content
-        def read(self, path):
-            return storage[path]
-        def delete(self, path):
-            storage.pop(path, None)
-        def exists(self, path):
-            return path in storage
-
-    monkeypatch.setattr(
-        "src.services.image_service.get_image_storage",
-        lambda: MockStorage()
+@pytest.fixture(scope="function")
+def db_engine():
+    engine = create_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
     )
-    return storage
+    # Create tables, skipping PostgreSQL-specific ones (config_history uses JSONB)
+    tables_to_create = [
+        t for t in Base.metadata.sorted_tables if t.name != "config_history"
+    ]
+    for table in tables_to_create:
+        table.create(bind=engine, checkfirst=True)
+
+    # Create simplified config_history (TEXT instead of JSONB)
+    with engine.connect() as conn:
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS config_history (
+                id INTEGER PRIMARY KEY, profile_id INTEGER NOT NULL,
+                domain VARCHAR(50) NOT NULL, action VARCHAR(50) NOT NULL,
+                changed_by VARCHAR(255) NOT NULL, changes TEXT NOT NULL,
+                snapshot TEXT, timestamp DATETIME NOT NULL
+            )
+        """))
+        conn.commit()
+
+    yield engine
+
+    for table in reversed(tables_to_create):
+        table.drop(bind=engine, checkfirst=True)
+    with engine.connect() as conn:
+        conn.execute(text("DROP TABLE IF EXISTS config_history"))
+        conn.commit()
+    engine.dispose()
+
+@pytest.fixture(scope="function")
+def db_session(db_engine):
+    SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=db_engine)
+    session = SessionLocal()
+    yield session
+    session.close()
+```
+
+**API route tests** use FastAPI `TestClient` with dependency overrides:
+```python
+from fastapi.testclient import TestClient
+from src.api.main import app
+from src.core.database import get_db
+
+@pytest.fixture(scope="function")
+def client(db_session):
+    def override_get_db():
+        try:
+            yield db_session
+        finally:
+            pass
+    app.dependency_overrides[get_db] = override_get_db
+    with TestClient(app) as c:
+        yield c
+    app.dependency_overrides.clear()
+```
+
+**Autouse fixtures** (from `conftest.py`, run automatically):
+- `reset_singleton_client()` — resets Databricks client singleton
+- `clear_settings_cache()` — clears `get_settings` LRU cache
+
+**Mock patterns** — use `unittest.mock.patch` at the import location:
+```python
+with patch("src.services.image_service.get_image_storage") as mock:
+    mock.return_value = MockStorage()
+```
+
+**Note**: This codebase has NO existing file upload tests. The `UploadFile`/`Form`/
+multipart patterns are new. TestClient handles multipart via the `files` parameter:
+```python
+response = client.post("/api/images/upload", files={"file": ("logo.png", png_bytes, "image/png")}, data={"category": "branding", "tags": '["logo"]'})
 ```
 
 ---
+
+### Test Fixtures: `tests/unit/conftest_images.py`
+
+These fixtures should be added to a new conftest or to the existing `tests/conftest.py`:
+
+```python
+"""Shared fixtures for image feature tests."""
+import io
+import pytest
+from unittest.mock import patch
+from PIL import Image as PILImage
+
+from src.database.models.image import ImageAsset
+
+
+# --- Test Image Generators ---
+
+@pytest.fixture
+def png_1x1() -> bytes:
+    """Minimal valid 1x1 red PNG image (< 1KB)."""
+    buf = io.BytesIO()
+    img = PILImage.new("RGB", (1, 1), color=(255, 0, 0))
+    img.save(buf, format="PNG")
+    return buf.getvalue()
+
+
+@pytest.fixture
+def png_100x100() -> bytes:
+    """100x100 PNG for thumbnail tests (large enough to resize)."""
+    buf = io.BytesIO()
+    img = PILImage.new("RGB", (100, 100), color=(0, 128, 255))
+    img.save(buf, format="PNG")
+    return buf.getvalue()
+
+
+@pytest.fixture
+def png_rgba_100x100() -> bytes:
+    """100x100 PNG with transparency (RGBA mode)."""
+    buf = io.BytesIO()
+    img = PILImage.new("RGBA", (100, 100), color=(0, 128, 255, 128))
+    img.save(buf, format="PNG")
+    return buf.getvalue()
+
+
+@pytest.fixture
+def jpeg_100x100() -> bytes:
+    """100x100 JPEG image."""
+    buf = io.BytesIO()
+    img = PILImage.new("RGB", (100, 100), color=(0, 255, 0))
+    img.save(buf, format="JPEG")
+    return buf.getvalue()
+
+
+@pytest.fixture
+def gif_animated() -> bytes:
+    """Animated GIF with 3 frames."""
+    frames = []
+    for color in [(255, 0, 0), (0, 255, 0), (0, 0, 255)]:
+        frames.append(PILImage.new("RGB", (50, 50), color=color))
+    buf = io.BytesIO()
+    frames[0].save(buf, format="GIF", save_all=True, append_images=frames[1:], duration=100, loop=0)
+    return buf.getvalue()
+
+
+@pytest.fixture
+def svg_content() -> bytes:
+    """Minimal SVG content."""
+    return b'<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100"><rect fill="red" width="100" height="100"/></svg>'
+
+
+@pytest.fixture
+def oversized_content() -> bytes:
+    """Content exceeding 5MB limit."""
+    return b"x" * (5 * 1024 * 1024 + 1)
+
+
+# --- Mock Storage ---
+
+class MockImageStorage:
+    """In-memory storage backend for tests."""
+
+    def __init__(self):
+        self._store: dict[str, bytes] = {}
+
+    def write(self, path: str, content: bytes) -> None:
+        self._store[path] = content
+
+    def read(self, path: str) -> bytes:
+        if path not in self._store:
+            raise FileNotFoundError(f"Mock storage: {path} not found")
+        return self._store[path]
+
+    def delete(self, path: str) -> None:
+        self._store.pop(path, None)
+
+    def exists(self, path: str) -> bool:
+        return path in self._store
+
+
+@pytest.fixture
+def mock_storage():
+    """Provide a MockImageStorage and patch get_image_storage to return it."""
+    storage = MockImageStorage()
+    with patch("src.services.image_service.get_image_storage", return_value=storage):
+        yield storage
+
+
+# --- Database Helpers ---
+
+def create_test_image(db_session, **overrides) -> ImageAsset:
+    """Helper to create an ImageAsset in the test DB with sensible defaults."""
+    from datetime import datetime
+    defaults = dict(
+        filename="test-uuid.png",
+        original_filename="test.png",
+        mime_type="image/png",
+        size_bytes=1234,
+        storage_path="system/test-uuid.png",
+        thumbnail_base64="data:image/jpeg;base64,/9j/4AAQ",
+        tags=["test"],
+        description="Test image",
+        category="content",
+        uploaded_by="system",
+        is_active=True,
+        created_by="system",
+        updated_by="system",
+        created_at=datetime.utcnow(),
+        updated_at=datetime.utcnow(),
+    )
+    defaults.update(overrides)
+    image = ImageAsset(**defaults)
+    db_session.add(image)
+    db_session.commit()
+    db_session.refresh(image)
+    return image
+```
+
+---
+
+### Phase 1 Tests: Image Service (`tests/unit/test_image_service.py`)
+
+Write these tests BEFORE implementing `src/services/image_service.py`.
+
+```python
+"""Unit tests for image upload, thumbnail, search, and delete service."""
+import base64
+import pytest
+from unittest.mock import patch
+
+from src.services import image_service
+from src.database.models.image import ImageAsset
+from tests.unit.conftest_images import create_test_image, MockImageStorage
+
+
+# ===== Upload Validation =====
+
+class TestUploadValidation:
+    """Tests for upload_image input validation (fail-fast, no side effects)."""
+
+    def test_rejects_invalid_mime_type(self, db_session, mock_storage, png_1x1):
+        with pytest.raises(ValueError, match="File type not allowed"):
+            image_service.upload_image(
+                db=db_session, file_content=png_1x1,
+                original_filename="test.bmp", mime_type="image/bmp",
+                user="test",
+            )
+        # Storage should NOT have been written to
+        assert len(mock_storage._store) == 0
+
+    def test_rejects_oversized_file(self, db_session, mock_storage, oversized_content):
+        with pytest.raises(ValueError, match="File too large"):
+            image_service.upload_image(
+                db=db_session, file_content=oversized_content,
+                original_filename="big.png", mime_type="image/png",
+                user="test",
+            )
+        assert len(mock_storage._store) == 0
+
+    def test_accepts_png(self, db_session, mock_storage, png_1x1):
+        result = image_service.upload_image(
+            db=db_session, file_content=png_1x1,
+            original_filename="logo.png", mime_type="image/png",
+            user="testuser",
+        )
+        assert result.id is not None
+        assert result.mime_type == "image/png"
+        assert result.original_filename == "logo.png"
+        assert result.size_bytes == len(png_1x1)
+        assert result.uploaded_by == "testuser"
+        assert result.is_active is True
+
+    def test_accepts_jpeg(self, db_session, mock_storage, jpeg_100x100):
+        result = image_service.upload_image(
+            db=db_session, file_content=jpeg_100x100,
+            original_filename="photo.jpg", mime_type="image/jpeg",
+            user="test",
+        )
+        assert result.mime_type == "image/jpeg"
+
+    def test_accepts_gif(self, db_session, mock_storage, gif_animated):
+        result = image_service.upload_image(
+            db=db_session, file_content=gif_animated,
+            original_filename="anim.gif", mime_type="image/gif",
+            user="test",
+        )
+        assert result.mime_type == "image/gif"
+
+    def test_accepts_svg(self, db_session, mock_storage, svg_content):
+        result = image_service.upload_image(
+            db=db_session, file_content=svg_content,
+            original_filename="icon.svg", mime_type="image/svg+xml",
+            user="test",
+        )
+        assert result.mime_type == "image/svg+xml"
+        assert result.thumbnail_base64 is None  # SVGs have no thumbnail
+
+
+# ===== Upload Storage & Metadata =====
+
+class TestUploadStorageAndMetadata:
+    """Tests that upload correctly writes to storage and DB."""
+
+    def test_writes_file_to_storage(self, db_session, mock_storage, png_1x1):
+        result = image_service.upload_image(
+            db=db_session, file_content=png_1x1,
+            original_filename="logo.png", mime_type="image/png",
+            user="testuser",
+        )
+        # File should exist in mock storage at expected path
+        assert mock_storage.exists(result.storage_path)
+        assert mock_storage.read(result.storage_path) == png_1x1
+
+    def test_storage_path_contains_user_and_uuid(self, db_session, mock_storage, png_1x1):
+        result = image_service.upload_image(
+            db=db_session, file_content=png_1x1,
+            original_filename="logo.png", mime_type="image/png",
+            user="alice@example.com",
+        )
+        assert result.storage_path.startswith("alice@example.com/")
+        assert result.storage_path.endswith(".png")
+
+    def test_saves_tags_and_description(self, db_session, mock_storage, png_1x1):
+        result = image_service.upload_image(
+            db=db_session, file_content=png_1x1,
+            original_filename="logo.png", mime_type="image/png",
+            user="test", tags=["branding", "logo"], description="Company logo",
+        )
+        assert result.tags == ["branding", "logo"]
+        assert result.description == "Company logo"
+
+    def test_saves_category(self, db_session, mock_storage, png_1x1):
+        result = image_service.upload_image(
+            db=db_session, file_content=png_1x1,
+            original_filename="logo.png", mime_type="image/png",
+            user="test", category="branding",
+        )
+        assert result.category == "branding"
+
+    def test_default_category_is_content(self, db_session, mock_storage, png_1x1):
+        result = image_service.upload_image(
+            db=db_session, file_content=png_1x1,
+            original_filename="logo.png", mime_type="image/png",
+            user="test",
+        )
+        assert result.category == "content"
+
+    def test_branding_category_pre_caches_base64(self, db_session, mock_storage, png_1x1):
+        result = image_service.upload_image(
+            db=db_session, file_content=png_1x1,
+            original_filename="logo.png", mime_type="image/png",
+            user="test", category="branding",
+        )
+        assert result.cached_base64 is not None
+        assert result.cached_base64 == base64.b64encode(png_1x1).decode("utf-8")
+
+    def test_content_category_does_not_cache(self, db_session, mock_storage, png_1x1):
+        result = image_service.upload_image(
+            db=db_session, file_content=png_1x1,
+            original_filename="logo.png", mime_type="image/png",
+            user="test", category="content",
+        )
+        assert result.cached_base64 is None
+
+    def test_sets_created_by_and_updated_by(self, db_session, mock_storage, png_1x1):
+        result = image_service.upload_image(
+            db=db_session, file_content=png_1x1,
+            original_filename="logo.png", mime_type="image/png",
+            user="alice",
+        )
+        assert result.created_by == "alice"
+        assert result.updated_by == "alice"
+
+
+# ===== Thumbnail Generation =====
+
+class TestThumbnailGeneration:
+    """Tests for _generate_thumbnail internal function."""
+
+    def test_generates_for_png(self, png_100x100):
+        thumb = image_service._generate_thumbnail(png_100x100, "image/png")
+        assert thumb is not None
+        assert thumb.startswith("data:image/")
+        assert ";base64," in thumb
+
+    def test_generates_for_jpeg(self, jpeg_100x100):
+        thumb = image_service._generate_thumbnail(jpeg_100x100, "image/jpeg")
+        assert thumb is not None
+        assert thumb.startswith("data:image/jpeg;base64,")
+
+    def test_generates_for_rgba_png(self, png_rgba_100x100):
+        thumb = image_service._generate_thumbnail(png_rgba_100x100, "image/png")
+        assert thumb is not None
+        # RGBA images should produce PNG thumbnails (to preserve transparency)
+        assert thumb.startswith("data:image/png;base64,")
+
+    def test_extracts_first_frame_from_animated_gif(self, gif_animated):
+        thumb = image_service._generate_thumbnail(gif_animated, "image/gif")
+        assert thumb is not None
+        # Result should be a static image (not animated)
+        assert thumb.startswith("data:image/")
+
+    def test_returns_none_for_svg(self, svg_content):
+        thumb = image_service._generate_thumbnail(svg_content, "image/svg+xml")
+        assert thumb is None
+
+    def test_thumbnail_is_reasonable_size(self, png_100x100):
+        thumb = image_service._generate_thumbnail(png_100x100, "image/png")
+        # Thumbnail base64 should be small (< 50KB for a 100x100 source)
+        assert len(thumb) < 50_000
+
+    def test_upload_stores_thumbnail_in_db(self, db_session, mock_storage, png_100x100):
+        result = image_service.upload_image(
+            db=db_session, file_content=png_100x100,
+            original_filename="test.png", mime_type="image/png",
+            user="test",
+        )
+        assert result.thumbnail_base64 is not None
+        assert result.thumbnail_base64.startswith("data:image/")
+
+
+# ===== get_image_base64 =====
+
+class TestGetImageBase64:
+    """Tests for retrieving full image as base64."""
+
+    def test_returns_from_cache_when_available(self, db_session, mock_storage):
+        image = create_test_image(db_session, cached_base64="CACHED_DATA", mime_type="image/png")
+        b64, mime = image_service.get_image_base64(db_session, image.id)
+        assert b64 == "CACHED_DATA"
+        assert mime == "image/png"
+        # Should NOT have read from storage
+        assert len(mock_storage._store) == 0
+
+    def test_reads_from_storage_when_no_cache(self, db_session, mock_storage, png_1x1):
+        image = create_test_image(db_session, cached_base64=None, storage_path="user/img.png")
+        mock_storage.write("user/img.png", png_1x1)
+
+        b64, mime = image_service.get_image_base64(db_session, image.id)
+        assert b64 == base64.b64encode(png_1x1).decode("utf-8")
+        assert mime == "image/png"
+
+    def test_raises_for_nonexistent_image(self, db_session, mock_storage):
+        with pytest.raises(ValueError, match="not found"):
+            image_service.get_image_base64(db_session, 99999)
+
+    def test_raises_for_inactive_image(self, db_session, mock_storage):
+        image = create_test_image(db_session, is_active=False)
+        with pytest.raises(ValueError, match="not found"):
+            image_service.get_image_base64(db_session, image.id)
+
+
+# ===== Search =====
+
+class TestSearchImages:
+    """Tests for image search/filtering."""
+
+    def test_returns_all_active_images(self, db_session, mock_storage):
+        create_test_image(db_session, original_filename="a.png")
+        create_test_image(db_session, original_filename="b.png")
+        create_test_image(db_session, original_filename="c.png", is_active=False)
+
+        results = image_service.search_images(db_session)
+        assert len(results) == 2
+
+    def test_filter_by_category(self, db_session, mock_storage):
+        create_test_image(db_session, category="branding", original_filename="logo.png")
+        create_test_image(db_session, category="content", original_filename="chart.png")
+
+        results = image_service.search_images(db_session, category="branding")
+        assert len(results) == 1
+        assert results[0].category == "branding"
+
+    def test_filter_by_tags(self, db_session, mock_storage):
+        create_test_image(db_session, tags=["branding", "logo"], original_filename="logo.png")
+        create_test_image(db_session, tags=["chart", "q4"], original_filename="chart.png")
+
+        results = image_service.search_images(db_session, tags=["branding"])
+        assert len(results) == 1
+        assert "branding" in results[0].tags
+
+    def test_filter_by_query_text_filename(self, db_session, mock_storage):
+        create_test_image(db_session, original_filename="acme-logo.png")
+        create_test_image(db_session, original_filename="chart-q4.png")
+
+        results = image_service.search_images(db_session, query="acme")
+        assert len(results) == 1
+        assert "acme" in results[0].original_filename
+
+    def test_filter_by_query_text_description(self, db_session, mock_storage):
+        create_test_image(db_session, description="ACME Corp logo", original_filename="a.png")
+        create_test_image(db_session, description="Revenue chart", original_filename="b.png")
+
+        results = image_service.search_images(db_session, query="ACME")
+        assert len(results) == 1
+
+    def test_excludes_inactive(self, db_session, mock_storage):
+        create_test_image(db_session, is_active=True, original_filename="visible.png")
+        create_test_image(db_session, is_active=False, original_filename="hidden.png")
+
+        results = image_service.search_images(db_session)
+        assert all(r.is_active for r in results)
+
+    def test_ordered_by_newest_first(self, db_session, mock_storage):
+        from datetime import datetime, timedelta
+        now = datetime.utcnow()
+        create_test_image(db_session, original_filename="old.png", created_at=now - timedelta(days=1))
+        create_test_image(db_session, original_filename="new.png", created_at=now)
+
+        results = image_service.search_images(db_session)
+        assert results[0].original_filename == "new.png"
+
+
+# ===== Soft Delete =====
+
+class TestDeleteImage:
+    """Tests for soft-delete."""
+
+    def test_sets_inactive(self, db_session, mock_storage):
+        image = create_test_image(db_session)
+        image_service.delete_image(db_session, image.id, "admin")
+
+        refreshed = db_session.query(ImageAsset).get(image.id)
+        assert refreshed.is_active is False
+
+    def test_sets_updated_by(self, db_session, mock_storage):
+        image = create_test_image(db_session)
+        image_service.delete_image(db_session, image.id, "admin@example.com")
+
+        refreshed = db_session.query(ImageAsset).get(image.id)
+        assert refreshed.updated_by == "admin@example.com"
+
+    def test_raises_for_nonexistent(self, db_session, mock_storage):
+        with pytest.raises(ValueError, match="not found"):
+            image_service.delete_image(db_session, 99999, "admin")
+
+    def test_does_not_delete_from_storage(self, db_session, mock_storage, png_1x1):
+        image = create_test_image(db_session, storage_path="user/img.png")
+        mock_storage.write("user/img.png", png_1x1)
+
+        image_service.delete_image(db_session, image.id, "admin")
+
+        # File should still exist in storage (soft delete only)
+        assert mock_storage.exists("user/img.png")
+```
+
+---
+
+### Phase 1 Tests: API Routes (`tests/integration/test_image_api.py`)
+
+Write these tests BEFORE implementing `src/api/routes/images.py`.
+
+```python
+"""Integration tests for image API endpoints using TestClient."""
+import json
+import pytest
+from unittest.mock import patch
+
+from fastapi.testclient import TestClient
+from sqlalchemy import create_engine, text
+from sqlalchemy.orm import sessionmaker
+from sqlalchemy.pool import StaticPool
+
+from src.api.main import app
+from src.core.database import Base, get_db
+from src.database.models.image import ImageAsset
+from tests.unit.conftest_images import create_test_image, MockImageStorage
+
+
+# --- Fixtures ---
+
+@pytest.fixture(scope="function")
+def db_engine():
+    engine = create_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    tables_to_create = [
+        t for t in Base.metadata.sorted_tables if t.name != "config_history"
+    ]
+    for table in tables_to_create:
+        table.create(bind=engine, checkfirst=True)
+    with engine.connect() as conn:
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS config_history (
+                id INTEGER PRIMARY KEY, profile_id INTEGER NOT NULL,
+                domain VARCHAR(50) NOT NULL, action VARCHAR(50) NOT NULL,
+                changed_by VARCHAR(255) NOT NULL, changes TEXT NOT NULL,
+                snapshot TEXT, timestamp DATETIME NOT NULL
+            )
+        """))
+        conn.commit()
+    yield engine
+    for table in reversed(tables_to_create):
+        table.drop(bind=engine, checkfirst=True)
+    with engine.connect() as conn:
+        conn.execute(text("DROP TABLE IF EXISTS config_history"))
+        conn.commit()
+    engine.dispose()
+
+
+@pytest.fixture(scope="function")
+def db_session(db_engine):
+    SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=db_engine)
+    session = SessionLocal()
+    yield session
+    session.close()
+
+
+@pytest.fixture(scope="function")
+def mock_storage():
+    storage = MockImageStorage()
+    with patch("src.services.image_service.get_image_storage", return_value=storage):
+        yield storage
+
+
+@pytest.fixture(scope="function")
+def client(db_session, mock_storage):
+    def override_get_db():
+        try:
+            yield db_session
+        finally:
+            pass
+    app.dependency_overrides[get_db] = override_get_db
+    with TestClient(app) as c:
+        yield c
+    app.dependency_overrides.clear()
+
+
+@pytest.fixture
+def png_bytes() -> bytes:
+    """Minimal valid PNG for upload tests."""
+    import io
+    from PIL import Image as PILImage
+    buf = io.BytesIO()
+    PILImage.new("RGB", (10, 10), color=(255, 0, 0)).save(buf, format="PNG")
+    return buf.getvalue()
+
+
+# --- Upload Endpoint Tests ---
+
+class TestUploadEndpoint:
+    """POST /api/images/upload"""
+
+    def test_upload_returns_201(self, client, png_bytes):
+        response = client.post(
+            "/api/images/upload",
+            files={"file": ("logo.png", png_bytes, "image/png")},
+            data={"category": "branding", "tags": '["logo"]'},
+        )
+        assert response.status_code == 201
+        data = response.json()
+        assert data["original_filename"] == "logo.png"
+        assert data["mime_type"] == "image/png"
+        assert data["category"] == "branding"
+        assert data["tags"] == ["logo"]
+        assert data["id"] is not None
+        assert data["thumbnail_base64"] is not None
+
+    def test_upload_rejects_invalid_type(self, client):
+        response = client.post(
+            "/api/images/upload",
+            files={"file": ("test.txt", b"not an image", "text/plain")},
+        )
+        assert response.status_code == 400
+        assert "not allowed" in response.json()["detail"]
+
+    def test_upload_rejects_oversized(self, client):
+        big = b"x" * (5 * 1024 * 1024 + 1)
+        response = client.post(
+            "/api/images/upload",
+            files={"file": ("big.png", big, "image/png")},
+        )
+        assert response.status_code == 400
+        assert "too large" in response.json()["detail"]
+
+    def test_upload_without_file_returns_422(self, client):
+        response = client.post("/api/images/upload")
+        assert response.status_code == 422
+
+    def test_upload_default_category_is_content(self, client, png_bytes):
+        response = client.post(
+            "/api/images/upload",
+            files={"file": ("test.png", png_bytes, "image/png")},
+        )
+        assert response.status_code == 201
+        assert response.json()["category"] == "content"
+
+
+# --- List Endpoint Tests ---
+
+class TestListEndpoint:
+    """GET /api/images"""
+
+    def test_list_empty(self, client):
+        response = client.get("/api/images")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["images"] == []
+        assert data["total"] == 0
+
+    def test_list_returns_uploaded_images(self, client, db_session):
+        create_test_image(db_session, original_filename="a.png")
+        create_test_image(db_session, original_filename="b.png")
+
+        response = client.get("/api/images")
+        assert response.status_code == 200
+        assert response.json()["total"] == 2
+
+    def test_list_filter_by_category(self, client, db_session):
+        create_test_image(db_session, category="branding", original_filename="logo.png")
+        create_test_image(db_session, category="content", original_filename="chart.png")
+
+        response = client.get("/api/images?category=branding")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["total"] == 1
+        assert data["images"][0]["category"] == "branding"
+
+    def test_list_filter_by_query(self, client, db_session):
+        create_test_image(db_session, original_filename="acme-logo.png")
+        create_test_image(db_session, original_filename="chart-q4.png")
+
+        response = client.get("/api/images?query=acme")
+        assert response.status_code == 200
+        assert response.json()["total"] == 1
+
+    def test_list_excludes_inactive(self, client, db_session):
+        create_test_image(db_session, is_active=True, original_filename="visible.png")
+        create_test_image(db_session, is_active=False, original_filename="hidden.png")
+
+        response = client.get("/api/images")
+        assert response.json()["total"] == 1
+
+
+# --- Get Single Image Tests ---
+
+class TestGetImageEndpoint:
+    """GET /api/images/{id}"""
+
+    def test_returns_image_metadata(self, client, db_session):
+        image = create_test_image(db_session, original_filename="logo.png")
+
+        response = client.get(f"/api/images/{image.id}")
+        assert response.status_code == 200
+        assert response.json()["original_filename"] == "logo.png"
+
+    def test_returns_404_for_nonexistent(self, client):
+        response = client.get("/api/images/99999")
+        assert response.status_code == 404
+
+    def test_returns_404_for_inactive(self, client, db_session):
+        image = create_test_image(db_session, is_active=False)
+        response = client.get(f"/api/images/{image.id}")
+        assert response.status_code == 404
+
+
+# --- Get Image Data Tests ---
+
+class TestGetImageDataEndpoint:
+    """GET /api/images/{id}/data"""
+
+    def test_returns_base64_data(self, client, db_session, mock_storage, png_bytes):
+        image = create_test_image(
+            db_session, storage_path="user/img.png", cached_base64=None,
+        )
+        mock_storage.write("user/img.png", png_bytes)
+
+        response = client.get(f"/api/images/{image.id}/data")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["mime_type"] == "image/png"
+        assert data["base64_data"] is not None
+        assert data["data_uri"].startswith("data:image/png;base64,")
+
+    def test_returns_404_for_nonexistent(self, client):
+        response = client.get("/api/images/99999/data")
+        assert response.status_code == 404
+
+
+# --- Update Tests ---
+
+class TestUpdateEndpoint:
+    """PUT /api/images/{id}"""
+
+    def test_update_tags(self, client, db_session):
+        image = create_test_image(db_session, tags=["old"])
+
+        response = client.put(
+            f"/api/images/{image.id}",
+            json={"tags": ["new", "tags"]},
+        )
+        assert response.status_code == 200
+        assert response.json()["tags"] == ["new", "tags"]
+
+    def test_update_description(self, client, db_session):
+        image = create_test_image(db_session, description="old")
+
+        response = client.put(
+            f"/api/images/{image.id}",
+            json={"description": "new description"},
+        )
+        assert response.status_code == 200
+        assert response.json()["description"] == "new description"
+
+    def test_update_returns_404_for_nonexistent(self, client):
+        response = client.put("/api/images/99999", json={"tags": ["x"]})
+        assert response.status_code == 404
+
+
+# --- Delete Tests ---
+
+class TestDeleteEndpoint:
+    """DELETE /api/images/{id}"""
+
+    def test_delete_returns_204(self, client, db_session):
+        image = create_test_image(db_session)
+
+        response = client.delete(f"/api/images/{image.id}")
+        assert response.status_code == 204
+
+    def test_deleted_image_no_longer_listed(self, client, db_session):
+        image = create_test_image(db_session)
+        client.delete(f"/api/images/{image.id}")
+
+        response = client.get("/api/images")
+        assert response.json()["total"] == 0
+
+    def test_delete_returns_404_for_nonexistent(self, client):
+        response = client.delete("/api/images/99999")
+        assert response.status_code == 404
+```
+
+---
+
+### Phase 2 Tests: Image Placeholder Substitution (`tests/unit/test_image_utils.py`)
+
+Write BEFORE implementing `src/utils/image_utils.py`.
+
+```python
+"""Unit tests for {{image:ID}} placeholder substitution."""
+import pytest
+from unittest.mock import patch
+
+from src.utils.image_utils import substitute_image_placeholders
+
+
+class TestSubstituteImagePlaceholders:
+    """Tests for replacing {{image:ID}} with base64 data URIs."""
+
+    def test_substitutes_single_placeholder(self, db_session):
+        html = '<img src="{{image:42}}" alt="logo" />'
+        with patch("src.services.image_service.get_image_base64") as mock:
+            mock.return_value = ("BASE64DATA", "image/png")
+            result = substitute_image_placeholders(html, db_session)
+
+        assert result == '<img src="data:image/png;base64,BASE64DATA" alt="logo" />'
+
+    def test_substitutes_multiple_placeholders(self, db_session):
+        html = '<img src="{{image:1}}" /><img src="{{image:2}}" />'
+        with patch("src.services.image_service.get_image_base64") as mock:
+            mock.side_effect = [
+                ("DATA_1", "image/png"),
+                ("DATA_2", "image/jpeg"),
+            ]
+            result = substitute_image_placeholders(html, db_session)
+
+        assert "data:image/png;base64,DATA_1" in result
+        assert "data:image/jpeg;base64,DATA_2" in result
+
+    def test_preserves_html_without_placeholders(self, db_session):
+        html = '<h1>Hello World</h1><img src="data:image/png;base64,existing" />'
+        result = substitute_image_placeholders(html, db_session)
+        assert result == html
+
+    def test_leaves_unresolved_placeholder_on_missing_image(self, db_session):
+        html = '<img src="{{image:999}}" />'
+        with patch("src.services.image_service.get_image_base64") as mock:
+            mock.side_effect = ValueError("not found")
+            result = substitute_image_placeholders(html, db_session)
+
+        # Placeholder should remain (graceful degradation)
+        assert "{{image:999}}" in result
+
+    def test_works_in_css_url_context(self, db_session):
+        css = "section::after { background-image: url('{{image:42}}'); }"
+        with patch("src.services.image_service.get_image_base64") as mock:
+            mock.return_value = ("BASE64", "image/png")
+            result = substitute_image_placeholders(css, db_session)
+
+        assert "url('data:image/png;base64,BASE64')" in result
+
+    def test_handles_empty_string(self, db_session):
+        assert substitute_image_placeholders("", db_session) == ""
+
+    def test_mixed_resolved_and_unresolved(self, db_session):
+        html = '<img src="{{image:1}}" /><img src="{{image:999}}" />'
+        with patch("src.services.image_service.get_image_base64") as mock:
+            def side_effect(db, image_id):
+                if image_id == 1:
+                    return ("OK_DATA", "image/png")
+                raise ValueError("not found")
+            mock.side_effect = side_effect
+            result = substitute_image_placeholders(html, db_session)
+
+        assert "data:image/png;base64,OK_DATA" in result
+        assert "{{image:999}}" in result
+```
+
+---
+
+### Phase 2 Tests: Agent Image Tool (`tests/unit/test_image_tools.py`)
+
+Write BEFORE implementing `src/services/image_tools.py`.
+
+```python
+"""Unit tests for the search_images agent tool."""
+import json
+import pytest
+from unittest.mock import patch, MagicMock
+
+from src.services.image_tools import search_images
+
+
+class TestSearchImagesTool:
+    """Tests for the agent's search_images tool function."""
+
+    def test_returns_json_string(self):
+        mock_image = MagicMock()
+        mock_image.id = 1
+        mock_image.original_filename = "logo.png"
+        mock_image.description = "Company logo"
+        mock_image.tags = ["branding"]
+        mock_image.category = "branding"
+        mock_image.mime_type = "image/png"
+
+        with patch("src.services.image_tools.get_db_session") as mock_ctx, \
+             patch("src.services.image_tools.image_service") as mock_svc:
+            mock_ctx.return_value.__enter__ = MagicMock(return_value=MagicMock())
+            mock_ctx.return_value.__exit__ = MagicMock(return_value=False)
+            mock_svc.search_images.return_value = [mock_image]
+
+            result = search_images(category="branding")
+
+        parsed = json.loads(result)
+        assert len(parsed["images"]) == 1
+        assert parsed["images"][0]["id"] == 1
+        assert parsed["images"][0]["filename"] == "logo.png"
+
+    def test_returns_usage_hint_with_placeholder(self):
+        mock_image = MagicMock()
+        mock_image.id = 42
+        mock_image.original_filename = "logo.png"
+        mock_image.description = "Logo"
+        mock_image.tags = []
+        mock_image.category = "branding"
+        mock_image.mime_type = "image/png"
+
+        with patch("src.services.image_tools.get_db_session") as mock_ctx, \
+             patch("src.services.image_tools.image_service") as mock_svc:
+            mock_ctx.return_value.__enter__ = MagicMock(return_value=MagicMock())
+            mock_ctx.return_value.__exit__ = MagicMock(return_value=False)
+            mock_svc.search_images.return_value = [mock_image]
+
+            result = search_images()
+
+        parsed = json.loads(result)
+        # Tool should tell agent how to use the image
+        assert "{{image:42}}" in parsed["images"][0]["usage"]
+
+    def test_does_not_include_base64(self):
+        mock_image = MagicMock()
+        mock_image.id = 1
+        mock_image.original_filename = "logo.png"
+        mock_image.description = ""
+        mock_image.tags = []
+        mock_image.category = "content"
+        mock_image.mime_type = "image/png"
+
+        with patch("src.services.image_tools.get_db_session") as mock_ctx, \
+             patch("src.services.image_tools.image_service") as mock_svc:
+            mock_ctx.return_value.__enter__ = MagicMock(return_value=MagicMock())
+            mock_ctx.return_value.__exit__ = MagicMock(return_value=False)
+            mock_svc.search_images.return_value = [mock_image]
+
+            result = search_images()
+
+        # CRITICAL: base64 data must NEVER appear in tool results
+        parsed = json.loads(result)
+        for img in parsed["images"]:
+            assert "base64_data" not in img
+            assert "cached_base64" not in img
+
+    def test_returns_empty_message_when_no_results(self):
+        with patch("src.services.image_tools.get_db_session") as mock_ctx, \
+             patch("src.services.image_tools.image_service") as mock_svc:
+            mock_ctx.return_value.__enter__ = MagicMock(return_value=MagicMock())
+            mock_ctx.return_value.__exit__ = MagicMock(return_value=False)
+            mock_svc.search_images.return_value = []
+
+            result = search_images(query="nonexistent")
+
+        parsed = json.loads(result)
+        assert parsed["images"] == []
+        assert "No images found" in parsed["message"]
+```
+
+---
+
+### Phase 3 Tests: Frontend E2E (`frontend/tests/e2e/image-library.spec.ts`)
+
+Write BEFORE building frontend components. These use the Playwright mock patterns
+established in the codebase (see `frontend/tests/fixtures/mocks.ts` and
+`frontend/tests/e2e/profile-ui.spec.ts` for reference).
+
+```typescript
+import { test, expect } from '../fixtures/base-test';
+
+// --- Mock Data ---
+
+const mockImages = {
+  images: [
+    {
+      id: 1,
+      filename: "uuid-1.png",
+      original_filename: "logo.png",
+      mime_type: "image/png",
+      size_bytes: 12345,
+      thumbnail_base64: "data:image/jpeg;base64,/9j/4AAQ",
+      tags: ["branding", "logo"],
+      description: "Company logo",
+      category: "branding",
+      uploaded_by: "test@example.com",
+      is_active: true,
+      created_at: "2026-02-09T10:00:00",
+      updated_at: "2026-02-09T10:00:00",
+    },
+    {
+      id: 2,
+      filename: "uuid-2.png",
+      original_filename: "chart-q4.png",
+      mime_type: "image/png",
+      size_bytes: 54321,
+      thumbnail_base64: "data:image/jpeg;base64,/9j/4BBQ",
+      tags: ["chart"],
+      description: "Q4 revenue chart",
+      category: "content",
+      uploaded_by: "test@example.com",
+      is_active: true,
+      created_at: "2026-02-09T11:00:00",
+      updated_at: "2026-02-09T11:00:00",
+    },
+  ],
+  total: 2,
+};
+
+const mockUploadResponse = {
+  id: 3,
+  filename: "uuid-3.png",
+  original_filename: "new-image.png",
+  mime_type: "image/png",
+  size_bytes: 9999,
+  thumbnail_base64: "data:image/jpeg;base64,/9j/4CCQ",
+  tags: [],
+  description: null,
+  category: "content",
+  uploaded_by: "test@example.com",
+  is_active: true,
+  created_at: "2026-02-09T12:00:00",
+  updated_at: "2026-02-09T12:00:00",
+};
+
+
+// --- Mock Setup ---
+
+async function setupImageMocks(page) {
+  // Mock GET /api/images
+  await page.route('**/api/images', (route, request) => {
+    if (request.method() === 'GET') {
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify(mockImages),
+      });
+    }
+  });
+
+  // Mock POST /api/images/upload
+  await page.route('**/api/images/upload', (route) => {
+    route.fulfill({
+      status: 201,
+      contentType: 'application/json',
+      body: JSON.stringify(mockUploadResponse),
+    });
+  });
+
+  // Mock GET /api/images/:id
+  await page.route(/\/api\/images\/\d+$/, (route) => {
+    route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify(mockImages.images[0]),
+    });
+  });
+
+  // Mock DELETE /api/images/:id
+  await page.route(/\/api\/images\/\d+$/, (route, request) => {
+    if (request.method() === 'DELETE') {
+      route.fulfill({ status: 204 });
+    }
+  });
+
+  // Also mock existing endpoints needed for page load
+  // (profiles, sessions, etc. — copy from existing mocks.ts)
+}
+
+
+// --- Tests ---
+
+test.describe('Image Library', () => {
+  test('displays uploaded images in gallery', async ({ page }) => {
+    await setupImageMocks(page);
+    await page.goto('/');
+    // Navigate to image library (adjust selector based on actual UI)
+    await page.click('[data-testid="image-library-nav"]');
+
+    // Should display both images
+    await expect(page.locator('[data-testid="image-grid-item"]')).toHaveCount(2);
+    await expect(page).toContainText('logo.png');
+    await expect(page).toContainText('chart-q4.png');
+  });
+
+  test('filters images by category', async ({ page }) => {
+    await setupImageMocks(page);
+    await page.goto('/');
+    await page.click('[data-testid="image-library-nav"]');
+
+    // Select branding filter
+    await page.selectOption('[data-testid="category-filter"]', 'branding');
+
+    // Mock should be called with category param (verify via route)
+    // UI should show filtered results
+  });
+
+  test('searches images by name', async ({ page }) => {
+    await setupImageMocks(page);
+    await page.goto('/');
+    await page.click('[data-testid="image-library-nav"]');
+
+    await page.fill('[data-testid="image-search"]', 'logo');
+    // Verify search triggers API call with query param
+  });
+});
+
+
+test.describe('Image Upload', () => {
+  test('uploads image via file picker', async ({ page }) => {
+    await setupImageMocks(page);
+    await page.goto('/');
+    await page.click('[data-testid="image-library-nav"]');
+    await page.click('[data-testid="upload-button"]');
+
+    // Create a test file and upload
+    const buffer = Buffer.from('fake-png-content');
+    await page.setInputFiles('[data-testid="file-input"]', {
+      name: 'test.png',
+      mimeType: 'image/png',
+      buffer,
+    });
+
+    // Should show preview and upload button
+    await expect(page.locator('[data-testid="upload-preview"]')).toBeVisible();
+    await page.click('[data-testid="confirm-upload"]');
+
+    // Should show success
+    await expect(page).toContainText('new-image.png');
+  });
+
+  test('rejects non-image files client-side', async ({ page }) => {
+    await setupImageMocks(page);
+    await page.goto('/');
+    await page.click('[data-testid="image-library-nav"]');
+    await page.click('[data-testid="upload-button"]');
+
+    // Try uploading a text file
+    const buffer = Buffer.from('not an image');
+    await page.setInputFiles('[data-testid="file-input"]', {
+      name: 'test.txt',
+      mimeType: 'text/plain',
+      buffer,
+    });
+
+    // Should show validation error, NOT submit to server
+    await expect(page.locator('[data-testid="upload-error"]')).toBeVisible();
+  });
+});
+
+
+test.describe('Image Deletion', () => {
+  test('deletes image and removes from gallery', async ({ page }) => {
+    await setupImageMocks(page);
+    await page.goto('/');
+    await page.click('[data-testid="image-library-nav"]');
+
+    // Click delete on first image
+    await page.click('[data-testid="image-delete-1"]');
+
+    // Confirm deletion dialog
+    await page.click('[data-testid="confirm-delete"]');
+
+    // Image should be removed from view
+  });
+});
+```
+
+**Note on `data-testid` attributes**: The implementing agent should add these to
+components as they're built. The selectors above are conventions — adjust to match
+actual component implementation. The key is that E2E tests mock the API at the network
+level (via `page.route()`) and assert on visible UI state.
+
+---
+
+### TDD Execution Order
+
+For each phase, follow this cycle:
+
+1. **Write test file** with all tests for the phase (they will all fail)
+2. **Run tests** to confirm they fail for the right reason (`ImportError`, `AssertionError`, etc.)
+3. **Implement the minimum code** to make tests pass
+4. **Run tests** to confirm they pass
+5. **Refactor** if needed (tests should still pass)
+6. **Move to next phase**
+
+```bash
+# Phase 1: Service + API tests
+pytest tests/unit/test_image_service.py -v      # All fail initially
+pytest tests/integration/test_image_api.py -v   # All fail initially
+# ... implement ... #
+pytest tests/unit/test_image_service.py tests/integration/test_image_api.py -v  # All pass
+
+# Phase 2: Tool + substitution tests
+pytest tests/unit/test_image_utils.py tests/unit/test_image_tools.py -v  # All fail
+# ... implement ... #
+pytest tests/unit/ -v  # All pass
+
+# Phase 3: Frontend E2E
+cd frontend && npx playwright test tests/e2e/image-library.spec.ts  # All fail
+# ... implement ... #
+cd frontend && npx playwright test tests/e2e/image-library.spec.ts  # All pass
+```
 
 ## Design Decisions (Finalized)
 
