@@ -20,6 +20,7 @@ jobs:
     outputs:
       backend: ${{ steps.filter.outputs.backend }}
       frontend: ${{ steps.filter.outputs.frontend }}
+      packages: ${{ steps.filter.outputs.packages }}
       api: ${{ steps.filter.outputs.api }}
       export: ${{ steps.filter.outputs.export }}
       streaming: ${{ steps.filter.outputs.streaming }}
@@ -38,6 +39,11 @@ jobs:
               - 'pyproject.toml'
             frontend:
               - 'frontend/**'
+            packages:
+              - 'packages/**'
+              - 'frontend/**'
+              - 'src/**'
+              - 'pyproject.toml'
             api:
               - 'src/api/**'
               - 'tests/integration/test_api_routes.py'
@@ -379,14 +385,81 @@ jobs:
           name: integration-genie-results
           path: test-results/
 
+  # Frontend build check - catches TypeScript errors before E2E
+  frontend-build:
+    name: Frontend Build
+    runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.frontend == 'true'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        working-directory: frontend
+        run: npm ci
+
+      - name: TypeScript type check
+        working-directory: frontend
+        run: npx tsc -b
+
+      - name: Vite production build
+        working-directory: frontend
+        run: npx vite build
+
+  # Wheel build check - verifies both packages build successfully
+  wheel-build:
+    name: Wheel Build
+    runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.packages == 'true'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install build tools
+        run: pip install build
+
+      - name: Build databricks-tellr wheel
+        run: python -m build packages/databricks-tellr --outdir dist/
+
+      - name: Build databricks-tellr-app wheel
+        run: python -m build packages/databricks-tellr-app --outdir dist/
+
+      - name: Verify wheels
+        run: |
+          echo "Built wheels:"
+          ls -lh dist/*.whl
+          pip install --dry-run dist/databricks_tellr-*.whl
+          pip install --dry-run dist/databricks_tellr_app-*.whl
+
   # E2E tests with Playwright - run each test file in isolation
   e2e-tests:
     name: E2E - ${{ matrix.test }}
     runs-on: ubuntu-latest
-    needs: [changes, unit-tests]
+    needs: [changes, unit-tests, frontend-build]
     if: |
       always() &&
       (needs.unit-tests.result == 'success' || needs.unit-tests.result == 'skipped') &&
+      needs.frontend-build.result == 'success' &&
       needs.changes.outputs.frontend == 'true'
     
     strategy:
@@ -676,6 +749,8 @@ jobs:
     runs-on: ubuntu-latest
     needs:
       - unit-tests
+      - frontend-build
+      - wheel-build
       - integration-api-routes
       - integration-config-api
       - integration-export
@@ -688,6 +763,8 @@ jobs:
       - name: Check test results
         run: |
           echo "Unit Tests: ${{ needs.unit-tests.result }}"
+          echo "Frontend Build: ${{ needs.frontend-build.result }}"
+          echo "Wheel Build: ${{ needs.wheel-build.result }}"
           echo "API Routes: ${{ needs.integration-api-routes.result }}"
           echo "Config API: ${{ needs.integration-config-api.result }}"
           echo "Export: ${{ needs.integration-export.result }}"
@@ -699,6 +776,8 @@ jobs:
           # Fail if any required job failed (not skipped)
           failed=false
           for result in "${{ needs.unit-tests.result }}" \
+                        "${{ needs.frontend-build.result }}" \
+                        "${{ needs.wheel-build.result }}" \
                         "${{ needs.integration-api-routes.result }}" \
                         "${{ needs.integration-config-api.result }}" \
                         "${{ needs.integration-export.result }}" \
