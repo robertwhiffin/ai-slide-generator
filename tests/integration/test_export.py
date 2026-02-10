@@ -2,12 +2,18 @@
 
 import io
 import zipfile
+from contextlib import contextmanager
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+from sqlalchemy.pool import StaticPool
 
 from src.api.main import app
+from src.core.database import Base
+from src.database.models.session import ExportJob
 
 
 # =============================================================================
@@ -575,6 +581,64 @@ class TestAsyncPPTXExport:
 
             assert response.status_code == 400
             assert "not ready" in response.json()["detail"].lower()
+
+    def test_poll_finds_job_after_inmemory_state_cleared(
+        self, client, mock_chat_service
+    ):
+        """Poll succeeds even when process-local state is empty.
+
+        Simulates multi-worker: POST /async hits Worker A,
+        GET /poll hits Worker B (empty in-memory state).
+        With DB-backed jobs, poll reads from shared storage.
+        """
+        mock_chat_service.get_slides.return_value = create_mock_slide_deck(3)
+
+        # Set up an in-memory SQLite DB for this test
+        engine = create_engine(
+            "sqlite:///:memory:",
+            connect_args={"check_same_thread": False},
+            poolclass=StaticPool,
+        )
+        Base.metadata.create_all(bind=engine)
+        TestSession = sessionmaker(bind=engine)
+
+        @contextmanager
+        def mock_get_db_session():
+            db = TestSession()
+            try:
+                yield db
+                db.commit()
+            except Exception:
+                db.rollback()
+                raise
+            finally:
+                db.close()
+
+        with patch(
+            "src.api.services.export_job_queue.get_db_session",
+            mock_get_db_session,
+        ):
+            # Start export job (writes to DB)
+            response = client.post(
+                "/api/export/pptx/async", json={"session_id": "test-123"}
+            )
+            assert response.status_code == 200
+            job_id = response.json()["job_id"]
+
+            # The old in-memory dict is gone. If any process-local
+            # dict existed, clearing it should not matter.
+            from src.api.services import export_job_queue
+
+            if hasattr(export_job_queue, "export_jobs"):
+                export_job_queue.export_jobs.clear()
+
+            # Poll must still find the job via database
+            response = client.get(f"/api/export/pptx/poll/{job_id}")
+            assert response.status_code == 200, (
+                f"Got {response.status_code}: poll failed after clearing "
+                f"in-memory state. Job tracking must use shared storage."
+            )
+            assert response.json()["status"] in ("pending", "running")
 
 
 # =============================================================================
