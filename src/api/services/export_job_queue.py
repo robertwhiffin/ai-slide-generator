@@ -1,8 +1,13 @@
-"""In-memory job queue for async PPTX export processing.
+"""Database-backed job queue for async PPTX export processing.
 
 This module provides a background worker that processes PPTX export requests
 asynchronously, enabling polling-based export to work around
 Databricks Apps' 60-second reverse proxy timeout.
+
+Job state is stored in the database (ExportJob model) so that any worker
+process can read status/progress, fixing multi-worker 404 errors.
+The asyncio.Queue remains process-local for dispatching work to the
+local background worker.
 
 Pattern mirrors job_queue.py for chat processing.
 """
@@ -15,10 +20,13 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from src.core.database import get_db_session
+from src.database.models.session import ExportJob
+
 logger = logging.getLogger(__name__)
 
-# In-memory job tracking (job_id -> metadata)
-export_jobs: Dict[str, Dict[str, Any]] = {}
+# Process-local queue for dispatching work to the background worker.
+# Only needs to work within a single process.
 export_queue: asyncio.Queue = asyncio.Queue()
 
 
@@ -30,33 +38,52 @@ def generate_job_id() -> str:
 async def enqueue_export_job(job_id: str, payload: dict) -> None:
     """Add an export job to the queue.
 
+    Creates a database row for cross-worker visibility, then puts the
+    job on the process-local asyncio queue for the background worker.
+
     Args:
         job_id: Unique job identifier
         payload: Job payload with session_id, slides_html, chart_images, etc.
     """
-    export_jobs[job_id] = {
-        "status": "pending",
-        "session_id": payload["session_id"],
-        "progress": 0,
-        "total_slides": payload.get("total_slides", 0),
-        "queued_at": datetime.utcnow(),
-        "output_path": None,
-        "error": None,
-    }
+    with get_db_session() as db:
+        export_job = ExportJob(
+            job_id=job_id,
+            session_id=payload["session_id"],
+            status="pending",
+            progress=0,
+            total_slides=payload.get("total_slides", 0),
+            title=payload.get("title"),
+        )
+        db.add(export_job)
+
     await export_queue.put((job_id, payload))
     logger.info("Enqueued export job", extra={"job_id": job_id})
 
 
 def get_export_job_status(job_id: str) -> Optional[Dict[str, Any]]:
-    """Get export job status.
+    """Get export job status from database.
 
     Args:
         job_id: Job identifier
 
     Returns:
-        Job metadata or None if not found
+        Job metadata dict or None if not found
     """
-    return export_jobs.get(job_id)
+    with get_db_session() as db:
+        row = db.query(ExportJob).filter(ExportJob.job_id == job_id).first()
+        if not row:
+            return None
+        return {
+            "status": row.status,
+            "session_id": row.session_id,
+            "progress": row.progress,
+            "total_slides": row.total_slides,
+            "title": row.title,
+            "output_path": row.output_path,
+            "error": row.error_message,
+            "queued_at": row.created_at,
+            "completed_at": row.completed_at,
+        }
 
 
 def update_export_progress(job_id: str, current: int, total: int) -> None:
@@ -67,13 +94,32 @@ def update_export_progress(job_id: str, current: int, total: int) -> None:
         current: Current slide being processed (1-indexed)
         total: Total number of slides
     """
-    if job_id in export_jobs:
-        export_jobs[job_id]["progress"] = current
-        export_jobs[job_id]["total_slides"] = total
-        logger.debug(
-            f"Export progress: {current}/{total}",
-            extra={"job_id": job_id, "progress": current, "total": total},
-        )
+    with get_db_session() as db:
+        row = db.query(ExportJob).filter(ExportJob.job_id == job_id).first()
+        if row:
+            row.progress = current
+            row.total_slides = total
+            logger.debug(
+                f"Export progress: {current}/{total}",
+                extra={"job_id": job_id, "progress": current, "total": total},
+            )
+
+
+def _update_job_field(job_id: str, **kwargs) -> None:
+    """Update one or more fields on an ExportJob row.
+
+    Convenience helper used by process_export_job / export_worker to
+    avoid repeating the session boilerplate.
+
+    Args:
+        job_id: Job identifier
+        **kwargs: Column name -> value pairs to update
+    """
+    with get_db_session() as db:
+        row = db.query(ExportJob).filter(ExportJob.job_id == job_id).first()
+        if row:
+            for key, value in kwargs.items():
+                setattr(row, key, value)
 
 
 async def process_export_job(job_id: str, payload: dict) -> None:
@@ -105,14 +151,14 @@ async def process_export_job(job_id: str, payload: dict) -> None:
         logger.info(f"Fetching slide deck for export job {job_id}")
         chat_service = get_chat_service()
         slide_deck = chat_service.get_slides(session_id)
-        
+
         if not slide_deck or not slide_deck.get("slides"):
             raise ValueError("No slides available")
-        
+
         slides = slide_deck.get("slides", [])
         total_slides = len(slides)
-        export_jobs[job_id]["total_slides"] = total_slides
-        
+        _update_job_field(job_id, total_slides=total_slides)
+
         # Build HTML for each slide (this is the slow part we moved here)
         logger.info(f"Building HTML for {total_slides} slides")
         slides_html: List[str] = []
@@ -120,16 +166,19 @@ async def process_export_job(job_id: str, payload: dict) -> None:
             slide_html = build_slide_html(slide, slide_deck)
             slides_html.append(slide_html)
             logger.debug(f"Built HTML for slide {i+1}/{total_slides}")
-        
+
     except Exception as e:
         logger.error(f"Failed to prepare slides for export: {e}", exc_info=True)
-        export_jobs[job_id]["status"] = "error"
-        export_jobs[job_id]["error"] = f"Failed to prepare slides: {str(e)}"
+        _update_job_field(
+            job_id,
+            status="error",
+            error_message=f"Failed to prepare slides: {str(e)}",
+        )
         return
 
     try:
         # Update status to running
-        export_jobs[job_id]["status"] = "running"
+        _update_job_field(job_id, status="running")
 
         # Create temporary output file
         output_file = tempfile.NamedTemporaryFile(
@@ -153,10 +202,13 @@ async def process_export_job(job_id: str, payload: dict) -> None:
         )
 
         # Store result
-        export_jobs[job_id]["output_path"] = output_path
-        export_jobs[job_id]["title"] = title
-        export_jobs[job_id]["status"] = "completed"
-        export_jobs[job_id]["completed_at"] = datetime.utcnow()
+        _update_job_field(
+            job_id,
+            output_path=output_path,
+            title=title,
+            status="completed",
+            completed_at=datetime.utcnow(),
+        )
 
         logger.info(
             "Export job completed",
@@ -169,13 +221,15 @@ async def process_export_job(job_id: str, payload: dict) -> None:
 
     except PPTXConversionError as e:
         logger.error(f"Export conversion failed: {e}", extra={"job_id": job_id})
-        export_jobs[job_id]["status"] = "error"
-        export_jobs[job_id]["error"] = f"Conversion failed: {str(e)}"
+        _update_job_field(
+            job_id,
+            status="error",
+            error_message=f"Conversion failed: {str(e)}",
+        )
 
     except Exception as e:
         logger.error(f"Export job failed: {e}", extra={"job_id": job_id}, exc_info=True)
-        export_jobs[job_id]["status"] = "error"
-        export_jobs[job_id]["error"] = str(e)
+        _update_job_field(job_id, status="error", error_message=str(e))
 
 
 async def convert_slides_with_progress(
@@ -236,7 +290,7 @@ async def convert_slides_with_progress(
 
 async def export_worker() -> None:
     """Background worker that processes export jobs from the queue.
-    
+
     Runs blocking export work in a thread pool to avoid blocking the event loop.
     This is critical - the LLM calls are synchronous and would otherwise block
     all async operations including HTTP response handling.
@@ -245,7 +299,7 @@ async def export_worker() -> None:
     while True:
         try:
             job_id, payload = await export_queue.get()
-            export_jobs[job_id]["status"] = "running"
+            _update_job_field(job_id, status="running")
             logger.info(f"Export worker picked up job {job_id}")
 
             try:
@@ -253,8 +307,9 @@ async def export_worker() -> None:
                 # This prevents LLM calls from blocking the event loop
                 await asyncio.to_thread(_run_export_job_sync, job_id, payload)
             except Exception as e:
-                export_jobs[job_id]["status"] = "error"
-                export_jobs[job_id]["error"] = str(e)
+                _update_job_field(
+                    job_id, status="error", error_message=str(e)
+                )
                 logger.error(
                     f"Export worker job failed: {e}", extra={"job_id": job_id}
                 )
@@ -270,12 +325,12 @@ async def export_worker() -> None:
 
 def _run_export_job_sync(job_id: str, payload: dict) -> None:
     """Synchronous wrapper to run export job in thread pool.
-    
+
     This is called from asyncio.to_thread() to run blocking I/O
     (LLM calls, file operations) without blocking the event loop.
     """
     import asyncio
-    
+
     # Create a new event loop for this thread
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
@@ -302,10 +357,17 @@ def cleanup_export_job(job_id: str) -> None:
     Args:
         job_id: Job to clean up
     """
-    job = export_jobs.pop(job_id, None)
-    if job and job.get("output_path"):
+    with get_db_session() as db:
+        row = db.query(ExportJob).filter(ExportJob.job_id == job_id).first()
+        if row:
+            output_path = row.output_path
+            db.delete(row)
+        else:
+            output_path = None
+
+    if output_path:
         try:
-            path = Path(job["output_path"])
+            path = Path(output_path)
             if path.exists():
                 path.unlink()
                 logger.debug(f"Cleaned up export file: {path}")
@@ -323,17 +385,24 @@ def cleanup_stale_jobs(max_age_minutes: int = 30) -> int:
         Number of jobs cleaned up
     """
     cutoff = datetime.utcnow() - timedelta(minutes=max_age_minutes)
-    stale_jobs = [
-        job_id
-        for job_id, job in export_jobs.items()
-        if job.get("status") in ("completed", "error")
-        and job.get("queued_at", datetime.utcnow()) < cutoff
-    ]
 
-    for job_id in stale_jobs:
+    with get_db_session() as db:
+        stale_rows = (
+            db.query(ExportJob)
+            .filter(
+                ExportJob.status.in_(["completed", "error"]),
+                ExportJob.created_at < cutoff,
+            )
+            .all()
+        )
+
+        stale_job_ids = [row.job_id for row in stale_rows]
+
+    # Clean up each stale job (deletes DB row + temp file)
+    for job_id in stale_job_ids:
         cleanup_export_job(job_id)
 
-    if stale_jobs:
-        logger.info(f"Cleaned up {len(stale_jobs)} stale export jobs")
+    if stale_job_ids:
+        logger.info(f"Cleaned up {len(stale_job_ids)} stale export jobs")
 
-    return len(stale_jobs)
+    return len(stale_job_ids)
