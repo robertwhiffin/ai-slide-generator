@@ -34,4 +34,5 @@ export interface ReplacementInfo {
   success?: boolean;
   error?: string | null;
   canvas_ids?: string[];
+  is_add_operation?: boolean;
 }
