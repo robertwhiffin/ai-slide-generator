@@ -6,8 +6,13 @@ This module provides two types of WorkspaceClient:
 2. User Client (request-scoped): Uses forwarded user token for Genie/LLM/MLflow
 
 The user client is set per-request via middleware and stored in a ContextVar.
+
+Both client types set product tracking headers for API call attribution:
+- System client: product="tellr-app-system", product_version from package
+- User client: product="tellr-app-{hashed_user_id}"
 """
 
+import hashlib
 import logging
 import os
 import threading
@@ -17,6 +22,61 @@ from typing import Optional
 from databricks.sdk import WorkspaceClient
 
 logger = logging.getLogger(__name__)
+
+# =============================================================================
+# Product Tracking Constants
+# =============================================================================
+
+PRODUCT_NAME_SYSTEM = "tellr-app-system"
+PRODUCT_NAME_USER_PREFIX = "tellr-app-"
+
+
+def _get_package_version() -> str:
+    """
+    Get the package version for product tracking.
+
+    Tries setuptools_scm generated _version.py first, falls back to __init__.py.
+
+    Returns:
+        Version string (e.g., "0.1.0" or "0.1.0.dev0")
+    """
+    try:
+        # Try setuptools_scm generated version first (available after build)
+        from src._version import version
+
+        return version
+    except ImportError:
+        pass
+
+    try:
+        # Fall back to __init__.py version
+        from src import __version__
+
+        return __version__
+    except ImportError:
+        pass
+
+    # Ultimate fallback
+    return "unknown"
+
+
+def _hash_username(username: str) -> str:
+    """
+    Create a short hash of the username for product tracking.
+
+    Extracts the local part from email addresses (before @) before hashing.
+    Uses first 12 characters of SHA-256 hash for a balance of
+    uniqueness and readability in logs/metrics.
+
+    Args:
+        username: User's email (e.g., "john.doe@company.com") or plain username
+
+    Returns:
+        12-character hex hash string
+    """
+    # Extract local part from email address
+    local_part = username.split("@")[0] if "@" in username else username
+    return hashlib.sha256(local_part.encode()).hexdigest()[:12]
 
 # =============================================================================
 # System Client (Singleton - Service Principal)
@@ -62,12 +122,19 @@ def get_system_client(force_new: bool = False) -> WorkspaceClient:
             return _system_client
 
         try:
-            logger.info("Initializing system Databricks client from environment")
-            _system_client = WorkspaceClient()
+            version = _get_package_version()
+            logger.info(
+                "Initializing system Databricks client from environment",
+                extra={"product": PRODUCT_NAME_SYSTEM, "product_version": version},
+            )
+            _system_client = WorkspaceClient(
+                product=PRODUCT_NAME_SYSTEM,
+                product_version=version,
+            )
 
-            # Skip verification in development mode - allows local dev without valid token
-            if os.getenv("ENVIRONMENT") == "development":
-                logger.info("Development mode: skipping Databricks connection verification")
+            # Skip verification in development/test mode - allows local dev and tests without valid token
+            if os.getenv("ENVIRONMENT") in ("development", "test"):
+                logger.info("Dev/test mode: skipping Databricks connection verification")
                 return _system_client
 
             # Verify connection (production/staging only)
@@ -154,11 +221,15 @@ def create_user_client(token: str) -> WorkspaceClient:
     The token comes from the x-forwarded-access-token header set by
     the Databricks Apps proxy.
 
+    Uses a two-stage creation process:
+    1. Create initial client to fetch the username
+    2. Recreate client with product tracking using hashed username
+
     Args:
         token: User's access token from request headers
 
     Returns:
-        WorkspaceClient configured with user's credentials
+        WorkspaceClient configured with user's credentials and product tracking
 
     Raises:
         DatabricksClientError: If client creation fails
@@ -188,13 +259,44 @@ def create_user_client(token: str) -> WorkspaceClient:
         )
 
     try:
+        # Stage 1: Create initial client to get username
+        initial_client = WorkspaceClient(
+            host=host,
+            token=token,
+            auth_type="pat",
+        )
+
+        # Get username for product tracking
+        try:
+            current_user = initial_client.current_user.me()
+            username = current_user.user_name or "unknown"
+            user_hash = _hash_username(username)
+            product_name = f"{PRODUCT_NAME_USER_PREFIX}{user_hash}"
+            logger.info(
+                "create_user_client: got username for product tracking",
+                extra={"username": username, "user_hash": user_hash},
+            )
+        except Exception as e:
+            # If we can't get username, use fallback product name
+            logger.warning(
+                f"create_user_client: couldn't get username for product tracking: {e}"
+            )
+            product_name = f"{PRODUCT_NAME_USER_PREFIX}unknown"
+
+        # Stage 2: Create final client with product tracking
+        version = _get_package_version()
         client = WorkspaceClient(
             host=host,
             token=token,
-            auth_type="pat",  # Required for user token authentication
+            auth_type="pat",
+            product=product_name,
+            product_version=version,
         )
 
-        logger.warning("create_user_client: client created successfully")
+        logger.warning(
+            "create_user_client: client created successfully",
+            extra={"product": product_name, "product_version": version},
+        )
         return client
     except Exception as e:
         raise DatabricksClientError(

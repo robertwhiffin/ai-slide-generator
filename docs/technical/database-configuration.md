@@ -494,11 +494,10 @@ pytest tests/unit/settings/test_models.py::test_create_profile -v
 - ConfigValidator for validation logic
 - Configuration history tracking
 
-See `docs/backend-database-implementation/PHASE_2_BACKEND_SERVICES.md` for details.
+See the database configuration documentation for details.
 
 ## References
 
 - [SQLAlchemy 2.0 Documentation](https://docs.sqlalchemy.org/en/20/)
 - [PostgreSQL Documentation](https://www.postgresql.org/docs/)
-- [Phase 1 Implementation Plan](../backend-database-implementation/PHASE_1_DATABASE_SETUP.md)
 

@@ -1,4 +1,6 @@
 """Integration tests for configuration API endpoints."""
+from unittest.mock import MagicMock, patch
+
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, text
@@ -18,9 +20,46 @@ from src.database.models import (  # noqa: F401
 )
 
 
-@pytest.fixture(scope="function")
+@pytest.fixture(scope="module", autouse=True)
+def mock_databricks_client():
+    """Mock Databricks client for entire module to avoid slow SDK initialization."""
+    # Reset the singleton before tests to ensure mock is used
+    import src.core.databricks_client as db_client
+    db_client._system_client = None
+    
+    mock_client = MagicMock()
+    mock_client.current_user.me.return_value = MagicMock(user_name="test@example.com")
+    
+    # Mock serving_endpoints.list() for get_available_endpoints and validate_ai_infra
+    mock_endpoint = MagicMock()
+    mock_endpoint.name = "databricks-meta-llama"
+    mock_client.serving_endpoints.list.return_value = [mock_endpoint]
+    
+    # Mock genie.list_spaces() for validate_genie_space
+    # Include all space IDs used in tests so validation passes
+    test_space_ids = ["test-space-123", "test-space-456", "test-space-789", "test-space-delete"]
+    mock_spaces = []
+    for space_id in test_space_ids:
+        mock_space = MagicMock()
+        mock_space.space_id = space_id
+        mock_space.title = f"Test Space {space_id}"
+        mock_space.description = "Test description"
+        mock_spaces.append(mock_space)
+    mock_spaces_response = MagicMock()
+    mock_spaces_response.spaces = mock_spaces
+    mock_spaces_response.next_page_token = None
+    mock_client.genie.list_spaces.return_value = mock_spaces_response
+    
+    with patch("src.core.databricks_client.WorkspaceClient", return_value=mock_client):
+        yield mock_client
+    
+    # Reset singleton after tests
+    db_client._system_client = None
+
+
+@pytest.fixture(scope="module")
 def test_db_engine():
-    """Create test database engine with SQLite in-memory."""
+    """Create test database engine with SQLite in-memory (shared across all tests in module)."""
     # Use StaticPool to ensure all connections use the same in-memory database
     # check_same_thread=False allows SQLite to work with FastAPI TestClient threading
     engine = create_engine(
@@ -57,7 +96,7 @@ def test_db_engine():
     
     yield engine
     
-    # Cleanup
+    # Cleanup at end of module
     for table in reversed(tables_to_create):
         table.drop(bind=engine, checkfirst=True)
     with engine.connect() as conn:
@@ -66,15 +105,32 @@ def test_db_engine():
     engine.dispose()
 
 
+@pytest.fixture(scope="module")
+def _session_factory(test_db_engine):
+    """Create session factory (shared across module)."""
+    return sessionmaker(autocommit=False, autoflush=False, bind=test_db_engine)
+
+
 @pytest.fixture(scope="function")
-def test_db(test_db_engine):
-    """Create test database session."""
-    SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=test_db_engine)
-    db = SessionLocal()
+def test_db(_session_factory, test_db_engine):
+    """Create test database session and clean up data after each test."""
+    db = _session_factory()
     
     yield db
     
+    # Rollback any uncommitted changes and close session
+    db.rollback()
     db.close()
+    
+    # Clean up all data between tests (but keep tables)
+    with test_db_engine.connect() as conn:
+        # Delete in correct order to respect foreign keys
+        conn.execute(text("DELETE FROM config_history"))
+        conn.execute(text("DELETE FROM config_genie_spaces"))
+        conn.execute(text("DELETE FROM config_prompts"))
+        conn.execute(text("DELETE FROM config_ai_infra"))
+        conn.execute(text("DELETE FROM config_profiles"))
+        conn.commit()
 
 
 @pytest.fixture(scope="function")
@@ -83,14 +139,15 @@ def db_session(test_db):
     return test_db
 
 
-@pytest.fixture(scope="function")
-def client(test_db):
-    """Create test client with dependency override."""
+@pytest.fixture(scope="module")
+def _test_client(test_db_engine, _session_factory):
+    """Create test client (shared across module)."""
     def override_get_db():
+        db = _session_factory()
         try:
-            yield test_db
+            yield db
         finally:
-            pass  # Don't close here, let test_db fixture handle it
+            db.close()
     
     app.dependency_overrides[get_db] = override_get_db
     
@@ -98,6 +155,13 @@ def client(test_db):
         yield test_client
     
     app.dependency_overrides.clear()
+
+
+@pytest.fixture(scope="function")
+def client(_test_client, test_db):
+    """Get the shared test client (test_db ensures data cleanup between tests)."""
+    # test_db fixture handles per-test cleanup
+    return _test_client
 
 
 @pytest.fixture(scope="function")
@@ -146,7 +210,6 @@ def test_create_profile_valid(client):
     assert data["description"] == "Test description"
     assert "ai_infra" in data
     assert "genie_spaces" in data
-    assert "mlflow" in data
     assert "prompts" in data
 
 
@@ -201,8 +264,9 @@ def test_duplicate_profile_valid(client, default_profile):
     assert data["ai_infra"]["llm_endpoint"] == default_profile["ai_infra"]["llm_endpoint"]
 
 
-def test_delete_profile_valid(client):
+def test_delete_profile_valid(client, default_profile):
     """Test deleting a non-default profile."""
+    # default_profile fixture ensures a default exists, so new profile won't become default
     # Create profile
     response = client.post(
         "/api/settings/profiles",
@@ -226,7 +290,7 @@ def test_delete_default_profile_forbidden(client, default_profile):
 
 def test_get_ai_infra_config_valid(client, default_profile):
     """Test getting AI infrastructure settings."""
-    response = client.get(f"/api/settings/ai-db_app_deployment/{default_profile['id']}")
+    response = client.get(f"/api/settings/ai-infra/{default_profile['id']}")
     assert response.status_code == 200
     data = response.json()
     assert "llm_endpoint" in data
@@ -250,7 +314,7 @@ def test_update_ai_infra_config_valid(client, default_profile, monkeypatch):
     )
     
     response = client.put(
-        f"/api/settings/ai-db_app_deployment/{default_profile['id']}",
+        f"/api/settings/ai-infra/{default_profile['id']}",
         json={
             "llm_endpoint": "new-endpoint",
             "llm_temperature": 0.8,
@@ -267,7 +331,7 @@ def test_update_ai_infra_config_valid(client, default_profile, monkeypatch):
 def test_update_ai_infra_config_invalid_temperature(client, default_profile):
     """Test updating with invalid temperature."""
     response = client.put(
-        f"/api/settings/ai-db_app_deployment/{default_profile['id']}",
+        f"/api/settings/ai-infra/{default_profile['id']}",
         json={"llm_temperature": 1.5}  # Invalid: > 1.0
     )
     assert response.status_code == 422  # Pydantic validation error
@@ -283,7 +347,7 @@ def test_get_available_endpoints(client, monkeypatch):
     
     monkeypatch.setattr(ConfigService, "get_available_endpoints", mock_get_endpoints)
     
-    response = client.get("/api/settings/ai-db_app_deployment/endpoints/available")
+    response = client.get("/api/settings/ai-infra/endpoints/available")
     assert response.status_code == 200
     data = response.json()
     assert "endpoints" in data
@@ -300,33 +364,64 @@ def test_get_genie_space_404_for_nonexistent_profile(client, test_db):
     assert response.status_code == 404
 
 
-def test_profile_has_default_genie_space(client, test_db):
-    """Test that creating a profile includes a default genie space."""
+def test_profile_has_no_default_genie_space(client, test_db):
+    """Test that creating a profile does NOT include a default genie space."""
     # Create profile via API
     response = client.post(
         "/api/settings/profiles",
         json={
             "name": "test_default_genie",
-            "description": "Profile should have default genie space",
+            "description": "Profile should NOT have default genie space",
             "copy_from_profile_id": None,
         }
     )
     assert response.status_code == 201
     profile = response.json()
-    
-    # Profile should have genie space by default
+
+    # Profile should NOT have genie space by default
     assert "genie_spaces" in profile
-    assert len(profile["genie_spaces"]) == 1
-    
-    # Also verify via genie endpoint
+    assert len(profile["genie_spaces"]) == 0
+
+    # Also verify via genie endpoint - should return 404
     response = client.get(f"/api/settings/genie/{profile['id']}")
-    assert response.status_code == 200
+    assert response.status_code == 404
+
+
+def test_add_genie_space_valid(client, default_profile):
+    """Test adding a Genie space to a profile."""
+    # Profile should not have a Genie space by default
+    response = client.get(f"/api/settings/genie/{default_profile['id']}")
+    assert response.status_code == 404
+
+    # Add a Genie space
+    response = client.post(
+        f"/api/settings/genie/{default_profile['id']}",
+        json={
+            "space_id": "test-space-123",
+            "space_name": "Test Space",
+            "description": "Test description",
+        }
+    )
+    assert response.status_code == 201
     data = response.json()
-    assert "space_id" in data
+    assert data["space_id"] == "test-space-123"
+    assert data["space_name"] == "Test Space"
 
 
 def test_get_genie_space_valid(client, default_profile):
     """Test getting the Genie space for a profile."""
+    # First add a Genie space
+    response = client.post(
+        f"/api/settings/genie/{default_profile['id']}",
+        json={
+            "space_id": "test-space-456",
+            "space_name": "Test Space for Get",
+            "description": "Test",
+        }
+    )
+    assert response.status_code == 201
+
+    # Now get it
     response = client.get(f"/api/settings/genie/{default_profile['id']}")
     assert response.status_code == 200
     data = response.json()
@@ -336,11 +431,18 @@ def test_get_genie_space_valid(client, default_profile):
 
 def test_update_genie_space_valid(client, default_profile):
     """Test updating the Genie space."""
-    # Get existing space
-    response = client.get(f"/api/settings/genie/{default_profile['id']}")
-    space = response.json()
-    space_id = space["id"]
-    
+    # First add a Genie space
+    response = client.post(
+        f"/api/settings/genie/{default_profile['id']}",
+        json={
+            "space_id": "test-space-789",
+            "space_name": "Original Name",
+            "description": "Original",
+        }
+    )
+    assert response.status_code == 201
+    space_id = response.json()["id"]
+
     # Update it
     response = client.put(
         f"/api/settings/genie/space/{space_id}",
@@ -356,48 +458,25 @@ def test_update_genie_space_valid(client, default_profile):
 
 def test_delete_genie_space_valid(client, default_profile):
     """Test deleting the Genie space."""
-    # Get existing space
-    response = client.get(f"/api/settings/genie/{default_profile['id']}")
-    space = response.json()
-    space_id = space["id"]
-    
+    # First add a Genie space
+    response = client.post(
+        f"/api/settings/genie/{default_profile['id']}",
+        json={
+            "space_id": "test-space-delete",
+            "space_name": "To Delete",
+            "description": "Will be deleted",
+        }
+    )
+    assert response.status_code == 201
+    space_id = response.json()["id"]
+
     # Delete it
     response = client.delete(f"/api/settings/genie/space/{space_id}")
     assert response.status_code == 204
-    
+
     # Verify it's gone
     response = client.get(f"/api/settings/genie/{default_profile['id']}")
     assert response.status_code == 404
-
-
-# MLflow Tests
-
-def test_get_mlflow_config_valid(client, default_profile):
-    """Test getting MLflow settings."""
-    response = client.get(f"/api/settings/mlflow/{default_profile['id']}")
-    assert response.status_code == 200
-    data = response.json()
-    assert "experiment_name" in data
-
-
-def test_update_mlflow_config_valid(client, default_profile):
-    """Test updating MLflow settings."""
-    response = client.put(
-        f"/api/settings/mlflow/{default_profile['id']}",
-        json={"experiment_name": "/new/experiment"}
-    )
-    assert response.status_code == 200
-    data = response.json()
-    assert data["experiment_name"] == "/new/experiment"
-
-
-def test_update_mlflow_config_invalid(client, default_profile):
-    """Test updating MLflow settings with invalid name."""
-    response = client.put(
-        f"/api/settings/mlflow/{default_profile['id']}",
-        json={"experiment_name": "no-leading-slash"}
-    )
-    assert response.status_code == 422  # Pydantic validation error
 
 
 # Prompts Tests
@@ -409,7 +488,6 @@ def test_get_prompts_config_valid(client, default_profile):
     data = response.json()
     assert "system_prompt" in data
     assert "slide_editing_instructions" in data
-    assert "user_prompt_template" in data
 
 
 def test_update_prompts_config_valid(client, default_profile):
@@ -419,20 +497,10 @@ def test_update_prompts_config_valid(client, default_profile):
         json={
             "system_prompt": "Updated system prompt",
             "slide_editing_instructions": "Updated instructions",
-            "user_prompt_template": "Updated template with {question}",
         }
     )
     assert response.status_code == 200
     data = response.json()
     assert "Updated system prompt" in data["system_prompt"]
     assert "Updated instructions" in data["slide_editing_instructions"]
-
-
-def test_update_prompts_config_missing_placeholder(client, default_profile):
-    """Test updating prompts with missing required placeholder."""
-    response = client.put(
-        f"/api/settings/prompts/{default_profile['id']}",
-        json={"user_prompt_template": "No placeholder here"}
-    )
-    assert response.status_code == 422  # Pydantic validation error
 

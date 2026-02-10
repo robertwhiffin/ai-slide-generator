@@ -135,6 +135,7 @@ Step-by-step instructions with screenshots:
 | [Real-Time Streaming](docs/technical/real-time-streaming.md) | SSE events, conversation persistence |
 | [Slide Parser](docs/technical/slide-parser-and-script-management.md) | HTML parsing, CSS merging |
 | [Slide Editing](docs/technical/slide-editing-robustness-fixes.md) | Deck preservation, validation |
+| [Save Points](docs/technical/save-points-versioning.md) | Version snapshots, preview/restore |
 
 ---
 

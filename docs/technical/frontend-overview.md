@@ -7,7 +7,7 @@ How the React/Vite frontend is structured, how it communicates with backend APIs
 ## Stack & Entry Points
 
 - **Tooling:** Vite + React + TypeScript, Tailwind utility classes, `@dnd-kit` for drag/drop, `@monaco-editor/react` for HTML editing, standard Fetch for API calls.
-- **Entrypoint:** `src/main.tsx` injects `<App />` into `#root`. `src/App.tsx` wraps the tree in `ProfileProvider`, `SessionProvider`, `GenerationProvider`, `SelectionProvider` and renders `AppLayout`.
+- **Entrypoint:** `src/main.tsx` injects `&lt;App /&gt;` into `#root`. `src/App.tsx` wraps the tree in `ProfileProvider`, `SessionProvider`, `GenerationProvider`, `SelectionProvider` and renders `AppLayout`.
 - **Env configuration:** `src/services/api.ts` reads `import.meta.env.VITE_API_URL` (defaults to `http://localhost:8000` in dev, relative URLs in production).
 
 ---
@@ -174,7 +174,39 @@ interface DeckPrompt {
 3. When generating slides, the selected prompt content is prepended to the system prompt
 4. User chat messages combine with the deck prompt for context-aware generation
 
-### 9. Slide Style Library (`src/components/config/SlideStyleList.tsx`)
+### 9. Save Points / Versioning (`src/components/SavePoints/`)
+
+Save points allow users to preview and restore previous deck states:
+
+```typescript
+// State in AppLayout.tsx
+const [versions, setVersions] = useState<SavePointVersion[]>([]);
+const [currentVersion, setCurrentVersion] = useState<number | null>(null);
+const [previewVersion, setPreviewVersion] = useState<number | null>(null);
+
+// Version key forces React to re-render when switching versions
+const versionKey = previewVersion 
+  ? `preview-v${previewVersion}` 
+  : `current-v${currentVersion || 'live'}`;
+```
+
+**Components:**
+| Component | Purpose |
+|-----------|---------|
+| `SavePointDropdown` | Version selection dropdown showing all save points |
+| `PreviewBanner` | Indigo banner with "Revert" and "Cancel" buttons during preview |
+| `RevertConfirmModal` | Confirmation dialog before deleting newer versions |
+
+**Key behaviors:**
+- Save points created automatically after slide operations (generation, edit, delete, etc.)
+- Maximum 40 save points per session; oldest deleted on overflow
+- Preview mode disables chat input and slide editing
+- Restoring deletes all newer versions permanently
+- `versionKey` passed to slide components prevents stale state during version switches
+
+See [Save Points / Versioning](save-points-versioning.md) for full architecture.
+
+### 10. Slide Style Library (`src/components/config/SlideStyleList.tsx`)
 
 Slide Styles control the visual appearance of generated slides:
 
@@ -234,6 +266,9 @@ interface SlideStyle {
 | `src/components/config/AdvancedSettingsEditor.tsx` | Power-user interface for editing system prompts (debug mode only) | `configApi.updatePromptsConfig` |
 | `src/components/UpdateBanner/UpdateBanner.tsx` | Displays update notification when new version available; different messaging for patch vs major updates | None (props only) |
 | `src/hooks/useVersionCheck.ts` | Checks PyPI for new versions on app load; returns update availability and type | `GET /api/version/check` |
+| `src/components/SavePoints/SavePointDropdown.tsx` | Version selection dropdown, triggers preview on selection | `api.listVersions`, `api.previewVersion` |
+| `src/components/SavePoints/PreviewBanner.tsx` | Indigo banner during preview with revert/cancel actions | None (props only) |
+| `src/components/SavePoints/RevertConfirmModal.tsx` | Confirmation dialog before restore (warns about version deletion) | `api.restoreVersion` |
 
 ---
 
@@ -334,6 +369,10 @@ The optimization prompt explicitly instructs the agent to:
 | `healthCheck` | GET | `/api/health` | – | `{ status }` |
 | `getSlides` | GET | `/api/sessions/{id}/slides` | – | `{ session_id, slide_deck }` |
 | `reorderSlides` | PUT | `/api/slides/reorder` | `{ session_id, new_order }` | `SlideDeck` |
+| `listVersions` | GET | `/api/slides/versions` | query: `session_id` | `{ versions, current_version }` |
+| `previewVersion` | GET | `/api/slides/versions/{n}` | query: `session_id` | `{ version_number, deck, verification_map }` |
+| `restoreVersion` | POST | `/api/slides/versions/{n}/restore` | `{ session_id }` | `{ version_number, deck, deleted_versions }` |
+| `createSavePoint` | POST | `/api/slides/versions/create` | `{ session_id, description }` | `{ version_number }` |
 | `updateSlide` | PATCH | `/api/slides/{index}` | `{ session_id, html }` | `Slide` |
 | `deleteSlide` | DELETE | `/api/slides/{index}` | query: `session_id` | `SlideDeck` |
 | `updateSlideVerification` | PATCH | `/api/slides/{index}/verification` | `{ session_id, verification }` | `SlideDeck` |
@@ -419,3 +458,4 @@ Errors bubble up as `ApiError` (status + message). Common statuses:
 - [Real-Time Streaming](real-time-streaming.md) – SSE events and conversation persistence
 - [Multi-User Concurrency](multi-user-concurrency.md) – session locking and async handling
 - [Slide Parser & Script Management](slide-parser-and-script-management.md) – HTML parsing and Chart.js reconciliation
+- [Save Points / Versioning](save-points-versioning.md) – Complete deck state snapshots with preview and restore

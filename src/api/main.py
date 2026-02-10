@@ -19,6 +19,7 @@ from fastapi.staticfiles import StaticFiles
 from src.api.routes import chat, slides, export, sessions, verification, version, permissions
 from src.core.databricks_client import create_user_client, set_user_client
 from src.core.database import (
+    init_db,
     is_lakebase_environment,
     start_token_refresh,
     stop_token_refresh,
@@ -40,6 +41,7 @@ logger = logging.getLogger(__name__)
 # Detect environment
 ENVIRONMENT = os.getenv("ENVIRONMENT", "development")
 IS_PRODUCTION = ENVIRONMENT == "production"
+IS_TESTING = ENVIRONMENT == "test"
 
 # Worker task references for cleanup
 _worker_task = None
@@ -56,6 +58,7 @@ async def lifespan(app: FastAPI):
     logger.info(f"Starting AI Slide Generator API (environment: {ENVIRONMENT})")
 
     # Start Lakebase token refresh if running in Databricks Apps
+    # Must happen before init_db() so OAuth token is ready for database connections
     if is_lakebase_environment():
         try:
             await start_token_refresh()
@@ -63,6 +66,25 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             logger.error(f"Failed to start Lakebase token refresh: {e}")
             raise
+
+    # Initialize database tables (idempotent - only creates tables that don't exist)
+    # Skip only when running under pytest (pytest sets PYTEST_CURRENT_TEST automatically).
+    # E2E tests run the app as a real server and need init_db() to create tables.
+    is_pytest = os.getenv("PYTEST_CURRENT_TEST") is not None
+    logger.warning(
+        f"LIFESPAN DEBUG: PYTEST_CURRENT_TEST={os.getenv('PYTEST_CURRENT_TEST')}, "
+        f"ENVIRONMENT={ENVIRONMENT}, IS_TESTING={IS_TESTING}, is_pytest={is_pytest}"
+    )
+    if not is_pytest:
+        try:
+            init_db()
+            logger.info("Database tables initialized")
+        except Exception as e:
+            logger.error(f"Failed to initialize database: {e}")
+            raise
+    else:
+        logger.info("Pytest detected: skipping database initialization (tests manage their own)")
+
 
     if IS_PRODUCTION:
         logger.info("Production mode: serving frontend from package assets")
@@ -73,21 +95,25 @@ async def lifespan(app: FastAPI):
         else:
             logger.warning("Frontend assets not found in package")
 
-    # Start the job queue worker for async chat processing
-    _worker_task = await start_worker()
-    logger.info("Chat job queue worker started")
+    # Skip background workers and recovery in test mode
+    if not IS_TESTING:
+        # Start the job queue worker for async chat processing
+        _worker_task = await start_worker()
+        logger.info("Chat job queue worker started")
 
-    # Start the export worker for async PPTX export processing
-    _export_worker_task = await start_export_worker()
-    logger.info("Export job queue worker started")
+        # Start the export worker for async PPTX export processing
+        _export_worker_task = await start_export_worker()
+        logger.info("Export job queue worker started")
 
-    # Recover any stuck requests from previous crashes
-    try:
-        recovered = await recover_stuck_requests()
-        if recovered > 0:
-            logger.info(f"Recovered {recovered} stuck chat requests")
-    except Exception as e:
-        logger.warning(f"Failed to recover stuck requests: {e}")
+        # Recover any stuck requests from previous crashes
+        try:
+            recovered = await recover_stuck_requests()
+            if recovered > 0:
+                logger.info(f"Recovered {recovered} stuck chat requests")
+        except Exception as e:
+            logger.warning(f"Failed to recover stuck requests: {e}")
+    else:
+        logger.info("Test mode: skipping background workers and recovery")
 
     yield
 
@@ -296,7 +322,16 @@ async def get_current_user():
 
     Uses user-scoped client when running as Databricks App (user's identity),
     falls back to system client in local development (service principal).
+    
+    In test/development mode, returns a default user to avoid network timeouts.
     """
+    # Skip Databricks call in test/dev to avoid network timeout
+    if ENVIRONMENT in ("development", "test"):
+        return {
+            "username": "user",
+            "display_name": "User",
+        }
+    
     try:
         from src.core.databricks_client import get_user_client
         client = get_user_client()

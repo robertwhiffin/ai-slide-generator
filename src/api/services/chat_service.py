@@ -402,6 +402,10 @@ class ChatService:
                             slide.slide_id = f"slide_{insert_position + idx}"
                             existing_deck.insert_slide(slide, insert_position + idx)
                         
+                        # Update ALL slide IDs to reflect new positions (prevents duplicate keys)
+                        for idx, slide in enumerate(existing_deck.slides):
+                            slide.slide_id = f"slide_{idx}"
+                        
                         if new_deck.css:
                             existing_deck.css = existing_deck.css + "\n" + new_deck.css
                         
@@ -456,6 +460,9 @@ class ChatService:
                     slide_count=len(current_deck.slides),
                     deck_dict=slide_deck_dict,
                 )
+
+                # NOTE: Save point creation moved to frontend after auto-verification completes
+                # Frontend calls POST /api/slides/versions/create after verification
 
             # Update session activity
             session_manager.update_last_activity(session_id)
@@ -670,6 +677,47 @@ class ChatService:
                     yield StreamEvent(
                         type=StreamEventType.COMPLETE,
                         slides=existing_deck.to_dict(),
+                    )
+                    return
+
+        # RC14: Validate slide_context indices against current backend deck state
+        # This catches state mismatches where frontend and backend are out of sync
+        if slide_context:
+            selected_indices = slide_context.get("indices", [])
+            existing_deck = self._get_or_load_deck(session_id)
+            if existing_deck and selected_indices:
+                max_index = max(selected_indices)
+                if max_index >= len(existing_deck.slides):
+                    # State mismatch detected - frontend shows more slides than backend has
+                    logger.error(
+                        "RC14: Frontend/backend deck state mismatch detected",
+                        extra={
+                            "session_id": session_id,
+                            "selected_indices": selected_indices,
+                            "backend_slide_count": len(existing_deck.slides),
+                            "max_selected_index": max_index,
+                        },
+                    )
+                    # Return error to user with instructions to refresh
+                    error_msg = (
+                        f"⚠️ Deck sync error: You selected slide {max_index + 1}, but only "
+                        f"{len(existing_deck.slides)} slide(s) exist in the saved deck. "
+                        "This can happen if a previous save failed. "
+                        "Please refresh the page to resync your session."
+                    )
+                    session_manager.add_message(
+                        session_id=session_id,
+                        role="assistant",
+                        content=error_msg,
+                        message_type="error",
+                    )
+                    yield StreamEvent(
+                        type=StreamEventType.ASSISTANT,
+                        content=error_msg,
+                    )
+                    yield StreamEvent(
+                        type=StreamEventType.COMPLETE,
+                        slides=existing_deck.to_dict() if existing_deck else None,
                     )
                     return
 
@@ -907,6 +955,10 @@ class ChatService:
                             slide.slide_id = f"slide_{insert_position + idx}"
                             existing_deck.insert_slide(slide, insert_position + idx)
                         
+                        # Update ALL slide IDs to reflect new positions (prevents duplicate keys)
+                        for idx, slide in enumerate(existing_deck.slides):
+                            slide.slide_id = f"slide_{idx}"
+                        
                         if new_deck.css:
                             existing_deck.css = existing_deck.css + "\n" + new_deck.css
                         
@@ -949,6 +1001,10 @@ class ChatService:
                     for idx, slide in enumerate(new_deck.slides):
                         slide.slide_id = f"slide_{insert_position + idx}"
                         existing_deck.insert_slide(slide, insert_position + idx)
+                    
+                    # Update ALL slide IDs to reflect new positions (prevents duplicate keys)
+                    for idx, slide in enumerate(existing_deck.slides):
+                        slide.slide_id = f"slide_{idx}"
                     
                     # Merge CSS if new deck has any
                     if new_deck.css:
@@ -1014,6 +1070,9 @@ class ChatService:
                 slide_count=len(current_deck.slides),
                 deck_dict=slide_deck_dict,
             )
+
+            # NOTE: Save point creation moved to frontend after auto-verification completes
+            # Frontend calls POST /api/slides/versions/create after verification
 
         # Update session activity
         session_manager.update_last_activity(session_id)
@@ -1658,6 +1717,71 @@ class ChatService:
         )
         return deck
 
+    def reload_deck_from_database(self, session_id: str) -> Optional[SlideDeck]:
+        """Force reload deck from database (clears cache first).
+
+        Used after restoring a version to ensure cache is updated.
+
+        Args:
+            session_id: Session to reload deck for
+
+        Returns:
+            Reloaded SlideDeck or None if not found
+        """
+        # Clear cache for this session
+        with self._cache_lock:
+            if session_id in self._deck_cache:
+                del self._deck_cache[session_id]
+
+        # Reload from database
+        return self._get_or_load_deck(session_id)
+
+    def create_save_point(
+        self,
+        session_id: str,
+        description: str,
+        deck: Optional[SlideDeck] = None,
+    ) -> Dict[str, Any]:
+        """Create a save point for the current deck state.
+
+        Args:
+            session_id: Session to create save point for
+            description: Auto-generated description of the change
+            deck: Optional deck to save (uses cached deck if not provided)
+
+        Returns:
+            Version info dictionary
+        """
+        if deck is None:
+            deck = self._get_or_load_deck(session_id)
+
+        if not deck:
+            raise ValueError("No slide deck available to save")
+
+        session_manager = get_session_manager()
+
+        # Get current verification map
+        verification_map = session_manager.get_verification_map(session_id)
+
+        # Create the version
+        version_info = session_manager.create_version(
+            session_id=session_id,
+            description=description,
+            deck_dict=deck.to_dict(),
+            verification_map=verification_map,
+        )
+
+        logger.info(
+            "Created save point",
+            extra={
+                "session_id": session_id,
+                "version_number": version_info.get("version_number"),
+                "description": description,
+            },
+        )
+
+        return version_info
+
     def _apply_slide_replacements(
         self,
         replacement_info: Dict[str, Any],
@@ -1697,28 +1821,64 @@ class ChatService:
             # Get position intent from replacement_info
             # Format: (position_type, absolute_position) or legacy string
             add_position_info = replacement_info.get("add_position", ("after", None))
-            
+
             # Handle legacy string format for backward compatibility
             if isinstance(add_position_info, str):
                 add_position_info = (add_position_info, None)
-            
+
             position_type, absolute_position = add_position_info
-            
+
+            # STATE MISMATCH DETECTION: Check if frontend selection is valid for backend deck
+            # This can happen if a previous save failed and frontend/backend are out of sync
+            state_mismatch = start_idx >= len(current_deck.slides)
+            if state_mismatch and start_idx >= 0:
+                logger.warning(
+                    "DECK STATE MISMATCH: Frontend selected index exceeds backend deck size",
+                    extra={
+                        "session_id": session_id,
+                        "frontend_selected_index": start_idx,
+                        "backend_slide_count": len(current_deck.slides),
+                        "position_type": position_type,
+                        "recommendation": "Frontend and backend decks may be out of sync. "
+                                          "User should refresh to resync state.",
+                    },
+                )
+
             if position_type == "beginning":
                 # ABSOLUTE position 0 (ignores selection)
                 insert_position = 0
             elif position_type == "before":
-                # Insert BEFORE selected slide, or at beginning if no selection
+                # Insert BEFORE selected slide, or at beginning if no selection/invalid index
                 if start_idx >= 0 and start_idx < len(current_deck.slides):
                     insert_position = start_idx
                 else:
-                    insert_position = 0  # Beginning of deck
+                    # Fallback: insert at beginning, but log this as unexpected
+                    insert_position = 0
+                    if start_idx > 0:  # User had selected a slide but it's out of range
+                        logger.warning(
+                            "Add 'before' fallback to position 0 due to invalid start_index",
+                            extra={
+                                "session_id": session_id,
+                                "start_idx": start_idx,
+                                "deck_size": len(current_deck.slides),
+                            },
+                        )
             else:
-                # Insert AFTER selected slide, or at end if no selection
+                # Insert AFTER selected slide, or at end if no selection/invalid index
                 if start_idx >= 0 and start_idx < len(current_deck.slides):
                     insert_position = start_idx + max(original_count, 1)
                 else:
-                    insert_position = len(current_deck.slides)  # End of deck
+                    # Fallback: insert at end, but log this as unexpected
+                    insert_position = len(current_deck.slides)
+                    if start_idx > 0:  # User had selected a slide but it's out of range
+                        logger.warning(
+                            "Add 'after' fallback to end of deck due to invalid start_index",
+                            extra={
+                                "session_id": session_id,
+                                "start_idx": start_idx,
+                                "deck_size": len(current_deck.slides),
+                            },
+                        )
             
             logger.info(
                 "Add operation detected - inserting slides",
@@ -1741,6 +1901,10 @@ class ChatService:
                     "Inserted new slide (add operation)",
                     extra={"slide_index": insert_position + idx, "session_id": session_id},
                 )
+            
+            # Update ALL slide IDs to reflect new positions (prevents duplicate keys)
+            for idx, slide in enumerate(current_deck.slides):
+                slide.slide_id = f"slide_{idx}"
             
             # Merge CSS if provided
             new_css = replacement_info.get("replacement_css", "")
@@ -1996,6 +2160,13 @@ class ChatService:
             deck_dict=deck_dict,
         )
 
+        # Create save point
+        self.create_save_point(
+            session_id=session_id,
+            description=f"Reordered slides",
+            deck=current_deck,
+        )
+
         logger.info(
             "Reordered slides",
             extra={"new_order": new_order, "session_id": session_id},
@@ -2028,8 +2199,15 @@ class ChatService:
         if '<div class="slide"' not in html:
             raise ValueError("HTML must contain <div class='slide'> wrapper")
 
-        # Update slide
-        current_deck.slides[index] = Slide(html=html, slide_id=f"slide_{index}")
+        # Preserve original slide's scripts (charts, etc.) before updating
+        original_scripts = current_deck.slides[index].scripts
+
+        # Update slide with preserved scripts
+        current_deck.slides[index] = Slide(
+            html=html,
+            slide_id=f"slide_{index}",
+            scripts=original_scripts,
+        )
 
         # Persist to database
         deck_dict = current_deck.to_dict()
@@ -2042,6 +2220,9 @@ class ChatService:
             slide_count=len(current_deck.slides),
             deck_dict=deck_dict,
         )
+
+        # NOTE: Save point creation moved to frontend after auto-verification completes
+        # Frontend calls POST /api/slides/versions/create after verification
 
         logger.info(
             "Updated slide",
@@ -2090,6 +2271,13 @@ class ChatService:
             scripts_content=current_deck.scripts,
             slide_count=len(current_deck.slides),
             deck_dict=deck_dict,
+        )
+
+        # Create save point
+        self.create_save_point(
+            session_id=session_id,
+            description=f"Duplicated slide {index + 1}",
+            deck=current_deck,
         )
 
         logger.info(
@@ -2143,6 +2331,13 @@ class ChatService:
             scripts_content=current_deck.scripts,
             slide_count=len(current_deck.slides),
             deck_dict=deck_dict,
+        )
+
+        # Create save point
+        self.create_save_point(
+            session_id=session_id,
+            description=f"Deleted slide {index + 1}",
+            deck=current_deck,
         )
 
         logger.info(

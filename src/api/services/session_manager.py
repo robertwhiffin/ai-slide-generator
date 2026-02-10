@@ -20,6 +20,7 @@ from src.database.models.session import (
     ChatRequest,
     SessionMessage,
     SessionSlideDeck,
+    SlideDeckVersion,
     UserSession,
 )
 from src.services.permission_service import PermissionDeniedError, PermissionService
@@ -658,6 +659,321 @@ class SessionManager:
             except json.JSONDecodeError:
                 logger.warning(f"Invalid verification_map JSON for session {session_id}")
                 return {}
+
+    # Version/Save Point operations
+    VERSION_LIMIT = 40  # Maximum save points per session
+
+    def create_version(
+        self,
+        session_id: str,
+        description: str,
+        deck_dict: Dict[str, Any],
+        verification_map: Optional[Dict[str, Any]] = None,
+        chat_history: Optional[List[Dict[str, Any]]] = None,
+    ) -> Dict[str, Any]:
+        """Create a new save point (version) for the slide deck.
+
+        If version limit is exceeded, the oldest version is deleted.
+        Version numbers are never reused - they continue incrementing.
+
+        Args:
+            session_id: Session to create version for
+            description: Auto-generated description of the change
+            deck_dict: Complete deck snapshot
+            verification_map: Verification results at time of snapshot
+            chat_history: Chat messages up to this point (auto-captured if not provided)
+
+        Returns:
+            Version info dictionary
+        """
+        with get_db_session() as db:
+            session = self._get_session_or_raise(db, session_id)
+
+            # Get the next version number
+            max_version = (
+                db.query(SlideDeckVersion.version_number)
+                .filter(SlideDeckVersion.session_id == session.id)
+                .order_by(SlideDeckVersion.version_number.desc())
+                .first()
+            )
+            next_version = (max_version[0] + 1) if max_version else 1
+
+            # Check version limit and delete oldest if needed
+            version_count = (
+                db.query(SlideDeckVersion)
+                .filter(SlideDeckVersion.session_id == session.id)
+                .count()
+            )
+            if version_count >= self.VERSION_LIMIT:
+                # Delete the oldest version
+                oldest = (
+                    db.query(SlideDeckVersion)
+                    .filter(SlideDeckVersion.session_id == session.id)
+                    .order_by(SlideDeckVersion.version_number.asc())
+                    .first()
+                )
+                if oldest:
+                    db.delete(oldest)
+                    logger.info(
+                        "Deleted oldest version due to limit",
+                        extra={
+                            "session_id": session_id,
+                            "deleted_version": oldest.version_number,
+                        },
+                    )
+
+            # Capture chat history if not provided
+            if chat_history is None:
+                chat_history = [
+                    {
+                        "id": m.id,
+                        "role": m.role,
+                        "content": m.content,
+                        "message_type": m.message_type,
+                        "created_at": m.created_at.isoformat(),
+                    }
+                    for m in session.messages
+                ]
+
+            # Create new version
+            version = SlideDeckVersion(
+                session_id=session.id,
+                version_number=next_version,
+                description=description,
+                deck_json=json.dumps(deck_dict),
+                verification_map_json=json.dumps(verification_map) if verification_map else None,
+                chat_history_json=json.dumps(chat_history) if chat_history else None,
+            )
+            db.add(version)
+            db.flush()
+
+            logger.info(
+                "Created save point",
+                extra={
+                    "session_id": session_id,
+                    "version_number": next_version,
+                    "description": description,
+                    "message_count": len(chat_history) if chat_history else 0,
+                },
+            )
+
+            return {
+                "version_number": version.version_number,
+                "description": version.description,
+                "created_at": version.created_at.isoformat(),
+                "slide_count": deck_dict.get("slide_count", len(deck_dict.get("slides", []))),
+                "message_count": len(chat_history) if chat_history else 0,
+            }
+
+    def list_versions(self, session_id: str) -> List[Dict[str, Any]]:
+        """List all save points for a session.
+
+        Args:
+            session_id: Session to list versions for
+
+        Returns:
+            List of version info dictionaries (newest first)
+        """
+        with get_db_session() as db:
+            session = self._get_session_or_raise(db, session_id)
+
+            versions = (
+                db.query(SlideDeckVersion)
+                .filter(SlideDeckVersion.session_id == session.id)
+                .order_by(SlideDeckVersion.version_number.desc())
+                .all()
+            )
+
+            result = []
+            for v in versions:
+                deck_dict = json.loads(v.deck_json) if v.deck_json else {}
+                result.append({
+                    "version_number": v.version_number,
+                    "description": v.description,
+                    "created_at": v.created_at.isoformat(),
+                    "slide_count": deck_dict.get("slide_count", len(deck_dict.get("slides", []))),
+                })
+
+            return result
+
+    def get_version(self, session_id: str, version_number: int) -> Optional[Dict[str, Any]]:
+        """Get a specific version for preview.
+
+        Args:
+            session_id: Session to get version from
+            version_number: Version number to retrieve
+
+        Returns:
+            Version data including full deck snapshot, or None if not found
+        """
+        with get_db_session() as db:
+            session = self._get_session_or_raise(db, session_id)
+
+            version = (
+                db.query(SlideDeckVersion)
+                .filter(
+                    SlideDeckVersion.session_id == session.id,
+                    SlideDeckVersion.version_number == version_number,
+                )
+                .first()
+            )
+
+            if not version:
+                return None
+
+            deck_dict = json.loads(version.deck_json) if version.deck_json else {}
+            verification_map = (
+                json.loads(version.verification_map_json)
+                if version.verification_map_json
+                else {}
+            )
+
+            # Merge verification into slides by content hash
+            from src.utils.slide_hash import compute_slide_hash
+
+            for slide in deck_dict.get("slides", []):
+                if slide.get("html"):
+                    content_hash = compute_slide_hash(slide["html"])
+                    slide["verification"] = verification_map.get(content_hash)
+                    slide["content_hash"] = content_hash
+
+            # Parse chat history for preview
+            chat_history = (
+                json.loads(version.chat_history_json)
+                if version.chat_history_json
+                else []
+            )
+
+            return {
+                "version_number": version.version_number,
+                "description": version.description,
+                "created_at": version.created_at.isoformat(),
+                "deck": deck_dict,
+                "verification_map": verification_map,
+                "chat_history": chat_history,
+            }
+
+    def restore_version(self, session_id: str, version_number: int) -> Dict[str, Any]:
+        """Restore deck to a specific version and delete all newer versions.
+
+        Args:
+            session_id: Session to restore
+            version_number: Version to restore to
+
+        Returns:
+            Restored deck dictionary
+
+        Raises:
+            ValueError: If version not found
+        """
+        with get_db_session() as db:
+            session = self._get_session_or_raise(db, session_id)
+
+            # Get the version to restore
+            version = (
+                db.query(SlideDeckVersion)
+                .filter(
+                    SlideDeckVersion.session_id == session.id,
+                    SlideDeckVersion.version_number == version_number,
+                )
+                .first()
+            )
+
+            if not version:
+                raise ValueError(f"Version {version_number} not found")
+
+            # Delete all versions newer than the restored one
+            deleted_count = (
+                db.query(SlideDeckVersion)
+                .filter(
+                    SlideDeckVersion.session_id == session.id,
+                    SlideDeckVersion.version_number > version_number,
+                )
+                .delete()
+            )
+
+            # Parse the deck data
+            deck_dict = json.loads(version.deck_json) if version.deck_json else {}
+            verification_map = (
+                json.loads(version.verification_map_json)
+                if version.verification_map_json
+                else {}
+            )
+            chat_history = (
+                json.loads(version.chat_history_json)
+                if version.chat_history_json
+                else []
+            )
+
+            # Merge verification into slides by content hash
+            from src.utils.slide_hash import compute_slide_hash
+
+            for slide in deck_dict.get("slides", []):
+                if slide.get("html"):
+                    content_hash = compute_slide_hash(slide["html"])
+                    slide["verification"] = verification_map.get(content_hash)
+                    slide["content_hash"] = content_hash
+
+            # Delete messages created after this save point
+            deleted_messages = 0
+            if version.created_at:
+                deleted_messages = (
+                    db.query(SessionMessage)
+                    .filter(
+                        SessionMessage.session_id == session.id,
+                        SessionMessage.created_at > version.created_at,
+                    )
+                    .delete()
+                )
+
+            # Update the current slide deck in database
+            if session.slide_deck:
+                session.slide_deck.deck_json = version.deck_json
+                session.slide_deck.verification_map = version.verification_map_json
+                session.slide_deck.title = deck_dict.get("title")
+                session.slide_deck.slide_count = len(deck_dict.get("slides", []))
+                session.slide_deck.updated_at = datetime.utcnow()
+
+            logger.info(
+                "Restored to save point",
+                extra={
+                    "session_id": session_id,
+                    "version_number": version_number,
+                    "deleted_newer_versions": deleted_count,
+                    "deleted_messages": deleted_messages,
+                },
+            )
+
+            return {
+                "version_number": version_number,
+                "description": version.description,
+                "deck": deck_dict,
+                "verification_map": verification_map,
+                "chat_history": chat_history,
+                "deleted_versions": deleted_count,
+                "deleted_messages": deleted_messages,
+            }
+
+    def get_current_version_number(self, session_id: str) -> Optional[int]:
+        """Get the current (latest) version number for a session.
+
+        Args:
+            session_id: Session to check
+
+        Returns:
+            Latest version number or None if no versions exist
+        """
+        with get_db_session() as db:
+            session = self._get_session_or_raise(db, session_id)
+
+            max_version = (
+                db.query(SlideDeckVersion.version_number)
+                .filter(SlideDeckVersion.session_id == session.id)
+                .order_by(SlideDeckVersion.version_number.desc())
+                .first()
+            )
+
+            return max_version[0] if max_version else None
 
     # Session locking for concurrent request handling
     def acquire_session_lock(self, session_id: str, timeout_seconds: int = 300) -> bool:

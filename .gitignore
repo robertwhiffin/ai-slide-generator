@@ -63,3 +63,8 @@ frontend/.vite/
 frontend/dist/
 *.local
 
+# Playwright
+frontend/playwright-report/
+frontend/test-results/
+
+config/deployment.yaml

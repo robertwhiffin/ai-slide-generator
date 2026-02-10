@@ -68,6 +68,14 @@ class ChatRequest(BaseModel):
         description="Optional context containing the slides to edit",
     )
 
+    @field_validator("message")
+    @classmethod
+    def validate_message_not_whitespace(cls, value: str) -> str:
+        """Validate message is not just whitespace."""
+        if not value.strip():
+            raise ValueError("Message cannot be empty or whitespace only")
+        return value
+
     class Config:
         """Pydantic model configuration."""
 
