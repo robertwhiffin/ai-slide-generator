@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { api } from '../../services/api';
 import type { Session } from '../../services/api';
 import { useSession } from '../../contexts/SessionContext';
+import { useGeneration } from '../../contexts/GenerationContext';
 
 interface SessionHistoryProps {
   onSessionSelect: (sessionId: string) => void;
@@ -18,6 +19,7 @@ export const SessionHistory: React.FC<SessionHistoryProps> = ({
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editTitle, setEditTitle] = useState('');
   const { sessionId: currentSessionId } = useSession();
+  const { historyInvalidationKey } = useGeneration();
 
   const loadSessions = async () => {
     try {
@@ -33,9 +35,10 @@ export const SessionHistory: React.FC<SessionHistoryProps> = ({
     }
   };
 
+  // Refetch when this view is shown and whenever a generation completes (invalidation key bumps)
   useEffect(() => {
     loadSessions();
-  }, []);
+  }, [historyInvalidationKey]);
 
   const handleRename = async (sessionId: string) => {
     if (!editTitle.trim()) return;
@@ -67,16 +70,19 @@ export const SessionHistory: React.FC<SessionHistoryProps> = ({
 
   const formatDate = (dateStr: string) => {
     const date = new Date(dateStr);
-    // Compact date format with year: "1/8/2026, 2:20 PM"
-    return date.toLocaleDateString('en-US', { 
-      month: 'numeric', 
-      day: 'numeric',
-      year: 'numeric'
-    }) + ', ' + date.toLocaleTimeString('en-US', { 
-      hour: 'numeric', 
-      minute: '2-digit',
-      hour12: true 
-    });
+    return (
+      date.toLocaleDateString('en-US', {
+        month: 'numeric',
+        day: 'numeric',
+        year: 'numeric',
+      }) +
+      ', ' +
+      date.toLocaleTimeString('en-US', {
+        hour: 'numeric',
+        minute: '2-digit',
+        hour12: true,
+      })
+    );
   };
 
   if (loading) {
@@ -165,7 +171,10 @@ export const SessionHistory: React.FC<SessionHistoryProps> = ({
                 >
                   <td className="px-3 py-3">
                     {session.profile_name ? (
-                      <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-purple-100 text-purple-800 truncate max-w-full" title={session.profile_name}>
+                      <span
+                        className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-purple-100 text-purple-800 truncate max-w-full"
+                        title={session.profile_name}
+                      >
                         {session.profile_name}
                       </span>
                     ) : (
@@ -201,7 +210,10 @@ export const SessionHistory: React.FC<SessionHistoryProps> = ({
                       </div>
                     ) : (
                       <div className="flex items-center gap-1">
-                        <span className="text-sm font-medium text-gray-900 truncate" title={session.title}>
+                        <span
+                          className="text-sm font-medium text-gray-900 truncate"
+                          title={session.title}
+                        >
                           {session.title}
                         </span>
                         {session.session_id === currentSessionId && (
@@ -263,4 +275,3 @@ export const SessionHistory: React.FC<SessionHistoryProps> = ({
     </div>
   );
 };
-

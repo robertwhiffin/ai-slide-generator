@@ -277,7 +277,10 @@ async def user_auth_middleware(request: Request, call_next):
         except Exception as e:
             logger.warning(f"Failed to create user client from token: {e}")
     else:
-        logger.warning("OBO auth: no x-forwarded-access-token header present")
+        # Local development: no token, so set a dev user so session create/list see same user
+        if os.getenv("ENVIRONMENT") == "development":
+            dev_user = os.getenv("DEV_USER_ID") or os.getenv("DEV_USER_EMAIL") or "dev@local.dev"
+            set_current_user(dev_user)
     
     try:
         response = await call_next(request)

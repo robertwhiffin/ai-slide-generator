@@ -97,6 +97,16 @@ export interface Session {
   profile_name?: string | null;
 }
 
+/** One MLflow run (invocation) for history, filtered for current user */
+export interface Invocation {
+  run_id: string | null;
+  session_id: string | null;
+  start_time: string | null;
+  end_time: string | null;
+  duration_seconds: number | null;
+  status: string;
+}
+
 interface SendMessageParams {
   message: string;
   sessionId: string;
@@ -174,13 +184,26 @@ export const api = {
   },
 
   /**
-   * List all sessions
+   * List all sessions (Postgres-backed)
    */
   async listSessions(limit = 50): Promise<{ sessions: Session[]; count: number }> {
     const response = await fetch(`${API_BASE_URL}/api/sessions?limit=${limit}`);
 
     if (!response.ok) {
       throw new ApiError(response.status, 'Failed to list sessions');
+    }
+
+    return response.json();
+  },
+
+  /**
+   * List invocations (MLflow runs) for the current user to populate history
+   */
+  async listInvocations(limit = 100): Promise<{ invocations: Invocation[]; count: number }> {
+    const response = await fetch(`${API_BASE_URL}/api/sessions/invocations?limit=${limit}`);
+
+    if (!response.ok) {
+      throw new ApiError(response.status, 'Failed to list invocations');
     }
 
     return response.json();

@@ -53,7 +53,7 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(({
     clearSelection,
   } = useSelection();
   const { sessionId, isInitializing, error: sessionError, setExperimentUrl } = useSession();
-  const { setIsGenerating } = useGeneration();
+  const { setIsGenerating, invalidateHistory } = useGeneration();
 
   useKeyboardShortcuts();
 
@@ -210,6 +210,7 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(({
           stopLoadingMessages();
           setIsLoading(false);
           setIsGenerating(false);
+          invalidateHistory();
 
           const nextRawHtml = event.raw_html ?? rawHtml ?? null;
 

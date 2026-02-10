@@ -25,7 +25,7 @@ cd ai-slide-generator
 
 ### Step 2: Configure Databricks Credentials (Optional)
 ```bash
-cp .env.example .env
+cp .env
 nano .env  # Set DATABRICKS_HOST and DATABRICKS_TOKEN
 ```
 

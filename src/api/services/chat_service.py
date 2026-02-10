@@ -1378,6 +1378,80 @@ class ChatService:
                 },
             )
 
+    def _get_user_experiment_id(self, username: str) -> Optional[str]:
+        """Get the MLflow experiment ID for a user (lookup only, no create).
+
+        Uses the same path convention as _ensure_user_experiment.
+        Returns None if the experiment does not exist.
+        """
+        import mlflow
+
+        sp_folder = get_service_principal_folder()
+        experiment_path = (
+            f"{sp_folder}/{username}/ai-slide-generator"
+            if sp_folder
+            else f"/Workspace/Users/{username}/ai-slide-generator"
+        )
+        try:
+            mlflow.set_tracking_uri("databricks")
+            experiment = mlflow.get_experiment_by_name(experiment_path)
+            return experiment.experiment_id if experiment else None
+        except Exception as e:
+            logger.warning(
+                f"Failed to get user experiment for invocations: {e}",
+                extra={"username": username, "experiment_path": experiment_path},
+            )
+            return None
+
+    def list_invocations(self, username: str, limit: int = 100) -> List[Dict[str, Any]]:
+        """List MLflow runs (invocations) for the current user's experiment.
+
+        Returns runs ordered by start_time descending, filtered to the user's
+        experiment. Each run may have a session_id tag for restore.
+        """
+        import mlflow
+
+        experiment_id = self._get_user_experiment_id(username)
+        if not experiment_id:
+            return []
+
+        try:
+            mlflow.set_tracking_uri("databricks")
+            runs = mlflow.search_runs(
+                experiment_ids=[experiment_id],
+                order_by=["start_time DESC"],
+                max_results=limit,
+            )
+            if runs.empty:
+                return []
+
+            invocations: List[Dict[str, Any]] = []
+            for _, row in runs.iterrows():
+                run_id = row.get("run_id") or row.get("run_uuid")
+                start_time = row.get("start_time")
+                end_time = row.get("end_time")
+                status = row.get("status", "UNKNOWN")
+                raw_sid = row.get("tags.session_id")
+                session_id = raw_sid if (isinstance(raw_sid, str) and raw_sid.strip()) else None
+                duration_seconds = None
+                if start_time is not None and end_time is not None:
+                    try:
+                        duration_seconds = (end_time - start_time).total_seconds()
+                    except Exception:
+                        pass
+                invocations.append({
+                    "run_id": str(run_id) if run_id else None,
+                    "session_id": session_id,
+                    "start_time": start_time.isoformat() if hasattr(start_time, "isoformat") and start_time else None,
+                    "end_time": end_time.isoformat() if hasattr(end_time, "isoformat") and end_time else None,
+                    "duration_seconds": duration_seconds,
+                    "status": status,
+                })
+            return invocations
+        except Exception as e:
+            logger.error(f"Failed to list invocations: {e}", exc_info=True)
+            return []
+
     def _hydrate_chat_history(
         self, session_id: str, chat_history: ChatMessageHistory
     ) -> int:

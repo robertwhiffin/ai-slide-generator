@@ -1144,6 +1144,11 @@ class SlideGeneratorAgent:
 
             # Use mlflow.start_span for manual tracing
             with mlflow.start_span(name="generate_slides") as span:
+                # Tag the run so list_invocations can map run -> session for restore
+                try:
+                    mlflow.set_tag("session_id", session_id)
+                except Exception:
+                    pass
                 # Set custom attributes including session metadata for filtering
                 span.set_attribute("question", question)
                 span.set_attribute("session_id", session_id)
@@ -1368,6 +1373,10 @@ class SlideGeneratorAgent:
                 mlflow.set_experiment(experiment_id=session["experiment_id"])
 
             with mlflow.start_span(name="generate_slides_streaming") as span:
+                try:
+                    mlflow.set_tag("session_id", session_id)
+                except Exception:
+                    pass
                 # Set custom attributes including session metadata for filtering
                 span.set_attribute("question", question)
                 span.set_attribute("session_id", session_id)

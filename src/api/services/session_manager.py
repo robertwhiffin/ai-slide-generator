@@ -164,6 +164,22 @@ class SessionManager:
                 "profile_name": session.profile_name,
             }
 
+    def _session_to_dict(self, s: UserSession) -> Dict[str, Any]:
+        """Convert a UserSession ORM object to a serialisable dictionary."""
+        return {
+            "session_id": s.session_id,
+            "user_id": s.user_id,
+            "created_by": s.created_by,
+            "visibility": s.visibility,
+            "title": s.title,
+            "created_at": s.created_at.isoformat(),
+            "last_activity": s.last_activity.isoformat(),
+            "message_count": len(s.messages),
+            "has_slide_deck": s.slide_deck is not None,
+            "profile_id": s.profile_id,
+            "profile_name": s.profile_name,
+        }
+
     def list_sessions(
         self,
         user_id: Optional[str] = None,
@@ -205,22 +221,35 @@ class SessionManager:
             accessible.sort(key=lambda s: s.last_activity, reverse=True)
             accessible = accessible[:limit]
 
-            return [
-                {
-                    "session_id": s.session_id,
-                    "user_id": s.user_id,
-                    "created_by": s.created_by,
-                    "visibility": s.visibility,
-                    "title": s.title,
-                    "created_at": s.created_at.isoformat(),
-                    "last_activity": s.last_activity.isoformat(),
-                    "message_count": len(s.messages),
-                    "has_slide_deck": s.slide_deck is not None,
-                    "profile_id": s.profile_id,
-                    "profile_name": s.profile_name,
-                }
-                for s in accessible
-            ]
+            return [self._session_to_dict(s) for s in accessible]
+
+    def list_user_generations(
+        self,
+        username: str,
+        limit: int = 100,
+    ) -> List[Dict[str, Any]]:
+        """List sessions created by a specific user (strict ownership, no ACL lookup).
+
+        Used by the history panel to show only the current user's generations.
+        This is a lean query: SELECT ... FROM user_sessions WHERE created_by = :user
+        ORDER BY last_activity DESC LIMIT :limit.
+
+        Args:
+            username: Owner's email / username (matched against created_by)
+            limit: Maximum number of sessions to return
+
+        Returns:
+            List of session info dictionaries, most-recent first
+        """
+        with get_db_session() as db:
+            sessions = (
+                db.query(UserSession)
+                .filter(UserSession.created_by == username)
+                .order_by(UserSession.last_activity.desc())
+                .limit(limit)
+                .all()
+            )
+            return [self._session_to_dict(s) for s in sessions]
 
     def delete_session(self, session_id: str, check_permission: bool = True) -> bool:
         """Delete a session and all associated data.

@@ -48,10 +48,33 @@ fi
 # 2. Check for uv
 # ============================================================================
 echo -e "${BLUE}Checking for uv...${NC}"
+
+# Add common pip install locations to PATH
+export PATH="$HOME/.local/bin:$PATH"
+
 if ! command -v uv &> /dev/null; then
     echo -e "${YELLOW}ℹ️  uv not found - installing for faster dependency management...${NC}"
-    pip3 install uv
+    pip3 install --user uv
     echo -e "${GREEN}✓ uv installed${NC}"
+    
+    # Make sure uv is available in PATH after installation
+    export PATH="$HOME/.local/bin:$PATH"
+    hash -r  # Clear bash's command cache
+    
+    # Verify uv is now available
+    if ! command -v uv &> /dev/null; then
+        echo -e "${RED}❌ uv installation succeeded but command not found${NC}"
+        echo "Trying to locate uv..."
+        # Try to find uv in common locations
+        UV_PATH=$(python3 -c "import site; print(site.USER_BASE)" 2>/dev/null)/bin/uv
+        if [ -f "$UV_PATH" ]; then
+            echo -e "${YELLOW}Found uv at: $UV_PATH${NC}"
+            export PATH="$(dirname $UV_PATH):$PATH"
+        else
+            echo -e "${RED}Could not locate uv. You may need to add it to your PATH manually.${NC}"
+            exit 1
+        fi
+    fi
 else
     echo -e "${GREEN}✓ uv found${NC}"
 fi
@@ -65,7 +88,15 @@ echo -e "${BLUE}→ Creating virtual environment and installing dependencies...$
 echo "  (This uses uv for 10-100x faster installation)"
 echo ""
 
-if uv sync --all-extras; then
+# Try uv command directly, fall back to python -m uv if needed
+if command -v uv &> /dev/null; then
+    UV_CMD="uv"
+else
+    echo -e "${YELLOW}Using python3 -m uv (uv not in PATH)${NC}"
+    UV_CMD="python3 -m uv"
+fi
+
+if $UV_CMD sync --all-extras; then
     echo ""
     echo -e "${GREEN}✓ Dependencies installed (including dev tools)${NC}"
 else
@@ -75,7 +106,8 @@ else
     echo "Troubleshooting:"
     echo "  - Check that requirements.txt exists"
     echo "  - Check that pyproject.toml is valid"
-    echo "  - Try: pip3 install uv --upgrade"
+    echo "  - Try: pip3 install --user uv --upgrade"
+    echo "  - Or manually add ~/.local/bin to your PATH"
     echo ""
     exit 1
 fi

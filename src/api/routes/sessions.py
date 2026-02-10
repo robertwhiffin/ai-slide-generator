@@ -2,6 +2,8 @@
 
 Provides CRUD operations for managing user sessions with persistent storage.
 All blocking database calls are wrapped with asyncio.to_thread to avoid blocking the event loop.
+
+History can be populated from invocations (MLflow runs) per user via GET /api/sessions/invocations.
 """
 
 import asyncio
@@ -14,10 +16,12 @@ from typing import List, Optional
 from fastapi import APIRouter, HTTPException, Query
 
 from src.api.schemas.requests import CreateSessionRequest
+from src.api.services.chat_service import get_chat_service
 from src.api.services.session_manager import (
     SessionNotFoundError,
     get_session_manager,
 )
+from src.core.user_context import get_current_user, get_current_user_from_client
 
 logger = logging.getLogger(__name__)
 
@@ -61,23 +65,23 @@ async def create_session(request: CreateSessionRequest = None):
 
 @router.get("")
 async def list_sessions(
-    user_id: Optional[str] = Query(None, description="Filter by user ID"),
     limit: int = Query(50, ge=1, le=100, description="Maximum sessions to return"),
 ):
-    """List sessions.
+    """List sessions for the current user only (user_sessions WHERE created_by = current_user)."""
+    current_user = get_current_user()
+    if not current_user:
+        try:
+            current_user = get_current_user_from_client()
+        except Exception:
+            pass
+    if not current_user:
+        return {"sessions": [], "count": 0}
 
-    Args:
-        user_id: Optional user filter
-        limit: Maximum number of sessions to return
-
-    Returns:
-        List of session summaries
-    """
     try:
         session_manager = get_session_manager()
         sessions = await asyncio.to_thread(
-            session_manager.list_sessions,
-            user_id=user_id,
+            session_manager.list_user_generations,
+            username=current_user,
             limit=limit,
         )
 
@@ -88,6 +92,40 @@ async def list_sessions(
         raise HTTPException(
             status_code=500,
             detail=f"Failed to list sessions: {str(e)}",
+        ) from e
+
+
+@router.get("/invocations")
+async def list_invocations(
+    limit: int = Query(100, ge=1, le=200, description="Maximum invocations to return"),
+):
+    """List MLflow runs (invocations) for the current user, filtered to their experiment.
+
+    Use this to populate history from invocations instead of Postgres sessions.
+    Each invocation may include session_id for restore.
+    """
+    username = get_current_user()
+    if not username:
+        try:
+            username = get_current_user_from_client()
+        except Exception:
+            pass
+    if not username:
+        return {"invocations": [], "count": 0}
+
+    try:
+        chat_service = get_chat_service()
+        invocations = await asyncio.to_thread(
+            chat_service.list_invocations,
+            username=username,
+            limit=limit,
+        )
+        return {"invocations": invocations, "count": len(invocations)}
+    except Exception as e:
+        logger.error(f"Failed to list invocations: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to list invocations: {str(e)}",
         ) from e
 
 
