@@ -54,6 +54,32 @@ class ChatRequest(Base):
         return f"<ChatRequest(request_id='{self.request_id}', status='{self.status}')>"
 
 
+class ExportJob(Base):
+    """Tracks async PPTX export jobs for polling.
+
+    Database-backed job tracking replaces the previous in-memory dict,
+    enabling multi-worker deployments where POST (enqueue) and GET (poll)
+    requests may hit different processes.
+    """
+
+    __tablename__ = "export_jobs"
+
+    id = Column(Integer, primary_key=True)
+    job_id = Column(String(64), unique=True, nullable=False, index=True)
+    session_id = Column(String(128), nullable=False)  # string session_id, not FK
+    status = Column(String(20), default="pending")  # pending/running/completed/error
+    progress = Column(Integer, default=0)
+    total_slides = Column(Integer, default=0)
+    title = Column(String(512), nullable=True)
+    output_path = Column(Text, nullable=True)
+    error_message = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    completed_at = Column(DateTime, nullable=True)
+
+    def __repr__(self):
+        return f"<ExportJob(job_id='{self.job_id}', status='{self.status}')>"
+
+
 class UserSession(Base):
     """User session for tracking conversation state.
 
