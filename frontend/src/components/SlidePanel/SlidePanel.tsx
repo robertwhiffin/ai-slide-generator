@@ -102,7 +102,7 @@ export const SlidePanel: React.FC<SlidePanelProps> = ({ slideDeck, rawHtml, onSl
         // Fetch full deck to get verification merged from verification_map
         const result = await api.getSlides(sessionId);
         if (result.slide_deck) {
-          onSlideChange(result.slide_deck);
+          onSlideChange?.(result.slide_deck);
         }
         clearSelection();
       } catch (error) {
@@ -126,7 +126,7 @@ export const SlidePanel: React.FC<SlidePanelProps> = ({ slideDeck, rawHtml, onSl
       // Fetch full deck to get verification merged from verification_map
       const result = await api.getSlides(sessionId);
       if (result.slide_deck) {
-        onSlideChange(result.slide_deck);
+        onSlideChange?.(result.slide_deck);
       }
       clearSelection();
     } catch (error) {
@@ -146,7 +146,7 @@ export const SlidePanel: React.FC<SlidePanelProps> = ({ slideDeck, rawHtml, onSl
       // Fetch updated deck
       const result = await api.getSlides(sessionId);
       if (result.slide_deck) {
-        onSlideChange(result.slide_deck);
+        onSlideChange?.(result.slide_deck);
       }
       clearSelection();
     } catch (error) {
@@ -167,7 +167,7 @@ export const SlidePanel: React.FC<SlidePanelProps> = ({ slideDeck, rawHtml, onSl
       // Update only the verification field locally
       const updatedSlides = [...slideDeck.slides];
       updatedSlides[index] = { ...updatedSlides[index], verification: verification || undefined };
-      onSlideChange({ ...slideDeck, slides: updatedSlides });
+      onSlideChange?.({ ...slideDeck, slides: updatedSlides });
     } catch (error) {
       console.error('Failed to update verification:', error);
       // Don't throw - verification persistence is non-critical
@@ -352,7 +352,7 @@ export const SlidePanel: React.FC<SlidePanelProps> = ({ slideDeck, rawHtml, onSl
     try {
       const result = await api.getSlides(sessionId);
       if (result.slide_deck) {
-        onSlideChange(result.slide_deck);
+        onSlideChange?.(result.slide_deck);
       }
     } catch (error) {
       console.error('[Auto-verify] Failed to refresh slides:', error);
