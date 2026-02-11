@@ -31,3 +31,17 @@ def substitute_image_placeholders(html: str, db: Session) -> str:
             return match.group(0)  # Leave placeholder if image not found
 
     return IMAGE_PLACEHOLDER_PATTERN.sub(replace_match, html)
+
+
+def substitute_deck_dict_images(deck_dict: dict, db: Session) -> dict:
+    """Substitute {{image:ID}} placeholders in all slides of a deck dict."""
+    if not deck_dict or not deck_dict.get("slides"):
+        return deck_dict
+    for slide in deck_dict["slides"]:
+        html = slide.get("html", "")
+        if "{{image:" in html:
+            slide["html"] = substitute_image_placeholders(html, db)
+    # Also handle html_content if present (full knitted HTML)
+    if deck_dict.get("html_content") and "{{image:" in deck_dict["html_content"]:
+        deck_dict["html_content"] = substitute_image_placeholders(deck_dict["html_content"], db)
+    return deck_dict
