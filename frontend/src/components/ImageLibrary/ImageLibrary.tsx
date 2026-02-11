@@ -23,6 +23,7 @@ export const ImageLibrary: React.FC<ImageLibraryProps> = ({
   const [images, setImages] = useState<ImageAsset[]>([]);
   const [loading, setLoading] = useState(true);
   const [uploading, setUploading] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedCategory, setSelectedCategory] = useState<string>(filterCategory || 'all');
@@ -51,32 +52,57 @@ export const ImageLibrary: React.FC<ImageLibraryProps> = ({
 
   const validateFile = (file: File): string | null => {
     if (!ALLOWED_TYPES.includes(file.type)) {
-      return `Invalid file type: ${file.type}. Allowed: PNG, JPEG, GIF, SVG`;
+      return `${file.name}: Invalid file type (${file.type}). Allowed: PNG, JPEG, GIF, SVG`;
     }
     if (file.size > MAX_FILE_SIZE) {
-      return `File too large: ${(file.size / 1024 / 1024).toFixed(1)}MB (max 5MB)`;
+      return `${file.name}: Too large (${(file.size / 1024 / 1024).toFixed(1)}MB, max 5MB)`;
     }
     return null;
   };
 
-  const handleUpload = async (file: File) => {
-    const validationError = validateFile(file);
-    if (validationError) {
-      setError(validationError);
+  const handleUploadFiles = async (files: File[]) => {
+    // Validate all files first
+    const errors: string[] = [];
+    const validFiles: File[] = [];
+    for (const file of files) {
+      const validationError = validateFile(file);
+      if (validationError) {
+        errors.push(validationError);
+      } else {
+        validFiles.push(file);
+      }
+    }
+
+    if (validFiles.length === 0) {
+      setError(errors.join('\n'));
       return;
     }
 
     setUploading(true);
     setError(null);
-    try {
-      await api.uploadImage(file, {
-        category: selectedCategory === 'all' ? 'content' : selectedCategory,
-      });
+
+    const category = selectedCategory === 'all' ? 'content' : selectedCategory;
+    let uploaded = 0;
+
+    for (const file of validFiles) {
+      setUploadProgress(`Uploading ${uploaded + 1} of ${validFiles.length}...`);
+      try {
+        await api.uploadImage(file, { category });
+        uploaded++;
+      } catch (err: any) {
+        errors.push(`${file.name}: ${err.message || 'Upload failed'}`);
+      }
+    }
+
+    setUploading(false);
+    setUploadProgress('');
+
+    if (errors.length > 0) {
+      setError(errors.join('\n'));
+    }
+
+    if (uploaded > 0) {
       await loadImages();
-    } catch (err: any) {
-      setError(err.message || 'Upload failed');
-    } finally {
-      setUploading(false);
     }
   };
 
@@ -92,13 +118,13 @@ export const ImageLibrary: React.FC<ImageLibraryProps> = ({
   const handleDrop = (e: React.DragEvent) => {
     e.preventDefault();
     setDragOver(false);
-    const file = e.dataTransfer.files[0];
-    if (file) handleUpload(file);
+    const files = Array.from(e.dataTransfer.files);
+    if (files.length > 0) handleUploadFiles(files);
   };
 
   const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (file) handleUpload(file);
+    const files = e.target.files ? Array.from(e.target.files) : [];
+    if (files.length > 0) handleUploadFiles(files);
     if (fileInputRef.current) fileInputRef.current.value = '';
   };
 
@@ -160,17 +186,18 @@ export const ImageLibrary: React.FC<ImageLibraryProps> = ({
             ref={fileInputRef}
             type="file"
             accept="image/png,image/jpeg,image/gif,image/svg+xml"
+            multiple
             onChange={handleFileSelect}
             className="hidden"
           />
           {uploading ? (
-            <p className="text-sm text-gray-500">Uploading...</p>
+            <p className="text-sm text-gray-500">{uploadProgress || 'Uploading...'}</p>
           ) : (
             <>
               <p className="text-sm text-gray-600">
-                Drop image here or <span className="text-blue-600 underline">browse</span>
+                Drop images here or <span className="text-blue-600 underline">browse</span>
               </p>
-              <p className="text-xs text-gray-400 mt-1">PNG, JPEG, GIF, SVG (max 5MB)</p>
+              <p className="text-xs text-gray-400 mt-1">PNG, JPEG, GIF, SVG (max 5MB each)</p>
             </>
           )}
         </div>
@@ -178,9 +205,9 @@ export const ImageLibrary: React.FC<ImageLibraryProps> = ({
 
       {/* Error */}
       {error && (
-        <div className="p-3 bg-red-50 text-red-700 rounded-lg text-sm flex items-center justify-between">
-          <span>{error}</span>
-          <button onClick={() => setError(null)} className="text-red-500 hover:text-red-700 ml-2">
+        <div className="p-3 bg-red-50 text-red-700 rounded-lg text-sm flex items-start justify-between">
+          <span className="whitespace-pre-line">{error}</span>
+          <button onClick={() => setError(null)} className="text-red-500 hover:text-red-700 ml-2 flex-shrink-0">
             &times;
           </button>
         </div>

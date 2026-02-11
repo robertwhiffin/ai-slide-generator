@@ -39,6 +39,17 @@ def upload_image(
     if len(file_content) > MAX_FILE_SIZE:
         raise ValueError(f"File too large: {len(file_content)} bytes (max {MAX_FILE_SIZE})")
 
+    # Check for duplicate original_filename among active images (case-insensitive)
+    existing = db.query(ImageAsset).filter(
+        ImageAsset.is_active == True,
+        ImageAsset.original_filename.ilike(original_filename),
+    ).first()
+    if existing:
+        raise ValueError(
+            f"An image named '{original_filename}' already exists (id={existing.id}). "
+            "Please rename the file or delete the existing image first."
+        )
+
     # 2. Generate thumbnail (in-memory, no side effects)
     thumbnail_b64 = _generate_thumbnail(file_content, mime_type)
 
