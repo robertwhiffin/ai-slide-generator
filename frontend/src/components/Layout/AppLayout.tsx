@@ -369,6 +369,19 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
                 >
                   New
                 </button>
+                {urlSessionId && (
+                  <button
+                    onClick={async () => {
+                      const viewUrl = `${window.location.origin}/sessions/${urlSessionId}/view`;
+                      await navigator.clipboard.writeText(viewUrl);
+                      showToast('Link copied to clipboard', 'success');
+                    }}
+                    className="px-3 py-1.5 rounded text-sm transition-colors bg-blue-500 hover:bg-blue-700 text-blue-100"
+                    title="Copy shareable view link"
+                  >
+                    Share
+                  </button>
+                )}
               </div>
             )}
 
