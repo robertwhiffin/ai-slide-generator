@@ -22,10 +22,15 @@ import { api } from '../../services/api';
 
 type ViewMode = 'main' | 'profiles' | 'deck_prompts' | 'slide_styles' | 'images' | 'history' | 'help';
 
-export const AppLayout: React.FC = () => {
+interface AppLayoutProps {
+  initialView?: ViewMode;
+  viewOnly?: boolean;
+}
+
+export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', viewOnly = false }) => {
   const [slideDeck, setSlideDeck] = useState<SlideDeck | null>(null);
   const [rawHtml, setRawHtml] = useState<string | null>(null);
-  const [viewMode, setViewMode] = useState<ViewMode>('help');
+  const [viewMode, setViewMode] = useState<ViewMode>(initialView);
   const [showSaveDialog, setShowSaveDialog] = useState(false);
   // Key to force remount ChatPanel when profile/session changes
   const [chatKey, setChatKey] = useState<number>(0);
@@ -460,7 +465,7 @@ export const AppLayout: React.FC = () => {
       {viewMode === 'main' && (
         <div className="flex-1 flex overflow-hidden">
           {/* Chat Panel */}
-          <div className="w-[32%] min-w-[260px] border-r">
+          <div className="w-[32%] min-w-[260px] border-r" data-testid="chat-panel">
             <ChatPanel
               key={chatKey}
               ref={chatPanelRef}
@@ -482,7 +487,7 @@ export const AppLayout: React.FC = () => {
           <SelectionRibbon slideDeck={displayDeck} onSlideNavigate={handleSlideNavigate} versionKey={versionKey} />
 
           {/* Slide Panel */}
-          <div className="flex-1">
+          <div className="flex-1" data-testid="slide-panel">
             <SlidePanel
               slideDeck={displayDeck}
               rawHtml={rawHtml}
