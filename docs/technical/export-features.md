@@ -160,11 +160,13 @@ Both export options are accessible through a unified dropdown menu in the slide 
 - Validates slide deck availability before queuing
 
 **Export Job Queue** (`src/api/services/export_job_queue.py`):
-- In-memory job queue using `asyncio.Queue`
+- Database-backed job tracking via `ExportJob` SQLAlchemy model
+- `asyncio.Queue` for local worker dispatch within each process
 - Background worker processes jobs in thread pool
 - Thread pool execution prevents blocking event loop during LLM calls
-- Progress tracking per job (slides completed / total)
-- Job cleanup after download
+- Progress tracking per job (slides completed / total) stored in DB
+- Job cleanup after download (deletes DB row + temp file)
+- Multi-worker safe: any process can read job status from the shared database
 
 **PPTX Converter Service** (`src/services/html_to_pptx.py`):
 - `HtmlToPptxConverterV3` class
@@ -277,7 +279,7 @@ Potential improvements for export features:
 - [ ] Export scheduling/automation
 - [ ] Compression options for PDF
 - [ ] Export quality presets (high/medium/low)
-- [ ] Persistent job storage (survive server restarts)
+- [x] Persistent job storage (survive server restarts) - **Implemented** (DB-backed ExportJob model)
 
 ## Related Documentation
 

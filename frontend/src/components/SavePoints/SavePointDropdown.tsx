@@ -21,7 +21,7 @@ export const SavePointDropdown: React.FC<SavePointDropdownProps> = ({
   currentVersion,
   previewVersion,
   onPreview,
-  onRevert,
+  onRevert: _onRevert,
   disabled = false,
 }) => {
   const [isOpen, setIsOpen] = useState(false);

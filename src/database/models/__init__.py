@@ -13,6 +13,7 @@ from src.database.models.profile import ConfigProfile
 from src.database.models.prompts import ConfigPrompts
 from src.database.models.session import (
     ChatRequest,
+    ExportJob,
     SessionMessage,
     SessionSlideDeck,
     SlideDeckVersion,
@@ -24,6 +25,7 @@ from src.database.models.slide_style_library import SlideStyleLibrary
 __all__ = [
     "ChatRequest",
     "ConfigAIInfra",
+    "ExportJob",
     "ConfigGenieSpace",
     "ConfigHistory",
     "ConfigProfile",

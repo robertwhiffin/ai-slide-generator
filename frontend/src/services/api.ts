@@ -947,6 +947,7 @@ export const api = {
     created_at: string;
     deck: SlideDeck;
     verification_map: Record<string, unknown>;
+    chat_history?: Record<string, unknown>[];
   }> {
     const response = await fetch(
       `${API_BASE_URL}/api/slides/versions/${versionNumber}?session_id=${encodeURIComponent(sessionId)}`
