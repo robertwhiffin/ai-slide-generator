@@ -2,13 +2,14 @@
 
 ## Quick Reference (MVP Decisions)
 
-- **Storage**: UC Volumes (binaries) + Lakebase (metadata + thumbnails)
+- **Storage**: Lakebase-only (metadata + image bytes in `LargeBinary` column)
 - **Serving**: Base64 data URIs embedded in HTML (self-contained slides)
 - **Thumbnails**: 150x150 base64 stored in `images.thumbnail_base64` column
 - **Size Limit**: 5MB per image
 - **File Types**: PNG, JPG, GIF (including animated), SVG
 - **Optimization**: None for MVP (rely on size limit)
 - **Branding**: Controlled via Slide Styles (single source of truth for appearance)
+- **Paste-to-Chat**: Clipboard paste into chat input, auto-upload, "Save to library?" toggle
 - **Permissions/Sharing**: Deferred (separate permissions branch in progress)
 
 ## Feature Overview
@@ -52,70 +53,44 @@ An implementing agent MUST follow these patterns (deviation will break consisten
 
 ## Storage Architecture
 
-### Primary Storage: Unity Catalog Volumes
+### Lakebase-Only (PostgreSQL)
 
-```
-/Volumes/{catalog}/{schema}/slide_images/
-├── {user_id}/
-│   ├── {image_id}.png
-│   ├── {image_id}.jpg
-│   └── {image_id}.gif
-└── shared/
-    └── {image_id}.{ext}
-```
+All image data — metadata, thumbnails, and raw image bytes — stored in a single
+PostgreSQL table. No external storage dependencies (no UC Volumes, no filesystem).
 
-**Why UC Volumes (not Lakebase binary)?**
-- Designed for file storage (PostgreSQL not optimized for large blobs)
-- Respects Unity Catalog permissions
-- Cost-effective at scale
-- Databricks-native SDK integration
+**Why Lakebase-only (not UC Volumes)?**
+- No UC Volume infrastructure exists in the project today
+- UC Volumes would require catalog + schema provisioning and configuration
+- 5MB size limit keeps images small — PostgreSQL handles this fine
+- Even 1,000 images at 5MB = ~5GB, well within PostgreSQL capacity
+- No storage abstraction layer needed (no `ImageStorageBackend`, no environment detection)
+- No local filesystem fallback needed for development
+- Single source of truth — backup, migration, and queries all in one place
+- Images are served as base64 anyway — no benefit to an intermediate file system
 
-### Volume Path Configuration
+**Future consideration**: If image volumes grow very large (10,000+ images), UC Volumes
+can be added later as an optimization. The `image_data` column would be replaced with a
+`storage_path` column pointing to the volume. This is a straightforward migration.
 
-The volume path MUST be configurable, not hardcoded. Add to `config/config.yaml`:
-
-```yaml
-images:
-  volume_path: "/Volumes/catalog/schema/slide_images"
-  max_file_size_bytes: 5242880  # 5MB
-  allowed_types:
-    - "image/png"
-    - "image/jpeg"
-    - "image/gif"
-    - "image/svg+xml"
-```
-
-For **local development** (no UC Volumes available), use a filesystem fallback:
-
-```python
-# Environment detection
-if os.getenv("ENVIRONMENT") == "development" and not is_databricks_environment():
-    # Fall back to local filesystem
-    storage_path = Path("./data/images")
-else:
-    # Use UC Volumes via Databricks SDK
-    storage_path = config.images.volume_path
-```
-
-### Metadata Storage: Lakebase (PostgreSQL)
+### Database Model
 
 ```python
 # src/database/models/image.py
-"""Image metadata model for uploaded images."""
+"""Image asset model — metadata and binary data stored together in Lakebase."""
 from datetime import datetime
 
-from sqlalchemy import Boolean, Column, DateTime, ForeignKey, Integer, String, Text
+from sqlalchemy import Boolean, Column, DateTime, Integer, LargeBinary, String, Text
 from sqlalchemy.dialects.postgresql import JSON
 
 from src.core.database import Base
 
 
 class ImageAsset(Base):
-    """Uploaded image metadata.
+    """Uploaded image with binary data stored directly in PostgreSQL.
 
-    Actual image binaries are stored in UC Volumes (or local filesystem in dev).
-    This table stores metadata, thumbnails, and optional base64 cache for
-    frequently accessed branding images.
+    All image data lives in this table — no external storage dependencies.
+    The image_data column stores raw bytes (PostgreSQL bytea type).
+    Base64 encoding is done on read when needed for HTML embedding.
     """
 
     __tablename__ = "image_assets"
@@ -125,7 +100,9 @@ class ImageAsset(Base):
     original_filename = Column(String(255), nullable=False)  # User's original filename
     mime_type = Column(String(50), nullable=False)           # image/png, image/jpeg, image/gif, image/svg+xml
     size_bytes = Column(Integer, nullable=False)
-    storage_path = Column(String(500), nullable=False)       # Relative path within volume/local dir
+
+    # Raw image bytes (PostgreSQL bytea, max ~5MB enforced at application level)
+    image_data = Column(LargeBinary, nullable=False)
 
     # Thumbnail (150x150, auto-generated on upload)
     # Stored as data URI: "data:image/jpeg;base64,..."
@@ -135,7 +112,7 @@ class ImageAsset(Base):
     # Organization
     tags = Column(JSON, default=list)                        # ["branding", "logo", "chart"]
     description = Column(Text, nullable=True)
-    category = Column(String(50), nullable=True)             # 'branding', 'content', 'background'
+    category = Column(String(50), nullable=True)             # 'branding', 'content', 'background', 'ephemeral'
 
     # Ownership (no FK to profiles - images are independent library items)
     uploaded_by = Column(String(255), nullable=True)
@@ -149,20 +126,17 @@ class ImageAsset(Base):
     updated_by = Column(String(255), nullable=True)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
 
-    # Optional: Full image base64 cache (for branding images used repeatedly)
-    # Avoids repeated UC Volume reads during slide generation
-    cached_base64 = Column(Text, nullable=True)
-
     def __repr__(self):
         return f"<ImageAsset(id={self.id}, filename='{self.filename}', category='{self.category}')>"
 ```
 
-**Key differences from original plan:**
-- `Integer` PK (not UUID string) - matches all other models
+**Key design choices:**
+- `Integer` PK (not UUID string) — matches all other models
 - Named `ImageAsset` (avoids collision with `PIL.Image`)
-- No `profile_id` FK - images are a global library, not profile-scoped
-- No `ImageCache` table - `cached_base64` column is sufficient
-- `storage_path` instead of `volume_path` - works for both UC Volumes and local dev
+- `image_data` as `LargeBinary` (PostgreSQL `bytea`) — stores raw bytes directly
+- No `storage_path`, no `cached_base64` — the bytes are right there, just `base64.b64encode(image.image_data)`
+- No `profile_id` FK — images are a global library, not profile-scoped
+- `category` includes `'ephemeral'` for paste-to-chat images not saved to library
 - Follows `created_by`/`updated_by`/`is_active` patterns from `SlideStyleLibrary`
 
 ### Register the Model
@@ -183,105 +157,16 @@ __all__ = [
 
 ### New Dependency: Pillow
 
-Add to `pyproject.toml` dependencies:
+Add to **both** dependency files (Databricks Apps uses `requirements.txt`):
+
+`pyproject.toml`:
 ```toml
 "Pillow>=10.0.0",
 ```
 
-### Storage Service: `src/services/image_storage.py`
-
-Abstracts storage backend (UC Volumes vs local filesystem):
-
-```python
-"""Image storage abstraction for UC Volumes and local filesystem."""
-import logging
-import os
-from abc import ABC, abstractmethod
-from pathlib import Path
-from typing import Optional
-
-logger = logging.getLogger(__name__)
-
-
-class ImageStorageBackend(ABC):
-    """Abstract base class for image storage."""
-
-    @abstractmethod
-    def write(self, path: str, content: bytes) -> None: ...
-
-    @abstractmethod
-    def read(self, path: str) -> bytes: ...
-
-    @abstractmethod
-    def delete(self, path: str) -> None: ...
-
-    @abstractmethod
-    def exists(self, path: str) -> bool: ...
-
-
-class UCVolumeStorage(ImageStorageBackend):
-    """Store images in Unity Catalog Volumes via Databricks SDK."""
-
-    def __init__(self, volume_base_path: str):
-        from src.core.databricks_client import get_system_client
-        self.client = get_system_client()
-        self.base_path = volume_base_path
-
-    def write(self, path: str, content: bytes) -> None:
-        from io import BytesIO
-        full_path = f"{self.base_path}/{path}"
-        self.client.files.upload(full_path, BytesIO(content), overwrite=True)
-
-    def read(self, path: str) -> bytes:
-        full_path = f"{self.base_path}/{path}"
-        response = self.client.files.download(full_path)
-        return response.contents.read()
-
-    def delete(self, path: str) -> None:
-        full_path = f"{self.base_path}/{path}"
-        self.client.files.delete(full_path)
-
-    def exists(self, path: str) -> bool:
-        try:
-            full_path = f"{self.base_path}/{path}"
-            self.client.files.get_status(full_path)
-            return True
-        except Exception:
-            return False
-
-
-class LocalFileStorage(ImageStorageBackend):
-    """Store images on local filesystem (for development)."""
-
-    def __init__(self, base_dir: str = "./data/images"):
-        self.base_dir = Path(base_dir)
-        self.base_dir.mkdir(parents=True, exist_ok=True)
-
-    def write(self, path: str, content: bytes) -> None:
-        file_path = self.base_dir / path
-        file_path.parent.mkdir(parents=True, exist_ok=True)
-        file_path.write_bytes(content)
-
-    def read(self, path: str) -> bytes:
-        return (self.base_dir / path).read_bytes()
-
-    def delete(self, path: str) -> None:
-        file_path = self.base_dir / path
-        if file_path.exists():
-            file_path.unlink()
-
-    def exists(self, path: str) -> bool:
-        return (self.base_dir / path).exists()
-
-
-def get_image_storage() -> ImageStorageBackend:
-    """Factory: returns appropriate storage backend for current environment."""
-    if os.getenv("ENVIRONMENT") == "development" and not os.getenv("PGHOST"):
-        return LocalFileStorage()
-    else:
-        # TODO: Get volume path from config
-        volume_path = os.getenv("IMAGE_VOLUME_PATH", "/Volumes/catalog/schema/slide_images")
-        return UCVolumeStorage(volume_path)
+`requirements.txt`:
+```
+Pillow>=10.0.0
 ```
 
 ### Image Service: `src/services/image_service.py`
@@ -298,7 +183,6 @@ from PIL import Image as PILImage
 from sqlalchemy.orm import Session
 
 from src.database.models.image import ImageAsset
-from src.services.image_storage import get_image_storage
 
 logger = logging.getLogger(__name__)
 
@@ -318,38 +202,30 @@ def upload_image(
     category: str = "content",
 ) -> ImageAsset:
     """
-    Upload an image: validate, generate thumbnail, store binary, save metadata.
+    Upload an image: validate, generate thumbnail, save to database.
 
-    Order of operations matters for error recovery:
-    1. Validate (fail fast, no side effects)
-    2. Generate thumbnail (in-memory, no side effects)
-    3. Write to storage (external side effect)
-    4. Write to database (if this fails, we have an orphan file - acceptable for MVP)
+    All data (metadata + raw bytes + thumbnail) stored in a single DB row.
+    No external storage dependencies.
     """
-    # 1. Validate
+    # 1. Validate (fail fast, no side effects)
     if mime_type not in ALLOWED_TYPES:
         raise ValueError(f"File type not allowed: {mime_type}. Allowed: {ALLOWED_TYPES}")
     if len(file_content) > MAX_FILE_SIZE:
         raise ValueError(f"File too large: {len(file_content)} bytes (max {MAX_FILE_SIZE})")
 
-    # 2. Generate thumbnail
+    # 2. Generate thumbnail (in-memory, no side effects)
     thumbnail_b64 = _generate_thumbnail(file_content, mime_type)
 
-    # 3. Write to storage
+    # 3. Save everything to database
     image_uuid = str(uuid.uuid4())
     ext = original_filename.rsplit(".", 1)[-1].lower() if "." in original_filename else "bin"
-    storage_path = f"{user}/{image_uuid}.{ext}"
 
-    storage = get_image_storage()
-    storage.write(storage_path, file_content)
-
-    # 4. Save metadata to database
     image = ImageAsset(
         filename=f"{image_uuid}.{ext}",
         original_filename=original_filename,
         mime_type=mime_type,
         size_bytes=len(file_content),
-        storage_path=storage_path,
+        image_data=file_content,
         thumbnail_base64=thumbnail_b64,
         tags=tags or [],
         description=description or "",
@@ -359,10 +235,6 @@ def upload_image(
         updated_by=user,
         is_active=True,
     )
-
-    # Pre-cache base64 for branding images (avoids repeated storage reads)
-    if category == "branding":
-        image.cached_base64 = base64.b64encode(file_content).decode("utf-8")
 
     db.add(image)
     db.commit()
@@ -386,14 +258,7 @@ def get_image_base64(db: Session, image_id: int) -> tuple[str, str]:
     if not image:
         raise ValueError(f"Image {image_id} not found")
 
-    # Use cache if available (branding images)
-    if image.cached_base64:
-        return image.cached_base64, image.mime_type
-
-    # Read from storage
-    storage = get_image_storage()
-    content = storage.read(image.storage_path)
-    b64 = base64.b64encode(content).decode("utf-8")
+    b64 = base64.b64encode(image.image_data).decode("utf-8")
     return b64, image.mime_type
 
 
@@ -404,22 +269,29 @@ def search_images(
     query: Optional[str] = None,
     uploaded_by: Optional[str] = None,
 ) -> List[ImageAsset]:
-    """Search images by metadata. Returns metadata only (no base64)."""
+    """Search images by metadata. Returns metadata only (no image_data loaded).
+
+    Note: SQLAlchemy loads all columns by default. For list views, the caller
+    should use deferred loading or column selection if performance becomes an
+    issue with many large images. For MVP, this is fine.
+    """
     q = db.query(ImageAsset).filter(ImageAsset.is_active == True)
 
+    # Exclude ephemeral images from default library view
     if category:
         q = q.filter(ImageAsset.category == category)
+    else:
+        q = q.filter(ImageAsset.category != "ephemeral")
+
     if uploaded_by:
         q = q.filter(ImageAsset.uploaded_by == uploaded_by)
     if query:
-        # Simple text search on filename and description
         search = f"%{query}%"
         q = q.filter(
             (ImageAsset.original_filename.ilike(search))
             | (ImageAsset.description.ilike(search))
         )
-    # Tag filtering: check if any requested tag exists in the JSON array
-    # PostgreSQL JSON containment: tags @> '["branding"]'
+    # Tag filtering: PostgreSQL JSON containment: tags @> '["branding"]'
     if tags:
         for tag in tags:
             q = q.filter(ImageAsset.tags.contains([tag]))
@@ -437,8 +309,6 @@ def delete_image(db: Session, image_id: int, user: str) -> None:
     image.updated_by = user
     db.commit()
 
-    # Note: Don't delete from storage on soft-delete.
-    # Hard delete (storage cleanup) can be a future admin operation.
     logger.info(f"Soft-deleted image: {image.filename} (id={image.id})")
 
 
@@ -480,13 +350,13 @@ def _generate_thumbnail(content: bytes, mime_type: str) -> Optional[str]:
     return f"data:{thumb_mime};base64,{b64}"
 ```
 
-**Key differences from original plan:**
+**Key design choices:**
 - Stateless functions that receive `db: Session` (matches codebase DI pattern)
-- Storage abstraction with local fallback for development
-- `get_image_base64` returns `(base64, mime_type)` tuple
-- `search_images` returns metadata only (no base64 in list responses)
+- No storage abstraction — image bytes stored directly in `image_data` column
+- `get_image_base64` simply `base64.b64encode(image.image_data)` — no cache layer needed
+- `search_images` excludes `ephemeral` category by default (paste-to-chat images)
+- `search_images` returns metadata only (callers don't get `image_data` blobs in list views)
 - Soft delete pattern matching `SlideStyleLibrary`
-- Proper error handling order (validate -> thumbnail -> store -> DB)
 
 ### API Routes: `src/api/routes/images.py`
 
@@ -975,6 +845,190 @@ This is a **nice-to-have** on top of the `{{image:ID}}` pattern - implement only
 
 ---
 
+## Paste-to-Chat Image Attachment
+
+### Overview
+
+Users can paste images from their clipboard directly into the chat input. The image is
+auto-uploaded via the existing `/api/images/upload` endpoint, shown as an attachment
+preview, and the user is asked whether to save it to their image library permanently.
+
+### User Experience
+
+1. User copies an image (screenshot, from browser, etc.)
+2. User pastes (Ctrl+V / Cmd+V) into the chat input area
+3. Image is auto-uploaded immediately, a thumbnail preview appears as an "attachment"
+4. A **"Save to image library"** checkbox appears (unchecked by default)
+5. User types their message (e.g., "use this as our logo")
+6. User sends — the message includes the attached image ID(s)
+7. If "Save to library" was unchecked, the image is marked `ephemeral` and excluded from
+   the image library gallery. Ephemeral images can be cleaned up periodically.
+
+### Backend Changes
+
+#### ChatRequest Schema Update
+
+Add optional `image_ids` field to `src/api/schemas/requests.py`:
+
+```python
+class ChatRequest(BaseModel):
+    session_id: str = Field(...)
+    message: str = Field(...)
+    slide_context: Optional[SlideContext] = Field(default=None)
+    image_ids: Optional[list[int]] = Field(
+        default=None,
+        description="IDs of images attached to this message (from upload or paste)",
+    )
+```
+
+#### Chat Service Context Injection
+
+In `chat_service.py`, when `image_ids` is provided, prepend image metadata to the
+agent's message context so it knows about the attached images:
+
+```python
+# In the chat processing flow, before calling the agent:
+if request.image_ids:
+    attached_images = []
+    for img_id in request.image_ids:
+        img = db.query(ImageAsset).filter(ImageAsset.id == img_id, ImageAsset.is_active == True).first()
+        if img:
+            attached_images.append({
+                "id": img.id,
+                "filename": img.original_filename,
+                "description": img.description,
+                "tags": img.tags,
+                "usage": f'<img src="{{{{image:{img.id}}}}}" alt="{img.description or img.original_filename}" />',
+            })
+
+    if attached_images:
+        import json
+        context_prefix = (
+            f"[The user attached {len(attached_images)} image(s) to this message. "
+            f"Image details: {json.dumps(attached_images)}. "
+            f"Use the {{{{image:ID}}}} syntax to embed them in slides.]\n\n"
+        )
+        augmented_message = context_prefix + request.message
+```
+
+The same `{{image:ID}}` → base64 post-processing substitution handles these images
+identically to search-discovered ones.
+
+#### Upload Endpoint: Ephemeral Flag
+
+Add an optional `save_to_library` parameter to the upload endpoint. When `false`, the
+image is stored with `category="ephemeral"`. The image library list endpoint already
+filters by category, so ephemeral images won't appear in the gallery unless explicitly
+queried.
+
+```python
+# In POST /api/images/upload
+save_to_library: Optional[str] = Form("true"),  # "true" or "false" (Form fields are strings)
+
+# When processing:
+effective_category = category if save_to_library != "false" else "ephemeral"
+```
+
+Ephemeral images are still fully functional (stored, retrievable, embeddable in slides)
+— they just don't show in the default library view. A future cleanup job can purge old
+ephemeral images not referenced by any slide.
+
+### Frontend Changes
+
+#### Chat Input Paste Handler
+
+Add to the chat input component (likely `ChatInput.tsx` or similar):
+
+```typescript
+// State for attached images
+const [attachedImages, setAttachedImages] = useState<ImageAsset[]>([]);
+const [saveToLibrary, setSaveToLibrary] = useState(false);
+
+// Paste event handler
+const handlePaste = async (e: React.ClipboardEvent) => {
+  const items = e.clipboardData?.items;
+  if (!items) return;
+
+  for (const item of Array.from(items)) {
+    if (item.type.startsWith('image/')) {
+      e.preventDefault();
+      const file = item.getAsFile();
+      if (!file) continue;
+
+      // Validate client-side
+      if (file.size > 5 * 1024 * 1024) {
+        setError('Image too large (max 5MB)');
+        continue;
+      }
+
+      try {
+        const uploaded = await api.uploadImage(file, {
+          category: saveToLibrary ? 'content' : 'ephemeral',
+        });
+        setAttachedImages(prev => [...prev, uploaded]);
+      } catch (err) {
+        setError('Failed to upload pasted image');
+      }
+    }
+  }
+};
+```
+
+#### Attachment Preview UI
+
+Below or above the chat input, show a strip of attached image thumbnails:
+
+```typescript
+{attachedImages.length > 0 && (
+  <div className="flex items-center gap-2 p-2 border-t">
+    {attachedImages.map(img => (
+      <div key={img.id} className="relative group">
+        <img
+          src={img.thumbnail_base64}
+          alt={img.original_filename}
+          className="w-12 h-12 object-cover rounded"
+        />
+        <button
+          onClick={() => removeAttachment(img.id)}
+          className="absolute -top-1 -right-1 bg-red-500 text-white rounded-full w-4 h-4 text-xs"
+        >
+          ×
+        </button>
+      </div>
+    ))}
+    <label className="flex items-center gap-1 text-xs text-gray-500 ml-2">
+      <input
+        type="checkbox"
+        checked={saveToLibrary}
+        onChange={(e) => setSaveToLibrary(e.target.checked)}
+      />
+      Save to image library
+    </label>
+  </div>
+)}
+```
+
+#### Send Message with Attachments
+
+When sending the chat message, include `image_ids`:
+
+```typescript
+const handleSend = async () => {
+  const payload = {
+    session_id: sessionId,
+    message: inputText,
+    slide_context: slideContext,
+    image_ids: attachedImages.length > 0
+      ? attachedImages.map(img => img.id)
+      : undefined,
+  };
+  await api.sendMessage(payload);
+  setAttachedImages([]);  // Clear after send
+};
+```
+
+---
+
 ## Frontend Implementation
 
 ### TypeScript Types: `frontend/src/types/image.ts`
@@ -1009,7 +1063,6 @@ export interface ImageDataResponse {
 }
 ```
 
-Note: `storage_path` is NOT exposed to frontend (internal implementation detail).
 
 ### API Methods: Add to `frontend/src/services/api.ts`
 
@@ -1151,14 +1204,25 @@ Add an "Insert Image Reference" helper to the CSS editor. When clicked:
 5. Post-processing substitutes `{{image:42}}` with actual base64 data URI
 6. Slide renders with embedded logo
 
-### Workflow 3: Manual Image in Editor
+### Workflow 3: Paste Image into Chat
+1. User copies a screenshot or image from another app
+2. User clicks into the chat input and pastes (Ctrl+V / Cmd+V)
+3. Image auto-uploads, thumbnail preview appears as attachment
+4. "Save to image library" checkbox shown (unchecked by default)
+5. User types: "use this image on the title slide"
+6. User sends message — chat request includes `image_ids: [43]`
+7. Agent receives image metadata context, generates `<img src="{{image:43}}" />`
+8. Post-processing substitutes placeholder with base64
+9. If "Save to library" was unchecked, image stays accessible but hidden from gallery
+
+### Workflow 4: Manual Image in Editor
 1. User opens slide in Monaco editor
 2. Clicks "Insert Image" toolbar button
 3. ImagePicker modal opens, user searches and selects
 4. Full base64 fetched, `<img>` tag inserted at cursor
 5. User saves slide
 
-### Workflow 4: Image Library Management
+### Workflow 5: Image Library Management
 1. User opens Image Library from sidebar/settings
 2. Grid of thumbnails loads (from `thumbnail_base64`, no additional requests)
 3. User can search, filter, upload, edit metadata, delete
@@ -1260,17 +1324,15 @@ def client(db_session):
 - `reset_singleton_client()` — resets Databricks client singleton
 - `clear_settings_cache()` — clears `get_settings` LRU cache
 
-**Mock patterns** — use `unittest.mock.patch` at the import location:
-```python
-with patch("src.services.image_service.get_image_storage") as mock:
-    mock.return_value = MockStorage()
-```
-
 **Note**: This codebase has NO existing file upload tests. The `UploadFile`/`Form`/
 multipart patterns are new. TestClient handles multipart via the `files` parameter:
 ```python
 response = client.post("/api/images/upload", files={"file": ("logo.png", png_bytes, "image/png")}, data={"category": "branding", "tags": '["logo"]'})
 ```
+
+**Lakebase-only simplification**: No mock storage backend is needed. Tests use the
+in-memory SQLite database directly — image bytes are stored in the `image_data` column
+just like production. No patching of storage backends required.
 
 ---
 
@@ -1282,7 +1344,6 @@ These fixtures should be added to a new conftest or to the existing `tests/conft
 """Shared fixtures for image feature tests."""
 import io
 import pytest
-from unittest.mock import patch
 from PIL import Image as PILImage
 
 from src.database.models.image import ImageAsset
@@ -1349,37 +1410,6 @@ def oversized_content() -> bytes:
     return b"x" * (5 * 1024 * 1024 + 1)
 
 
-# --- Mock Storage ---
-
-class MockImageStorage:
-    """In-memory storage backend for tests."""
-
-    def __init__(self):
-        self._store: dict[str, bytes] = {}
-
-    def write(self, path: str, content: bytes) -> None:
-        self._store[path] = content
-
-    def read(self, path: str) -> bytes:
-        if path not in self._store:
-            raise FileNotFoundError(f"Mock storage: {path} not found")
-        return self._store[path]
-
-    def delete(self, path: str) -> None:
-        self._store.pop(path, None)
-
-    def exists(self, path: str) -> bool:
-        return path in self._store
-
-
-@pytest.fixture
-def mock_storage():
-    """Provide a MockImageStorage and patch get_image_storage to return it."""
-    storage = MockImageStorage()
-    with patch("src.services.image_service.get_image_storage", return_value=storage):
-        yield storage
-
-
 # --- Database Helpers ---
 
 def create_test_image(db_session, **overrides) -> ImageAsset:
@@ -1390,7 +1420,7 @@ def create_test_image(db_session, **overrides) -> ImageAsset:
         original_filename="test.png",
         mime_type="image/png",
         size_bytes=1234,
-        storage_path="system/test-uuid.png",
+        image_data=b"\x89PNG\r\n\x1a\n" + b"\x00" * 100,  # Minimal PNG-like bytes
         thumbnail_base64="data:image/jpeg;base64,/9j/4AAQ",
         tags=["test"],
         description="Test image",
@@ -1420,11 +1450,10 @@ Write these tests BEFORE implementing `src/services/image_service.py`.
 """Unit tests for image upload, thumbnail, search, and delete service."""
 import base64
 import pytest
-from unittest.mock import patch
 
 from src.services import image_service
 from src.database.models.image import ImageAsset
-from tests.unit.conftest_images import create_test_image, MockImageStorage
+from tests.unit.conftest_images import create_test_image
 
 
 # ===== Upload Validation =====
@@ -1432,26 +1461,26 @@ from tests.unit.conftest_images import create_test_image, MockImageStorage
 class TestUploadValidation:
     """Tests for upload_image input validation (fail-fast, no side effects)."""
 
-    def test_rejects_invalid_mime_type(self, db_session, mock_storage, png_1x1):
+    def test_rejects_invalid_mime_type(self, db_session, png_1x1):
         with pytest.raises(ValueError, match="File type not allowed"):
             image_service.upload_image(
                 db=db_session, file_content=png_1x1,
                 original_filename="test.bmp", mime_type="image/bmp",
                 user="test",
             )
-        # Storage should NOT have been written to
-        assert len(mock_storage._store) == 0
+        # Nothing should have been written to DB
+        assert db_session.query(ImageAsset).count() == 0
 
-    def test_rejects_oversized_file(self, db_session, mock_storage, oversized_content):
+    def test_rejects_oversized_file(self, db_session, oversized_content):
         with pytest.raises(ValueError, match="File too large"):
             image_service.upload_image(
                 db=db_session, file_content=oversized_content,
                 original_filename="big.png", mime_type="image/png",
                 user="test",
             )
-        assert len(mock_storage._store) == 0
+        assert db_session.query(ImageAsset).count() == 0
 
-    def test_accepts_png(self, db_session, mock_storage, png_1x1):
+    def test_accepts_png(self, db_session, png_1x1):
         result = image_service.upload_image(
             db=db_session, file_content=png_1x1,
             original_filename="logo.png", mime_type="image/png",
@@ -1464,7 +1493,7 @@ class TestUploadValidation:
         assert result.uploaded_by == "testuser"
         assert result.is_active is True
 
-    def test_accepts_jpeg(self, db_session, mock_storage, jpeg_100x100):
+    def test_accepts_jpeg(self, db_session, jpeg_100x100):
         result = image_service.upload_image(
             db=db_session, file_content=jpeg_100x100,
             original_filename="photo.jpg", mime_type="image/jpeg",
@@ -1472,7 +1501,7 @@ class TestUploadValidation:
         )
         assert result.mime_type == "image/jpeg"
 
-    def test_accepts_gif(self, db_session, mock_storage, gif_animated):
+    def test_accepts_gif(self, db_session, gif_animated):
         result = image_service.upload_image(
             db=db_session, file_content=gif_animated,
             original_filename="anim.gif", mime_type="image/gif",
@@ -1480,7 +1509,7 @@ class TestUploadValidation:
         )
         assert result.mime_type == "image/gif"
 
-    def test_accepts_svg(self, db_session, mock_storage, svg_content):
+    def test_accepts_svg(self, db_session, svg_content):
         result = image_service.upload_image(
             db=db_session, file_content=svg_content,
             original_filename="icon.svg", mime_type="image/svg+xml",
@@ -1490,31 +1519,21 @@ class TestUploadValidation:
         assert result.thumbnail_base64 is None  # SVGs have no thumbnail
 
 
-# ===== Upload Storage & Metadata =====
+# ===== Upload Database Storage =====
 
-class TestUploadStorageAndMetadata:
-    """Tests that upload correctly writes to storage and DB."""
+class TestUploadDatabaseStorage:
+    """Tests that upload correctly stores image data and metadata in DB."""
 
-    def test_writes_file_to_storage(self, db_session, mock_storage, png_1x1):
+    def test_stores_image_bytes_in_db(self, db_session, png_1x1):
         result = image_service.upload_image(
             db=db_session, file_content=png_1x1,
             original_filename="logo.png", mime_type="image/png",
             user="testuser",
         )
-        # File should exist in mock storage at expected path
-        assert mock_storage.exists(result.storage_path)
-        assert mock_storage.read(result.storage_path) == png_1x1
+        # Image bytes should be stored directly in the database
+        assert result.image_data == png_1x1
 
-    def test_storage_path_contains_user_and_uuid(self, db_session, mock_storage, png_1x1):
-        result = image_service.upload_image(
-            db=db_session, file_content=png_1x1,
-            original_filename="logo.png", mime_type="image/png",
-            user="alice@example.com",
-        )
-        assert result.storage_path.startswith("alice@example.com/")
-        assert result.storage_path.endswith(".png")
-
-    def test_saves_tags_and_description(self, db_session, mock_storage, png_1x1):
+    def test_saves_tags_and_description(self, db_session, png_1x1):
         result = image_service.upload_image(
             db=db_session, file_content=png_1x1,
             original_filename="logo.png", mime_type="image/png",
@@ -1523,7 +1542,7 @@ class TestUploadStorageAndMetadata:
         assert result.tags == ["branding", "logo"]
         assert result.description == "Company logo"
 
-    def test_saves_category(self, db_session, mock_storage, png_1x1):
+    def test_saves_category(self, db_session, png_1x1):
         result = image_service.upload_image(
             db=db_session, file_content=png_1x1,
             original_filename="logo.png", mime_type="image/png",
@@ -1531,7 +1550,7 @@ class TestUploadStorageAndMetadata:
         )
         assert result.category == "branding"
 
-    def test_default_category_is_content(self, db_session, mock_storage, png_1x1):
+    def test_default_category_is_content(self, db_session, png_1x1):
         result = image_service.upload_image(
             db=db_session, file_content=png_1x1,
             original_filename="logo.png", mime_type="image/png",
@@ -1539,24 +1558,7 @@ class TestUploadStorageAndMetadata:
         )
         assert result.category == "content"
 
-    def test_branding_category_pre_caches_base64(self, db_session, mock_storage, png_1x1):
-        result = image_service.upload_image(
-            db=db_session, file_content=png_1x1,
-            original_filename="logo.png", mime_type="image/png",
-            user="test", category="branding",
-        )
-        assert result.cached_base64 is not None
-        assert result.cached_base64 == base64.b64encode(png_1x1).decode("utf-8")
-
-    def test_content_category_does_not_cache(self, db_session, mock_storage, png_1x1):
-        result = image_service.upload_image(
-            db=db_session, file_content=png_1x1,
-            original_filename="logo.png", mime_type="image/png",
-            user="test", category="content",
-        )
-        assert result.cached_base64 is None
-
-    def test_sets_created_by_and_updated_by(self, db_session, mock_storage, png_1x1):
+    def test_sets_created_by_and_updated_by(self, db_session, png_1x1):
         result = image_service.upload_image(
             db=db_session, file_content=png_1x1,
             original_filename="logo.png", mime_type="image/png",
@@ -1603,7 +1605,7 @@ class TestThumbnailGeneration:
         # Thumbnail base64 should be small (< 50KB for a 100x100 source)
         assert len(thumb) < 50_000
 
-    def test_upload_stores_thumbnail_in_db(self, db_session, mock_storage, png_100x100):
+    def test_upload_stores_thumbnail_in_db(self, db_session, png_100x100):
         result = image_service.upload_image(
             db=db_session, file_content=png_100x100,
             original_filename="test.png", mime_type="image/png",
@@ -1618,27 +1620,17 @@ class TestThumbnailGeneration:
 class TestGetImageBase64:
     """Tests for retrieving full image as base64."""
 
-    def test_returns_from_cache_when_available(self, db_session, mock_storage):
-        image = create_test_image(db_session, cached_base64="CACHED_DATA", mime_type="image/png")
-        b64, mime = image_service.get_image_base64(db_session, image.id)
-        assert b64 == "CACHED_DATA"
-        assert mime == "image/png"
-        # Should NOT have read from storage
-        assert len(mock_storage._store) == 0
-
-    def test_reads_from_storage_when_no_cache(self, db_session, mock_storage, png_1x1):
-        image = create_test_image(db_session, cached_base64=None, storage_path="user/img.png")
-        mock_storage.write("user/img.png", png_1x1)
-
+    def test_encodes_image_data_to_base64(self, db_session, png_1x1):
+        image = create_test_image(db_session, image_data=png_1x1)
         b64, mime = image_service.get_image_base64(db_session, image.id)
         assert b64 == base64.b64encode(png_1x1).decode("utf-8")
         assert mime == "image/png"
 
-    def test_raises_for_nonexistent_image(self, db_session, mock_storage):
+    def test_raises_for_nonexistent_image(self, db_session):
         with pytest.raises(ValueError, match="not found"):
             image_service.get_image_base64(db_session, 99999)
 
-    def test_raises_for_inactive_image(self, db_session, mock_storage):
+    def test_raises_for_inactive_image(self, db_session):
         image = create_test_image(db_session, is_active=False)
         with pytest.raises(ValueError, match="not found"):
             image_service.get_image_base64(db_session, image.id)
@@ -1649,7 +1641,7 @@ class TestGetImageBase64:
 class TestSearchImages:
     """Tests for image search/filtering."""
 
-    def test_returns_all_active_images(self, db_session, mock_storage):
+    def test_returns_all_active_images(self, db_session):
         create_test_image(db_session, original_filename="a.png")
         create_test_image(db_session, original_filename="b.png")
         create_test_image(db_session, original_filename="c.png", is_active=False)
@@ -1657,7 +1649,7 @@ class TestSearchImages:
         results = image_service.search_images(db_session)
         assert len(results) == 2
 
-    def test_filter_by_category(self, db_session, mock_storage):
+    def test_filter_by_category(self, db_session):
         create_test_image(db_session, category="branding", original_filename="logo.png")
         create_test_image(db_session, category="content", original_filename="chart.png")
 
@@ -1665,7 +1657,21 @@ class TestSearchImages:
         assert len(results) == 1
         assert results[0].category == "branding"
 
-    def test_filter_by_tags(self, db_session, mock_storage):
+    def test_excludes_ephemeral_by_default(self, db_session):
+        create_test_image(db_session, category="content", original_filename="kept.png")
+        create_test_image(db_session, category="ephemeral", original_filename="pasted.png")
+
+        results = image_service.search_images(db_session)
+        assert len(results) == 1
+        assert results[0].original_filename == "kept.png"
+
+    def test_includes_ephemeral_when_explicitly_filtered(self, db_session):
+        create_test_image(db_session, category="ephemeral", original_filename="pasted.png")
+
+        results = image_service.search_images(db_session, category="ephemeral")
+        assert len(results) == 1
+
+    def test_filter_by_tags(self, db_session):
         create_test_image(db_session, tags=["branding", "logo"], original_filename="logo.png")
         create_test_image(db_session, tags=["chart", "q4"], original_filename="chart.png")
 
@@ -1673,7 +1679,7 @@ class TestSearchImages:
         assert len(results) == 1
         assert "branding" in results[0].tags
 
-    def test_filter_by_query_text_filename(self, db_session, mock_storage):
+    def test_filter_by_query_text_filename(self, db_session):
         create_test_image(db_session, original_filename="acme-logo.png")
         create_test_image(db_session, original_filename="chart-q4.png")
 
@@ -1681,21 +1687,21 @@ class TestSearchImages:
         assert len(results) == 1
         assert "acme" in results[0].original_filename
 
-    def test_filter_by_query_text_description(self, db_session, mock_storage):
+    def test_filter_by_query_text_description(self, db_session):
         create_test_image(db_session, description="ACME Corp logo", original_filename="a.png")
         create_test_image(db_session, description="Revenue chart", original_filename="b.png")
 
         results = image_service.search_images(db_session, query="ACME")
         assert len(results) == 1
 
-    def test_excludes_inactive(self, db_session, mock_storage):
+    def test_excludes_inactive(self, db_session):
         create_test_image(db_session, is_active=True, original_filename="visible.png")
         create_test_image(db_session, is_active=False, original_filename="hidden.png")
 
         results = image_service.search_images(db_session)
         assert all(r.is_active for r in results)
 
-    def test_ordered_by_newest_first(self, db_session, mock_storage):
+    def test_ordered_by_newest_first(self, db_session):
         from datetime import datetime, timedelta
         now = datetime.utcnow()
         create_test_image(db_session, original_filename="old.png", created_at=now - timedelta(days=1))
@@ -1710,32 +1716,31 @@ class TestSearchImages:
 class TestDeleteImage:
     """Tests for soft-delete."""
 
-    def test_sets_inactive(self, db_session, mock_storage):
+    def test_sets_inactive(self, db_session):
         image = create_test_image(db_session)
         image_service.delete_image(db_session, image.id, "admin")
 
         refreshed = db_session.query(ImageAsset).get(image.id)
         assert refreshed.is_active is False
 
-    def test_sets_updated_by(self, db_session, mock_storage):
+    def test_sets_updated_by(self, db_session):
         image = create_test_image(db_session)
         image_service.delete_image(db_session, image.id, "admin@example.com")
 
         refreshed = db_session.query(ImageAsset).get(image.id)
         assert refreshed.updated_by == "admin@example.com"
 
-    def test_raises_for_nonexistent(self, db_session, mock_storage):
+    def test_raises_for_nonexistent(self, db_session):
         with pytest.raises(ValueError, match="not found"):
             image_service.delete_image(db_session, 99999, "admin")
 
-    def test_does_not_delete_from_storage(self, db_session, mock_storage, png_1x1):
-        image = create_test_image(db_session, storage_path="user/img.png")
-        mock_storage.write("user/img.png", png_1x1)
-
+    def test_image_data_preserved_after_soft_delete(self, db_session, png_1x1):
+        image = create_test_image(db_session, image_data=png_1x1)
         image_service.delete_image(db_session, image.id, "admin")
 
-        # File should still exist in storage (soft delete only)
-        assert mock_storage.exists("user/img.png")
+        # Data should still exist (soft delete only)
+        refreshed = db_session.query(ImageAsset).get(image.id)
+        assert refreshed.image_data == png_1x1
 ```
 
 ---
@@ -1748,7 +1753,6 @@ Write these tests BEFORE implementing `src/api/routes/images.py`.
 """Integration tests for image API endpoints using TestClient."""
 import json
 import pytest
-from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, text
@@ -1758,7 +1762,7 @@ from sqlalchemy.pool import StaticPool
 from src.api.main import app
 from src.core.database import Base, get_db
 from src.database.models.image import ImageAsset
-from tests.unit.conftest_images import create_test_image, MockImageStorage
+from tests.unit.conftest_images import create_test_image
 
 
 # --- Fixtures ---
@@ -1803,14 +1807,7 @@ def db_session(db_engine):
 
 
 @pytest.fixture(scope="function")
-def mock_storage():
-    storage = MockImageStorage()
-    with patch("src.services.image_service.get_image_storage", return_value=storage):
-        yield storage
-
-
-@pytest.fixture(scope="function")
-def client(db_session, mock_storage):
+def client(db_session):
     def override_get_db():
         try:
             yield db_session
@@ -1955,11 +1952,8 @@ class TestGetImageEndpoint:
 class TestGetImageDataEndpoint:
     """GET /api/images/{id}/data"""
 
-    def test_returns_base64_data(self, client, db_session, mock_storage, png_bytes):
-        image = create_test_image(
-            db_session, storage_path="user/img.png", cached_base64=None,
-        )
-        mock_storage.write("user/img.png", png_bytes)
+    def test_returns_base64_data(self, client, db_session, png_bytes):
+        image = create_test_image(db_session, image_data=png_bytes)
 
         response = client.get(f"/api/images/{image.id}/data")
         assert response.status_code == 200
@@ -2449,12 +2443,15 @@ cd frontend && npx playwright test tests/e2e/image-library.spec.ts  # All pass
 | Decision | Choice | Rationale |
 |----------|--------|-----------|
 | Image optimization | None for MVP | 5MB size limit is sufficient |
-| Thumbnail storage | `thumbnail_base64` column in images table | Fast gallery (one query, no storage reads) |
-| Size limit | 5MB per image | Reasonable for logos/charts |
+| Image storage | Lakebase-only (`LargeBinary` column) | No UC Volume infra needed, simple single-table design |
+| Thumbnail storage | `thumbnail_base64` column in images table | Fast gallery (one query, no extra reads) |
+| Size limit | 5MB per image | Reasonable for logos/charts, PostgreSQL handles fine |
 | Animated GIFs | Supported | First frame for thumbnail, full GIF in storage |
 | Branding integration | Via Slide Styles CSS | Single source of truth for appearance |
 | Agent image handling | Metadata only + placeholders | Avoid blowing up LLM context window |
-| Local development | Filesystem fallback | UC Volumes unavailable locally |
+| Paste-to-chat | Auto-upload + "Save to library?" toggle | Low friction; user controls persistence |
+| Ephemeral images | `category="ephemeral"`, hidden from gallery | Avoids library clutter from quick pastes |
+| Local development | Same as production (PostgreSQL) | No environment-specific storage backends |
 | Sharing/Permissions | Deferred | Separate permissions branch in progress |
 
 ---
@@ -2462,31 +2459,36 @@ cd frontend && npx playwright test tests/e2e/image-library.spec.ts  # All pass
 ## Implementation Phases
 
 ### Phase 1: Core Infrastructure
-- [ ] Add `Pillow` dependency to `pyproject.toml`
-- [ ] Create `ImageAsset` model in `src/database/models/image.py`
+- [ ] Add `Pillow` dependency to `pyproject.toml` and `requirements.txt`
+- [ ] Create `ImageAsset` model in `src/database/models/image.py` (with `LargeBinary` for image bytes)
 - [ ] Register model in `src/database/models/__init__.py`
-- [ ] Create storage abstraction: `src/services/image_storage.py`
 - [ ] Create image service: `src/services/image_service.py`
 - [ ] Create API routes: `src/api/routes/images.py`
 - [ ] Register routes in `src/api/main.py`
 - [ ] Write unit tests for service and routes
 
-### Phase 2: Agent Integration
+### Phase 2: Agent Integration + Chat Attachments
 - [ ] Create image tools: `src/services/image_tools.py`
 - [ ] Register `search_images` tool in `src/services/agent.py`
 - [ ] Create placeholder substitution: `src/utils/image_utils.py`
 - [ ] Wire substitution into `chat_service.py` post-processing
 - [ ] Update system prompt with image instructions
-- [ ] Write tests for tools and substitution
+- [ ] Add `image_ids` field to `ChatRequest` schema
+- [ ] Add image context injection in `chat_service.py` for attached images
+- [ ] Add `save_to_library` / `ephemeral` category support to upload endpoint
+- [ ] Write tests for tools, substitution, and chat attachment flow
 
-### Phase 3: Frontend - Image Library
+### Phase 3: Frontend - Image Library + Paste-to-Chat
 - [ ] Create TypeScript types: `frontend/src/types/image.ts`
 - [ ] Add API methods to `frontend/src/services/api.ts`
 - [ ] Build ImageLibrary component (gallery with thumbnails)
 - [ ] Build ImageUpload component (drag-drop + validation)
 - [ ] Build ImagePicker modal
 - [ ] Add navigation/sidebar entry for Image Library
-- [ ] Write E2E tests
+- [ ] Add paste event handler to chat input (clipboard image detection)
+- [ ] Build attachment preview strip with "Save to image library" toggle
+- [ ] Update chat send to include `image_ids` in request payload
+- [ ] Write E2E tests (including paste-to-chat flow)
 
 ### Phase 4: Frontend - Editor Integration
 - [ ] Add "Insert Image" button to slide editor toolbar
