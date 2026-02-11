@@ -54,6 +54,32 @@ class ChatRequest(Base):
         return f"<ChatRequest(request_id='{self.request_id}', status='{self.status}')>"
 
 
+class ExportJob(Base):
+    """Tracks async PPTX export jobs for polling.
+
+    Database-backed job tracking replaces the previous in-memory dict,
+    enabling multi-worker deployments where POST (enqueue) and GET (poll)
+    requests may hit different processes.
+    """
+
+    __tablename__ = "export_jobs"
+
+    id = Column(Integer, primary_key=True)
+    job_id = Column(String(64), unique=True, nullable=False, index=True)
+    session_id = Column(String(128), nullable=False)  # string session_id, not FK
+    status = Column(String(20), default="pending")  # pending/running/completed/error
+    progress = Column(Integer, default=0)
+    total_slides = Column(Integer, default=0)
+    title = Column(String(512), nullable=True)
+    output_path = Column(Text, nullable=True)
+    error_message = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    completed_at = Column(DateTime, nullable=True)
+
+    def __repr__(self):
+        return f"<ExportJob(job_id='{self.job_id}', status='{self.status}')>"
+
+
 class UserSession(Base):
     """User session for tracking conversation state.
 
@@ -98,6 +124,12 @@ class UserSession(Base):
         back_populates="session",
         uselist=False,
         cascade="all, delete-orphan",
+    )
+    versions = relationship(
+        "SlideDeckVersion",
+        back_populates="session",
+        cascade="all, delete-orphan",
+        order_by="SlideDeckVersion.version_number.desc()",
     )
 
     # Indexes for common queries
@@ -185,4 +217,48 @@ class SessionSlideDeck(Base):
 
     def __repr__(self):
         return f"<SessionSlideDeck(session_id={self.session_id}, title='{self.title}')>"
+
+
+class SlideDeckVersion(Base):
+    """Save point for slide deck versioning.
+
+    Stores complete snapshots of the slide deck at specific points in time,
+    allowing users to preview and rollback to previous states.
+    Limited to 40 versions per session (oldest deleted when exceeded).
+    """
+
+    __tablename__ = "slide_deck_versions"
+
+    id = Column(Integer, primary_key=True)
+    session_id = Column(
+        Integer,
+        ForeignKey("user_sessions.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+
+    # Version tracking
+    version_number = Column(Integer, nullable=False)
+    description = Column(String(255), nullable=False)  # Auto-generated description
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    # Complete deck snapshot (JSON format)
+    deck_json = Column(Text, nullable=False)
+
+    # Verification results at time of snapshot
+    verification_map_json = Column(Text, nullable=True)
+
+    # Chat history snapshot (JSON array of messages up to this point)
+    chat_history_json = Column(Text, nullable=True)
+
+    # Relationship
+    session = relationship("UserSession", back_populates="versions")
+
+    # Indexes for efficient queries
+    __table_args__ = (
+        Index("ix_deck_versions_session_version", "session_id", "version_number"),
+        Index("ix_deck_versions_session_created", "session_id", "created_at"),
+    )
+
+    def __repr__(self):
+        return f"<SlideDeckVersion(session_id={self.session_id}, version={self.version_number}, desc='{self.description}')>"
 

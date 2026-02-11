@@ -36,14 +36,17 @@ interface SlideContext {
 interface SlidePanelProps {
   slideDeck: SlideDeck | null;
   rawHtml: string | null;
-  onSlideChange: (slideDeck: SlideDeck) => void;
+  onSlideChange?: (slideDeck: SlideDeck) => void;
   scrollToSlide?: { index: number; key: number } | null;
   onSendMessage?: (content: string, slideContext?: SlideContext) => void;
+  readOnly?: boolean;
+  onVerificationComplete?: (description?: string) => void;
+  versionKey?: string;  // Used to force re-render when switching save point versions
 }
 
 type ViewMode = 'tiles' | 'rawhtml' | 'rawtext';
 
-export const SlidePanel: React.FC<SlidePanelProps> = ({ slideDeck, rawHtml, onSlideChange, scrollToSlide, onSendMessage }) => {
+export const SlidePanel: React.FC<SlidePanelProps> = ({ slideDeck, rawHtml, onSlideChange, scrollToSlide, onSendMessage, readOnly = false, onVerificationComplete, versionKey }) => {
   const [isReordering, setIsReordering] = useState(false);
   const [viewMode, setViewMode] = useState<ViewMode>('tiles');
   const [isExportingPDF, setIsExportingPDF] = useState(false);
@@ -61,6 +64,7 @@ export const SlidePanel: React.FC<SlidePanelProps> = ({ slideDeck, rawHtml, onSl
   const [isAutoVerifying, setIsAutoVerifying] = useState(false);
   const [verifyingSlides, setVerifyingSlides] = useState<Set<number>>(new Set());
   const autoVerifyTriggeredRef = useRef<Set<string>>(new Set()); // Track which content hashes we've tried to verify
+  const pendingEditDescriptionRef = useRef<string | null>(null); // Track description for panel edits
   
   const sensors = useSensors(
     useSensor(PointerSensor),
@@ -72,7 +76,7 @@ export const SlidePanel: React.FC<SlidePanelProps> = ({ slideDeck, rawHtml, onSl
   const handleDragEnd = async (event: DragEndEvent) => {
     const { active, over } = event;
 
-    if (!over || !slideDeck) return;
+    if (!over || !slideDeck || readOnly || !onSlideChange) return;
     
     if (active.id !== over.id) {
       const oldIndex = slideDeck.slides.findIndex(s => s.slide_id === active.id);
@@ -98,7 +102,7 @@ export const SlidePanel: React.FC<SlidePanelProps> = ({ slideDeck, rawHtml, onSl
         // Fetch full deck to get verification merged from verification_map
         const result = await api.getSlides(sessionId);
         if (result.slide_deck) {
-          onSlideChange(result.slide_deck);
+          onSlideChange?.(result.slide_deck);
         }
         clearSelection();
       } catch (error) {
@@ -113,7 +117,7 @@ export const SlidePanel: React.FC<SlidePanelProps> = ({ slideDeck, rawHtml, onSl
   };
 
   const handleDeleteSlide = async (index: number) => {
-    if (!slideDeck || !sessionId) return;
+    if (!slideDeck || !sessionId || readOnly || !onSlideChange) return;
     
     if (!confirm(`Delete slide ${index + 1}?`)) return;
 
@@ -122,7 +126,7 @@ export const SlidePanel: React.FC<SlidePanelProps> = ({ slideDeck, rawHtml, onSl
       // Fetch full deck to get verification merged from verification_map
       const result = await api.getSlides(sessionId);
       if (result.slide_deck) {
-        onSlideChange(result.slide_deck);
+        onSlideChange?.(result.slide_deck);
       }
       clearSelection();
     } catch (error) {
@@ -132,18 +136,22 @@ export const SlidePanel: React.FC<SlidePanelProps> = ({ slideDeck, rawHtml, onSl
   };
 
   const handleUpdateSlide = async (index: number, html: string) => {
-    if (!slideDeck || !sessionId) return;
+    if (!slideDeck || !sessionId || readOnly || !onSlideChange) return;
 
     try {
+      // Set pending description for save point creation after verification
+      pendingEditDescriptionRef.current = `Edited slide ${index + 1} (HTML)`;
+      
       await api.updateSlide(index, html, sessionId);
       // Fetch updated deck
       const result = await api.getSlides(sessionId);
       if (result.slide_deck) {
-        onSlideChange(result.slide_deck);
+        onSlideChange?.(result.slide_deck);
       }
       clearSelection();
     } catch (error) {
       console.error('Failed to update:', error);
+      pendingEditDescriptionRef.current = null; // Clear on error
       throw error; // Re-throw for editor to handle
     }
   };
@@ -159,7 +167,7 @@ export const SlidePanel: React.FC<SlidePanelProps> = ({ slideDeck, rawHtml, onSl
       // Update only the verification field locally
       const updatedSlides = [...slideDeck.slides];
       updatedSlides[index] = { ...updatedSlides[index], verification: verification || undefined };
-      onSlideChange({ ...slideDeck, slides: updatedSlides });
+      onSlideChange?.({ ...slideDeck, slides: updatedSlides });
     } catch (error) {
       console.error('Failed to update verification:', error);
       // Don't throw - verification persistence is non-critical
@@ -344,7 +352,7 @@ export const SlidePanel: React.FC<SlidePanelProps> = ({ slideDeck, rawHtml, onSl
     try {
       const result = await api.getSlides(sessionId);
       if (result.slide_deck) {
-        onSlideChange(result.slide_deck);
+        onSlideChange?.(result.slide_deck);
       }
     } catch (error) {
       console.error('[Auto-verify] Failed to refresh slides:', error);
@@ -353,7 +361,13 @@ export const SlidePanel: React.FC<SlidePanelProps> = ({ slideDeck, rawHtml, onSl
     setVerifyingSlides(new Set());
     setIsAutoVerifying(false);
     console.log('[Auto-verify] Completed');
-  }, [sessionId, isAutoVerifying, onSlideChange]);
+
+    // Notify parent that verification is complete (for save point creation)
+    // Pass description from panel edit if available
+    const editDescription = pendingEditDescriptionRef.current;
+    pendingEditDescriptionRef.current = null; // Clear after use
+    onVerificationComplete?.(editDescription || undefined);
+  }, [sessionId, isAutoVerifying, onSlideChange, onVerificationComplete]);
 
   // Effect to trigger auto-verification when slides change
   useEffect(() => {
@@ -682,9 +696,12 @@ export const SlidePanel: React.FC<SlidePanelProps> = ({ slideDeck, rawHtml, onSl
                   items={slideDeck.slides.map(s => s.slide_id)}
                   strategy={verticalListSortingStrategy}
                 >
-        {slideDeck.slides.map((slide, index) => (
+        {slideDeck.slides.map((slide, index) => {
+          // Include versionKey in key to force re-render when switching save point versions
+          const elementKey = versionKey ? `${versionKey}-${slide.slide_id}` : slide.slide_id;
+          return (
           <div
-            key={slide.slide_id}
+            key={elementKey}
             ref={(el) => {
               if (el) {
                 slideRefs.current.set(index, el);
@@ -706,7 +723,8 @@ export const SlidePanel: React.FC<SlidePanelProps> = ({ slideDeck, rawHtml, onSl
               isOptimizing={optimizingSlideIndex === index}
             />
           </div>
-        ))}
+          );
+        })}
                 </SortableContext>
               </DndContext>
             </div>
