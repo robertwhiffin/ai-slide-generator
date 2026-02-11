@@ -331,8 +331,8 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
           </div>
           
           <div className="flex items-center gap-4">
-            {/* Session Actions */}
-            {viewMode === 'main' && (
+            {/* Session Actions (hidden in view-only mode) */}
+            {viewMode === 'main' && !viewOnly && (
               <div className="flex items-center gap-2">
                 {/* Save Points Dropdown */}
                 {versions.length > 0 && (
@@ -528,7 +528,7 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
                   setPendingSavePointDescription(actionDescription);
                 }
               }}
-              disabled={!!previewVersion}
+              disabled={viewOnly || !!previewVersion}
               previewMessages={previewMessages}
             />
           </div>
@@ -541,10 +541,10 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
             <SlidePanel
               slideDeck={displayDeck}
               rawHtml={rawHtml}
-              onSlideChange={previewVersion ? undefined : setSlideDeck}
+              onSlideChange={viewOnly || previewVersion ? undefined : setSlideDeck}
               scrollToSlide={scrollTarget}
-              onSendMessage={previewVersion ? undefined : handleSendMessage}
-              readOnly={!!previewVersion}
+              onSendMessage={viewOnly || previewVersion ? undefined : handleSendMessage}
+              readOnly={viewOnly || !!previewVersion}
               onVerificationComplete={handleVerificationComplete}
               versionKey={versionKey}
             />
