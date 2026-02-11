@@ -1,4 +1,5 @@
 import React, { useState, useCallback, useRef, useEffect } from 'react';
+import { useParams, useNavigate } from 'react-router-dom';
 import type { SlideDeck } from '../../types/slide';
 import type { Message } from '../../types/message';
 import { ChatPanel, type ChatPanelHandle } from '../ChatPanel/ChatPanel';
@@ -17,6 +18,7 @@ import { SavePointDropdown, PreviewBanner, RevertConfirmModal, type SavePointVer
 import { useSession } from '../../contexts/SessionContext';
 import { useGeneration } from '../../contexts/GenerationContext';
 import { useProfiles } from '../../contexts/ProfileContext';
+import { useToast } from '../../contexts/ToastContext';
 import { useVersionCheck } from '../../hooks/useVersionCheck';
 import { api } from '../../services/api';
 
@@ -28,6 +30,9 @@ interface AppLayoutProps {
 }
 
 export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', viewOnly = false }) => {
+  const { sessionId: urlSessionId } = useParams<{ sessionId?: string }>();
+  const navigate = useNavigate();
+  const { showToast } = useToast();
   const [slideDeck, setSlideDeck] = useState<SlideDeck | null>(null);
   const [rawHtml, setRawHtml] = useState<string | null>(null);
   const [viewMode, setViewMode] = useState<ViewMode>(initialView);
@@ -53,6 +58,34 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
   const [revertTargetVersion, setRevertTargetVersion] = useState<number | null>(null);
   // Pending save point - created after verification completes
   const [pendingSavePointDescription, setPendingSavePointDescription] = useState<string | null>(null);
+
+  // Load session from URL parameter when on a session route
+  useEffect(() => {
+    if (!urlSessionId || initialView !== 'main') return;
+
+    const loadSession = async () => {
+      try {
+        // Get session info to check profile
+        const sessionInfo = await api.getSession(urlSessionId);
+
+        // Auto-switch profile if needed
+        if (sessionInfo.profile_id && currentProfile && sessionInfo.profile_id !== currentProfile.id) {
+          await loadProfile(sessionInfo.profile_id);
+        }
+
+        // Load session data
+        const { slideDeck: restoredDeck, rawHtml: restoredRawHtml } = await switchSession(urlSessionId);
+        setSlideDeck(restoredDeck);
+        setRawHtml(restoredRawHtml);
+        setChatKey(prev => prev + 1);
+      } catch {
+        navigate('/help');
+        showToast('Session not found', 'error');
+      }
+    };
+
+    loadSession();
+  }, [urlSessionId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Handle navigation from ribbon to main slide panel
   const handleSlideNavigate = useCallback((index: number) => {
