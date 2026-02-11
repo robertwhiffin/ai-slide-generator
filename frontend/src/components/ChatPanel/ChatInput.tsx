@@ -163,6 +163,7 @@ export const ChatInput: React.FC<ChatInputProps> = ({
             <div className="relative">
               <textarea
                 ref={textareaRef}
+                data-testid="chat-input"
                 value={message}
                 onChange={(e) => setMessage(e.target.value)}
                 onPaste={handlePaste}
