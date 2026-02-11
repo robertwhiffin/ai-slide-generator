@@ -99,6 +99,16 @@ Slides are HTML snippets embedded in iframes for preview. The optional `verifica
 - Tracks `isGenerating` boolean for navigation locking
 - Set by `ChatPanel` during streaming, consumed by `AppLayout`
 - Disables navigation buttons, profile selector, and session actions during generation
+- **History invalidation:** Exposes `historyInvalidationKey` (counter) and `invalidateHistory()` callback. When a generation completes, `ChatPanel` calls `invalidateHistory()` to bump the key, causing `SessionHistory` to refetch the session list automatically
+
+```typescript
+interface GenerationContextType {
+  isGenerating: boolean;
+  setIsGenerating: (value: boolean) => void;
+  historyInvalidationKey: number;   // incremented after each generation
+  invalidateHistory: () => void;    // call to trigger history refresh
+}
+```
 
 ### 5. Version Check (`src/hooks/useVersionCheck.ts`)
 
@@ -239,7 +249,7 @@ interface SlideStyle {
 
 | Path | Responsibility | Backend Touchpoints |
 |------|----------------|---------------------|
-| `src/components/ChatPanel/ChatPanel.tsx` | Sends prompts via SSE or polling, displays real-time events, loads persisted messages | `api.sendChatMessage`, `api.getSession` |
+| `src/components/ChatPanel/ChatPanel.tsx` | Sends prompts via SSE or polling, displays real-time events, loads persisted messages. Calls `invalidateHistory()` on generation complete to refresh history panel. | `api.sendChatMessage`, `api.getSession` |
 | `src/components/ChatPanel/ChatInput.tsx` | Textarea with selection badge when context exists | None (props only) |
 | `src/components/ChatPanel/MessageList.tsx` & `Message.tsx` | Renders conversation, collapses HTML/tool outputs | None |
 | `src/components/SlidePanel/SlidePanel.tsx` | Hosts drag/drop, tabs, per-slide CRUD, auto-verification trigger for unverified slides | `api.getSlides`, `api.reorderSlides`, `api.updateSlide`, `api.deleteSlide`, `api.verifySlide` |
@@ -253,6 +263,7 @@ interface SlideStyle {
 | `src/components/SlidePanel/ElementTreeView.tsx` | Tree view component with collapsible nodes and inline text editing | None |
 | `src/components/SlidePanel/VisualEditorPanel.tsx` | Split-pane visual editor with element tree and live preview | None |
 | `src/components/SlidePanel/SelectionRibbon.tsx` + `SlideSelection.tsx` | Thumbnail strip with dual interaction: preview click navigates main panel, checkbox toggles selection for chat context | `onSlideNavigate` callback to `AppLayout`, updates `SelectionContext` |
+| `src/components/History/SessionHistory.tsx` | Lists user's sessions (Postgres-backed), scoped to the current profile via `profile_id`. Auto-refreshes via `historyInvalidationKey` from `GenerationContext` and re-fetches on profile switch. Supports rename and restore. | `api.listSessions`, `api.renameSession`, `api.deleteSession` |
 | `src/hooks/useKeyboardShortcuts.ts` | `Esc` clears selection globally | None |
 | `src/utils/loadingMessages.ts` | Rotating messages during LLM calls | None |
 | `src/components/common/Tooltip.tsx` | Lightweight hover tooltip wrapper using Tailwind; appears instantly on hover | None |
@@ -352,7 +363,8 @@ The optimization prompt explicitly instructs the agent to:
 | Method | HTTP | Path | Request | Returns |
 |--------|------|------|---------|---------|
 | `createSession` | POST | `/api/sessions` | `{ title? }` | `Session` |
-| `listSessions` | GET | `/api/sessions` | query: `limit` | `{ sessions, count }` |
+| `listSessions` | GET | `/api/sessions` | query: `limit`, `profile_id` | `{ sessions, count }` (user-scoped, optionally filtered by profile) |
+| `listInvocations` | GET | `/api/sessions/invocations` | query: `limit` | `{ invocations, count }` (MLflow runs for current user) |
 | `getSession` | GET | `/api/sessions/{id}` | – | `Session` |
 | `renameSession` | PATCH | `/api/sessions/{id}` | query: `title` | `Session` |
 | `deleteSession` | DELETE | `/api/sessions/{id}` | – | – |

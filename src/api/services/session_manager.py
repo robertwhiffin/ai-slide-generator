@@ -227,24 +227,33 @@ class SessionManager:
         self,
         username: str,
         limit: int = 100,
+        profile_id: Optional[int] = None,
     ) -> List[Dict[str, Any]]:
         """List sessions created by a specific user (strict ownership, no ACL lookup).
 
         Used by the history panel to show only the current user's generations.
-        This is a lean query: SELECT ... FROM user_sessions WHERE created_by = :user
-        ORDER BY last_activity DESC LIMIT :limit.
+        Optionally filtered by profile_id so switching profiles shows only
+        that profile's sessions.
 
         Args:
             username: Owner's email / username (matched against created_by)
             limit: Maximum number of sessions to return
+            profile_id: If provided, only return sessions for this profile
 
         Returns:
             List of session info dictionaries, most-recent first
         """
         with get_db_session() as db:
-            sessions = (
+            query = (
                 db.query(UserSession)
                 .filter(UserSession.created_by == username)
+            )
+
+            if profile_id is not None:
+                query = query.filter(UserSession.profile_id == profile_id)
+
+            sessions = (
+                query
                 .order_by(UserSession.last_activity.desc())
                 .limit(limit)
                 .all()
@@ -1105,11 +1114,14 @@ class SessionManager:
 
             if not session:
                 # Auto-create session on first request
+                from src.core.user_context import get_current_user
                 session = UserSession(
                     session_id=session_id,
                     title=f"Session {datetime.utcnow().strftime('%Y-%m-%d %H:%M')}",
                     profile_id=profile_id,
                     profile_name=profile_name,
+                    created_by=get_current_user(),
+                    visibility="private",
                 )
                 db.add(session)
                 db.flush()

@@ -32,10 +32,16 @@ Complete implementation of session-level access control for tellr.
 
 ### ✅ Updated Session Manager
 - **Enhanced**: `src/api/services/session_manager.py`
-  - Auto-sets owner on session creation
+  - Auto-sets `created_by` and `visibility = 'private'` on session creation
   - Permission checks on get/delete/rename
-  - Lists only accessible sessions
+  - Lists only accessible sessions with optional `profile_id` filter for profile-scoped history
   - New methods for permission management
+
+### ✅ Auto-Migration on Startup
+- **Enhanced**: `src/core/database.py`
+  - `_run_migrations()` inspects live schema and adds missing columns (`created_by`, `visibility`, `experiment_id`)
+  - Runs automatically during `init_db()` before `Base.metadata.create_all()`
+  - Ensures deployed apps self-heal schema differences without manual SQL
 
 ### ✅ Permission API Routes
 - **New**: `src/api/routes/permissions.py`
@@ -102,6 +108,7 @@ Complete implementation of session-level access control for tellr.
 ```python
 def can_user_access(session, user, required_permission):
     """
+    0. Legacy session (created_by is NULL)? → Yes (any authenticated user)
     1. Owner? → Yes (always has edit)
     2. Workspace visibility + read required? → Yes
     3. User has explicit grant? → Check level
@@ -109,6 +116,8 @@ def can_user_access(session, user, required_permission):
     5. Otherwise → No
     """
 ```
+
+**Legacy session handling:** Sessions created before ownership tracking have `created_by = NULL`. These are accessible to any authenticated user to prevent "permission denied" errors on pre-existing data.
 
 ## Files Created
 

@@ -3,6 +3,7 @@ import { api } from '../../services/api';
 import type { Session } from '../../services/api';
 import { useSession } from '../../contexts/SessionContext';
 import { useGeneration } from '../../contexts/GenerationContext';
+import { useProfiles } from '../../contexts/ProfileContext';
 
 interface SessionHistoryProps {
   onSessionSelect: (sessionId: string) => void;
@@ -20,11 +21,12 @@ export const SessionHistory: React.FC<SessionHistoryProps> = ({
   const [editTitle, setEditTitle] = useState('');
   const { sessionId: currentSessionId } = useSession();
   const { historyInvalidationKey } = useGeneration();
+  const { currentProfile } = useProfiles();
 
   const loadSessions = async () => {
     try {
       setLoading(true);
-      const result = await api.listSessions(100);
+      const result = await api.listSessions(100, currentProfile?.id);
       setSessions(result.sessions);
       setError(null);
     } catch (err) {
@@ -35,10 +37,10 @@ export const SessionHistory: React.FC<SessionHistoryProps> = ({
     }
   };
 
-  // Refetch when this view is shown and whenever a generation completes (invalidation key bumps)
+  // Refetch when this view is shown, whenever a generation completes, or when profile changes
   useEffect(() => {
     loadSessions();
-  }, [historyInvalidationKey]);
+  }, [historyInvalidationKey, currentProfile?.id]);
 
   const handleRename = async (sessionId: string) => {
     if (!editTitle.trim()) return;

@@ -66,8 +66,12 @@ async def create_session(request: CreateSessionRequest = None):
 @router.get("")
 async def list_sessions(
     limit: int = Query(50, ge=1, le=100, description="Maximum sessions to return"),
+    profile_id: Optional[int] = Query(None, description="Filter by profile ID"),
 ):
-    """List sessions for the current user only (user_sessions WHERE created_by = current_user)."""
+    """List sessions for the current user only (user_sessions WHERE created_by = current_user).
+
+    Optionally filtered by profile_id to scope history to the active profile.
+    """
     current_user = get_current_user()
     if not current_user:
         try:
@@ -83,6 +87,7 @@ async def list_sessions(
             session_manager.list_user_generations,
             username=current_user,
             limit=limit,
+            profile_id=profile_id,
         )
 
         return {"sessions": sessions, "count": len(sessions)}

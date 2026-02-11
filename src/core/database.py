@@ -336,11 +336,72 @@ def get_db_session() -> Generator[Session, None, None]:
         db.close()
 
 
+def _run_migrations(engine):
+    """Run schema migrations for columns/tables added after initial deployment.
+
+    create_all() only creates NEW tables — it won't add columns to existing
+    tables. This function detects missing columns and tables, then adds them
+    via ALTER TABLE / CREATE TABLE using the same connection the app uses.
+    """
+    from sqlalchemy import text, inspect
+
+    inspector = inspect(engine)
+    schema = os.getenv("LAKEBASE_SCHEMA") or None
+
+    # --- 1. Migrate user_sessions: add columns introduced in session-permissions ---
+    table_name = "user_sessions"
+    try:
+        existing_cols = {
+            col["name"] for col in inspector.get_columns(table_name, schema=schema)
+        }
+    except Exception:
+        # Table doesn't exist yet — create_all() will handle it
+        existing_cols = set()
+
+    migrations = []
+
+    if existing_cols:  # Table exists; check for missing columns
+        new_columns = {
+            "created_by": "VARCHAR(255)",
+            "visibility": "VARCHAR(20)",
+            "experiment_id": "VARCHAR(255)",
+        }
+        for col_name, col_type in new_columns.items():
+            if col_name not in existing_cols:
+                migrations.append(
+                    f'ALTER TABLE {table_name} ADD COLUMN {col_name} {col_type}'
+                )
+
+    if migrations:
+        logger.info(f"Running {len(migrations)} migration(s) on {table_name}")
+        with engine.connect() as conn:
+            for stmt in migrations:
+                logger.info(f"  Migration: {stmt}")
+                try:
+                    conn.execute(text(stmt))
+                except Exception as e:
+                    logger.warning(f"  Migration skipped (may already exist): {e}")
+            conn.commit()
+        logger.info("Migrations complete")
+
+    # --- 2. Ensure new tables exist (session_permissions, export_jobs, etc.) ---
+    # create_all() handles this, but log for visibility
+    existing_tables = set(inspector.get_table_names(schema=schema))
+    expected_tables = {t.name for t in Base.metadata.tables.values()}
+    missing = expected_tables - existing_tables
+    if missing:
+        logger.info(f"Tables to be created by create_all(): {missing}")
+
+
 def init_db():
     """Create all tables in the database.
 
     For Lakebase deployments, ensures the schema is set correctly before
     creating tables. The schema is read from LAKEBASE_SCHEMA env var.
+
+    Also runs lightweight migrations to add columns that were introduced
+    after the initial table creation (create_all only creates new tables,
+    it does not alter existing ones).
     """
     # Import all models to ensure they're registered with Base.metadata
     # This is necessary for create_all() to create all tables
@@ -365,4 +426,8 @@ def init_db():
             if table.schema is None:
                 table.schema = schema
     
+    # Run migrations BEFORE create_all so existing tables get new columns
+    _run_migrations(engine)
+
+    # Create any entirely new tables
     Base.metadata.create_all(bind=engine)

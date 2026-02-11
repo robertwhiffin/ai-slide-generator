@@ -12,15 +12,15 @@ Create a new conversation session.
 
 ```json
 {
-  "title": "Q3 Revenue Analysis",
-  "user_id": "user@example.com"
+  "title": "Q3 Revenue Analysis"
 }
 ```
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `title` | string | No | Session title |
-| `user_id` | string | No | User identifier |
+
+`created_by` is automatically set to the authenticated user. `visibility` defaults to `'private'`.
 
 ### Response
 
@@ -28,6 +28,8 @@ Create a new conversation session.
 {
   "session_id": "abc123",
   "title": "Q3 Revenue Analysis",
+  "created_by": "user@example.com",
+  "visibility": "private",
   "created_at": "2024-01-15T10:30:00Z",
   "updated_at": "2024-01-15T10:30:00Z"
 }
@@ -35,7 +37,7 @@ Create a new conversation session.
 
 ## List Sessions
 
-List all sessions, optionally filtered by user.
+List sessions owned by the current user, optionally filtered by profile.
 
 **GET** `/api/sessions`
 
@@ -43,8 +45,10 @@ List all sessions, optionally filtered by user.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `user_id` | string | No | Filter by user ID |
 | `limit` | integer | No | Maximum sessions to return (1-100, default: 50) |
+| `profile_id` | integer | No | Filter by profile ID (shows only sessions for that profile) |
+
+Sessions are automatically scoped to the authenticated user (`created_by = current_user`). Legacy sessions (where `created_by` is `NULL`) are accessible to any authenticated user.
 
 ### Response
 
@@ -54,8 +58,12 @@ List all sessions, optionally filtered by user.
     {
       "session_id": "abc123",
       "title": "Q3 Revenue Analysis",
+      "created_by": "user@example.com",
+      "visibility": "private",
+      "profile_id": 1,
+      "profile_name": "Production",
       "created_at": "2024-01-15T10:30:00Z",
-      "updated_at": "2024-01-15T10:30:00Z"
+      "last_activity": "2024-01-15T11:00:00Z"
     }
   ],
   "count": 1

@@ -29,10 +29,13 @@ The database consists of configuration and session tables:
 7. **`slide_deck_prompt_library`** - Global deck prompt templates (shared across profiles)
 
 **Session Tables:**
-7. **`user_sessions`** - User conversation sessions with processing locks
+7. **`user_sessions`** - User conversation sessions with ownership, visibility, and processing locks
 8. **`session_messages`** - Chat messages with request_id for polling
 9. **`session_slide_decks`** - Slide deck state per session
 10. **`chat_requests`** - Async chat request tracking for polling mode
+11. **`session_permissions`** - Access control entries for session sharing (user/group grants)
+12. **`slide_deck_versions`** - Save point snapshots for deck versioning
+13. **`export_jobs`** - Async PPTX export job tracking
 
 ### Entity Relationships
 
@@ -51,7 +54,9 @@ slide_deck_prompt_library (global) ──── (n) config_prompts (via selected
 ```
 user_sessions (1) ──┬── (n) session_messages
                     ├── (1) session_slide_decks
-                    └── (n) chat_requests
+                    ├── (n) chat_requests
+                    ├── (n) session_permissions
+                    └── (n) slide_deck_versions
 ```
 
 - One profile has exactly one AI infrastructure config
@@ -247,22 +252,36 @@ class ConfigHistory(Base):
 
 ### UserSession
 
-User conversation sessions with processing lock support and profile association.
+User conversation sessions with ownership, visibility, processing lock support, and profile association.
 
 ```python
 class UserSession(Base):
     id: int
     session_id: str              # Unique session identifier
-    user_id: str | None          # Optional user identification
+    user_id: str | None          # Optional user identification (deprecated, use created_by)
+    
+    # Ownership and visibility
+    created_by: str | None       # Owner's email/username (indexed)
+    visibility: str              # 'private', 'shared', or 'workspace' (default: 'private')
+    
     title: str                   # Session title
     created_at: datetime
     last_activity: datetime
     profile_id: int | None       # Profile this session belongs to (for Genie space association)
     profile_name: str | None     # Cached profile name for display in session history
     genie_conversation_id: str | None  # Genie conversation ID (persists across profile switches)
+    experiment_id: str | None    # MLflow experiment ID for tracing
     is_processing: bool          # Lock flag for concurrent requests
     processing_started_at: datetime | None
+    
+    # Relationships
+    messages: list[SessionMessage]
+    slide_deck: SessionSlideDeck | None
+    permissions: list[SessionPermission]   # Access control entries
+    versions: list[SlideDeckVersion]       # Save point snapshots
 ```
+
+**Ownership model:** The `created_by` column stores the owner's identity (email or username). The `GET /api/sessions` endpoint filters by `created_by = current_user` to ensure users only see their own sessions. An optional `profile_id` query parameter further scopes results to a specific profile, so switching profiles in the UI shows only that profile's sessions. The `visibility` column controls whether a session is private (owner only), shared (owner + explicit grants via `session_permissions`), or workspace-wide. Sessions with `created_by = NULL` (legacy, pre-ownership) are accessible to any authenticated user.
 
 **Note:** Sessions track their `profile_id` to preserve Genie conversation IDs across profile switches. When restoring a session, the frontend auto-switches to the session's profile.
 
@@ -353,35 +372,114 @@ class ChatRequest(Base):
     completed_at: datetime | None
 ```
 
+### SessionPermission
+
+Access control entries for session sharing. Defines who (principal) has what permission on a session. Owners always have edit permission implicitly.
+
+```python
+class SessionPermission(Base):
+    id: int
+    session_id: int              # Foreign key to user_sessions
+    principal_type: str          # 'user' or 'group'
+    principal_id: str            # Email address or group name
+    permission: str              # 'read' or 'edit'
+    granted_by: str              # Who granted this permission
+    granted_at: datetime
+```
+
+**Permission levels:**
+| Level | Capabilities |
+|-------|-------------|
+| `read` | View session and slides |
+| `edit` | Modify session, slides, and share with others |
+
+**Visibility levels on UserSession:**
+| Level | Access |
+|-------|--------|
+| `private` | Owner only (default) |
+| `shared` | Owner + explicit grants in `session_permissions` |
+| `workspace` | All workspace users |
+
+**Indexes:**
+- `ix_session_permissions_session` – fast lookup by session
+- `ix_session_permissions_principal` – fast lookup by principal (type + id)
+- `uq_session_principal` – unique constraint on (session, principal_type, principal_id)
+
+### ExportJob
+
+Tracks async PPTX export jobs for polling. Database-backed job tracking replaces the previous in-memory dict, enabling multi-worker deployments.
+
+```python
+class ExportJob(Base):
+    id: int
+    job_id: str                  # Unique job identifier
+    session_id: str              # String session_id (not FK)
+    status: str                  # 'pending', 'running', 'completed', 'error'
+    progress: int                # Slides processed so far
+    total_slides: int            # Total slides to export
+    title: str | None            # Export title
+    output_path: str | None      # Path to generated PPTX
+    error_message: str | None    # Error details if failed
+    created_at: datetime
+    completed_at: datetime | None
+```
+
+### SlideDeckVersion
+
+Save point snapshots for deck versioning. Limited to 40 per session.
+
+```python
+class SlideDeckVersion(Base):
+    id: int
+    session_id: int              # Foreign key to user_sessions
+    version_number: int          # Sequential version number
+    description: str             # Auto-generated description
+    deck_json: str               # Complete deck snapshot (JSON)
+    verification_map_json: str | None  # Verification results at snapshot time
+    chat_history_json: str | None      # Chat messages up to this point
+    created_at: datetime
+```
+
+See [Save Points / Versioning](save-points-versioning.md) for full architecture.
+
 ## Schema Management
 
-### Pre-Release Approach
+### Auto-Migration on Startup
 
-**Current Status:** Pre-release - schema is actively evolving.
+`src/core/database.py` includes a `_run_migrations()` function that runs automatically during `init_db()`. It inspects the live database schema via `sqlalchemy.inspect()` and programmatically adds missing columns to the `user_sessions` table:
 
-Tables are automatically created from SQLAlchemy models using:
+| Column | Type | Default | Purpose |
+|--------|------|---------|---------|
+| `created_by` | `VARCHAR(255)` | `NULL` | Session ownership (owner's email/username) |
+| `visibility` | `VARCHAR(20)` | `'private'` | Access control level (private/shared/workspace) |
+| `experiment_id` | `VARCHAR(255)` | `NULL` | MLflow experiment ID for tracing |
 
 ```python
 from src.core.database import init_db
 
-init_db()  # Creates all tables from Base.metadata
+init_db()  # Runs _run_migrations() then Base.metadata.create_all()
 ```
+
+This approach was adopted because Databricks Lakebase may not propagate schema changes made via Unity Catalog SQL to the PostgreSQL protocol used by SQLAlchemy. The in-app migration ensures deployed apps self-heal schema differences without manual intervention.
+
+**Migration logic:**
+1. Inspect existing columns via `sqlalchemy.inspect(engine)`
+2. Compare against expected columns (`created_by`, `visibility`, `experiment_id`)
+3. Execute `ALTER TABLE ADD COLUMN` for any missing columns
+4. Then run `Base.metadata.create_all()` for new tables
 
 This is called automatically by:
 - `scripts/init_database.py` - Ensures tables exist before seeding data
 - `quickstart/setup_database.sh` - Creates tables during initial setup
+- App startup (via `init_db()` in lifespan)
 
-### When to Add Migrations
+### Legacy Session Handling
 
-**Migrations will be added when:**
-- Application reaches production with real user data
-- Schema changes need to preserve existing data
-- Deploying to Databricks Lakebase with established datasets
+Sessions created before ownership tracking have `created_by = NULL`. The `PermissionService` grants read access to any authenticated user for these legacy sessions, preventing "permission denied" errors on pre-existing data. New sessions always set `created_by` to the authenticated user.
 
-**For now:** Schema changes are handled by dropping and recreating the database during development.
+### Future Migration Setup
 
-**Future Migration Setup:**
-When ready for production, [Alembic](https://alembic.sqlalchemy.org/) can be added back:
+When ready for formal production migrations, [Alembic](https://alembic.sqlalchemy.org/) can be added:
 1. Install: `pip install alembic`
 2. Initialize: `alembic init alembic`
 3. Configure `alembic.ini` with `DATABASE_URL` from environment

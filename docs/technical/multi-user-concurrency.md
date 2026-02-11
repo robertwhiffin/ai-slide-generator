@@ -8,9 +8,12 @@ How the backend handles concurrent requests from multiple users without blocking
 
 The AI Slide Generator supports multiple simultaneous users through:
 - **Session-scoped state** – each user operates on their own session with isolated slide decks
+- **Ownership-based isolation** – `GET /api/sessions` returns only sessions where `created_by = current_user` (with optional `profile_id` filter)
+- **Auth middleware** – extracts user identity from Databricks proxy headers or dev environment variables
 - **Async endpoint handlers** – FastAPI endpoints use `asyncio.to_thread()` for blocking LLM calls
 - **Database-based locking** – prevents concurrent mutations to the same session
 - **Per-request tool binding** – eliminates shared mutable state in the LangChain agent
+- **Permission model** – optional session sharing via `session_permissions` table with read/edit grants
 
 ---
 
@@ -42,7 +45,37 @@ The AI Slide Generator supports multiple simultaneous users through:
 
 ## Key Mechanisms
 
-### 1. Async Request Handling
+### 1. User Identity & Session Ownership
+
+The auth middleware in `src/api/main.py` establishes user identity on every request:
+
+**Production (Databricks Apps):**
+- Extracts `x-forwarded-access-token` header from the Databricks proxy
+- Creates a per-request user client via `create_user_client(token)`
+- Sets `current_user` from `x-forwarded-user` header or by querying the Databricks API
+
+**Local development:**
+- When `ENVIRONMENT=development` and no token header is present, sets `current_user` to `DEV_USER_ID` env var (or `dev@local.dev` fallback)
+- Ensures sessions are created and listed with a consistent owner identity
+
+**Session listing isolation:**
+- `GET /api/sessions` calls `session_manager.list_user_generations(username=current_user, profile_id=...)`
+- This queries `WHERE created_by = :username ORDER BY last_activity DESC`
+- An optional `profile_id` parameter further scopes results to a specific profile, so switching profiles in the frontend shows only that profile's session history
+- Users never see other users' sessions in history, even if they share the same database
+
+**Legacy session access:**
+- Sessions created before ownership tracking have `created_by = NULL`
+- The `PermissionService` grants read access to any authenticated user for these legacy sessions
+- New sessions always set `created_by` to the authenticated user and `visibility = 'private'`
+
+**Permission-based sharing (optional):**
+- Sessions default to `visibility = 'private'` (owner only)
+- Setting `visibility = 'shared'` enables explicit grants via `session_permissions` table
+- Setting `visibility = 'workspace'` makes the session visible to all workspace users
+- See [Database Configuration](database-configuration.md) for the `SessionPermission` model
+
+### 2. Async Request Handling
 
 All FastAPI endpoints are `async def`. Blocking operations (LLM calls, database queries) are wrapped with `asyncio.to_thread()` so the event loop remains responsive:
 
@@ -60,7 +93,7 @@ async def send_message(request: ChatRequest):
 
 This allows one worker to handle multiple in-flight requests concurrently.
 
-### 2. Database-Based Session Locking
+### 3. Database-Based Session Locking
 
 Mutation endpoints (chat, reorder, update, duplicate, delete) acquire a session lock before proceeding:
 
@@ -93,7 +126,7 @@ def acquire_session_lock(self, session_id: str, timeout_seconds: int = 300) -> b
 | `is_processing` | `BOOLEAN NOT NULL DEFAULT FALSE` | Lock flag |
 | `processing_started_at` | `TIMESTAMP` | Stale lock detection (>5 min) |
 
-### 5. Async Chat Requests (Polling Mode)
+### 4. Async Chat Requests (Polling Mode)
 
 For polling-based streaming, async requests are tracked in the `chat_requests` table:
 
@@ -108,7 +141,7 @@ For polling-based streaming, async requests are tracked in the `chat_requests` t
 
 Messages are linked to requests via `session_messages.request_id` for efficient polling.
 
-### 3. Per-Request Tool Binding
+### 5. Per-Request Tool Binding
 
 The LangChain agent previously used a shared `current_session_id` instance variable—a race condition when multiple requests ran in parallel. Now tools are created per-request with the session ID bound via closure:
 
@@ -124,7 +157,7 @@ def generate_slides(self, question: str, session_id: str, ...):
 
 The Genie wrapper inside `_create_tools_for_session()` captures the `session` dict reference at creation time, eliminating any shared mutable state.
 
-### 4. Thread-Safe Deck Cache
+### 6. Thread-Safe Deck Cache
 
 `ChatService` maintains an in-memory slide deck cache keyed by session ID. All cache access is protected by `_cache_lock`:
 

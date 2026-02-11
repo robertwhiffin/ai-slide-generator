@@ -186,8 +186,12 @@ export const api = {
   /**
    * List all sessions (Postgres-backed)
    */
-  async listSessions(limit = 50): Promise<{ sessions: Session[]; count: number }> {
-    const response = await fetch(`${API_BASE_URL}/api/sessions?limit=${limit}`);
+  async listSessions(limit = 50, profileId?: number): Promise<{ sessions: Session[]; count: number }> {
+    let url = `${API_BASE_URL}/api/sessions?limit=${limit}`;
+    if (profileId !== undefined) {
+      url += `&profile_id=${profileId}`;
+    }
+    const response = await fetch(url);
 
     if (!response.ok) {
       throw new ApiError(response.status, 'Failed to list sessions');

@@ -73,6 +73,14 @@ class PermissionService:
             return False
         
         # 1. Owner always has edit (and read) permission
+        #    Sessions with no owner (created_by is NULL) are legacy sessions
+        #    from before ownership tracking — grant access to any authenticated user
+        if session.created_by is None:
+            logger.debug(
+                f"Session {session.session_id} has no owner (legacy), granting access to {current_user}"
+            )
+            return True
+        
         if session.created_by == current_user:
             logger.debug(f"User {current_user} is owner of session {session.session_id}")
             return True

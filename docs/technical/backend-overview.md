@@ -44,7 +44,8 @@ Frontend fetch -> FastAPI router ->   │ ChatService (singleton)│
 | Method | Path | Purpose | Backend handler |
 | --- | --- | --- | --- |
 | `POST` | `/api/sessions` | Create new session | `routes/sessions.create_session` |
-| `GET` | `/api/sessions` | List sessions | `routes/sessions.list_sessions` |
+| `GET` | `/api/sessions` | List current user's sessions (ownership + profile filtering) | `routes/sessions.list_sessions` |
+| `GET` | `/api/sessions/invocations` | List MLflow runs for current user (alternative history source) | `routes/sessions.list_invocations` |
 | `GET` | `/api/sessions/{id}` | Get session details | `routes/sessions.get_session` |
 | `PATCH` | `/api/sessions/{id}` | Rename session | `routes/sessions.update_session` |
 | `DELETE` | `/api/sessions/{id}` | Delete session | `routes/sessions.delete_session` |
@@ -163,13 +164,13 @@ Mutation endpoints return **409 Conflict** if the session is already processing 
 
 | Module | Responsibility | Key Details |
 | --- | --- | --- |
-| `src/api/main.py` | App assembly | Registers routers, CORS, health root. |
+| `src/api/main.py` | App assembly, auth middleware | Registers routers, CORS, health root. Auth middleware extracts user identity from `x-forwarded-access-token`/`x-forwarded-user` headers (production) or sets `DEV_USER_ID` / `dev@local.dev` (local development). |
 | `src/api/routes/chat.py` | `/api/chat`, `/api/chat/stream`, `/api/chat/async`, `/api/chat/poll` | Session locking, SSE streaming, polling endpoints. |
 | `src/api/services/job_queue.py` | Async chat processing | In-memory job queue with background worker for polling mode. |
-| `src/api/routes/sessions.py` | Session CRUD endpoints | Create, list, get (with messages), rename, delete. |
+| `src/api/routes/sessions.py` | Session CRUD + invocations | Create, list (user-scoped via `created_by`, optional `profile_id` filter), get (with messages), rename, delete. Invocations endpoint lists MLflow runs. |
 | `src/api/routes/slides.py` | Slide CRUD endpoints | Session-scoped operations with locking. |
 | `src/api/services/chat_service.py` | Stateful orchestration | Deck cache, streaming generator, history hydration. |
-| `src/api/services/session_manager.py` | Session persistence | Database CRUD, message storage, session locking. |
+| `src/api/services/session_manager.py` | Session persistence | Database CRUD, message storage, session locking. `list_user_generations()` provides ownership filtering (`created_by = username`) with optional `profile_id` parameter for profile-scoped history. Auto-sets `created_by` and `visibility = 'private'` on new sessions. |
 | `src/services/agent.py` | LangChain agent | Per-request tools, streaming callbacks, MLflow spans. |
 | `src/services/streaming_callback.py` | SSE event emission | Emits events to queue AND persists to database. |
 | `src/services/tools.py` | Genie wrappers | Starts conversations, retries, converts tabular responses. |
@@ -204,7 +205,7 @@ Breaking these invariants (e.g., submitting non-contiguous indices, missing `.sl
 - **Tools:** Created per-request via `_create_tools_for_session(session_id)`. The Genie wrapper captures the session dict via closure, eliminating race conditions from shared state. Automatically reuses the session's `conversation_id`.
 - **Sessions:** `SlideGeneratorAgent.sessions` holds `chat_history`, `genie_conversation_id`, `experiment_id`, `experiment_url`, `username`, and `metadata`. Each user operates on their own session with isolated state.
 - **Concurrency:** Tools and `AgentExecutor` are created fresh for each request. No shared mutable state between concurrent requests.
-- **Observability:** MLflow spans wrap each generation. Attributes include mode (`generate` vs `edit`), latency, tool call counts, Genie conversation ID, and replacement stats.
+- **Observability:** MLflow spans wrap each generation. Attributes include mode (`generate` vs `edit`), latency, tool call counts, Genie conversation ID, and replacement stats. Each run is also tagged with `session_id` via `mlflow.set_tag("session_id", session_id)` to link traces back to Postgres sessions.
 - **Robustness:** Multiple safeguards prevent slide data loss during edits (see [Slide Editing Robustness](slide-editing-robustness-fixes.md)):
   - Response validation with automatic retry if LLM returns text instead of HTML
   - Add vs edit intent detection to preserve existing slides when adding new ones
@@ -285,6 +286,20 @@ If the agent's HTML has empty slides, out-of-range indices, or references canvas
 - **Logging:** `src/utils/logging_config.setup_logging()` sets JSON or text output, attaches rotating file handlers, and lowers noisy dependency log levels. Every router/service log call already uses structured `extra={...}` fields for easier filtering.
 - **MLflow traces:** Each session creates its own experiment. Traces run inside `mlflow.start_span("generate_slides")`, recording latency, tool usage, session info, and (for edits) replacement counts. Users access their traces via the "Run Details" header link.
 - **Tests:** `tests/unit` and `tests/integration` target agents, config loaders, HTML utilities, and API-level interactions. When adding features, mirror new code with a matching test file (e.g., `tests/unit/test_<module>.py`).
+
+### Auto-Migration on Startup
+
+`src/core/database.py` includes a `_run_migrations()` function that runs automatically during `init_db()`. It inspects the live database schema via `sqlalchemy.inspect()` and adds any missing columns to the `user_sessions` table using `ALTER TABLE ADD COLUMN` statements:
+
+- `created_by` (VARCHAR) — session ownership
+- `visibility` (VARCHAR, default `'private'`) — access control level
+- `experiment_id` (VARCHAR) — MLflow experiment tracking
+
+This ensures deployed apps self-heal schema differences without manual SQL, which is critical for Lakebase environments where external DDL may not propagate through the PostgreSQL protocol.
+
+### Legacy Session Access
+
+Sessions created before ownership tracking have `created_by = NULL`. The `PermissionService.check_permission()` method grants read access to any authenticated user for these legacy sessions, preventing "permission denied" errors on pre-existing data. New sessions always have `created_by` set to the authenticated user's identity.
 
 ---
 

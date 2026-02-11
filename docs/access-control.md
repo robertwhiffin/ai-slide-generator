@@ -19,6 +19,7 @@ tellr now provides comprehensive access control for sessions (presentations):
 - Owners automatically have full **edit** permission
 - Owners can grant/revoke permissions to others
 - Owners can change visibility and delete sessions
+- **Legacy sessions** (created before ownership tracking) have `created_by = NULL` and are accessible to any authenticated user
 
 ### Permission Levels
 
@@ -71,10 +72,11 @@ Content-Type: application/json
 
 ### 2. List Accessible Sessions
 
-Returns only sessions you have permission to access.
+Returns only sessions you have permission to access. Optionally filter by profile to see only sessions from a specific profile.
 
 ```bash
 GET /api/sessions?limit=50
+GET /api/sessions?limit=50&profile_id=1
 ```
 
 **Response:**
@@ -345,7 +347,7 @@ curl http://localhost:8000/api/sessions/{session_id}
 
 ### 4. Backfill Existing Sessions (Optional)
 
-Existing sessions may not have `created_by` set. The migration automatically backfills from `user_id` where possible.
+Existing sessions may not have `created_by` set. The app auto-migrates missing columns on startup via `_run_migrations()` in `src/core/database.py`, and legacy sessions (where `created_by IS NULL`) are automatically accessible to any authenticated user.
 
 To manually set ownership:
 
