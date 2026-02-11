@@ -508,11 +508,11 @@ test.describe('Session History Navigation', () => {
   test('can navigate back to History after leaving', async ({ page }) => {
     await goToHistory(page);
 
-    // Go to Generator
-    await page.getByRole('button', { name: /Back to Generator/i }).click();
-    await expect(page.getByRole('heading', { name: 'Chat', level: 2 })).toBeVisible();
+    // Navigate away from History to another page
+    await page.getByRole('navigation').getByRole('button', { name: 'Help' }).click();
+    await expect(page.getByRole('heading', { name: /how to use/i })).toBeVisible();
 
-    // Go back to History via nav
+    // Navigate back to History via nav
     await page.getByRole('navigation').getByRole('button', { name: 'History' }).click();
     await expect(page.getByRole('heading', { name: 'Session History' })).toBeVisible();
   });
