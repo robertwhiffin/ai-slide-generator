@@ -5,6 +5,7 @@ import { SelectionProvider } from './contexts/SelectionContext';
 import { ProfileProvider } from './contexts/ProfileContext';
 import { SessionProvider } from './contexts/SessionContext';
 import { GenerationProvider } from './contexts/GenerationContext';
+import { ToastProvider } from './contexts/ToastContext';
 
 function AppRoutes() {
   // Use location key to force remount when route changes
@@ -31,7 +32,9 @@ function App() {
       <SessionProvider>
         <GenerationProvider>
           <SelectionProvider>
-            <AppRoutes />
+            <ToastProvider>
+              <AppRoutes />
+            </ToastProvider>
           </SelectionProvider>
         </GenerationProvider>
       </SessionProvider>
