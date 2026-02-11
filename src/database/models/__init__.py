@@ -7,8 +7,10 @@ from src.database.models.profile import ConfigProfile
 from src.database.models.prompts import ConfigPrompts
 from src.database.models.session import (
     ChatRequest,
+    ExportJob,
     SessionMessage,
     SessionSlideDeck,
+    SlideDeckVersion,
     UserSession,
 )
 from src.database.models.slide_deck_prompt import SlideDeckPromptLibrary
@@ -17,6 +19,7 @@ from src.database.models.slide_style_library import SlideStyleLibrary
 __all__ = [
     "ChatRequest",
     "ConfigAIInfra",
+    "ExportJob",
     "ConfigGenieSpace",
     "ConfigHistory",
     "ConfigProfile",
@@ -24,6 +27,7 @@ __all__ = [
     "SessionMessage",
     "SessionSlideDeck",
     "SlideDeckPromptLibrary",
+    "SlideDeckVersion",
     "SlideStyleLibrary",
     "UserSession",
 ]

@@ -141,6 +141,16 @@ async function setupMocks(page: Page) {
     });
   });
 
+  // Mock slides/versions endpoints (save points feature)
+  // AppLayout calls listVersions on every mount since sessionId is always set
+  await page.route('http://127.0.0.1:8000/api/slides/versions**', (route) => {
+    route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ versions: [], current_version: null })
+    });
+  });
+
   // Mock version check to avoid distraction
   await page.route('**/api/version**', (route) => {
     route.fulfill({
