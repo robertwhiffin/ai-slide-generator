@@ -1,13 +1,18 @@
 """Unit tests for {{image:ID}} placeholder substitution."""
 import pytest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from src.core.database import Base
+from src.api.services.chat_service import ChatService
+from src.domain.slide import Slide
+from src.domain.slide_deck import SlideDeck
 from src.utils.image_utils import substitute_image_placeholders
+
+from tests.fixtures.html import load_3_slide_deck
 
 
 # --- Fixtures ---
@@ -118,3 +123,80 @@ class TestSubstituteImagePlaceholders:
 
         assert "data:image/png;base64,OK_DATA" in result
         assert "{{image:999}}" in result
+
+
+class TestSlideContextBase64Stripping:
+    """Regression: frontend sends base64 HTML in slide_context; agent must receive placeholders."""
+
+    def _create_mock_service(self) -> ChatService:
+        service = ChatService.__new__(ChatService)
+        service.agent = MagicMock()
+        service._deck_cache = {}
+        service._cache_lock = MagicMock()
+        service._cache_lock.__enter__ = MagicMock(return_value=None)
+        service._cache_lock.__exit__ = MagicMock(return_value=None)
+        return service
+
+    def test_agent_receives_placeholders_not_base64(self):
+        """slide_context passed to agent.generate_slides must use {{image:ID}} placeholders,
+        even when the frontend sends base64-substituted HTML."""
+        service = self._create_mock_service()
+        session_id = "img-ctx-test"
+
+        # Build a deck whose slide[0] uses an image placeholder (backend canonical form)
+        placeholder_html = '<div class="slide"><img src="{{image:42}}" /></div>'
+        deck = SlideDeck.from_html_string(load_3_slide_deck())
+        deck.slides[0] = Slide(html=placeholder_html, slide_id="slide_0")
+        service._deck_cache[session_id] = deck
+
+        # Frontend would have received base64-substituted HTML for rendering
+        base64_html = '<div class="slide"><img src="data:image/png;base64,AAAA..." /></div>'
+
+        # Mock agent to capture what slide_context it receives
+        captured = {}
+        def fake_generate(*args, **kwargs):
+            captured["slide_context"] = kwargs.get("slide_context")
+            return {
+                "html": '<div class="slide"><h1>Edited</h1></div>',
+                "messages": [{"role": "assistant", "content": "Done"}],
+                "metadata": {},
+                "replacement_info": None,
+                "parsed_output": {"html": '<div class="slide"><h1>Edited</h1></div>', "type": "full_deck"},
+            }
+        service.agent.generate_slides = MagicMock(side_effect=fake_generate)
+
+        # Stub helpers used by send_message
+        service._ensure_agent_session = MagicMock(return_value=None)
+        service._detect_edit_intent = MagicMock(return_value=True)
+        service._detect_generation_intent = MagicMock(return_value=False)
+        service._detect_add_intent = MagicMock(return_value=False)
+        service._parse_slide_references = MagicMock(return_value=([], None))
+        service._detect_explicit_replace_intent = MagicMock(return_value=False)
+
+        mock_session_manager = MagicMock()
+        mock_session_manager.get_session.return_value = {
+            "id": session_id, "profile_id": None, "profile_name": None,
+            "genie_conversation_id": None,
+        }
+        mock_session_manager.get_slide_deck.return_value = None
+
+        slide_context = {
+            "indices": [0],
+            "slide_htmls": [base64_html],  # frontend sends base64
+        }
+
+        with patch("src.api.services.chat_service.get_session_manager", return_value=mock_session_manager):
+            with patch("src.core.settings_db.get_settings") as mock_settings:
+                mock_settings.return_value = MagicMock(profile_id=None, profile_name=None)
+                # The RC3 guard raises ValueError when replacement_info is None
+                # with slide_context present — we only care about the captured context
+                try:
+                    service.send_message(session_id, "Edit this slide", slide_context=slide_context)
+                except ValueError:
+                    pass
+
+        # The agent must have received the placeholder form, NOT base64
+        agent_ctx = captured["slide_context"]
+        assert agent_ctx is not None
+        assert "{{image:42}}" in agent_ctx["slide_htmls"][0]
+        assert "base64" not in agent_ctx["slide_htmls"][0]
