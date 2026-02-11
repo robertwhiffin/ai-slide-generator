@@ -68,3 +68,6 @@ frontend/playwright-report/
 frontend/test-results/
 
 config/deployment.yaml
+
+# Git worktrees
+.worktrees/
