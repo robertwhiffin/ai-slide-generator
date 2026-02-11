@@ -233,6 +233,7 @@ def load_settings_from_database(profile_id: Optional[int] = None) -> AppSettings
 
             # Load slide style content if selected
             slide_style_content = None
+            image_guidelines = None
             if prompts.selected_slide_style_id:
                 from src.database.models import SlideStyleLibrary
                 slide_style = db.query(SlideStyleLibrary).filter_by(
@@ -241,6 +242,7 @@ def load_settings_from_database(profile_id: Optional[int] = None) -> AppSettings
                 ).first()
                 if slide_style:
                     slide_style_content = slide_style.style_content
+                    image_guidelines = slide_style.image_guidelines
                     logger.info(
                         "Loaded slide style",
                         extra={"slide_style_name": slide_style.name, "slide_style_id": slide_style.id}
@@ -272,6 +274,7 @@ def load_settings_from_database(profile_id: Optional[int] = None) -> AppSettings
                 prompts={
                     "deck_prompt": deck_prompt_content or "",
                     "slide_style": slide_style_content or "",
+                    "image_guidelines": image_guidelines or "",
                     "system_prompt": prompts.system_prompt,
                     "slide_editing_instructions": prompts.slide_editing_instructions,
                 },

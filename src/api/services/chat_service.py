@@ -33,6 +33,7 @@ from src.utils.html_utils import (
     extract_canvas_ids_from_html,
     split_script_by_canvas,
 )
+from src.utils.image_utils import substitute_image_placeholders
 
 logger = logging.getLogger(__name__)
 
@@ -166,6 +167,7 @@ class ChatService:
         session_id: str,
         message: str,
         slide_context: Optional[Dict[str, Any]] = None,
+        image_ids: Optional[List[int]] = None,
     ) -> Dict[str, Any]:
         """Send a message to the agent and get response.
 
@@ -173,6 +175,7 @@ class ChatService:
             session_id: Session ID (auto-created if doesn't exist)
             message: User's message
             slide_context: Optional context for slide editing
+            image_ids: Optional list of image IDs attached to this message
 
         Returns:
             Dictionary containing:
@@ -184,12 +187,17 @@ class ChatService:
         Raises:
             Exception: If agent fails to generate slides
         """
+        # Inject image context if images are attached
+        if image_ids:
+            message = self._inject_image_context(message, image_ids)
+
         logger.info(
             "Processing message",
             extra={
                 "message_length": len(message),
                 "session_id": session_id,
                 "has_slide_context": slide_context is not None,
+                "attached_image_ids": image_ids,
             },
         )
 
@@ -321,6 +329,12 @@ class ChatService:
 
             html_output = result.get("html")
             replacement_info = result.get("replacement_info")
+
+            # Substitute {{image:ID}} placeholders with base64 data URIs
+            if html_output and "{{image:" in html_output:
+                from src.core.database import get_db_session
+                with get_db_session() as img_db:
+                    html_output = substitute_image_placeholders(html_output, img_db)
 
             # Get deck from cache or restore from database (RC6: survive backend restarts)
             current_deck = self._get_or_load_deck(session_id)
@@ -528,6 +542,7 @@ class ChatService:
         message: str,
         slide_context: Optional[Dict[str, Any]] = None,
         request_id: Optional[str] = None,
+        image_ids: Optional[List[int]] = None,
     ) -> Generator[StreamEvent, None, None]:
         """Send a message and yield streaming events.
 
@@ -541,6 +556,7 @@ class ChatService:
             message: User's message
             slide_context: Optional context for slide editing
             request_id: Optional request ID for async polling support
+            image_ids: Optional list of image IDs attached to this message
 
         Yields:
             StreamEvent objects for real-time display
@@ -548,6 +564,10 @@ class ChatService:
         Raises:
             Exception: If agent fails to generate slides
         """
+        # Inject image context if images are attached
+        if image_ids:
+            message = self._inject_image_context(message, image_ids)
+
         logger.info(
             "Processing streaming message",
             extra={
@@ -823,6 +843,12 @@ class ChatService:
 
         html_output = result.get("html")
         replacement_info = result.get("replacement_info")
+
+        # Substitute {{image:ID}} placeholders with base64 data URIs
+        if html_output and "{{image:" in html_output:
+            from src.core.database import get_db_session
+            with get_db_session() as img_db:
+                html_output = substitute_image_placeholders(html_output, img_db)
 
         # Get deck from cache or restore from database (RC6: survive backend restarts)
         current_deck = self._get_or_load_deck(session_id)
@@ -1639,6 +1665,34 @@ class ChatService:
             return ([slide_num - 1], None)  # Convert to 0-based
         
         return ([], None)
+
+    def _inject_image_context(self, message: str, image_ids: List[int]) -> str:
+        """Append image metadata to user message so the agent knows about attached images."""
+        from src.core.database import get_db_session
+        from src.services import image_service
+
+        image_descriptions = []
+        with get_db_session() as db:
+            for img_id in image_ids:
+                try:
+                    img = db.query(image_service.ImageAsset).filter(
+                        image_service.ImageAsset.id == img_id,
+                        image_service.ImageAsset.is_active == True,
+                    ).first()
+                    if img:
+                        image_descriptions.append(
+                            f'- Image ID {img.id}: "{img.original_filename}" '
+                            f'({img.description or "no description"}). '
+                            f'Use: <img src="{{{{image:{img.id}}}}}" alt="{img.description or img.original_filename}" />'
+                        )
+                except Exception as e:
+                    logger.warning(f"Failed to load image {img_id} for context injection: {e}")
+
+        if not image_descriptions:
+            return message
+
+        context = "\n\n[Attached images]\n" + "\n".join(image_descriptions)
+        return message + context
 
     def _get_or_load_deck(self, session_id: str) -> Optional[SlideDeck]:
         """Get deck from cache or load from database.

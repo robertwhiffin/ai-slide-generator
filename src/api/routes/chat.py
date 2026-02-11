@@ -76,6 +76,7 @@ async def send_message(request: ChatRequest) -> ChatResponse:
             request.session_id,
             request.message,
             request.slide_context.model_dump() if request.slide_context else None,
+            request.image_ids,
         )
 
         return ChatResponse(**result)
@@ -161,6 +162,7 @@ async def send_message_streaming(request: ChatRequest) -> StreamingResponse:
                     slide_context=request.slide_context.model_dump()
                     if request.slide_context
                     else None,
+                    image_ids=request.image_ids,
                 ):
                     event_queue.put(event)
             except Exception as e:
