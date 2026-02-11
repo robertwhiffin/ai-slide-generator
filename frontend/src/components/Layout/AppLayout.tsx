@@ -574,7 +574,8 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
                 if (lastWorkingSessionId) {
                   navigate(`/sessions/${lastWorkingSessionId}/edit`);
                 } else {
-                  navigate('/help');
+                  const newId = createNewSession();
+                  navigate(`/sessions/${newId}/edit`);
                 }
               }}
             />
