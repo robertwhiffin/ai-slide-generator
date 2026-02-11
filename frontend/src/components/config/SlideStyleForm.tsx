@@ -1,12 +1,13 @@
 /**
  * Slide Style form modal.
- * 
+ *
  * Used for creating and editing slide styles.
  */
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import Editor from '@monaco-editor/react';
 import type { SlideStyle, SlideStyleCreate, SlideStyleUpdate } from '../../api/config';
+import { ImagePicker } from '../ImageLibrary/ImagePicker';
 
 interface SlideStyleFormProps {
   isOpen: boolean;
@@ -27,8 +28,12 @@ export const SlideStyleForm: React.FC<SlideStyleFormProps> = ({
   const [description, setDescription] = useState('');
   const [category, setCategory] = useState('');
   const [styleContent, setStyleContent] = useState('');
+  const [imageGuidelines, setImageGuidelines] = useState('');
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [showImagePicker, setShowImagePicker] = useState(false);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const imageGuidelinesEditorRef = useRef<any>(null);
 
   // Reset form when opening
   useEffect(() => {
@@ -38,11 +43,13 @@ export const SlideStyleForm: React.FC<SlideStyleFormProps> = ({
         setDescription(style.description || '');
         setCategory(style.category || '');
         setStyleContent(style.style_content);
+        setImageGuidelines(style.image_guidelines || '');
       } else {
         setName('');
         setDescription('');
         setCategory('');
         setStyleContent('');
+        setImageGuidelines('');
       }
       setError(null);
     }
@@ -60,7 +67,7 @@ export const SlideStyleForm: React.FC<SlideStyleFormProps> = ({
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    
+
     const validationError = validate();
     if (validationError) {
       setError(validationError);
@@ -76,6 +83,7 @@ export const SlideStyleForm: React.FC<SlideStyleFormProps> = ({
         description: description.trim() || null,
         category: category.trim() || null,
         style_content: styleContent,
+        image_guidelines: imageGuidelines.trim() || null,
       };
       await onSubmit(data);
     } catch (err) {
@@ -83,6 +91,32 @@ export const SlideStyleForm: React.FC<SlideStyleFormProps> = ({
     } finally {
       setSaving(false);
     }
+  };
+
+  const handleInsertImageRef = (image: { id: number; original_filename: string }) => {
+    const textToInsert = `{{image:${image.id}}}  /* ${image.original_filename} */`;
+
+    const editor = imageGuidelinesEditorRef.current;
+    if (editor) {
+      const position = editor.getPosition();
+      if (position) {
+        // Insert at cursor position
+        editor.executeEdits('insert-image-ref', [{
+          range: {
+            startLineNumber: position.lineNumber,
+            startColumn: position.column,
+            endLineNumber: position.lineNumber,
+            endColumn: position.column,
+          },
+          text: textToInsert,
+        }]);
+        editor.focus();
+        return;
+      }
+    }
+
+    // Fallback: append at end if no editor ref or cursor position
+    setImageGuidelines(prev => prev + (prev ? '\n' : '') + textToInsert);
   };
 
   if (!isOpen) return null;
@@ -185,8 +219,53 @@ export const SlideStyleForm: React.FC<SlideStyleFormProps> = ({
                 />
               </div>
               <p className="text-xs text-gray-500 mt-1">
-                Define typography, colors, layout rules, and visual guidelines. 
+                Define typography, colors, layout rules, and visual guidelines.
                 Include font sizes, color codes, spacing, and chart color palettes.
+              </p>
+            </div>
+
+            {/* Image Guidelines */}
+            <div>
+              <div className="flex items-center justify-between mb-1">
+                <label className="block text-sm font-medium text-gray-700">
+                  Image Guidelines
+                </label>
+                <button
+                  type="button"
+                  onClick={() => setShowImagePicker(true)}
+                  disabled={saving}
+                  className="px-2.5 py-1 text-xs bg-green-600 text-white rounded hover:bg-green-700 disabled:bg-gray-300 disabled:cursor-not-allowed transition-colors flex items-center gap-1"
+                  title="Insert an image reference placeholder at cursor position"
+                >
+                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <rect x="3" y="3" width="18" height="18" rx="2" ry="2" />
+                    <circle cx="8.5" cy="8.5" r="1.5" />
+                    <polyline points="21 15 16 10 5 21" />
+                  </svg>
+                  Insert Image Ref
+                </button>
+              </div>
+              <div className="border border-gray-300 rounded overflow-hidden">
+                <Editor
+                  height="150px"
+                  defaultLanguage="markdown"
+                  value={imageGuidelines}
+                  onChange={(value) => setImageGuidelines(value || '')}
+                  onMount={(editor) => { imageGuidelinesEditorRef.current = editor; }}
+                  options={{
+                    minimap: { enabled: false },
+                    wordWrap: 'on',
+                    lineNumbers: 'on',
+                    scrollBeyondLastLine: false,
+                    fontSize: 13,
+                    readOnly: saving,
+                  }}
+                />
+              </div>
+              <p className="text-xs text-gray-500 mt-1">
+                Specify which images to include on slides (e.g. logos, backgrounds).
+                Use "Insert Image Ref" to add image IDs. When set, the agent uses these images
+                automatically without searching. Leave blank to skip image injection.
               </p>
             </div>
           </div>
@@ -211,6 +290,16 @@ export const SlideStyleForm: React.FC<SlideStyleFormProps> = ({
           </div>
         </form>
       </div>
+
+      {/* Image Picker for inserting image references */}
+      <ImagePicker
+        isOpen={showImagePicker}
+        onClose={() => setShowImagePicker(false)}
+        onSelect={(image) => {
+          handleInsertImageRef(image);
+          setShowImagePicker(false);
+        }}
+      />
     </div>
   );
 };

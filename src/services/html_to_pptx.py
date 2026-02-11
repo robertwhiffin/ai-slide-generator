@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 
+import base64
 import importlib.util
 import logging
 import os
@@ -117,6 +118,10 @@ class HtmlToPptxConverterV3:
             )
             print("[PPTX_CONVERTER] WARNING: Server-side screenshots disabled. Use client-side capture.")
         
+        # 2b. Extract base64 content images before sending to LLM
+        html_str, content_images = self._extract_and_save_content_images(html_str, str(assets_dir))
+        chart_images.extend(content_images)
+
         # 3. Call LLM to generate converter code
         logger.info("Calling LLM to generate converter code")
         converter_code = await self._generate_converter_code(
@@ -302,6 +307,10 @@ class HtmlToPptxConverterV3:
                 logger.warning("No chart screenshots captured", extra={"slide_number": slide_number})
                 print(f"[PPTX_CONVERTER] WARNING: No chart screenshots captured for slide {slide_number}")
         
+        # 2b. Extract base64 content images before sending to LLM
+        html_str, content_images = self._extract_and_save_content_images(html_str, str(assets_dir))
+        chart_images.extend(content_images)
+
         # 3. Call LLM to generate code for adding this slide
         logger.debug("Calling LLM for slide", extra={"slide_number": slide_number})
         slide_code = await self._generate_slide_adder_code(
@@ -574,6 +583,63 @@ class HtmlToPptxConverterV3:
         
         return chart_images
     
+    # Regex matching <img> tags whose src is a base64 data URI.
+    _BASE64_IMG_RE = re.compile(
+        r'(<img\b[^>]*?\bsrc=")data:image/(png|jpeg|jpg|gif|svg\+xml);base64,([A-Za-z0-9+/=\s]+)(")',
+        re.IGNORECASE,
+    )
+
+    # Map MIME sub-type to file extension
+    _EXT_MAP = {"png": ".png", "jpeg": ".jpg", "jpg": ".jpg", "gif": ".gif", "svg+xml": ".svg"}
+
+    def _extract_and_save_content_images(
+        self, html_str: str, assets_dir: str
+    ) -> tuple[str, list[str]]:
+        """Extract base64-embedded images from HTML, save as files, replace src with filename.
+
+        This prevents huge base64 blobs from being sent to the LLM (where they
+        would be truncated by ``_truncate_html``).  The saved files are later
+        merged into the ``chart_images`` list so the LLM receives
+        ``add_picture()`` instructions for them.
+
+        Args:
+            html_str: HTML that may contain ``<img src="data:image/...;base64,...">`` tags.
+            assets_dir: Directory to write extracted image files into.
+
+        Returns:
+            Tuple of (cleaned_html, list_of_saved_filenames).
+        """
+        filenames: list[str] = []
+        counter = 0
+
+        def _replace(match: re.Match) -> str:
+            nonlocal counter
+            prefix = match.group(1)       # '<img ... src="'
+            mime_sub = match.group(2)      # 'png', 'jpeg', etc.
+            b64_data = match.group(3)      # raw base64 payload
+            suffix = match.group(4)        # closing '"'
+
+            ext = self._EXT_MAP.get(mime_sub.lower(), ".png")
+            filename = f"content_image_{counter}{ext}"
+            counter += 1
+
+            # Decode and write
+            try:
+                image_bytes = base64.b64decode(b64_data)
+                filepath = Path(assets_dir) / filename
+                filepath.write_bytes(image_bytes)
+                filenames.append(filename)
+                logger.info("Extracted content image", extra={"filename": filename, "size": len(image_bytes)})
+            except Exception as e:
+                logger.warning("Failed to extract content image", exc_info=True, extra={"error": str(e)})
+                # Return original match unchanged on error
+                return match.group(0)
+
+            return f"{prefix}{filename}{suffix}"
+
+        cleaned = self._BASE64_IMG_RE.sub(_replace, html_str)
+        return cleaned, filenames
+
     def _truncate_html(self, html_str: str, max_length: int = 15000) -> str:
         """Truncate HTML to reasonable length for LLM while preserving CSS.
         

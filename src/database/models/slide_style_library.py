@@ -32,7 +32,8 @@ class SlideStyleLibrary(Base):
     description = Column(Text, nullable=True)
     category = Column(String(50), nullable=True)  # e.g., "Brand", "Minimal", "Bold"
     style_content = Column(Text, nullable=False)
-    
+    image_guidelines = Column(Text, nullable=True)
+
     is_active = Column(Boolean, default=True, nullable=False)
     is_system = Column(Boolean, default=False, nullable=False)  # Protected system styles cannot be edited/deleted
     
