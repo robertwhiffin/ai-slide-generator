@@ -33,7 +33,7 @@ from src.utils.html_utils import (
     extract_canvas_ids_from_html,
     split_script_by_canvas,
 )
-from src.utils.image_utils import substitute_image_placeholders
+from src.utils.image_utils import substitute_deck_dict_images, substitute_image_placeholders
 
 logger = logging.getLogger(__name__)
 
@@ -83,6 +83,29 @@ class ChatService:
         self._deck_cache: Dict[str, SlideDeck] = {}
 
         logger.info("ChatService initialized successfully")
+
+    def _substitute_images_for_response(self, deck_dict, raw_html=None):
+        """Apply image placeholder substitution before sending to client.
+
+        Converts {{image:ID}} placeholders to base64 data URIs in deck dicts
+        and raw HTML. Called at API response boundaries so that stored/cached
+        HTML keeps lightweight placeholders (avoiding LLM context bloat).
+        """
+        from src.core.database import get_db_session
+
+        needs_deck = deck_dict and any(
+            "{{image:" in s.get("html", "") for s in deck_dict.get("slides", [])
+        )
+        needs_html = raw_html and "{{image:" in raw_html
+        needs_deck_html = deck_dict and deck_dict.get("html_content") and "{{image:" in deck_dict.get("html_content", "")
+
+        if needs_deck or needs_html or needs_deck_html:
+            with get_db_session() as db:
+                if needs_deck or needs_deck_html:
+                    substitute_deck_dict_images(deck_dict, db)
+                if needs_html:
+                    raw_html = substitute_image_placeholders(raw_html, db)
+        return deck_dict, raw_html
 
     def reload_agent(self, profile_id: Optional[int] = None) -> Dict[str, Any]:
         """
@@ -330,12 +353,6 @@ class ChatService:
             html_output = result.get("html")
             replacement_info = result.get("replacement_info")
 
-            # Substitute {{image:ID}} placeholders with base64 data URIs
-            if html_output and "{{image:" in html_output:
-                from src.core.database import get_db_session
-                with get_db_session() as img_db:
-                    html_output = substitute_image_placeholders(html_output, img_db)
-
             # Get deck from cache or restore from database (RC6: survive backend restarts)
             current_deck = self._get_or_load_deck(session_id)
 
@@ -505,11 +522,14 @@ class ChatService:
                             message_type="info",
                         )
 
+            # Substitute image placeholders before sending to client
+            slide_deck_dict, raw_html = self._substitute_images_for_response(slide_deck_dict, raw_html)
+
             # Build response
             messages = result["messages"]
             if conflict_note:
                 messages = messages + [{"role": "assistant", "content": conflict_note}]
-            
+
             response = {
                 "messages": messages,
                 "slide_deck": slide_deck_dict,
@@ -664,12 +684,13 @@ class ChatService:
                         type=StreamEventType.ASSISTANT,
                         content=clarification_msg,
                     )
+                    early_deck_dict, _ = self._substitute_images_for_response(existing_deck.to_dict())
                     yield StreamEvent(
                         type=StreamEventType.COMPLETE,
-                        slides=existing_deck.to_dict(),
+                        slides=early_deck_dict,
                     )
                     return
-                
+
                 # Edit intent without clear target - ask for clarification
                 if _is_edit and not _slide_refs and not _is_generation:
                     logger.info(
@@ -694,9 +715,10 @@ class ChatService:
                         type=StreamEventType.ASSISTANT,
                         content=clarification_msg,
                     )
+                    early_deck_dict, _ = self._substitute_images_for_response(existing_deck.to_dict())
                     yield StreamEvent(
                         type=StreamEventType.COMPLETE,
-                        slides=existing_deck.to_dict(),
+                        slides=early_deck_dict,
                     )
                     return
 
@@ -735,9 +757,12 @@ class ChatService:
                         type=StreamEventType.ASSISTANT,
                         content=error_msg,
                     )
+                    early_deck_dict = existing_deck.to_dict() if existing_deck else None
+                    if early_deck_dict:
+                        early_deck_dict, _ = self._substitute_images_for_response(early_deck_dict)
                     yield StreamEvent(
                         type=StreamEventType.COMPLETE,
-                        slides=existing_deck.to_dict() if existing_deck else None,
+                        slides=early_deck_dict,
                     )
                     return
 
@@ -843,12 +868,6 @@ class ChatService:
 
         html_output = result.get("html")
         replacement_info = result.get("replacement_info")
-
-        # Substitute {{image:ID}} placeholders with base64 data URIs
-        if html_output and "{{image:" in html_output:
-            from src.core.database import get_db_session
-            with get_db_session() as img_db:
-                html_output = substitute_image_placeholders(html_output, img_db)
 
         # Get deck from cache or restore from database (RC6: survive backend restarts)
         current_deck = self._get_or_load_deck(session_id)
@@ -1116,6 +1135,9 @@ class ChatService:
                 content=conflict_note,
                 message_type="info",
             )
+
+        # Substitute image placeholders before sending to client
+        slide_deck_dict, raw_html = self._substitute_images_for_response(slide_deck_dict, raw_html)
 
         # Yield final complete event (sanitize replacement_info for JSON serialization)
         yield StreamEvent(
@@ -2137,15 +2159,18 @@ class ChatService:
             # Use session_manager to get deck with verification merged
             deck_dict = session_manager.get_slide_deck(session_id)
             if deck_dict and deck_dict.get("slides"):
+                deck_dict, _ = self._substitute_images_for_response(deck_dict)
                 return deck_dict
         except Exception as e:
             logger.warning(f"Failed to load deck from session_manager: {e}")
-        
+
         # Fallback to internal cache (without verification/content_hash)
         deck = self._get_or_load_deck(session_id)
         if not deck:
             return None
-        return deck.to_dict()
+        deck_dict = deck.to_dict()
+        deck_dict, _ = self._substitute_images_for_response(deck_dict)
+        return deck_dict
 
     def reorder_slides(self, session_id: str, new_order: List[int]) -> Dict[str, Any]:
         """Reorder slides based on new index order.
@@ -2226,6 +2251,7 @@ class ChatService:
             extra={"new_order": new_order, "session_id": session_id},
         )
 
+        deck_dict, _ = self._substitute_images_for_response(deck_dict)
         return deck_dict
 
     def update_slide(self, session_id: str, index: int, html: str) -> Dict[str, Any]:
@@ -2343,6 +2369,7 @@ class ChatService:
             },
         )
 
+        deck_dict, _ = self._substitute_images_for_response(deck_dict)
         return deck_dict
 
     def delete_slide(self, session_id: str, index: int) -> Dict[str, Any]:
@@ -2403,6 +2430,7 @@ class ChatService:
             },
         )
 
+        deck_dict, _ = self._substitute_images_for_response(deck_dict)
         return deck_dict
 
 

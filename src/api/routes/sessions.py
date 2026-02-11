@@ -24,6 +24,15 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/sessions", tags=["sessions"])
 
 
+def _substitute_deck_images(deck_dict: dict) -> None:
+    """Substitute {{image:ID}} placeholders in a deck dict with base64 data URIs."""
+    from src.core.database import get_db_session
+    from src.utils.image_utils import substitute_deck_dict_images
+
+    with get_db_session() as db:
+        substitute_deck_dict_images(deck_dict, db)
+
+
 @router.post("")
 async def create_session(request: CreateSessionRequest = None):
     """Create a new session.
@@ -112,6 +121,10 @@ async def get_session(session_id: str):
 
         # Get slide deck if it exists
         slide_deck = await asyncio.to_thread(session_manager.get_slide_deck, session_id)
+
+        # Substitute {{image:ID}} placeholders with base64 before sending to client
+        if slide_deck:
+            await asyncio.to_thread(_substitute_deck_images, slide_deck)
 
         return {
             **session,
@@ -252,6 +265,9 @@ async def get_session_slides(session_id: str):
     try:
         session_manager = get_session_manager()
         deck = await asyncio.to_thread(session_manager.get_slide_deck, session_id)
+
+        if deck:
+            await asyncio.to_thread(_substitute_deck_images, deck)
 
         return {"session_id": session_id, "slide_deck": deck}
 
