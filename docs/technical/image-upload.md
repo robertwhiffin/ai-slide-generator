@@ -22,23 +22,27 @@ Images live entirely in PostgreSQL/Lakebase (no external storage). The agent ref
 
 ```
 User
-  ├── Upload image ──► POST /api/images/upload
-  │                         │
-  │                    image_service.upload_image()
-  │                         │
-  │                    ┌────▼────┐
-  │                    │Lakebase │  image_assets table
-  │                    │ (bytea) │  raw bytes + 150x150 thumbnail
-  │                    └────┬────┘
-  │                         │
+  ├── Upload image(s) ──► POST /api/images/upload (one per file)
+  │                             │
+  │                        image_service.upload_image()
+  │                        (validates type, size, unique name)
+  │                             │
+  │                        ┌────▼────┐
+  │                        │Lakebase │  image_assets table
+  │                        │ (bytea) │  raw bytes + 150x150 thumbnail
+  │                        └────┬────┘
+  │                             │
   ├── Chat message ──► ChatService
+  │                         │
+  │                    _replace_slide_htmls_from_cache()
+  │                    (strips base64 from slide_context before LLM call)
   │                         │
   │                    LangChain Agent
   │                    ├── search_images tool (metadata only)
   │                    └── outputs {{image:ID}} placeholders
   │                         │
-  │                    substitute_image_placeholders()
-  │                    (regex replaces → base64 data URIs)
+  │                    _substitute_images_for_response()
+  │                    (regex replaces → base64 data URIs at API boundary)
   │                         │
   └── Receives HTML ◄──────┘
        with embedded images
@@ -70,6 +74,7 @@ class ImageAsset(Base):
 
 **Invariants:**
 - `image_data` stores raw bytes; base64 encoding happens on read
+- `original_filename` must be unique among active images (case-insensitive); soft-deleted images free their name for reuse
 - `thumbnail_base64` is a complete data URI ready for `<img src=...>`; `None` for SVGs (they scale natively)
 - `category = "ephemeral"` means paste-to-chat images not saved to library (excluded from default library view)
 - No foreign key to profiles — images are independent library items shared across all profiles
@@ -107,11 +112,11 @@ The `SlideStyleLibrary` model has an `image_guidelines` column (`Text, nullable`
 | `src/services/image_tools.py` | Agent tool wrapper | `search_images` — returns metadata JSON, never base64 |
 | `src/utils/image_utils.py` | Placeholder substitution | Regex `{{image:(\d+)}}` → `data:{mime};base64,...` |
 | `src/api/routes/images.py` | REST API | CRUD + base64 data endpoint |
-| `src/api/services/chat_service.py` | Integration glue | Calls `substitute_image_placeholders` after agent response; `_inject_image_context` for attached images |
+| `src/api/services/chat_service.py` | Integration glue | `_replace_slide_htmls_from_cache` strips base64 from inbound slide_context; `_substitute_images_for_response` adds base64 at API boundary; `_inject_image_context` for attached images |
 | `src/services/agent.py` | Prompt construction | Conditional IMAGE GUIDELINES section; `search_images` tool binding |
 | `src/core/settings_db.py` | Settings loader | Extracts `image_guidelines` from selected slide style |
 | `src/api/routes/settings/slide_styles.py` | Slide style CRUD | `image_guidelines` field in schemas and handlers |
-| `frontend/src/components/ImageLibrary/ImageLibrary.tsx` | Image gallery | Grid view, drag-drop upload, category filter, search |
+| `frontend/src/components/ImageLibrary/ImageLibrary.tsx` | Image gallery | Grid view, multi-file drag-drop upload, category filter, search |
 | `frontend/src/components/ImageLibrary/ImagePicker.tsx` | Modal picker | Wraps ImageLibrary with select callback |
 | `frontend/src/components/ChatPanel/ChatInput.tsx` | Paste-to-chat | Clipboard paste, upload, attach preview, "Save to library" toggle |
 | `frontend/src/components/config/SlideStyleForm.tsx` | Style editor | Separate Image Guidelines Monaco editor + Insert Image Ref button |
@@ -124,12 +129,13 @@ The `SlideStyleLibrary` model has an `image_guidelines` column (`Text, nullable`
 
 ### 1. Image upload
 
-1. User drops/selects a file in ImageLibrary or pastes into ChatInput
-2. Frontend sends `POST /api/images/upload` (multipart form: file + tags + description + category + save_to_library)
-3. `image_service.upload_image()` validates type and size
+1. User drops/selects one or more files in ImageLibrary (multi-file drag-drop and file picker supported), or pastes into ChatInput
+2. Frontend validates each file client-side (type + size), then sends one `POST /api/images/upload` per file (sequential, with progress indicator "Uploading 2 of 5...")
+3. `image_service.upload_image()` validates type, size, and **unique filename** (case-insensitive check against active images; rejects duplicates with 400)
 4. Pillow generates 150x150 thumbnail (PNG for RGBA, JPEG otherwise; `None` for SVG)
 5. Raw bytes + thumbnail + metadata saved to `image_assets` table
 6. Response returns `ImageResponse` with thumbnail for immediate display
+7. Per-file errors (validation failures, duplicate names) are collected and displayed together in the UI
 
 ### 2. Paste-to-chat
 
@@ -142,13 +148,14 @@ The `SlideStyleLibrary` model has an `image_guidelines` column (`Text, nullable`
 
 ### 3. Agent uses images in slides
 
-1. Agent receives message (possibly with `[Attached images]` context)
-2. Agent calls `search_images` tool if user explicitly requested images
-3. Tool returns JSON metadata (id, filename, description, tags, usage example) — **never base64**
-4. Agent outputs HTML with `{{image:ID}}` placeholders
-5. `ChatService` calls `substitute_image_placeholders()` on the HTML output
-6. Regex finds all `{{image:(\d+)}}`, loads each image's raw bytes, base64-encodes, replaces with `data:{mime};base64,...`
-7. Frontend receives self-contained HTML with embedded images
+1. If the frontend sends `slide_context` (for edits), `ChatService._replace_slide_htmls_from_cache()` swaps the frontend's base64-substituted HTML with lightweight `{{image:ID}}` placeholder versions from the backend deck cache — this prevents megabytes of base64 from entering the LLM prompt
+2. Agent receives message (possibly with `[Attached images]` context)
+3. Agent calls `search_images` tool if user explicitly requested images
+4. Tool returns JSON metadata (id, filename, description, tags, usage example) — **never base64**
+5. Agent outputs HTML with `{{image:ID}}` placeholders
+6. `ChatService._substitute_images_for_response()` converts placeholders to base64 data URIs at the API response boundary
+7. Backend deck cache always stores the placeholder form; base64 only exists in API responses
+8. Frontend receives self-contained HTML with embedded images
 
 ### 4. Image guidelines (branding flow)
 
@@ -197,16 +204,19 @@ search_images(
 
 | Constraint | Value | Enforced in |
 |-----------|-------|-------------|
-| Max file size | 5MB | `image_service.py` + `ChatInput.tsx` |
+| Max file size | 5MB | `image_service.py` + `ChatInput.tsx` + `ImageLibrary.tsx` |
 | Allowed MIME types | png, jpeg, gif, svg+xml | `image_service.py` + `ImageLibrary.tsx` |
+| Unique filename | Case-insensitive among active images | `image_service.py` (server-side) |
 | Thumbnail size | 150x150 | `image_service.py` |
 
 ### Error handling
 
 - **Invalid type/size**: `ValueError` raised in `image_service`, returned as 400 from API
+- **Duplicate filename**: `ValueError` raised in `image_service`, returned as 400 from API; frontend shows per-file error messages
 - **Image not found**: 404 from API; placeholder substitution logs warning and leaves `{{image:ID}}` intact
 - **Paste upload failure**: Error shown in ChatInput UI, does not block message sending
 - **Agent uses invalid ID**: Placeholder stays in HTML (graceful degradation)
+- **Multi-file upload partial failure**: Successfully uploaded files are kept; per-file errors are collected and displayed together
 
 ### Category semantics
 

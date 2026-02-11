@@ -333,3 +333,44 @@ class TestDeleteImage:
 
         refreshed = db_session.get(ImageAsset, image.id)
         assert refreshed.image_data == png_1x1
+
+
+# ===== Duplicate Name Prevention =====
+
+class TestDuplicateNamePrevention:
+    """Uploading an image with the same original_filename as an existing active image should fail."""
+
+    def test_rejects_duplicate_original_filename(self, db_session, png_1x1):
+        image_service.upload_image(
+            db=db_session, file_content=png_1x1,
+            original_filename="logo.png", mime_type="image/png", user="test",
+        )
+        with pytest.raises(ValueError, match="already exists"):
+            image_service.upload_image(
+                db=db_session, file_content=png_1x1,
+                original_filename="logo.png", mime_type="image/png", user="test",
+            )
+
+    def test_allows_same_name_after_soft_delete(self, db_session, png_1x1):
+        first = image_service.upload_image(
+            db=db_session, file_content=png_1x1,
+            original_filename="logo.png", mime_type="image/png", user="test",
+        )
+        image_service.delete_image(db_session, first.id, "test")
+        # Should succeed — original is soft-deleted
+        second = image_service.upload_image(
+            db=db_session, file_content=png_1x1,
+            original_filename="logo.png", mime_type="image/png", user="test",
+        )
+        assert second.id != first.id
+
+    def test_duplicate_check_is_case_insensitive(self, db_session, png_1x1):
+        image_service.upload_image(
+            db=db_session, file_content=png_1x1,
+            original_filename="Logo.PNG", mime_type="image/png", user="test",
+        )
+        with pytest.raises(ValueError, match="already exists"):
+            image_service.upload_image(
+                db=db_session, file_content=png_1x1,
+                original_filename="logo.png", mime_type="image/png", user="test",
+            )
