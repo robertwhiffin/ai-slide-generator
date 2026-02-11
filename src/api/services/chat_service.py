@@ -343,6 +343,10 @@ class ChatService:
                     )
 
         try:
+            # Replace frontend base64 HTML with lightweight backend cache versions
+            if slide_context:
+                slide_context = self._replace_slide_htmls_from_cache(session_id, slide_context)
+
             # Call agent to generate slides
             result = self.agent.generate_slides(
                 question=message,
@@ -814,6 +818,10 @@ class ChatService:
                             "deck_size": len(existing_deck.slides),
                         },
                     )
+
+        # Replace frontend base64 HTML with lightweight backend cache versions
+        if slide_context:
+            slide_context = self._replace_slide_htmls_from_cache(session_id, slide_context)
 
         # Create event queue and callback handler
         event_queue: queue.Queue[StreamEvent] = queue.Queue()
@@ -1766,7 +1774,38 @@ class ChatService:
             logger.warning(f"Failed to load deck from database: {e}")
 
         return None
-    
+
+    def _replace_slide_htmls_from_cache(self, session_id: str, slide_context: Dict[str, Any]) -> Dict[str, Any]:
+        """Replace frontend-supplied slide_htmls with backend cache versions.
+
+        The frontend has base64-substituted HTML (needed for rendering). The backend
+        cache has {{image:ID}} placeholders (lightweight). We use the cache versions
+        for the LLM prompt to avoid sending megabytes of base64 to the model.
+        """
+        indices = slide_context.get("indices", [])
+        if not indices:
+            return slide_context
+
+        deck = self._get_or_load_deck(session_id)
+        if not deck:
+            return slide_context
+
+        cache_htmls = []
+        for i in indices:
+            if 0 <= i < len(deck.slides):
+                cache_htmls.append(deck.slides[i].html)
+            else:
+                # Index out of range — keep frontend HTML as fallback
+                frontend_htmls = slide_context.get("slide_htmls", [])
+                idx_in_list = indices.index(i)
+                if idx_in_list < len(frontend_htmls):
+                    cache_htmls.append(frontend_htmls[idx_in_list])
+
+        if cache_htmls:
+            slide_context = {**slide_context, "slide_htmls": cache_htmls}
+
+        return slide_context
+
     def _reconstruct_deck_from_dict(self, deck_data: Dict[str, Any]) -> SlideDeck:
         """Reconstruct SlideDeck from stored dict (preserves individual slide scripts).
         
