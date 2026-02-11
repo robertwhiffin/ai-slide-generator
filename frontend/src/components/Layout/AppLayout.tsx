@@ -42,7 +42,7 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
   // Track which slide to scroll to in the main panel (uses key to allow re-scroll to same index)
   const [scrollTarget, setScrollTarget] = useState<{ index: number; key: number } | null>(null);
   const chatPanelRef = useRef<ChatPanelHandle>(null);
-  const { sessionId, sessionTitle, experimentUrl, createNewSession, switchSession, renameSession } = useSession();
+  const { sessionId, sessionTitle, experimentUrl, createNewSession, switchSession, renameSession, lastWorkingSessionId, setLastWorkingSessionId } = useSession();
   const { isGenerating } = useGeneration();
   const { currentProfile, loadProfile } = useProfiles();
   const { updateAvailable, latestVersion, updateType, dismissed, dismiss } = useVersionCheck();
@@ -59,9 +59,18 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
   // Pending save point - created after verification completes
   const [pendingSavePointDescription, setPendingSavePointDescription] = useState<string | null>(null);
 
+  // Track last working session ID when on a session edit route
+  useEffect(() => {
+    if (urlSessionId && initialView === 'main' && !viewOnly) {
+      setLastWorkingSessionId(urlSessionId);
+    }
+  }, [urlSessionId, initialView, viewOnly, setLastWorkingSessionId]);
+
   // Load session from URL parameter when on a session route
+  // Skip if URL session ID matches current context (newly created session, not yet in DB)
   useEffect(() => {
     if (!urlSessionId || initialView !== 'main') return;
+    if (urlSessionId === sessionId) return;
 
     const loadSession = async () => {
       try {
@@ -150,8 +159,9 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
     setCurrentVersion(null);
     setPreviewVersion(null);
     setPreviewDeck(null);
-    createNewSession();
-  }, [createNewSession]);
+    const newId = createNewSession();
+    navigate(`/sessions/${newId}/edit`);
+  }, [createNewSession, navigate]);
 
   // Load versions when session or slideDeck changes
   useEffect(() => {
@@ -365,7 +375,14 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
             {/* Navigation */}
             <nav className="flex gap-2 border-l border-blue-500 pl-4">
               <button
-                onClick={() => setViewMode('main')}
+                onClick={() => {
+                  if (lastWorkingSessionId) {
+                    navigate(`/sessions/${lastWorkingSessionId}/edit`);
+                  } else {
+                    const newId = createNewSession();
+                    navigate(`/sessions/${newId}/edit`);
+                  }
+                }}
                 className={`px-3 py-1.5 rounded text-sm transition-colors ${
                   viewMode === 'main'
                     ? 'bg-blue-700 text-white'
@@ -375,7 +392,7 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
                 Generator
               </button>
               <button
-                onClick={() => setViewMode('history')}
+                onClick={() => navigate('/history')}
                 disabled={isGenerating}
                 className={`px-3 py-1.5 rounded text-sm transition-colors ${
                   viewMode === 'history'
@@ -389,7 +406,7 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
                 History
               </button>
               <button
-                onClick={() => setViewMode('profiles')}
+                onClick={() => navigate('/profiles')}
                 disabled={isGenerating}
                 className={`px-3 py-1.5 rounded text-sm transition-colors ${
                   viewMode === 'profiles'
@@ -403,7 +420,7 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
                 Profiles
               </button>
               <button
-                onClick={() => setViewMode('deck_prompts')}
+                onClick={() => navigate('/deck-prompts')}
                 disabled={isGenerating}
                 className={`px-3 py-1.5 rounded text-sm transition-colors ${
                   viewMode === 'deck_prompts'
@@ -417,7 +434,7 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
                 Deck Prompts
               </button>
               <button
-                onClick={() => setViewMode('slide_styles')}
+                onClick={() => navigate('/slide-styles')}
                 disabled={isGenerating}
                 className={`px-3 py-1.5 rounded text-sm transition-colors ${
                   viewMode === 'slide_styles'
@@ -431,7 +448,7 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
                 Slide Styles
               </button>
               <button
-                onClick={() => setViewMode('images')}
+                onClick={() => navigate('/images')}
                 disabled={isGenerating}
                 className={`px-3 py-1.5 rounded text-sm transition-colors ${
                   viewMode === 'images'
@@ -445,7 +462,7 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
                 Images
               </button>
               <button
-                onClick={() => setViewMode('help')}
+                onClick={() => navigate('/help')}
                 disabled={isGenerating}
                 className={`px-3 py-1.5 rounded text-sm transition-colors ${
                   viewMode === 'help'
@@ -466,8 +483,8 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
             </nav>
 
             {/* Profile Selector */}
-            <ProfileSelector 
-              onManageClick={() => setViewMode('profiles')}
+            <ProfileSelector
+              onManageClick={() => navigate('/profiles')}
               onProfileChange={handleProfileChange}
               disabled={isGenerating}
             />
@@ -539,8 +556,14 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
         <div className="flex-1 overflow-auto bg-gray-50">
           <div className="p-6">
             <SessionHistory
-              onSessionSelect={handleSessionRestore}
-              onBack={() => setViewMode('main')}
+              onSessionSelect={(id) => navigate(`/sessions/${id}/edit`)}
+              onBack={() => {
+                if (lastWorkingSessionId) {
+                  navigate(`/sessions/${lastWorkingSessionId}/edit`);
+                } else {
+                  navigate('/help');
+                }
+              }}
             />
           </div>
         </div>
@@ -581,7 +604,14 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
       {viewMode === 'help' && (
         <div className="flex-1 overflow-auto bg-gray-50">
           <div className="p-6">
-            <HelpPage onBack={() => setViewMode('main')} />
+            <HelpPage onBack={() => {
+              if (lastWorkingSessionId) {
+                navigate(`/sessions/${lastWorkingSessionId}/edit`);
+              } else {
+                const newId = createNewSession();
+                navigate(`/sessions/${newId}/edit`);
+              }
+            }} />
           </div>
         </div>
       )}
