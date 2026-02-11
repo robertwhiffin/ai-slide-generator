@@ -21,7 +21,9 @@ interface SessionContextType {
   experimentUrl: string | null;
   isInitializing: boolean;
   error: string | null;
-  createNewSession: () => void;
+  lastWorkingSessionId: string | null;
+  setLastWorkingSessionId: (id: string) => void;
+  createNewSession: () => string;
   switchSession: (sessionId: string) => Promise<SessionRestoreResult>;
   renameSession: (title: string) => Promise<void>;
   setExperimentUrl: (url: string | null) => void;
@@ -36,6 +38,14 @@ export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ child
   const [experimentUrl, setExperimentUrl] = useState<string | null>(null);
   const [isInitializing, setIsInitializing] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [lastWorkingSessionId, setLastWorkingSessionIdState] = useState<string | null>(
+    () => localStorage.getItem('lastWorkingSessionId')
+  );
+
+  const setLastWorkingSessionId = useCallback((id: string) => {
+    setLastWorkingSessionIdState(id);
+    localStorage.setItem('lastWorkingSessionId', id);
+  }, []);
 
   // Set the session ID in the API service on initial render
   React.useEffect(() => {
@@ -47,14 +57,16 @@ export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ child
   /**
    * Create a new ephemeral session (local UUID only, no API call).
    * The session will be persisted to DB on first message.
+   * Returns the new session ID.
    */
-  const createNewSession = useCallback(() => {
+  const createNewSession = useCallback((): string => {
     const newSessionId = generateLocalSessionId();
     setSessionId(newSessionId);
     setSessionTitle(null);
     setExperimentUrl(null);
     setError(null);
     api.setCurrentSessionId(newSessionId);
+    return newSessionId;
   }, []);
 
   /**
@@ -67,7 +79,7 @@ export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ child
     try {
       // Validate session exists and get its info
       const sessionInfo = await api.getSession(newSessionId);
-      
+
       // Get slide deck if it has one
       let slideDeck: SlideDeck | null = null;
       let rawHtml: string | null = null;
@@ -119,6 +131,8 @@ export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ child
         experimentUrl,
         isInitializing,
         error,
+        lastWorkingSessionId,
+        setLastWorkingSessionId,
         createNewSession,
         switchSession,
         renameSession,
