@@ -462,6 +462,14 @@ jobs:
       needs.frontend-build.result == 'success' &&
       needs.changes.outputs.frontend == 'true'
     
+    # Job-level env vars — inherited by ALL steps so no process ever falls
+    # through to the userless local-dev default in _get_database_url().
+    env:
+      DATABASE_URL: postgresql://test:test@localhost:5432/test_db
+      ENVIRONMENT: test
+      DATABRICKS_HOST: https://test.databricks.com
+      DATABRICKS_TOKEN: test-token
+
     strategy:
       fail-fast: false
       matrix:
@@ -526,11 +534,6 @@ jobs:
           pip install -e ".[dev]"
 
       - name: Seed database with default data
-        env:
-          DATABASE_URL: postgresql://test:test@localhost:5432/test_db
-          ENVIRONMENT: test
-          DATABRICKS_HOST: https://test.databricks.com
-          DATABRICKS_TOKEN: test-token
         run: |
           echo "Initializing database tables and seeding default data..."
           python -c "
@@ -607,11 +610,6 @@ jobs:
           "
 
       - name: Verify database seeding
-        env:
-          DATABASE_URL: postgresql://test:test@localhost:5432/test_db
-          ENVIRONMENT: test
-          DATABRICKS_HOST: https://test.databricks.com
-          DATABRICKS_TOKEN: test-token
         run: |
           echo "Verifying database state..."
           python -c "
@@ -650,10 +648,6 @@ jobs:
 
       - name: Start backend server
         run: |
-          DATABASE_URL="postgresql://test:test@localhost:5432/test_db" \
-          ENVIRONMENT="test" \
-          DATABRICKS_HOST="https://test.databricks.com" \
-          DATABRICKS_TOKEN="test-token" \
           python -m uvicorn src.api.main:app --host 0.0.0.0 --port 8000 &
           for i in {1..30}; do
             if curl -s http://localhost:8000/api/health > /dev/null 2>&1; then

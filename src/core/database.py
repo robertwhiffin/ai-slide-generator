@@ -183,13 +183,16 @@ def _get_database_url() -> str:
     Priority:
     1. DATABASE_URL environment variable (explicit override)
     2. PGHOST (Lakebase on Databricks Apps - auto-set when database resource attached)
-    3. Default local PostgreSQL
+    3. Default local PostgreSQL (development only)
 
     For Lakebase, returns URL without password - the password is injected
     dynamically via the do_connect event to support token refresh.
 
     Returns:
         Database connection URL string
+
+    Raises:
+        RuntimeError: If DATABASE_URL is not set in test/production environments
     """
     # Check for explicit DATABASE_URL first
     explicit_url = os.getenv("DATABASE_URL")
@@ -217,8 +220,27 @@ def _get_database_url() -> str:
 
         return url
 
-    # Default to local PostgreSQL for development
-    return "postgresql://localhost/ai_slide_generator"
+    # In test/production environments, DATABASE_URL must be explicitly set.
+    # Falling through to a userless default causes "role <os_user> does not exist"
+    # errors in CI (e.g., GitHub Actions runner connects as "root" or "runner").
+    environment = os.getenv("ENVIRONMENT", "development")
+    if environment in ("test", "production", "staging"):
+        raise RuntimeError(
+            f"DATABASE_URL environment variable is required in '{environment}' mode. "
+            f"Set it to a valid PostgreSQL connection string, e.g.: "
+            f"postgresql://user:password@localhost:5432/dbname"
+        )
+
+    # Default to local PostgreSQL for development only
+    import getpass
+    try:
+        current_user = getpass.getuser()
+    except Exception:
+        current_user = ""
+
+    default_url = f"postgresql://{current_user}@localhost/ai_slide_generator" if current_user else "postgresql://localhost/ai_slide_generator"
+    logger.info(f"No DATABASE_URL set, using local development default: {default_url}")
+    return default_url
 
 
 def _create_engine():
