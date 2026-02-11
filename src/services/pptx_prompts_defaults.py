@@ -82,6 +82,12 @@ CHARTS:
 - Position images at canvas location in HTML. Typical position: left=1.0", top=3.5", width=8.0", height=3.5" (adjust based on HTML layout)
 - If no images: Extract Chart.js data from <script> tags.
 
+CONTENT IMAGES (<img> tags):
+- HTML may contain <img src="content_image_0.png"> tags — these are real image files in assets_dir
+- For EACH: slide.shapes.add_picture(os.path.join(assets_dir, filename), left, top, width, height)
+- Position based on the image's location in the HTML layout
+- Preserve aspect ratio; typical size: width=2-3", height=1.5-2.5"
+
 Return ONLY Python code."""
 
 # User prompt template for single slide conversion
@@ -169,6 +175,12 @@ CHARTS:
 - Match image filename to canvas element in HTML by canvas ID or position
 - Position images at canvas location in HTML. Typical position: left=1.0", top=3.5", width=8.0", height=3.5" (adjust based on HTML layout)
 - If no images: Extract Chart.js data from <script> tags.
+
+CONTENT IMAGES (<img> tags):
+- HTML may contain <img src="content_image_0.png"> tags — these are real image files in assets_dir
+- For EACH: slide.shapes.add_picture(os.path.join(assets_dir, filename), left, top, width, height)
+- Position based on the image's location in the HTML layout
+- Preserve aspect ratio; typical size: width=2-3", height=1.5-2.5"
 
 Return ONLY Python code."""
 

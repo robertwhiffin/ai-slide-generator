@@ -32,6 +32,7 @@ from src.core.databricks_client import (
 )
 from src.core.settings_db import get_settings
 from src.domain.slide import Slide
+from src.services.image_tools import SearchImagesInput, search_images
 from src.services.tools import initialize_genie_conversation, query_genie_space
 from src.utils.html_utils import extract_canvas_ids_from_script, split_script_by_canvas
 from src.utils.js_validator import validate_and_fix_javascript
@@ -313,13 +314,26 @@ class SlideGeneratorAgent:
         Returns:
             List of StructuredTool instances for this session (empty if no Genie)
         """
-        # Return empty tools if no Genie configured (prompt-only mode)
+        # Image search tool (always available, not Genie-dependent)
+        image_search_tool = StructuredTool.from_function(
+            func=search_images,
+            name="search_images",
+            description=(
+                "Search for uploaded images to include in slides. "
+                "Use when user mentions images, logos, or branding. "
+                "Returns image metadata with IDs. "
+                'To embed an image, use: <img src="{{image:ID}}" alt="description" />'
+            ),
+            args_schema=SearchImagesInput,
+        )
+
+        # Return image tool only if no Genie configured
         if not self.settings.genie:
             logger.info(
-                "No Genie configured, running without tools",
+                "No Genie configured, running with image tools only",
                 extra={"session_id": session_id},
             )
-            return []
+            return [image_search_tool]
 
         # Get session reference for use in closure
         session = self.sessions.get(session_id)
@@ -393,7 +407,7 @@ class SlideGeneratorAgent:
         )
 
         logger.info("Tools created for session", extra={"session_id": session_id})
-        return [genie_tool]
+        return [genie_tool, image_search_tool]
 
     def _create_prompt(self) -> ChatPromptTemplate:
         """Create prompt template with system prompt from settings and chat history.
@@ -434,7 +448,39 @@ class SlideGeneratorAgent:
         # Editing instructions appended at the end
         if editing_prompt:
             prompt_parts.append(editing_prompt.strip())
-        
+
+        # Image tool instructions (conditional on image_guidelines)
+        image_guidelines = self.settings.prompts.get("image_guidelines", "")
+
+        image_section = (
+            "IMAGE SUPPORT:\n"
+            "You have access to user-uploaded images via the search_images tool.\n\n"
+            "WHEN TO USE search_images:\n"
+            "- Use search_images ONLY when the user explicitly requests images in their message\n"
+            "- When the user attaches images to their message (image context will be provided)\n"
+            "- Do NOT call search_images on every request — only when images are relevant\n\n"
+            "HOW TO USE IMAGES:\n"
+            '1. Call search_images to find matching images (try broad search first, then filter)\n'
+            '2. Embed them using: <img src="{{image:ID}}" alt="description" />\n'
+            '3. For CSS backgrounds: background-image: url(\'{{image:ID}}\');\n'
+            '4. The system will replace {{image:ID}} with the actual image data\n\n'
+            "IMPORTANT RULES:\n"
+            "- NEVER guess or fabricate image IDs — only use IDs returned by search_images or image guidelines\n"
+            "- DO NOT attempt to generate or guess base64 image data\n"
+            "- If no images are found, generate slides without images rather than using fake IDs"
+        )
+
+        if image_guidelines.strip():
+            image_section += (
+                "\n\n"
+                "IMAGE GUIDELINES (from slide style):\n"
+                "Follow these instructions for which images to use. "
+                "The image IDs listed here are pre-validated — use them directly without calling search_images.\n\n"
+                f"{image_guidelines.strip()}"
+            )
+
+        prompt_parts.append(image_section)
+
         full_system_prompt = "\n\n".join(prompt_parts)
 
         # Escape curly braces to allow user prompts with HTML/JS/JSON content
