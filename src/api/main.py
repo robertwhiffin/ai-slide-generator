@@ -16,7 +16,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from src.api.routes import chat, slides, export, sessions, verification, version, permissions
+from src.api.routes import chat, images, slides, export, sessions, verification, version, permissions
 from src.core.databricks_client import create_user_client, set_user_client
 from src.core.database import (
     init_db,
@@ -289,6 +289,7 @@ async def user_auth_middleware(request: Request, call_next):
 
 # Include API routers
 app.include_router(chat.router)
+app.include_router(images.router)
 app.include_router(slides.router)
 app.include_router(export.router)
 app.include_router(sessions.router)

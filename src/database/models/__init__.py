@@ -3,6 +3,7 @@
 from src.database.models.ai_infra import ConfigAIInfra
 from src.database.models.genie_space import ConfigGenieSpace
 from src.database.models.history import ConfigHistory
+from src.database.models.image import ImageAsset
 from src.database.models.permissions import (
     PermissionLevel,
     PrincipalType,
@@ -30,6 +31,7 @@ __all__ = [
     "ConfigHistory",
     "ConfigProfile",
     "ConfigPrompts",
+    "ImageAsset",
     "PermissionLevel",
     "PrincipalType",
     "SessionMessage",

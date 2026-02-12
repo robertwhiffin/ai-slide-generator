@@ -67,6 +67,10 @@ class ChatRequest(BaseModel):
         default=None,
         description="Optional context containing the slides to edit",
     )
+    image_ids: Optional[list[int]] = Field(
+        default=None,
+        description="IDs of images attached to this message (from upload or paste)",
+    )
 
     @field_validator("message")
     @classmethod

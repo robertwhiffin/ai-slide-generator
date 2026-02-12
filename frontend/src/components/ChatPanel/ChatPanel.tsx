@@ -107,7 +107,19 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(({
     setLoadingMessage('');
   };
 
-  const handleSendMessage = async (content: string, explicitSlideContext?: SlideContext) => {
+  const handleSendMessage = async (content: string, explicitSlideContextOrImageIds?: SlideContext | number[], maybeImageIds?: number[]) => {
+    // Support two calling conventions:
+    // 1. From ChatInput: (content, imageIds)
+    // 2. From imperative ref: (content, slideContext)
+    let explicitSlideContext: SlideContext | undefined;
+    let imageIds: number[] | undefined;
+
+    if (Array.isArray(explicitSlideContextOrImageIds)) {
+      imageIds = explicitSlideContextOrImageIds;
+    } else {
+      explicitSlideContext = explicitSlideContextOrImageIds;
+      imageIds = maybeImageIds;
+    }
     const trimmedContent = content.trim();
     if (!trimmedContent) {
       return;
@@ -268,7 +280,8 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(({
         stopLoadingMessages();
         setIsLoading(false);
         setIsGenerating(false);
-      }
+      },
+      imageIds,
     );
   };
 

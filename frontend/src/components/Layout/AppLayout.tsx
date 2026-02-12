@@ -11,6 +11,7 @@ import { SlideStyleList } from '../config/SlideStyleList';
 import { SessionHistory } from '../History/SessionHistory';
 import { SaveAsDialog } from '../History/SaveAsDialog';
 import { HelpPage } from '../Help';
+import { ImageLibrary } from '../ImageLibrary/ImageLibrary';
 import { UpdateBanner } from '../UpdateBanner';
 import { SavePointDropdown, PreviewBanner, RevertConfirmModal, type SavePointVersion } from '../SavePoints';
 import { useSession } from '../../contexts/SessionContext';
@@ -19,7 +20,7 @@ import { useProfiles } from '../../contexts/ProfileContext';
 import { useVersionCheck } from '../../hooks/useVersionCheck';
 import { api } from '../../services/api';
 
-type ViewMode = 'main' | 'profiles' | 'deck_prompts' | 'slide_styles' | 'history' | 'help';
+type ViewMode = 'main' | 'profiles' | 'deck_prompts' | 'slide_styles' | 'images' | 'history' | 'help';
 
 export const AppLayout: React.FC = () => {
   const [slideDeck, setSlideDeck] = useState<SlideDeck | null>(null);
@@ -392,6 +393,20 @@ export const AppLayout: React.FC = () => {
                 Slide Styles
               </button>
               <button
+                onClick={() => setViewMode('images')}
+                disabled={isGenerating}
+                className={`px-3 py-1.5 rounded text-sm transition-colors ${
+                  viewMode === 'images'
+                    ? 'bg-blue-700 text-white'
+                    : isGenerating
+                    ? 'bg-blue-400 text-blue-200 cursor-not-allowed opacity-50'
+                    : 'bg-blue-500 hover:bg-blue-700 text-blue-100'
+                }`}
+                title={isGenerating ? 'Navigation disabled during generation' : undefined}
+              >
+                Images
+              </button>
+              <button
                 onClick={() => setViewMode('help')}
                 disabled={isGenerating}
                 className={`px-3 py-1.5 rounded text-sm transition-colors ${
@@ -513,6 +528,14 @@ export const AppLayout: React.FC = () => {
         <div className="flex-1 overflow-auto bg-gray-50">
           <div className="max-w-7xl mx-auto p-6">
             <SlideStyleList />
+          </div>
+        </div>
+      )}
+
+      {viewMode === 'images' && (
+        <div className="flex-1 overflow-auto bg-gray-50">
+          <div className="max-w-7xl mx-auto p-6">
+            <ImageLibrary />
           </div>
         </div>
       )}

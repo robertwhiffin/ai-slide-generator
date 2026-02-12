@@ -29,6 +29,7 @@ class SlideStyleBase(BaseModel):
     description: Optional[str] = None
     category: Optional[str] = Field(None, max_length=50)
     style_content: str = Field(..., min_length=1)
+    image_guidelines: Optional[str] = None
 
 
 class SlideStyleCreate(SlideStyleBase):
@@ -42,6 +43,7 @@ class SlideStyleUpdate(BaseModel):
     description: Optional[str] = None
     category: Optional[str] = Field(None, max_length=50)
     style_content: Optional[str] = Field(None, min_length=1)
+    image_guidelines: Optional[str] = None
 
 
 class SlideStyleResponse(SlideStyleBase):
@@ -101,6 +103,7 @@ def list_slide_styles(
                     description=s.description,
                     category=s.category,
                     style_content=s.style_content,
+                    image_guidelines=s.image_guidelines,
                     is_active=s.is_active,
                     is_system=s.is_system,
                     created_by=s.created_by,
@@ -154,6 +157,7 @@ def get_slide_style(
             description=style.description,
             category=style.category,
             style_content=style.style_content,
+            image_guidelines=style.image_guidelines,
             is_active=style.is_active,
             is_system=style.is_system,
             created_by=style.created_by,
@@ -216,6 +220,7 @@ def create_slide_style(
             description=request.description,
             category=request.category,
             style_content=request.style_content,
+            image_guidelines=request.image_guidelines,
             is_active=True,
             created_by=user,
             updated_by=user,
@@ -233,6 +238,7 @@ def create_slide_style(
             description=style.description,
             category=style.category,
             style_content=style.style_content,
+            image_guidelines=style.image_guidelines,
             is_active=style.is_active,
             is_system=style.is_system,
             created_by=style.created_by,
@@ -308,7 +314,9 @@ def update_slide_style(
             style.category = request.category
         if request.style_content is not None:
             style.style_content = request.style_content
-        
+        if request.image_guidelines is not None:
+            style.image_guidelines = request.image_guidelines
+
         # Update the user (skip Databricks call in test/dev to avoid network timeout)
         if os.getenv("ENVIRONMENT") in ("development", "test"):
             style.updated_by = "system"
@@ -331,6 +339,7 @@ def update_slide_style(
             description=style.description,
             category=style.category,
             style_content=style.style_content,
+            image_guidelines=style.image_guidelines,
             is_active=style.is_active,
             is_system=style.is_system,
             created_by=style.created_by,
