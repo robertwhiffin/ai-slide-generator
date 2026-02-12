@@ -462,9 +462,12 @@ test.describe('Session-Profile Association', () => {
     try {
       await goToHistory(page);
 
+      // Wait for table to be visible before searching for row
+      await expect(page.getByRole('table')).toBeVisible();
+
       // Session should be visible in table
       const row = page.locator('tr', { hasText: sessionTitle });
-      await expect(row).toBeVisible();
+      await expect(row).toBeVisible({ timeout: 15000 });
 
       // Row should have the standard action buttons
       await expect(row.getByRole('button', { name: 'Rename' })).toBeVisible();
@@ -482,9 +485,12 @@ test.describe('Session-Profile Association', () => {
     try {
       await goToHistory(page);
 
+      // Wait for table to be visible before searching for row
+      await expect(page.getByRole('table')).toBeVisible();
+
       // Row should exist
       const row = page.locator('tr', { hasText: sessionTitle });
-      await expect(row).toBeVisible();
+      await expect(row).toBeVisible({ timeout: 15000 });
     } finally {
       await deleteSessionViaAPI(request, session.session_id);
     }
@@ -533,16 +539,23 @@ test.describe('Session History Edge Cases', () => {
     try {
       await goToHistory(page);
 
+      // Wait for table to render before searching for row
+      await expect(page.getByRole('table')).toBeVisible();
+
       // Rename with special characters
       const row = page.locator('tr', { hasText: originalTitle });
+      await expect(row).toBeVisible({ timeout: 15000 });
       await row.getByRole('button', { name: 'Rename' }).click();
 
+      // Wait for input to be ready
       const input = page.getByRole('textbox');
+      await expect(input).toBeVisible({ timeout: 5000 });
       await input.clear();
       await input.fill(specialTitle);
       await page.keyboard.press('Enter');
 
-      await page.waitForTimeout(1000);
+      // Wait longer for database update
+      await page.waitForTimeout(2000);
 
       // Verify the title is displayed correctly (escaped)
       // Note: The actual displayed text may have HTML entities escaped
@@ -560,6 +573,12 @@ test.describe('Session History Edge Cases', () => {
 
     try {
       await goToHistory(page);
+
+      // Wait for table to render
+      await expect(page.getByRole('table')).toBeVisible({ timeout: 15000 });
+
+      // Allow API response to settle
+      await page.waitForTimeout(2000);
 
       // Get session count from API
       const apiData = await getSessionsViaAPI(request);
