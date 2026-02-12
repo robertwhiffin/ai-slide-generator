@@ -785,11 +785,20 @@ test.describe('Session-Profile Association', () => {
       return;
     }
 
-    // Find two sessions with different profiles
+    // Find two sessions with different profiles that have slide decks (Restore requires it)
     const sessions = sessionsData.sessions;
-    const session1 = sessions[0];
+    const session1 = sessions.find(
+      (s: { has_slide_deck: boolean }) => s.has_slide_deck
+    );
+
+    if (!session1) {
+      test.skip();
+      return;
+    }
+
     const session2 = sessions.find(
-      (s: { profile_id: number }) => s.profile_id !== session1.profile_id
+      (s: { profile_id: number; has_slide_deck: boolean }) =>
+        s.profile_id !== session1.profile_id && s.has_slide_deck
     );
 
     if (!session2) {
@@ -813,8 +822,8 @@ test.describe('Session-Profile Association', () => {
     // Go to History and restore session2
     await goToHistory(page);
 
-    // Click on session2 to restore it - use session_id for unique matching
-    const sessionRow = page.locator('tr').filter({ has: page.getByText(session2.session_id) }).first();
+    // Click on session2 to restore it - match by title (session_id is not rendered in the table)
+    const sessionRow = page.locator('tr').filter({ has: page.getByText(session2.title) }).first();
     await sessionRow.getByRole('button', { name: 'Restore' }).click();
 
     // Wait for potential profile switch
