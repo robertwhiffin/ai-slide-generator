@@ -13,8 +13,8 @@ Welcome to the Databricks Tellr user guide. This documentation covers the main w
 ## Quick Start
 
 1. **Open the app** - Navigate to the application URL
-2. **Select a profile** - Choose a profile that connects to your data source
-3. **Go to Generator** - Click "Generator" in the navigation
+2. **Start a session** - Click "New Session" in the navigation bar
+3. **Check your profile** - The active profile is shown top-right; switch if needed
 4. **Enter a prompt** - Describe the presentation you want to create
 5. **Send** - Click Send and watch your slides generate
 
