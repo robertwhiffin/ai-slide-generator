@@ -53,6 +53,23 @@ def test_key_from_env_var():
         assert get_encryption_key() == expected_key.encode()
 
 
+def test_production_guard_raises_without_env_var(tmp_path):
+    """In production, missing GOOGLE_OAUTH_ENCRYPTION_KEY raises RuntimeError."""
+    key_file = tmp_path / ".encryption_key"
+
+    with (
+        patch.dict(
+            os.environ,
+            {"ENVIRONMENT": "production"},
+            clear=False,
+        ),
+        patch("src.core.encryption._KEY_FILE", key_file),
+    ):
+        os.environ.pop("GOOGLE_OAUTH_ENCRYPTION_KEY", None)
+        with pytest.raises(RuntimeError, match="required in production"):
+            get_encryption_key()
+
+
 def test_key_auto_generated_when_missing(tmp_path):
     """When env var is absent and no key file, a key is generated and persisted."""
     key_file = tmp_path / ".encryption_key"

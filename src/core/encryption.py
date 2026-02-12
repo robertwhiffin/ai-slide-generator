@@ -33,6 +33,14 @@ def get_encryption_key() -> bytes:
     if key:
         return key.encode()
 
+    # Production guard: fail fast if the env var is not set
+    if os.getenv("ENVIRONMENT") == "production":
+        raise RuntimeError(
+            "GOOGLE_OAUTH_ENCRYPTION_KEY environment variable is required in production. "
+            'Generate one with: python -c "from cryptography.fernet import Fernet; '
+            'print(Fernet.generate_key().decode())"'
+        )
+
     # 2. Read from persisted key file
     if _KEY_FILE.exists():
         key = _KEY_FILE.read_text().strip()
