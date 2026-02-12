@@ -174,7 +174,7 @@ async function setupStreamMock(page: Page, slideDeck = mockSlideDeck) {
 
 async function goToGenerator(page: Page) {
   await page.goto('/');
-  await page.getByRole('navigation').getByRole('button', { name: 'Generator' }).click();
+  await page.getByRole('navigation').getByRole('button', { name: 'New Session' }).click();
   await expect(page.getByRole('heading', { name: 'Chat', level: 2 })).toBeVisible();
 }
 
@@ -503,7 +503,7 @@ test.describe('ViewModes', () => {
     await setupMocks(page);
     await setupStreamMock(page);
     await page.goto('/?debug=true');
-    await page.getByRole('navigation').getByRole('button', { name: 'Generator' }).click();
+    await page.getByRole('navigation').getByRole('button', { name: 'New Session' }).click();
     await expect(page.getByRole('heading', { name: 'Chat', level: 2 })).toBeVisible();
     await generateSlides(page);
 

@@ -51,9 +51,9 @@ export const HelpPage: React.FC<HelpPageProps> = ({ onBack }) => {
       {/* Tab bar */}
       <div className="flex gap-2 mb-6 flex-wrap">
         <TabButton tab="overview" label="Overview" icon={FiInfo} />
-        <TabButton tab="generator" label="Generator" icon={FiMessageSquare} />
+        <TabButton tab="generator" label="New Session" icon={FiMessageSquare} />
         <TabButton tab="verification" label="Verification" icon={FiShield} />
-        <TabButton tab="history" label="History" icon={FiClock} />
+        <TabButton tab="history" label="My Sessions" icon={FiClock} />
         <TabButton tab="profiles" label="Profiles" icon={FiSettings} />
         <TabButton tab="deck_prompts" label="Deck Prompts" icon={FiFileText} />
         <TabButton tab="slide_styles" label="Slide Styles" icon={FiLayout} />
@@ -108,9 +108,9 @@ const OverviewTab: React.FC<{
     <section>
       <h2 className="text-lg font-semibold text-gray-800 mb-3">Navigation Quick Links</h2>
       <div className="flex gap-2 flex-wrap">
-        <QuickLinkButton tab="generator" label="Learn about Generator →" />
+        <QuickLinkButton tab="generator" label="Learn about New Session →" />
         <QuickLinkButton tab="verification" label="Learn about Verification →" />
-        <QuickLinkButton tab="history" label="Learn about History →" />
+        <QuickLinkButton tab="history" label="Learn about My Sessions →" />
         <QuickLinkButton tab="profiles" label="Learn about Profiles →" />
         <QuickLinkButton tab="deck_prompts" label="Learn about Deck Prompts →" />
         <QuickLinkButton tab="slide_styles" label="Learn about Slide Styles →" />

@@ -334,7 +334,7 @@ export const AppLayout: React.FC = () => {
                     : 'bg-blue-500 hover:bg-blue-700 text-blue-100'
                 }`}
               >
-                Generator
+                New Session
               </button>
               <button
                 onClick={() => setViewMode('history')}
@@ -348,7 +348,7 @@ export const AppLayout: React.FC = () => {
                 }`}
                 title={isGenerating ? 'Navigation disabled during generation' : undefined}
               >
-                History
+                My Sessions
               </button>
               <button
                 onClick={() => setViewMode('profiles')}

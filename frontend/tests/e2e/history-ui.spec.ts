@@ -133,8 +133,8 @@ async function setupEmptySessionsMock(page: Page) {
 
 async function goToHistory(page: Page) {
   await page.goto('/');
-  await page.getByRole('navigation').getByRole('button', { name: 'History' }).click();
-  await expect(page.getByRole('heading', { name: 'Session History' })).toBeVisible();
+  await page.getByRole('navigation').getByRole('button', { name: 'My Sessions' }).click();
+  await expect(page.getByRole('heading', { name: 'My Sessions' })).toBeVisible();
 }
 
 // ============================================
@@ -149,7 +149,7 @@ test.describe('SessionHistoryList', () => {
   test('renders page heading and session count', async ({ page }) => {
     await goToHistory(page);
 
-    await expect(page.getByRole('heading', { name: 'Session History' })).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'My Sessions' })).toBeVisible();
     // Check for session count text
     await expect(page.getByText(/\d+ sessions? saved/)).toBeVisible();
   });
@@ -210,16 +210,16 @@ test.describe('SessionHistoryList', () => {
     expect(restoreButtons).toBeGreaterThan(0);
   });
 
-  test('shows Back to Generator button', async ({ page }) => {
+  test('shows Back to New Session button', async ({ page }) => {
     await goToHistory(page);
 
-    await expect(page.getByRole('button', { name: /Back to Generator/i })).toBeVisible();
+    await expect(page.getByRole('button', { name: /Back to New Session/i })).toBeVisible();
   });
 
-  test('Back to Generator button navigates to Generator', async ({ page }) => {
+  test('Back to New Session button navigates to New Session', async ({ page }) => {
     await goToHistory(page);
 
-    await page.getByRole('button', { name: /Back to Generator/i }).click();
+    await page.getByRole('button', { name: /Back to New Session/i }).click();
 
     // Should navigate to Generator view
     await expect(page.getByRole('heading', { name: 'Chat', level: 2 })).toBeVisible();

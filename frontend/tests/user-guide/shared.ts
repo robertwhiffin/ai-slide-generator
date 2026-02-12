@@ -217,7 +217,7 @@ export async function setupUserGuideMocks(page: Page): Promise<void> {
  */
 export async function goToGenerator(page: Page): Promise<void> {
   await page.goto('/');
-  await page.getByRole('navigation').getByRole('button', { name: 'Generator' }).click();
+  await page.getByRole('navigation').getByRole('button', { name: 'New Session' }).click();
   await expect(page.getByRole('heading', { name: 'Chat', level: 2 })).toBeVisible();
 }
 

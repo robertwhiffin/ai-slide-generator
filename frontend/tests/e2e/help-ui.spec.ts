@@ -93,9 +93,9 @@ test.describe('HelpTabs', () => {
     await goToHelp(page);
 
     await expect(getHelpTabButton(page, 'Overview')).toBeVisible();
-    await expect(getHelpTabButton(page, 'Generator')).toBeVisible();
+    await expect(getHelpTabButton(page, 'New Session')).toBeVisible();
     await expect(getHelpTabButton(page, 'Verification')).toBeVisible();
-    await expect(getHelpTabButton(page, 'History')).toBeVisible();
+    await expect(getHelpTabButton(page, 'My Sessions')).toBeVisible();
     await expect(getHelpTabButton(page, 'Profiles')).toBeVisible();
     await expect(getHelpTabButton(page, 'Deck Prompts')).toBeVisible();
     await expect(getHelpTabButton(page, 'Slide Styles')).toBeVisible();
@@ -104,7 +104,7 @@ test.describe('HelpTabs', () => {
   test('clicking Generator tab shows generator content', async ({ page }) => {
     await goToHelp(page);
 
-    await getHelpTabButton(page, 'Generator').click();
+    await getHelpTabButton(page, 'New Session').click();
 
     await expect(page.getByRole('heading', { name: 'Chat Panel (Left)' })).toBeVisible();
   });
@@ -120,7 +120,7 @@ test.describe('HelpTabs', () => {
   test('clicking History tab shows history content', async ({ page }) => {
     await goToHelp(page);
 
-    await getHelpTabButton(page, 'History').click();
+    await getHelpTabButton(page, 'My Sessions').click();
 
     await expect(page.getByRole('heading', { name: 'Session List' })).toBeVisible();
   });
@@ -162,14 +162,14 @@ test.describe('QuickLinks', () => {
   test('quick links visible in overview tab', async ({ page }) => {
     await goToHelp(page);
 
-    await expect(page.getByRole('button', { name: /Learn about Generator/i })).toBeVisible();
+    await expect(page.getByRole('button', { name: /Learn about New Session/i })).toBeVisible();
     await expect(page.getByRole('button', { name: /Learn about Verification/i })).toBeVisible();
   });
 
   test('clicking quick link navigates to corresponding tab', async ({ page }) => {
     await goToHelp(page);
 
-    await page.getByRole('button', { name: /Learn about Generator/i }).click();
+    await page.getByRole('button', { name: /Learn about New Session/i }).click();
 
     await expect(page.getByRole('heading', { name: 'Chat Panel (Left)' })).toBeVisible();
   });

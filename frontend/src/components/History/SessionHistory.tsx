@@ -99,7 +99,7 @@ export const SessionHistory: React.FC<SessionHistoryProps> = ({
     <div className="max-w-6xl mx-auto">
       <div className="flex items-center justify-between mb-6">
         <div>
-          <h2 className="text-2xl font-bold text-gray-900">Session History</h2>
+          <h2 className="text-2xl font-bold text-gray-900">My Sessions</h2>
           <p className="text-sm text-gray-500 mt-1">
             {sessions.length} session{sessions.length !== 1 ? 's' : ''} saved
           </p>
@@ -108,7 +108,7 @@ export const SessionHistory: React.FC<SessionHistoryProps> = ({
           onClick={onBack}
           className="px-4 py-2 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-md hover:bg-gray-50"
         >
-          ← Back to Generator
+          ← Back to New Session
         </button>
       </div>
 

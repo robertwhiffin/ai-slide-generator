@@ -166,7 +166,7 @@ async function setupMocks(page: Page) {
  */
 async function goToGenerator(page: Page) {
   await page.goto('/');
-  await page.getByRole('navigation').getByRole('button', { name: 'Generator' }).click();
+  await page.getByRole('navigation').getByRole('button', { name: 'New Session' }).click();
   // Wait for the Generator view to load (Chat heading appears)
   await expect(page.getByRole('heading', { name: 'Chat', level: 2 })).toBeVisible();
 }
@@ -216,7 +216,7 @@ test.describe('Deck Integrity - Navigation', () => {
     await page.goto('/');
 
     // Navigate to each view
-    const views = ['Generator', 'History', 'Profiles', 'Deck Prompts', 'Slide Styles', 'Help'];
+    const views = ['New Session', 'My Sessions', 'Profiles', 'Deck Prompts', 'Slide Styles', 'Help'];
 
     for (const view of views) {
       await page.getByRole('navigation').getByRole('button', { name: view }).click();
@@ -229,9 +229,9 @@ test.describe('Deck Integrity - Navigation', () => {
 
   test('History view loads sessions without errors', async ({ page }) => {
     await page.goto('/');
-    await page.getByRole('navigation').getByRole('button', { name: 'History' }).click();
+    await page.getByRole('navigation').getByRole('button', { name: 'My Sessions' }).click();
 
-    await expect(page.getByRole('heading', { name: 'Session History' })).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'My Sessions' })).toBeVisible();
 
     const errors = consoleCollector.getErrors();
     expect(errors).toHaveLength(0);

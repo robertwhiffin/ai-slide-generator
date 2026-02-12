@@ -175,14 +175,14 @@ async function goToProfiles(page: Page): Promise<void> {
 
 async function goToGenerator(page: Page): Promise<void> {
   await page.goto('/');
-  await page.getByRole('navigation').getByRole('button', { name: 'Generator' }).click();
+  await page.getByRole('navigation').getByRole('button', { name: 'New Session' }).click();
   await expect(page.getByRole('heading', { name: 'Chat', level: 2 })).toBeVisible();
 }
 
 async function goToHistory(page: Page): Promise<void> {
   await page.goto('/');
-  await page.getByRole('navigation').getByRole('button', { name: 'History' }).click();
-  await expect(page.getByRole('heading', { name: 'Session History' })).toBeVisible();
+  await page.getByRole('navigation').getByRole('button', { name: 'My Sessions' }).click();
+  await expect(page.getByRole('heading', { name: 'My Sessions' })).toBeVisible();
 }
 
 // ============================================
@@ -746,7 +746,7 @@ test.describe('Session-Profile Association', () => {
       await page.waitForTimeout(1000);
 
       // Navigate to Generator and send a message to create a session
-      await page.getByRole('navigation').getByRole('button', { name: 'Generator' }).click();
+      await page.getByRole('navigation').getByRole('button', { name: 'New Session' }).click();
       await expect(page.getByRole('heading', { name: 'Chat', level: 2 })).toBeVisible();
 
       // Type a message
@@ -758,8 +758,8 @@ test.describe('Session-Profile Association', () => {
       await page.waitForTimeout(2000);
 
       // Go to History
-      await page.getByRole('navigation').getByRole('button', { name: 'History' }).click();
-      await expect(page.getByRole('heading', { name: 'Session History' })).toBeVisible();
+      await page.getByRole('navigation').getByRole('button', { name: 'My Sessions' }).click();
+      await expect(page.getByRole('heading', { name: 'My Sessions' })).toBeVisible();
 
       // The most recent session should show the profile name
       await expect(page.getByText(profileName).first()).toBeVisible();

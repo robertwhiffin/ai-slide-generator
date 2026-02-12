@@ -36,13 +36,13 @@ test.describe('User Guide: Generating Slides', () => {
     });
 
     // Step 02: Navigate to Generator
-    await page.getByRole('navigation').getByRole('button', { name: 'Generator' }).click();
+    await page.getByRole('navigation').getByRole('button', { name: 'New Session' }).click();
     await expect(page.getByRole('heading', { name: 'Chat', level: 2 })).toBeVisible();
     await capture.capture({
       step: '02',
       name: 'generator-view',
       description: 'Navigate to the Generator view using the navigation bar',
-      highlightSelector: 'nav button:has-text("Generator")',
+      highlightSelector: 'nav button:has-text("New Session")',
     });
 
     // Step 03: Profile Selector

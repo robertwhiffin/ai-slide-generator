@@ -89,7 +89,7 @@ async function setupMocks(page: Page) {
  */
 async function goToGenerator(page: Page) {
   await page.goto('/');
-  await page.getByRole('navigation').getByRole('button', { name: 'Generator' }).click();
+  await page.getByRole('navigation').getByRole('button', { name: 'New Session' }).click();
   // Wait for the Generator view to load
   await expect(page.getByRole('heading', { name: 'Chat', level: 2 })).toBeVisible();
 }
@@ -107,8 +107,8 @@ test.describe('Slide Generator App - Navigation', () => {
     
     // Check that navigation buttons are visible (scope to navigation element)
     const nav = page.getByRole('navigation');
-    await expect(nav.getByRole('button', { name: 'Generator' })).toBeVisible();
-    await expect(nav.getByRole('button', { name: 'History' })).toBeVisible();
+    await expect(nav.getByRole('button', { name: 'New Session' })).toBeVisible();
+    await expect(nav.getByRole('button', { name: 'My Sessions' })).toBeVisible();
     await expect(nav.getByRole('button', { name: 'Profiles' })).toBeVisible();
     await expect(nav.getByRole('button', { name: 'Deck Prompts' })).toBeVisible();
     await expect(nav.getByRole('button', { name: 'Slide Styles' })).toBeVisible();
@@ -168,10 +168,10 @@ test.describe('Slide Generator App - Navigation', () => {
     await page.goto('/');
     
     // Click on History in the navigation bar
-    await page.getByRole('navigation').getByRole('button', { name: 'History' }).click();
+    await page.getByRole('navigation').getByRole('button', { name: 'My Sessions' }).click();
     
     // Check that History page is displayed
-    await expect(page.getByRole('heading', { name: 'Session History' })).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'My Sessions' })).toBeVisible();
   });
 
   test('should navigate to Profiles section', async ({ page }) => {
