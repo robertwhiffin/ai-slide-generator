@@ -7,7 +7,7 @@ How the React/Vite frontend is structured, how it communicates with backend APIs
 ## Stack & Entry Points
 
 - **Tooling:** Vite + React + TypeScript, Tailwind utility classes, `@dnd-kit` for drag/drop, `@monaco-editor/react` for HTML editing, standard Fetch for API calls.
-- **Entrypoint:** `src/main.tsx` injects `&lt;App /&gt;` into `#root`. `src/App.tsx` wraps the tree in `ProfileProvider`, `SessionProvider`, `GenerationProvider`, `SelectionProvider` and renders `AppLayout`.
+- **Entrypoint:** `src/main.tsx` wraps `<App />` in `<BrowserRouter>` and injects into `#root`. `src/App.tsx` wraps the tree in `ProfileProvider`, `SessionProvider`, `GenerationProvider`, `SelectionProvider`, `ToastProvider` and defines routes via React Router v7 — each route renders `AppLayout` with `initialView` and optional `viewOnly` props.
 - **Env configuration:** `src/services/api.ts` reads `import.meta.env.VITE_API_URL` (defaults to `http://localhost:8000` in dev, relative URLs in production).
 
 ---
@@ -25,15 +25,18 @@ How the React/Vite frontend is structured, how it communicates with backend APIs
 └──────────────┴──────────────┴─────────────────────────────────────────┘
 ```
 
-### View Modes
+### View Modes & URL Routing
 
-The app has six view modes controlled by navigation buttons:
-- **Generator** (`main`): The primary slide generation interface
-- **History**: Session list and restore functionality
-- **Profiles**: Configuration profile management
-- **Deck Prompts**: Presentation template library management
-- **Slide Styles**: Visual style library management (typography, colors, layout)
-- **Help**: Documentation and usage guide
+Each page has a dedicated URL. Navigation buttons use `useNavigate()` to change routes. Session routes (`/sessions/:id/edit`, `/sessions/:id/view`) load session data from URL parameters. See [URL Routing](url-routing.md) for full details.
+
+- **Generator** (`/sessions/:id/edit`): The primary slide generation interface
+- **Viewer** (`/sessions/:id/view`): Read-only presentation viewer (chat disabled, editing disabled)
+- **History** (`/history`): Session list and restore functionality
+- **Profiles** (`/profiles`): Configuration profile management
+- **Deck Prompts** (`/deck-prompts`): Presentation template library management
+- **Slide Styles** (`/slide-styles`): Visual style library management (typography, colors, layout)
+- **Images** (`/images`): Image library management
+- **Help** (`/`, `/help`): Documentation and usage guide
 
 - **ChatPanel** owns chat history and calls backend APIs to generate or edit slides.
 - **SelectionRibbon** mirrors the current `SlideDeck` with dual interaction:
@@ -459,3 +462,4 @@ Errors bubble up as `ApiError` (status + message). Common statuses:
 - [Multi-User Concurrency](multi-user-concurrency.md) – session locking and async handling
 - [Slide Parser & Script Management](slide-parser-and-script-management.md) – HTML parsing and Chart.js reconciliation
 - [Save Points / Versioning](save-points-versioning.md) – Complete deck state snapshots with preview and restore
+- [URL Routing](url-routing.md) – Client-side routing, session URLs, shareable view links
