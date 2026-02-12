@@ -15,9 +15,10 @@ import { AIInfraForm } from './AIInfraForm';
 import { GenieForm } from './GenieForm';
 import { DeckPromptSelector } from './DeckPromptSelector';
 import { SlideStyleSelector } from './SlideStyleSelector';
+import { GoogleSlidesAuthForm } from './GoogleSlidesAuthForm';
 import { AdvancedSettingsEditor } from './AdvancedSettingsEditor';
 
-type TabId = 'ai_infra' | 'genie' | 'deck_prompt' | 'slide_style' | 'advanced';
+type TabId = 'ai_infra' | 'genie' | 'deck_prompt' | 'slide_style' | 'google_slides' | 'advanced';
 
 interface Tab {
   id: TabId;
@@ -36,6 +37,7 @@ const allTabs: Tab[] = [
   { id: 'deck_prompt', label: 'Deck Prompt', icon: '📋' },
   { id: 'slide_style', label: 'Slide Style', icon: '🎨' },
   { id: 'ai_infra', label: 'AI Infrastructure', icon: '🤖' },
+  { id: 'google_slides', label: 'Google Slides', icon: '📊' },
   { id: 'advanced', label: 'Advanced', icon: '⚙️', debugOnly: true },
 ];
 
@@ -143,6 +145,10 @@ export const ConfigTabs: React.FC<ConfigTabsProps> = ({ profileId, profileName }
             onSave={reload}
             saving={saving}
           />
+        )}
+
+        {activeTab === 'google_slides' && (
+          <GoogleSlidesAuthForm profileId={profileId} />
         )}
 
         {activeTab === 'advanced' && config.prompts && (

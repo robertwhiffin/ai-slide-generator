@@ -20,6 +20,7 @@ import { SlideTile } from './SlideTile';
 import { PresentationMode } from '../PresentationMode';
 import { api } from '../../services/api';
 import { useSelection } from '../../contexts/SelectionContext';
+import { useProfiles } from '../../contexts/ProfileContext';
 import { exportSlideDeckToPDF } from '../../services/pdf_client';
 import { useSession } from '../../contexts/SessionContext';
 
@@ -51,6 +52,7 @@ export const SlidePanel: React.FC<SlidePanelProps> = ({ slideDeck, rawHtml, onSl
   const [viewMode, setViewMode] = useState<ViewMode>('tiles');
   const [isExportingPDF, setIsExportingPDF] = useState(false);
   const [isExportingPPTX, setIsExportingPPTX] = useState(false);
+  const [isExportingGoogleSlides, setIsExportingGoogleSlides] = useState(false);
   const [exportProgress, setExportProgress] = useState<{ current: number; total: number; status: string } | null>(null);
   const [showExportMenu, setShowExportMenu] = useState(false);
   const exportMenuRef = useRef<HTMLDivElement>(null);
@@ -58,6 +60,7 @@ export const SlidePanel: React.FC<SlidePanelProps> = ({ slideDeck, rawHtml, onSl
   const [optimizingSlideIndex, setOptimizingSlideIndex] = useState<number | null>(null);
   const { selectedIndices, setSelection, clearSelection } = useSelection();
   const { sessionId } = useSession();
+  const { currentProfile } = useProfiles();
   const slideRefs = useRef<Map<number, HTMLDivElement>>(new Map());
   
   // Auto-verification state
@@ -274,6 +277,77 @@ export const SlidePanel: React.FC<SlidePanelProps> = ({ slideDeck, rawHtml, onSl
       alert(message);
     } finally {
       setIsExportingPPTX(false);
+      setExportProgress(null);
+    }
+  };
+
+  const handleExportGoogleSlides = async () => {
+    if (!slideDeck || !sessionId || isExportingGoogleSlides || !currentProfile) return;
+
+    const profileId = currentProfile.id;
+    setIsExportingGoogleSlides(true);
+    setShowExportMenu(false);
+    setExportProgress({ current: 0, total: slideDeck.slides.length, status: 'Checking authorization...' });
+
+    try {
+      // Check auth first
+      const { authorized } = await api.checkGoogleSlidesAuth(profileId);
+
+      if (!authorized) {
+        // Open OAuth popup
+        setExportProgress({ current: 0, total: slideDeck.slides.length, status: 'Waiting for Google authorization...' });
+        const { url } = await api.getGoogleSlidesAuthUrl(profileId);
+
+        const authResult = await new Promise<boolean>((resolve) => {
+          const popup = window.open(url, 'google-slides-auth', 'width=600,height=700,popup=yes');
+
+          const handleMessage = (event: MessageEvent) => {
+            if (event.data?.type === 'google-slides-auth') {
+              window.removeEventListener('message', handleMessage);
+              resolve(event.data.success === true);
+            }
+          };
+          window.addEventListener('message', handleMessage);
+
+          // Fallback: poll for popup closure
+          const pollTimer = setInterval(() => {
+            if (popup?.closed) {
+              clearInterval(pollTimer);
+              window.removeEventListener('message', handleMessage);
+              // Check auth status after popup closes
+              api.checkGoogleSlidesAuth(profileId).then(({ authorized: ok }) => resolve(ok));
+            }
+          }, 1000);
+        });
+
+        if (!authResult) {
+          alert('Google authorization was not completed. Please try again.');
+          return;
+        }
+      }
+
+      // Proceed with export
+      setExportProgress({ current: 0, total: slideDeck.slides.length, status: 'Exporting to Google Slides...' });
+
+      const result = await api.exportToGoogleSlides(
+        sessionId,
+        profileId,
+        slideDeck,
+        (progress, total, status) => {
+          setExportProgress({ current: progress, total, status });
+        }
+      );
+
+      // Open the presentation in a new tab
+      window.open(result.presentation_url, '_blank');
+    } catch (error) {
+      console.error('Google Slides export failed:', error);
+      const message = error instanceof Error
+        ? error.message
+        : 'Failed to export to Google Slides. Please try again.';
+      alert(message);
+    } finally {
+      setIsExportingGoogleSlides(false);
       setExportProgress(null);
     }
   };
@@ -567,6 +641,8 @@ export const SlidePanel: React.FC<SlidePanelProps> = ({ slideDeck, rawHtml, onSl
               {isExportingPDF && ' • Exporting PDF...'}
               {isExportingPPTX && exportProgress && ` • ${exportProgress.status}`}
               {isExportingPPTX && !exportProgress && ' • Exporting PowerPoint...'}
+              {isExportingGoogleSlides && exportProgress && ` • ${exportProgress.status}`}
+              {isExportingGoogleSlides && !exportProgress && ' • Exporting to Google Slides...'}
               {isAutoVerifying && ` • Verifying ${verifyingSlides.size} slide${verifyingSlides.size !== 1 ? 's' : ''}...`}
             </p>
           </div>
@@ -576,17 +652,17 @@ export const SlidePanel: React.FC<SlidePanelProps> = ({ slideDeck, rawHtml, onSl
             <div className="relative" ref={exportMenuRef}>
               <button
                 onClick={() => setShowExportMenu(!showExportMenu)}
-                disabled={!slideDeck || isExportingPDF || isExportingPPTX}
+                disabled={!slideDeck || isExportingPDF || isExportingPPTX || isExportingGoogleSlides}
                 className={`
                   flex items-center space-x-2 px-4 py-2 rounded-l-lg transition-colors
-                  ${!slideDeck || isExportingPDF || isExportingPPTX
+                  ${!slideDeck || isExportingPDF || isExportingPPTX || isExportingGoogleSlides
                     ? 'bg-gray-100 text-gray-400 cursor-not-allowed'
                     : 'bg-blue-600 text-white hover:bg-blue-700'
                   }
                 `}
                 title="Export slides"
               >
-                {(isExportingPDF || isExportingPPTX) ? (
+                {(isExportingPDF || isExportingPPTX || isExportingGoogleSlides) ? (
                   <>
                     <div className="animate-spin rounded-full h-4 w-4 border-2 border-white border-t-transparent"></div>
                     <span>Exporting...</span>
@@ -599,8 +675,8 @@ export const SlidePanel: React.FC<SlidePanelProps> = ({ slideDeck, rawHtml, onSl
                 )}
               </button>
               
-              {showExportMenu && !isExportingPDF && !isExportingPPTX && (
-                <div className="absolute right-0 mt-2 w-48 bg-white rounded-lg shadow-lg border border-blue-200 py-1 z-50">
+              {showExportMenu && !isExportingPDF && !isExportingPPTX && !isExportingGoogleSlides && (
+                <div className="absolute right-0 mt-2 w-56 bg-white rounded-lg shadow-lg border border-blue-200 py-1 z-50">
                   <button
                     onClick={handleExportPDF}
                     className="w-full text-left px-4 py-2 hover:bg-blue-50 flex items-center space-x-2 text-gray-700 hover:text-blue-700 transition-colors"
@@ -614,6 +690,15 @@ export const SlidePanel: React.FC<SlidePanelProps> = ({ slideDeck, rawHtml, onSl
                   >
                     <FiFile size={18} className="text-blue-600" />
                     <span>Export as PowerPoint</span>
+                  </button>
+                  <button
+                    onClick={handleExportGoogleSlides}
+                    className="w-full text-left px-4 py-2 hover:bg-blue-50 flex items-center space-x-2 text-gray-700 hover:text-blue-700 transition-colors"
+                  >
+                    <svg width="18" height="18" viewBox="0 0 24 24" className="text-blue-600 flex-shrink-0" fill="currentColor">
+                      <path d="M7 2v2H3v16h18V4h-4V2H7zm0 2h10v2H7V4zM5 8h14v10H5V8zm2 2v2h4v-2H7zm6 0v2h4v-2h-4zm-6 4v2h4v-2H7zm6 0v2h4v-2h-4z"/>
+                    </svg>
+                    <span>Export to Google Slides</span>
                   </button>
                   <button
                     onClick={handleSaveAsHTML}

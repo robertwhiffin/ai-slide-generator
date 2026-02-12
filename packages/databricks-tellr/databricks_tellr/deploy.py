@@ -80,6 +80,7 @@ def create(
     client: WorkspaceClient | None = None,
     profile: str | None = None,
     config_yaml_path: str | None = None,
+    encryption_key: str | None = None,
 ) -> dict[str, Any]:
     """Deploy Tellr to Databricks Apps.
 
@@ -108,6 +109,7 @@ def create(
         client: External WorkspaceClient (optional)
         profile: Databricks CLI profile name (optional)
         config_yaml_path: Path to deployment config YAML (mutually exclusive with other args)
+        encryption_key: Fernet key for Google OAuth encryption. Auto-generated if not provided.
 
     Returns:
         Dictionary with deployment info:
@@ -134,6 +136,7 @@ def create(
         profile=profile,
         config_yaml_path=config_yaml_path,
         seed_databricks_defaults=False,
+        encryption_key=encryption_key,
     )
 
 
@@ -146,6 +149,7 @@ def update(
     reset_database: bool = False,
     client: WorkspaceClient | None = None,
     profile: str | None = None,
+    encryption_key: str | None = None,
 ) -> dict[str, Any]:
     """Deploy a new version of an existing Tellr app.
 
@@ -160,6 +164,8 @@ def update(
         reset_database: If True, drop and recreate the schema (tables recreated on app startup)
         client: External WorkspaceClient (optional)
         profile: Databricks CLI profile name (optional)
+        encryption_key: Fernet key for Google OAuth encryption. If not provided, the
+            existing key is read from the deployed app.yaml to preserve encrypted data.
 
     Returns:
         Dictionary with deployment info
@@ -177,6 +183,7 @@ def update(
         client=client,
         profile=profile,
         seed_databricks_defaults=False,
+        encryption_key=encryption_key,
     )
 
 
@@ -198,6 +205,7 @@ def _create_databricks(
     profile: str | None = None,
     config_yaml_path: str | None = None,
     seed_databricks_defaults: bool = True,
+    encryption_key: str | None = None,
 ) -> dict[str, Any]:
     """Deploy Tellr to Databricks Apps with configurable seeding.
     
@@ -216,6 +224,7 @@ def _create_databricks(
         profile: Databricks CLI profile name (optional)
         config_yaml_path: Path to deployment config YAML (mutually exclusive with other args)
         seed_databricks_defaults: If True, seed Databricks-specific content on startup
+        encryption_key: Fernet key for Google OAuth encryption. Auto-generated if not provided.
 
     Returns:
         Dictionary with deployment info
@@ -269,8 +278,9 @@ def _create_databricks(
                 lakebase_name,
                 schema_name,
                 seed_databricks_defaults=seed_databricks_defaults,
+                encryption_key=encryption_key,
             )
-            print("   Generated app.yaml")
+            print("   Generated app.yaml (with encryption key)")
 
             print(f"Uploading to: {app_file_workspace_path}")
             _upload_files(ws, staging, app_file_workspace_path)
@@ -328,6 +338,7 @@ def _update_databricks(
     client: WorkspaceClient | None = None,
     profile: str | None = None,
     seed_databricks_defaults: bool = True,
+    encryption_key: str | None = None,
 ) -> dict[str, Any]:
     """Deploy a new version of an existing Tellr app with configurable seeding.
     
@@ -343,6 +354,8 @@ def _update_databricks(
         client: External WorkspaceClient (optional)
         profile: Databricks CLI profile name (optional)
         seed_databricks_defaults: If True, seed Databricks-specific content on startup
+        encryption_key: Fernet key for Google OAuth encryption. If not provided, reads
+            the existing key from the deployed app.yaml to preserve encrypted data.
 
     Returns:
         Dictionary with deployment info
@@ -353,6 +366,10 @@ def _update_databricks(
     print(f"Updating Tellr app: {app_name}")
 
     ws = _get_workspace_client(client, profile)
+
+    # Preserve the existing encryption key so we don't invalidate encrypted data
+    if not encryption_key:
+        encryption_key = _read_existing_encryption_key(ws, app_file_workspace_path)
 
     try:
         # Reset database if requested
@@ -371,6 +388,7 @@ def _update_databricks(
                 lakebase_name,
                 schema_name,
                 seed_databricks_defaults=seed_databricks_defaults,
+                encryption_key=encryption_key,
             )
             _upload_files(ws, staging, app_file_workspace_path)
             print("   Files updated")
@@ -456,6 +474,35 @@ def delete(
 # -----------------------------------------------------------------------------
 # Internal functions
 # -----------------------------------------------------------------------------
+
+
+def _read_existing_encryption_key(
+    ws: WorkspaceClient, workspace_path: str
+) -> str | None:
+    """Read the GOOGLE_OAUTH_ENCRYPTION_KEY from an existing deployed app.yaml.
+
+    This preserves the encryption key across updates so that previously encrypted
+    credentials and tokens remain decryptable.
+
+    Returns:
+        The encryption key string, or None if not found.
+    """
+    try:
+        resp = ws.workspace.download(f"{workspace_path}/app.yaml")
+        raw = resp.read() if hasattr(resp, "read") else resp
+        content = raw.decode("utf-8") if isinstance(raw, bytes) else str(raw)
+
+        existing = yaml.safe_load(content)
+        for env_entry in existing.get("env", []):
+            if env_entry.get("name") == "GOOGLE_OAUTH_ENCRYPTION_KEY":
+                key = env_entry.get("value")
+                if key:
+                    print("   Preserved existing encryption key from deployed app.yaml")
+                    return key
+    except Exception as e:
+        logger.warning("Could not read existing encryption key from app.yaml: %s", e)
+
+    return None
 
 
 def _load_deployment_config(config_yaml_path: str) -> dict[str, str]:
@@ -575,6 +622,7 @@ def _write_app_yaml(
     lakebase_name: str,
     schema_name: str,
     seed_databricks_defaults: bool = False,
+    encryption_key: str | None = None,
 ) -> None:
     """Generate app.yaml with environment variables.
     
@@ -583,18 +631,27 @@ def _write_app_yaml(
         lakebase_name: Lakebase instance name
         schema_name: Schema name
         seed_databricks_defaults: If True, include Databricks-specific content seeding
+        encryption_key: Fernet encryption key for Google OAuth credentials/tokens.
+            Auto-generated if not provided.
     """
     # Build init_database call - only show seed_databricks_defaults when True
     if seed_databricks_defaults:
         init_call = "init_database(seed_databricks_defaults=True)"
     else:
         init_call = "init_database()"
+
+    if not encryption_key:
+        from cryptography.fernet import Fernet
+
+        encryption_key = Fernet.generate_key().decode()
+        logger.info("Auto-generated GOOGLE_OAUTH_ENCRYPTION_KEY for deployment")
     
     template_content = _load_template("app.yaml.template")
     content = Template(template_content).substitute(
         LAKEBASE_INSTANCE=lakebase_name,
         LAKEBASE_SCHEMA=schema_name,
         INIT_DATABASE_CALL=init_call,
+        GOOGLE_OAUTH_ENCRYPTION_KEY=encryption_key,
     )
     (staging_dir / "app.yaml").write_text(content)
 

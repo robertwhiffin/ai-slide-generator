@@ -230,6 +230,45 @@ Get details about a specific Genie space.
 
 Validate Genie space configuration.
 
+## Google Credentials
+
+Manage Google OAuth client credentials for Google Slides export. Credentials are stored encrypted per profile.
+
+### Upload Google Credentials
+
+**POST** `/api/settings/profiles/{profile_id}/google-credentials`
+
+Upload a `credentials.json` file obtained from Google Cloud Console. The file is validated, encrypted, and stored with the profile.
+
+**Request:** `multipart/form-data` with `file` field containing `credentials.json`.
+
+**Response:**
+```json
+{
+  "success": true,
+  "message": "Google credentials uploaded successfully"
+}
+```
+
+### Get Google Credentials Status
+
+**GET** `/api/settings/profiles/{profile_id}/google-credentials/status`
+
+Check whether credentials are configured for the profile.
+
+**Response:**
+```json
+{
+  "has_credentials": true
+}
+```
+
+### Delete Google Credentials
+
+**DELETE** `/api/settings/profiles/{profile_id}/google-credentials`
+
+Remove stored credentials from the profile. Returns 204 on success.
+
 ## Common Response Patterns
 
 Most settings endpoints return detailed configuration objects. Error responses follow standard HTTP status codes:

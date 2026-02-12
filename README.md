@@ -136,6 +136,7 @@ Step-by-step instructions with screenshots:
 | [Slide Parser](docs/technical/slide-parser-and-script-management.md) | HTML parsing, CSS merging |
 | [Slide Editing](docs/technical/slide-editing-robustness-fixes.md) | Deck preservation, validation |
 | [Save Points](docs/technical/save-points-versioning.md) | Version snapshots, preview/restore |
+| [Google Slides](docs/technical/google-slides-integration.md) | OAuth2 flow, encrypted credentials, LLM export |
 
 ---
 

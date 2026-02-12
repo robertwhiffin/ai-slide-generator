@@ -26,6 +26,10 @@ env:
     value: "INFO"
   - name: MLFLOW_TRACKING_URI
     value: "databricks"
+  # Required for Google Slides OAuth credential/token encryption.
+  # Generate with: python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+  # - name: GOOGLE_OAUTH_ENCRYPTION_KEY
+  #   value: "<your-fernet-key>"
   # Lakebase schema configuration
   # PGHOST and PGUSER are auto-set when database resource is attached
   - name: LAKEBASE_SCHEMA
