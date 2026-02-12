@@ -596,8 +596,7 @@ test.describe('Profile Switching', () => {
       const row = page.locator('tr', { hasText: profileName });
       await row.getByRole('button', { name: 'Load' }).click();
 
-      // loading a profile takes you to the generator page - go back
-      await goToProfiles(page);
+
 
       // Confirm if dialog appears
       const confirmButton = page.getByRole('button', { name: /Confirm|Load/i }).last();
@@ -606,6 +605,8 @@ test.describe('Profile Switching', () => {
       }
 
       // Wait for load
+      // loading a profile takes you to the generator page - go back
+      await goToProfiles(page);
       await page.waitForTimeout(1000);
 
       // Row should now show Loaded badge
@@ -810,9 +811,9 @@ test.describe('Session-Profile Association', () => {
     // Go to History and restore session2
     await goToHistory(page);
 
-// Click on session2 to restore it - use session_id for unique matching
-const sessionRow = page.locator('tr').filter({ has: page.getByText(session2.session_id) }).first();
-await sessionRow.getByRole('button', { name: 'Restore' }).click();
+    // Click on session2 to restore it - use session_id for unique matching
+    const sessionRow = page.locator('tr').filter({ has: page.getByText(session2.session_id) }).first();
+    await sessionRow.getByRole('button', { name: 'Restore' }).click();
 
     // Wait for potential profile switch
     await page.waitForTimeout(1000);
