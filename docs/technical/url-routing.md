@@ -84,9 +84,9 @@ onClick={() => setViewMode('profiles')}
 onClick={() => navigate('/profiles')}
 ```
 
-Active state detection still uses `viewMode` (set from `initialView` prop), which stays synchronized with the URL through the route definitions.
+Active state detection uses `initialView` (passed as a prop from the route definition), which stays synchronized with the URL through the route configuration.
 
-The `isGenerating` guard is preserved — all navigation buttons except "Generator" are disabled during slide generation.
+The `isGenerating` guard is preserved — all navigation buttons except "New Session" are disabled during slide generation.
 
 ---
 
@@ -94,61 +94,71 @@ The `isGenerating` guard is preserved — all navigation buttons except "Generat
 
 ### Session Loading from URL
 
-When `AppLayout` mounts on a session route (`/sessions/:id/edit` or `/sessions/:id/view`), it extracts the session ID from the URL and loads the session:
+When `AppLayout` mounts on a session route (`/sessions/:id/edit` or `/sessions/:id/view`), it extracts the session ID from the URL and loads the session. The effect uses a `cancelled` flag to prevent stale navigations when the user clicks away before loading completes:
 
 ```tsx
 const { sessionId: urlSessionId } = useParams<{ sessionId?: string }>();
 
 useEffect(() => {
   if (!urlSessionId || initialView !== 'main') return;
-  if (urlSessionId === sessionId) return;  // Skip for newly created sessions
+  if (urlSessionId === sessionId) return;  // Already in context, skip
+
+  let cancelled = false;
 
   const loadSession = async () => {
+    setIsLoadingSession(true);
     try {
       const sessionInfo = await api.getSession(urlSessionId);
-      // Auto-switch profile if session belongs to a different one
-      if (sessionInfo.profile_id !== currentProfile?.id) {
+      if (cancelled) return;
+
+      if (sessionInfo.profile_id && currentProfile && sessionInfo.profile_id !== currentProfile.id) {
         await loadProfile(sessionInfo.profile_id);
       }
+      if (cancelled) return;
+
       const { slideDeck, rawHtml } = await switchSession(urlSessionId);
+      if (cancelled) return;
+
       setSlideDeck(slideDeck);
       setRawHtml(rawHtml);
       setChatKey(prev => prev + 1);
     } catch {
+      if (cancelled) return;
       navigate('/help');
       showToast('Session not found', 'error');
+    } finally {
+      if (!cancelled) setIsLoadingSession(false);
     }
   };
+
   loadSession();
+  return () => { cancelled = true; };
 }, [urlSessionId]);
 ```
 
-**Important invariant:** The `urlSessionId === sessionId` check prevents a redirect loop when creating new sessions. `createNewSession()` generates a local UUID and navigates to `/sessions/{newId}/edit`, but the session doesn't exist in the database yet (only persisted on first chat message). Without this guard, the session-loading effect would fire, get a 404, and redirect to `/help`.
+**Important invariant:** The `urlSessionId === sessionId` check prevents redundant loading when creating new sessions. The "New Session" button generates a local UUID, persists it to the database via `api.createSession()`, then navigates to `/sessions/{newId}/edit`. Since the session ID is already in context, the loading effect skips validation.
 
-### Last Working Session
+### Session Creation and Cleanup
 
-`SessionContext` tracks `lastWorkingSessionId` in localStorage. This enables:
+Every "New Session" action creates a DB-persisted session immediately before navigating. This ensures the session exists when the loading effect runs (no phantom IDs that cause 404s).
 
-- **Generator button**: Returns to the last session instead of creating a new one
-- **History "Back to Generator"**: Same behavior
-- **HelpPage "Back" button**: Same behavior
-
-```typescript
-// SessionContext.tsx
-const [lastWorkingSessionId, setLastWorkingSessionIdState] = useState<string | null>(
-  () => localStorage.getItem('lastWorkingSessionId')
-);
-```
-
-Updated whenever a session edit route loads:
+Empty sessions (no slides generated) are cleaned up automatically when the next session is created:
 
 ```tsx
-useEffect(() => {
-  if (urlSessionId && initialView === 'main' && !viewOnly) {
-    setLastWorkingSessionId(urlSessionId);
+const handleNewSession = useCallback(async () => {
+  const previousSessionId = sessionId;
+  const previousDeck = slideDeck;
+  const newId = createNewSession();
+  await api.createSession({ sessionId: newId });
+  navigate(`/sessions/${newId}/edit`);
+  // Cleanup: delete previous session if it had no content (fire-and-forget)
+  if (previousSessionId && !previousDeck) {
+    api.deleteSession(previousSessionId).catch(() => {});
   }
-}, [urlSessionId, initialView, viewOnly]);
+}, [createNewSession, navigate, sessionId, slideDeck]);
 ```
+
+Users resume previous sessions from History — there is no "return to last session" concept.
 
 ### Read-Only View Mode
 
@@ -191,13 +201,14 @@ Toasts auto-dismiss after 5 seconds. Rendered at `fixed bottom-4 right-4` with `
 
 ### New Session
 
-1. User clicks "Generator" nav button (no `lastWorkingSessionId`)
-2. `createNewSession()` generates local UUID (sync, no API call)
-3. `navigate(`/sessions/${newId}/edit`)` updates URL
-4. `AppLayout` mounts with `initialView="main"`, `urlSessionId` = new ID
-5. `urlSessionId === sessionId` → skip loading (session not in DB yet)
-6. User sees empty chat + empty slide panel
-7. First chat message persists session to database
+1. User clicks "New Session" nav button
+2. `createNewSession()` generates local UUID (sync)
+3. `api.createSession({ sessionId: newId })` persists to database
+4. `navigate(`/sessions/${newId}/edit`)` updates URL
+5. `AppLayout` mounts with `initialView="main"`, `urlSessionId` = new ID
+6. `urlSessionId === sessionId` → skip loading (already in context)
+7. User sees empty chat + empty slide panel
+8. Previous empty session (if any) is deleted in the background
 
 ### Resuming a Session
 
@@ -207,7 +218,6 @@ Toasts auto-dismiss after 5 seconds. Rendered at `fixed bottom-4 right-4` with `
 4. Profile auto-switch if needed → `loadProfile(profileId)`
 5. `switchSession(abc123)` loads slides + raw HTML
 6. State updates → chat panel remounts with session messages
-7. `lastWorkingSessionId` updated in localStorage
 
 ### Sharing
 
@@ -226,11 +236,11 @@ Toasts auto-dismiss after 5 seconds. Rendered at `fixed bottom-4 right-4` with `
 | `src/main.tsx` | Wraps app in `<BrowserRouter>` |
 | `src/App.tsx` | Defines all `<Route>` elements with `AppLayout` + props |
 | `src/components/Layout/AppLayout.tsx` | Reads `useParams()`, loads sessions from URL, handles `viewOnly` mode, uses `useNavigate()` for all navigation |
-| `src/contexts/SessionContext.tsx` | Provides `lastWorkingSessionId` (localStorage), `createNewSession()` returns ID string |
+| `src/contexts/SessionContext.tsx` | Provides `createNewSession()` (returns local UUID string), `switchSession()` for restoring existing sessions |
 | `src/contexts/ToastContext.tsx` | New context for toast notifications (`showToast(message, type)`) |
 | `src/components/ChatPanel/ChatInput.tsx` | Added `data-testid="chat-input"` for test targeting |
 | `src/components/ImageLibrary/ImageLibrary.tsx` | Added `data-testid="image-library"` for test targeting |
-| `src/components/History/SessionHistory.tsx` | `onSessionSelect` callback now navigates to `/sessions/{id}/edit` |
+| `src/components/History/SessionHistory.tsx` | `onSessionSelect` callback navigates to `/sessions/{id}/edit` (no "Back" button — users navigate via nav bar) |
 
 ---
 
@@ -242,7 +252,7 @@ Toasts auto-dismiss after 5 seconds. Rendered at `fixed bottom-4 right-4` with `
 |-----------|-------|----------|
 | `tests/routing.spec.ts` | 9 | URL → correct page content for all routes |
 | `tests/session-loading.spec.ts` | 4 | Session load from URL, 404 redirect, profile auto-switch, slide count |
-| `tests/navigation.spec.ts` | 5 | Nav buttons update URL, back button, Generator nav, History restore |
+| `tests/navigation.spec.ts` | 4 | Nav buttons update URL, New Session nav, History restore |
 | `tests/viewer-readonly.spec.ts` | 4 | Disabled chat, read-only slides, hidden buttons, export available |
 | `tests/share-link.spec.ts` | 4 | Share button copies view URL, toast confirmation, link opens view mode |
 
@@ -264,7 +274,7 @@ Tests use the custom `{ test, expect }` from `./fixtures/base-test` for console 
 | Invalid session ID in URL | Redirect to `/help` + error toast |
 | Session belongs to different profile | Auto-switch profile before loading |
 | Network error during session load | Redirect to `/help` + error toast |
-| No `lastWorkingSessionId` in localStorage | Generator button creates new session |
+| User navigates away during load | Cancellation flag prevents stale redirects |
 
 ### Browser Behavior
 
