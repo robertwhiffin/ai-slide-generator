@@ -2,6 +2,7 @@
 
 from src.database.models.ai_infra import ConfigAIInfra
 from src.database.models.genie_space import ConfigGenieSpace
+from src.database.models.google_oauth_token import GoogleOAuthToken
 from src.database.models.history import ConfigHistory
 from src.database.models.profile import ConfigProfile
 from src.database.models.prompts import ConfigPrompts
@@ -21,6 +22,7 @@ __all__ = [
     "ConfigAIInfra",
     "ExportJob",
     "ConfigGenieSpace",
+    "GoogleOAuthToken",
     "ConfigHistory",
     "ConfigProfile",
     "ConfigPrompts",

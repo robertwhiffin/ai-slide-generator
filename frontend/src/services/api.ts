@@ -885,6 +885,92 @@ export const api = {
   },
 
   // =========================================================================
+  // Google Slides Export API
+  // =========================================================================
+
+  /**
+   * Check if the current user has a valid Google OAuth token for a profile.
+   */
+  async checkGoogleSlidesAuth(profileId: number): Promise<{ authorized: boolean }> {
+    const response = await fetch(
+      `${API_BASE_URL}/api/export/google-slides/auth/status?profile_id=${profileId}`
+    );
+    if (!response.ok) {
+      return { authorized: false };
+    }
+    return response.json();
+  },
+
+  /**
+   * Get the Google OAuth consent URL for a profile.
+   */
+  async getGoogleSlidesAuthUrl(profileId: number): Promise<{ url: string }> {
+    const response = await fetch(
+      `${API_BASE_URL}/api/export/google-slides/auth/url?profile_id=${profileId}`
+    );
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({}));
+      throw new ApiError(response.status, error.detail || 'Failed to get auth URL');
+    }
+    return response.json();
+  },
+
+  /**
+   * Export slides to Google Slides.
+   *
+   * Full flow: check auth -> capture charts -> call backend -> return URL.
+   */
+  async exportToGoogleSlides(
+    sessionId: string,
+    profileId: number,
+    slideDeck?: import('../types/slide').SlideDeck,
+    onProgress?: (progress: number, total: number, status: string) => void,
+  ): Promise<{ presentation_id: string; presentation_url: string }> {
+    const totalSlides = slideDeck?.slides.length || 0;
+
+    // Step 1: Capture chart images client-side
+    let chartImages: Array<Array<{ canvas_id: string; base64_data: string }>> | undefined;
+
+    if (slideDeck) {
+      try {
+        onProgress?.(0, totalSlides, 'Capturing charts...');
+        const { captureSlideDeckCharts } = await import('./pptx_client');
+        const chartImagesPerSlide = await captureSlideDeckCharts(slideDeck);
+
+        chartImages = chartImagesPerSlide.map((slideCharts) =>
+          Object.entries(slideCharts).map(([canvasId, base64Data]) => ({
+            canvas_id: canvasId,
+            base64_data: base64Data,
+          }))
+        );
+      } catch (error) {
+        console.error('[GSLIDES_EXPORT] Chart capture failed:', error);
+      }
+    }
+
+    // Step 2: Call backend export endpoint
+    onProgress?.(0, totalSlides, 'Creating Google Slides presentation...');
+
+    const response = await fetch(`${API_BASE_URL}/api/export/google-slides`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        session_id: sessionId,
+        profile_id: profileId,
+        chart_images: chartImages,
+      }),
+    });
+
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({}));
+      throw new ApiError(response.status, error.detail || 'Google Slides export failed');
+    }
+
+    onProgress?.(totalSlides, totalSlides, 'Done!');
+    return response.json();
+  },
+
+  // =========================================================================
   // Version / Save Point API
   // =========================================================================
 

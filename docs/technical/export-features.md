@@ -1,12 +1,13 @@
-# Export Features - PDF and PPTX
+# Export Features - PDF, PPTX, and Google Slides
 
 ## Overview
 
-The AI Slide Generator supports exporting slide decks in two formats:
+The AI Slide Generator supports exporting slide decks in three formats:
 - **PDF**: Client-side generation using browser APIs
 - **PPTX**: Server-side async generation using LLM-powered conversion with polling
+- **Google Slides**: Server-side export to a new Google Slides presentation via OAuth2
 
-Both export options are accessible through a unified dropdown menu in the slide panel.
+All export options are accessible through a unified dropdown menu in the slide panel.
 
 ## User Guide
 
@@ -174,6 +175,51 @@ Both export options are accessible through a unified dropdown menu in the slide 
 - Generates and executes Python code for slide creation
 - Ensures proper positioning and no overlaps
 
+### Google Slides Export (Server-Side)
+
+**Location:**
+- `src/api/routes/google_slides.py` — API endpoints (auth + export)
+- `src/api/routes/settings/google_credentials.py` — Credential management endpoints
+- `src/services/google_slides_auth.py` — OAuth2 flow and token management
+- `src/services/html_to_google_slides.py` — LLM-powered converter
+
+**Technology Stack:**
+- Google Slides API + Google Drive API: Creates and populates presentations
+- `google-auth-oauthlib`: OAuth2 authorization flow
+- Fernet encryption (`cryptography`): Encrypts credentials and tokens at rest
+- LLM (Databricks Claude Sonnet 4.5): Generates Python code that calls the Slides API
+
+**Process:**
+1. Admin uploads `credentials.json` for the profile (one-time setup per profile)
+2. User authorizes via Google OAuth popup (one-time per user per profile)
+3. User clicks "Export to Google Slides"
+4. Backend builds authenticated API clients from encrypted DB records
+5. Creates a blank presentation via Slides API
+6. For each slide, LLM generates Python code to populate the slide via `batchUpdate`
+7. Code is sanitized and executed server-side
+8. Returns the presentation URL to the frontend
+
+**Features:**
+- Produces editable Google Slides (not static images)
+- Per-profile credential storage (encrypted)
+- Per-user OAuth tokens (multi-user safe)
+- LLM-powered layout with retry and fallback
+- Chart images uploaded to Google Drive and embedded
+- Stale token/credential auto-cleanup
+
+**Configuration:**
+- Google Cloud project with Slides API + Drive API enabled
+- OAuth 2.0 Desktop Client credentials (`credentials.json`)
+- `GOOGLE_OAUTH_ENCRYPTION_KEY` env var for production encryption key
+
+**Limitations:**
+- Requires Google Cloud project setup
+- Requires user interaction for initial OAuth consent
+- Processing time: 5–15 seconds per slide (similar to PPTX)
+- Requires LLM API access (Databricks endpoint)
+
+For full technical details, see [Google Slides Integration](./google-slides-integration.md).
+
 ## Positioning Constraints
 
 The PPTX converter uses strict positioning constraints to prevent overlapping elements:
@@ -280,10 +326,13 @@ Potential improvements for export features:
 - [ ] Compression options for PDF
 - [ ] Export quality presets (high/medium/low)
 - [x] Persistent job storage (survive server restarts) - **Implemented** (DB-backed ExportJob model)
+- [x] Google Slides export - **Implemented** (OAuth2, encrypted credential storage, LLM code-gen)
+- [ ] Google Slides async export with progress polling
 
 ## Related Documentation
 
 - [Backend Overview](../technical/backend-overview.md) - Backend architecture
 - [Frontend Overview](../technical/frontend-overview.md) - Frontend architecture
 - [Slide Parser & Script Management](../technical/slide-parser-and-script-management.md) - How slides are structured
+- [Google Slides Integration](../technical/google-slides-integration.md) - OAuth2 flow, encryption, LLM converter
 
