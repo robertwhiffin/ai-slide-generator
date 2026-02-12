@@ -29,6 +29,7 @@ Complete implementation of session-level access control for tellr.
   - Extracts user identity from `x-forwarded-user` header
   - Falls back to Databricks API query
   - Sets user context for request lifecycle
+  - In `development` and `test` environments (no token), sets a default `dev@local.dev` user to prevent blocking Databricks API calls
 
 ### ✅ Updated Session Manager
 - **Enhanced**: `src/api/services/session_manager.py`

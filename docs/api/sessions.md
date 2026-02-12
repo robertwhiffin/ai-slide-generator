@@ -12,15 +12,19 @@ Create a new conversation session.
 
 ```json
 {
-  "title": "Q3 Revenue Analysis"
+  "title": "Q3 Revenue Analysis",
+  "profile_id": 1,
+  "profile_name": "Production"
 }
 ```
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `title` | string | No | Session title |
+| `profile_id` | integer | No | Profile ID to associate this session with |
+| `profile_name` | string | No | Profile name (cached for display in session history) |
 
-`created_by` is automatically set to the authenticated user. `visibility` defaults to `'private'`.
+`created_by` is automatically set to the authenticated user. `visibility` defaults to `'private'`. When `profile_id` is provided, the session is associated with that profile and appears in profile-filtered history views.
 
 ### Response
 

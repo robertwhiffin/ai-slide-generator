@@ -24,11 +24,11 @@ Navigate to the application URL. You'll see the main navigation and the Help pag
 
 ![Open the app](images/01-generating-slides/01-app-landing.png)
 
-### Step 02: Navigate to Generator
+### Step 02: Navigate to New Session
 
-Click "Generator" in the navigation bar to access the slide generation interface.
+Click **New Session** in the navigation bar to access the slide generation interface.
 
-![Navigate to Generator](images/01-generating-slides/02-generator-view.png)
+![Navigate to New Session](images/01-generating-slides/02-generator-view.png)
 
 ### Step 03: Check Your Profile
 

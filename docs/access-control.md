@@ -55,7 +55,9 @@ Content-Type: application/json
 
 {
   "title": "Q3 Revenue Analysis",
-  "visibility": "private"  # optional: private (default), shared, workspace
+  "visibility": "private",   # optional: private (default), shared, workspace
+  "profile_id": 1,           # optional: associate with a profile
+  "profile_name": "Production"  # optional: cached for display
 }
 ```
 

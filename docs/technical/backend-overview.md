@@ -43,7 +43,7 @@ Frontend fetch -> FastAPI router ->   │ ChatService (singleton)│
 
 | Method | Path | Purpose | Backend handler |
 | --- | --- | --- | --- |
-| `POST` | `/api/sessions` | Create new session | `routes/sessions.create_session` |
+| `POST` | `/api/sessions` | Create new session (accepts optional `profile_id`, `profile_name`) | `routes/sessions.create_session` |
 | `GET` | `/api/sessions` | List current user's sessions (ownership + profile filtering) | `routes/sessions.list_sessions` |
 | `GET` | `/api/sessions/invocations` | List MLflow runs for current user (alternative history source) | `routes/sessions.list_invocations` |
 | `GET` | `/api/sessions/{id}` | Get session details | `routes/sessions.get_session` |
@@ -164,10 +164,10 @@ Mutation endpoints return **409 Conflict** if the session is already processing 
 
 | Module | Responsibility | Key Details |
 | --- | --- | --- |
-| `src/api/main.py` | App assembly, auth middleware | Registers routers, CORS, health root. Auth middleware extracts user identity from `x-forwarded-access-token`/`x-forwarded-user` headers (production) or sets `DEV_USER_ID` / `dev@local.dev` (local development). |
+| `src/api/main.py` | App assembly, auth middleware | Registers routers, CORS, health root. Auth middleware extracts user identity from `x-forwarded-access-token`/`x-forwarded-user` headers (production) or sets `DEV_USER_ID` / `dev@local.dev` (development and test environments). In CI/test (`ENVIRONMENT=test`), the dev user fallback prevents blocking Databricks API calls. |
 | `src/api/routes/chat.py` | `/api/chat`, `/api/chat/stream`, `/api/chat/async`, `/api/chat/poll` | Session locking, SSE streaming, polling endpoints. |
 | `src/api/services/job_queue.py` | Async chat processing | In-memory job queue with background worker for polling mode. |
-| `src/api/routes/sessions.py` | Session CRUD + invocations | Create, list (user-scoped via `created_by`, optional `profile_id` filter), get (with messages), rename, delete. Invocations endpoint lists MLflow runs. |
+| `src/api/routes/sessions.py` | Session CRUD + invocations | Create (with optional `profile_id`/`profile_name`), list (user-scoped via `created_by`, optional `profile_id` filter), get (with messages), rename, delete. Invocations endpoint lists MLflow runs. Fallback `get_current_user_from_client()` calls are wrapped in `asyncio.to_thread()` to prevent event-loop blocking. |
 | `src/api/routes/slides.py` | Slide CRUD endpoints | Session-scoped operations with locking. |
 | `src/api/services/chat_service.py` | Stateful orchestration | Deck cache, streaming generator, history hydration. |
 | `src/api/services/session_manager.py` | Session persistence | Database CRUD, message storage, session locking. `list_user_generations()` provides ownership filtering (`created_by = username`) with optional `profile_id` parameter for profile-scoped history. Auto-sets `created_by` and `visibility = 'private'` on new sessions. |

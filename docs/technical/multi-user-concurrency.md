@@ -54,9 +54,10 @@ The auth middleware in `src/api/main.py` establishes user identity on every requ
 - Creates a per-request user client via `create_user_client(token)`
 - Sets `current_user` from `x-forwarded-user` header or by querying the Databricks API
 
-**Local development:**
-- When `ENVIRONMENT=development` and no token header is present, sets `current_user` to `DEV_USER_ID` env var (or `dev@local.dev` fallback)
+**Local development and test:**
+- When `ENVIRONMENT` is `development` or `test` and no token header is present, sets `current_user` to `DEV_USER_ID` env var (or `dev@local.dev` fallback)
 - Ensures sessions are created and listed with a consistent owner identity
+- In CI/test environments, this prevents `get_current_user_from_client()` from attempting Databricks API calls that would block the event loop
 
 **Session listing isolation:**
 - `GET /api/sessions` calls `session_manager.list_user_generations(username=current_user, profile_id=...)`

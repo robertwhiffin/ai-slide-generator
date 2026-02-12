@@ -17,7 +17,7 @@ How the React/Vite frontend is structured, how it communicates with backend APIs
 ```
 ┌──────────────────────────────────────────────────────────────────────┐
 │ Header: title + session metadata + navigation                         │
-│ [Generator] [History] [Profiles] [Deck Prompts] [Slide Styles] [Help] │
+│ [New Session] [My Sessions] [Profiles] [Deck Prompts] [Slide Styles] [Help] │
 ├──────────────┬──────────────┬─────────────────────────────────────────┤
 │ Chat Panel   │ Selection    │ Slide Panel                             │
 │ (32% width)  │ Ribbon       │ (flex-1)                                │
@@ -28,8 +28,8 @@ How the React/Vite frontend is structured, how it communicates with backend APIs
 ### View Modes
 
 The app has six view modes controlled by navigation buttons:
-- **Generator** (`main`): The primary slide generation interface
-- **History**: Session list and restore functionality
+- **New Session** (`main`): The primary slide generation interface
+- **My Sessions**: Session list and restore functionality
 - **Profiles**: Configuration profile management
 - **Deck Prompts**: Presentation template library management
 - **Slide Styles**: Visual style library management (typography, colors, layout)
@@ -263,7 +263,7 @@ interface SlideStyle {
 | `src/components/SlidePanel/ElementTreeView.tsx` | Tree view component with collapsible nodes and inline text editing | None |
 | `src/components/SlidePanel/VisualEditorPanel.tsx` | Split-pane visual editor with element tree and live preview | None |
 | `src/components/SlidePanel/SelectionRibbon.tsx` + `SlideSelection.tsx` | Thumbnail strip with dual interaction: preview click navigates main panel, checkbox toggles selection for chat context | `onSlideNavigate` callback to `AppLayout`, updates `SelectionContext` |
-| `src/components/History/SessionHistory.tsx` | Lists user's sessions (Postgres-backed), scoped to the current profile via `profile_id`. Auto-refreshes via `historyInvalidationKey` from `GenerationContext` and re-fetches on profile switch. Supports rename and restore. | `api.listSessions`, `api.renameSession`, `api.deleteSession` |
+| `src/components/History/SessionHistory.tsx` | Lists user's sessions under the "My Sessions" view (Postgres-backed), scoped to the current profile via `profile_id`. Auto-refreshes via `historyInvalidationKey` from `GenerationContext` and re-fetches on profile switch. Supports rename and restore. | `api.listSessions`, `api.renameSession`, `api.deleteSession` |
 | `src/hooks/useKeyboardShortcuts.ts` | `Esc` clears selection globally | None |
 | `src/utils/loadingMessages.ts` | Rotating messages during LLM calls | None |
 | `src/components/common/Tooltip.tsx` | Lightweight hover tooltip wrapper using Tailwind; appears instantly on hover | None |
@@ -362,7 +362,7 @@ The optimization prompt explicitly instructs the agent to:
 
 | Method | HTTP | Path | Request | Returns |
 |--------|------|------|---------|---------|
-| `createSession` | POST | `/api/sessions` | `{ title? }` | `Session` |
+| `createSession` | POST | `/api/sessions` | `{ title?, profile_id?, profile_name? }` | `Session` |
 | `listSessions` | GET | `/api/sessions` | query: `limit`, `profile_id` | `{ sessions, count }` (user-scoped, optionally filtered by profile) |
 | `listInvocations` | GET | `/api/sessions/invocations` | query: `limit` | `{ invocations, count }` (MLflow runs for current user) |
 | `getSession` | GET | `/api/sessions/{id}` | – | `Session` |
@@ -417,7 +417,7 @@ Errors bubble up as `ApiError` (status + message). Common statuses:
 ## User Flow Reference
 
 ### Profile Creation
-1. **Open Profiles page** – Click "Profiles" in navigation
+1. **Open Profiles page** – Click **Profiles** in navigation
 2. **Start wizard** – Click "Create Profile" button
 3. **Basic Info** – Enter profile name and optional description
 4. **Genie Space** – Select data source and provide AI description
