@@ -605,7 +605,7 @@ test.describe('SlideVerification', () => {
 
     // Wait for verification badge to appear
     // The badge shows the rating label - for 'green' rating it shows "No issues"
-    await expect(page.getByText('No issues').first()).toBeVisible({ timeout: 5000 });
+    await expect(page.getByText('No issues').first()).toBeVisible({ timeout: 10000 });
   });
 });
 

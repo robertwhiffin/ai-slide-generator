@@ -84,7 +84,9 @@ async def list_sessions(
     current_user = get_current_user()
     if not current_user:
         try:
-            current_user = get_current_user_from_client()
+            # Wrap in to_thread: this calls the Databricks API (network I/O)
+            # and must not block the event loop.
+            current_user = await asyncio.to_thread(get_current_user_from_client)
         except Exception:
             pass
     if not current_user:
@@ -121,7 +123,9 @@ async def list_invocations(
     username = get_current_user()
     if not username:
         try:
-            username = get_current_user_from_client()
+            # Wrap in to_thread: this calls the Databricks API (network I/O)
+            # and must not block the event loop.
+            username = await asyncio.to_thread(get_current_user_from_client)
         except Exception:
             pass
     if not username:

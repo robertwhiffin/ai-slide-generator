@@ -273,8 +273,11 @@ async def user_auth_middleware(request: Request, call_next):
         except Exception as e:
             logger.warning(f"Failed to create user client from token: {e}")
     else:
-        # Local development: no token, so set a dev user so session create/list see same user
-        if os.getenv("ENVIRONMENT") == "development":
+        # No token: set a default user in dev/test so session create/list see the same user.
+        # Without this, list_sessions falls through to get_current_user_from_client()
+        # which calls the Databricks API — blocking the event loop in CI/test environments.
+        env = os.getenv("ENVIRONMENT", "development")
+        if env in ("development", "test"):
             dev_user = os.getenv("DEV_USER_ID") or os.getenv("DEV_USER_EMAIL") or "dev@local.dev"
             set_current_user(dev_user)
     
