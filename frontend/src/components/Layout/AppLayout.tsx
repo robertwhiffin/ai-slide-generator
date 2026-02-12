@@ -119,19 +119,13 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
 
   // Reset chat state and create new session when profile changes
   const handleProfileChange = useCallback(async () => {
-    const previousSessionId = sessionId;
-    const previousDeck = slideDeck;
     setSlideDeck(null);
     setRawHtml(null);
     setChatKey(prev => prev + 1);
     const newId = createNewSession();
     await api.createSession({ sessionId: newId });
     navigate(`/sessions/${newId}/edit`);
-    // Cleanup: delete previous session if it had no content (fire-and-forget)
-    if (previousSessionId && !previousDeck) {
-      api.deleteSession(previousSessionId).catch(() => {});
-    }
-  }, [createNewSession, navigate, sessionId, slideDeck]);
+  }, [createNewSession, navigate]);
 
   // Handle saving session with a custom name
   const handleSaveAs = useCallback(async (title: string) => {
@@ -146,8 +140,6 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
 
   // Start a new session
   const handleNewSession = useCallback(async () => {
-    const previousSessionId = sessionId;
-    const previousDeck = slideDeck;
     setSlideDeck(null);
     setRawHtml(null);
     setChatKey(prev => prev + 1);
@@ -158,11 +150,7 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
     const newId = createNewSession();
     await api.createSession({ sessionId: newId });
     navigate(`/sessions/${newId}/edit`);
-    // Cleanup: delete previous session if it had no content (fire-and-forget)
-    if (previousSessionId && !previousDeck) {
-      api.deleteSession(previousSessionId).catch(() => {});
-    }
-  }, [createNewSession, navigate, sessionId, slideDeck]);
+  }, [createNewSession, navigate]);
 
   // Load versions when session or slideDeck changes
   useEffect(() => {
@@ -390,15 +378,9 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
             <nav className="flex gap-2 border-l border-blue-500 pl-4">
               <button
                 onClick={async () => {
-                  const previousSessionId = sessionId;
-                  const previousDeck = slideDeck;
                   const newId = createNewSession();
                   await api.createSession({ sessionId: newId });
                   navigate(`/sessions/${newId}/edit`);
-                  // Cleanup: delete previous session if it had no content (fire-and-forget)
-                  if (previousSessionId && !previousDeck) {
-                    api.deleteSession(previousSessionId).catch(() => {});
-                  }
                 }}
                 className={`px-3 py-1.5 rounded text-sm transition-colors ${
                   initialView === 'main'
