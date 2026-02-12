@@ -22,7 +22,7 @@ test.describe('Read-only Viewer', () => {
     await expect(page.locator('[data-testid="slide-panel"]')).toBeVisible();
 
     // New and Save As buttons should not be visible
-    await expect(page.locator('button:has-text("New")')).toBeHidden();
+    await expect(page.locator('button:text-is("New")')).toBeHidden();
     await expect(page.locator('button:has-text("Save As")')).toBeHidden();
   });
 

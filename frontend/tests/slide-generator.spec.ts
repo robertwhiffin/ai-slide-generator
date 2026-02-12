@@ -44,7 +44,14 @@ async function setupMocks(page: Page) {
   // Mock sessions endpoints
   await page.route('http://127.0.0.1:8000/api/sessions**', (route, request) => {
     const url = request.url();
-    
+    const method = request.method();
+
+    // Handle session creation/deletion
+    if (method === 'POST' || method === 'DELETE') {
+      route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ session_id: 'mock', title: 'New', user_id: null, created_at: '2026-01-01T00:00:00Z' }) });
+      return;
+    }
+
     if (url.includes('limit=')) {
       // Sessions list
       route.fulfill({
@@ -89,7 +96,7 @@ async function setupMocks(page: Page) {
  */
 async function goToGenerator(page: Page) {
   await page.goto('/');
-  await page.getByRole('navigation').getByRole('button', { name: 'Generator' }).click();
+  await page.getByRole('navigation').getByRole('button', { name: 'New Session' }).click();
   // Wait for the Generator view to load
   await expect(page.getByRole('heading', { name: 'Chat', level: 2 })).toBeVisible();
 }
@@ -107,7 +114,7 @@ test.describe('Slide Generator App - Navigation', () => {
     
     // Check that navigation buttons are visible (scope to navigation element)
     const nav = page.getByRole('navigation');
-    await expect(nav.getByRole('button', { name: 'Generator' })).toBeVisible();
+    await expect(nav.getByRole('button', { name: 'New Session' })).toBeVisible();
     await expect(nav.getByRole('button', { name: 'History' })).toBeVisible();
     await expect(nav.getByRole('button', { name: 'Profiles' })).toBeVisible();
     await expect(nav.getByRole('button', { name: 'Deck Prompts' })).toBeVisible();

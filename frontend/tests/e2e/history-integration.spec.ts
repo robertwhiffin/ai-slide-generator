@@ -165,7 +165,7 @@ async function goToHistory(page: Page): Promise<void> {
 
 async function goToGenerator(page: Page): Promise<void> {
   await page.goto('/');
-  await page.getByRole('navigation').getByRole('button', { name: 'Generator' }).click();
+  await page.getByRole('navigation').getByRole('button', { name: 'New Session' }).click();
   await expect(page.getByRole('heading', { name: 'Chat', level: 2 })).toBeVisible();
 }
 
@@ -496,15 +496,6 @@ test.describe('Session-Profile Association', () => {
 // ============================================
 
 test.describe('Session History Navigation', () => {
-  test('Back to Generator button works', async ({ page }) => {
-    await goToHistory(page);
-
-    await page.getByRole('button', { name: /Back to Generator/i }).click();
-
-    // Should be on Generator page
-    await expect(page.getByRole('heading', { name: 'Chat', level: 2 })).toBeVisible();
-  });
-
   test('can navigate back to History after leaving', async ({ page }) => {
     await goToHistory(page);
 

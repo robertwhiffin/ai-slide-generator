@@ -2,10 +2,6 @@ import React, { createContext, useContext, useState, useCallback } from 'react';
 import { api } from '../services/api';
 import type { SlideDeck } from '../types/slide';
 
-/**
- * Generate a local UUID for ephemeral sessions.
- * Sessions are only persisted to the database on first message.
- */
 function generateLocalSessionId(): string {
   return crypto.randomUUID();
 }
@@ -21,8 +17,6 @@ interface SessionContextType {
   experimentUrl: string | null;
   isInitializing: boolean;
   error: string | null;
-  lastWorkingSessionId: string | null;
-  setLastWorkingSessionId: (id: string | null) => void;
   createNewSession: () => string;
   switchSession: (sessionId: string) => Promise<SessionRestoreResult>;
   renameSession: (title: string) => Promise<void>;
@@ -32,25 +26,11 @@ interface SessionContextType {
 const SessionContext = createContext<SessionContextType | undefined>(undefined);
 
 export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  // Generate local session ID immediately - no API call needed
   const [sessionId, setSessionId] = useState<string | null>(() => generateLocalSessionId());
   const [sessionTitle, setSessionTitle] = useState<string | null>(null);
   const [experimentUrl, setExperimentUrl] = useState<string | null>(null);
   const [isInitializing, setIsInitializing] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [lastWorkingSessionId, setLastWorkingSessionIdState] = useState<string | null>(
-    () => localStorage.getItem('lastWorkingSessionId')
-  );
-
-  const setLastWorkingSessionId = useCallback((id: string | null) => {
-    setLastWorkingSessionIdState(id);
-    if (id) {
-      localStorage.setItem('lastWorkingSessionId', id);
-    } else {
-      localStorage.removeItem('lastWorkingSessionId');
-    }
-  }, []);
-
   // Set the session ID in the API service on initial render
   React.useEffect(() => {
     if (sessionId) {
@@ -59,9 +39,8 @@ export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ child
   }, []);
 
   /**
-   * Create a new ephemeral session (local UUID only, no API call).
-   * The session will be persisted to DB on first message.
-   * Returns the new session ID.
+   * Create a new local session (UUID + context state only).
+   * Callers are responsible for DB persistence via api.createSession().
    */
   const createNewSession = useCallback((): string => {
     const newSessionId = generateLocalSessionId();
@@ -135,8 +114,6 @@ export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ child
         experimentUrl,
         isInitializing,
         error,
-        lastWorkingSessionId,
-        setLastWorkingSessionId,
         createNewSession,
         switchSession,
         renameSession,

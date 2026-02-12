@@ -37,28 +37,13 @@ test.describe('Navigation', () => {
     await expect(page).toHaveURL('/help');
   });
 
-  test('Generator nav creates new session if no last session', async ({ page }) => {
+  test('New Session always creates a fresh session', async ({ page }) => {
     await page.goto('/help');
-    await page.click('button:has-text("Generator")');
+    await page.click('button:has-text("New Session")');
 
     // Should create a new UUID session and navigate there
     await expect(page).toHaveURL(/\/sessions\/[^/]+\/edit/);
     await expect(page.locator('[data-testid="chat-panel"]')).toBeVisible();
-  });
-
-  test('Generator nav returns to last session after navigating away', async ({ page }) => {
-    await mockSessionWithSlides(page);
-    await page.goto(`/sessions/${TEST_SESSION_ID}/edit`);
-    // Wait for session to load
-    await expect(page.locator('header').getByText('Test Session With Slides')).toBeVisible();
-
-    // Navigate away
-    await page.click('button:has-text("Profiles")');
-    await expect(page).toHaveURL('/profiles');
-
-    // Click Generator to return
-    await page.click('button:has-text("Generator")');
-    await expect(page).toHaveURL(`/sessions/${TEST_SESSION_ID}/edit`);
   });
 
   test('History page session click navigates to edit mode', async ({ page }) => {

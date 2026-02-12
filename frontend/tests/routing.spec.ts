@@ -1,5 +1,6 @@
 import { test, expect } from './fixtures/base-test';
 import { setupMocks } from './helpers/setup-mocks';
+import { mockSessionWithSlides } from './helpers/session-helpers';
 
 test.describe('URL Routing', () => {
   test.beforeEach(async ({ page }) => {
@@ -43,12 +44,14 @@ test.describe('URL Routing', () => {
   });
 
   test('session edit URL loads generator', async ({ page }) => {
+    await mockSessionWithSlides(page, 'test-session-id');
     await page.goto('/sessions/test-session-id/edit');
     await expect(page.locator('[data-testid="chat-panel"]')).toBeVisible();
     await expect(page.locator('[data-testid="slide-panel"]')).toBeVisible();
   });
 
   test('session view URL loads read-only viewer', async ({ page }) => {
+    await mockSessionWithSlides(page, 'test-session-id');
     await page.goto('/sessions/test-session-id/view');
     await expect(page.locator('[data-testid="slide-panel"]')).toBeVisible();
   });

@@ -27,7 +27,7 @@ export default defineConfig({
   webServer: {
     command: 'npm run dev',
     url: 'http://localhost:3000',
-    reuseExistingServer: !process.env.CI,
+    reuseExistingServer: true,
     // Give more time for dev server to start in CI
     timeout: process.env.CI ? 120000 : 60000,
     // Explicitly pass API URL to ensure frontend connects to backend

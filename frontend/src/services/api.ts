@@ -128,13 +128,16 @@ export const api = {
   /**
    * Create a new session
    */
-  async createSession(title?: string): Promise<Session> {
+  async createSession(options?: { sessionId?: string; title?: string }): Promise<Session> {
     const response = await fetch(`${API_BASE_URL}/api/sessions`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify({ title }),
+      body: JSON.stringify({
+        session_id: options?.sessionId,
+        title: options?.title,
+      }),
     });
 
     if (!response.ok) {

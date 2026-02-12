@@ -35,14 +35,13 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
   const { showToast } = useToast();
   const [slideDeck, setSlideDeck] = useState<SlideDeck | null>(null);
   const [rawHtml, setRawHtml] = useState<string | null>(null);
-  const [viewMode, setViewMode] = useState<ViewMode>(initialView);
   const [showSaveDialog, setShowSaveDialog] = useState(false);
   // Key to force remount ChatPanel when profile/session changes
   const [chatKey, setChatKey] = useState<number>(0);
   // Track which slide to scroll to in the main panel (uses key to allow re-scroll to same index)
   const [scrollTarget, setScrollTarget] = useState<{ index: number; key: number } | null>(null);
   const chatPanelRef = useRef<ChatPanelHandle>(null);
-  const { sessionId, sessionTitle, experimentUrl, createNewSession, switchSession, renameSession, lastWorkingSessionId, setLastWorkingSessionId } = useSession();
+  const { sessionId, sessionTitle, experimentUrl, createNewSession, switchSession, renameSession } = useSession();
   const { isGenerating } = useGeneration();
   const { currentProfile, loadProfile } = useProfiles();
   const { updateAvailable, latestVersion, updateType, dismissed, dismiss } = useVersionCheck();
@@ -63,45 +62,49 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
   const [isLoadingSession, setIsLoadingSession] = useState(false);
 
   // Load session from URL parameter when on a session route
-  // Skip if URL session ID matches current context (newly created session, not yet in DB)
+  // Skip if URL session ID matches current context (newly created session)
   useEffect(() => {
     if (!urlSessionId || initialView !== 'main') return;
 
-    // Newly created session — not in DB yet, no validation needed
+    // Newly created session — already in context, skip validation
     if (urlSessionId === sessionId) {
-      if (!viewOnly) setLastWorkingSessionId(urlSessionId);
       return;
     }
+
+    let cancelled = false;
 
     const loadSession = async () => {
       setIsLoadingSession(true);
       try {
         // Get session info to check profile
         const sessionInfo = await api.getSession(urlSessionId);
+        if (cancelled) return;
 
         // Auto-switch profile if needed
         if (sessionInfo.profile_id && currentProfile && sessionInfo.profile_id !== currentProfile.id) {
           await loadProfile(sessionInfo.profile_id);
         }
+        if (cancelled) return;
 
         // Load session data
         const { slideDeck: restoredDeck, rawHtml: restoredRawHtml } = await switchSession(urlSessionId);
+        if (cancelled) return;
+
         setSlideDeck(restoredDeck);
         setRawHtml(restoredRawHtml);
         setChatKey(prev => prev + 1);
-
-        // Only persist to localStorage after successful validation
-        if (!viewOnly) setLastWorkingSessionId(urlSessionId);
       } catch {
-        setLastWorkingSessionId(null);
+        if (cancelled) return;
         navigate('/help');
         showToast('Session not found', 'error');
       } finally {
-        setIsLoadingSession(false);
+        if (!cancelled) setIsLoadingSession(false);
       }
     };
 
     loadSession();
+
+    return () => { cancelled = true; };
   }, [urlSessionId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Handle navigation from ribbon to main slide panel
@@ -115,37 +118,20 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
   }, []);
 
   // Reset chat state and create new session when profile changes
-  const handleProfileChange = useCallback(() => {
+  const handleProfileChange = useCallback(async () => {
+    const previousSessionId = sessionId;
+    const previousDeck = slideDeck;
     setSlideDeck(null);
     setRawHtml(null);
     setChatKey(prev => prev + 1);
-    // Create new session for the new profile
-    createNewSession();
-  }, [createNewSession]);
-
-  // Handle restoring a session from history
-  // Auto-switches profile if the session belongs to a different profile
-  const handleSessionRestore = useCallback(async (restoredSessionId: string) => {
-    try {
-      // First, get the session info to check its profile
-      const sessionInfo = await api.getSession(restoredSessionId);
-      
-      // If session has a profile_id and it's different from current, switch profiles first
-      if (sessionInfo.profile_id && currentProfile && sessionInfo.profile_id !== currentProfile.id) {
-        console.log(`Session belongs to profile ${sessionInfo.profile_name}, switching from ${currentProfile.name}`);
-        await loadProfile(sessionInfo.profile_id);
-      }
-      
-      // Now restore the session
-      const { slideDeck: restoredDeck, rawHtml: restoredRawHtml } = await switchSession(restoredSessionId);
-      setSlideDeck(restoredDeck);
-      setRawHtml(restoredRawHtml);
-      setChatKey(prev => prev + 1);
-      setViewMode('main');
-    } catch (err) {
-      console.error('Failed to restore session:', err);
+    const newId = createNewSession();
+    await api.createSession({ sessionId: newId });
+    navigate(`/sessions/${newId}/edit`);
+    // Cleanup: delete previous session if it had no content (fire-and-forget)
+    if (previousSessionId && !previousDeck) {
+      api.deleteSession(previousSessionId).catch(() => {});
     }
-  }, [switchSession, currentProfile, loadProfile]);
+  }, [createNewSession, navigate, sessionId, slideDeck]);
 
   // Handle saving session with a custom name
   const handleSaveAs = useCallback(async (title: string) => {
@@ -159,7 +145,9 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
   }, [renameSession]);
 
   // Start a new session
-  const handleNewSession = useCallback(() => {
+  const handleNewSession = useCallback(async () => {
+    const previousSessionId = sessionId;
+    const previousDeck = slideDeck;
     setSlideDeck(null);
     setRawHtml(null);
     setChatKey(prev => prev + 1);
@@ -168,8 +156,13 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
     setPreviewVersion(null);
     setPreviewDeck(null);
     const newId = createNewSession();
+    await api.createSession({ sessionId: newId });
     navigate(`/sessions/${newId}/edit`);
-  }, [createNewSession, navigate]);
+    // Cleanup: delete previous session if it had no content (fire-and-forget)
+    if (previousSessionId && !previousDeck) {
+      api.deleteSession(previousSessionId).catch(() => {});
+    }
+  }, [createNewSession, navigate, sessionId, slideDeck]);
 
   // Load versions when session or slideDeck changes
   useEffect(() => {
@@ -201,7 +194,7 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
       setPreviewVersion(versionNumber);
       setPreviewDeck(deck as SlideDeck);
       setPreviewDescription(description);
-      
+
       // Convert chat history to Message format for preview
       if (chat_history && Array.isArray(chat_history)) {
         const previewMsgs: Message[] = chat_history.map((msg: Record<string, unknown>) => ({
@@ -256,12 +249,12 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
       setPreviewMessages(null);
       setShowRevertModal(false);
       setRevertTargetVersion(null);
-      
+
       // Reload versions to reflect the changes
       const { versions: loadedVersions, current_version } = await api.listVersions(sessionId);
       setVersions(loadedVersions);
       setCurrentVersion(current_version);
-      
+
       // Force ChatPanel to remount and reload messages (which are now restored)
       setChatKey(prev => prev + 1);
     } catch (err) {
@@ -274,21 +267,21 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
   const handleVerificationComplete = useCallback(async (panelEditDescription?: string) => {
     // Use panel edit description if provided, otherwise use pending description from chat
     const description = panelEditDescription || pendingSavePointDescription;
-    
+
     if (!sessionId || !description) return;
 
     try {
       console.log(`[SavePoint] Creating save point after verification: "${description}"`);
       await api.createSavePoint(sessionId, description);
-      
+
       // Clear pending description
       setPendingSavePointDescription(null);
-      
+
       // Reload versions to show the new save point
       const { versions: loadedVersions, current_version } = await api.listVersions(sessionId);
       setVersions(loadedVersions);
       setCurrentVersion(current_version);
-      
+
       console.log(`[SavePoint] Created save point v${current_version}`);
     } catch (err) {
       console.error('Failed to create save point:', err);
@@ -299,7 +292,7 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
 
   // Determine which deck to display
   const displayDeck = previewVersion ? previewDeck : slideDeck;
-  
+
   // Version key for forcing re-render when switching save point versions
   // This prevents React from reusing DOM elements with identical slide_id keys
   const versionKey = previewVersion ? `preview-v${previewVersion}` : `current-v${currentVersion || 'live'}`;
@@ -337,10 +330,10 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
               )}
             </p>
           </div>
-          
+
           <div className="flex items-center gap-4">
             {/* Session Actions (hidden in view-only mode) */}
-            {viewMode === 'main' && !viewOnly && (
+            {initialView === 'main' && !viewOnly && (
               <div className="flex items-center gap-2">
                 {/* Save Points Dropdown */}
                 {versions.length > 0 && (
@@ -396,27 +389,30 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
             {/* Navigation */}
             <nav className="flex gap-2 border-l border-blue-500 pl-4">
               <button
-                onClick={() => {
-                  if (lastWorkingSessionId) {
-                    navigate(`/sessions/${lastWorkingSessionId}/edit`);
-                  } else {
-                    const newId = createNewSession();
-                    navigate(`/sessions/${newId}/edit`);
+                onClick={async () => {
+                  const previousSessionId = sessionId;
+                  const previousDeck = slideDeck;
+                  const newId = createNewSession();
+                  await api.createSession({ sessionId: newId });
+                  navigate(`/sessions/${newId}/edit`);
+                  // Cleanup: delete previous session if it had no content (fire-and-forget)
+                  if (previousSessionId && !previousDeck) {
+                    api.deleteSession(previousSessionId).catch(() => {});
                   }
                 }}
                 className={`px-3 py-1.5 rounded text-sm transition-colors ${
-                  viewMode === 'main'
+                  initialView === 'main'
                     ? 'bg-blue-700 text-white'
                     : 'bg-blue-500 hover:bg-blue-700 text-blue-100'
                 }`}
               >
-                Generator
+                New Session
               </button>
               <button
                 onClick={() => navigate('/history')}
                 disabled={isGenerating}
                 className={`px-3 py-1.5 rounded text-sm transition-colors ${
-                  viewMode === 'history'
+                  initialView === 'history'
                     ? 'bg-blue-700 text-white'
                     : isGenerating
                     ? 'bg-blue-400 text-blue-200 cursor-not-allowed opacity-50'
@@ -430,7 +426,7 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
                 onClick={() => navigate('/profiles')}
                 disabled={isGenerating}
                 className={`px-3 py-1.5 rounded text-sm transition-colors ${
-                  viewMode === 'profiles'
+                  initialView === 'profiles'
                     ? 'bg-blue-700 text-white'
                     : isGenerating
                     ? 'bg-blue-400 text-blue-200 cursor-not-allowed opacity-50'
@@ -444,7 +440,7 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
                 onClick={() => navigate('/deck-prompts')}
                 disabled={isGenerating}
                 className={`px-3 py-1.5 rounded text-sm transition-colors ${
-                  viewMode === 'deck_prompts'
+                  initialView === 'deck_prompts'
                     ? 'bg-blue-700 text-white'
                     : isGenerating
                     ? 'bg-blue-400 text-blue-200 cursor-not-allowed opacity-50'
@@ -458,7 +454,7 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
                 onClick={() => navigate('/slide-styles')}
                 disabled={isGenerating}
                 className={`px-3 py-1.5 rounded text-sm transition-colors ${
-                  viewMode === 'slide_styles'
+                  initialView === 'slide_styles'
                     ? 'bg-blue-700 text-white'
                     : isGenerating
                     ? 'bg-blue-400 text-blue-200 cursor-not-allowed opacity-50'
@@ -472,7 +468,7 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
                 onClick={() => navigate('/images')}
                 disabled={isGenerating}
                 className={`px-3 py-1.5 rounded text-sm transition-colors ${
-                  viewMode === 'images'
+                  initialView === 'images'
                     ? 'bg-blue-700 text-white'
                     : isGenerating
                     ? 'bg-blue-400 text-blue-200 cursor-not-allowed opacity-50'
@@ -486,7 +482,7 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
                 onClick={() => navigate('/help')}
                 disabled={isGenerating}
                 className={`px-3 py-1.5 rounded text-sm transition-colors ${
-                  viewMode === 'help'
+                  initialView === 'help'
                     ? 'bg-blue-700 text-white'
                     : isGenerating
                     ? 'bg-blue-400 text-blue-200 cursor-not-allowed opacity-50'
@@ -533,7 +529,7 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
       )}
 
       {/* Main Content */}
-      {viewMode === 'main' && (
+      {initialView === 'main' && (
         <div className="flex-1 flex overflow-hidden">
           {/* Chat Panel */}
           <div className="w-[32%] min-w-[260px] border-r" data-testid="chat-panel">
@@ -573,25 +569,17 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
         </div>
       )}
 
-      {viewMode === 'history' && (
+      {initialView === 'history' && (
         <div className="flex-1 overflow-auto bg-gray-50">
           <div className="p-6">
             <SessionHistory
               onSessionSelect={(id) => navigate(`/sessions/${id}/edit`)}
-              onBack={() => {
-                if (lastWorkingSessionId) {
-                  navigate(`/sessions/${lastWorkingSessionId}/edit`);
-                } else {
-                  const newId = createNewSession();
-                  navigate(`/sessions/${newId}/edit`);
-                }
-              }}
             />
           </div>
         </div>
       )}
 
-      {viewMode === 'profiles' && (
+      {initialView === 'profiles' && (
         <div className="flex-1 overflow-auto bg-gray-50">
           <div className="max-w-7xl mx-auto p-6">
             <ProfileList onProfileChange={handleProfileChange} />
@@ -599,7 +587,7 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
         </div>
       )}
 
-      {viewMode === 'deck_prompts' && (
+      {initialView === 'deck_prompts' && (
         <div className="flex-1 overflow-auto bg-gray-50">
           <div className="max-w-7xl mx-auto p-6">
             <DeckPromptList />
@@ -607,7 +595,7 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
         </div>
       )}
 
-      {viewMode === 'slide_styles' && (
+      {initialView === 'slide_styles' && (
         <div className="flex-1 overflow-auto bg-gray-50">
           <div className="max-w-7xl mx-auto p-6">
             <SlideStyleList />
@@ -615,7 +603,7 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
         </div>
       )}
 
-      {viewMode === 'images' && (
+      {initialView === 'images' && (
         <div className="flex-1 overflow-auto bg-gray-50">
           <div className="max-w-7xl mx-auto p-6">
             <ImageLibrary />
@@ -623,17 +611,10 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
         </div>
       )}
 
-      {viewMode === 'help' && (
+      {initialView === 'help' && (
         <div className="flex-1 overflow-auto bg-gray-50">
           <div className="p-6">
-            <HelpPage onBack={() => {
-              if (lastWorkingSessionId) {
-                navigate(`/sessions/${lastWorkingSessionId}/edit`);
-              } else {
-                const newId = createNewSession();
-                navigate(`/sessions/${newId}/edit`);
-              }
-            }} />
+            <HelpPage />
           </div>
         </div>
       )}
