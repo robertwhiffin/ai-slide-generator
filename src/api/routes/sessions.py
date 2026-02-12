@@ -55,6 +55,8 @@ async def create_session(request: CreateSessionRequest = None):
             session_manager.create_session,
             user_id=request.user_id,
             title=request.title,
+            profile_id=request.profile_id,
+            profile_name=request.profile_name,
         )
 
         logger.info(

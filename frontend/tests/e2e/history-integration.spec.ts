@@ -138,14 +138,38 @@ async function renameSessionViaAPI(
 }
 
 /**
- * Create a test session via API
+ * Get the default (or first) profile ID so sessions are visible in the
+ * profile-filtered history view.
+ */
+async function getDefaultProfileId(request: APIRequestContext): Promise<number | undefined> {
+  try {
+    const response = await request.get(`${API_BASE}/settings/profiles`);
+    if (response.ok()) {
+      const profiles = await response.json();
+      const defaultProfile = profiles.find((p: { is_default: boolean }) => p.is_default);
+      return defaultProfile?.id ?? profiles[0]?.id;
+    }
+  } catch {
+    // Ignore — session will be created without profile_id
+  }
+  return undefined;
+}
+
+/**
+ * Create a test session via API.
+ * Automatically associates the session with the default profile so it
+ * appears in the profile-filtered history page.
  */
 async function createTestSessionViaAPI(
   request: APIRequestContext,
   title?: string
 ): Promise<{ session_id: string }> {
+  const profileId = await getDefaultProfileId(request);
   const response = await request.post(`${API_BASE}/sessions`, {
-    data: { title: title || `E2E Test Session ${Date.now()}` },
+    data: {
+      title: title || `E2E Test Session ${Date.now()}`,
+      profile_id: profileId,
+    },
   });
   if (!response.ok()) {
     throw new Error(`Failed to create session: ${response.status()}`);
