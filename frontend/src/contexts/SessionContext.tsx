@@ -22,7 +22,7 @@ interface SessionContextType {
   isInitializing: boolean;
   error: string | null;
   lastWorkingSessionId: string | null;
-  setLastWorkingSessionId: (id: string) => void;
+  setLastWorkingSessionId: (id: string | null) => void;
   createNewSession: () => string;
   switchSession: (sessionId: string) => Promise<SessionRestoreResult>;
   renameSession: (title: string) => Promise<void>;
@@ -42,9 +42,13 @@ export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ child
     () => localStorage.getItem('lastWorkingSessionId')
   );
 
-  const setLastWorkingSessionId = useCallback((id: string) => {
+  const setLastWorkingSessionId = useCallback((id: string | null) => {
     setLastWorkingSessionIdState(id);
-    localStorage.setItem('lastWorkingSessionId', id);
+    if (id) {
+      localStorage.setItem('lastWorkingSessionId', id);
+    } else {
+      localStorage.removeItem('lastWorkingSessionId');
+    }
   }, []);
 
   // Set the session ID in the API service on initial render

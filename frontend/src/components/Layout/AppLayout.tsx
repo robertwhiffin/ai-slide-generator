@@ -59,20 +59,22 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
   // Pending save point - created after verification completes
   const [pendingSavePointDescription, setPendingSavePointDescription] = useState<string | null>(null);
 
-  // Track last working session ID when on a session edit route
-  useEffect(() => {
-    if (urlSessionId && initialView === 'main' && !viewOnly) {
-      setLastWorkingSessionId(urlSessionId);
-    }
-  }, [urlSessionId, initialView, viewOnly, setLastWorkingSessionId]);
+  // Loading state while validating session from URL
+  const [isLoadingSession, setIsLoadingSession] = useState(false);
 
   // Load session from URL parameter when on a session route
   // Skip if URL session ID matches current context (newly created session, not yet in DB)
   useEffect(() => {
     if (!urlSessionId || initialView !== 'main') return;
-    if (urlSessionId === sessionId) return;
+
+    // Newly created session — not in DB yet, no validation needed
+    if (urlSessionId === sessionId) {
+      if (!viewOnly) setLastWorkingSessionId(urlSessionId);
+      return;
+    }
 
     const loadSession = async () => {
+      setIsLoadingSession(true);
       try {
         // Get session info to check profile
         const sessionInfo = await api.getSession(urlSessionId);
@@ -87,9 +89,15 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
         setSlideDeck(restoredDeck);
         setRawHtml(restoredRawHtml);
         setChatKey(prev => prev + 1);
+
+        // Only persist to localStorage after successful validation
+        if (!viewOnly) setLastWorkingSessionId(urlSessionId);
       } catch {
+        setLastWorkingSessionId(null);
         navigate('/help');
         showToast('Session not found', 'error');
+      } finally {
+        setIsLoadingSession(false);
       }
     };
 
@@ -541,7 +549,7 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
                   setPendingSavePointDescription(actionDescription);
                 }
               }}
-              disabled={viewOnly || !!previewVersion}
+              disabled={viewOnly || !!previewVersion || isLoadingSession}
               previewMessages={previewMessages}
             />
           </div>
