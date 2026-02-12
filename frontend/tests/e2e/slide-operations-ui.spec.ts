@@ -580,6 +580,22 @@ test.describe('SlideVerification', () => {
   });
 
   test('verification badge appears after verification', async ({ page }) => {
+    // Mock the verification endpoint to return a green rating
+    await page.route(/http:\/\/127.0.0.1:8000\/api\/verification/, async (route) => {
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          score: 0.95,
+          rating: 'green',
+          explanation: 'Slide content verified successfully',
+          issues: [],
+          duration_ms: 150,
+          error: false,
+        }),
+      });
+    });
+
     await goToGenerator(page);
     await generateSlides(page);
 
