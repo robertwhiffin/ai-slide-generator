@@ -128,12 +128,17 @@ jobs:
           POSTGRES_PASSWORD: test
           POSTGRES_DB: test_db
         options: >-
-          --health-cmd pg_isready
+          --health-cmd "pg_isready -U test"
           --health-interval 10s
           --health-timeout 5s
           --health-retries 5
         ports:
           - 5432:5432
+    env:
+      DATABASE_URL: postgresql://test:test@localhost:5432/test_db
+      ENVIRONMENT: test
+      DATABRICKS_HOST: https://test.cloud.databricks.com
+      DATABRICKS_TOKEN: test-token
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -142,11 +147,6 @@ jobs:
           cache: 'pip'
       - run: pip install -e ".[dev]"
       - name: Run API routes tests
-        env:
-          DATABASE_URL: postgresql://test:test@localhost:5432/test_db
-          ENVIRONMENT: test
-          DATABRICKS_HOST: https://test.cloud.databricks.com
-          DATABRICKS_TOKEN: test-token
         run: |
           pytest tests/integration/test_api_routes.py -v --tb=short \
             --junitxml=test-results/api-routes-results.xml -m "not live"
@@ -173,12 +173,17 @@ jobs:
           POSTGRES_PASSWORD: test
           POSTGRES_DB: test_db
         options: >-
-          --health-cmd pg_isready
+          --health-cmd "pg_isready -U test"
           --health-interval 10s
           --health-timeout 5s
           --health-retries 5
         ports:
           - 5432:5432
+    env:
+      DATABASE_URL: postgresql://test:test@localhost:5432/test_db
+      ENVIRONMENT: test
+      DATABRICKS_HOST: https://test.cloud.databricks.com
+      DATABRICKS_TOKEN: test-token
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -187,11 +192,6 @@ jobs:
           cache: 'pip'
       - run: pip install -e ".[dev]"
       - name: Run config API tests
-        env:
-          DATABASE_URL: postgresql://test:test@localhost:5432/test_db
-          ENVIRONMENT: test
-          DATABRICKS_HOST: https://test.cloud.databricks.com
-          DATABRICKS_TOKEN: test-token
         run: |
           pytest tests/integration/test_config_api.py -v --tb=short \
             --log-cli-level=WARNING -s \
@@ -219,12 +219,17 @@ jobs:
           POSTGRES_PASSWORD: test
           POSTGRES_DB: test_db
         options: >-
-          --health-cmd pg_isready
+          --health-cmd "pg_isready -U test"
           --health-interval 10s
           --health-timeout 5s
           --health-retries 5
         ports:
           - 5432:5432
+    env:
+      DATABASE_URL: postgresql://test:test@localhost:5432/test_db
+      ENVIRONMENT: test
+      DATABRICKS_HOST: https://test.cloud.databricks.com
+      DATABRICKS_TOKEN: test-token
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -233,11 +238,6 @@ jobs:
           cache: 'pip'
       - run: pip install -e ".[dev]"
       - name: Run export tests
-        env:
-          DATABASE_URL: postgresql://test:test@localhost:5432/test_db
-          ENVIRONMENT: test
-          DATABRICKS_HOST: https://test.cloud.databricks.com
-          DATABRICKS_TOKEN: test-token
         run: |
           pytest tests/integration/test_export.py -v --tb=short \
             --junitxml=test-results/export-results.xml -m "not live"
@@ -264,12 +264,17 @@ jobs:
           POSTGRES_PASSWORD: test
           POSTGRES_DB: test_db
         options: >-
-          --health-cmd pg_isready
+          --health-cmd "pg_isready -U test"
           --health-interval 10s
           --health-timeout 5s
           --health-retries 5
         ports:
           - 5432:5432
+    env:
+      DATABASE_URL: postgresql://test:test@localhost:5432/test_db
+      ENVIRONMENT: test
+      DATABRICKS_HOST: https://test.cloud.databricks.com
+      DATABRICKS_TOKEN: test-token
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -278,11 +283,6 @@ jobs:
           cache: 'pip'
       - run: pip install -e ".[dev]"
       - name: Run streaming tests
-        env:
-          DATABASE_URL: postgresql://test:test@localhost:5432/test_db
-          ENVIRONMENT: test
-          DATABRICKS_HOST: https://test.cloud.databricks.com
-          DATABRICKS_TOKEN: test-token
         run: |
           pytest tests/integration/test_streaming.py -v --tb=short \
             --junitxml=test-results/streaming-results.xml -m "not live"
@@ -309,12 +309,17 @@ jobs:
           POSTGRES_PASSWORD: test
           POSTGRES_DB: test_db
         options: >-
-          --health-cmd pg_isready
+          --health-cmd "pg_isready -U test"
           --health-interval 10s
           --health-timeout 5s
           --health-retries 5
         ports:
           - 5432:5432
+    env:
+      DATABASE_URL: postgresql://test:test@localhost:5432/test_db
+      ENVIRONMENT: test
+      DATABRICKS_HOST: https://test.cloud.databricks.com
+      DATABRICKS_TOKEN: test-token
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -323,11 +328,6 @@ jobs:
           cache: 'pip'
       - run: pip install -e ".[dev]"
       - name: Run slide tests
-        env:
-          DATABASE_URL: postgresql://test:test@localhost:5432/test_db
-          ENVIRONMENT: test
-          DATABRICKS_HOST: https://test.cloud.databricks.com
-          DATABRICKS_TOKEN: test-token
         run: |
           pytest tests/integration/test_slide_deck_integration.py tests/integration/test_slide_replacement_flow.py \
             -v --tb=short --junitxml=test-results/slides-results.xml -m "not live"
@@ -354,12 +354,17 @@ jobs:
           POSTGRES_PASSWORD: test
           POSTGRES_DB: test_db
         options: >-
-          --health-cmd pg_isready
+          --health-cmd "pg_isready -U test"
           --health-interval 10s
           --health-timeout 5s
           --health-retries 5
         ports:
           - 5432:5432
+    env:
+      DATABASE_URL: postgresql://test:test@localhost:5432/test_db
+      ENVIRONMENT: test
+      DATABRICKS_HOST: https://test.cloud.databricks.com
+      DATABRICKS_TOKEN: test-token
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -368,11 +373,6 @@ jobs:
           cache: 'pip'
       - run: pip install -e ".[dev]"
       - name: Run Genie tests
-        env:
-          DATABASE_URL: postgresql://test:test@localhost:5432/test_db
-          ENVIRONMENT: test
-          DATABRICKS_HOST: https://test.cloud.databricks.com
-          DATABRICKS_TOKEN: test-token
         run: |
           # Exit code 5 means no tests collected (all deselected) - treat as success
           # These files currently only contain 'live' tests requiring real Databricks
@@ -499,7 +499,7 @@ jobs:
         ports:
           - 5432:5432
         options: >-
-          --health-cmd pg_isready
+          --health-cmd "pg_isready -U test"
           --health-interval 10s
           --health-timeout 5s
           --health-retries 5
@@ -649,16 +649,18 @@ jobs:
       - name: Start backend server
         run: |
           python -m uvicorn src.api.main:app --host 0.0.0.0 --port 8000 &
-          for i in {1..30}; do
+          # Allow up to 90 seconds for backend startup — importing heavy ML/AI
+          # libraries (langchain, mlflow, scikit-learn, etc.) can be slow on cold CI runners.
+          for i in {1..90}; do
             if curl -s http://localhost:8000/api/health > /dev/null 2>&1; then
-              echo "Backend is ready"
+              echo "Backend is ready (took ~${i}s)"
               break
             fi
-            if [ $i -eq 30 ]; then
-              echo "Backend failed to start"
+            if [ $i -eq 90 ]; then
+              echo "Backend failed to start after 90s"
               exit 1
             fi
-            echo "Waiting for backend... ($i/30)"
+            echo "Waiting for backend... ($i/90)"
             sleep 1
           done
 

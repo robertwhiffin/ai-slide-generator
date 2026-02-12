@@ -550,32 +550,47 @@ class TestSessionEndpoints:
     """Tests for /api/sessions endpoints."""
 
     def test_list_sessions_success(self, client, mock_session_manager):
-        """GET /api/sessions returns list of sessions."""
-        mock_session_manager.list_sessions.return_value = [
+        """GET /api/sessions returns list of sessions for current user."""
+        mock_session_manager.list_user_generations.return_value = [
             {"session_id": "sess-1", "title": "Session 1"},
             {"session_id": "sess-2", "title": "Session 2"}
         ]
 
-        response = client.get("/api/sessions")
+        with patch("src.api.routes.sessions.get_current_user", return_value="test-user"):
+            response = client.get("/api/sessions")
         assert response.status_code == 200
         data = response.json()
         assert "sessions" in data
         assert "count" in data
         assert data["count"] == 2
 
-    def test_list_sessions_with_user_filter(self, client, mock_session_manager):
-        """GET /api/sessions accepts user_id filter."""
-        mock_session_manager.list_sessions.return_value = []
-
-        response = client.get("/api/sessions?user_id=user-123")
+    def test_list_sessions_no_user(self, client, mock_session_manager):
+        """GET /api/sessions returns empty when no current user."""
+        with patch("src.api.routes.sessions.get_current_user", return_value=None):
+            with patch("src.api.routes.sessions.get_current_user_from_client", side_effect=Exception("no client")):
+                response = client.get("/api/sessions")
         assert response.status_code == 200
-        mock_session_manager.list_sessions.assert_called_once()
+        data = response.json()
+        assert data["sessions"] == []
+        assert data["count"] == 0
+
+    def test_list_sessions_with_profile_filter(self, client, mock_session_manager):
+        """GET /api/sessions accepts profile_id filter."""
+        mock_session_manager.list_user_generations.return_value = []
+
+        with patch("src.api.routes.sessions.get_current_user", return_value="test-user"):
+            response = client.get("/api/sessions?profile_id=42")
+        assert response.status_code == 200
+        mock_session_manager.list_user_generations.assert_called_once()
+        call_kwargs = mock_session_manager.list_user_generations.call_args
+        assert call_kwargs[1].get("profile_id") == 42 or (len(call_kwargs[0]) > 2 and call_kwargs[0][2] == 42)
 
     def test_list_sessions_with_limit(self, client, mock_session_manager):
         """GET /api/sessions accepts limit parameter."""
-        mock_session_manager.list_sessions.return_value = []
+        mock_session_manager.list_user_generations.return_value = []
 
-        response = client.get("/api/sessions?limit=10")
+        with patch("src.api.routes.sessions.get_current_user", return_value="test-user"):
+            response = client.get("/api/sessions?limit=10")
         assert response.status_code == 200
 
     def test_list_sessions_limit_validation(self, client):

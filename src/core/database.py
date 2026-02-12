@@ -253,20 +253,8 @@ def _create_engine():
     Returns:
         Engine configured for the appropriate database backend
     """
-    import traceback
     database_url = _get_database_url()
     sql_echo = os.getenv("SQL_ECHO", "false").lower() == "true"
-    
-    # Debug: Log when engine is created and by whom
-    pytest_test = os.getenv("PYTEST_CURRENT_TEST")
-    logger.warning(
-        f"DATABASE ENGINE CREATION: url={database_url[:50]}..., "
-        f"PYTEST_CURRENT_TEST={pytest_test}, "
-        f"ENVIRONMENT={os.getenv('ENVIRONMENT')}"
-    )
-    # Print stack trace to see what triggered engine creation
-    if pytest_test or os.getenv("ENVIRONMENT") == "test":
-        logger.warning(f"Engine creation stack trace:\n{''.join(traceback.format_stack()[-8:-1])}")
 
     logger.info("Configuring database connection")
 
