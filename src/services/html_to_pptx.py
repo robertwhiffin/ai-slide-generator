@@ -485,9 +485,16 @@ class HtmlToPptxConverterV3:
                     {"role": "user", "content": user_prompt}
                 ],
                 temperature=0.2,  # Some creativity but not too much
+                max_tokens=16384,
+                extra_body={
+                    "thinking": {
+                        "type": "enabled",
+                        "budget_tokens": 10240,
+                    }
+                },
             )
             
-            code = response.choices[0].message.content
+            code = self._extract_text_content(response.choices[0].message.content)
             
             logger.debug(
                 "LLM response received",
@@ -498,14 +505,7 @@ class HtmlToPptxConverterV3:
             )
             
             # Extract code from markdown if wrapped
-            if '```python' in code:
-                match = re.search(r'```python\n(.*?)```', code, re.DOTALL)
-                if match:
-                    code = match.group(1)
-            elif '```' in code:
-                match = re.search(r'```\n(.*?)```', code, re.DOTALL)
-                if match:
-                    code = match.group(1)
+            code = self._strip_markdown_fences(code)
             
             return code
             
@@ -513,6 +513,50 @@ class HtmlToPptxConverterV3:
             logger.error("LLM call failed", exc_info=True, extra={"error": str(e)})
             return None
     
+    @staticmethod
+    def _extract_text_content(content) -> str:
+        """Extract text from LLM response, handling reasoning model responses.
+
+        When reasoning/thinking is enabled, ``content`` is a list of blocks
+        (e.g. [{"type": "reasoning", ...}, {"type": "text", "text": "..."}]).
+        Otherwise it's a plain string.
+        """
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            for block in content:
+                if isinstance(block, dict) and block.get("type") == "text":
+                    return block.get("text", "")
+        # Fallback — stringify whatever we got
+        return str(content) if content else ""
+
+    @staticmethod
+    def _strip_markdown_fences(code: str) -> str:
+        """Remove markdown code fences from LLM-generated code.
+
+        Handles variations like ```python, ```Python, ``` python, bare ```,
+        trailing ```, and leading/trailing whitespace around fences.
+        """
+        # Try to extract content between ```python ... ``` (case-insensitive, optional whitespace)
+        match = re.search(
+            r"```[Pp]ython\s*\n(.*?)```", code, re.DOTALL
+        )
+        if match:
+            return match.group(1).strip()
+
+        # Try bare ``` ... ```
+        match = re.search(r"```\s*\n(.*?)```", code, re.DOTALL)
+        if match:
+            return match.group(1).strip()
+
+        # If the code just starts/ends with ``` on its own line, strip them
+        lines = code.strip().splitlines()
+        if lines and lines[0].strip().startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].strip() == "```":
+            lines = lines[:-1]
+        return "\n".join(lines)
+
     def _save_client_chart_images(
         self, 
         client_chart_images: Dict[str, str], 

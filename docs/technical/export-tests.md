@@ -277,8 +277,53 @@ These invariants must NEVER be violated:
 
 ---
 
-## 7. Cross-References
+## 7. Google Slides Export Tests
+
+The Google Slides integration has dedicated unit test suites covering the full feature surface.
+
+### Test Files
+
+| File | Test Count | Purpose |
+|------|------------|---------|
+| `tests/unit/test_encryption.py` | 4 | Fernet encryption roundtrip, key management |
+| `tests/unit/config/test_google_oauth.py` | 26 | Models, credential API, auth service, endpoints |
+| `tests/unit/test_google_slides_routes.py` | 14 | Auth endpoints, export endpoint, helpers |
+| `tests/unit/test_google_slides_converter.py` | 17 | Converter static methods (extract, strip, prep) |
+| `tests/unit/test_prompts_defaults.py` | 7 | PPTX + Google Slides prompt validation |
+| `tests/unit/test_app_wiring.py` | 8 | Route and model registration |
+| `tests/unit/test_database_migrations.py` | 2 | Column migration idempotency |
+
+### Running Google Slides Tests
+
+```bash
+# All Google Slides related tests
+pytest tests/unit/test_encryption.py \
+  tests/unit/config/test_google_oauth.py \
+  tests/unit/test_google_slides_routes.py \
+  tests/unit/test_google_slides_converter.py \
+  tests/unit/test_prompts_defaults.py \
+  tests/unit/test_app_wiring.py \
+  tests/unit/test_database_migrations.py -v
+
+# Quick smoke test of auth + credential endpoints
+pytest tests/unit/config/test_google_oauth.py -v
+```
+
+### Key Invariants (Google Slides)
+
+1. **Credentials validated on upload:** Must contain `installed` or `web` key with `client_id` and `client_secret`
+2. **Stale data cleaned up:** Undecryptable tokens/credentials are silently deleted
+3. **Auth status never crashes:** Returns `authorized: false` on any error
+4. **Per-user isolation:** OAuth tokens scoped to (user_identity, profile_id) pair
+5. **Encryption required:** All credentials and tokens stored encrypted at rest
+
+For full technical details, see [Google Slides Integration](./google-slides-integration.md).
+
+---
+
+## 8. Cross-References
 
 - [Export Features](./export-features.md) - Export implementation details
 - [API Routes Tests](./api-routes-tests.md) - Other endpoint tests
 - [Slide Parser and Script Management](./slide-parser-and-script-management.md) - HTML parsing
+- [Google Slides Integration](./google-slides-integration.md) - OAuth2 flow, encryption, converter
