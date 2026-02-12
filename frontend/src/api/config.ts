@@ -170,6 +170,7 @@ export interface SlideStyle {
   description: string | null;
   category: string | null;
   style_content: string;
+  image_guidelines: string | null;
   is_active: boolean;
   is_system: boolean;  // Protected system styles cannot be edited/deleted
   created_by: string | null;
@@ -183,6 +184,7 @@ export interface SlideStyleCreate {
   description?: string | null;
   category?: string | null;
   style_content: string;
+  image_guidelines?: string | null;
 }
 
 export interface SlideStyleUpdate {
@@ -190,6 +192,7 @@ export interface SlideStyleUpdate {
   description?: string | null;
   category?: string | null;
   style_content?: string;
+  image_guidelines?: string | null;
 }
 
 export interface SlideStyleListResponse {

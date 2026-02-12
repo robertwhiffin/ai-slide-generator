@@ -165,9 +165,10 @@ class TestSlideGeneratorAgent:
             # Create tools for the session
             tools = agent_with_mocks._create_tools_for_session(session_id)
 
-            assert len(tools) == 1
-            assert tools[0].name == "query_genie_space"
-            assert "Genie" in tools[0].description
+            assert len(tools) == 2
+            genie_tool = next(t for t in tools if t.name == "query_genie_space")
+            assert "Genie" in genie_tool.description
+            assert any(t.name == "search_images" for t in tools)
     
     def test_session_management(self, agent_with_mocks):
         """Test session creation, retrieval, and management."""
