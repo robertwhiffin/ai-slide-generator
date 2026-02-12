@@ -63,6 +63,11 @@ frontend/.vite/
 frontend/dist/
 *.local
 
+# Root-level Node.js files (shouldn't exist - frontend has its own)
+/package.json
+/package-lock.json
+/test-results/
+
 # Playwright
 frontend/playwright-report/
 frontend/test-results/
