@@ -853,9 +853,10 @@ class TestGracefulDegradation:
             session = agent.get_session(session_id)
             assert session["genie_conversation_id"] is None
 
-            # Tools should be empty in prompt-only mode
+            # Without Genie, only image search tool should be available
             tools = agent._create_tools_for_session(session_id)
-            assert len(tools) == 0
+            assert len(tools) == 1
+            assert tools[0].name == "search_images"
 
     def test_mlflow_failure_doesnt_break_agent(
         self, mock_settings, mock_client, mock_langchain_components
@@ -923,13 +924,13 @@ class TestGracefulDegradation:
             result = agent.create_session()
             session_id = result["session_id"]
 
-            # Get tools - they should be created
+            # Get tools - genie + image search
             tools = agent._create_tools_for_session(session_id)
-            assert len(tools) == 1
+            assert len(tools) == 2
 
             # The tool wrapper propagates GenieToolError directly
             # (not converted to ToolExecutionError)
-            genie_tool = tools[0]
+            genie_tool = next(t for t in tools if t.name == "query_genie_space")
             with pytest.raises(GenieToolError) as exc_info:
                 genie_tool.func("test query")
 

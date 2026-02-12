@@ -1,4 +1,5 @@
 import type { ChatResponse } from '../types/message';
+import type { ImageAsset, ImageListResponse, ImageDataResponse } from '../types/image';
 import type { SlideDeck, Slide, SlideContext, ReplacementInfo } from '../types/slide';
 import type { VerificationResult } from '../types/verification';
 
@@ -101,6 +102,7 @@ interface SendMessageParams {
   message: string;
   sessionId: string;
   slideContext?: SlideContext;
+  imageIds?: number[];
 }
 
 /**
@@ -238,6 +240,7 @@ export const api = {
     message,
     sessionId,
     slideContext,
+    imageIds,
   }: SendMessageParams): Promise<ChatResponse> {
     const response = await fetch(`${API_BASE_URL}/api/chat`, {
       method: 'POST',
@@ -248,6 +251,7 @@ export const api = {
         session_id: sessionId,
         message,
         slide_context: slideContext,
+        image_ids: imageIds,
       }),
     });
 
@@ -400,6 +404,7 @@ export const api = {
     slideContext: SlideContext | undefined,
     onEvent: (event: StreamEvent) => void,
     onError: (error: Error) => void,
+    imageIds?: number[],
   ): () => void {
     const controller = new AbortController();
 
@@ -414,6 +419,7 @@ export const api = {
             session_id: sessionId,
             message,
             slide_context: slideContext,
+            image_ids: imageIds,
           }),
           signal: controller.signal,
         });
@@ -488,6 +494,7 @@ export const api = {
     sessionId: string,
     message: string,
     slideContext?: SlideContext,
+    imageIds?: number[],
   ): Promise<{ request_id: string }> {
     const response = await fetch(`${API_BASE_URL}/api/chat/async`, {
       method: 'POST',
@@ -496,6 +503,7 @@ export const api = {
         session_id: sessionId,
         message,
         slide_context: slideContext,
+        image_ids: imageIds,
       }),
     });
 
@@ -543,13 +551,14 @@ export const api = {
     slideContext: SlideContext | undefined,
     onEvent: (event: StreamEvent) => void,
     onError: (error: Error) => void,
+    imageIds?: number[],
   ): () => void {
     let cancelled = false;
     let pollInterval: ReturnType<typeof setInterval> | null = null;
 
     (async () => {
       try {
-        const { request_id } = await this.submitChatAsync(sessionId, message, slideContext);
+        const { request_id } = await this.submitChatAsync(sessionId, message, slideContext, imageIds);
 
         let lastMessageId = 0;
 
@@ -623,12 +632,74 @@ export const api = {
     slideContext: SlideContext | undefined,
     onEvent: (event: StreamEvent) => void,
     onError: (error: Error) => void,
+    imageIds?: number[],
   ): () => void {
     if (isPollingMode()) {
-      return this.startPolling(sessionId, message, slideContext, onEvent, onError);
+      return this.startPolling(sessionId, message, slideContext, onEvent, onError, imageIds);
     } else {
-      return this.streamChat(sessionId, message, slideContext, onEvent, onError);
+      return this.streamChat(sessionId, message, slideContext, onEvent, onError, imageIds);
     }
+  },
+
+  // ============ Image API ============
+
+  async uploadImage(
+    file: File,
+    metadata: { tags?: string[]; description?: string; category?: string; saveToLibrary?: boolean } = {}
+  ): Promise<ImageAsset> {
+    const formData = new FormData();
+    formData.append('file', file);
+    if (metadata.tags) formData.append('tags', JSON.stringify(metadata.tags));
+    if (metadata.description) formData.append('description', metadata.description);
+    if (metadata.category) formData.append('category', metadata.category);
+    if (metadata.saveToLibrary === false) formData.append('save_to_library', 'false');
+
+    const response = await fetch(`${API_BASE_URL}/api/images/upload`, {
+      method: 'POST',
+      body: formData,
+    });
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({}));
+      throw new ApiError(response.status, error.detail || 'Upload failed');
+    }
+    return response.json();
+  },
+
+  async listImages(params?: { category?: string; query?: string }): Promise<ImageListResponse> {
+    const searchParams = new URLSearchParams();
+    if (params?.category) searchParams.set('category', params.category);
+    if (params?.query) searchParams.set('query', params.query);
+
+    const url = `${API_BASE_URL}/api/images${searchParams.toString() ? '?' + searchParams : ''}`;
+    const response = await fetch(url);
+    if (!response.ok) throw new ApiError(response.status, 'Failed to list images');
+    return response.json();
+  },
+
+  async getImageData(imageId: number): Promise<ImageDataResponse> {
+    const response = await fetch(`${API_BASE_URL}/api/images/${imageId}/data`);
+    if (!response.ok) throw new ApiError(response.status, 'Failed to get image data');
+    return response.json();
+  },
+
+  async updateImage(
+    imageId: number,
+    updates: { tags?: string[]; description?: string; category?: string }
+  ): Promise<ImageAsset> {
+    const response = await fetch(`${API_BASE_URL}/api/images/${imageId}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(updates),
+    });
+    if (!response.ok) throw new ApiError(response.status, 'Failed to update image');
+    return response.json();
+  },
+
+  async deleteImage(imageId: number): Promise<void> {
+    const response = await fetch(`${API_BASE_URL}/api/images/${imageId}`, {
+      method: 'DELETE',
+    });
+    if (!response.ok) throw new ApiError(response.status, 'Failed to delete image');
   },
 
   // ============ Verification API ============

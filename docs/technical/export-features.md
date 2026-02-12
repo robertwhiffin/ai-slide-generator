@@ -99,8 +99,9 @@ All export options are accessible through a unified dropdown menu in the slide p
 3. Backend validates request and queues job, returns job ID immediately
 4. Background worker (in thread pool) processes the export:
    - Fetches slide deck from database
-   - Builds complete HTML for each slide
-   - For each slide, LLM generates Python code to create PowerPoint slide
+   - Builds complete HTML for each slide (including `{{image:ID}}` → base64 substitution)
+   - Extracts base64-embedded content images from HTML, saves as files in a per-slide assets directory, and replaces `<img src="data:image/...;base64,...">` with filename references
+   - For each slide, LLM generates Python code to create PowerPoint slide (receiving clean HTML + image filenames, not raw base64)
    - Code is executed to add slide to presentation
    - Progress is updated after each slide
 5. Frontend polls `GET /api/export/pptx/poll/{job_id}` for status/progress
@@ -172,6 +173,7 @@ All export options are accessible through a unified dropdown menu in the slide p
 **PPTX Converter Service** (`src/services/html_to_pptx.py`):
 - `HtmlToPptxConverterV3` class
 - LLM-powered HTML to PPTX conversion
+- Extracts base64-embedded content images (`_extract_and_save_content_images()`) before sending HTML to LLM
 - Generates and executes Python code for slide creation
 - Ensures proper positioning and no overlaps
 
@@ -240,11 +242,24 @@ The PPTX converter uses strict positioning constraints to prevent overlapping el
 - Charts appear exactly as they do in the browser
 
 ### PPTX Export
-- **Client-Side Capture**: Charts are captured as base64 PNG images in the browser before export
+
+**Chart Images (client-side capture)**:
+- Charts are captured as base64 PNG images in the browser before export
 - The frontend identifies all `<canvas>` elements within chart containers
 - Canvas images are sent to the server as part of the export request
-- Chart images are inserted into PowerPoint slides at appropriate positions
-- This approach ensures charts appear exactly as rendered in the browser
+- Chart images are saved to a per-slide assets directory and referenced by filename in the LLM prompt
+
+**Content Images (server-side extraction)**:
+- Slides may contain `<img>` tags with base64 data URIs (e.g. uploaded logos or photos injected via `{{image:ID}}` placeholders)
+- Before the LLM call, `_extract_and_save_content_images()` scans the HTML for `<img src="data:image/...;base64,...">` tags
+- Each image is decoded and saved to the assets directory as `content_image_0.png`, `content_image_1.jpg`, etc.
+- The HTML `src` attribute is replaced with the filename so the LLM receives clean, compact HTML
+- Extracted content image filenames are merged into the chart images list, so the LLM receives unified `add_picture()` instructions for all image assets
+
+**LLM prompt integration**:
+- Both chart and content image filenames are listed in the LLM user prompt via the `screenshot_note`
+- The LLM system prompt includes a `CONTENT IMAGES` section instructing it to call `slide.shapes.add_picture()` for any `content_image_*.png` files
+- This ensures images are positioned in the PowerPoint slide at their HTML layout location
 
 ## File Naming
 
@@ -289,10 +304,16 @@ If the slide deck has no title, "slides" is used as the default.
 - **Solution**: The LLM prompts include strict positioning constraints. If overlaps occur, the prompts may need adjustment in `src/services/html_to_pptx.py`.
 
 **Problem**: Charts not appearing in PPTX
-- **Solution**: 
+- **Solution**:
   - Ensure charts are visible on screen before exporting (client-side capture requires rendered charts)
   - Check browser console for errors during chart capture
   - Verify the chart container has a valid `<canvas>` element
+
+**Problem**: Uploaded images show as text/filename in PPTX instead of rendering
+- **Solution**:
+  - Check backend logs for "Extracted content image" messages to confirm extraction is running
+  - Verify the `<img>` tag uses a standard `data:image/(png|jpeg|gif|svg+xml);base64,...` format
+  - The LLM system prompt must include the `CONTENT IMAGES` section (check `pptx_prompts_defaults.py` or the profile's custom prompts)
 
 **Problem**: "ModuleNotFoundError: No module named 'pptx'"
 - **Solution**: Install dependencies: `pip install python-pptx`

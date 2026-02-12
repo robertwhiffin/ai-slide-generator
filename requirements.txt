@@ -58,5 +58,8 @@ cryptography>=42.0.0
 # Browser automation (HTML to image rendering)
 playwright==1.48.0
 
+# Image processing
+Pillow>=10.0.0
+
 # Note: Development dependencies are in pyproject.toml [project.optional-dependencies.dev]
 # Install with: uv sync --all-extras
