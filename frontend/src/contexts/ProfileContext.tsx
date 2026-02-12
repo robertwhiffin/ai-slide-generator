@@ -30,13 +30,31 @@ interface ProfileContextValue {
 
 const ProfileContext = createContext<ProfileContextValue | undefined>(undefined);
 
+const LOADED_PROFILE_KEY = 'loadedProfileId';
+
+function readStoredProfileId(): number | null {
+  const raw = localStorage.getItem(LOADED_PROFILE_KEY);
+  if (!raw) return null;
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
 export const ProfileProvider: React.FC<React.PropsWithChildren> = ({ children }) => {
   const [profiles, setProfiles] = useState<Profile[]>([]);
   const [currentProfile, setCurrentProfile] = useState<Profile | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   // Track the last loaded profile ID (may differ from is_default)
-  const [loadedProfileId, setLoadedProfileId] = useState<number | null>(null);
+  const [loadedProfileId, setLoadedProfileId] = useState<number | null>(readStoredProfileId);
+
+  // Persist loadedProfileId to localStorage so it survives page reloads
+  useEffect(() => {
+    if (loadedProfileId !== null) {
+      localStorage.setItem(LOADED_PROFILE_KEY, String(loadedProfileId));
+    } else {
+      localStorage.removeItem(LOADED_PROFILE_KEY);
+    }
+  }, [loadedProfileId]);
 
   /**
    * Load all profiles and determine the current profile
