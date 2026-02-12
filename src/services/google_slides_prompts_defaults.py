@@ -87,13 +87,24 @@ CHARTS (CRITICAL):
 - Chart + metrics: use CHART + METRICS SIDE-BY-SIDE layout above.
 - If NO chart images are listed, skip chart rendering entirely — do not attempt to recreate.
 
+HYPERLINKS (<a href="...">):
+- Extract ALL <a> tags from HTML and preserve their href URLs.
+- Insert the link text via insertText, then apply the link via updateTextStyle with FIXED_RANGE:
+  {'updateTextStyle': {'objectId': id,
+    'textRange': {'type': 'FIXED_RANGE', 'startIndex': start, 'endIndex': end},
+    'style': {'link': {'url': 'https://...'}}, 'fields': 'link'}}
+- CRITICAL: when using startIndex/endIndex, you MUST set 'type': 'FIXED_RANGE'. Without it the API returns a 400 error.
+- Track character offsets: after each insertText, the next text starts at the previous end index.
+- Also style link text with underline and a blue/brand color to make links visible.
+
 API PATTERNS (CRITICAL — wrong nesting causes 400 errors):
 - updateShapeProperties MUST nest inside 'shapeProperties':
   {'updateShapeProperties': {'objectId': id, 'shapeProperties': {
       'shapeBackgroundFill': {'solidFill': {'color': {'rgbColor': hex_to_rgb(...)}}},
       'outline': {'propertyState': 'NOT_RENDERED'}
   }, 'fields': 'shapeBackgroundFill.solidFill.color,outline.propertyState'}}
-- textRange: ALWAYS use {'type': 'ALL'} — do NOT include startIndex or endIndex.
+- textRange for full element styling: use {'type': 'ALL'} — no startIndex/endIndex.
+- textRange for partial styling (bold spans, hyperlinks): use {'type': 'FIXED_RANGE', 'startIndex': N, 'endIndex': M}.
 - Foreground color: {'opaqueColor': {'rgbColor': hex_to_rgb('#XXXXXX')}}
 - Page background: updatePageProperties, objectId=page_id,
   fields: 'pageBackgroundFill.solidFill.color'

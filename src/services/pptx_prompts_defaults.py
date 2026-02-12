@@ -97,6 +97,26 @@ CHARTS:
 - If slide has ONLY a chart: left=Inches(0.5), top=Inches(2.0), width=Inches(9.0), height=Inches(4.5)
 - If slide has chart AND metrics: use CHART + METRICS layout above
 - If no images: Extract Chart.js data from <script> tags.
+- Do NOT recreate charts with matplotlib or any library when chart images are provided.
+
+HYPERLINKS (<a href="...">):
+- Extract ALL <a> tags from HTML and preserve their href URLs.
+- To add a hyperlink in python-pptx:
+  run = paragraph.add_run()
+  run.text = "Link Text"
+  run.hyperlink.address = "https://example.com"
+  run.font.color.rgb = RGBColor(59, 113, 175)  # blue/brand color
+  run.font.underline = True
+  run.font.size = Pt(9)
+- For text boxes with mixed content (normal text + link), add separate runs:
+  p = text_frame.paragraphs[0]
+  run1 = p.add_run()
+  run1.text = "Normal text "
+  run2 = p.add_run()
+  run2.text = "Click here"
+  run2.hyperlink.address = "https://..."
+  run2.font.underline = True
+  run2.font.color.rgb = RGBColor(59, 113, 175)
 
 Return ONLY Python code. Do NOT wrap the code in markdown fences."""
 
