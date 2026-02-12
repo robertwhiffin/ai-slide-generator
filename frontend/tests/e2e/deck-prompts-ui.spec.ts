@@ -103,7 +103,15 @@ async function setupMocks(page: Page) {
   });
 
   // Mock sessions
-  await page.route('http://127.0.0.1:8000/api/sessions**', (route) => {
+  await page.route('http://127.0.0.1:8000/api/sessions**', (route, request) => {
+    const method = request.method();
+
+    // Handle session creation/deletion
+    if (method === 'POST' || method === 'DELETE') {
+      route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ session_id: 'mock', title: 'New', user_id: null, created_at: '2026-01-01T00:00:00Z' }) });
+      return;
+    }
+
     route.fulfill({
       status: 200,
       contentType: 'application/json',
@@ -423,7 +431,15 @@ test.describe('Form Submission', () => {
     await page.route('http://127.0.0.1:8000/api/settings/slide-styles', (route) => {
       route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(mockSlideStyles) });
     });
-    await page.route('http://127.0.0.1:8000/api/sessions**', (route) => {
+    await page.route('http://127.0.0.1:8000/api/sessions**', (route, request) => {
+      const method = request.method();
+
+      // Handle session creation/deletion
+      if (method === 'POST' || method === 'DELETE') {
+        route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ session_id: 'mock', title: 'New', user_id: null, created_at: '2026-01-01T00:00:00Z' }) });
+        return;
+      }
+
       route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(mockSessions) });
     });
     await page.route('http://127.0.0.1:8000/api/genie/spaces', (route) => {
@@ -475,7 +491,15 @@ test.describe('Empty State', () => {
     await page.route('http://127.0.0.1:8000/api/settings/slide-styles', (route) => {
       route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(mockSlideStyles) });
     });
-    await page.route('http://127.0.0.1:8000/api/sessions**', (route) => {
+    await page.route('http://127.0.0.1:8000/api/sessions**', (route, request) => {
+      const method = request.method();
+
+      // Handle session creation/deletion
+      if (method === 'POST' || method === 'DELETE') {
+        route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ session_id: 'mock', title: 'New', user_id: null, created_at: '2026-01-01T00:00:00Z' }) });
+        return;
+      }
+
       route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(mockSessions) });
     });
     await page.route('http://127.0.0.1:8000/api/genie/spaces', (route) => {

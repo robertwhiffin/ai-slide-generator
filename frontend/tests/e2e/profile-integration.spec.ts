@@ -175,7 +175,7 @@ async function goToProfiles(page: Page): Promise<void> {
 
 async function goToGenerator(page: Page): Promise<void> {
   await page.goto('/');
-  await page.getByRole('navigation').getByRole('button', { name: 'Generator' }).click();
+  await page.getByRole('navigation').getByRole('button', { name: 'New Session' }).click();
   await expect(page.getByRole('heading', { name: 'Chat', level: 2 })).toBeVisible();
 }
 
@@ -743,7 +743,7 @@ test.describe('Session-Profile Association', () => {
       await page.waitForTimeout(1000);
 
       // Navigate to Generator and send a message to create a session
-      await page.getByRole('navigation').getByRole('button', { name: 'Generator' }).click();
+      await page.getByRole('navigation').getByRole('button', { name: 'New Session' }).click();
       await expect(page.getByRole('heading', { name: 'Chat', level: 2 })).toBeVisible();
 
       // Type a message

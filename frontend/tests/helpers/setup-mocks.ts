@@ -48,6 +48,23 @@ export async function setupMocks(page: Page) {
   // Mock sessions endpoints
   await page.route('http://127.0.0.1:8000/api/sessions**', (route, request) => {
     const url = request.url();
+    const method = request.method();
+
+    // Handle session creation (POST /api/sessions)
+    if (method === 'POST' && !url.includes('/slides') && !url.includes('/versions') && !url.includes('/messages')) {
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ session_id: 'mock-session-id', title: 'New Session', created_at: new Date().toISOString() })
+      });
+      return;
+    }
+
+    // Handle session deletion (DELETE /api/sessions/{id})
+    if (method === 'DELETE') {
+      route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ success: true }) });
+      return;
+    }
 
     if (url.includes('limit=')) {
       // Sessions list
