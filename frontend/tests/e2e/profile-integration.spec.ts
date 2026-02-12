@@ -473,9 +473,9 @@ test.describe('Profile Validation', () => {
       await skipWizardStep4(page);
       await submitWizard(page);
 
-      // Should show error - match the error div specifically, not the asterisk span
+      // Should show error - match error divs across all styling variants (500/600/700)
       await expect(
-        page.locator('div.text-red-600, div.text-red-500, [role="alert"]').filter({ hasText: /already exists/i }).first()
+        page.locator('div.text-red-500, div.text-red-600, div.text-red-700, [role="alert"]').filter({ hasText: /already exists/i }).first()
       ).toBeVisible({ timeout: 5000 });
     } finally {
       await deleteTestProfileViaAPI(request, profile.id);
@@ -507,9 +507,9 @@ test.describe('Profile Validation', () => {
       // Save - use exact text to avoid matching "Save Genie Configuration"
       await page.getByRole('button', { name: 'Save Profile Info' }).click();
 
-      // Should show error - match the error div specifically, not the asterisk span
+      // Should show error - match error divs across all styling variants (500/600/700)
       await expect(
-        page.locator('div.text-red-600, div.text-red-500, [role="alert"]').filter({ hasText: /already exists/i }).first()
+        page.locator('div.text-red-500, div.text-red-600, div.text-red-700, [role="alert"]').filter({ hasText: /already exists/i }).first()
       ).toBeVisible({ timeout: 5000 });
     } finally {
       await deleteTestProfileViaAPI(request, profile1.id);
