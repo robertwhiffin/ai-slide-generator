@@ -17,7 +17,7 @@ How the React/Vite frontend is structured, how it communicates with backend APIs
 ```
 ┌──────────────────────────────────────────────────────────────────────┐
 │ Header: title + session metadata + navigation                         │
-│ [Generator] [History] [Profiles] [Deck Prompts] [Slide Styles] [Help] │
+│ [New Session] [History] [Profiles] [Deck Prompts] [Slide Styles] [Help] │
 ├──────────────┬──────────────┬─────────────────────────────────────────┤
 │ Chat Panel   │ Selection    │ Slide Panel                             │
 │ (32% width)  │ Ribbon       │ (flex-1)                                │
@@ -29,7 +29,7 @@ How the React/Vite frontend is structured, how it communicates with backend APIs
 
 Each page has a dedicated URL. Navigation buttons use `useNavigate()` to change routes. Session routes (`/sessions/:id/edit`, `/sessions/:id/view`) load session data from URL parameters. See [URL Routing](url-routing.md) for full details.
 
-- **Generator** (`/sessions/:id/edit`): The primary slide generation interface
+- **New Session** (`/sessions/:id/edit`): The primary slide generation interface
 - **Viewer** (`/sessions/:id/view`): Read-only presentation viewer (chat disabled, editing disabled)
 - **History** (`/history`): Session list and restore functionality
 - **Profiles** (`/profiles`): Configuration profile management
@@ -54,18 +54,19 @@ Each page has a dedicated URL. Navigation buttons use `useNavigate()` to change 
 
 ### 1. Session Management
 
-Every user interaction is scoped to a session. The frontend maintains `currentSessionId` in `api.ts`:
+Every user interaction is scoped to a session. `SessionContext` provides session state and the `api.ts` module tracks `currentSessionId`:
 
 ```typescript
-// src/services/api.ts
-let currentSessionId: string | null = null;
+// src/contexts/SessionContext.tsx
+createNewSession()   // Generates local UUID, updates context (callers persist to DB)
+switchSession(id)    // Loads existing session from database
 
-api.getOrCreateSession()   // Returns existing or creates new
-api.setCurrentSessionId()  // For restoring sessions
-api.getCurrentSessionId()  // Access current session
+// src/services/api.ts
+api.setCurrentSessionId()  // Set active session for API calls
+api.createSession({ sessionId, title })  // Persist session to database
 ```
 
-All API calls that modify state require `session_id`. Sessions are created lazily on first interaction.
+All API calls that modify state require `session_id`. Sessions are persisted to the database immediately when created via the "New Session" button (before navigation). Empty sessions are automatically cleaned up when the next session is created.
 
 ### 2. Slide Deck Contract (`src/types/slide.ts`)
 
@@ -281,7 +282,7 @@ interface SlideStyle {
 
 1. `AppLayout` renders with `slideDeck = null`
 2. `SelectionProvider` ensures any component can call `useSelection()`
-3. Session created lazily via `api.getOrCreateSession()` on first chat
+3. Session created on "New Session" click: `createNewSession()` → `api.createSession({ sessionId })` → `navigate()`
 
 ### Generating / Editing Slides
 
@@ -354,7 +355,7 @@ The optimization prompt explicitly instructs the agent to:
 
 | Method | HTTP | Path | Request | Returns |
 |--------|------|------|---------|---------|
-| `createSession` | POST | `/api/sessions` | `{ title? }` | `Session` |
+| `createSession` | POST | `/api/sessions` | `{ session_id?, title? }` | `Session` |
 | `listSessions` | GET | `/api/sessions` | query: `limit` | `{ sessions, count }` |
 | `getSession` | GET | `/api/sessions/{id}` | – | `Session` |
 | `renameSession` | PATCH | `/api/sessions/{id}` | query: `title` | `Session` |
