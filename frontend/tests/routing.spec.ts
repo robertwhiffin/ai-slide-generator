@@ -55,4 +55,10 @@ test.describe('URL Routing', () => {
     await page.goto('/sessions/test-session-id/view');
     await expect(page.locator('[data-testid="slide-panel"]')).toBeVisible();
   });
+
+  test('unknown path redirects to help page', async ({ page }) => {
+    await page.goto('/this-does-not-exist');
+    await expect(page).toHaveURL(/\/help$/);
+    await expect(page.getByRole('heading', { name: 'How to Use databricks tellr' })).toBeVisible();
+  });
 });
