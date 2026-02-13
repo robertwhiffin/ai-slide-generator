@@ -836,6 +836,7 @@ class ChatService:
         # Run agent in thread and yield events
         result_container: Dict[str, Any] = {}
         error_container: Dict[str, Exception] = {}
+        title_container: Dict[str, str] = {}
 
         # Capture context BEFORE starting thread to preserve user auth
         ctx = contextvars.copy_context()
@@ -858,9 +859,45 @@ class ChatService:
                 # Signal completion by putting None
                 event_queue.put(None)
 
+        def run_title_gen():
+            """Generate a session title in parallel with the main agent."""
+            try:
+                from databricks_langchain import ChatDatabricks
+                from src.core.databricks_client import get_user_client
+
+                naming_model = ChatDatabricks(
+                    endpoint=settings.llm.endpoint,
+                    max_tokens=50,
+                    temperature=0.3,
+                    workspace_client=get_user_client(),
+                )
+                generated_title = generate_session_title(message, naming_model)
+                if generated_title:
+                    session_manager.rename_session(session_id, generated_title)
+                    title_container["title"] = generated_title
+                    logger.info(
+                        "Auto-named session from first message",
+                        extra={
+                            "session_id": session_id,
+                            "generated_title": generated_title,
+                        },
+                    )
+            except Exception:
+                logger.warning(
+                    "Failed to auto-name session",
+                    extra={"session_id": session_id},
+                    exc_info=True,
+                )
+
         # Start agent thread with context preserved for user auth
         agent_thread = threading.Thread(target=lambda: ctx.run(run_agent), daemon=True)
         agent_thread.start()
+
+        # Start title generation in parallel on first message
+        title_thread: Optional[threading.Thread] = None
+        if is_first_message:
+            title_thread = threading.Thread(target=lambda: ctx.run(run_title_gen), daemon=True)
+            title_thread.start()
 
         # Yield events as they arrive
         while True:
@@ -1170,38 +1207,13 @@ class ChatService:
             },
         )
 
-        # Smart session naming: generate a title from the first user message
-        # Runs AFTER COMPLETE so slide delivery is never delayed by this LLM call
-        if is_first_message:
-            try:
-                from databricks_langchain import ChatDatabricks
-                from src.core.databricks_client import get_user_client
-
-                naming_model = ChatDatabricks(
-                    endpoint=settings.llm.endpoint,
-                    max_tokens=50,
-                    temperature=0.3,
-                    workspace_client=get_user_client(),
-                )
-                generated_title = generate_session_title(message, naming_model)
-                if generated_title:
-                    session_manager.rename_session(session_id, generated_title)
-                    yield StreamEvent(
-                        type=StreamEventType.SESSION_TITLE,
-                        session_title=generated_title,
-                    )
-                    logger.info(
-                        "Auto-named session from first message",
-                        extra={
-                            "session_id": session_id,
-                            "generated_title": generated_title,
-                        },
-                    )
-            except Exception:
-                logger.warning(
-                    "Failed to auto-name session",
-                    extra={"session_id": session_id},
-                    exc_info=True,
+        # Collect title generated in parallel (if applicable)
+        if title_thread is not None:
+            title_thread.join(timeout=10)
+            if "title" in title_container:
+                yield StreamEvent(
+                    type=StreamEventType.SESSION_TITLE,
+                    session_title=title_container["title"],
                 )
 
     def _ensure_agent_session(
