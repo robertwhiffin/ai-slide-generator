@@ -1,4 +1,4 @@
-import { Routes, Route, useLocation } from 'react-router-dom';
+import { Routes, Route, Navigate, useLocation } from 'react-router-dom';
 import { AppLayout } from './components/Layout/AppLayout';
 import './index.css';
 import { SelectionProvider } from './contexts/SelectionContext';
@@ -22,6 +22,7 @@ function AppRoutes() {
       <Route path="/history" element={<AppLayout key="history" initialView="history" />} />
       <Route path="/sessions/:sessionId/edit" element={<AppLayout key={`edit-${location.pathname}`} initialView="main" />} />
       <Route path="/sessions/:sessionId/view" element={<AppLayout key={`view-${location.pathname}`} initialView="main" viewOnly={true} />} />
+      <Route path="*" element={<Navigate to="/help" replace />} />
     </Routes>
   );
 }
