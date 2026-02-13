@@ -18,6 +18,7 @@ from src.api.services.session_manager import (
     SessionNotFoundError,
     get_session_manager,
 )
+from src.core.user_context import get_current_user
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +38,9 @@ def _substitute_deck_images(deck_dict: dict) -> None:
 async def create_session(request: CreateSessionRequest = None):
     """Create a new session.
 
+    The ``created_by`` field is set server-side from the authenticated user
+    identity resolved by the middleware (never from the client request body).
+
     Args:
         request: Optional session creation parameters
 
@@ -44,19 +48,20 @@ async def create_session(request: CreateSessionRequest = None):
         Created session info with session_id
     """
     request = request or CreateSessionRequest()
+    current_user = get_current_user()
 
     try:
         session_manager = get_session_manager()
         result = await asyncio.to_thread(
             session_manager.create_session,
             session_id=request.session_id,
-            user_id=request.user_id,
             title=request.title,
+            created_by=current_user,
         )
 
         logger.info(
             "Session created via API",
-            extra={"session_id": result["session_id"]},
+            extra={"session_id": result["session_id"], "created_by": current_user},
         )
 
         return result
@@ -71,23 +76,26 @@ async def create_session(request: CreateSessionRequest = None):
 
 @router.get("")
 async def list_sessions(
-    user_id: Optional[str] = Query(None, description="Filter by user ID"),
     limit: int = Query(50, ge=1, le=100, description="Maximum sessions to return"),
 ):
-    """List sessions.
+    """List sessions for the current user.
+
+    Sessions are implicitly scoped to the authenticated user resolved by the
+    middleware.  No ``user_id`` query parameter is needed.
 
     Args:
-        user_id: Optional user filter
         limit: Maximum number of sessions to return
 
     Returns:
         List of session summaries
     """
+    current_user = get_current_user()
+
     try:
         session_manager = get_session_manager()
         sessions = await asyncio.to_thread(
             session_manager.list_sessions,
-            user_id=user_id,
+            created_by=current_user,
             limit=limit,
         )
 

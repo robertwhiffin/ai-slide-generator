@@ -293,7 +293,8 @@ User conversation sessions with processing lock support and profile association.
 class UserSession(Base):
     id: int
     session_id: str              # Unique session identifier
-    user_id: str | None          # Optional user identification
+    user_id: str | None          # Optional user identification (legacy)
+    created_by: str | None       # Username of session creator (used for user-scoped filtering)
     title: str                   # Session title
     created_at: datetime
     last_activity: datetime
@@ -475,7 +476,9 @@ This is called automatically by:
 
 ### Schema Migrations
 
-For adding columns to existing tables in production, a lightweight `run_migrations()` function runs idempotent `ALTER TABLE` statements on app startup:
+For adding columns to existing tables in production, a lightweight `run_migrations()` function runs idempotent `ALTER TABLE` statements on app startup.
+
+**Manual migrations:** Some schema changes require standalone SQL scripts (placed in `scripts/`).
 
 ```python
 # packages/databricks-tellr-app/databricks_tellr_app/run.py

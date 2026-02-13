@@ -402,7 +402,7 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
                 }`}
                 title={isGenerating ? 'Navigation disabled during generation' : undefined}
               >
-                History
+                My Sessions
               </button>
               <button
                 onClick={() => navigate('/profiles')}

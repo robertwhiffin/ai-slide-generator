@@ -223,7 +223,7 @@ test.describe('Deck Integrity - Navigation', () => {
     await page.goto('/');
 
     // Navigate to each view
-    const views = ['New Session', 'History', 'Profiles', 'Deck Prompts', 'Slide Styles', 'Help'];
+    const views = ['New Session', 'My Sessions', 'Profiles', 'Deck Prompts', 'Slide Styles', 'Help'];
 
     for (const view of views) {
       await page.getByRole('navigation').getByRole('button', { name: view }).click();
@@ -236,9 +236,9 @@ test.describe('Deck Integrity - Navigation', () => {
 
   test('History view loads sessions without errors', async ({ page }) => {
     await page.goto('/');
-    await page.getByRole('navigation').getByRole('button', { name: 'History' }).click();
+    await page.getByRole('navigation').getByRole('button', { name: 'My Sessions' }).click();
 
-    await expect(page.getByRole('heading', { name: 'Session History' })).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'My Sessions' })).toBeVisible();
 
     const errors = consoleCollector.getErrors();
     expect(errors).toHaveLength(0);

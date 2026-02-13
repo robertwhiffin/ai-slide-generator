@@ -147,8 +147,8 @@ async function setupEmptySessionsMock(page: Page) {
 
 async function goToHistory(page: Page) {
   await page.goto('/');
-  await page.getByRole('navigation').getByRole('button', { name: 'History' }).click();
-  await expect(page.getByRole('heading', { name: 'Session History' })).toBeVisible();
+  await page.getByRole('navigation').getByRole('button', { name: 'My Sessions' }).click();
+  await expect(page.getByRole('heading', { name: 'My Sessions' })).toBeVisible();
 }
 
 // ============================================
@@ -163,9 +163,9 @@ test.describe('SessionHistoryList', () => {
   test('renders page heading and session count', async ({ page }) => {
     await goToHistory(page);
 
-    await expect(page.getByRole('heading', { name: 'Session History' })).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'My Sessions' })).toBeVisible();
     // Check for session count text
-    await expect(page.getByText(/\d+ sessions? saved/)).toBeVisible();
+    await expect(page.getByText(/\d+ sessions?$/)).toBeVisible();
   });
 
   test('renders all sessions in table', async ({ page }) => {

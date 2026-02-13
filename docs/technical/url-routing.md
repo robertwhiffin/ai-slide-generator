@@ -158,7 +158,7 @@ const handleNewSession = useCallback(async () => {
 }, [createNewSession, navigate, sessionId, slideDeck]);
 ```
 
-Users resume previous sessions from History — there is no "return to last session" concept.
+Users resume previous sessions from My Sessions — there is no "return to last session" concept.
 
 ### Read-Only View Mode
 
@@ -252,7 +252,7 @@ Toasts auto-dismiss after 5 seconds. Rendered at `fixed bottom-4 right-4` with `
 |-----------|-------|----------|
 | `tests/routing.spec.ts` | 9 | URL → correct page content for all routes |
 | `tests/session-loading.spec.ts` | 4 | Session load from URL, 404 redirect, profile auto-switch, slide count |
-| `tests/navigation.spec.ts` | 4 | Nav buttons update URL, New Session nav, History restore |
+| `tests/navigation.spec.ts` | 4 | Nav buttons update URL, New Session nav, My Sessions restore |
 | `tests/viewer-readonly.spec.ts` | 4 | Disabled chat, read-only slides, hidden buttons, export available |
 | `tests/share-link.spec.ts` | 4 | Share button copies view URL, toast confirmation, link opens view mode |
 
