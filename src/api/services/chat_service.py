@@ -894,9 +894,11 @@ class ChatService:
         agent_thread.start()
 
         # Start title generation in parallel on first message
+        # Uses a separate context copy since ctx.run() can only be entered by one thread at a time
         title_thread: Optional[threading.Thread] = None
         if is_first_message:
-            title_thread = threading.Thread(target=lambda: ctx.run(run_title_gen), daemon=True)
+            title_ctx = contextvars.copy_context()
+            title_thread = threading.Thread(target=lambda: title_ctx.run(run_title_gen), daemon=True)
             title_thread.start()
 
         # Yield events as they arrive
