@@ -64,7 +64,7 @@ class SurveyResponse(Base):
             name="check_time_saved_values",
         ),
         CheckConstraint(
-            "nps_score >= 0 AND nps_score <= 10 OR nps_score IS NULL",
+            "(nps_score >= 0 AND nps_score <= 10) OR nps_score IS NULL",
             name="check_nps_score_range",
         ),
     )
