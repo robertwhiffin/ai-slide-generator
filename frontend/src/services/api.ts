@@ -1087,4 +1087,60 @@ export const api = {
 
     return response.json();
   },
+
+  // --- Feedback ---
+
+  async feedbackChat(messages: Array<{ role: string; content: string }>): Promise<{ content: string; summary_ready: boolean }> {
+    const response = await fetch(`${API_BASE_URL}/api/feedback/chat`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ messages }),
+    });
+
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({}));
+      throw new ApiError(response.status, error.detail || 'Failed to send feedback message');
+    }
+
+    return response.json();
+  },
+
+  async submitFeedback(data: {
+    category: string;
+    summary: string;
+    severity: string;
+    raw_conversation: Array<{ role: string; content: string }>;
+  }): Promise<{ id: number; message: string }> {
+    const response = await fetch(`${API_BASE_URL}/api/feedback/submit`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(data),
+    });
+
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({}));
+      throw new ApiError(response.status, error.detail || 'Failed to submit feedback');
+    }
+
+    return response.json();
+  },
+
+  async submitSurvey(data: {
+    star_rating: number;
+    time_saved_minutes?: number;
+    nps_score?: number;
+  }): Promise<{ id: number; message: string }> {
+    const response = await fetch(`${API_BASE_URL}/api/feedback/survey`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(data),
+    });
+
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({}));
+      throw new ApiError(response.status, error.detail || 'Failed to submit survey');
+    }
+
+    return response.json();
+  },
 };
