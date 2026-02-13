@@ -17,7 +17,7 @@ How the React/Vite frontend is structured, how it communicates with backend APIs
 ```
 ┌──────────────────────────────────────────────────────────────────────┐
 │ Header: title + session metadata + navigation                         │
-│ [New Session] [History] [Profiles] [Deck Prompts] [Slide Styles] [Help] │
+│ [New Session] [My Sessions] [Profiles] [Deck Prompts] [Slide Styles] [Help] │
 ├──────────────┬──────────────┬─────────────────────────────────────────┤
 │ Chat Panel   │ Selection    │ Slide Panel                             │
 │ (32% width)  │ Ribbon       │ (flex-1)                                │
@@ -31,7 +31,7 @@ Each page has a dedicated URL. Navigation buttons use `useNavigate()` to change 
 
 - **New Session** (`/sessions/:id/edit`): The primary slide generation interface
 - **Viewer** (`/sessions/:id/view`): Read-only presentation viewer (chat disabled, editing disabled)
-- **History** (`/history`): Session list and restore functionality
+- **My Sessions** (`/history`): Session list and restore functionality
 - **Profiles** (`/profiles`): Configuration profile management
 - **Deck Prompts** (`/deck-prompts`): Presentation template library management
 - **Slide Styles** (`/slide-styles`): Visual style library management (typography, colors, layout)

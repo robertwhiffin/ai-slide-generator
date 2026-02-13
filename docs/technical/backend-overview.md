@@ -44,7 +44,7 @@ Frontend fetch -> FastAPI router ->   │ ChatService (singleton)│
 | Method | Path | Purpose | Backend handler |
 | --- | --- | --- | --- |
 | `POST` | `/api/sessions` | Create new session | `routes/sessions.create_session` |
-| `GET` | `/api/sessions` | List sessions | `routes/sessions.list_sessions` |
+| `GET` | `/api/sessions` | List sessions (filtered by authenticated user via `created_by`) | `routes/sessions.list_sessions` |
 | `GET` | `/api/sessions/{id}` | Get session details | `routes/sessions.get_session` |
 | `PATCH` | `/api/sessions/{id}` | Rename session | `routes/sessions.update_session` |
 | `DELETE` | `/api/sessions/{id}` | Delete session | `routes/sessions.delete_session` |
@@ -164,6 +164,7 @@ Mutation endpoints return **409 Conflict** if the session is already processing 
 | Module | Responsibility | Key Details |
 | --- | --- | --- |
 | `src/api/main.py` | App assembly | Registers routers, CORS, health root. |
+| `src/core/user_context.py` | Request-scoped user identity | Provides authenticated username via `ContextVar`; middleware in `main.py` sets it per request. |
 | `src/api/routes/chat.py` | `/api/chat`, `/api/chat/stream`, `/api/chat/async`, `/api/chat/poll` | Session locking, SSE streaming, polling endpoints. |
 | `src/api/services/job_queue.py` | Async chat processing | In-memory job queue with background worker for polling mode. |
 | `src/api/routes/sessions.py` | Session CRUD endpoints | Create, list, get (with messages), rename, delete. |
