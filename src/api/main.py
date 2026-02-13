@@ -16,7 +16,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from src.api.routes import chat, images, slides, export, sessions, verification, version
+from src.api.routes import chat, export, feedback, images, sessions, slides, verification, version
 from src.core.databricks_client import create_user_client, set_user_client
 from src.core.database import (
     init_db,
@@ -83,7 +83,6 @@ async def lifespan(app: FastAPI):
             raise
     else:
         logger.info("Pytest detected: skipping database initialization (tests manage their own)")
-
 
     if IS_PRODUCTION:
         logger.info("Production mode: serving frontend from package assets")
@@ -194,11 +193,10 @@ def _mount_frontend(app: FastAPI, frontend_dist: Path) -> None:
 
         index_path = frontend_dist / "index.html"
         if not index_path.exists():
-            raise HTTPException(
-                status_code=500, detail="Frontend not bundled in package"
-            )
+            raise HTTPException(status_code=500, detail="Frontend not bundled in package")
 
         return FileResponse(str(index_path))
+
 
 # Configure CORS only for development
 if not IS_PRODUCTION:
@@ -246,9 +244,7 @@ async def user_auth_middleware(request: Request, call_next):
             },
         )
         if is_sp_token:
-            logger.warning(
-                "OBO auth: token appears to be service principal ID, not user token!"
-            )
+            logger.warning("OBO auth: token appears to be service principal ID, not user token!")
         try:
             user_client = create_user_client(token)
             set_user_client(user_client)
@@ -267,6 +263,7 @@ async def user_auth_middleware(request: Request, call_next):
 
 # Include API routers
 app.include_router(chat.router)
+app.include_router(feedback.router)
 app.include_router(images.router)
 app.include_router(slides.router)
 app.include_router(export.router)
@@ -299,7 +296,7 @@ async def get_current_user():
 
     Uses user-scoped client when running as Databricks App (user's identity),
     falls back to system client in local development (service principal).
-    
+
     In test/development mode, returns a default user to avoid network timeouts.
     """
     # Skip Databricks call in test/dev to avoid network timeout
@@ -308,9 +305,10 @@ async def get_current_user():
             "username": "user",
             "display_name": "User",
         }
-    
+
     try:
         from src.core.databricks_client import get_user_client
+
         client = get_user_client()
         user = client.current_user.me()
         return {
@@ -338,4 +336,3 @@ if not IS_PRODUCTION:
             "status": "operational",
             "message": "Frontend should be running on http://localhost:3000",
         }
-
