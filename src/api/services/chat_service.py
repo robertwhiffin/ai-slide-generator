@@ -1151,7 +1151,27 @@ class ChatService:
         # Substitute image placeholders before sending to client
         slide_deck_dict, raw_html = self._substitute_images_for_response(slide_deck_dict, raw_html)
 
+        # Yield final complete event FIRST so the user sees slides immediately
+        yield StreamEvent(
+            type=StreamEventType.COMPLETE,
+            slides=slide_deck_dict,
+            raw_html=raw_html,
+            replacement_info=_sanitize_replacement_info(replacement_info),
+            metadata=result.get("metadata"),
+            experiment_url=experiment_url or result.get("experiment_url"),
+        )
+
+        logger.info(
+            "Streaming message completed",
+            extra={
+                "session_id": session_id,
+                "has_slide_deck": slide_deck_dict is not None,
+                "had_conflict_note": conflict_note is not None,
+            },
+        )
+
         # Smart session naming: generate a title from the first user message
+        # Runs AFTER COMPLETE so slide delivery is never delayed by this LLM call
         if is_first_message:
             try:
                 from databricks_langchain import ChatDatabricks
@@ -1183,25 +1203,6 @@ class ChatService:
                     extra={"session_id": session_id},
                     exc_info=True,
                 )
-
-        # Yield final complete event (sanitize replacement_info for JSON serialization)
-        yield StreamEvent(
-            type=StreamEventType.COMPLETE,
-            slides=slide_deck_dict,
-            raw_html=raw_html,
-            replacement_info=_sanitize_replacement_info(replacement_info),
-            metadata=result.get("metadata"),
-            experiment_url=experiment_url or result.get("experiment_url"),
-        )
-
-        logger.info(
-            "Streaming message completed",
-            extra={
-                "session_id": session_id,
-                "has_slide_deck": slide_deck_dict is not None,
-                "had_conflict_note": conflict_note is not None,
-            },
-        )
 
     def _ensure_agent_session(
         self, session_id: str, genie_conversation_id: Optional[str] = None
