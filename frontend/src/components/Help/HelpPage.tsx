@@ -1,14 +1,10 @@
 import React, { useState } from 'react';
-import { FiArrowLeft, FiMessageSquare, FiClock, FiSettings, FiInfo, FiShield, FiFileText, FiLayout, FiExternalLink } from 'react-icons/fi';
+import { FiMessageSquare, FiClock, FiSettings, FiInfo, FiShield, FiFileText, FiLayout, FiExternalLink } from 'react-icons/fi';
 import { FaGavel } from 'react-icons/fa';
 
 type HelpTab = 'overview' | 'generator' | 'history' | 'profiles' | 'deck_prompts' | 'slide_styles' | 'verification';
 
-interface HelpPageProps {
-  onBack: () => void;
-}
-
-export const HelpPage: React.FC<HelpPageProps> = ({ onBack }) => {
+export const HelpPage: React.FC = () => {
   const [activeTab, setActiveTab] = useState<HelpTab>('overview');
 
   const TabButton = ({ tab, label, icon: Icon }: { tab: HelpTab; label: string; icon: React.ElementType }) => (
@@ -36,16 +32,9 @@ export const HelpPage: React.FC<HelpPageProps> = ({ onBack }) => {
 
   return (
     <div className="max-w-4xl mx-auto">
-      {/* Header with back button */}
-      <div className="flex items-center justify-between mb-6">
+      {/* Header */}
+      <div className="mb-6">
         <h1 className="text-2xl font-bold text-gray-800">How to Use databricks tellr</h1>
-        <button
-          onClick={onBack}
-          className="flex items-center gap-2 px-4 py-2 text-sm text-gray-600 hover:text-gray-800 hover:bg-gray-100 rounded-lg transition-colors"
-        >
-          <FiArrowLeft size={16} />
-          Back
-        </button>
       </div>
 
       {/* Tab bar */}

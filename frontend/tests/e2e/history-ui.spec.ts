@@ -30,6 +30,12 @@ async function setupMocks(page: Page) {
     const url = request.url();
     const method = request.method();
 
+    // Handle session creation
+    if (method === 'POST') {
+      route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ session_id: 'mock', title: 'New', user_id: null, created_at: '2026-01-01T00:00:00Z' }) });
+      return;
+    }
+
     if (url.includes('limit=')) {
       // Sessions list
       route.fulfill({
@@ -119,6 +125,14 @@ async function setupMocks(page: Page) {
 async function setupEmptySessionsMock(page: Page) {
   // Override sessions to return empty list
   await page.route('http://127.0.0.1:8000/api/sessions**', (route, request) => {
+    const method = request.method();
+
+    // Handle session creation/deletion
+    if (method === 'POST' || method === 'DELETE') {
+      route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ session_id: 'mock', title: 'New', user_id: null, created_at: '2026-01-01T00:00:00Z' }) });
+      return;
+    }
+
     if (request.url().includes('limit=')) {
       route.fulfill({
         status: 200,
@@ -210,20 +224,6 @@ test.describe('SessionHistoryList', () => {
     expect(restoreButtons).toBeGreaterThan(0);
   });
 
-  test('shows Back to Generator button', async ({ page }) => {
-    await goToHistory(page);
-
-    await expect(page.getByRole('button', { name: /Back to Generator/i })).toBeVisible();
-  });
-
-  test('Back to Generator button navigates to Generator', async ({ page }) => {
-    await goToHistory(page);
-
-    await page.getByRole('button', { name: /Back to Generator/i }).click();
-
-    // Should navigate to Generator view
-    await expect(page.getByRole('heading', { name: 'Chat', level: 2 })).toBeVisible();
-  });
 });
 
 // ============================================
@@ -378,7 +378,15 @@ test.describe('SessionHistory Error State', () => {
   test('shows error message when API fails', async ({ page }) => {
     // Set up mocks but make sessions fail
     await setupMocks(page);
-    await page.route('http://127.0.0.1:8000/api/sessions**', (route) => {
+    await page.route('http://127.0.0.1:8000/api/sessions**', (route, request) => {
+      const method = request.method();
+
+      // Handle session creation/deletion
+      if (method === 'POST' || method === 'DELETE') {
+        route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ session_id: 'mock', title: 'New', user_id: null, created_at: '2026-01-01T00:00:00Z' }) });
+        return;
+      }
+
       route.fulfill({
         status: 500,
         contentType: 'application/json',

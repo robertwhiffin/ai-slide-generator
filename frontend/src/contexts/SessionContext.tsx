@@ -2,10 +2,6 @@ import React, { createContext, useContext, useState, useCallback } from 'react';
 import { api } from '../services/api';
 import type { SlideDeck } from '../types/slide';
 
-/**
- * Generate a local UUID for ephemeral sessions.
- * Sessions are only persisted to the database on first message.
- */
 function generateLocalSessionId(): string {
   return crypto.randomUUID();
 }
@@ -21,7 +17,7 @@ interface SessionContextType {
   experimentUrl: string | null;
   isInitializing: boolean;
   error: string | null;
-  createNewSession: () => void;
+  createNewSession: () => string;
   switchSession: (sessionId: string) => Promise<SessionRestoreResult>;
   renameSession: (title: string) => Promise<void>;
   setExperimentUrl: (url: string | null) => void;
@@ -30,13 +26,11 @@ interface SessionContextType {
 const SessionContext = createContext<SessionContextType | undefined>(undefined);
 
 export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  // Generate local session ID immediately - no API call needed
   const [sessionId, setSessionId] = useState<string | null>(() => generateLocalSessionId());
   const [sessionTitle, setSessionTitle] = useState<string | null>(null);
   const [experimentUrl, setExperimentUrl] = useState<string | null>(null);
   const [isInitializing, setIsInitializing] = useState(false);
   const [error, setError] = useState<string | null>(null);
-
   // Set the session ID in the API service on initial render
   React.useEffect(() => {
     if (sessionId) {
@@ -45,16 +39,17 @@ export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ child
   }, []);
 
   /**
-   * Create a new ephemeral session (local UUID only, no API call).
-   * The session will be persisted to DB on first message.
+   * Create a new local session (UUID + context state only).
+   * Callers are responsible for DB persistence via api.createSession().
    */
-  const createNewSession = useCallback(() => {
+  const createNewSession = useCallback((): string => {
     const newSessionId = generateLocalSessionId();
     setSessionId(newSessionId);
     setSessionTitle(null);
     setExperimentUrl(null);
     setError(null);
     api.setCurrentSessionId(newSessionId);
+    return newSessionId;
   }, []);
 
   /**
@@ -67,7 +62,7 @@ export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ child
     try {
       // Validate session exists and get its info
       const sessionInfo = await api.getSession(newSessionId);
-      
+
       // Get slide deck if it has one
       let slideDeck: SlideDeck | null = null;
       let rawHtml: string | null = null;

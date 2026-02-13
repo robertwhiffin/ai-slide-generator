@@ -46,8 +46,8 @@ export const SelectionProvider: React.FC<React.PropsWithChildren> = ({
   }, []);
 
   const clearSelection = useCallback(() => {
-    setSelectedIndices([]);
-    setSelectedSlides([]);
+    setSelectedIndices(prev => prev.length === 0 ? prev : []);
+    setSelectedSlides(prev => prev.length === 0 ? prev : []);
   }, []);
 
   const value = useMemo<SelectionContextValue>(

@@ -49,6 +49,7 @@ async def create_session(request: CreateSessionRequest = None):
         session_manager = get_session_manager()
         result = await asyncio.to_thread(
             session_manager.create_session,
+            session_id=request.session_id,
             user_id=request.user_id,
             title=request.title,
         )

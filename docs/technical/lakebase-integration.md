@@ -10,9 +10,10 @@ This document describes how the AI Slide Generator integrates with Databricks La
 |-----------|------|---------|
 | Lakebase Module | `src/core/lakebase.py` | Instance management, credentials, schema setup |
 | Database Module | `src/core/database.py` | SQLAlchemy engine, session management, auto-detection |
-| Deployment Config | `db_app_deployment/config.py` | `LakebaseConfig` dataclass |
-| Deployment Script | `db_app_deployment/deploy.py` | Orchestrates instance + app + schema creation |
-| App Config | `app.yaml` | Runtime environment variables |
+| Deployment Library | `packages/databricks-tellr/databricks_tellr/deploy.py` | Orchestrates instance + app + schema creation |
+| Local Deploy Script | `scripts/deploy_local.py` | Local development deployment using locally-built wheels |
+| App Entrypoint | `packages/databricks-tellr-app/databricks_tellr_app/run.py` | `init_database()`, `run_migrations()`, `main()` |
+| App Config Template | `packages/databricks-tellr/databricks_tellr/_templates/app.yaml.template` | Generated `app.yaml` with env var substitution |
 | Environment Config | `config/deployment.yaml` | Per-environment Lakebase settings |
 
 **Key Dependencies:**
@@ -157,7 +158,7 @@ OAuth tokens expire after 1 hour. To maintain continuous database connectivity, 
 
 ## Deployment Flow
 
-When deploying with `python -m db_app_deployment.deploy --create --env development`:
+When deploying with `scripts/deploy_local.sh create --env development --profile <profile>`:
 
 ```
 1. Load config from deployment.yaml
@@ -293,10 +294,12 @@ python scripts/init_database.py
 
 ## Extension Guidance
 
-- **Adding new tables**: Define in `src/database/models/`, they'll be created on next deployment
+- **Adding new tables**: Define in `src/database/models/`, they'll be created on next deployment via `init_db()` → `Base.metadata.create_all()`
+- **Adding columns to existing tables**: `create_all()` does **not** alter existing tables. Add an idempotent `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` statement to `run_migrations()` in `packages/databricks-tellr-app/databricks_tellr_app/run.py`. This runs on every app startup.
 - **Changing schema name**: Update `deployment.yaml` and redeploy (creates new schema)
 - **Scaling capacity**: Update `capacity` in deployment.yaml (CU_1 → CU_8)
 - **Multiple environments**: Each env gets its own instance (dev, staging, prod)
+- **App startup command**: Generated from `app.yaml.template` (not the local `app.yaml`). Update the template in `packages/databricks-tellr/databricks_tellr/_templates/` for deployment changes.
 
 ---
 

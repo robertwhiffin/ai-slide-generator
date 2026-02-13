@@ -71,6 +71,22 @@ class SessionManager:
             session_id = secrets.token_urlsafe(32)
 
         with get_db_session() as db:
+            # Idempotent: return existing session if ID already taken
+            existing = (
+                db.query(UserSession)
+                .filter(UserSession.session_id == session_id)
+                .first()
+            )
+            if existing:
+                return {
+                    "session_id": existing.session_id,
+                    "user_id": existing.user_id,
+                    "title": existing.title,
+                    "created_at": existing.created_at.isoformat(),
+                    "profile_id": existing.profile_id,
+                    "profile_name": existing.profile_name,
+                }
+
             session = UserSession(
                 session_id=session_id,
                 user_id=user_id,
