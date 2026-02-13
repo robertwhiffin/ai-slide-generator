@@ -1,4 +1,5 @@
 import React, { useState, useCallback, useRef, useEffect } from 'react';
+import { useParams, useNavigate } from 'react-router-dom';
 import type { SlideDeck } from '../../types/slide';
 import type { Message } from '../../types/message';
 import { ChatPanel, type ChatPanelHandle } from '../ChatPanel/ChatPanel';
@@ -17,15 +18,23 @@ import { SavePointDropdown, PreviewBanner, RevertConfirmModal, type SavePointVer
 import { useSession } from '../../contexts/SessionContext';
 import { useGeneration } from '../../contexts/GenerationContext';
 import { useProfiles } from '../../contexts/ProfileContext';
+import { useToast } from '../../contexts/ToastContext';
 import { useVersionCheck } from '../../hooks/useVersionCheck';
 import { api } from '../../services/api';
 
 type ViewMode = 'main' | 'profiles' | 'deck_prompts' | 'slide_styles' | 'images' | 'history' | 'help';
 
-export const AppLayout: React.FC = () => {
+interface AppLayoutProps {
+  initialView?: ViewMode;
+  viewOnly?: boolean;
+}
+
+export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', viewOnly = false }) => {
+  const { sessionId: urlSessionId } = useParams<{ sessionId?: string }>();
+  const navigate = useNavigate();
+  const { showToast } = useToast();
   const [slideDeck, setSlideDeck] = useState<SlideDeck | null>(null);
   const [rawHtml, setRawHtml] = useState<string | null>(null);
-  const [viewMode, setViewMode] = useState<ViewMode>('help');
   const [showSaveDialog, setShowSaveDialog] = useState(false);
   // Key to force remount ChatPanel when profile/session changes
   const [chatKey, setChatKey] = useState<number>(0);
@@ -49,6 +58,55 @@ export const AppLayout: React.FC = () => {
   // Pending save point - created after verification completes
   const [pendingSavePointDescription, setPendingSavePointDescription] = useState<string | null>(null);
 
+  // Loading state while validating session from URL
+  const [isLoadingSession, setIsLoadingSession] = useState(false);
+
+  // Load session from URL parameter when on a session route
+  // Skip if URL session ID matches current context (newly created session)
+  useEffect(() => {
+    if (!urlSessionId || initialView !== 'main') return;
+
+    // Newly created session — already in context, skip validation
+    if (urlSessionId === sessionId) {
+      return;
+    }
+
+    let cancelled = false;
+
+    const loadSession = async () => {
+      setIsLoadingSession(true);
+      try {
+        // Get session info to check profile
+        const sessionInfo = await api.getSession(urlSessionId);
+        if (cancelled) return;
+
+        // Auto-switch profile if needed
+        if (sessionInfo.profile_id && currentProfile && sessionInfo.profile_id !== currentProfile.id) {
+          await loadProfile(sessionInfo.profile_id);
+        }
+        if (cancelled) return;
+
+        // Load session data
+        const { slideDeck: restoredDeck, rawHtml: restoredRawHtml } = await switchSession(urlSessionId);
+        if (cancelled) return;
+
+        setSlideDeck(restoredDeck);
+        setRawHtml(restoredRawHtml);
+        setChatKey(prev => prev + 1);
+      } catch {
+        if (cancelled) return;
+        navigate('/help');
+        showToast('Session not found', 'error');
+      } finally {
+        if (!cancelled) setIsLoadingSession(false);
+      }
+    };
+
+    loadSession();
+
+    return () => { cancelled = true; };
+  }, [urlSessionId]); // eslint-disable-line react-hooks/exhaustive-deps
+
   // Handle navigation from ribbon to main slide panel
   const handleSlideNavigate = useCallback((index: number) => {
     setScrollTarget(prev => ({ index, key: (prev?.key ?? 0) + 1 }));
@@ -60,37 +118,14 @@ export const AppLayout: React.FC = () => {
   }, []);
 
   // Reset chat state and create new session when profile changes
-  const handleProfileChange = useCallback(() => {
+  const handleProfileChange = useCallback(async () => {
     setSlideDeck(null);
     setRawHtml(null);
     setChatKey(prev => prev + 1);
-    // Create new session for the new profile
-    createNewSession();
-  }, [createNewSession]);
-
-  // Handle restoring a session from history
-  // Auto-switches profile if the session belongs to a different profile
-  const handleSessionRestore = useCallback(async (restoredSessionId: string) => {
-    try {
-      // First, get the session info to check its profile
-      const sessionInfo = await api.getSession(restoredSessionId);
-      
-      // If session has a profile_id and it's different from current, switch profiles first
-      if (sessionInfo.profile_id && currentProfile && sessionInfo.profile_id !== currentProfile.id) {
-        console.log(`Session belongs to profile ${sessionInfo.profile_name}, switching from ${currentProfile.name}`);
-        await loadProfile(sessionInfo.profile_id);
-      }
-      
-      // Now restore the session
-      const { slideDeck: restoredDeck, rawHtml: restoredRawHtml } = await switchSession(restoredSessionId);
-      setSlideDeck(restoredDeck);
-      setRawHtml(restoredRawHtml);
-      setChatKey(prev => prev + 1);
-      setViewMode('main');
-    } catch (err) {
-      console.error('Failed to restore session:', err);
-    }
-  }, [switchSession, currentProfile, loadProfile]);
+    const newId = createNewSession();
+    await api.createSession({ sessionId: newId });
+    navigate(`/sessions/${newId}/edit`);
+  }, [createNewSession, navigate]);
 
   // Handle saving session with a custom name
   const handleSaveAs = useCallback(async (title: string) => {
@@ -104,7 +139,7 @@ export const AppLayout: React.FC = () => {
   }, [renameSession]);
 
   // Start a new session
-  const handleNewSession = useCallback(() => {
+  const handleNewSession = useCallback(async () => {
     setSlideDeck(null);
     setRawHtml(null);
     setChatKey(prev => prev + 1);
@@ -112,8 +147,10 @@ export const AppLayout: React.FC = () => {
     setCurrentVersion(null);
     setPreviewVersion(null);
     setPreviewDeck(null);
-    createNewSession();
-  }, [createNewSession]);
+    const newId = createNewSession();
+    await api.createSession({ sessionId: newId });
+    navigate(`/sessions/${newId}/edit`);
+  }, [createNewSession, navigate]);
 
   // Load versions when session or slideDeck changes
   useEffect(() => {
@@ -145,7 +182,7 @@ export const AppLayout: React.FC = () => {
       setPreviewVersion(versionNumber);
       setPreviewDeck(deck as SlideDeck);
       setPreviewDescription(description);
-      
+
       // Convert chat history to Message format for preview
       if (chat_history && Array.isArray(chat_history)) {
         const previewMsgs: Message[] = chat_history.map((msg: Record<string, unknown>) => ({
@@ -200,12 +237,12 @@ export const AppLayout: React.FC = () => {
       setPreviewMessages(null);
       setShowRevertModal(false);
       setRevertTargetVersion(null);
-      
+
       // Reload versions to reflect the changes
       const { versions: loadedVersions, current_version } = await api.listVersions(sessionId);
       setVersions(loadedVersions);
       setCurrentVersion(current_version);
-      
+
       // Force ChatPanel to remount and reload messages (which are now restored)
       setChatKey(prev => prev + 1);
     } catch (err) {
@@ -218,21 +255,21 @@ export const AppLayout: React.FC = () => {
   const handleVerificationComplete = useCallback(async (panelEditDescription?: string) => {
     // Use panel edit description if provided, otherwise use pending description from chat
     const description = panelEditDescription || pendingSavePointDescription;
-    
+
     if (!sessionId || !description) return;
 
     try {
       console.log(`[SavePoint] Creating save point after verification: "${description}"`);
       await api.createSavePoint(sessionId, description);
-      
+
       // Clear pending description
       setPendingSavePointDescription(null);
-      
+
       // Reload versions to show the new save point
       const { versions: loadedVersions, current_version } = await api.listVersions(sessionId);
       setVersions(loadedVersions);
       setCurrentVersion(current_version);
-      
+
       console.log(`[SavePoint] Created save point v${current_version}`);
     } catch (err) {
       console.error('Failed to create save point:', err);
@@ -243,7 +280,7 @@ export const AppLayout: React.FC = () => {
 
   // Determine which deck to display
   const displayDeck = previewVersion ? previewDeck : slideDeck;
-  
+
   // Version key for forcing re-render when switching save point versions
   // This prevents React from reusing DOM elements with identical slide_id keys
   const versionKey = previewVersion ? `preview-v${previewVersion}` : `current-v${currentVersion || 'live'}`;
@@ -281,10 +318,10 @@ export const AppLayout: React.FC = () => {
               )}
             </p>
           </div>
-          
+
           <div className="flex items-center gap-4">
-            {/* Session Actions */}
-            {viewMode === 'main' && (
+            {/* Session Actions (hidden in view-only mode) */}
+            {initialView === 'main' && !viewOnly && (
               <div className="flex items-center gap-2">
                 {/* Save Points Dropdown */}
                 {versions.length > 0 && (
@@ -321,26 +358,43 @@ export const AppLayout: React.FC = () => {
                 >
                   New
                 </button>
+                {urlSessionId && (
+                  <button
+                    onClick={async () => {
+                      const viewUrl = `${window.location.origin}/sessions/${urlSessionId}/view`;
+                      await navigator.clipboard.writeText(viewUrl);
+                      showToast('Link copied to clipboard', 'success');
+                    }}
+                    className="px-3 py-1.5 rounded text-sm transition-colors bg-blue-500 hover:bg-blue-700 text-blue-100"
+                    title="Copy shareable view link"
+                  >
+                    Share
+                  </button>
+                )}
               </div>
             )}
 
             {/* Navigation */}
             <nav className="flex gap-2 border-l border-blue-500 pl-4">
               <button
-                onClick={() => setViewMode('main')}
+                onClick={async () => {
+                  const newId = createNewSession();
+                  await api.createSession({ sessionId: newId });
+                  navigate(`/sessions/${newId}/edit`);
+                }}
                 className={`px-3 py-1.5 rounded text-sm transition-colors ${
-                  viewMode === 'main'
+                  initialView === 'main'
                     ? 'bg-blue-700 text-white'
                     : 'bg-blue-500 hover:bg-blue-700 text-blue-100'
                 }`}
               >
-                Generator
+                New Session
               </button>
               <button
-                onClick={() => setViewMode('history')}
+                onClick={() => navigate('/history')}
                 disabled={isGenerating}
                 className={`px-3 py-1.5 rounded text-sm transition-colors ${
-                  viewMode === 'history'
+                  initialView === 'history'
                     ? 'bg-blue-700 text-white'
                     : isGenerating
                     ? 'bg-blue-400 text-blue-200 cursor-not-allowed opacity-50'
@@ -351,10 +405,10 @@ export const AppLayout: React.FC = () => {
                 History
               </button>
               <button
-                onClick={() => setViewMode('profiles')}
+                onClick={() => navigate('/profiles')}
                 disabled={isGenerating}
                 className={`px-3 py-1.5 rounded text-sm transition-colors ${
-                  viewMode === 'profiles'
+                  initialView === 'profiles'
                     ? 'bg-blue-700 text-white'
                     : isGenerating
                     ? 'bg-blue-400 text-blue-200 cursor-not-allowed opacity-50'
@@ -365,10 +419,10 @@ export const AppLayout: React.FC = () => {
                 Profiles
               </button>
               <button
-                onClick={() => setViewMode('deck_prompts')}
+                onClick={() => navigate('/deck-prompts')}
                 disabled={isGenerating}
                 className={`px-3 py-1.5 rounded text-sm transition-colors ${
-                  viewMode === 'deck_prompts'
+                  initialView === 'deck_prompts'
                     ? 'bg-blue-700 text-white'
                     : isGenerating
                     ? 'bg-blue-400 text-blue-200 cursor-not-allowed opacity-50'
@@ -379,10 +433,10 @@ export const AppLayout: React.FC = () => {
                 Deck Prompts
               </button>
               <button
-                onClick={() => setViewMode('slide_styles')}
+                onClick={() => navigate('/slide-styles')}
                 disabled={isGenerating}
                 className={`px-3 py-1.5 rounded text-sm transition-colors ${
-                  viewMode === 'slide_styles'
+                  initialView === 'slide_styles'
                     ? 'bg-blue-700 text-white'
                     : isGenerating
                     ? 'bg-blue-400 text-blue-200 cursor-not-allowed opacity-50'
@@ -393,10 +447,10 @@ export const AppLayout: React.FC = () => {
                 Slide Styles
               </button>
               <button
-                onClick={() => setViewMode('images')}
+                onClick={() => navigate('/images')}
                 disabled={isGenerating}
                 className={`px-3 py-1.5 rounded text-sm transition-colors ${
-                  viewMode === 'images'
+                  initialView === 'images'
                     ? 'bg-blue-700 text-white'
                     : isGenerating
                     ? 'bg-blue-400 text-blue-200 cursor-not-allowed opacity-50'
@@ -407,10 +461,10 @@ export const AppLayout: React.FC = () => {
                 Images
               </button>
               <button
-                onClick={() => setViewMode('help')}
+                onClick={() => navigate('/help')}
                 disabled={isGenerating}
                 className={`px-3 py-1.5 rounded text-sm transition-colors ${
-                  viewMode === 'help'
+                  initialView === 'help'
                     ? 'bg-blue-700 text-white'
                     : isGenerating
                     ? 'bg-blue-400 text-blue-200 cursor-not-allowed opacity-50'
@@ -428,8 +482,8 @@ export const AppLayout: React.FC = () => {
             </nav>
 
             {/* Profile Selector */}
-            <ProfileSelector 
-              onManageClick={() => setViewMode('profiles')}
+            <ProfileSelector
+              onManageClick={() => navigate('/profiles')}
               onProfileChange={handleProfileChange}
               disabled={isGenerating}
             />
@@ -457,10 +511,10 @@ export const AppLayout: React.FC = () => {
       )}
 
       {/* Main Content */}
-      {viewMode === 'main' && (
+      {initialView === 'main' && (
         <div className="flex-1 flex overflow-hidden">
           {/* Chat Panel */}
-          <div className="w-[32%] min-w-[260px] border-r">
+          <div className="w-[32%] min-w-[260px] border-r" data-testid="chat-panel">
             <ChatPanel
               key={chatKey}
               ref={chatPanelRef}
@@ -473,7 +527,7 @@ export const AppLayout: React.FC = () => {
                   setPendingSavePointDescription(actionDescription);
                 }
               }}
-              disabled={!!previewVersion}
+              disabled={viewOnly || !!previewVersion || isLoadingSession}
               previewMessages={previewMessages}
             />
           </div>
@@ -482,14 +536,14 @@ export const AppLayout: React.FC = () => {
           <SelectionRibbon slideDeck={displayDeck} onSlideNavigate={handleSlideNavigate} versionKey={versionKey} />
 
           {/* Slide Panel */}
-          <div className="flex-1">
+          <div className="flex-1" data-testid="slide-panel">
             <SlidePanel
               slideDeck={displayDeck}
               rawHtml={rawHtml}
-              onSlideChange={previewVersion ? undefined : setSlideDeck}
+              onSlideChange={viewOnly || previewVersion ? undefined : setSlideDeck}
               scrollToSlide={scrollTarget}
-              onSendMessage={previewVersion ? undefined : handleSendMessage}
-              readOnly={!!previewVersion}
+              onSendMessage={viewOnly || previewVersion ? undefined : handleSendMessage}
+              readOnly={viewOnly || !!previewVersion}
               onVerificationComplete={handleVerificationComplete}
               versionKey={versionKey}
             />
@@ -497,18 +551,17 @@ export const AppLayout: React.FC = () => {
         </div>
       )}
 
-      {viewMode === 'history' && (
+      {initialView === 'history' && (
         <div className="flex-1 overflow-auto bg-gray-50">
           <div className="p-6">
             <SessionHistory
-              onSessionSelect={handleSessionRestore}
-              onBack={() => setViewMode('main')}
+              onSessionSelect={(id) => navigate(`/sessions/${id}/edit`)}
             />
           </div>
         </div>
       )}
 
-      {viewMode === 'profiles' && (
+      {initialView === 'profiles' && (
         <div className="flex-1 overflow-auto bg-gray-50">
           <div className="max-w-7xl mx-auto p-6">
             <ProfileList onProfileChange={handleProfileChange} />
@@ -516,7 +569,7 @@ export const AppLayout: React.FC = () => {
         </div>
       )}
 
-      {viewMode === 'deck_prompts' && (
+      {initialView === 'deck_prompts' && (
         <div className="flex-1 overflow-auto bg-gray-50">
           <div className="max-w-7xl mx-auto p-6">
             <DeckPromptList />
@@ -524,7 +577,7 @@ export const AppLayout: React.FC = () => {
         </div>
       )}
 
-      {viewMode === 'slide_styles' && (
+      {initialView === 'slide_styles' && (
         <div className="flex-1 overflow-auto bg-gray-50">
           <div className="max-w-7xl mx-auto p-6">
             <SlideStyleList />
@@ -532,7 +585,7 @@ export const AppLayout: React.FC = () => {
         </div>
       )}
 
-      {viewMode === 'images' && (
+      {initialView === 'images' && (
         <div className="flex-1 overflow-auto bg-gray-50">
           <div className="max-w-7xl mx-auto p-6">
             <ImageLibrary />
@@ -540,10 +593,10 @@ export const AppLayout: React.FC = () => {
         </div>
       )}
 
-      {viewMode === 'help' && (
+      {initialView === 'help' && (
         <div className="flex-1 overflow-auto bg-gray-50">
           <div className="p-6">
-            <HelpPage onBack={() => setViewMode('main')} />
+            <HelpPage />
           </div>
         </div>
       )}

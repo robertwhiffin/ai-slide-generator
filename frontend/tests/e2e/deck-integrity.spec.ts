@@ -102,6 +102,13 @@ async function setupMocks(page: Page) {
   // Mock sessions endpoints
   await page.route('http://127.0.0.1:8000/api/sessions**', (route, request) => {
     const url = request.url();
+    const method = request.method();
+
+    // Handle session creation/deletion
+    if (method === 'POST' || method === 'DELETE') {
+      route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ session_id: 'mock', title: 'New', user_id: null, created_at: '2026-01-01T00:00:00Z' }) });
+      return;
+    }
 
     if (url.includes('limit=')) {
       // Sessions list
@@ -166,7 +173,7 @@ async function setupMocks(page: Page) {
  */
 async function goToGenerator(page: Page) {
   await page.goto('/');
-  await page.getByRole('navigation').getByRole('button', { name: 'Generator' }).click();
+  await page.getByRole('navigation').getByRole('button', { name: 'New Session' }).click();
   // Wait for the Generator view to load (Chat heading appears)
   await expect(page.getByRole('heading', { name: 'Chat', level: 2 })).toBeVisible();
 }
@@ -216,7 +223,7 @@ test.describe('Deck Integrity - Navigation', () => {
     await page.goto('/');
 
     // Navigate to each view
-    const views = ['Generator', 'History', 'Profiles', 'Deck Prompts', 'Slide Styles', 'Help'];
+    const views = ['New Session', 'History', 'Profiles', 'Deck Prompts', 'Slide Styles', 'Help'];
 
     for (const view of views) {
       await page.getByRole('navigation').getByRole('button', { name: view }).click();

@@ -165,7 +165,7 @@ async function goToHistory(page: Page): Promise<void> {
 
 async function goToGenerator(page: Page): Promise<void> {
   await page.goto('/');
-  await page.getByRole('navigation').getByRole('button', { name: 'Generator' }).click();
+  await page.getByRole('navigation').getByRole('button', { name: 'New Session' }).click();
   await expect(page.getByRole('heading', { name: 'Chat', level: 2 })).toBeVisible();
 }
 
@@ -496,23 +496,14 @@ test.describe('Session-Profile Association', () => {
 // ============================================
 
 test.describe('Session History Navigation', () => {
-  test('Back to Generator button works', async ({ page }) => {
-    await goToHistory(page);
-
-    await page.getByRole('button', { name: /Back to Generator/i }).click();
-
-    // Should be on Generator page
-    await expect(page.getByRole('heading', { name: 'Chat', level: 2 })).toBeVisible();
-  });
-
   test('can navigate back to History after leaving', async ({ page }) => {
     await goToHistory(page);
 
-    // Go to Generator
-    await page.getByRole('button', { name: /Back to Generator/i }).click();
-    await expect(page.getByRole('heading', { name: 'Chat', level: 2 })).toBeVisible();
+    // Navigate away from History to another page
+    await page.getByRole('navigation').getByRole('button', { name: 'Help' }).click();
+    await expect(page.getByRole('heading', { name: /how to use/i })).toBeVisible();
 
-    // Go back to History via nav
+    // Navigate back to History via nav
     await page.getByRole('navigation').getByRole('button', { name: 'History' }).click();
     await expect(page.getByRole('heading', { name: 'Session History' })).toBeVisible();
   });

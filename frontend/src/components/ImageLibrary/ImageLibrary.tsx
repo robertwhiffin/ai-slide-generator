@@ -135,7 +135,7 @@ export const ImageLibrary: React.FC<ImageLibraryProps> = ({
   };
 
   return (
-    <div className="space-y-4">
+    <div className="space-y-4" data-testid="image-library">
       <div className="flex items-center justify-between">
         <h2 className="text-xl font-semibold text-gray-900">Image Library</h2>
         <span className="text-sm text-gray-500">{images.length} image{images.length !== 1 ? 's' : ''}</span>
