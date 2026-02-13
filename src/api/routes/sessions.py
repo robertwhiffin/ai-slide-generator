@@ -13,6 +13,8 @@ from typing import List, Optional
 
 from fastapi import APIRouter, HTTPException, Query
 
+from pydantic import BaseModel, Field
+
 from src.api.schemas.requests import CreateSessionRequest
 from src.api.services.session_manager import (
     SessionNotFoundError,
@@ -250,6 +252,48 @@ async def get_session_messages(
         raise HTTPException(
             status_code=500,
             detail=f"Failed to get messages: {str(e)}",
+        ) from e
+
+
+class AddMessageRequest(BaseModel):
+    """Request model for adding a message to a session."""
+
+    role: str = Field(default="user", description="Message role (user, assistant, system)")
+    content: str = Field(..., description="Message content")
+
+
+@router.post("/{session_id}/messages")
+async def add_message(session_id: str, request: AddMessageRequest):
+    """Add a message to a session.
+
+    Args:
+        session_id: Session to add message to
+        request: Message role and content
+
+    Returns:
+        Created message info
+    """
+    try:
+        session_manager = get_session_manager()
+        result = await asyncio.to_thread(
+            session_manager.add_message,
+            session_id=session_id,
+            role=request.role,
+            content=request.content,
+        )
+
+        return result
+
+    except SessionNotFoundError:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Session not found: {session_id}",
+        )
+    except Exception as e:
+        logger.error(f"Failed to add message: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to add message: {str(e)}",
         ) from e
 
 

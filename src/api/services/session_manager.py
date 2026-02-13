@@ -154,7 +154,7 @@ class SessionManager:
             List of session info dictionaries
         """
         with get_db_session() as db:
-            query = db.query(UserSession)
+            query = db.query(UserSession).filter(UserSession.messages.any())
 
             if user_id:
                 query = query.filter(UserSession.user_id == user_id)

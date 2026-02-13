@@ -52,7 +52,7 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(({
     hasSelection,
     clearSelection,
   } = useSelection();
-  const { sessionId, isInitializing, error: sessionError, setExperimentUrl } = useSession();
+  const { sessionId, isInitializing, error: sessionError, setExperimentUrl, setSessionTitle } = useSession();
   const { setIsGenerating } = useGeneration();
 
   useKeyboardShortcuts();
@@ -208,6 +208,12 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(({
                 tool_call_id: event.tool_name,
               },
             ]);
+          }
+          break;
+
+        case 'session_title':
+          if (event.session_title) {
+            setSessionTitle(event.session_title);
           }
           break;
 
