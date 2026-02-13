@@ -2,6 +2,7 @@
 
 import pytest
 from sqlalchemy import create_engine
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import sessionmaker
 
 from src.core.database import Base
@@ -54,6 +55,36 @@ class TestFeedbackConversation:
 
         assert FeedbackConversation.__tablename__ == "feedback_conversations"
 
+    def test_feedback_invalid_category_rejected(self, db_session):
+        """Insert with category='Invalid' should raise IntegrityError."""
+        from src.database.models.feedback import FeedbackConversation
+
+        feedback = FeedbackConversation(
+            category="Invalid",
+            summary="Test summary",
+            severity="High",
+            raw_conversation=[{"role": "user", "content": "test"}],
+        )
+        db_session.add(feedback)
+        with pytest.raises(IntegrityError):
+            db_session.commit()
+        db_session.rollback()
+
+    def test_feedback_invalid_severity_rejected(self, db_session):
+        """Insert with severity='Critical' should raise IntegrityError."""
+        from src.database.models.feedback import FeedbackConversation
+
+        feedback = FeedbackConversation(
+            category="Bug Report",
+            summary="Test summary",
+            severity="Critical",
+            raw_conversation=[{"role": "user", "content": "test"}],
+        )
+        db_session.add(feedback)
+        with pytest.raises(IntegrityError):
+            db_session.commit()
+        db_session.rollback()
+
 
 class TestSurveyResponse:
     """Tests for SurveyResponse model."""
@@ -96,3 +127,33 @@ class TestSurveyResponse:
         from src.database.models.feedback import SurveyResponse
 
         assert SurveyResponse.__tablename__ == "survey_responses"
+
+    def test_survey_star_rating_too_high(self, db_session):
+        """Insert with star_rating=6 should raise IntegrityError."""
+        from src.database.models.feedback import SurveyResponse
+
+        survey = SurveyResponse(star_rating=6)
+        db_session.add(survey)
+        with pytest.raises(IntegrityError):
+            db_session.commit()
+        db_session.rollback()
+
+    def test_survey_star_rating_too_low(self, db_session):
+        """Insert with star_rating=0 should raise IntegrityError."""
+        from src.database.models.feedback import SurveyResponse
+
+        survey = SurveyResponse(star_rating=0)
+        db_session.add(survey)
+        with pytest.raises(IntegrityError):
+            db_session.commit()
+        db_session.rollback()
+
+    def test_survey_invalid_nps_score(self, db_session):
+        """Insert with nps_score=11 should raise IntegrityError."""
+        from src.database.models.feedback import SurveyResponse
+
+        survey = SurveyResponse(star_rating=3, nps_score=11)
+        db_session.add(survey)
+        with pytest.raises(IntegrityError):
+            db_session.commit()
+        db_session.rollback()
