@@ -20,6 +20,7 @@ from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 from src.api.schemas.streaming import StreamEvent, StreamEventType
 from src.api.services.session_manager import SessionNotFoundError, get_session_manager
+from src.api.services.session_naming import generate_session_title
 from src.core.databricks_client import (
     get_current_username,
     get_service_principal_folder,
@@ -629,6 +630,9 @@ class ChatService:
                 extra={"session_id": session_id, "profile_id": profile_id},
             )
 
+        # Capture first-message flag BEFORE add_message increments the count
+        is_first_message = db_session.get("message_count", 0) == 0
+
         # Persist user message to database FIRST (only if not already done by async endpoint)
         if not request_id:
             user_msg = session_manager.add_message(
@@ -1146,6 +1150,39 @@ class ChatService:
 
         # Substitute image placeholders before sending to client
         slide_deck_dict, raw_html = self._substitute_images_for_response(slide_deck_dict, raw_html)
+
+        # Smart session naming: generate a title from the first user message
+        if is_first_message:
+            try:
+                from databricks_langchain import ChatDatabricks
+                from src.core.databricks_client import get_user_client
+
+                naming_model = ChatDatabricks(
+                    endpoint=settings.llm.endpoint,
+                    max_tokens=50,
+                    temperature=0.3,
+                    workspace_client=get_user_client(),
+                )
+                generated_title = generate_session_title(message, naming_model)
+                if generated_title:
+                    session_manager.rename_session(session_id, generated_title)
+                    yield StreamEvent(
+                        type=StreamEventType.SESSION_TITLE,
+                        session_title=generated_title,
+                    )
+                    logger.info(
+                        "Auto-named session from first message",
+                        extra={
+                            "session_id": session_id,
+                            "generated_title": generated_title,
+                        },
+                    )
+            except Exception:
+                logger.warning(
+                    "Failed to auto-name session",
+                    extra={"session_id": session_id},
+                    exc_info=True,
+                )
 
         # Yield final complete event (sanitize replacement_info for JSON serialization)
         yield StreamEvent(

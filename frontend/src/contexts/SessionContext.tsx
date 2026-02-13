@@ -20,6 +20,7 @@ interface SessionContextType {
   createNewSession: () => string;
   switchSession: (sessionId: string) => Promise<SessionRestoreResult>;
   renameSession: (title: string) => Promise<void>;
+  setSessionTitle: (title: string | null) => void;
   setExperimentUrl: (url: string | null) => void;
 }
 
@@ -117,6 +118,7 @@ export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ child
         createNewSession,
         switchSession,
         renameSession,
+        setSessionTitle,
         setExperimentUrl,
       }}
     >
