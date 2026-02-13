@@ -54,15 +54,17 @@ class SessionManager:
         session_id: Optional[str] = None,
         profile_id: Optional[int] = None,
         profile_name: Optional[str] = None,
+        created_by: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Create a new session.
 
         Args:
-            user_id: Optional user identifier for session isolation
+            user_id: Legacy user identifier (kept for backward compat)
             title: Optional session title
             session_id: Optional session ID (if not provided, one is generated)
             profile_id: Optional profile ID this session belongs to
             profile_name: Optional profile name (cached for display)
+            created_by: Username of the authenticated user creating the session
 
         Returns:
             Dictionary with session info including session_id
@@ -81,6 +83,7 @@ class SessionManager:
                 return {
                     "session_id": existing.session_id,
                     "user_id": existing.user_id,
+                    "created_by": existing.created_by,
                     "title": existing.title,
                     "created_at": existing.created_at.isoformat(),
                     "profile_id": existing.profile_id,
@@ -90,6 +93,7 @@ class SessionManager:
             session = UserSession(
                 session_id=session_id,
                 user_id=user_id,
+                created_by=created_by,
                 title=title or f"Session {datetime.utcnow().strftime('%Y-%m-%d %H:%M')}",
                 profile_id=profile_id,
                 profile_name=profile_name,
@@ -99,12 +103,17 @@ class SessionManager:
 
             logger.info(
                 "Created new session",
-                extra={"session_id": session_id, "user_id": user_id, "profile_id": profile_id},
+                extra={
+                    "session_id": session_id,
+                    "created_by": created_by,
+                    "profile_id": profile_id,
+                },
             )
 
             return {
                 "session_id": session_id,
                 "user_id": user_id,
+                "created_by": created_by,
                 "title": session.title,
                 "created_at": session.created_at.isoformat(),
                 "profile_id": profile_id,
@@ -129,6 +138,7 @@ class SessionManager:
             return {
                 "session_id": session.session_id,
                 "user_id": session.user_id,
+                "created_by": session.created_by,
                 "title": session.title,
                 "created_at": session.created_at.isoformat(),
                 "last_activity": session.last_activity.isoformat(),
@@ -141,13 +151,15 @@ class SessionManager:
 
     def list_sessions(
         self,
+        created_by: Optional[str] = None,
         user_id: Optional[str] = None,
         limit: int = 50,
     ) -> List[Dict[str, Any]]:
-        """List sessions, optionally filtered by user.
+        """List sessions, optionally filtered by creator.
 
         Args:
-            user_id: Optional user filter
+            created_by: Filter sessions to those created by this username
+            user_id: Legacy user filter (kept for backward compat)
             limit: Maximum number of sessions to return
 
         Returns:
@@ -156,7 +168,9 @@ class SessionManager:
         with get_db_session() as db:
             query = db.query(UserSession)
 
-            if user_id:
+            if created_by:
+                query = query.filter(UserSession.created_by == created_by)
+            elif user_id:
                 query = query.filter(UserSession.user_id == user_id)
 
             sessions = (
@@ -169,6 +183,7 @@ class SessionManager:
                 {
                     "session_id": s.session_id,
                     "user_id": s.user_id,
+                    "created_by": s.created_by,
                     "title": s.title,
                     "created_at": s.created_at.isoformat(),
                     "last_activity": s.last_activity.isoformat(),
@@ -179,6 +194,25 @@ class SessionManager:
                 }
                 for s in sessions
             ]
+
+    def list_user_sessions(
+        self,
+        created_by: str,
+        limit: int = 50,
+    ) -> List[Dict[str, Any]]:
+        """List sessions belonging to a specific user.
+
+        Convenience wrapper around ``list_sessions`` that enforces a mandatory
+        ``created_by`` filter.
+
+        Args:
+            created_by: Username whose sessions to return (required)
+            limit: Maximum number of sessions to return
+
+        Returns:
+            List of session info dictionaries
+        """
+        return self.list_sessions(created_by=created_by, limit=limit)
 
     def delete_session(self, session_id: str) -> bool:
         """Delete a session and all associated data.

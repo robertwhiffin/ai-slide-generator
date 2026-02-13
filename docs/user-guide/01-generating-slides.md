@@ -84,7 +84,7 @@ Click the checkbox on individual slides to select them. Selected slides can be:
 
 ## Returning to a Previous Session
 
-To get back to a previous session, click **History** in the navigation bar. Any session with slides has a **Restore** button that loads it back into the editor.
+To get back to a previous session, click **My Sessions** in the navigation bar. Any session with slides has a **Restore** button that loads it back into the editor.
 
 ## Tips
 

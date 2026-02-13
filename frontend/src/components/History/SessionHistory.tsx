@@ -85,9 +85,9 @@ export const SessionHistory: React.FC<SessionHistoryProps> = ({
   return (
     <div className="max-w-6xl mx-auto">
       <div className="mb-6">
-        <h2 className="text-2xl font-bold text-gray-900">Session History</h2>
+        <h2 className="text-2xl font-bold text-gray-900">My Sessions</h2>
         <p className="text-sm text-gray-500 mt-1">
-          {sessions.length} session{sessions.length !== 1 ? 's' : ''} saved
+          {sessions.length} session{sessions.length !== 1 ? 's' : ''}
         </p>
       </div>
 
