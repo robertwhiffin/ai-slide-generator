@@ -58,8 +58,17 @@ class HtmlToGoogleSlidesConverter:
         slides: List[str],
         title: str = "Presentation",
         chart_images_per_slide: Optional[List[Dict[str, str]]] = None,
+        progress_callback: Optional[callable] = None,
     ) -> Dict[str, str]:
-        """Convert HTML slides to a Google Slides presentation."""
+        """Convert HTML slides to a Google Slides presentation.
+
+        Args:
+            slides: HTML strings for each slide.
+            title: Presentation title.
+            chart_images_per_slide: Chart images keyed by canvas ID, per slide.
+            progress_callback: Optional ``(current, total, status)`` callback
+                invoked after each slide is processed.
+        """
         total = len(slides)
         print(f"[GSLIDES_CONVERTER] Converting {total} slides to Google Slides "
               f"– total HTML size: {sum(len(h) for h in slides)}")
@@ -113,6 +122,12 @@ class HtmlToGoogleSlidesConverter:
                 slides_service, drive_service, pres_id, page_id,
                 html_str, i, chart_imgs,
             )
+
+            if progress_callback:
+                try:
+                    progress_callback(i, total, f"Processed slide {i}/{total}")
+                except Exception:
+                    pass  # Don't let callback errors break conversion
 
         url = f"https://docs.google.com/presentation/d/{pres_id}/edit"
         print(f"[GSLIDES_CONVERTER] Done: {url}")

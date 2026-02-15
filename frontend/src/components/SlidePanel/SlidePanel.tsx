@@ -23,6 +23,7 @@ import { useSelection } from '../../contexts/SelectionContext';
 import { useProfiles } from '../../contexts/ProfileContext';
 import { exportSlideDeckToPDF } from '../../services/pdf_client';
 import { useSession } from '../../contexts/SessionContext';
+import { useGoogleOAuthPopup } from '../../hooks/useGoogleOAuthPopup';
 
 const isDebugMode = (): boolean => {
   const urlParams = new URLSearchParams(window.location.search);
@@ -61,6 +62,7 @@ export const SlidePanel: React.FC<SlidePanelProps> = ({ slideDeck, rawHtml, onSl
   const { selectedIndices, setSelection, clearSelection } = useSelection();
   const { sessionId } = useSession();
   const { currentProfile } = useProfiles();
+  const { openOAuthPopup } = useGoogleOAuthPopup();
   const slideRefs = useRef<Map<number, HTMLDivElement>>(new Map());
   
   // Auto-verification state
@@ -296,30 +298,8 @@ export const SlidePanel: React.FC<SlidePanelProps> = ({ slideDeck, rawHtml, onSl
       if (!authorized) {
         // Open OAuth popup
         setExportProgress({ current: 0, total: slideDeck.slides.length, status: 'Waiting for Google authorization...' });
-        const { url } = await api.getGoogleSlidesAuthUrl(profileId);
 
-        const authResult = await new Promise<boolean>((resolve) => {
-          const popup = window.open(url, 'google-slides-auth', 'width=600,height=700,popup=yes');
-
-          const handleMessage = (event: MessageEvent) => {
-            if (event.data?.type === 'google-slides-auth') {
-              window.removeEventListener('message', handleMessage);
-              resolve(event.data.success === true);
-            }
-          };
-          window.addEventListener('message', handleMessage);
-
-          // Fallback: poll for popup closure
-          const pollTimer = setInterval(() => {
-            if (popup?.closed) {
-              clearInterval(pollTimer);
-              window.removeEventListener('message', handleMessage);
-              // Check auth status after popup closes
-              api.checkGoogleSlidesAuth(profileId).then(({ authorized: ok }) => resolve(ok));
-            }
-          }, 1000);
-        });
-
+        const authResult = await openOAuthPopup(profileId);
         if (!authResult) {
           alert('Google authorization was not completed. Please try again.');
           return;
