@@ -19,7 +19,10 @@ Common issues and solutions for the AI Slide Generator.
 
 **Problem:** Application can't find environment configuration.
 
-**Solution:**
+**Solution A — Use UI authentication (no `.env` needed):**
+Open http://localhost:3000, enter your workspace URL in the welcome screen, and sign in via browser. Configuration is saved to `~/.tellr/config.yaml` automatically.
+
+**Solution B — Create `.env` file:**
 ```bash
 # Copy template and edit
 cp .env.example .env

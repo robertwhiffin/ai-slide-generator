@@ -44,7 +44,45 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
   const { sessionId, sessionTitle, experimentUrl, createNewSession, switchSession, renameSession } = useSession();
   const { isGenerating } = useGeneration();
   const { currentProfile, loadProfile } = useProfiles();
-  const { updateAvailable, latestVersion, updateType, dismissed, dismiss } = useVersionCheck();
+  const { updateAvailable, installedVersion, latestVersion, updateType, dismissed, dismiss } = useVersionCheck();
+
+  // Local/Homebrew version check (only when PyPI version is unknown, i.e. not a pip install)
+  const [localUpdateAvailable, setLocalUpdateAvailable] = useState(false);
+  const [localLatestVersion, setLocalLatestVersion] = useState<string | null>(null);
+  const [localUpdateCommand, setLocalUpdateCommand] = useState('brew upgrade tellr');
+  const [localDismissed, setLocalDismissed] = useState(() => {
+    return sessionStorage.getItem('local_version_check_dismissed') === 'true';
+  });
+
+  const dismissLocal = useCallback(() => {
+    setLocalDismissed(true);
+    sessionStorage.setItem('local_version_check_dismissed', 'true');
+  }, []);
+
+  useEffect(() => {
+    // Only check local version if PyPI version is unknown (indicates local/Homebrew install)
+    if (installedVersion !== 'unknown') return;
+
+    const checkLocalVersion = async () => {
+      try {
+        const response = await fetch('/api/version/local-check');
+        if (!response.ok) return;
+        const data = await response.json();
+        if (data.update_available) {
+          setLocalUpdateAvailable(true);
+          setLocalLatestVersion(data.latest_version);
+          if (data.update_command) {
+            setLocalUpdateCommand(data.update_command);
+          }
+        }
+      } catch (err) {
+        // Fail silently - version check is non-critical
+        console.warn('Local version check failed:', err);
+      }
+    };
+
+    checkLocalVersion();
+  }, [installedVersion]);
 
   // Save Points / Versioning state
   const [versions, setVersions] = useState<SavePointVersion[]>([]);
@@ -491,12 +529,22 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
         </div>
       </header>
 
-      {/* Update Banner */}
+      {/* Update Banner (PyPI - Databricks App deployments) */}
       {updateAvailable && !dismissed && latestVersion && updateType && (
         <UpdateBanner
           latestVersion={latestVersion}
           updateType={updateType}
           onDismiss={dismiss}
+        />
+      )}
+
+      {/* Update Banner (Local/Homebrew installations) */}
+      {localUpdateAvailable && !localDismissed && localLatestVersion && (
+        <UpdateBanner
+          latestVersion={localLatestVersion}
+          updateType="patch"
+          onDismiss={dismissLocal}
+          customMessage={`A new version (v${localLatestVersion}) is available. Run \`${localUpdateCommand}\` in your terminal to update.`}
         />
       )}
 

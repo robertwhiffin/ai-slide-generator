@@ -14,9 +14,9 @@ from pydantic import BaseModel, field_validator
 
 from src.core.databricks_client import (
     get_tellr_config,
-    save_tellr_config,
     is_tellr_configured,
     reset_client,
+    save_tellr_config,
 )
 
 logger = logging.getLogger(__name__)
@@ -32,18 +32,18 @@ class SetupStatusResponse(BaseModel):
 class ConfigureWorkspaceRequest(BaseModel):
     """Request to configure workspace URL."""
     host: str
-    
+
     @field_validator("host")
     @classmethod
     def validate_host(cls, v: str) -> str:
         """Validate and normalize the workspace URL."""
         # Remove trailing slashes
         v = v.rstrip("/")
-        
+
         # Add https:// if not present
         if not v.startswith("http://") and not v.startswith("https://"):
             v = f"https://{v}"
-        
+
         # Validate it looks like a Databricks URL
         # Common patterns: *.cloud.databricks.com, *.azuredatabricks.net, etc.
         databricks_patterns = [
@@ -53,14 +53,14 @@ class ConfigureWorkspaceRequest(BaseModel):
             r"https://[\w\-]+\.databricks\.com",
             r"https://[\w\-\.]+\.databricks\.com",
         ]
-        
+
         is_valid = any(re.match(pattern, v) for pattern in databricks_patterns)
         if not is_valid:
             raise ValueError(
                 "Invalid Databricks workspace URL. "
                 "Expected format: https://your-workspace.cloud.databricks.com"
             )
-        
+
         return v
 
 
@@ -75,23 +75,23 @@ class ConfigureWorkspaceResponse(BaseModel):
 async def get_setup_status():
     """
     Check if the app has been configured with a Databricks workspace.
-    
+
     Returns configured=True if ~/.tellr/config.yaml exists with a valid host,
     or if DATABRICKS_HOST environment variable is set.
     """
     import os
-    
+
     # Check tellr config file first
     if is_tellr_configured():
         config = get_tellr_config()
         host = config.get("databricks", {}).get("host") if config else None
         return SetupStatusResponse(configured=True, host=host)
-    
+
     # Fall back to environment variable
     env_host = os.getenv("DATABRICKS_HOST")
     if env_host:
         return SetupStatusResponse(configured=True, host=env_host)
-    
+
     return SetupStatusResponse(configured=False, host=None)
 
 
@@ -99,7 +99,7 @@ async def get_setup_status():
 async def configure_workspace(request: ConfigureWorkspaceRequest):
     """
     Configure the Databricks workspace URL.
-    
+
     Saves the workspace URL to ~/.tellr/config.yaml with OAuth browser
     authentication enabled. On the next API call that requires Databricks
     access, the browser will open for SSO login.
@@ -107,18 +107,18 @@ async def configure_workspace(request: ConfigureWorkspaceRequest):
     try:
         # Save the configuration
         save_tellr_config(host=request.host, auth_type="external-browser")
-        
+
         # Reset the client so it picks up the new config
         reset_client()
-        
+
         logger.info(f"Workspace configured: {request.host}")
-        
+
         return ConfigureWorkspaceResponse(
             success=True,
             message="Workspace configured successfully. SSO login will be triggered on first use.",
             host=request.host,
         )
-        
+
     except Exception as e:
         logger.error(f"Failed to configure workspace: {e}")
         raise HTTPException(
@@ -131,16 +131,16 @@ async def configure_workspace(request: ConfigureWorkspaceRequest):
 async def test_connection():
     """
     Test the Databricks connection after configuration.
-    
+
     This will trigger the OAuth browser flow if using external-browser auth.
     Returns user info on success.
     """
     try:
         from src.core.databricks_client import get_system_client
-        
+
         client = get_system_client(force_new=True)
         user = client.current_user.me()
-        
+
         return {
             "success": True,
             "message": "Connection successful",
@@ -149,7 +149,7 @@ async def test_connection():
                 "display_name": user.display_name or user.user_name,
             }
         }
-        
+
     except Exception as e:
         logger.error(f"Connection test failed: {e}")
         raise HTTPException(
