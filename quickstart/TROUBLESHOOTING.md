@@ -172,6 +172,19 @@ DATABRICKS_HOST=http://your-workspace.cloud.databricks.com
    - No spaces or quotes
    - Full token copied
 
+### Want to switch workspace or re-authenticate
+
+**Problem:** You want to connect to a different Databricks workspace or re-do the SSO login.
+
+**Solution:**
+```bash
+# Remove saved config and restart — the welcome screen will appear again
+rm ~/.tellr/config.yaml
+./start_app.sh
+```
+
+This only affects the UI authentication. If you use a `.env` file, edit that instead.
+
 ### "Genie space not found"
 
 **Problem:** Configured Genie space doesn't exist or you don't have access.
