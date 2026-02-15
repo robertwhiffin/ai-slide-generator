@@ -1,12 +1,14 @@
-"""Local/Homebrew version check endpoint.
+"""Local version check endpoint.
 
 Checks GitHub releases for newer versions of the ai-slide-generator repo.
 This is separate from the PyPI version check (version.py) which serves
-Databricks App deployments. This endpoint serves local/Homebrew installations.
+Databricks App deployments. This endpoint serves local installations
+(both Homebrew and git-clone).
 """
 
 import logging
 import time
+from pathlib import Path
 from typing import Optional
 
 import httpx
@@ -35,7 +37,7 @@ class LocalVersionCheckResponse(BaseModel):
     installed_version: str
     latest_version: Optional[str] = None
     update_available: bool = False
-    update_command: str = "brew upgrade tellr"
+    update_command: str = "brew upgrade tellr"  # overridden at runtime
     release_url: Optional[str] = None
 
 
@@ -123,12 +125,33 @@ def _is_update_available(installed: str, latest: str) -> bool:
         return False
 
 
+def _is_homebrew_install() -> bool:
+    """Detect whether the app was installed via Homebrew.
+
+    Checks for the Homebrew Cellar path which only exists for
+    Homebrew-managed installations.
+    """
+    homebrew_paths = [
+        Path("/opt/homebrew/Cellar/tellr"),   # Apple Silicon
+        Path("/usr/local/Cellar/tellr"),       # Intel Mac
+    ]
+    return any(p.exists() for p in homebrew_paths)
+
+
+def _get_update_command() -> str:
+    """Return the appropriate update command based on install method."""
+    if _is_homebrew_install():
+        return "brew upgrade tellr"
+    return "git pull && ./start_app.sh"
+
+
 @router.get("/local-check", response_model=LocalVersionCheckResponse)
 async def check_local_version() -> LocalVersionCheckResponse:
-    """Check for available updates for local/Homebrew installations.
+    """Check for available updates for local installations.
 
     Compares the locally running version against the latest GitHub release.
-    Returns update info with Homebrew-specific upgrade instructions.
+    Returns update info with the appropriate upgrade command based on
+    whether the app was installed via Homebrew or git clone.
     """
     installed = _get_local_version()
     release = _get_latest_github_release()
@@ -136,6 +159,7 @@ async def check_local_version() -> LocalVersionCheckResponse:
     latest_version = None
     update_available = False
     release_url = None
+    update_command = _get_update_command()
 
     if release:
         tag = release.get("tag_name", "")
@@ -149,6 +173,6 @@ async def check_local_version() -> LocalVersionCheckResponse:
         installed_version=installed,
         latest_version=latest_version,
         update_available=update_available,
-        update_command="brew upgrade tellr",
+        update_command=update_command,
         release_url=release_url,
     )
