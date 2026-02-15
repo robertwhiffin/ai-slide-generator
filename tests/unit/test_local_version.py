@@ -117,7 +117,7 @@ class TestLocalVersionCheckEndpoint:
 
     def test_local_check_valid_scenarios(self, client):
         """Test update detection and no-update when current."""
-        # Update available when newer release exists
+        # Update available when newer release exists (simulate Homebrew install)
         with patch(
             "src.api.routes.local_version._get_latest_github_release",
             return_value={
@@ -129,13 +129,37 @@ class TestLocalVersionCheckEndpoint:
                 "src.api.routes.local_version._get_local_version",
                 return_value="0.1.0",
             ):
-                response = client.get("/api/version/local-check")
-                assert response.status_code == 200
-                data = response.json()
-                assert data["update_available"] is True
-                assert data["latest_version"] == "1.0.0"
-                assert data["update_command"] == "brew upgrade tellr"
-                assert data["release_url"] == "https://github.com/repo/releases/v1.0.0"
+                with patch(
+                    "src.api.routes.local_version._is_homebrew_install",
+                    return_value=True,
+                ):
+                    response = client.get("/api/version/local-check")
+                    assert response.status_code == 200
+                    data = response.json()
+                    assert data["update_available"] is True
+                    assert data["latest_version"] == "1.0.0"
+                    assert data["update_command"] == "brew upgrade tellr"
+                    assert data["release_url"] == "https://github.com/repo/releases/v1.0.0"
+
+        # Git-clone install shows git pull command
+        with patch(
+            "src.api.routes.local_version._get_latest_github_release",
+            return_value={
+                "tag_name": "v1.0.0",
+                "html_url": "https://github.com/repo/releases/v1.0.0",
+            },
+        ):
+            with patch(
+                "src.api.routes.local_version._get_local_version",
+                return_value="0.1.0",
+            ):
+                with patch(
+                    "src.api.routes.local_version._is_homebrew_install",
+                    return_value=False,
+                ):
+                    response = client.get("/api/version/local-check")
+                    assert response.status_code == 200
+                    assert response.json()["update_command"] == "git pull && ./start_app.sh"
 
         # No update when already on latest
         with patch(
