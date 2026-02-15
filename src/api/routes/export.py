@@ -600,12 +600,15 @@ async def export_to_pptx(request: ExportPPTXRequest):
 
 
 class ExportJobResponse(BaseModel):
-    """Response from async export endpoints."""
+    """Unified response for async export jobs (PPTX and Google Slides)."""
     job_id: str
     status: str  # pending, running, completed, error
     progress: int = 0
     total_slides: int = 0
     error: Optional[str] = None
+    # Google Slides specific (only populated for GSlides jobs)
+    presentation_id: Optional[str] = None
+    presentation_url: Optional[str] = None
 
 
 @router.post("/pptx/async", response_model=ExportJobResponse)
@@ -734,20 +737,12 @@ async def poll_pptx_export(job_id: str):
     Raises:
         HTTPException: 404 if job not found
     """
-    from src.api.services.export_job_queue import get_export_job_status
+    from src.api.services.export_job_queue import build_export_job_response
     
-    job = get_export_job_status(job_id)
-    
-    if not job:
+    try:
+        return ExportJobResponse(**build_export_job_response(job_id))
+    except ValueError:
         raise HTTPException(status_code=404, detail="Export job not found")
-    
-    return ExportJobResponse(
-        job_id=job_id,
-        status=job["status"],
-        progress=job.get("progress", 0),
-        total_slides=job.get("total_slides", 0),
-        error=job.get("error"),
-    )
 
 
 @router.get("/pptx/download/{job_id}")

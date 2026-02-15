@@ -86,6 +86,46 @@ def get_export_job_status(job_id: str) -> Optional[Dict[str, Any]]:
         }
 
 
+def build_export_job_response(job_id: str) -> Dict[str, Any]:
+    """Build a unified ExportJobResponse dict for a job, or raise 404.
+
+    Handles both PPTX and Google Slides jobs.  For Google Slides,
+    ``output_path`` contains a JSON blob with ``presentation_id`` and
+    ``presentation_url``; these are extracted into top-level fields.
+
+    Returns:
+        Dict ready to be unpacked into ``ExportJobResponse(**result)``.
+
+    Raises:
+        ValueError: If job not found (caller should map to HTTP 404).
+    """
+    import json as _json
+
+    job = get_export_job_status(job_id)
+    if not job:
+        raise ValueError(f"Export job not found: {job_id}")
+
+    result: Dict[str, Any] = {
+        "job_id": job_id,
+        "status": job["status"],
+        "progress": job.get("progress", 0),
+        "total_slides": job.get("total_slides", 0),
+        "error": job.get("error"),
+    }
+
+    # Google Slides jobs store the result as JSON in output_path
+    if job["status"] == "completed" and job.get("output_path"):
+        try:
+            data = _json.loads(job["output_path"])
+            if "presentation_id" in data:
+                result["presentation_id"] = data["presentation_id"]
+                result["presentation_url"] = data["presentation_url"]
+        except (ValueError, TypeError):
+            pass  # Not JSON — PPTX job, output_path is a file path
+
+    return result
+
+
 def update_export_progress(job_id: str, current: int, total: int) -> None:
     """Update export progress for a job.
 
@@ -323,19 +363,93 @@ async def export_worker() -> None:
             logger.error(f"Export worker loop error: {e}")
 
 
+async def process_google_slides_job(job_id: str, payload: dict) -> None:
+    """Process a Google Slides export job.
+
+    Uses pre-built HTML from the payload (built at enqueue time)
+    and runs the LLM code-gen converter, storing the presentation
+    URL in ``output_path`` as a JSON blob.
+    """
+    import json as _json
+    from src.services.google_slides_auth import GoogleSlidesAuth, GoogleSlidesAuthError
+    from src.services.html_to_google_slides import (
+        HtmlToGoogleSlidesConverter,
+        GoogleSlidesConversionError,
+    )
+    from src.core.database import get_db_session
+
+    slides_html: List[str] = payload["slides_html"]
+    title: str = payload.get("title", "Presentation")
+    profile_id: int = payload["profile_id"]
+    user_identity: str = payload["user_identity"]
+    chart_images_per_slide: Optional[List[Dict[str, str]]] = payload.get(
+        "chart_images_per_slide"
+    )
+    total_slides = len(slides_html)
+
+    try:
+        _update_job_field(job_id, status="running", total_slides=total_slides)
+
+        # Build auth from profile (needs a DB session)
+        with get_db_session() as db:
+            auth = GoogleSlidesAuth.from_profile(profile_id, user_identity, db)
+
+        # Run conversion with progress callback
+        def on_progress(current: int, total: int, status: str) -> None:
+            update_export_progress(job_id, current, total)
+
+        converter = HtmlToGoogleSlidesConverter(google_auth=auth)
+        result = await converter.convert_slide_deck(
+            slides=slides_html,
+            title=title,
+            chart_images_per_slide=chart_images_per_slide,
+            progress_callback=on_progress,
+        )
+
+        # Store result as JSON in output_path
+        result_json = _json.dumps({
+            "presentation_id": result["presentation_id"],
+            "presentation_url": result["presentation_url"],
+        })
+        _update_job_field(
+            job_id,
+            output_path=result_json,
+            status="completed",
+            completed_at=datetime.utcnow(),
+        )
+        logger.info(
+            "Google Slides export completed",
+            extra={"job_id": job_id, "presentation_id": result["presentation_id"]},
+        )
+
+    except (GoogleSlidesConversionError, GoogleSlidesAuthError) as e:
+        logger.error(f"Google Slides conversion failed: {e}", extra={"job_id": job_id})
+        _update_job_field(job_id, status="error", error_message=str(e))
+    except Exception as e:
+        logger.error(f"Google Slides export failed: {e}", extra={"job_id": job_id}, exc_info=True)
+        _update_job_field(job_id, status="error", error_message=str(e))
+
+
 def _run_export_job_sync(job_id: str, payload: dict) -> None:
     """Synchronous wrapper to run export job in thread pool.
 
     This is called from asyncio.to_thread() to run blocking I/O
     (LLM calls, file operations) without blocking the event loop.
+
+    Routes to the correct processor based on ``job_type``.
     """
     import asyncio
+
+    job_type = payload.get("job_type", "pptx")
 
     # Create a new event loop for this thread
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     try:
-        loop.run_until_complete(process_export_job(job_id, payload))
+        if job_type == "google_slides":
+            loop.run_until_complete(process_google_slides_job(job_id, payload))
+        else:
+            loop.run_until_complete(process_export_job(job_id, payload))
     finally:
         loop.close()
 

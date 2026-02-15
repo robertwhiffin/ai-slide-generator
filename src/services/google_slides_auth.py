@@ -217,14 +217,23 @@ class GoogleSlidesAuth:
             )
         return creds
 
-    def get_auth_url(self, redirect_uri: str) -> str:
-        """Generate the OAuth2 consent URL."""
+    def get_auth_url(self, redirect_uri: str, state: str | None = None) -> str:
+        """Generate the OAuth2 consent URL.
+
+        Args:
+            redirect_uri: The registered OAuth callback URI (no query params).
+            state: Optional opaque string that Google will return unchanged on
+                   the callback.  Used to carry profile_id / user context.
+        """
         flow = self._build_flow(redirect_uri)
-        auth_url, _ = flow.authorization_url(
-            access_type="offline",
-            include_granted_scopes="true",
-            prompt="consent",
-        )
+        kwargs: dict = {
+            "access_type": "offline",
+            "include_granted_scopes": "true",
+            "prompt": "consent",
+        }
+        if state:
+            kwargs["state"] = state
+        auth_url, _ = flow.authorization_url(**kwargs)
         logger.info("Generated Google OAuth consent URL")
         return auth_url
 

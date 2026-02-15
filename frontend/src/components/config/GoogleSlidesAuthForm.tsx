@@ -12,6 +12,7 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { FiUploadCloud, FiCheck, FiX, FiTrash2, FiExternalLink, FiShield } from 'react-icons/fi';
 import { configApi, ConfigApiError } from '../../api/config';
 import { api } from '../../services/api';
+import { useGoogleOAuthPopup } from '../../hooks/useGoogleOAuthPopup';
 
 interface GoogleSlidesAuthFormProps {
   profileId: number;
@@ -35,6 +36,7 @@ export const GoogleSlidesAuthForm: React.FC<GoogleSlidesAuthFormProps> = ({ prof
   // --- Drag & drop ---
   const [isDragging, setIsDragging] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const { openOAuthPopup } = useGoogleOAuthPopup();
 
   // ---------------------------------------------------------------
   // Load initial statuses
@@ -151,29 +153,7 @@ export const GoogleSlidesAuthForm: React.FC<GoogleSlidesAuthFormProps> = ({ prof
     setAuthError(null);
 
     try {
-      const { url } = await api.getGoogleSlidesAuthUrl(profileId);
-
-      const authResult = await new Promise<boolean>((resolve) => {
-        const popup = window.open(url, 'google-slides-auth', 'width=600,height=700,popup=yes');
-
-        const handleMessage = (event: MessageEvent) => {
-          if (event.data?.type === 'google-slides-auth') {
-            window.removeEventListener('message', handleMessage);
-            resolve(event.data.success === true);
-          }
-        };
-        window.addEventListener('message', handleMessage);
-
-        // Fallback: poll for popup closure
-        const pollTimer = setInterval(() => {
-          if (popup?.closed) {
-            clearInterval(pollTimer);
-            window.removeEventListener('message', handleMessage);
-            api.checkGoogleSlidesAuth(profileId).then(({ authorized: ok }) => resolve(ok));
-          }
-        }, 1000);
-      });
-
+      const authResult = await openOAuthPopup(profileId);
       setAuthorized(authResult);
       if (!authResult) {
         setAuthError('Authorization was not completed');

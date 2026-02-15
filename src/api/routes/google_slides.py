@@ -18,12 +18,9 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from src.api.services.chat_service import get_chat_service
+from src.api.routes.export import ExportJobResponse
 from src.core.database import get_db
 from src.services.google_slides_auth import GoogleSlidesAuth, GoogleSlidesAuthError
-from src.services.html_to_google_slides import (
-    HtmlToGoogleSlidesConverter,
-    GoogleSlidesConversionError,
-)
 
 logger = logging.getLogger(__name__)
 
@@ -83,9 +80,6 @@ class AuthUrlResponse(BaseModel):
     url: str
 
 
-class ExportGoogleSlidesResponse(BaseModel):
-    presentation_id: str
-    presentation_url: str
 
 
 # -------------------------------------------------------------------------
@@ -94,8 +88,30 @@ class ExportGoogleSlidesResponse(BaseModel):
 
 
 def _build_redirect_uri(request: Request) -> str:
-    """Build the OAuth callback redirect URI from the current request."""
-    base = str(request.base_url).rstrip("/")
+    """Build the OAuth callback redirect URI from the current request.
+
+    Google requires redirect URIs to match *exactly* what's registered in GCP,
+    with no query parameters.
+
+    Behind a reverse proxy (e.g. Databricks Apps), ``request.base_url``
+    returns the internal address (``http://localhost:8000``).  We use the
+    ``X-Forwarded-Host`` / ``X-Forwarded-Proto`` headers set by the proxy
+    to reconstruct the public URL instead.
+
+    For localhost, Google only allows ``http``.
+    """
+    forwarded_host = request.headers.get("x-forwarded-host")
+    forwarded_proto = request.headers.get("x-forwarded-proto")
+
+    if forwarded_host:
+        scheme = forwarded_proto or "https"
+        base = f"{scheme}://{forwarded_host.split(',')[0].strip()}"
+    else:
+        base = str(request.base_url).rstrip("/")
+        # Force http for localhost (Google rejects https://localhost)
+        if "://localhost" in base or "://127.0.0.1" in base:
+            base = base.replace("https://", "http://")
+
     return f"{base}/api/export/google-slides/auth/callback"
 
 
@@ -122,24 +138,16 @@ async def auth_url(
 ):
     """Generate the Google OAuth consent URL for a profile.
 
-    The frontend should open this URL in a popup window.  ``profile_id`` is
-    encoded into the ``state`` parameter so the callback can look up the right
-    profile.
+    The frontend should open this URL in a popup window.  Context (profile_id,
+    user) is passed via the OAuth ``state`` parameter so the callback can route
+    the token to the right profile — the redirect URI itself stays clean
+    (no query params) to satisfy Google's exact-match requirement.
     """
     try:
         auth = _get_auth(profile_id, db)
         redirect_uri = _build_redirect_uri(request)
-        url = auth.get_auth_url(redirect_uri=redirect_uri)
-
-        # Append state so callback knows which profile / user to store the token for
-        state_payload = json.dumps({"profile_id": profile_id, "user": _get_user_identity()})
-        # google_auth_oauthlib encodes state automatically; we re-build
-        # with from_client_config so the state is already baked in. Instead,
-        # we persist it server-side in a lightweight dict keyed by profile+user.
-        # For simplicity, pass profile_id as a query param on the redirect URI.
-        # Re-generate auth URL with profile_id baked into redirect URI.
-        redirect_uri_with_state = f"{_build_redirect_uri(request)}?profile_id={profile_id}"
-        url = auth.get_auth_url(redirect_uri=redirect_uri_with_state)
+        state = json.dumps({"profile_id": profile_id, "user": _get_user_identity()})
+        url = auth.get_auth_url(redirect_uri=redirect_uri, state=state)
 
         return AuthUrlResponse(url=url)
     except GoogleSlidesAuthError as exc:
@@ -156,24 +164,33 @@ async def auth_url(
 async def auth_callback(
     request: Request,
     code: str,
-    profile_id: int = Query(..., description="Profile that owns the credentials"),
+    state: str = Query("", description="OAuth state carrying profile context"),
     db: Session = Depends(get_db),
 ):
     """Handle the OAuth callback from Google.
+
+    ``profile_id`` is extracted from the ``state`` parameter that was set
+    during the consent URL generation.  The redirect URI used here must
+    match exactly what was registered in GCP (no query params).
 
     Exchanges the authorization code for tokens, encrypts them, and stores
     them in the ``google_oauth_tokens`` table.  Returns a small HTML page
     that notifies the opener window and closes itself.
     """
     try:
+        state_data = json.loads(state) if state else {}
+        profile_id = int(state_data.get("profile_id", 0))
+        if not profile_id:
+            raise ValueError("Missing profile_id in OAuth state")
+
         auth = _get_auth(profile_id, db)
-        redirect_uri = f"{_build_redirect_uri(request)}?profile_id={profile_id}"
+        redirect_uri = _build_redirect_uri(request)
         auth.authorize(code=code, redirect_uri=redirect_uri)
         logger.info(
             "Google Slides OAuth callback successful",
             extra={"profile_id": profile_id, "user": _get_user_identity()},
         )
-    except GoogleSlidesAuthError as exc:
+    except (GoogleSlidesAuthError, ValueError, json.JSONDecodeError) as exc:
         logger.error("OAuth callback failed", exc_info=True)
         return HTMLResponse(
             content=f"""
@@ -219,21 +236,26 @@ def _build_slide_html(slide: dict, slide_deck: dict) -> str:
     return build_slide_html(slide, slide_deck)
 
 
-@router.post("", response_model=ExportGoogleSlidesResponse)
-async def export_to_google_slides(
+@router.post("", response_model=ExportJobResponse)
+async def start_google_slides_export(
     request_body: ExportGoogleSlidesRequest,
     db: Session = Depends(get_db),
 ):
-    """Export the current slide deck to a new Google Slides presentation.
+    """Start an async Google Slides export job.
+
+    Returns immediately with a job_id.  The frontend polls
+    ``GET .../poll/{job_id}`` for progress until completion.
 
     Flow:
-    1. Build a DB-backed auth instance for the current user + profile.
-    2. Verify authorization.
-    3. Fetch slide deck from session.
-    4. Build complete HTML per slide.
-    5. Run the V3 LLM code-gen converter.
-    6. Return the presentation URL.
+    1. Validate auth, fetch slides, build HTML (fast).
+    2. Enqueue background job for the slow LLM conversion.
+    3. Return job_id so the frontend can poll.
     """
+    from src.api.services.export_job_queue import (
+        enqueue_export_job,
+        generate_job_id,
+    )
+
     try:
         auth = _get_auth(request_body.profile_id, db)
     except GoogleSlidesAuthError as exc:
@@ -260,16 +282,10 @@ async def export_to_google_slides(
     total = len(slides_data)
     title = slide_deck.get("title", "Presentation")
 
-    logger.info(
-        "Starting Google Slides export",
-        extra={"session_id": request_body.session_id, "total_slides": total},
-    )
-
-    # Build complete HTML for each slide
+    # Build complete HTML for each slide (fast — no LLM calls)
     slides_html: list[str] = []
-    for i, slide in enumerate(slides_data):
-        html = _build_slide_html(slide, slide_deck)
-        slides_html.append(html)
+    for slide in slides_data:
+        slides_html.append(_build_slide_html(slide, slide_deck))
 
     # Prepare chart images
     chart_images_per_slide: Optional[list[dict[str, str]]] = None
@@ -279,24 +295,42 @@ async def export_to_google_slides(
             for slide_charts in request_body.chart_images
         ]
 
-    # Convert
-    try:
-        converter = HtmlToGoogleSlidesConverter(google_auth=auth)
-        result = await converter.convert_slide_deck(
-            slides=slides_html,
-            title=title,
-            chart_images_per_slide=chart_images_per_slide,
-        )
-    except (GoogleSlidesConversionError, GoogleSlidesAuthError) as exc:
-        logger.error("Google Slides conversion failed", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
-    except Exception as exc:
-        logger.error("Unexpected error during Google Slides export", exc_info=True)
-        raise HTTPException(
-            status_code=500, detail=f"Export failed: {exc}"
-        ) from exc
+    # Enqueue background job
+    job_id = generate_job_id()
+    payload = {
+        "session_id": request_body.session_id,
+        "profile_id": request_body.profile_id,
+        "user_identity": _get_user_identity(),
+        "slides_html": slides_html,
+        "title": title,
+        "total_slides": total,
+        "chart_images_per_slide": chart_images_per_slide,
+        "job_type": "google_slides",
+    }
+    await enqueue_export_job(job_id, payload)
 
-    return ExportGoogleSlidesResponse(
-        presentation_id=result["presentation_id"],
-        presentation_url=result["presentation_url"],
+    logger.info(
+        "Google Slides export job enqueued",
+        extra={"job_id": job_id, "session_id": request_body.session_id, "total_slides": total},
     )
+
+    return ExportJobResponse(
+        job_id=job_id,
+        status="pending",
+        total_slides=total,
+    )
+
+
+@router.get("/poll/{job_id}", response_model=ExportJobResponse)
+async def poll_google_slides_export(job_id: str):
+    """Poll for Google Slides export status and progress.
+
+    When ``status`` is ``completed``, the response includes
+    ``presentation_id`` and ``presentation_url``.
+    """
+    from src.api.services.export_job_queue import build_export_job_response
+
+    try:
+        return ExportJobResponse(**build_export_job_response(job_id))
+    except ValueError:
+        raise HTTPException(status_code=404, detail="Export job not found")
