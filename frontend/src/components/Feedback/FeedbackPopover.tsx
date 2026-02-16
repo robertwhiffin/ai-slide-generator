@@ -28,10 +28,18 @@ export const FeedbackPopover: React.FC<FeedbackPopoverProps> = ({ onClose }) => 
   const [summaryReady, setSummaryReady] = useState(false);
   const [submitted, setSubmitted] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
+
+  // Refocus input after loading completes
+  useEffect(() => {
+    if (!loading && !submitted) {
+      inputRef.current?.focus();
+    }
+  }, [loading, submitted]);
 
   const handleSend = async () => {
     const trimmed = input.trim();
@@ -176,6 +184,7 @@ export const FeedbackPopover: React.FC<FeedbackPopoverProps> = ({ onClose }) => 
               </button>
               <div className="flex gap-2">
                 <input
+                  ref={inputRef}
                   type="text"
                   value={input}
                   onChange={(e) => setInput(e.target.value)}
@@ -199,6 +208,7 @@ export const FeedbackPopover: React.FC<FeedbackPopoverProps> = ({ onClose }) => 
           ) : (
             <div className="flex gap-2">
               <input
+                ref={inputRef}
                 type="text"
                 value={input}
                 onChange={(e) => setInput(e.target.value)}
@@ -207,6 +217,7 @@ export const FeedbackPopover: React.FC<FeedbackPopoverProps> = ({ onClose }) => 
                 className="flex-1 px-3 py-2 border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
                 data-testid="feedback-input"
                 disabled={loading}
+                autoFocus
               />
               <button
                 onClick={handleSend}

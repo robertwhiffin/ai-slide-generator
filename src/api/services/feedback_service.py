@@ -38,22 +38,15 @@ Rules:
 SUMMARY_MARKER = "**Summary**"
 
 
-def get_feedback_endpoint() -> str:
-    """Get the LLM endpoint for feedback, with fallback to profile config."""
-    endpoint = os.environ.get("FEEDBACK_LLM_ENDPOINT")
-    if endpoint:
-        return endpoint
-    try:
-        from src.core.settings_db import get_settings
+FEEDBACK_DEFAULT_ENDPOINT = "databricks-gemma-3-12b"
 
-        settings = get_settings()
-        return settings.llm.endpoint
-    except Exception:
-        logger.warning("No FEEDBACK_LLM_ENDPOINT set and no active profile found")
-        raise ValueError(
-            "No feedback LLM endpoint configured. "
-            "Set FEEDBACK_LLM_ENDPOINT or configure an active profile."
-        )
+
+def get_feedback_endpoint() -> str:
+    """Get the LLM endpoint for feedback.
+
+    Priority: FEEDBACK_LLM_ENDPOINT env var > default (databricks-gpt-oss-20b).
+    """
+    return os.environ.get("FEEDBACK_LLM_ENDPOINT", FEEDBACK_DEFAULT_ENDPOINT)
 
 
 def _format_minutes(minutes: int) -> str:
