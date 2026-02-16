@@ -55,7 +55,7 @@ export async function setupMocks(page: Page) {
       route.fulfill({
         status: 200,
         contentType: 'application/json',
-        body: JSON.stringify({ session_id: 'mock-session-id', title: 'New Session', created_at: new Date().toISOString() })
+        body: JSON.stringify({ session_id: 'mock-session-id', created_by: 'dev@local.dev', title: 'New Session', created_at: new Date().toISOString() })
       });
       return;
     }

@@ -42,7 +42,7 @@ export const HelpPage: React.FC = () => {
         <TabButton tab="overview" label="Overview" icon={FiInfo} />
         <TabButton tab="generator" label="Generator" icon={FiMessageSquare} />
         <TabButton tab="verification" label="Verification" icon={FiShield} />
-        <TabButton tab="history" label="History" icon={FiClock} />
+        <TabButton tab="history" label="My Sessions" icon={FiClock} />
         <TabButton tab="profiles" label="Profiles" icon={FiSettings} />
         <TabButton tab="deck_prompts" label="Deck Prompts" icon={FiFileText} />
         <TabButton tab="slide_styles" label="Slide Styles" icon={FiLayout} />
