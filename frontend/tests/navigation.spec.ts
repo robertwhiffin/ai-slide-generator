@@ -21,7 +21,7 @@ test.describe('Navigation', () => {
     await page.click('button:has-text("Images")');
     await expect(page).toHaveURL('/images');
 
-    await page.click('button:has-text("History")');
+    await page.click('button:has-text("My Sessions")');
     await expect(page).toHaveURL('/history');
 
     await page.click('button:has-text("Help")');
@@ -30,7 +30,7 @@ test.describe('Navigation', () => {
 
   test('browser back button returns to previous page', async ({ page }) => {
     await page.goto('/help');
-    await page.click('button:has-text("History")');
+    await page.click('button:has-text("My Sessions")');
     await expect(page).toHaveURL('/history');
 
     await page.goBack();

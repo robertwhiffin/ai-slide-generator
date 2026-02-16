@@ -121,6 +121,7 @@ export const mockSessions = {
     {
       session_id: "b1b4d8e3-6cf6-47cb-ad58-9fdc6ad205cc",
       user_id: null,
+      created_by: "dev@local.dev",
       title: "Session 2026-01-08 20:38",
       created_at: "2026-01-08T20:38:56.749592",
       last_activity: "2026-01-08T20:42:11.058737",
@@ -132,6 +133,7 @@ export const mockSessions = {
     {
       session_id: "a2c5f1d9-8ef7-48dc-be69-0ead7be316dd",
       user_id: null,
+      created_by: "dev@local.dev",
       title: "Session 2026-01-08 20:20",
       created_at: "2026-01-08T20:20:26.292382",
       last_activity: "2026-01-08T20:21:02.581630",

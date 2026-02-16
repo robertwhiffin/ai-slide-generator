@@ -94,7 +94,7 @@ test.describe('HelpTabs', () => {
     await expect(getHelpTabButton(page, 'Overview')).toBeVisible();
     await expect(getHelpTabButton(page, 'Generator')).toBeVisible();
     await expect(getHelpTabButton(page, 'Verification')).toBeVisible();
-    await expect(getHelpTabButton(page, 'History')).toBeVisible();
+    await expect(getHelpTabButton(page, 'My Sessions')).toBeVisible();
     await expect(getHelpTabButton(page, 'Profiles')).toBeVisible();
     await expect(getHelpTabButton(page, 'Deck Prompts')).toBeVisible();
     await expect(getHelpTabButton(page, 'Slide Styles')).toBeVisible();
@@ -119,7 +119,7 @@ test.describe('HelpTabs', () => {
   test('clicking History tab shows history content', async ({ page }) => {
     await goToHelp(page);
 
-    await getHelpTabButton(page, 'History').click();
+    await getHelpTabButton(page, 'My Sessions').click();
 
     await expect(page.getByRole('heading', { name: 'Session List' })).toBeVisible();
   });
