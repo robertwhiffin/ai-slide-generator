@@ -5,7 +5,6 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
 from src.api.schemas.settings import PromptsConfig, PromptsConfigUpdate
-from src.api.services.chat_service import ChatService, get_chat_service
 from src.core.database import get_db
 from src.core.settings_db import get_active_profile_id
 from src.services import ConfigService, ConfigValidator
@@ -58,7 +57,6 @@ def update_prompts_config(
     profile_id: int,
     request: PromptsConfigUpdate,
     service: ConfigService = Depends(get_config_service),
-    chat_service: ChatService = Depends(get_chat_service),
 ):
     """
     Update prompts configuration.
@@ -101,13 +99,16 @@ def update_prompts_config(
             user=user,
         )
 
-        # Reload agent if the updated profile is the currently active one
+        # Reload agent if the updated profile is the currently active one.
+        # ChatService is resolved lazily to avoid eager initialization of the
+        # full agent pipeline (expensive and breaks tests that only override get_db).
         if profile_id == get_active_profile_id():
             logger.info(
                 "Reloading agent after prompts update for active profile",
                 extra={"profile_id": profile_id},
             )
-            chat_service.reload_agent(profile_id)
+            from src.api.services.chat_service import get_chat_service
+            get_chat_service().reload_agent(profile_id)
 
         return config
     except ValueError as e:
