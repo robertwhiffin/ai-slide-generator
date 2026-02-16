@@ -381,10 +381,12 @@ async def process_google_slides_job(job_id: str, payload: dict) -> None:
     slides_html: List[str] = payload["slides_html"]
     title: str = payload.get("title", "Presentation")
     profile_id: int = payload["profile_id"]
+    session_id: str = payload["session_id"]
     user_identity: str = payload["user_identity"]
     chart_images_per_slide: Optional[List[Dict[str, str]]] = payload.get(
         "chart_images_per_slide"
     )
+    existing_presentation_id: Optional[str] = payload.get("existing_presentation_id")
     total_slides = len(slides_html)
 
     try:
@@ -404,7 +406,20 @@ async def process_google_slides_job(job_id: str, payload: dict) -> None:
             title=title,
             chart_images_per_slide=chart_images_per_slide,
             progress_callback=on_progress,
+            existing_presentation_id=existing_presentation_id,
         )
+
+        # Persist presentation info on the session for future re-exports
+        try:
+            from src.api.services.session_manager import get_session_manager
+            session_mgr = get_session_manager()
+            session_mgr.set_google_slides_info(
+                session_id,
+                result["presentation_id"],
+                result["presentation_url"],
+            )
+        except Exception:
+            logger.warning("Failed to persist Google Slides info on session", exc_info=True)
 
         # Store result as JSON in output_path
         result_json = _json.dumps({

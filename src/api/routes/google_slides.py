@@ -295,6 +295,12 @@ async def start_google_slides_export(
             for slide_charts in request_body.chart_images
         ]
 
+    # Check for existing presentation on this session (re-export overwrites)
+    from src.api.services.session_manager import get_session_manager
+    session_manager = get_session_manager()
+    existing_info = session_manager.get_google_slides_info(request_body.session_id)
+    existing_presentation_id = existing_info["presentation_id"] if existing_info else None
+
     # Enqueue background job
     job_id = generate_job_id()
     payload = {
@@ -306,6 +312,7 @@ async def start_google_slides_export(
         "total_slides": total,
         "chart_images_per_slide": chart_images_per_slide,
         "job_type": "google_slides",
+        "existing_presentation_id": existing_presentation_id,
     }
     await enqueue_export_job(job_id, payload)
 
