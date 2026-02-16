@@ -109,6 +109,10 @@ class UserSession(Base):
     # MLflow experiment tracking (per-session experiment for tracing)
     experiment_id = Column(String(255), nullable=True)
 
+    # Google Slides export tracking (reuse existing presentation on re-export)
+    google_slides_presentation_id = Column(String(255), nullable=True)
+    google_slides_url = Column(String(512), nullable=True)
+
     # Processing lock for concurrent request handling
     is_processing = Column(Boolean, default=False, nullable=False)
     processing_started_at = Column(DateTime, nullable=True)

@@ -55,6 +55,7 @@ export const SlidePanel: React.FC<SlidePanelProps> = ({ slideDeck, rawHtml, onSl
   const [isExportingPPTX, setIsExportingPPTX] = useState(false);
   const [isExportingGoogleSlides, setIsExportingGoogleSlides] = useState(false);
   const [exportProgress, setExportProgress] = useState<{ current: number; total: number; status: string } | null>(null);
+  const [googleSlidesUrl, setGoogleSlidesUrl] = useState<string | null>(null);
   const [showExportMenu, setShowExportMenu] = useState(false);
   const exportMenuRef = useRef<HTMLDivElement>(null);
   const [isPresentationMode, setIsPresentationMode] = useState(false);
@@ -318,8 +319,8 @@ export const SlidePanel: React.FC<SlidePanelProps> = ({ slideDeck, rawHtml, onSl
         }
       );
 
-      // Open the presentation in a new tab
-      window.open(result.presentation_url, '_blank');
+      // Show the link instead of opening a popup
+      setGoogleSlidesUrl(result.presentation_url);
     } catch (error) {
       console.error('Google Slides export failed:', error);
       const message = error instanceof Error
@@ -349,6 +350,23 @@ export const SlidePanel: React.FC<SlidePanelProps> = ({ slideDeck, rawHtml, onSl
       setSelection(validIndices, slides);
     }
   }, [slideDeck, selectedIndices, clearSelection, setSelection]);
+
+  // Load Google Slides URL from session when session changes
+  useEffect(() => {
+    if (!sessionId) {
+      setGoogleSlidesUrl(null);
+      return;
+    }
+    let cancelled = false;
+    api.getSession(sessionId).then((session) => {
+      if (!cancelled) {
+        setGoogleSlidesUrl(session.google_slides_url ?? null);
+      }
+    }).catch(() => {
+      if (!cancelled) setGoogleSlidesUrl(null);
+    });
+    return () => { cancelled = true; };
+  }, [sessionId]);
 
   // Close export menu when clicking outside
   useEffect(() => {
@@ -699,6 +717,35 @@ export const SlidePanel: React.FC<SlidePanelProps> = ({ slideDeck, rawHtml, onSl
             </button>
           </div>
         </div>
+
+        {/* Google Slides link banner */}
+        {googleSlidesUrl && (
+          <div className="flex items-center justify-between px-4 py-2 bg-green-50 border-t border-green-200">
+            <div className="flex items-center space-x-2 text-sm">
+              <svg width="16" height="16" viewBox="0 0 24 24" className="text-green-600 flex-shrink-0" fill="currentColor">
+                <path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/>
+              </svg>
+              <span className="text-green-800">Google Slides created:</span>
+              <a
+                href={googleSlidesUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-blue-600 hover:text-blue-800 underline font-medium truncate max-w-md"
+              >
+                Open in Google Slides
+              </a>
+            </div>
+            <button
+              onClick={() => setGoogleSlidesUrl(null)}
+              className="text-green-600 hover:text-green-800 p-1"
+              title="Dismiss"
+            >
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <path d="M18 6L6 18M6 6l12 12"/>
+              </svg>
+            </button>
+          </div>
+        )}
 
         {/* Tab Navigation */}
         <div className="flex border-t">

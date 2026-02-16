@@ -97,6 +97,8 @@ export interface Session {
   slide_deck?: SlideDeck | null;
   profile_id?: number | null;
   profile_name?: string | null;
+  google_slides_url?: string | null;
+  google_slides_presentation_id?: string | null;
 }
 
 interface SendMessageParams {

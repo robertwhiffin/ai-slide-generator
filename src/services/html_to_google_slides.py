@@ -59,8 +59,14 @@ class HtmlToGoogleSlidesConverter:
         title: str = "Presentation",
         chart_images_per_slide: Optional[List[Dict[str, str]]] = None,
         progress_callback: Optional[callable] = None,
+        existing_presentation_id: Optional[str] = None,
     ) -> Dict[str, str]:
         """Convert HTML slides to a Google Slides presentation.
+
+        If ``existing_presentation_id`` is provided, the converter tries to
+        reuse that presentation (clearing all existing slides first).  If the
+        existing presentation is inaccessible (deleted, revoked, etc.) it
+        falls back to creating a new one.
 
         Args:
             slides: HTML strings for each slide.
@@ -68,6 +74,8 @@ class HtmlToGoogleSlidesConverter:
             chart_images_per_slide: Chart images keyed by canvas ID, per slide.
             progress_callback: Optional ``(current, total, status)`` callback
                 invoked after each slide is processed.
+            existing_presentation_id: Optional ID of an existing presentation
+                to overwrite instead of creating a new one.
         """
         total = len(slides)
         print(f"[GSLIDES_CONVERTER] Converting {total} slides to Google Slides "
@@ -79,23 +87,33 @@ class HtmlToGoogleSlidesConverter:
         except GoogleSlidesAuthError as exc:
             raise GoogleSlidesConversionError(f"Auth failed: {exc}") from exc
 
-        try:
-            pres = slides_service.presentations().create(body={"title": title}).execute()
-            pres_id = pres["presentationId"]
-            print(f"[GSLIDES_CONVERTER] Created presentation: {pres_id}")
-        except Exception as exc:
-            raise GoogleSlidesConversionError(f"Failed to create presentation: {exc}") from exc
+        pres_id = None
 
-        # Delete default blank slide
-        default_slides = pres.get("slides", [])
-        if default_slides:
+        # Try to reuse existing presentation
+        if existing_presentation_id:
+            pres_id = self._try_reuse_presentation(
+                slides_service, existing_presentation_id, title,
+            )
+
+        # Create new if reuse failed or not requested
+        if not pres_id:
             try:
-                slides_service.presentations().batchUpdate(
-                    presentationId=pres_id,
-                    body={"requests": [{"deleteObject": {"objectId": default_slides[0]["objectId"]}}]},
-                ).execute()
-            except Exception:
-                logger.warning("Failed to delete default slide", exc_info=True)
+                pres = slides_service.presentations().create(body={"title": title}).execute()
+                pres_id = pres["presentationId"]
+                print(f"[GSLIDES_CONVERTER] Created presentation: {pres_id}")
+            except Exception as exc:
+                raise GoogleSlidesConversionError(f"Failed to create presentation: {exc}") from exc
+
+            # Delete default blank slide
+            default_slides = pres.get("slides", [])
+            if default_slides:
+                try:
+                    slides_service.presentations().batchUpdate(
+                        presentationId=pres_id,
+                        body={"requests": [{"deleteObject": {"objectId": default_slides[0]["objectId"]}}]},
+                    ).execute()
+                except Exception:
+                    logger.warning("Failed to delete default slide", exc_info=True)
 
         # Process each slide
         for i, html_str in enumerate(slides, 1):
@@ -132,6 +150,61 @@ class HtmlToGoogleSlidesConverter:
         url = f"https://docs.google.com/presentation/d/{pres_id}/edit"
         print(f"[GSLIDES_CONVERTER] Done: {url}")
         return {"presentation_id": pres_id, "presentation_url": url}
+
+    # -- Presentation reuse ------------------------------------------------
+
+    def _try_reuse_presentation(
+        self, slides_service, presentation_id: str, title: str,
+    ) -> Optional[str]:
+        """Try to reuse an existing presentation by clearing all its slides.
+
+        Returns the presentation_id on success, or None if the presentation
+        is inaccessible (deleted, permission revoked, etc.).
+        """
+        try:
+            pres = slides_service.presentations().get(
+                presentationId=presentation_id,
+            ).execute()
+
+            existing_slides = pres.get("slides", [])
+            print(
+                f"[GSLIDES_CONVERTER] Reusing presentation {presentation_id} "
+                f"– clearing {len(existing_slides)} existing slides"
+            )
+
+            # Delete all existing slides
+            if existing_slides:
+                delete_requests = [
+                    {"deleteObject": {"objectId": s["objectId"]}}
+                    for s in existing_slides
+                ]
+                slides_service.presentations().batchUpdate(
+                    presentationId=presentation_id,
+                    body={"requests": delete_requests},
+                ).execute()
+
+            # Update title if different
+            current_title = pres.get("title", "")
+            if current_title != title:
+                try:
+                    from googleapiclient.discovery import build
+                    # Use the Drive API to rename the file
+                    drive_service = self.auth.build_drive_service()
+                    drive_service.files().update(
+                        fileId=presentation_id,
+                        body={"name": title},
+                    ).execute()
+                except Exception:
+                    logger.debug("Could not update presentation title", exc_info=True)
+
+            return presentation_id
+
+        except Exception as exc:
+            logger.warning(
+                "Cannot reuse existing presentation %s: %s — creating new one",
+                presentation_id, exc,
+            )
+            return None
 
     # -- Per-slide pipeline ------------------------------------------------
 
