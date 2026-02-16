@@ -423,13 +423,19 @@ def load_profile(
         404: Profile not found
         500: Reload failed
     """
-    # Verify profile exists
+    # Verify profile exists and is not deleted
     try:
         profile = service.get_profile(profile_id)
         if not profile:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"Profile {profile_id} not found",
+            )
+
+        if profile.is_deleted:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Profile {profile_id} has been deleted",
             )
 
         logger.info(

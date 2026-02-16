@@ -5,7 +5,9 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
 from src.api.schemas.settings import PromptsConfig, PromptsConfigUpdate
+from src.api.services.chat_service import ChatService, get_chat_service
 from src.core.database import get_db
+from src.core.settings_db import get_active_profile_id
 from src.services import ConfigService, ConfigValidator
 
 logger = logging.getLogger(__name__)
@@ -56,9 +58,13 @@ def update_prompts_config(
     profile_id: int,
     request: PromptsConfigUpdate,
     service: ConfigService = Depends(get_config_service),
+    chat_service: ChatService = Depends(get_chat_service),
 ):
     """
     Update prompts configuration.
+    
+    If the updated profile is the currently active profile, the agent is
+    reloaded so changes (e.g. slide style, deck prompt) take effect immediately.
     
     Args:
         profile_id: Profile ID
@@ -94,6 +100,15 @@ def update_prompts_config(
             slide_editing_instructions=request.slide_editing_instructions,
             user=user,
         )
+
+        # Reload agent if the updated profile is the currently active one
+        if profile_id == get_active_profile_id():
+            logger.info(
+                "Reloading agent after prompts update for active profile",
+                extra={"profile_id": profile_id},
+            )
+            chat_service.reload_agent(profile_id)
+
         return config
     except ValueError as e:
         raise HTTPException(
