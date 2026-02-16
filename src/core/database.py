@@ -366,3 +366,38 @@ def init_db():
                 table.schema = schema
     
     Base.metadata.create_all(bind=engine)
+
+    # Run migrations for columns that create_all() won't add to existing tables
+    _run_migrations(engine, schema)
+
+
+def _run_migrations(engine, schema: str | None = None):
+    """Add columns that create_all() won't add to existing tables.
+
+    SQLAlchemy's create_all() only creates new tables; it does not alter
+    existing ones. This function adds any missing columns via ALTER TABLE.
+    """
+    from sqlalchemy import inspect, text
+
+    inspector = inspect(engine)
+
+    table_name = "config_profiles"
+    qualified_table = f'"{schema}"."{table_name}"' if schema else f'"{table_name}"'
+
+    try:
+        columns = {c["name"] for c in inspector.get_columns(table_name, schema=schema)}
+    except Exception:
+        # Table doesn't exist yet (will be created by create_all on next run)
+        return
+
+    with engine.begin() as conn:
+        if "is_deleted" not in columns:
+            logger.info(f"Migration: adding is_deleted column to {table_name}")
+            conn.execute(text(
+                f"ALTER TABLE {qualified_table} ADD COLUMN is_deleted BOOLEAN DEFAULT FALSE NOT NULL"
+            ))
+        if "deleted_at" not in columns:
+            logger.info(f"Migration: adding deleted_at column to {table_name}")
+            conn.execute(text(
+                f"ALTER TABLE {qualified_table} ADD COLUMN deleted_at TIMESTAMP NULL"
+            ))
