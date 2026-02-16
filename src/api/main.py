@@ -18,6 +18,7 @@ from fastapi.staticfiles import StaticFiles
 
 from src.api.routes import chat, images, slides, export, sessions, verification, version, google_slides
 from src.core.databricks_client import create_user_client, set_user_client
+from src.core.user_context import get_current_user as get_ctx_user, set_current_user
 from src.core.database import (
     init_db,
     is_lakebase_environment,
@@ -228,7 +229,11 @@ async def user_auth_middleware(request: Request, call_next):
     token in the x-forwarded-access-token header. This middleware extracts that
     token and creates a request-scoped WorkspaceClient for Genie/LLM/MLflow calls.
 
-    In local development (no token header), operations fall back to system client.
+    It also populates the request-scoped user identity (``set_current_user``) so
+    that downstream handlers can access the username without an extra API call.
+
+    In local development (no token header), the identity falls back to the
+    ``DEV_USER_ID`` environment variable.
     """
     token = request.headers.get("x-forwarded-access-token")
     client_id = os.getenv("DATABRICKS_CLIENT_ID", "")
@@ -254,16 +259,26 @@ async def user_auth_middleware(request: Request, call_next):
             user_client = create_user_client(token)
             set_user_client(user_client)
             logger.warning("OBO auth: user client set successfully")
+            # Extract username from the token-scoped client
+            try:
+                me = user_client.current_user.me()
+                set_current_user(me.user_name)
+            except Exception as e:
+                logger.warning(f"OBO auth: failed to resolve username from token: {e}")
         except Exception as e:
             logger.warning(f"Failed to create user client from token: {e}")
     else:
-        logger.warning("OBO auth: no x-forwarded-access-token header present")
+        # Local / dev fallback: use DEV_USER_ID env var
+        dev_user = os.getenv("DEV_USER_ID", "dev@local.dev")
+        set_current_user(dev_user)
+        logger.debug("OBO auth: no token header — using dev identity %s", dev_user)
     try:
         response = await call_next(request)
         return response
     finally:
-        # Always clean up the user client after request
+        # Always clean up request-scoped state
         set_user_client(None)
+        set_current_user(None)
 
 
 # Include API routers
@@ -298,20 +313,21 @@ async def health():
 
 @app.get("/api/user/current")
 async def get_current_user():
-    """Get the current user from Databricks workspace client.
+    """Return the current user's identity.
 
-    Uses user-scoped client when running as Databricks App (user's identity),
-    falls back to system client in local development (service principal).
-    
-    In test/development mode, returns a default user to avoid network timeouts.
+    The middleware already resolved the username (from the Databricks token in
+    production, or ``DEV_USER_ID`` in local dev) and stored it via
+    ``set_current_user``.  This endpoint simply reads that value, avoiding an
+    extra Databricks API call.
     """
-    # Skip Databricks call in test/dev to avoid network timeout
-    if ENVIRONMENT in ("development", "test"):
+    ctx_user = get_ctx_user()
+    if ctx_user:
         return {
-            "username": "user",
-            "display_name": "User",
+            "username": ctx_user,
+            "display_name": ctx_user,
         }
-    
+
+    # Fallback: resolve from Databricks client (production without middleware hit)
     try:
         from src.core.databricks_client import get_user_client
         client = get_user_client()

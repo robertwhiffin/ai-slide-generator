@@ -11,10 +11,7 @@ import { test as base, expect } from '@playwright/test';
  * Known benign console errors that don't affect test validity.
  * These are logged but not treated as test failures.
  */
-const IGNORED_CONSOLE_ERRORS = [
-  // React infinite loop warning that occurs during error recovery
-  // but doesn't affect actual functionality
-  'Maximum update depth exceeded',
+const IGNORED_CONSOLE_ERRORS: string[] = [
 ];
 
 /**

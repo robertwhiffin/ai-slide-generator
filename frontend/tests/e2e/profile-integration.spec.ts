@@ -175,14 +175,14 @@ async function goToProfiles(page: Page): Promise<void> {
 
 async function goToGenerator(page: Page): Promise<void> {
   await page.goto('/');
-  await page.getByRole('navigation').getByRole('button', { name: 'Generator' }).click();
+  await page.getByRole('navigation').getByRole('button', { name: 'New Session' }).click();
   await expect(page.getByRole('heading', { name: 'Chat', level: 2 })).toBeVisible();
 }
 
 async function goToHistory(page: Page): Promise<void> {
   await page.goto('/');
-  await page.getByRole('navigation').getByRole('button', { name: 'History' }).click();
-  await expect(page.getByRole('heading', { name: 'Session History' })).toBeVisible();
+  await page.getByRole('navigation').getByRole('button', { name: 'My Sessions' }).click();
+  await expect(page.getByRole('heading', { name: 'My Sessions' })).toBeVisible();
 }
 
 // ============================================
@@ -596,13 +596,19 @@ test.describe('Profile Switching', () => {
       const row = page.locator('tr', { hasText: profileName });
       await row.getByRole('button', { name: 'Load' }).click();
 
+
+
       // Confirm if dialog appears
       const confirmButton = page.getByRole('button', { name: /Confirm|Load/i }).last();
       if (await confirmButton.isVisible()) {
         await confirmButton.click();
       }
 
-      // Wait for load
+      // Wait for load to complete and redirect to generator page
+      await page.waitForURL(/\/sessions\/.*\/edit/, { timeout: 10000 });
+
+      // loading a profile takes you to the generator page - go back
+      await goToProfiles(page);
       await page.waitForTimeout(1000);
 
       // Row should now show Loaded badge
@@ -743,7 +749,7 @@ test.describe('Session-Profile Association', () => {
       await page.waitForTimeout(1000);
 
       // Navigate to Generator and send a message to create a session
-      await page.getByRole('navigation').getByRole('button', { name: 'Generator' }).click();
+      await page.getByRole('navigation').getByRole('button', { name: 'New Session' }).click();
       await expect(page.getByRole('heading', { name: 'Chat', level: 2 })).toBeVisible();
 
       // Type a message
@@ -755,8 +761,8 @@ test.describe('Session-Profile Association', () => {
       await page.waitForTimeout(2000);
 
       // Go to History
-      await page.getByRole('navigation').getByRole('button', { name: 'History' }).click();
-      await expect(page.getByRole('heading', { name: 'Session History' })).toBeVisible();
+      await page.getByRole('navigation').getByRole('button', { name: 'My Sessions' }).click();
+      await expect(page.getByRole('heading', { name: 'My Sessions' })).toBeVisible();
 
       // The most recent session should show the profile name
       await expect(page.getByText(profileName).first()).toBeVisible();
@@ -779,11 +785,20 @@ test.describe('Session-Profile Association', () => {
       return;
     }
 
-    // Find two sessions with different profiles
+    // Find two sessions with different profiles that have slide decks (Restore requires it)
     const sessions = sessionsData.sessions;
-    const session1 = sessions[0];
+    const session1 = sessions.find(
+      (s: { has_slide_deck: boolean }) => s.has_slide_deck
+    );
+
+    if (!session1) {
+      test.skip();
+      return;
+    }
+
     const session2 = sessions.find(
-      (s: { profile_id: number }) => s.profile_id !== session1.profile_id
+      (s: { profile_id: number; has_slide_deck: boolean }) =>
+        s.profile_id !== session1.profile_id && s.has_slide_deck
     );
 
     if (!session2) {
@@ -807,9 +822,9 @@ test.describe('Session-Profile Association', () => {
     // Go to History and restore session2
     await goToHistory(page);
 
-    // Click on session2 to restore it - use session_id for unique matching
-    const sessionRow = page.locator('tr').filter({ has: page.getByText(session2.session_id) }).first();
-    await sessionRow.click();
+    // Click on session2 to restore it - match by title (session_id is not rendered in the table)
+    const sessionRow = page.locator('tr').filter({ has: page.getByText(session2.title) }).first();
+    await sessionRow.getByRole('button', { name: 'Restore' }).click();
 
     // Wait for potential profile switch
     await page.waitForTimeout(1000);

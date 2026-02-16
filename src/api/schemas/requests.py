@@ -99,11 +99,16 @@ class ChatRequest(BaseModel):
 
 
 class CreateSessionRequest(BaseModel):
-    """Request model for creating a new session."""
+    """Request model for creating a new session.
 
-    user_id: Optional[str] = Field(
+    Note: ``created_by`` is set server-side from the authenticated user
+    identity and is not accepted in the request body.
+    """
+
+    session_id: Optional[str] = Field(
         default=None,
-        description="Optional user identifier for session isolation",
+        description="Optional client-generated session ID (UUID). If not provided, server generates one.",
+        max_length=64,
     )
     title: Optional[str] = Field(
         default=None,

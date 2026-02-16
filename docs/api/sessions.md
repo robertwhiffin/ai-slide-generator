@@ -4,7 +4,7 @@ Session management endpoints for creating, listing, and managing conversation se
 
 ## Create Session
 
-Create a new conversation session.
+Create a new conversation session. The `created_by` field is set server-side from the authenticated user identity (extracted from the Databricks token in production, or `DEV_USER_ID` in local development). Clients do not pass or override this value.
 
 **POST** `/api/sessions`
 
@@ -12,15 +12,13 @@ Create a new conversation session.
 
 ```json
 {
-  "title": "Q3 Revenue Analysis",
-  "user_id": "user@example.com"
+  "title": "Q3 Revenue Analysis"
 }
 ```
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `title` | string | No | Session title |
-| `user_id` | string | No | User identifier |
 
 ### Response
 
@@ -35,7 +33,7 @@ Create a new conversation session.
 
 ## List Sessions
 
-List all sessions, optionally filtered by user.
+List sessions for the authenticated user. Sessions are implicitly filtered by `created_by = current_user`; the user identity is extracted from the Databricks token in production, or `DEV_USER_ID` in local development.
 
 **GET** `/api/sessions`
 
@@ -43,7 +41,6 @@ List all sessions, optionally filtered by user.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `user_id` | string | No | Filter by user ID |
 | `limit` | integer | No | Maximum sessions to return (1-100, default: 50) |
 
 ### Response

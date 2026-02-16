@@ -1,7 +1,7 @@
 # Database Configuration System
 
 **Status:** Complete - Configuration & Session Models  
-**Last Updated:** January 7, 2026
+**Last Updated:** February 12, 2026
 
 ## Overview
 
@@ -27,13 +27,19 @@ The database consists of configuration and session tables:
 5. **`config_prompts`** - System prompts and deck prompt selection
 6. **`config_history`** - Audit trail of all configuration changes
 7. **`slide_deck_prompt_library`** - Global deck prompt templates (shared across profiles)
-8. **`google_oauth_tokens`** - Per-user, per-profile encrypted Google OAuth tokens
+8. **`slide_style_library`** - Global slide style library (CSS styles, image guidelines)
+9. **`google_oauth_tokens`** - Per-user, per-profile encrypted Google OAuth tokens
 
 **Session Tables:**
-7. **`user_sessions`** - User conversation sessions with processing locks
-8. **`session_messages`** - Chat messages with request_id for polling
-9. **`session_slide_decks`** - Slide deck state per session
-10. **`chat_requests`** - Async chat request tracking for polling mode
+8. **`user_sessions`** - User conversation sessions with processing locks
+9. **`session_messages`** - Chat messages with request_id for polling
+10. **`session_slide_decks`** - Slide deck state per session
+11. **`slide_deck_versions`** - Save point snapshots (up to 40 per session)
+12. **`chat_requests`** - Async chat request tracking for polling mode
+13. **`export_jobs`** - Async PPTX export job tracking
+
+**Asset Tables:**
+14. **`image_assets`** - Uploaded images with binary data and thumbnails
 
 ### Entity Relationships
 
@@ -42,18 +48,28 @@ The database consists of configuration and session tables:
 config_profiles (1) ──┬── (1) config_ai_infra
                       ├── (1) config_genie_spaces
                       ├── (1) config_mlflow
-                      ├── (1) config_prompts ──── (0..1) slide_deck_prompt_library
+                      ├── (1) config_prompts ──┬── (0..1) slide_deck_prompt_library
+                      │                        └── (0..1) slide_style_library
                       ├── (n) config_history
                       └── (n) google_oauth_tokens (per user)
 
 slide_deck_prompt_library (global) ──── (n) config_prompts (via selected_deck_prompt_id FK)
+slide_style_library (global) ──── (n) config_prompts (via selected_slide_style_id FK)
 ```
 
 **Session Tables:**
 ```
 user_sessions (1) ──┬── (n) session_messages
                     ├── (1) session_slide_decks
+                    ├── (n) slide_deck_versions
                     └── (n) chat_requests
+
+export_jobs (standalone, references session_id as string)
+```
+
+**Asset Tables:**
+```
+image_assets (standalone, no foreign keys)
 ```
 
 - One profile has exactly one AI infrastructure config
@@ -230,6 +246,32 @@ class SlideDeckPromptLibrary(Base):
 3. When generating slides, the deck prompt content is prepended to the system prompt
 4. This enables standardized presentations without users retyping instructions each time
 
+### SlideStyleLibrary
+
+Global slide style library shared across all profiles.
+
+```python
+class SlideStyleLibrary(Base):
+    id: int
+    name: str                    # Style name (e.g., "Databricks Brand"), unique
+    description: str | None
+    category: str | None         # e.g., "Brand", "Minimal", "Dark"
+    style_content: str           # CSS/typography/layout rules for the AI
+    image_guidelines: str | None # Markdown instructions for image usage in slides
+    is_active: bool              # Whether available for selection
+    is_system: bool              # Protected system styles (cannot be edited/deleted)
+    created_by: str | None
+    created_at: datetime
+    updated_by: str | None
+    updated_at: datetime
+```
+
+**How slide styles work:**
+1. Styles are created globally (not per-profile)
+2. Each profile can select one style via `config_prompts.selected_slide_style_id`
+3. When generating slides, the style content is included in the system prompt
+4. `is_system=True` styles (e.g., "System Default") are protected from user modification
+
 ### ConfigHistory
 
 Audit trail of all configuration changes.
@@ -256,7 +298,8 @@ User conversation sessions with processing lock support and profile association.
 class UserSession(Base):
     id: int
     session_id: str              # Unique session identifier
-    user_id: str | None          # Optional user identification
+    user_id: str | None          # Optional user identification (legacy)
+    created_by: str | None       # Username of session creator (used for user-scoped filtering)
     title: str                   # Session title
     created_at: datetime
     last_activity: datetime
@@ -356,13 +399,72 @@ class ChatRequest(Base):
     completed_at: datetime | None
 ```
 
+### SlideDeckVersion
+
+Save point snapshots for deck versioning (up to 40 per session).
+
+```python
+class SlideDeckVersion(Base):
+    id: int
+    session_id: int              # Foreign key to user_sessions
+    version_number: int          # Sequential version number within session
+    description: str             # Human-readable description (e.g., "Generated 5 slides")
+    deck_json: str               # Full SlideDeck structure as JSON
+    verification_map_json: str | None  # Verification results keyed by content hash
+    chat_history_json: str | None      # Chat messages at this point in time
+    created_at: datetime
+```
+
+Indexed on `(session_id, version_number)` and `(session_id, created_at)`.
+
+### ExportJob
+
+Tracks async PPTX export jobs for polling.
+
+```python
+class ExportJob(Base):
+    id: int
+    job_id: str                  # Unique job identifier (UUID)
+    session_id: str              # Session string ID (not FK — standalone)
+    status: str                  # 'pending', 'running', 'completed', 'error'
+    progress: int                # Slides processed so far
+    total_slides: int            # Total slides to export
+    title: str | None            # Deck title for filename
+    output_path: str | None      # Path to generated PPTX file
+    error_message: str | None
+    created_at: datetime
+    completed_at: datetime | None
+```
+
+### ImageAsset
+
+Uploaded images with binary data stored directly in PostgreSQL.
+
+```python
+class ImageAsset(Base):
+    id: int
+    filename: str                # Generated unique filename
+    original_filename: str       # User's original filename
+    mime_type: str               # e.g., "image/png"
+    size_bytes: int
+    image_data: bytes            # Binary image data (LargeBinary)
+    thumbnail_base64: str | None # Base64-encoded thumbnail for previews
+    tags: list                   # JSON array of tags
+    description: str | None
+    category: str | None
+    uploaded_by: str | None
+    is_active: bool
+    created_by: str | None
+    created_at: datetime
+    updated_by: str | None
+    updated_at: datetime
+```
+
 ## Schema Management
 
-### Pre-Release Approach
+### Table Creation
 
-**Current Status:** Pre-release - schema is actively evolving.
-
-Tables are automatically created from SQLAlchemy models using:
+Tables are created from SQLAlchemy models using `init_db()`:
 
 ```python
 from src.core.database import init_db
@@ -371,25 +473,37 @@ init_db()  # Creates all tables from Base.metadata
 ```
 
 This is called automatically by:
-- `scripts/init_database.py` - Ensures tables exist before seeding data
-- `quickstart/setup_database.sh` - Creates tables during initial setup
+- `scripts/init_database.py` — Ensures tables exist before seeding data
+- `quickstart/setup_database.sh` — Creates tables during initial setup
+- Databricks App startup via `app.yaml` — `init_database()` in `databricks_tellr_app.run`
 
-### When to Add Migrations
+**Important limitation:** `init_db()` (which calls `Base.metadata.create_all()`) only creates tables that don't already exist. It does **not** add columns to existing tables. For that, use `run_migrations()`.
 
-**Migrations will be added when:**
-- Application reaches production with real user data
-- Schema changes need to preserve existing data
-- Deploying to Databricks Lakebase with established datasets
+### Schema Migrations
 
-**For now:** Schema changes are handled by dropping and recreating the database during development.
+For adding columns to existing tables in production, a lightweight `run_migrations()` function runs idempotent `ALTER TABLE` statements on app startup.
 
-**Future Migration Setup:**
-When ready for production, [Alembic](https://alembic.sqlalchemy.org/) can be added back:
-1. Install: `pip install alembic`
-2. Initialize: `alembic init alembic`
-3. Configure `alembic.ini` with `DATABASE_URL` from environment
-4. Generate initial migration: `alembic revision --autogenerate -m "initial schema"`
-5. Apply migrations: `alembic upgrade head`
+**Manual migrations:** Some schema changes require standalone SQL scripts (placed in `scripts/`).
+
+```python
+# packages/databricks-tellr-app/databricks_tellr_app/run.py
+def run_migrations() -> None:
+    engine = get_engine()
+    schema = os.getenv("LAKEBASE_SCHEMA")
+
+    with engine.connect() as conn:
+        if schema:
+            conn.execute(text(f'SET search_path TO "{schema}"'))
+
+        # 2026-02-12: Add image_guidelines to slide_style_library
+        conn.execute(text(
+            "ALTER TABLE slide_style_library "
+            "ADD COLUMN IF NOT EXISTS image_guidelines TEXT"
+        ))
+        conn.commit()
+```
+
+Called from the Databricks App startup command in `app.yaml` after `init_database()` and before `uvicorn`. Each migration uses `IF NOT EXISTS` / `IF EXISTS` for idempotency — safe to run on every startup.
 
 ## Database Initialization
 
@@ -487,17 +601,6 @@ pytest tests/unit/settings/test_models.py::test_create_profile -v
 - Complete profile with all configs
 
 **Note:** Tests use SQLite in-memory database for speed. Some PostgreSQL-specific features (like JSONB and cascade deletes) are tested separately in integration tests.
-
-## Next Steps
-
-**Phase 2: Backend Services** (Days 3-5)
-- ProfileService for CRUD operations
-- ConfigService for configuration management
-- GenieService for Genie space operations
-- ConfigValidator for validation logic
-- Configuration history tracking
-
-See the database configuration documentation for details.
 
 ## References
 
