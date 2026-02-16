@@ -181,8 +181,8 @@ async function goToGenerator(page: Page): Promise<void> {
 
 async function goToHistory(page: Page): Promise<void> {
   await page.goto('/');
-  await page.getByRole('navigation').getByRole('button', { name: 'History' }).click();
-  await expect(page.getByRole('heading', { name: 'Session History' })).toBeVisible();
+  await page.getByRole('navigation').getByRole('button', { name: 'My Sessions' }).click();
+  await expect(page.getByRole('heading', { name: 'My Sessions' })).toBeVisible();
 }
 
 // ============================================
@@ -761,8 +761,8 @@ test.describe('Session-Profile Association', () => {
       await page.waitForTimeout(2000);
 
       // Go to History
-      await page.getByRole('navigation').getByRole('button', { name: 'History' }).click();
-      await expect(page.getByRole('heading', { name: 'Session History' })).toBeVisible();
+      await page.getByRole('navigation').getByRole('button', { name: 'My Sessions' }).click();
+      await expect(page.getByRole('heading', { name: 'My Sessions' })).toBeVisible();
 
       // The most recent session should show the profile name
       await expect(page.getByText(profileName).first()).toBeVisible();

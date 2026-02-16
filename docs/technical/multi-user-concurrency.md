@@ -11,6 +11,13 @@ The AI Slide Generator supports multiple simultaneous users through:
 - **Async endpoint handlers** – FastAPI endpoints use `asyncio.to_thread()` for blocking LLM calls
 - **Database-based locking** – prevents concurrent mutations to the same session
 - **Per-request tool binding** – eliminates shared mutable state in the LangChain agent
+- **Per-user session isolation** – sessions are scoped to the authenticated user via the `created_by` column
+
+---
+
+## Per-User Session Isolation
+
+Sessions are isolated per user using the `created_by` column. Authentication middleware extracts the username from the Databricks token in production (or from `DEV_USER_ID` in local development) and stores it in a `ContextVar`. The `GET /api/sessions` endpoint automatically filters by `created_by = current_user`, so each user sees only their own sessions. The `POST /api/sessions` endpoint sets `created_by` server-side from the authenticated user identity; clients do not pass or override this value.
 
 ---
 

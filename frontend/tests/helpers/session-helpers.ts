@@ -12,6 +12,7 @@ export const TEST_SESSION_ID = 'b1b4d8e3-6cf6-47cb-ad58-9fdc6ad205cc';
 export const mockSessionDetail = {
   session_id: TEST_SESSION_ID,
   user_id: null,
+  created_by: 'dev@local.dev',
   title: 'Test Session With Slides',
   has_slide_deck: true,
   profile_id: 1,

@@ -550,32 +550,30 @@ class TestSessionEndpoints:
     """Tests for /api/sessions endpoints."""
 
     def test_list_sessions_success(self, client, mock_session_manager):
-        """GET /api/sessions returns list of sessions."""
+        """GET /api/sessions returns list of sessions scoped to the current user."""
         mock_session_manager.list_sessions.return_value = [
-            {"session_id": "sess-1", "title": "Session 1"},
-            {"session_id": "sess-2", "title": "Session 2"}
+            {"session_id": "sess-1", "title": "Session 1", "created_by": "dev@local.dev"},
+            {"session_id": "sess-2", "title": "Session 2", "created_by": "dev@local.dev"},
         ]
 
-        response = client.get("/api/sessions")
+        with patch("src.api.routes.sessions.get_current_user", return_value="dev@local.dev"):
+            response = client.get("/api/sessions")
         assert response.status_code == 200
         data = response.json()
         assert "sessions" in data
         assert "count" in data
         assert data["count"] == 2
-
-    def test_list_sessions_with_user_filter(self, client, mock_session_manager):
-        """GET /api/sessions accepts user_id filter."""
-        mock_session_manager.list_sessions.return_value = []
-
-        response = client.get("/api/sessions?user_id=user-123")
-        assert response.status_code == 200
-        mock_session_manager.list_sessions.assert_called_once()
+        # Verify the route passed the user identity to session_manager
+        mock_session_manager.list_sessions.assert_called_once_with(
+            created_by="dev@local.dev", limit=50
+        )
 
     def test_list_sessions_with_limit(self, client, mock_session_manager):
         """GET /api/sessions accepts limit parameter."""
         mock_session_manager.list_sessions.return_value = []
 
-        response = client.get("/api/sessions?limit=10")
+        with patch("src.api.routes.sessions.get_current_user", return_value="dev@local.dev"):
+            response = client.get("/api/sessions?limit=10")
         assert response.status_code == 200
 
     def test_list_sessions_limit_validation(self, client):
@@ -586,52 +584,58 @@ class TestSessionEndpoints:
         response = client.get("/api/sessions?limit=101")
         assert response.status_code == 422
 
-    def test_create_session_success(self, client, mock_session_manager):
-        """POST /api/sessions creates new session."""
+    def test_create_session_sets_created_by(self, client, mock_session_manager):
+        """POST /api/sessions injects created_by from the middleware user context."""
         mock_session_manager.create_session.return_value = {
             "session_id": "new-session-123",
+            "created_by": "alice@example.com",
             "title": "New Session",
-            "created_at": "2024-01-01T12:00:00Z"
+            "created_at": "2024-01-01T12:00:00Z",
         }
 
-        response = client.post("/api/sessions", json={})
+        with patch("src.api.routes.sessions.get_current_user", return_value="alice@example.com"):
+            response = client.post("/api/sessions", json={})
         assert response.status_code == 200
         data = response.json()
-        assert "session_id" in data
+        assert data["created_by"] == "alice@example.com"
+        # Verify created_by was passed server-side, not from request body
+        call_kwargs = mock_session_manager.create_session.call_args
+        assert call_kwargs.kwargs.get("created_by") == "alice@example.com"
 
     def test_create_session_with_title(self, client, mock_session_manager):
         """POST /api/sessions accepts optional title."""
         mock_session_manager.create_session.return_value = {
             "session_id": "new-session-123",
             "title": "My Custom Title",
-            "created_at": "2024-01-01T12:00:00Z"
+            "created_at": "2024-01-01T12:00:00Z",
         }
 
-        response = client.post("/api/sessions", json={
-            "title": "My Custom Title"
-        })
-        assert response.status_code == 200
-
-    def test_create_session_with_user_id(self, client, mock_session_manager):
-        """POST /api/sessions accepts optional user_id."""
-        mock_session_manager.create_session.return_value = {
-            "session_id": "new-session-123",
-            "user_id": "user-abc",
-            "title": "Session",
-            "created_at": "2024-01-01T12:00:00Z"
-        }
-
-        response = client.post("/api/sessions", json={
-            "user_id": "user-abc"
-        })
+        with patch("src.api.routes.sessions.get_current_user", return_value="dev@local.dev"):
+            response = client.post("/api/sessions", json={
+                "title": "My Custom Title"
+            })
         assert response.status_code == 200
 
     def test_create_session_internal_error(self, client, mock_session_manager):
         """POST /api/sessions returns 500 on service error."""
         mock_session_manager.create_session.side_effect = Exception("Database error")
 
-        response = client.post("/api/sessions", json={})
+        with patch("src.api.routes.sessions.get_current_user", return_value="dev@local.dev"):
+            response = client.post("/api/sessions", json={})
         assert response.status_code == 500
+
+    def test_list_sessions_filters_by_current_user(self, client, mock_session_manager):
+        """GET /api/sessions only returns sessions for the authenticated user."""
+        mock_session_manager.list_sessions.return_value = [
+            {"session_id": "s1", "created_by": "bob@example.com"},
+        ]
+
+        with patch("src.api.routes.sessions.get_current_user", return_value="bob@example.com"):
+            response = client.get("/api/sessions")
+        assert response.status_code == 200
+        mock_session_manager.list_sessions.assert_called_once_with(
+            created_by="bob@example.com", limit=50
+        )
 
     def test_get_session_success(self, client, mock_session_manager):
         """GET /api/sessions/{id} returns session details."""
