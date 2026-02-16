@@ -82,3 +82,8 @@ token.json
 
 # Git worktrees
 .worktrees/
+
+# OpenSkills / PRPM
+.openskills/
+AGENTS.md
+prpm.lock
