@@ -145,10 +145,21 @@ class TestHelpers:
         """_build_redirect_uri constructs the callback URL from request base."""
         from src.api.routes.google_slides import _build_redirect_uri
 
+        # Local dev: no forwarded headers → uses base_url
         mock_request = MagicMock()
+        mock_request.headers.get.return_value = None
         mock_request.base_url = "http://localhost:8000/"
         uri = _build_redirect_uri(mock_request)
         assert uri == "http://localhost:8000/api/export/google-slides/auth/callback"
+
+        # Behind proxy: X-Forwarded-Host/Proto present → uses public URL
+        mock_proxy = MagicMock()
+        mock_proxy.headers.get.side_effect = lambda h: {
+            "x-forwarded-host": "myapp.databricksapps.com",
+            "x-forwarded-proto": "https",
+        }.get(h)
+        uri = _build_redirect_uri(mock_proxy)
+        assert uri == "https://myapp.databricksapps.com/api/export/google-slides/auth/callback"
 
 
 # ---------------------------------------------------------------------------
