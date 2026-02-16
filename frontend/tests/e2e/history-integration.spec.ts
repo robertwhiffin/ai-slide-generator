@@ -159,13 +159,13 @@ async function createTestSessionViaAPI(
 
 async function goToHistory(page: Page): Promise<void> {
   await page.goto('/');
-  await page.getByRole('navigation').getByRole('button', { name: 'History' }).click();
-  await expect(page.getByRole('heading', { name: 'Session History' })).toBeVisible();
+  await page.getByRole('navigation').getByRole('button', { name: 'My Sessions' }).click();
+  await expect(page.getByRole('heading', { name: 'My Sessions' })).toBeVisible();
 }
 
 async function goToGenerator(page: Page): Promise<void> {
   await page.goto('/');
-  await page.getByRole('navigation').getByRole('button', { name: 'Generator' }).click();
+  await page.getByRole('navigation').getByRole('button', { name: 'New Session' }).click();
   await expect(page.getByRole('heading', { name: 'Chat', level: 2 })).toBeVisible();
 }
 
@@ -178,7 +178,7 @@ test.describe('Session History Display', () => {
     await goToHistory(page);
 
     // Page heading should be visible
-    await expect(page.getByRole('heading', { name: 'Session History' })).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'My Sessions' })).toBeVisible();
 
     // Either shows table or empty state
     const table = page.getByRole('table');
@@ -444,7 +444,7 @@ test.describe('Session Restore', () => {
       await restoreButton.click();
 
       // Should navigate away from History
-      await expect(page.getByRole('heading', { name: 'Session History' })).not.toBeVisible({ timeout: 5000 });
+      await expect(page.getByRole('heading', { name: 'My Sessions' })).not.toBeVisible({ timeout: 5000 });
     }
   });
 });
@@ -496,25 +496,16 @@ test.describe('Session-Profile Association', () => {
 // ============================================
 
 test.describe('Session History Navigation', () => {
-  test('Back to Generator button works', async ({ page }) => {
-    await goToHistory(page);
-
-    await page.getByRole('button', { name: /Back to Generator/i }).click();
-
-    // Should be on Generator page
-    await expect(page.getByRole('heading', { name: 'Chat', level: 2 })).toBeVisible();
-  });
-
   test('can navigate back to History after leaving', async ({ page }) => {
     await goToHistory(page);
 
-    // Go to Generator
-    await page.getByRole('button', { name: /Back to Generator/i }).click();
-    await expect(page.getByRole('heading', { name: 'Chat', level: 2 })).toBeVisible();
+    // Navigate away from History to another page
+    await page.getByRole('navigation').getByRole('button', { name: 'Help' }).click();
+    await expect(page.getByRole('heading', { name: /how to use/i })).toBeVisible();
 
-    // Go back to History via nav
-    await page.getByRole('navigation').getByRole('button', { name: 'History' }).click();
-    await expect(page.getByRole('heading', { name: 'Session History' })).toBeVisible();
+    // Navigate back to History via nav
+    await page.getByRole('navigation').getByRole('button', { name: 'My Sessions' }).click();
+    await expect(page.getByRole('heading', { name: 'My Sessions' })).toBeVisible();
   });
 });
 
@@ -565,7 +556,7 @@ test.describe('Session History Edge Cases', () => {
       const apiData = await getSessionsViaAPI(request);
 
       // Get count from page
-      const countText = await page.getByText(/\d+ sessions? saved/).textContent();
+      const countText = await page.getByText(/^\d+ sessions?$/).textContent();
       const countMatch = countText?.match(/(\d+) sessions?/);
       const uiCount = countMatch ? parseInt(countMatch[1]) : 0;
 

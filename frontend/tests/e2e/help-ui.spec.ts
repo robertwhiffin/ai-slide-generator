@@ -27,7 +27,15 @@ async function setupMocks(page: Page) {
   await page.route('http://127.0.0.1:8000/api/settings/slide-styles', (route) => {
     route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(mockSlideStyles) });
   });
-  await page.route('http://127.0.0.1:8000/api/sessions**', (route) => {
+  await page.route('http://127.0.0.1:8000/api/sessions**', (route, request) => {
+    const method = request.method();
+
+    // Handle session creation/deletion
+    if (method === 'POST' || method === 'DELETE') {
+      route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ session_id: 'mock', title: 'New', user_id: null, created_at: '2026-01-01T00:00:00Z' }) });
+      return;
+    }
+
     route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(mockSessions) });
   });
   await page.route('**/api/version**', (route) => {
@@ -58,15 +66,6 @@ test.describe('HelpNavigation', () => {
     await expect(page.getByRole('heading', { name: 'How to Use databricks tellr' })).toBeVisible();
   });
 
-  test('Back button returns to main view', async ({ page }) => {
-    await goToHelp(page);
-
-    await page.getByRole('button', { name: 'Back' }).click();
-
-    // Should return to main view
-    await expect(page.getByRole('heading', { name: 'How to Use databricks tellr' })).not.toBeVisible();
-  });
-
   test('shows Overview tab by default', async ({ page }) => {
     await goToHelp(page);
 
@@ -95,7 +94,7 @@ test.describe('HelpTabs', () => {
     await expect(getHelpTabButton(page, 'Overview')).toBeVisible();
     await expect(getHelpTabButton(page, 'Generator')).toBeVisible();
     await expect(getHelpTabButton(page, 'Verification')).toBeVisible();
-    await expect(getHelpTabButton(page, 'History')).toBeVisible();
+    await expect(getHelpTabButton(page, 'My Sessions')).toBeVisible();
     await expect(getHelpTabButton(page, 'Profiles')).toBeVisible();
     await expect(getHelpTabButton(page, 'Deck Prompts')).toBeVisible();
     await expect(getHelpTabButton(page, 'Slide Styles')).toBeVisible();
@@ -120,7 +119,7 @@ test.describe('HelpTabs', () => {
   test('clicking History tab shows history content', async ({ page }) => {
     await goToHelp(page);
 
-    await getHelpTabButton(page, 'History').click();
+    await getHelpTabButton(page, 'My Sessions').click();
 
     await expect(page.getByRole('heading', { name: 'Session List' })).toBeVisible();
   });
