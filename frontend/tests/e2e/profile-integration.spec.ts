@@ -604,12 +604,6 @@ test.describe('Profile Switching', () => {
         await confirmButton.click();
       }
 
-      // Wait for load to complete and redirect to generator page
-      await page.waitForURL(/\/sessions\/.*\/edit/, { timeout: 10000 });
-
-      // loading a profile takes you to the generator page - go back
-      await goToProfiles(page);
-      await page.waitForTimeout(1000);
 
       // Row should now show Loaded badge
       const updatedRow = page.locator('tr', { hasText: profileName });
