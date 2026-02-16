@@ -91,7 +91,8 @@ class UserSession(Base):
 
     id = Column(Integer, primary_key=True)
     session_id = Column(String(64), unique=True, nullable=False, index=True)
-    user_id = Column(String(255), nullable=True, index=True)  # Optional user identification
+    user_id = Column(String(255), nullable=True, index=True)  # Legacy — kept for backward compat
+    created_by = Column(String(255), nullable=True, index=True)  # Username of session creator
 
     # Session metadata
     title = Column(String(255))  # Optional session title/name
@@ -134,11 +135,11 @@ class UserSession(Base):
 
     # Indexes for common queries
     __table_args__ = (
-        Index("ix_user_sessions_user_last_activity", "user_id", "last_activity"),
+        Index("ix_user_sessions_created_by_last_activity", "created_by", "last_activity"),
     )
 
     def __repr__(self):
-        return f"<UserSession(session_id='{self.session_id}', user_id='{self.user_id}')>"
+        return f"<UserSession(session_id='{self.session_id}', created_by='{self.created_by}')>"
 
 
 class SessionMessage(Base):
