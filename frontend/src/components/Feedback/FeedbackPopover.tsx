@@ -51,13 +51,13 @@ export const FeedbackPopover: React.FC<FeedbackPopoverProps> = ({ onClose }) => 
 
       const response = await api.feedbackChat(conversationHistory);
 
+      setMessages((prev) => [
+        ...prev,
+        { role: 'assistant', content: response.content },
+      ]);
+
       if (response.summary_ready) {
         setSummaryReady(true);
-      } else {
-        setMessages((prev) => [
-          ...prev,
-          { role: 'assistant', content: response.content },
-        ]);
       }
     } catch (err) {
       console.error('Feedback chat error:', err);
@@ -68,6 +68,15 @@ export const FeedbackPopover: React.FC<FeedbackPopoverProps> = ({ onClose }) => 
     } finally {
       setLoading(false);
     }
+  };
+
+  const handleSendCorrection = async () => {
+    const trimmed = input.trim();
+    if (!trimmed || loading) return;
+
+    // Send correction as a regular message - AI will revise the summary
+    setSummaryReady(false);
+    await handleSend();
   };
 
   const handleSubmitFeedback = async () => {
@@ -157,13 +166,36 @@ export const FeedbackPopover: React.FC<FeedbackPopoverProps> = ({ onClose }) => 
       {!submitted && (
         <div className="border-t p-3">
           {summaryReady ? (
-            <button
-              onClick={handleSubmitFeedback}
-              className="w-full py-2 bg-green-600 text-white rounded-lg font-medium hover:bg-green-700 transition-colors"
-              data-testid="feedback-submit"
-            >
-              Submit Feedback
-            </button>
+            <div className="space-y-2">
+              <button
+                onClick={handleSubmitFeedback}
+                className="w-full py-2 bg-green-600 text-white rounded-lg font-medium hover:bg-green-700 transition-colors"
+                data-testid="feedback-submit"
+              >
+                Submit Feedback
+              </button>
+              <div className="flex gap-2">
+                <input
+                  type="text"
+                  value={input}
+                  onChange={(e) => setInput(e.target.value)}
+                  onKeyDown={handleKeyDown}
+                  placeholder="Or type a correction..."
+                  className="flex-1 px-3 py-2 border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  data-testid="feedback-correction-input"
+                  disabled={loading}
+                />
+                <button
+                  onClick={handleSendCorrection}
+                  disabled={!input.trim() || loading}
+                  className="px-3 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 transition-colors"
+                  data-testid="feedback-correction-send"
+                  aria-label="Send correction"
+                >
+                  <FiSend size={16} />
+                </button>
+              </div>
+            </div>
           ) : (
             <div className="flex gap-2">
               <input

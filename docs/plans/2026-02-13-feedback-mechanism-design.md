@@ -19,15 +19,15 @@ Two complementary feedback features for tellr:
 2. Clicking opens an Intercom-style chat popover (~360x450px), anchored to the button.
 3. The AI greets the user: *"What's on your mind? Tell me about your experience."*
 4. The user describes their feedback in natural language.
-5. The AI asks **at most 2 clarifying questions** (short, 1-2 sentences each). If the initial message is already clear, it skips straight to summary.
-6. The AI presents a structured summary for confirmation:
+5. The AI asks up to 2 clarifying questions (short, 1-2 sentences each). If the initial message is already clear, it skips straight to summary. After the 2nd question is answered, it must immediately produce the summary.
+6. The AI presents a structured summary:
    - **Category:** Bug Report | Feature Request | UX Issue | Performance | Content Quality | Other
    - **Issue:** One sentence description
    - **Severity:** Low | Medium | High
    - **Details:** 2-3 sentences with specifics
-   - *"Does this look right?"*
-7. User confirms → feedback submitted → "Thank you" message → popover closes after 2 seconds.
-8. If user corrects something → AI revises and asks again (one more attempt).
+7. The user sees a "Submit Feedback" button. They can click it to submit immediately, or type a correction in the text box below.
+8. If user types a correction → AI revises the summary → Submit button reappears.
+9. On submit → "Thank you" message → popover closes after 2 seconds.
 
 ### State Management
 
@@ -52,12 +52,13 @@ Rules:
 
 Does this look right?
 
-- If the user confirms, respond with exactly: "FEEDBACK_CONFIRMED"
-- If the user corrects something, revise the summary and ask again
-- If the user's initial message is already clear and specific, skip questions and go straight to the summary
+- If the user sends a correction after the summary, revise it and present the updated summary
+  in the same format above
+- Do not ask "Does this look right?" or request confirmation - just present the summary
+- If the user's initial message is already clear and specific, skip questions entirely
 ```
 
-The `FEEDBACK_CONFIRMED` sentinel tells the backend to set `summary_ready: true`. The frontend never displays this token - it replaces it with the thank-you message.
+The backend detects `summary_ready` by the presence of `**Summary**` in the AI response. The frontend shows the summary as a message, with a Submit button and an optional correction text box below it.
 
 ## Feature B: Satisfaction Survey
 
@@ -222,6 +223,6 @@ Both tables are anonymous - no user identity columns.
 | Separate `FEEDBACK_LLM_ENDPOINT` env var | Decouple from the main slide generation model; use a faster/cheaper model |
 | localStorage for survey cooldown | Simplest option; no user auth in the system to track server-side |
 | Anonymous feedback | Low friction; no user identity system exists |
-| `FEEDBACK_CONFIRMED` sentinel | Clean separation between conversation and submission; trivial to detect |
+| `**Summary**` marker detection | Detects when AI produces structured summary; no sentinel token needed |
 | No report caching | Low traffic admin endpoint; always-fresh data worth the LLM cost |
 | Preset feedback categories | Structured enough for aggregation; flexible enough to cover most cases |

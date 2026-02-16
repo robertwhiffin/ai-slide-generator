@@ -19,9 +19,10 @@ FEEDBACK_SYSTEM_PROMPT = """You are a feedback assistant for tellr, a presentati
 Your job is to help users articulate their feedback clearly.
 
 Rules:
-- Ask at most 2 clarifying questions to understand the user's feedback
-- Keep your responses short (1-2 sentences per question)
-- After at most 2 clarifying questions, produce a structured summary
+- You may ask up to 2 short clarifying questions (1-2 sentences each), one at a time
+- After your 2nd clarifying question has been answered, you MUST immediately produce the summary
+- Never ask a 3rd question. After 2 questions, go straight to the summary
+- If the user's initial message is already clear and specific, skip questions entirely
 - Present the summary in this exact format:
 
 **Summary**
@@ -30,14 +31,11 @@ Rules:
 - **Severity:** [Low | Medium | High]
 - **Details:** [2-3 sentences with specifics]
 
-Does this look right?
+- If the user sends a correction after the summary, revise it and present the updated summary
+  in the same format above
+- Do not ask "Does this look right?" or request confirmation - just present the summary"""
 
-- If the user confirms, respond with exactly: "FEEDBACK_CONFIRMED"
-- If the user corrects something, revise the summary and ask again
-- If the user's initial message is already clear and specific, skip questions and go
-  straight to the summary"""
-
-FEEDBACK_CONFIRMED_SENTINEL = "FEEDBACK_CONFIRMED"
+SUMMARY_MARKER = "**Summary**"
 
 
 def get_feedback_endpoint() -> str:
@@ -90,7 +88,7 @@ class FeedbackService:
 
         response = model.invoke(lc_messages)
         content = response.content.strip()
-        summary_ready = FEEDBACK_CONFIRMED_SENTINEL in content
+        summary_ready = SUMMARY_MARKER in content
 
         return {"content": content, "summary_ready": summary_ready}
 

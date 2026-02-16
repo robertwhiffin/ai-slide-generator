@@ -42,19 +42,26 @@ class TestFeedbackChat:
         assert result["summary_ready"] is False
 
     @patch("src.api.services.feedback_service.ChatDatabricks")
-    def test_chat_detects_feedback_confirmed(self, mock_chat_class):
+    def test_chat_detects_summary_in_response(self, mock_chat_class):
         from src.api.services.feedback_service import FeedbackService
 
         mock_model = MagicMock()
         mock_response = Mock()
-        mock_response.content = "FEEDBACK_CONFIRMED"
+        mock_response.content = (
+            "**Summary**\n"
+            "- **Category:** Bug Report\n"
+            "- **Issue:** Text unreadable on dark backgrounds\n"
+            "- **Severity:** High\n"
+            "- **Details:** White text on light backgrounds."
+        )
         mock_model.invoke.return_value = mock_response
         mock_chat_class.return_value = mock_model
 
         service = FeedbackService(endpoint="test-endpoint")
-        result = service.chat([{"role": "user", "content": "Yes, that looks right"}])
+        result = service.chat([{"role": "user", "content": "The text is hard to read"}])
 
         assert result["summary_ready"] is True
+        assert "**Summary**" in result["content"]
 
     @patch("src.api.services.feedback_service.ChatDatabricks")
     def test_chat_prepends_system_prompt(self, mock_chat_class):
