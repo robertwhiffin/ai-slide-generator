@@ -81,7 +81,7 @@ export const SurveyModal: React.FC<SurveyModalProps> = ({ isOpen, onClose }) => 
             {/* Time Saved */}
             <div className="mb-6">
               <label className="block text-sm font-medium text-gray-700 mb-2">
-                How much time has tellr saved you today?
+                How much time has tellr saved you?
               </label>
               <TimeSavedPills value={timeSaved} onChange={setTimeSaved} />
             </div>

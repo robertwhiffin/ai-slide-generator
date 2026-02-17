@@ -116,7 +116,7 @@ The frontend sends the full conversation history each call (stateless on the ser
 | `frontend/src/components/Feedback/StarRating.tsx` | 5-star interactive rating |
 | `frontend/src/components/Feedback/NPSScale.tsx` | 0-10 numbered button row |
 | `frontend/src/components/Feedback/TimeSavedPills.tsx` | Pill buttons: 15min, 30min, 1hr, 2hrs, 4hrs, 8hrs |
-| `frontend/src/hooks/useSurveyTrigger.ts` | 60s post-generation timer with 7-day localStorage cooldown |
+| `frontend/src/hooks/useSurveyTrigger.ts` | 30s post-generation timer with 7-day localStorage cooldown |
 | `frontend/src/services/api.ts` | `feedbackChat()`, `submitFeedback()`, `submitSurvey()` methods |
 
 ---
@@ -138,9 +138,9 @@ The frontend sends the full conversation history each call (stateless on the ser
 
 1. User generates a presentation successfully.
 2. `useSurveyTrigger` checks `localStorage` key `tellr_survey_last_shown`.
-3. If eligible (no survey in last 7 days), starts a 60-second timer.
-4. If the user starts another generation during the 60s, the timer resets.
-5. After 60s idle → survey modal appears; timestamp written to `localStorage` immediately.
+3. If eligible (no survey in last 7 days), starts a 30-second timer.
+4. If the user starts another generation during the 30s, the timer resets.
+5. After 30s idle → survey modal appears; timestamp written to `localStorage` immediately.
 6. User fills in star rating (required), time saved, and NPS (optional), then clicks Submit.
 7. `POST /api/feedback/survey` stores the response in `survey_responses`.
 8. Dismissing (X button) without submitting still counts as "shown" for the 7-day cooldown.
