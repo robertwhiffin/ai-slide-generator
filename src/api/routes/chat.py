@@ -285,6 +285,13 @@ async def submit_chat_async(request: ChatRequest):
             profile_name,
         )
 
+        # Capture first-message flag BEFORE persisting the user message,
+        # because add_message increments message_count.
+        session_data = await asyncio.to_thread(
+            session_manager.get_session, request.session_id
+        )
+        is_first_message = session_data.get("message_count", 0) == 0
+
         # Persist user message
         await asyncio.to_thread(
             session_manager.add_message,
@@ -304,6 +311,7 @@ async def submit_chat_async(request: ChatRequest):
                 "slide_context": (
                     request.slide_context.model_dump() if request.slide_context else None
                 ),
+                "is_first_message": is_first_message,
             },
         )
 

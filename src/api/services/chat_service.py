@@ -568,6 +568,7 @@ class ChatService:
         slide_context: Optional[Dict[str, Any]] = None,
         request_id: Optional[str] = None,
         image_ids: Optional[List[int]] = None,
+        is_first_message_override: Optional[bool] = None,
     ) -> Generator[StreamEvent, None, None]:
         """Send a message and yield streaming events.
 
@@ -582,6 +583,9 @@ class ChatService:
             slide_context: Optional context for slide editing
             request_id: Optional request ID for async polling support
             image_ids: Optional list of image IDs attached to this message
+            is_first_message_override: If set, overrides the DB-based first-message
+                detection. Used by the async path where the user message is
+                persisted before the job runs.
 
         Yields:
             StreamEvent objects for real-time display
@@ -630,8 +634,13 @@ class ChatService:
                 extra={"session_id": session_id, "profile_id": profile_id},
             )
 
-        # Capture first-message flag BEFORE add_message increments the count
-        is_first_message = db_session.get("message_count", 0) == 0
+        # Capture first-message flag BEFORE add_message increments the count.
+        # The async path pre-persists the user message before the job runs,
+        # so the DB count is already incremented; use the override in that case.
+        if is_first_message_override is not None:
+            is_first_message = is_first_message_override
+        else:
+            is_first_message = db_session.get("message_count", 0) == 0
 
         # Persist user message to database FIRST (only if not already done by async endpoint)
         if not request_id:
