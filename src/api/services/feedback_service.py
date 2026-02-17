@@ -11,7 +11,10 @@ from databricks_langchain import ChatDatabricks
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from sqlalchemy.orm import Session
 
+from sqlalchemy import func
+
 from src.database.models.feedback import FeedbackConversation, SurveyResponse
+from src.database.models.session import UserSession
 
 logger = logging.getLogger(__name__)
 
@@ -133,6 +136,26 @@ class FeedbackService:
             .all()
         )
 
+        # Usage stats from sessions table (independent of survey responses)
+        total_sessions = (
+            db.query(func.count(UserSession.id))
+            .filter(UserSession.created_at >= cutoff)
+            .scalar()
+        ) or 0
+        distinct_users = (
+            db.query(func.count(func.distinct(UserSession.created_by)))
+            .filter(
+                UserSession.created_at >= cutoff,
+                UserSession.created_by.isnot(None),
+            )
+            .scalar()
+        ) or 0
+
+        usage = {
+            "total_sessions": total_sessions,
+            "distinct_users": distinct_users,
+        }
+
         if not responses:
             return {
                 "weeks": [],
@@ -143,6 +166,7 @@ class FeedbackService:
                     "total_time_saved_minutes": 0,
                     "time_saved_display": "0 minutes",
                 },
+                "usage": usage,
             }
 
         weekly: Dict[str, list] = defaultdict(list)
@@ -188,6 +212,7 @@ class FeedbackService:
                 "total_time_saved_minutes": total_time,
                 "time_saved_display": _format_minutes(total_time),
             },
+            "usage": usage,
         }
 
     def get_feedback_summary(self, db: Session, weeks: int = 4) -> Dict[str, Any]:

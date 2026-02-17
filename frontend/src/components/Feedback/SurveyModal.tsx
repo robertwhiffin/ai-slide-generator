@@ -2,7 +2,7 @@
  * Satisfaction survey modal.
  *
  * Collects: star rating (1-5), time saved (pill buttons), NPS (0-10).
- * Appears 60s after a generation, at most once per 7 days.
+ * Appears 30s after a generation, at most once per 7 days.
  */
 import React, { useState } from 'react';
 import { FiX } from 'react-icons/fi';
@@ -93,6 +93,11 @@ export const SurveyModal: React.FC<SurveyModalProps> = ({ isOpen, onClose }) => 
               </label>
               <NPSScale value={npsScore} onChange={setNpsScore} />
             </div>
+
+            {/* Privacy note */}
+            <p className="text-xs text-gray-400 mb-4">
+              Your response is anonymous and is not shared with Databricks. It helps measure the time and effort tellr is saving your team.
+            </p>
 
             {/* Submit */}
             <div className="flex justify-end">

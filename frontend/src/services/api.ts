@@ -1295,6 +1295,10 @@ export const api = {
       total_time_saved_minutes: number;
       time_saved_display: string;
     };
+    usage: {
+      total_sessions: number;
+      distinct_users: number;
+    };
   }> {
     const response = await fetch(`${API_BASE_URL}/api/feedback/report/stats?weeks=${weeks}`);
 

@@ -19,6 +19,11 @@ interface Totals {
   time_saved_display: string;
 }
 
+interface Usage {
+  total_sessions: number;
+  distinct_users: number;
+}
+
 interface FeedbackSummary {
   period: string;
   feedback_count: number;
@@ -30,6 +35,7 @@ interface FeedbackSummary {
 export const FeedbackDashboard: React.FC = () => {
   const [weeks, setWeeks] = useState<WeekStats[]>([]);
   const [totals, setTotals] = useState<Totals | null>(null);
+  const [usage, setUsage] = useState<Usage | null>(null);
   const [summary, setSummary] = useState<FeedbackSummary | null>(null);
   const [statsLoading, setStatsLoading] = useState(true);
   const [summaryLoading, setSummaryLoading] = useState(true);
@@ -45,6 +51,7 @@ export const FeedbackDashboard: React.FC = () => {
       const data = await api.getReportStats(statsWeeks);
       setWeeks(data.weeks);
       setTotals(data.totals);
+      setUsage(data.usage);
     } catch (err) {
       setStatsError(err instanceof Error ? err.message : 'Failed to load stats');
     } finally {
@@ -106,11 +113,13 @@ export const FeedbackDashboard: React.FC = () => {
 
       {/* Totals Cards */}
       {totals && !statsLoading && (
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+        <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
+          <StatCard label="Distinct Users" value={usage ? String(usage.distinct_users) : '-'} />
+          <StatCard label="Total Sessions" value={usage ? String(usage.total_sessions) : '-'} />
+          <StatCard label="Survey Responses" value={String(totals.total_responses)} />
           <StatCard label="Avg Star Rating" value={totals.avg_star_rating !== null ? `${totals.avg_star_rating} / 5` : '-'} />
           <StatCard label="Avg NPS Score" value={totals.avg_nps_score !== null ? npsLabel(totals.avg_nps_score) : '-'} />
           <StatCard label="Total Time Saved" value={totals.time_saved_display || '-'} />
-          <StatCard label="Total Responses" value={String(totals.total_responses)} />
         </div>
       )}
 
