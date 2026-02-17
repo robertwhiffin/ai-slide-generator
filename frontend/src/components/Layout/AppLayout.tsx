@@ -119,7 +119,7 @@ export const AppLayout: React.FC = () => {
       />
       <SidebarInset>
         {viewMode === 'main' && (
-          <div className="flex h-full flex-col overflow-hidden">
+          <div className="flex flex-1 flex-col overflow-hidden">
             <PageHeader
               title={sessionTitle || 'Untitled session'}
               subtitle={getSubtitle()}
@@ -143,7 +143,7 @@ export const AppLayout: React.FC = () => {
             )}
 
             <div className="flex flex-1 overflow-hidden">
-              <div className="w-[32%] min-w-[260px] border-r border-border bg-card">
+              <div className="h-full w-[32%] min-w-[260px] border-r border-border bg-card">
                 <ChatPanel
                   key={chatKey}
                   ref={chatPanelRef}
@@ -157,7 +157,7 @@ export const AppLayout: React.FC = () => {
 
               <SelectionRibbon slideDeck={slideDeck} onSlideNavigate={handleSlideNavigate} />
 
-              <div className="flex-1 bg-background">
+              <div className="h-full flex-1 bg-background">
                 <SlidePanel
                   slideDeck={slideDeck}
                   rawHtml={rawHtml}
@@ -171,7 +171,7 @@ export const AppLayout: React.FC = () => {
         )}
 
         {viewMode === 'history' && (
-          <div className="flex h-full flex-col overflow-hidden">
+          <div className="flex flex-1 flex-col overflow-hidden">
             <SimplePageHeader title="History" />
             <div className="flex-1 overflow-y-auto">
               <div className="mx-auto w-full max-w-4xl px-4 py-8">
@@ -185,7 +185,7 @@ export const AppLayout: React.FC = () => {
         )}
 
         {viewMode === 'profiles' && (
-          <div className="flex h-full flex-col overflow-hidden">
+          <div className="flex flex-1 flex-col overflow-hidden">
             <SimplePageHeader title="Agent Profiles" />
             <div className="flex-1 overflow-y-auto">
               <div className="mx-auto w-full max-w-4xl px-4 py-8">
@@ -196,7 +196,7 @@ export const AppLayout: React.FC = () => {
         )}
 
         {viewMode === 'deck_prompts' && (
-          <div className="flex h-full flex-col overflow-hidden">
+          <div className="flex flex-1 flex-col overflow-hidden">
             <SimplePageHeader title="Deck Prompts" />
             <div className="flex-1 overflow-y-auto">
               <div className="mx-auto w-full max-w-4xl px-4 py-8">
@@ -207,7 +207,7 @@ export const AppLayout: React.FC = () => {
         )}
 
         {viewMode === 'slide_styles' && (
-          <div className="flex h-full flex-col overflow-hidden">
+          <div className="flex flex-1 flex-col overflow-hidden">
             <SimplePageHeader title="Slide Styles" />
             <div className="flex-1 overflow-y-auto">
               <div className="mx-auto w-full max-w-4xl px-4 py-8">
@@ -218,7 +218,7 @@ export const AppLayout: React.FC = () => {
         )}
 
         {viewMode === 'help' && (
-          <div className="flex h-full flex-col overflow-hidden">
+          <div className="flex flex-1 flex-col overflow-hidden">
             <SimplePageHeader title="Help" />
             <div className="flex-1 overflow-y-auto">
               <div className="mx-auto w-full max-w-4xl px-4 py-8">
