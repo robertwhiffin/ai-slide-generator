@@ -221,8 +221,12 @@ Use [nvm-windows](https://github.com/coreybutler/nvm-windows)
   - Create Genie spaces
   - Generate personal access tokens
 
-### 1. Create Personal Access Token
+### 1. Authenticate with Databricks
 
+**Option A — Browser SSO (recommended, no PAT needed):**
+When you first open the app at http://localhost:3000, a welcome screen will ask for your workspace URL. Enter it, and sign in via your browser using your normal Databricks credentials (SSO). No access token or `.env` file required.
+
+**Option B — Personal Access Token (traditional):**
 1. **Login** to your Databricks workspace
 2. **Click** your user icon (top right)
 3. **Go to** Settings → Developer

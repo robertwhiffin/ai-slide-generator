@@ -125,7 +125,7 @@ def test_update_profile(db_session):
 
 
 def test_delete_profile(db_session):
-    """Test deleting profile."""
+    """Test soft-deleting profile."""
     service = ProfileService(db_session)
 
     # Create two profiles so we can delete the non-default one
@@ -133,11 +133,19 @@ def test_delete_profile(db_session):
     profile = service.create_profile("to-delete", None, "test")
     profile_id = profile.id
 
-    # Delete it
+    # Delete it (soft-delete)
     service.delete_profile(profile_id, "test")
 
-    # Should not exist
-    assert service.get_profile(profile_id) is None
+    # Profile still exists but is marked as deleted
+    deleted = service.get_profile(profile_id)
+    assert deleted is not None
+    assert deleted.is_deleted is True
+    assert deleted.deleted_at is not None
+    assert deleted.is_default is False
+
+    # Should not appear in list_profiles
+    active_profiles = service.list_profiles()
+    assert all(p.id != profile_id for p in active_profiles)
 
 
 def test_cannot_delete_default_profile(db_session):

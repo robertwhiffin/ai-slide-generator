@@ -3,20 +3,25 @@ Unit tests for Databricks client module (dual-client architecture).
 
 Tests both the system client (singleton, service principal) and
 user client (request-scoped, user token) patterns.
+Also tests tellr config file management for local/Homebrew installs.
 """
 
-from unittest.mock import MagicMock, Mock, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
+import yaml
 
 from src.core.databricks_client import (
     DatabricksClientError,
     create_user_client,
     get_databricks_client,
     get_system_client,
+    get_tellr_config,
     get_user_client,
+    is_tellr_configured,
     reset_client,
     reset_user_client,
+    save_tellr_config,
     set_user_client,
     verify_connection,
 )
@@ -81,7 +86,7 @@ class TestUserClient:
         # Test with explicitly set user client
         mock_user_client = MagicMock()
         set_user_client(mock_user_client)
-        
+
         client = get_user_client()
         assert client is mock_user_client
         assert client is not mock_workspace_client
@@ -199,7 +204,9 @@ class TestResetClient:
         reset_client()
         # Should not raise any errors
 
-    def test_reset_client_thread_safe(self, mock_workspace_client, mock_config_loader, mock_env_vars):
+    def test_reset_client_thread_safe(
+        self, mock_workspace_client, mock_config_loader, mock_env_vars
+    ):
         """Test reset_client is thread-safe."""
         import threading
 
@@ -252,3 +259,104 @@ class TestVerifyConnection:
             ):
                 result = verify_connection()
                 assert result is False
+
+
+class TestTellrConfig:
+    """Tests for tellr config file management (~/.tellr/config.yaml)."""
+
+    def test_tellr_config_read_write_valid_scenarios(self, tmp_path):
+        """Test reading, writing, and checking tellr config files."""
+        # Save config creates file with correct content and parent dirs
+        config_path = tmp_path / ".tellr" / "config.yaml"
+        with patch("src.core.databricks_client.TELLR_CONFIG_PATH", config_path):
+            save_tellr_config(
+                host="https://mycompany.cloud.databricks.com",
+                auth_type="external-browser",
+            )
+        assert config_path.exists()
+        with open(config_path) as f:
+            data = yaml.safe_load(f)
+        assert data["databricks"]["host"] == "https://mycompany.cloud.databricks.com"
+        assert data["databricks"]["auth_type"] == "external-browser"
+
+        # Read config returns saved data
+        with patch("src.core.databricks_client.TELLR_CONFIG_PATH", config_path):
+            result = get_tellr_config()
+            assert result is not None
+            assert result["databricks"]["host"] == "https://mycompany.cloud.databricks.com"
+
+        # is_tellr_configured returns True when host is present
+        with patch("src.core.databricks_client.TELLR_CONFIG_PATH", config_path):
+            assert is_tellr_configured() is True
+
+        # Default auth_type is external-browser
+        config_path2 = tmp_path / ".tellr2" / "config.yaml"
+        with patch("src.core.databricks_client.TELLR_CONFIG_PATH", config_path2):
+            save_tellr_config(host="https://test.cloud.databricks.com")
+        with open(config_path2) as f:
+            data2 = yaml.safe_load(f)
+        assert data2["databricks"]["auth_type"] == "external-browser"
+
+    def test_tellr_config_error_handling(self, tmp_path):
+        """Test config handling for missing files, invalid YAML, and missing host."""
+        # Returns None when file doesn't exist
+        with patch(
+            "src.core.databricks_client.TELLR_CONFIG_PATH",
+            tmp_path / "nonexistent" / "config.yaml",
+        ):
+            assert get_tellr_config() is None
+
+        # is_tellr_configured returns False when no file
+        with patch(
+            "src.core.databricks_client.TELLR_CONFIG_PATH",
+            tmp_path / "nonexistent.yaml",
+        ):
+            assert is_tellr_configured() is False
+
+        # Handles invalid YAML without crashing
+        bad_path = tmp_path / "bad.yaml"
+        bad_path.write_text(": : : invalid yaml [[[")
+        with patch("src.core.databricks_client.TELLR_CONFIG_PATH", bad_path):
+            get_tellr_config()  # should not raise
+
+        # is_tellr_configured returns False when no host
+        no_host_path = tmp_path / "nohost.yaml"
+        no_host_path.write_text(yaml.dump({"databricks": {"auth_type": "external-browser"}}))
+        with patch("src.core.databricks_client.TELLR_CONFIG_PATH", no_host_path):
+            assert is_tellr_configured() is False
+
+    def test_get_system_client_oauth_valid_scenarios(
+        self, mock_config_loader, mock_env_vars
+    ):
+        """Test system client uses tellr config for OAuth and falls back to env."""
+        # Uses tellr config when OAuth auth_type is set
+        tellr_config = {
+            "databricks": {
+                "host": "https://oauth.cloud.databricks.com",
+                "auth_type": "external-browser",
+            }
+        }
+        with patch("src.core.databricks_client.get_tellr_config", return_value=tellr_config):
+            mock_client = MagicMock()
+            with patch(
+                "src.core.databricks_client.WorkspaceClient",
+                return_value=mock_client,
+            ) as mock_ws:
+                get_system_client()
+                mock_ws.assert_called_once()
+                call_kwargs = mock_ws.call_args[1]
+                assert call_kwargs["host"] == "https://oauth.cloud.databricks.com"
+                assert call_kwargs["auth_type"] == "external-browser"
+                assert "product" in call_kwargs
+                assert "product_version" in call_kwargs
+
+        # Reset for next scenario
+        reset_client()
+
+    def test_get_system_client_env_fallback(
+        self, mock_workspace_client, mock_config_loader, mock_env_vars
+    ):
+        """Test system client falls back to env vars when no tellr config."""
+        with patch("src.core.databricks_client.get_tellr_config", return_value=None):
+            client = get_system_client()
+            assert client is not None

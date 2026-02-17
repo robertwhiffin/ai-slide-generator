@@ -158,6 +158,11 @@ class AppSettings(BaseSettings):
         return v.rstrip("/")
 
 
+def get_active_profile_id() -> Optional[int]:
+    """Return the currently active profile ID."""
+    return _active_profile_id
+
+
 def load_settings_from_database(profile_id: Optional[int] = None) -> AppSettings:
     """
     Load settings from database profile.

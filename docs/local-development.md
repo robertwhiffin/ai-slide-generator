@@ -15,19 +15,17 @@ Run the full stack locally for development and testing.
 git clone https://github.com/robertwhiffin/ai-slide-generator.git
 cd ai-slide-generator
 
-# 2. Copy .env.example and fill in your values
-cp .env.example .env
-# Edit .env with your Databricks workspace details
-
-# 3. Run automated setup
+# 2. Run automated setup
 ./quickstart/setup.sh
 
-# 4. Start the app
+# 3. Start the app
 ./start_app.sh
 
-# 5. Open http://localhost:3000
+# 4. Open http://localhost:3000
+#    - First run: Enter your Databricks workspace URL and sign in
+#    - Subsequent runs: Goes straight to the app
 
-# 6. To stop front and back end
+# 5. To stop front and back end
 ./stop_app.sh
 ```
 
@@ -36,6 +34,18 @@ The setup script will:
 - Create Python virtual environment with uv
 - Initialize PostgreSQL database
 - Install frontend dependencies
+
+## Authentication Options
+
+tellr supports multiple ways to authenticate with Databricks:
+
+| Method | How to Use |
+|--------|------------|
+| **Browser SSO** (recommended) | Just run the app — enter your workspace URL in the welcome screen and sign in via browser |
+| **Environment file** | Create `.env` with `DATABRICKS_HOST` and `DATABRICKS_TOKEN` (traditional method) |
+| **Databricks CLI** | If you have `~/.databrickscfg` configured, tellr will use it automatically |
+
+**No PAT tokens required** — the browser SSO method lets you sign in with your normal Databricks credentials.
 
 ## Manual Setup
 
@@ -173,10 +183,11 @@ environments:
 
 | Issue | Solution |
 |-------|----------|
-| `DATABRICKS_HOST not set` | Create `.env` file with credentials |
+| `DATABRICKS_HOST not set` | Use the welcome screen to enter your workspace URL, or create `.env` file |
 | `Database connection failed` | Run `./quickstart/setup_database.sh` |
 | `Port already in use` | Run `./stop_app.sh` first |
 | Deployment fails | Run with `--dry-run` to validate config |
+| Want to change workspace | Delete config and restart: `rm ~/.tellr/config.yaml && ./start_app.sh` |
 
 For more troubleshooting information, see the troubleshooting guide in the quickstart directory at the project root.
 

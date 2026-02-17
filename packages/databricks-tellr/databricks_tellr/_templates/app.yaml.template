@@ -17,6 +17,8 @@ env:
     value: "${LAKEBASE_INSTANCE}"
   - name: LAKEBASE_SCHEMA
     value: "${LAKEBASE_SCHEMA}"
+  - name: GOOGLE_OAUTH_ENCRYPTION_KEY
+    value: "${GOOGLE_OAUTH_ENCRYPTION_KEY}"
   - name: DATABRICKS_HOST
     valueFrom: "system.databricks_host"
   - name: DATABRICKS_TOKEN
