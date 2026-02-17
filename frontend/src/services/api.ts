@@ -58,7 +58,7 @@ const isPollingMode = (): boolean => {
 };
 
 // Streaming event types matching backend StreamEventType
-export type StreamEventType = 'assistant' | 'tool_call' | 'tool_result' | 'error' | 'complete';
+export type StreamEventType = 'assistant' | 'tool_call' | 'tool_result' | 'error' | 'complete' | 'session_title';
 
 export interface StreamEvent {
   type: StreamEventType;
@@ -73,6 +73,7 @@ export interface StreamEvent {
   replacement_info?: ReplacementInfo;
   metadata?: Record<string, any>;
   experiment_url?: string;
+  session_title?: string;
 }
 
 export interface SessionMessage {
@@ -99,6 +100,7 @@ export interface Session {
   profile_name?: string | null;
   google_slides_url?: string | null;
   google_slides_presentation_id?: string | null;
+  profile_deleted?: boolean;
 }
 
 interface SendMessageParams {

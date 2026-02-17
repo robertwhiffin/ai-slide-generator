@@ -10,6 +10,8 @@ The user client is set per-request via middleware and stored in a ContextVar.
 Both client types set product tracking headers for API call attribution:
 - System client: product="tellr-app-system", product_version from package
 - User client: product="tellr-app-{hashed_user_id}"
+
+For Homebrew installations, supports OAuth browser authentication via config file.
 """
 
 import hashlib
@@ -17,8 +19,10 @@ import logging
 import os
 import threading
 from contextvars import ContextVar
+from pathlib import Path
 from typing import Optional
 
+import yaml
 from databricks.sdk import WorkspaceClient
 
 logger = logging.getLogger(__name__)
@@ -78,6 +82,71 @@ def _hash_username(username: str) -> str:
     local_part = username.split("@")[0] if "@" in username else username
     return hashlib.sha256(local_part.encode()).hexdigest()[:12]
 
+
+# =============================================================================
+# Tellr Config File Support (for Homebrew installations)
+# =============================================================================
+
+TELLR_CONFIG_PATH = Path.home() / ".tellr" / "config.yaml"
+
+
+def get_tellr_config() -> Optional[dict]:
+    """
+    Load tellr config from ~/.tellr/config.yaml if it exists.
+
+    This config is created by the Homebrew formula or when user configures
+    their workspace URL through the UI.
+
+    Returns:
+        Config dict or None if no config file exists
+    """
+    if not TELLR_CONFIG_PATH.exists():
+        return None
+
+    try:
+        with open(TELLR_CONFIG_PATH) as f:
+            config = yaml.safe_load(f)
+            logger.info(f"Loaded tellr config from {TELLR_CONFIG_PATH}")
+            return config
+    except Exception as e:
+        logger.warning(f"Failed to load tellr config: {e}")
+        return None
+
+
+def save_tellr_config(host: str, auth_type: str = "external-browser") -> None:
+    """
+    Save tellr config to ~/.tellr/config.yaml.
+
+    Called when user configures their workspace URL through the UI.
+
+    Args:
+        host: Databricks workspace URL (e.g., https://mycompany.cloud.databricks.com)
+        auth_type: Authentication type (default: external-browser for OAuth SSO)
+    """
+    TELLR_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+
+    config = {
+        "databricks": {
+            "host": host,
+            "auth_type": auth_type,
+        }
+    }
+
+    with open(TELLR_CONFIG_PATH, "w") as f:
+        yaml.dump(config, f, default_flow_style=False)
+
+    logger.info(f"Saved tellr config to {TELLR_CONFIG_PATH}")
+
+
+def is_tellr_configured() -> bool:
+    """Check if tellr has been configured with a workspace URL."""
+    config = get_tellr_config()
+    if not config:
+        return False
+
+    databricks_config = config.get("databricks", {})
+    return bool(databricks_config.get("host"))
+
 # =============================================================================
 # System Client (Singleton - Service Principal)
 # =============================================================================
@@ -93,12 +162,38 @@ class DatabricksClientError(Exception):
     pass
 
 
+def _refresh_oauth_env_token() -> None:
+    """Keep DATABRICKS_TOKEN fresh for MLflow when using SSO/OAuth.
+
+    The Databricks SDK handles token refresh internally, but MLflow
+    reads DATABRICKS_TOKEN from the environment.  This silently
+    updates the env var with the latest token from the SDK so MLflow
+    never sees an expired credential.  No-op for PAT/.env users.
+    """
+    if _system_client is None:
+        return
+    cfg = get_tellr_config()
+    if not cfg or cfg.get("databricks", {}).get("auth_type") != "external-browser":
+        return
+    try:
+        headers = _system_client.config.authenticate()
+        bearer = headers.get("Authorization", "")
+        if bearer.startswith("Bearer "):
+            os.environ["DATABRICKS_TOKEN"] = bearer[7:]
+    except Exception:
+        pass  # non-critical; existing token may still be valid
+
+
 def get_system_client(force_new: bool = False) -> WorkspaceClient:
     """
     Get the system-level WorkspaceClient (service principal).
 
     Used for system operations like loading settings, health checks,
-    and database operations. Uses environment variables for authentication.
+    and database operations.
+
+    Authentication priority:
+    1. Tellr config file (~/.tellr/config.yaml) - for Homebrew/OAuth installations
+    2. Environment variables - for traditional local development or production
 
     Args:
         force_new: If True, create a new client instance (useful for testing)
@@ -113,6 +208,7 @@ def get_system_client(force_new: bool = False) -> WorkspaceClient:
 
     # Fast path: return existing instance without locking
     if _system_client is not None and not force_new:
+        _refresh_oauth_env_token()
         return _system_client
 
     # Slow path: create new instance with lock
@@ -123,16 +219,53 @@ def get_system_client(force_new: bool = False) -> WorkspaceClient:
 
         try:
             version = _get_package_version()
-            logger.info(
-                "Initializing system Databricks client from environment",
-                extra={"product": PRODUCT_NAME_SYSTEM, "product_version": version},
-            )
-            _system_client = WorkspaceClient(
-                product=PRODUCT_NAME_SYSTEM,
-                product_version=version,
-            )
 
-            # Skip verification in development/test mode - allows local dev and tests without valid token
+            # Check for tellr config file first (Homebrew/OAuth installations)
+            tellr_config = get_tellr_config()
+
+            db_cfg = tellr_config.get("databricks", {}) if tellr_config else {}
+            auth_type = db_cfg.get("auth_type")
+            if auth_type == "external-browser":
+                # OAuth browser authentication - opens browser for SSO
+                host = tellr_config["databricks"]["host"]
+                logger.info(f"Initializing Databricks client with OAuth browser auth for {host}")
+                _system_client = WorkspaceClient(
+                    host=host,
+                    auth_type="external-browser",
+                    product=PRODUCT_NAME_SYSTEM,
+                    product_version=version,
+                )
+                # MLflow doesn't support external-browser OAuth natively.
+                # Extract the bearer token from the authenticated SDK
+                # client and set it as DATABRICKS_TOKEN so MLflow and
+                # other tools can authenticate via standard env vars.
+                os.environ["DATABRICKS_HOST"] = host
+                try:
+                    headers = _system_client.config.authenticate()
+                    bearer = headers.get("Authorization", "")
+                    if bearer.startswith("Bearer "):
+                        os.environ["DATABRICKS_TOKEN"] = bearer[7:]
+                        logger.info(
+                            "Set DATABRICKS_TOKEN from OAuth for MLflow"
+                        )
+                except Exception as e:
+                    logger.warning(f"Could not extract OAuth token: {e}")
+                logger.info(
+                    "Databricks client initialized with OAuth browser auth"
+                )
+            else:
+                # Traditional authentication via environment variables
+                logger.info(
+                    "Initializing system Databricks client from environment",
+                    extra={"product": PRODUCT_NAME_SYSTEM, "product_version": version},
+                )
+                _system_client = WorkspaceClient(
+                    product=PRODUCT_NAME_SYSTEM,
+                    product_version=version,
+                )
+
+            # Skip verification in dev/test mode
+            # Allows local dev and tests without valid token
             if os.getenv("ENVIRONMENT") in ("development", "test"):
                 logger.info("Dev/test mode: skipping Databricks connection verification")
                 return _system_client
@@ -140,11 +273,12 @@ def get_system_client(force_new: bool = False) -> WorkspaceClient:
             # Verify connection (production/staging only)
             try:
                 current_user = _system_client.current_user.me()
+                auth_method = "oauth_browser" if tellr_config else "service_principal"
                 logger.info(
                     "System Databricks client initialized",
                     extra={
                         "user": current_user.user_name,
-                        "auth_method": "service_principal",
+                        "auth_method": auth_method,
                     },
                 )
             except Exception as e:
@@ -420,7 +554,6 @@ def ensure_workspace_folder(folder_path: str) -> None:
     Raises:
         DatabricksClientError: If folder creation fails
     """
-    from databricks.sdk.service.workspace import ImportFormat
 
     try:
         client = get_system_client()
