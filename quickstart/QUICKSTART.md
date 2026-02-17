@@ -143,6 +143,11 @@ brew services start postgresql@14
 ```
 
 ### "DATABRICKS_HOST or DATABRICKS_TOKEN not set"
+
+**Option A — UI authentication (recommended):**
+Simply open http://localhost:3000, enter your workspace URL in the welcome screen, and sign in via browser. No `.env` file needed.
+
+**Option B — Environment file:**
 1. Create `.env` file: `cp .env.example .env`
 2. Edit and set values: `nano .env`
 3. Restart app: `./stop_app.sh && ./start_app.sh`

@@ -12,12 +12,15 @@ interface UpdateBannerProps {
   latestVersion: string;
   updateType: 'patch' | 'major';
   onDismiss: () => void;
+  /** Optional custom message to override the default update text */
+  customMessage?: string;
 }
 
 export const UpdateBanner: React.FC<UpdateBannerProps> = ({
   latestVersion,
   updateType,
   onDismiss,
+  customMessage,
 }) => {
   const isPatch = updateType === 'patch';
 
@@ -30,9 +33,11 @@ export const UpdateBanner: React.FC<UpdateBannerProps> = ({
     ? 'text-blue-600 hover:text-blue-800'
     : 'text-amber-600 hover:text-amber-800';
 
-  const message = isPatch
-    ? `A new version (v${latestVersion}) is available. Redeploy the app to update.`
-    : `A new version (v${latestVersion}) is available. This update requires running the update command from databricks-tellr.`;
+  const message = customMessage
+    ? customMessage
+    : isPatch
+      ? `A new version (v${latestVersion}) is available. Redeploy the app to update.`
+      : `A new version (v${latestVersion}) is available. This update requires running the update command from databricks-tellr.`;
 
   return (
     <div className={`${bgColor} ${borderColor} border-b px-4 py-2`}>

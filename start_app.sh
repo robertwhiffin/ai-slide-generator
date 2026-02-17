@@ -9,6 +9,7 @@ echo "🚀 Starting AI Slide Generator..."
 echo ""
 
 # Color codes for output
+RED='\033[0;31m'
 GREEN='\033[0;32m'
 BLUE='\033[0;34m'
 YELLOW='\033[1;33m'
@@ -18,7 +19,10 @@ NC='\033[0m' # No Color
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$PROJECT_ROOT"
 
-# Load environment variables from .env file
+# Tellr config file path (for Homebrew/OAuth installations)
+TELLR_CONFIG="$HOME/.tellr/config.yaml"
+
+# Load environment variables from .env file (if exists)
 if [ -f .env ]; then
     echo -e "${BLUE}🔧 Loading environment variables from .env...${NC}"
     # Export variables safely (handles values with spaces) - macOS compatible
@@ -26,25 +30,29 @@ if [ -f .env ]; then
     source .env
     set +a  # disable automatic export
     echo -e "${GREEN}✅ Environment variables loaded${NC}"
+    AUTH_MODE="env"
+elif [ -f "$TELLR_CONFIG" ]; then
+    # Homebrew installation with OAuth config
+    echo -e "${BLUE}🔧 Using tellr config for OAuth authentication...${NC}"
+    echo -e "${GREEN}✅ Tellr config found at $TELLR_CONFIG${NC}"
+    AUTH_MODE="oauth"
 else
-    echo -e "${RED}❌ .env file not found${NC}"
-    echo ""
-    echo "Please create .env file:"
-    echo -e "  ${BLUE}cp .env.example .env${NC}"
-    echo -e "  ${BLUE}nano .env${NC}  # Set DATABRICKS_HOST and DATABRICKS_TOKEN"
-    echo ""
-    exit 1
+    # Fresh install - welcome screen will handle setup
+    echo -e "${YELLOW}📝 No configuration found - welcome screen will guide setup${NC}"
+    AUTH_MODE="setup"
 fi
 
-# Validate required environment variables
-if [ -z "$DATABRICKS_HOST" ] || [ -z "$DATABRICKS_TOKEN" ]; then
-    echo -e "${RED}❌ Missing required environment variables${NC}"
-    echo ""
-    echo "Please ensure .env file contains:"
-    echo "  - DATABRICKS_HOST=https://your-workspace.cloud.databricks.com"
-    echo "  - DATABRICKS_TOKEN=your-token-here"
-    echo ""
-    exit 1
+# Validate required environment variables (only for .env mode)
+if [ "$AUTH_MODE" = "env" ]; then
+    if [ -z "$DATABRICKS_HOST" ] || [ -z "$DATABRICKS_TOKEN" ]; then
+        echo -e "${RED}❌ Missing required environment variables${NC}"
+        echo ""
+        echo "Please ensure .env file contains:"
+        echo "  - DATABRICKS_HOST=https://your-workspace.cloud.databricks.com"
+        echo "  - DATABRICKS_TOKEN=your-token-here"
+        echo ""
+        exit 1
+    fi
 fi
 
 # Check if .venv exists
