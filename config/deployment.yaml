@@ -5,9 +5,10 @@ environments:
   staging:
     app_name: "ai-slide-generator-dev"
     description: "AI Slide Generator - Development Environment"
-    workspace_path: "/Workspace/Users/robert.whiffin@databricks.com/.apps/databricks-tellr/dev"
+    #workspace_path: "/Workspace/Users/robert.whiffin@databricks.com/.apps/databricks-tellr/dev"
+    workspace_path: "/Workspace/Users/joy@databricks.com/.apps/databricks-tellr/dev"
     permissions:
-      - user_name: "robert.whiffin@databricks.com"
+      - user_name: "joy@databricks.com"
         permission_level: "CAN_MANAGE"
     compute_size: "MEDIUM"  # Options: MEDIUM, LARGE, LIQUID
     env_vars:
@@ -21,27 +22,27 @@ environments:
       capacity: "CU_1"  # Options: CU_1, CU_2, CU_4, CU_8
 
   development:
-    app_name: "db-tellr-dev"
+    app_name: "ai-slide-generator-dev-2"
     description: "AI Slide Generator - dev Environment"
-    workspace_path: "/Workspace/Users/robert.whiffin@databricks.com/.apps/dev/tellr"
+    workspace_path: "/Workspace/Users/joy@databricks.com/.apps/databricks-tellr/dev2"
     permissions:
-      - user_name: "robert.whiffin@databricks.com"
+      - user_name: "joy@databricks.com"
         permission_level: "CAN_MANAGE"
     compute_size: "MEDIUM"  # Options: MEDIUM, LARGE, LIQUID
     env_vars:
       ENVIRONMENT: "development"
       LOG_LEVEL: "DEBUG"
-      LAKEBASE_INSTANCE: "db-tellr"
-      LAKEBASE_SCHEMA: "app_data_dev"
+      LAKEBASE_INSTANCE: "ai-slide-generator-db-dev"
+      LAKEBASE_SCHEMA: "app_data_staging"
     lakebase:
-      database_name: "db-tellr"
-      schema: "app_data_dev"
+      database_name: "db-tellr-dev"
+      schema: "app_data_dev2"
       capacity: "CU_1"  # Options: CU_1, CU_2, CU_4, CU_8
 
   production:
-    app_name: "db-tellr-prod"
-    description: "Databricks tellr AI Slide Generator - Production"
-    workspace_path: "/Workspace/Users/robert.whiffin@databricks.com/.apps/prod/tellr"
+    app_name: "ai-slide-generator"
+    description: "AI Slide Generator - Production"
+    workspace_path: "/Workspace/Shared/apps/production/ai-slide-generator"
     permissions:
       - group_name: "users"
         permission_level: "CAN_USE"
@@ -51,11 +52,11 @@ environments:
     env_vars:
       ENVIRONMENT: "production"
       LOG_LEVEL: "INFO"
-      LAKEBASE_INSTANCE: "db-tellr"
-      LAKEBASE_SCHEMA: "app_data_prod"
+      LAKEBASE_INSTANCE: "ai-slide-generator-db"
+      LAKEBASE_SCHEMA: "app_data"
     lakebase:
-      database_name: "db-tellr"
-      schema: "app_data_prod"
+      database_name: "ai-slide-generator-db"
+      schema: "app_data"
       capacity: "CU_1"  # Options: CU_1, CU_2, CU_4, CU_8
 
 # Common settings across all environments
