@@ -20,7 +20,6 @@ import { SlideTile } from './SlideTile';
 import { PresentationMode } from '../PresentationMode';
 import { api } from '../../services/api';
 import { useSelection } from '../../contexts/SelectionContext';
-import { useProfiles } from '../../contexts/ProfileContext';
 import { exportSlideDeckToPDF } from '../../services/pdf_client';
 import { useSession } from '../../contexts/SessionContext';
 import { useGoogleOAuthPopup } from '../../hooks/useGoogleOAuthPopup';
@@ -62,7 +61,6 @@ export const SlidePanel: React.FC<SlidePanelProps> = ({ slideDeck, rawHtml, onSl
   const [optimizingSlideIndex, setOptimizingSlideIndex] = useState<number | null>(null);
   const { selectedIndices, setSelection, clearSelection } = useSelection();
   const { sessionId } = useSession();
-  const { currentProfile } = useProfiles();
   const { openOAuthPopup } = useGoogleOAuthPopup();
   const slideRefs = useRef<Map<number, HTMLDivElement>>(new Map());
   
@@ -285,22 +283,21 @@ export const SlidePanel: React.FC<SlidePanelProps> = ({ slideDeck, rawHtml, onSl
   };
 
   const handleExportGoogleSlides = async () => {
-    if (!slideDeck || !sessionId || isExportingGoogleSlides || !currentProfile) return;
+    if (!slideDeck || !sessionId || isExportingGoogleSlides) return;
 
-    const profileId = currentProfile.id;
     setIsExportingGoogleSlides(true);
     setShowExportMenu(false);
     setExportProgress({ current: 0, total: slideDeck.slides.length, status: 'Checking authorization...' });
 
     try {
       // Check auth first
-      const { authorized } = await api.checkGoogleSlidesAuth(profileId);
+      const { authorized } = await api.checkGoogleSlidesAuth();
 
       if (!authorized) {
         // Open OAuth popup
         setExportProgress({ current: 0, total: slideDeck.slides.length, status: 'Waiting for Google authorization...' });
 
-        const authResult = await openOAuthPopup(profileId);
+        const authResult = await openOAuthPopup();
         if (!authResult) {
           alert('Google authorization was not completed. Please try again.');
           return;
@@ -312,7 +309,6 @@ export const SlidePanel: React.FC<SlidePanelProps> = ({ slideDeck, rawHtml, onSl
 
       const result = await api.exportToGoogleSlides(
         sessionId,
-        profileId,
         slideDeck,
         (progress, total, status) => {
           setExportProgress({ current: progress, total, status });

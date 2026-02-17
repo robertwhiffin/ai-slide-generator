@@ -1,7 +1,7 @@
 """Tests for application wiring: model registration, route inclusion, exports.
 
-Verifies that recent additions (GoogleOAuthToken model, google_credentials
-router, google_slides router) are properly connected in the app.
+Verifies that recent additions (GoogleOAuthToken model, admin google-credentials,
+google_slides router) are properly connected in the app.
 """
 
 import pytest
@@ -20,19 +20,15 @@ class TestModelRegistration:
         from src.database.models import GoogleOAuthToken
         assert GoogleOAuthToken.__tablename__ == "google_oauth_tokens"
 
-    def test_config_profile_has_google_credentials_column(self):
-        """ConfigProfile model includes google_credentials_encrypted."""
-        from src.database.models import ConfigProfile
-        assert hasattr(ConfigProfile, "google_credentials_encrypted")
+    def test_google_global_credentials_model_exists(self):
+        """GoogleGlobalCredentials model exists for app-wide credentials."""
+        from src.database.models import GoogleGlobalCredentials
+        assert GoogleGlobalCredentials.__tablename__ == "google_global_credentials"
+        assert hasattr(GoogleGlobalCredentials, "credentials_encrypted")
 
 
 class TestSettingsRouterExports:
     """Verify the settings __init__ exports all required routers."""
-
-    def test_google_credentials_router_exported(self):
-        """google_credentials_router is in settings __all__."""
-        from src.api.routes.settings import __all__ as exports
-        assert "google_credentials_router" in exports
 
     def test_all_routers_importable(self):
         """Every router listed in __all__ is importable."""
@@ -54,13 +50,13 @@ class TestAppRoutes:
         assert "/api/export/google-slides/auth/callback" in route_paths
         assert "/api/export/google-slides" in route_paths
 
-    def test_google_credentials_routes_registered(self):
-        """Google credentials management routes are reachable."""
+    def test_admin_google_credentials_routes_registered(self):
+        """Admin Google credentials management routes are reachable."""
         from src.api.main import app
 
         route_paths = {r.path for r in app.routes if hasattr(r, "path")}
-        assert "/api/settings/profiles/{profile_id}/google-credentials" in route_paths
-        assert "/api/settings/profiles/{profile_id}/google-credentials/status" in route_paths
+        assert "/api/admin/google-credentials" in route_paths
+        assert "/api/admin/google-credentials/status" in route_paths
 
     def test_health_endpoint(self):
         """Health endpoint still works."""

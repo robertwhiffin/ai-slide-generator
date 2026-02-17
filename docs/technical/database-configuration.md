@@ -20,7 +20,7 @@ The AI Slide Generator uses a PostgreSQL database to manage configuration profil
 The database consists of configuration and session tables:
 
 **Configuration Tables:**
-1. **`config_profiles`** - Configuration profiles (e.g., "production", "development"). Includes `google_credentials_encrypted` column for Google OAuth credentials.
+1. **`config_profiles`** - Configuration profiles (e.g., "production", "development")
 2. **`config_ai_infra`** - AI/LLM settings (endpoint, temperature, max tokens)
 3. **`config_genie_spaces`** - Databricks Genie space configurations
 4. **`config_mlflow`** - MLflow experiment settings
@@ -28,7 +28,8 @@ The database consists of configuration and session tables:
 6. **`config_history`** - Audit trail of all configuration changes
 7. **`slide_deck_prompt_library`** - Global deck prompt templates (shared across profiles)
 8. **`slide_style_library`** - Global slide style library (CSS styles, image guidelines)
-9. **`google_oauth_tokens`** - Per-user, per-profile encrypted Google OAuth tokens
+9. **`google_global_credentials`** - App-wide encrypted Google OAuth credentials.json (single row)
+10. **`google_oauth_tokens`** - Per-user encrypted Google OAuth tokens (unique on `user_identity` only)
 
 **Session Tables:**
 8. **`user_sessions`** - User conversation sessions with processing locks
@@ -50,8 +51,10 @@ config_profiles (1) ──┬── (1) config_ai_infra
                       ├── (1) config_mlflow
                       ├── (1) config_prompts ──┬── (0..1) slide_deck_prompt_library
                       │                        └── (0..1) slide_style_library
-                      ├── (n) config_history
-                      └── (n) google_oauth_tokens (per user)
+                      └── (n) config_history
+
+google_global_credentials (standalone, single row)
+google_oauth_tokens (standalone, per user_identity, no profile FK)
 
 slide_deck_prompt_library (global) ──── (n) config_prompts (via selected_deck_prompt_id FK)
 slide_style_library (global) ──── (n) config_prompts (via selected_slide_style_id FK)
@@ -154,7 +157,6 @@ class ConfigProfile(Base):
     created_by: str | None
     updated_at: datetime
     updated_by: str | None
-    google_credentials_encrypted: str | None  # Fernet-encrypted credentials.json
     
     # Relationships
     ai_infra: ConfigAIInfra
@@ -286,6 +288,33 @@ class ConfigHistory(Base):
     changes: dict                # {"field": {"old": "...", "new": "..."}}
     snapshot: dict | None        # Full settings snapshot at time of change
     timestamp: datetime
+```
+
+### GoogleGlobalCredentials
+
+App-wide Google OAuth credentials (single row). Uploaded via admin page.
+
+```python
+class GoogleGlobalCredentials(Base):
+    id: int
+    credentials_encrypted: str    # Fernet-encrypted credentials.json
+    uploaded_by: str | None       # User who uploaded
+    created_at: datetime
+    updated_at: datetime
+```
+
+### GoogleOAuthToken
+
+Per-user encrypted Google OAuth tokens. Scoped by `user_identity` only (no `profile_id`).
+
+```python
+class GoogleOAuthToken(Base):
+    id: int
+    user_identity: str           # Databricks username or "local_dev"
+    token_encrypted: str         # Fernet-encrypted JSON token
+    created_at: datetime
+    updated_at: datetime
+    # UNIQUE (user_identity)
 ```
 
 ## Session Models
@@ -482,6 +511,13 @@ This is called automatically by:
 ### Schema Migrations
 
 For adding columns to existing tables in production, a lightweight `run_migrations()` function runs idempotent `ALTER TABLE` statements on app startup.
+
+**Google credentials migration:** `run_migrations()` in `src/core/database.py` includes `_migrate_google_credentials_to_global()`, which:
+1. Creates `google_global_credentials` table if missing
+2. Copies the first non-null `google_credentials_encrypted` from `config_profiles` into the global table
+3. Nulls out `google_credentials_encrypted` on all profile rows
+
+This migrates from the old per-profile credential storage to the new app-wide model. The `google_oauth_tokens` table has no `profile_id` column; tokens are unique on `user_identity` only.
 
 **Manual migrations:** Some schema changes require standalone SQL scripts (placed in `scripts/`).
 

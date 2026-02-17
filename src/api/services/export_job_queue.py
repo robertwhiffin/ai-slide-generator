@@ -380,7 +380,6 @@ async def process_google_slides_job(job_id: str, payload: dict) -> None:
 
     slides_html: List[str] = payload["slides_html"]
     title: str = payload.get("title", "Presentation")
-    profile_id: int = payload["profile_id"]
     session_id: str = payload["session_id"]
     user_identity: str = payload["user_identity"]
     chart_images_per_slide: Optional[List[Dict[str, str]]] = payload.get(
@@ -392,9 +391,9 @@ async def process_google_slides_job(job_id: str, payload: dict) -> None:
     try:
         _update_job_field(job_id, status="running", total_slides=total_slides)
 
-        # Build auth from profile (needs a DB session)
+        # Build auth from global credentials (needs a DB session)
         with get_db_session() as db:
-            auth = GoogleSlidesAuth.from_profile(profile_id, user_identity, db)
+            auth = GoogleSlidesAuth.from_global(user_identity, db)
 
         # Run conversion with progress callback
         def on_progress(current: int, total: int, status: str) -> None:

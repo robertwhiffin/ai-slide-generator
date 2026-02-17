@@ -1,6 +1,6 @@
 # Google Slides Integration
 
-**One-Line Summary:** Profile-scoped, user-scoped Google OAuth2 flow with encrypted credential storage and LLM-powered HTML-to-Google-Slides conversion.
+**One-Line Summary:** Global, user-scoped Google OAuth2 flow with encrypted credential storage and LLM-powered HTML-to-Google-Slides conversion.
 
 ---
 
@@ -9,8 +9,8 @@
 The Google Slides integration allows users to export their AI-generated slide decks directly to Google Slides presentations. It extends the existing PPTX export with a cloud-native alternative that produces editable Google Slides.
 
 Key design decisions:
-- **Per-profile credentials** — Each configuration profile stores its own Google OAuth `credentials.json`, encrypted at rest.
-- **Per-user tokens** — OAuth tokens are scoped to the combination of (user, profile) so multiple users share the same client credentials but maintain their own authorization.
+- **Global credentials** — A single `credentials.json` is stored app-wide in the `google_global_credentials` table, encrypted at rest. Admins upload via the `/admin` page.
+- **Per-user tokens** — OAuth tokens are scoped to `user_identity` only (no profile). Each user authorizes once; tokens are stored in `google_oauth_tokens`.
 - **DB-backed storage** — No files on disk; all secrets live in PostgreSQL/Lakebase, encrypted with Fernet symmetric encryption.
 - **LLM code-gen approach** — Same architecture as PPTX export: an LLM generates Python code that calls the Google Slides API, which is then executed server-side.
 
@@ -19,10 +19,10 @@ Key design decisions:
 ## 2. Architecture
 
 ```
-Frontend (ConfigTabs → GoogleSlidesAuthForm)
+Frontend (Admin page → GoogleSlidesAuthForm)
   │
-  ├─ Upload credentials.json ──► POST /api/settings/profiles/{id}/google-credentials
-  │                                 └─ validates → encrypts → stores in config_profiles
+  ├─ Upload credentials.json ──► POST /api/admin/google-credentials
+  │                                 └─ validates → encrypts → stores in google_global_credentials
   │
   ├─ Authorize (popup) ────────► GET /api/export/google-slides/auth/url
   │                                 └─ builds Flow from decrypted creds → returns consent URL
@@ -35,48 +35,51 @@ Frontend (ConfigTabs → GoogleSlidesAuthForm)
 
 ### Data Flow
 
-1. **Admin** uploads `credentials.json` via the Google Slides tab in profile settings.
-2. **Each user** clicks "Authorize" to complete the OAuth consent flow in a popup. The resulting token is encrypted and stored per-user.
+1. **Admin** uploads `credentials.json` via the Google Slides tab on the `/admin` page.
+2. **Each user** clicks "Authorize" to complete the OAuth consent flow in a popup. The resulting token is encrypted and stored per-user (by `user_identity`).
 3. **Export** builds an authenticated Google API client, creates a blank presentation, and processes each slide through the LLM converter.
 
 ---
 
 ## 3. Database Schema
 
-### New Column: `config_profiles.google_credentials_encrypted`
+### Table: `google_global_credentials`
 
 ```sql
-ALTER TABLE config_profiles
-ADD COLUMN IF NOT EXISTS google_credentials_encrypted TEXT;
+CREATE TABLE google_global_credentials (
+    id                   SERIAL PRIMARY KEY,
+    credentials_encrypted TEXT NOT NULL,
+    uploaded_by          VARCHAR(255),
+    created_at           TIMESTAMP NOT NULL DEFAULT NOW(),
+    updated_at           TIMESTAMP NOT NULL DEFAULT NOW()
+);
 ```
 
-Stores the Fernet-encrypted contents of `credentials.json` for the profile. `NULL` if not configured.
+Stores the Fernet-encrypted contents of `credentials.json` app-wide. Single-row table; upsert on upload.
 
-### New Table: `google_oauth_tokens`
+### Table: `google_oauth_tokens`
 
 ```sql
 CREATE TABLE google_oauth_tokens (
     id              SERIAL PRIMARY KEY,
     user_identity   VARCHAR(255) NOT NULL,
-    profile_id      INTEGER NOT NULL REFERENCES config_profiles(id) ON DELETE CASCADE,
     token_encrypted TEXT NOT NULL,
     created_at      TIMESTAMP NOT NULL DEFAULT NOW(),
     updated_at      TIMESTAMP NOT NULL DEFAULT NOW(),
-    UNIQUE (user_identity, profile_id)
+    UNIQUE (user_identity)
 );
 ```
 
 | Column | Description |
 |--------|-------------|
 | `user_identity` | Databricks username (email) or `"local_dev"` |
-| `profile_id` | FK to the profile whose client credentials were used |
 | `token_encrypted` | Fernet-encrypted JSON token (access, refresh, expiry) |
 
-The composite unique constraint ensures one token per user per profile.
+Unique on `user_identity` only — one token per user across the app.
 
-### Column Migration
+### Migration
 
-`_run_column_migrations()` in `src/core/database.py` runs `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` on startup. This is idempotent and safe for repeated execution.
+`run_migrations()` in `src/core/database.py` migrates any existing `config_profiles.google_credentials_encrypted` data into `google_global_credentials` on startup, then nulls out the profile column. See [Database Configuration](./database-configuration.md).
 
 ---
 
@@ -107,13 +110,13 @@ python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().d
 
 ## 5. API Endpoints
 
-### Credential Management (`/api/settings/profiles/{profile_id}/google-credentials`)
+### Credential Management (`/api/admin/google-credentials`)
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `POST` | `/{profile_id}/google-credentials` | Upload `credentials.json` file. Validates structure, encrypts, stores. |
-| `GET` | `/{profile_id}/google-credentials/status` | Returns `{"has_credentials": bool}`. Attempts decryption; clears stale data on failure. |
-| `DELETE` | `/{profile_id}/google-credentials` | Removes stored credentials from the profile. Returns 204. |
+| `POST` | `/api/admin/google-credentials` | Upload `credentials.json` file. Validates structure, encrypts, upserts into `google_global_credentials`. |
+| `GET` | `/api/admin/google-credentials/status` | Returns `{"has_credentials": bool}`. Attempts decryption; clears stale data on failure. |
+| `DELETE` | `/api/admin/google-credentials` | Removes stored credentials. Returns 204. |
 
 **Validation:** The uploaded JSON must contain either an `"installed"` or `"web"` top-level key with `client_id` and `client_secret`.
 
@@ -121,9 +124,9 @@ python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().d
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `GET` | `/auth/status?profile_id=N` | Returns `{"authorized": bool}`. Gracefully returns `false` on any error. |
-| `GET` | `/auth/url?profile_id=N` | Generates and returns the Google OAuth consent URL. |
-| `GET` | `/auth/callback?code=...&profile_id=N` | Exchanges auth code for tokens, encrypts, stores. Returns HTML that notifies the opener window. |
+| `GET` | `/auth/status` | Returns `{"authorized": bool}`. Gracefully returns `false` on any error. No `profile_id` required. |
+| `GET` | `/auth/url` | Generates and returns the Google OAuth consent URL. No `profile_id` required. |
+| `GET` | `/auth/callback?code=...` | Exchanges auth code for tokens, encrypts, stores. Returns HTML that notifies the opener window. No `profile_id` required. |
 
 ### Export (`/api/export/google-slides`)
 
@@ -135,10 +138,11 @@ python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().d
 ```json
 {
   "session_id": "abc123",
-  "profile_id": 1,
   "chart_images": [[{"canvas_id": "chart_0", "base64_data": "data:image/png;base64,..."}]]
 }
 ```
+
+No `profile_id` in the body; auth uses global credentials and user-scoped token.
 
 ---
 
@@ -150,7 +154,7 @@ Manages OAuth2 credentials and token lifecycle. Supports two modes:
 
 | Mode | Constructor | Persistence |
 |------|-------------|-------------|
-| **DB-backed** | `GoogleSlidesAuth.from_profile(profile_id, user_identity, db_session)` | Encrypted in PostgreSQL |
+| **DB-backed** | `GoogleSlidesAuth.from_global(user_identity, db_session)` | Encrypted in PostgreSQL |
 | **File-backed** | `GoogleSlidesAuth(credentials_path=..., token_path=...)` | JSON files on disk |
 
 Key methods:
@@ -184,7 +188,7 @@ Shared rules cover:
 
 ### GoogleSlidesAuthForm (`frontend/src/components/config/GoogleSlidesAuthForm.tsx`)
 
-New component rendered as the "Google Slides" tab in `ConfigTabs`. Provides:
+Rendered on the `/admin` page (not in profile ConfigTabs). Does **not** take `profileId`. Provides:
 - Drag-and-drop file upload for `credentials.json`
 - Status indicators (uploaded / not configured)
 - Upload / replace / remove actions
@@ -194,22 +198,20 @@ New component rendered as the "Google Slides" tab in `ConfigTabs`. Provides:
 
 ### ConfigTabs (`frontend/src/components/config/ConfigTabs.tsx`)
 
-Added tab `{ id: 'google_slides', label: 'Google Slides', icon: '📊' }` to the `allTabs` array.
+No Google Slides tab. Google Slides configuration is on the admin page only.
 
 ### ProfileDetail (`frontend/src/components/config/ProfileDetail.tsx`)
 
-Read-only view mode now displays Google Slides status:
-- Credentials: "Uploaded" (green) or "Not configured" (gray)
-- Authorization: "Authorized" (green) or "Not authorized" (gray) or "—" (if no credentials)
+Does **not** display Google Slides status. That is shown on the admin page.
 
 ### SlidePanel (`frontend/src/components/SlidePanel/SlidePanel.tsx`)
 
-`handleExportGoogleSlides` now passes `profileId` to all Google Slides API calls.
+`handleExportGoogleSlides` exports without `profileId`. Calls `exportToGoogleSlides(sessionId, chartImages)` — no profile parameter.
 
 ### API Services
 
-- `frontend/src/api/config.ts` — `uploadGoogleCredentials()`, `getGoogleCredentialsStatus()`, `deleteGoogleCredentials()`
-- `frontend/src/services/api.ts` — `checkGoogleSlidesAuth(profileId)`, `getGoogleSlidesAuthUrl(profileId)`, `exportToGoogleSlides(sessionId, profileId, ...)`
+- `frontend/src/api/config.ts` — `uploadGoogleCredentials()`, `getGoogleCredentialsStatus()`, `deleteGoogleCredentials()` (admin endpoints)
+- `frontend/src/services/api.ts` — `checkGoogleSlidesAuth()`, `getGoogleSlidesAuthUrl()`, `exportToGoogleSlides(sessionId, chartImages)` — no profileId
 
 ---
 
@@ -218,8 +220,9 @@ Read-only view mode now displays Google Slides status:
 | Test File | Tests | Coverage |
 |-----------|-------|----------|
 | `tests/unit/test_encryption.py` | 4 | Encrypt/decrypt roundtrip, wrong-key rejection, key sources |
-| `tests/unit/config/test_google_oauth.py` | 26 | Models, credentials API, `from_profile`, auth service, auth endpoint |
-| `tests/unit/test_database_migrations.py` | 2 | Column migration idempotency |
+| `tests/unit/config/test_google_oauth.py` | 26 | Models, credentials API, `from_global`, auth service, auth endpoint |
+| `tests/unit/config/test_admin_routes.py` | — | Admin credential upload, status, delete |
+| `tests/unit/test_database_migrations.py` | 2 | Migration from profile credentials to global |
 | `tests/unit/test_google_slides_converter.py` | 17 | Static methods: extract, strip fences, chart notes, code prep, image save |
 | `tests/unit/test_prompts_defaults.py` | 7 | PPTX + Google Slides prompt constant validation |
 | `tests/unit/test_app_wiring.py` | 8 | Model registration, router exports, route registration |
@@ -243,7 +246,7 @@ pytest tests/unit/ -v --ignore=tests/unit/test_chart_persistence.py \
 3. Enable the **Google Slides API** and **Google Drive API**.
 4. Go to Credentials → Create OAuth 2.0 Client ID (Desktop app).
 5. Download the `credentials.json` file.
-6. Upload it in the profile's Google Slides tab.
+6. Upload it on the admin page (Google Slides tab).
 
 ### Environment Variables
 
@@ -269,4 +272,3 @@ cryptography>=42.0.0
 - [Backend Overview](./backend-overview.md) — FastAPI architecture and API surface
 - [Database Configuration](./database-configuration.md) — Schema details
 - [Frontend Overview](./frontend-overview.md) — React components and state management
-

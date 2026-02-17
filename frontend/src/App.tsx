@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react';
 import { Routes, Route, Navigate, useLocation } from 'react-router-dom';
 import { AppLayout } from './components/Layout/AppLayout';
-import { FeedbackDashboard } from './components/Feedback/FeedbackDashboard';
+import { AdminPage } from './components/Admin/AdminPage';
 import { WelcomeSetup } from './components/Setup';
 import './index.css';
 import { SelectionProvider } from './contexts/SelectionContext';
@@ -23,7 +23,8 @@ function AppRoutes() {
       <Route path="/slide-styles" element={<AppLayout key="slide_styles" initialView="slide_styles" />} />
       <Route path="/images" element={<AppLayout key="images" initialView="images" />} />
       <Route path="/history" element={<AppLayout key="history" initialView="history" />} />
-      <Route path="/feedback" element={<div className="min-h-screen bg-gray-50"><FeedbackDashboard /></div>} />
+      <Route path="/admin" element={<AdminPage />} />
+      <Route path="/feedback" element={<Navigate to="/admin" replace />} />
       <Route path="/sessions/:sessionId/edit" element={<AppLayout key={`edit-${location.pathname}`} initialView="main" />} />
       <Route path="/sessions/:sessionId/view" element={<AppLayout key={`view-${location.pathname}`} initialView="main" viewOnly={true} />} />
       <Route path="*" element={<Navigate to="/help" replace />} />

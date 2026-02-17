@@ -1020,11 +1020,11 @@ export const api = {
   // =========================================================================
 
   /**
-   * Check if the current user has a valid Google OAuth token for a profile.
+   * Check if the current user has a valid Google OAuth token.
    */
-  async checkGoogleSlidesAuth(profileId: number): Promise<{ authorized: boolean }> {
+  async checkGoogleSlidesAuth(): Promise<{ authorized: boolean }> {
     const response = await fetch(
-      `${API_BASE_URL}/api/export/google-slides/auth/status?profile_id=${profileId}`
+      `${API_BASE_URL}/api/export/google-slides/auth/status`
     );
     if (!response.ok) {
       return { authorized: false };
@@ -1033,11 +1033,11 @@ export const api = {
   },
 
   /**
-   * Get the Google OAuth consent URL for a profile.
+   * Get the Google OAuth consent URL.
    */
-  async getGoogleSlidesAuthUrl(profileId: number): Promise<{ url: string }> {
+  async getGoogleSlidesAuthUrl(): Promise<{ url: string }> {
     const response = await fetch(
-      `${API_BASE_URL}/api/export/google-slides/auth/url?profile_id=${profileId}`
+      `${API_BASE_URL}/api/export/google-slides/auth/url`
     );
     if (!response.ok) {
       const error = await response.json().catch(() => ({}));
@@ -1054,7 +1054,6 @@ export const api = {
    */
   async exportToGoogleSlides(
     sessionId: string,
-    profileId: number,
     slideDeck?: import('../types/slide').SlideDeck,
     onProgress?: (progress: number, total: number, status: string) => void,
   ): Promise<{ presentation_id: string; presentation_url: string }> {
@@ -1071,7 +1070,6 @@ export const api = {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         session_id: sessionId,
-        profile_id: profileId,
         chart_images: chartImages,
       }),
     });

@@ -3,6 +3,7 @@
 from src.database.models.ai_infra import ConfigAIInfra
 from src.database.models.feedback import FeedbackConversation, SurveyResponse
 from src.database.models.genie_space import ConfigGenieSpace
+from src.database.models.google_global_credentials import GoogleGlobalCredentials
 from src.database.models.google_oauth_token import GoogleOAuthToken
 from src.database.models.history import ConfigHistory
 from src.database.models.image import ImageAsset
@@ -25,6 +26,7 @@ __all__ = [
     "ConfigAIInfra",
     "ExportJob",
     "ConfigGenieSpace",
+    "GoogleGlobalCredentials",
     "GoogleOAuthToken",
     "ConfigHistory",
     "ConfigProfile",
