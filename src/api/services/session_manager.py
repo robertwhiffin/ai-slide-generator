@@ -166,7 +166,7 @@ class SessionManager:
             List of session info dictionaries
         """
         with get_db_session() as db:
-            query = db.query(UserSession)
+            query = db.query(UserSession).filter(UserSession.messages.any())
 
             if created_by:
                 query = query.filter(UserSession.created_by == created_by)
