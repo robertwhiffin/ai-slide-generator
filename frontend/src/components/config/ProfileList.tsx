@@ -10,11 +10,12 @@
  */
 
 import React, { useState, useEffect } from 'react';
-import { FiExternalLink } from 'react-icons/fi';
+import { User, ChevronDown, Trash2, Plus, Copy, Play, Star } from 'lucide-react';
+import { Button } from '@/ui/button';
+import { Badge } from '@/ui/badge';
 import type { Profile, ProfileCreate, ProfileUpdate } from '../../api/config';
 import { useProfiles } from '../../hooks/useProfiles';
 import { ProfileForm } from './ProfileForm';
-import { DOCS_URLS } from '../../constants/docs';
 import { ProfileCreationWizard } from './ProfileCreationWizard';
 import { ConfirmDialog } from './ConfirmDialog';
 import { ProfileDetailView } from './ProfileDetail';
@@ -65,9 +66,9 @@ export const ProfileList: React.FC<ProfileListProps> = ({ onProfileChange }) => 
   useEffect(() => {
     const fetchUsername = async () => {
       try {
-        // Use environment-aware URL (127.0.0.1 to avoid IPv6 issues in CI)
+        // Use environment-aware URL
         const apiBase = import.meta.env.VITE_API_URL || (
-          import.meta.env.MODE === 'production' ? '' : 'http://127.0.0.1:8000'
+          import.meta.env.MODE === 'production' ? '' : 'http://localhost:8000'
         );
         const response = await fetch(`${apiBase}/api/user/current`);
         if (response.ok) {
@@ -223,234 +224,240 @@ export const ProfileList: React.FC<ProfileListProps> = ({ onProfileChange }) => 
     }
   };
 
+  const [expandedId, setExpandedId] = useState<number | null>(null);
+
+  const toggleExpand = (id: number) => {
+    setExpandedId(expandedId === id ? null : id);
+  };
+
   if (loading) {
     return (
       <div className="flex items-center justify-center h-64">
-        <div className="text-gray-600">Loading profiles...</div>
+        <div className="text-muted-foreground">Loading profiles...</div>
       </div>
     );
   }
 
   if (error) {
     return (
-      <div className="p-4 bg-red-50 border border-red-200 rounded text-red-700">
+      <div className="p-4 bg-destructive/10 border border-destructive rounded-lg text-destructive">
         Error: {error}
       </div>
     );
   }
 
   return (
-    <div className="space-y-4">
+    <div className="flex flex-col gap-6">
       {/* Header */}
-      <div className="flex justify-between items-center">
+      <div className="flex items-start justify-between">
         <div>
-          <h2 className="text-2xl font-semibold text-gray-900">Configuration Profiles</h2>
-          <p className="text-sm text-gray-600 mt-1">
+          <h1 className="text-xl font-bold text-foreground">Agent Profiles</h1>
+          <p className="mt-1 text-sm text-muted-foreground">
             Manage your configuration profiles. Load different profiles to switch settings without restarting.
-            {' '}
-            <a
-              href={DOCS_URLS.creatingProfiles}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="inline-flex items-center gap-1 text-blue-600 hover:text-blue-800"
-            >
-              View guide <FiExternalLink size={12} />
-            </a>
           </p>
         </div>
-        <button
-          onClick={handleCreate}
-          className="px-4 py-2 bg-blue-500 hover:bg-blue-600 text-white rounded transition-colors"
-        >
-          + Create Profile
-        </button>
+        <Button size="sm" onClick={handleCreate} className="gap-1.5">
+          <Plus className="size-3.5" />
+          New Agent
+        </Button>
       </div>
 
       {/* Current Profile Badge */}
       {currentProfile && (
-        <div className="p-3 bg-blue-50 border border-blue-200 rounded">
-          <span className="text-sm text-blue-700">
+        <div className="rounded-lg border border-primary/30 bg-primary/5 px-4 py-3">
+          <span className="text-sm text-primary">
             <strong>Currently Loaded:</strong> {currentProfile.name}
             {currentProfile.is_default && ' (Default)'}
           </span>
         </div>
       )}
 
-      {/* Profiles Table */}
-      <div className="border rounded-lg overflow-hidden">
-        <table className="w-full">
-          <thead className="bg-gray-50 border-b">
-            <tr>
-              <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                Name
-              </th>
-              <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                Description
-              </th>
-              <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                Status
-              </th>
-              <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                Actions
-              </th>
-            </tr>
-          </thead>
-          <tbody className="bg-white divide-y divide-gray-200">
-            {profiles.map((profile) => (
-              <React.Fragment key={profile.id}>
-                <tr className="hover:bg-gray-50">
-                  <td className="px-4 py-3 text-sm font-medium text-gray-900">
-                    {profile.name}
-                  </td>
-                  <td className="px-4 py-3 text-sm text-gray-600">
-                    {profile.description || <span className="italic text-gray-400">No description</span>}
-                  </td>
-                  <td className="px-4 py-3 text-sm">
-                    <div className="flex gap-2">
-                      {profile.is_default && (
-                        <span className="px-2 py-1 bg-blue-100 text-blue-700 text-xs rounded">
-                          Default
-                        </span>
-                      )}
-                      {currentProfile?.id === profile.id && (
-                        <span className="px-2 py-1 bg-green-100 text-green-700 text-xs rounded">
-                          Loaded
-                        </span>
-                      )}
-                    </div>
-                  </td>
-                  <td className="px-4 py-3 text-sm">
-                    <div className="flex gap-2">
-                      {/* View and Edit Button */}
-                      <button
-                        onClick={() => {
-                          setViewingProfileId(profile.id);
-                          setViewingProfileMode('view');
-                        }}
-                        disabled={actionLoading === profile.id}
-                        className="px-3 py-1 bg-indigo-500 hover:bg-indigo-600 text-white text-xs rounded transition-colors disabled:bg-gray-300"
-                        title="View and edit configuration"
-                      >
-                        View and Edit
-                      </button>
+      {/* Profile Cards */}
+      {profiles.length === 0 ? (
+        <div className="flex flex-col items-center justify-center rounded-lg border border-dashed border-border bg-muted/20 p-12 text-center">
+          <User className="mb-3 size-12 text-muted-foreground/50" />
+          <p className="text-sm text-muted-foreground">
+            No profiles found. Create your first profile to get started.
+          </p>
+        </div>
+      ) : (
+        <div className="flex flex-col gap-3">
+          {profiles.map((profile) => (
+            <div
+              key={profile.id}
+              className="rounded-lg border border-border bg-card transition-colors hover:bg-accent/5"
+            >
+              {/* Profile Header */}
+              <div className="flex items-start gap-4 p-4">
+                {/* Icon */}
+                <div className="flex size-10 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary">
+                  <User className="size-5" />
+                </div>
 
-                      {/* Load Button */}
-                      {currentProfile?.id !== profile.id && (
-                        <button
-                          onClick={() => handleLoadProfile(profile)}
-                          disabled={actionLoading === profile.id}
-                          className="px-3 py-1 bg-green-500 hover:bg-green-600 text-white text-xs rounded transition-colors disabled:bg-gray-300"
-                          title="Load this profile"
-                        >
-                          Load
-                        </button>
-                      )}
-
-                      {/* Set Default Button */}
-                      {!profile.is_default && (
-                        <button
-                          onClick={() => handleSetDefault(profile)}
-                          disabled={actionLoading === profile.id}
-                          className="px-3 py-1 bg-blue-500 hover:bg-blue-600 text-white text-xs rounded transition-colors disabled:bg-gray-300"
-                          title="Set as default"
-                        >
-                          Set Default
-                        </button>
-                      )}
-
-                      {/* Duplicate Button */}
-                      <button
-                        onClick={() => handleDuplicateClick(profile)}
-                        disabled={actionLoading === profile.id}
-                        className="px-3 py-1 bg-purple-500 hover:bg-purple-600 text-white text-xs rounded transition-colors disabled:bg-gray-300"
-                        title="Duplicate profile"
-                      >
-                        Duplicate
-                      </button>
-
-                      {/* Delete Button */}
-                      {profiles.length > 1 && (
-                        <button
-                          onClick={() => handleDelete(profile)}
-                          disabled={actionLoading === profile.id}
-                          className="px-3 py-1 bg-red-500 hover:bg-red-600 text-white text-xs rounded transition-colors disabled:bg-gray-300"
-                          title="Delete profile"
-                        >
-                          Delete
-                        </button>
-                      )}
-                    </div>
-                  </td>
-                </tr>
-
-                {/* Duplicate Input Row */}
-                {showDuplicateInput === profile.id && (
-                  <tr>
-                    <td colSpan={4} className="px-4 py-3 bg-gray-50">
-                      <div className="space-y-2">
-                        <div className="flex items-center gap-3">
-                          <label className="text-sm text-gray-700 font-medium">
-                            New name:
-                          </label>
-                          <input
-                            type="text"
-                            value={duplicateName}
-                            onChange={(e) => {
-                              setDuplicateName(e.target.value);
-                              setDuplicateError(null); // Clear error when user types
-                            }}
-                            onKeyDown={(e) => {
-                              if (e.key === 'Enter' && duplicateName.trim()) {
-                                handleDuplicateSubmit(profile.id);
-                              } else if (e.key === 'Escape') {
-                                handleDuplicateCancel();
-                              }
-                            }}
-                            className={`flex-1 px-3 py-1 border rounded text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 ${
-                              duplicateError ? 'border-red-400 bg-red-50' : 'border-gray-300'
-                            }`}
-                            placeholder="Enter new profile name"
-                            maxLength={100}
-                            autoFocus
-                          />
-                          <button
-                            onClick={() => handleDuplicateSubmit(profile.id)}
-                            disabled={!duplicateName.trim() || actionLoading === profile.id}
-                            className="px-3 py-1 bg-green-500 hover:bg-green-600 text-white text-sm rounded transition-colors disabled:bg-gray-300"
-                          >
-                            {actionLoading === profile.id ? 'Creating...' : 'Create'}
-                          </button>
-                          <button
-                            onClick={handleDuplicateCancel}
-                            className="px-3 py-1 bg-gray-300 hover:bg-gray-400 text-gray-800 text-sm rounded transition-colors"
-                          >
-                            Cancel
-                          </button>
-                        </div>
-                        {/* Error Message */}
-                        {duplicateError && (
-                          <div className="flex items-center gap-2 px-3 py-2 bg-red-50 border border-red-200 rounded text-sm text-red-700">
-                            <svg className="w-4 h-4 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20">
-                              <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.707 7.293a1 1 0 00-1.414 1.414L8.586 10l-1.293 1.293a1 1 0 101.414 1.414L10 11.414l1.293 1.293a1 1 0 001.414-1.414L11.414 10l1.293-1.293a1 1 0 00-1.414-1.414L10 8.586 8.707 7.293z" clipRule="evenodd" />
-                            </svg>
-                            <span>{duplicateError}</span>
-                          </div>
+                {/* Content */}
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <h3 className="text-sm font-medium text-foreground">
+                          {profile.name}
+                        </h3>
+                        {profile.is_default && (
+                          <Badge variant="secondary" className="text-xs">
+                            Default
+                          </Badge>
+                        )}
+                        {currentProfile?.id === profile.id && (
+                          <Badge className="text-xs bg-green-500/10 text-green-700 hover:bg-green-500/20">
+                            Loaded
+                          </Badge>
                         )}
                       </div>
-                    </td>
-                  </tr>
-                )}
-              </React.Fragment>
-            ))}
-          </tbody>
-        </table>
+                      <p className="mt-0.5 text-sm text-muted-foreground">
+                        {profile.description || 'No description'}
+                      </p>
+                    </div>
 
-        {profiles.length === 0 && (
-          <div className="p-8 text-center text-gray-500">
-            No profiles found. Create your first profile to get started.
-          </div>
-        )}
-      </div>
+                    {/* Actions */}
+                    <div className="flex shrink-0 items-center gap-1">
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        className="size-8 p-0"
+                        onClick={() => toggleExpand(profile.id)}
+                      >
+                        <ChevronDown
+                          className={`size-4 text-muted-foreground transition-transform ${
+                            expandedId === profile.id ? "rotate-180" : ""
+                          }`}
+                        />
+                      </Button>
+                      {profiles.length > 1 && (
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          className="size-8 p-0 text-muted-foreground hover:text-destructive"
+                          onClick={() => handleDelete(profile)}
+                          disabled={actionLoading === profile.id}
+                        >
+                          <Trash2 className="size-4" />
+                        </Button>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* Expanded Details */}
+                  {expandedId === profile.id && (
+                    <div className="mt-3 space-y-3">
+                      {/* Duplicate Input (when active) */}
+                      {showDuplicateInput === profile.id && (
+                        <div className="rounded-md border border-border bg-muted/30 p-3 space-y-2">
+                          <div className="flex items-center gap-2">
+                            <input
+                              type="text"
+                              value={duplicateName}
+                              onChange={(e) => {
+                                setDuplicateName(e.target.value);
+                                setDuplicateError(null);
+                              }}
+                              onKeyDown={(e) => {
+                                if (e.key === 'Enter' && duplicateName.trim()) {
+                                  handleDuplicateSubmit(profile.id);
+                                } else if (e.key === 'Escape') {
+                                  handleDuplicateCancel();
+                                }
+                              }}
+                              className={`flex-1 rounded-md border px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-primary ${
+                                duplicateError ? 'border-destructive bg-destructive/5' : 'border-input bg-background'
+                              }`}
+                              placeholder="Enter new profile name"
+                              maxLength={100}
+                              autoFocus
+                            />
+                            <Button
+                              size="sm"
+                              onClick={() => handleDuplicateSubmit(profile.id)}
+                              disabled={!duplicateName.trim() || actionLoading === profile.id}
+                            >
+                              {actionLoading === profile.id ? 'Creating...' : 'Create'}
+                            </Button>
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              onClick={handleDuplicateCancel}
+                            >
+                              Cancel
+                            </Button>
+                          </div>
+                          {duplicateError && (
+                            <div className="flex items-center gap-2 rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm text-destructive">
+                              <span>{duplicateError}</span>
+                            </div>
+                          )}
+                        </div>
+                      )}
+
+                      {/* Action Buttons */}
+                      {showDuplicateInput !== profile.id && (
+                        <div className="flex flex-wrap gap-2">
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            onClick={() => {
+                              setViewingProfileId(profile.id);
+                              setViewingProfileMode('view');
+                            }}
+                            disabled={actionLoading === profile.id}
+                          >
+                            View and Edit
+                          </Button>
+
+                          {currentProfile?.id !== profile.id && (
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              onClick={() => handleLoadProfile(profile)}
+                              disabled={actionLoading === profile.id}
+                              className="gap-1.5"
+                            >
+                              <Play className="size-3.5" />
+                              Load
+                            </Button>
+                          )}
+
+                          {!profile.is_default && (
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              onClick={() => handleSetDefault(profile)}
+                              disabled={actionLoading === profile.id}
+                              className="gap-1.5"
+                            >
+                              <Star className="size-3.5" />
+                              Set as Default
+                            </Button>
+                          )}
+
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            onClick={() => handleDuplicateClick(profile)}
+                            disabled={actionLoading === profile.id}
+                            className="gap-1.5"
+                          >
+                            <Copy className="size-3.5" />
+                            Duplicate
+                          </Button>
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
 
       {/* Profile Creation Wizard */}
       <ProfileCreationWizard
