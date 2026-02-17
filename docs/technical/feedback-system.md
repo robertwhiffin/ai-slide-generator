@@ -116,8 +116,9 @@ The frontend sends the full conversation history each call (stateless on the ser
 | `frontend/src/components/Feedback/StarRating.tsx` | 5-star interactive rating |
 | `frontend/src/components/Feedback/NPSScale.tsx` | 0-10 numbered button row |
 | `frontend/src/components/Feedback/TimeSavedPills.tsx` | Pill buttons: 15min, 30min, 1hr, 2hrs, 4hrs, 8hrs |
+| `frontend/src/components/Feedback/FeedbackDashboard.tsx` | Hidden `/feedback` page — stats table, totals, AI summary (no nav link) |
 | `frontend/src/hooks/useSurveyTrigger.ts` | 30s post-generation timer with 7-day localStorage cooldown |
-| `frontend/src/services/api.ts` | `feedbackChat()`, `submitFeedback()`, `submitSurvey()` methods |
+| `frontend/src/services/api.ts` | `feedbackChat()`, `submitFeedback()`, `submitSurvey()`, `getReportStats()`, `getReportSummary()` |
 
 ---
 
@@ -144,6 +145,17 @@ The frontend sends the full conversation history each call (stateless on the ser
 6. User fills in star rating (required), time saved, and NPS (optional), then clicks Submit.
 7. `POST /api/feedback/survey` stores the response in `survey_responses`.
 8. Dismissing (X button) without submitting still counts as "shown" for the 7-day cooldown.
+
+### Feedback Dashboard (Hidden Page)
+
+The `/feedback` route renders a read-only dashboard that displays the reporting API data. It is **not linked** from the navigation bar — access it by typing the URL directly (e.g. `https://<host>/feedback`).
+
+The page shows:
+- **Summary cards** — overall average star rating, NPS, total time saved, total responses.
+- **Weekly stats table** — one row per week with response count, avg stars, avg NPS, and time saved.
+- **AI-generated summary** — narrative analysis of feedback themes, category breakdown, and top themes.
+
+Both the stats and summary sections have a configurable week-range selector.
 
 ---
 

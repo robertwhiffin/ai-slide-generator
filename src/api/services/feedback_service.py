@@ -228,7 +228,12 @@ Respond with valid JSON only."""
         response = model.invoke([HumanMessage(content=report_prompt)])
 
         try:
-            parsed = json.loads(response.content)
+            raw = response.content.strip()
+            # Strip markdown code fences if present
+            if raw.startswith("```"):
+                raw = raw.split("\n", 1)[1] if "\n" in raw else raw[3:]
+                raw = raw.rsplit("```", 1)[0].strip()
+            parsed = json.loads(raw)
             summary = parsed.get("summary", response.content)
             top_themes = parsed.get("top_themes", [])
         except (json.JSONDecodeError, AttributeError):
