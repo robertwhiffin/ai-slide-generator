@@ -103,98 +103,101 @@ export const DeckPromptForm: React.FC<DeckPromptFormProps> = ({
         </div>
 
         {/* Form */}
-        <form onSubmit={handleSubmit} className="flex flex-1 flex-col overflow-y-auto">
-          <div className="space-y-4 p-6">
-            {/* Error Message */}
-            {error && (
-              <div className="flex items-center gap-2 rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm text-destructive">
-                <AlertCircle className="size-4 shrink-0" />
-                <span>{error}</span>
-              </div>
-            )}
+        <form onSubmit={handleSubmit} className="flex flex-1 flex-col overflow-hidden">
+          {/* Scrollable Content */}
+          <div className="flex-1 overflow-y-auto">
+            <div className="space-y-4 p-6">
+              {/* Error Message */}
+              {error && (
+                <div className="flex items-center gap-2 rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm text-destructive">
+                  <AlertCircle className="size-4 shrink-0" />
+                  <span>{error}</span>
+                </div>
+              )}
 
-            {/* Name */}
-            <div>
-              <label htmlFor="prompt-name" className="mb-1 block text-sm font-medium text-foreground">
-                Name <span className="text-destructive">*</span>
-              </label>
-              <input
-                id="prompt-name"
-                type="text"
-                value={name}
-                onChange={(e) => setName(e.target.value)}
-                placeholder="e.g., Quarterly Business Review"
-                className="flex h-9 w-full rounded-md border border-input bg-background px-3 py-1 text-sm shadow-sm transition-colors file:border-0 file:bg-transparent file:text-sm file:font-medium placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
-                maxLength={100}
-                disabled={saving}
-              />
-            </div>
-
-            {/* Description */}
-            <div>
-              <label htmlFor="prompt-description" className="mb-1 block text-sm font-medium text-foreground">
-                Description
-              </label>
-              <textarea
-                id="prompt-description"
-                value={description}
-                onChange={(e) => setDescription(e.target.value)}
-                placeholder="Brief description of what this prompt is for..."
-                className="flex min-h-[60px] w-full rounded-md border border-input bg-background px-3 py-2 text-sm shadow-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
-                rows={2}
-                disabled={saving}
-              />
-            </div>
-
-            {/* Category */}
-            <div>
-              <label htmlFor="prompt-category" className="mb-1 block text-sm font-medium text-foreground">
-                Category
-              </label>
-              <input
-                id="prompt-category"
-                type="text"
-                value={category}
-                onChange={(e) => setCategory(e.target.value)}
-                placeholder="e.g., Review, Report, Summary, Analysis"
-                className="flex h-9 w-full rounded-md border border-input bg-background px-3 py-1 text-sm shadow-sm transition-colors file:border-0 file:bg-transparent file:text-sm file:font-medium placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
-                maxLength={50}
-                disabled={saving}
-              />
-              <p className="mt-1 text-xs text-muted-foreground">
-                Optional category for organizing prompts.
-              </p>
-            </div>
-
-            {/* Prompt Content */}
-            <div>
-              <label className="mb-1 block text-sm font-medium text-foreground">
-                Prompt Content <span className="text-destructive">*</span>
-              </label>
-              <div className="overflow-hidden rounded-md border border-input">
-                <Editor
-                  height="300px"
-                  defaultLanguage="markdown"
-                  value={promptContent}
-                  onChange={(value) => setPromptContent(value || '')}
-                  options={{
-                    minimap: { enabled: false },
-                    wordWrap: 'on',
-                    lineNumbers: 'on',
-                    scrollBeyondLastLine: false,
-                    fontSize: 13,
-                    readOnly: saving,
-                  }}
+              {/* Name */}
+              <div>
+                <label htmlFor="prompt-name" className="mb-1 block text-sm font-medium text-foreground">
+                  Name <span className="text-destructive">*</span>
+                </label>
+                <input
+                  id="prompt-name"
+                  type="text"
+                  value={name}
+                  onChange={(e) => setName(e.target.value)}
+                  placeholder="e.g., Quarterly Business Review"
+                  className="flex h-9 w-full rounded-md border border-input bg-background px-3 py-1 text-sm shadow-sm transition-colors file:border-0 file:bg-transparent file:text-sm file:font-medium placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
+                  maxLength={100}
+                  disabled={saving}
                 />
               </div>
-              <p className="mt-1 text-xs text-muted-foreground">
-                Instructions for the AI on how to create this type of presentation.
-                Include sections, data to query, and formatting guidelines.
-              </p>
+
+              {/* Description */}
+              <div>
+                <label htmlFor="prompt-description" className="mb-1 block text-sm font-medium text-foreground">
+                  Description
+                </label>
+                <textarea
+                  id="prompt-description"
+                  value={description}
+                  onChange={(e) => setDescription(e.target.value)}
+                  placeholder="Brief description of what this prompt is for..."
+                  className="flex min-h-[60px] w-full rounded-md border border-input bg-background px-3 py-2 text-sm shadow-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
+                  rows={2}
+                  disabled={saving}
+                />
+              </div>
+
+              {/* Category */}
+              <div>
+                <label htmlFor="prompt-category" className="mb-1 block text-sm font-medium text-foreground">
+                  Category
+                </label>
+                <input
+                  id="prompt-category"
+                  type="text"
+                  value={category}
+                  onChange={(e) => setCategory(e.target.value)}
+                  placeholder="e.g., Review, Report, Summary, Analysis"
+                  className="flex h-9 w-full rounded-md border border-input bg-background px-3 py-1 text-sm shadow-sm transition-colors file:border-0 file:bg-transparent file:text-sm file:font-medium placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
+                  maxLength={50}
+                  disabled={saving}
+                />
+                <p className="mt-1 text-xs text-muted-foreground">
+                  Optional category for organizing prompts.
+                </p>
+              </div>
+
+              {/* Prompt Content */}
+              <div>
+                <label className="mb-1 block text-sm font-medium text-foreground">
+                  Prompt Content <span className="text-destructive">*</span>
+                </label>
+                <div className="overflow-hidden rounded-md border border-input">
+                  <Editor
+                    height="300px"
+                    defaultLanguage="markdown"
+                    value={promptContent}
+                    onChange={(value) => setPromptContent(value || '')}
+                    options={{
+                      minimap: { enabled: false },
+                      wordWrap: 'on',
+                      lineNumbers: 'on',
+                      scrollBeyondLastLine: false,
+                      fontSize: 13,
+                      readOnly: saving,
+                    }}
+                  />
+                </div>
+                <p className="mt-1 text-xs text-muted-foreground">
+                  Instructions for the AI on how to create this type of presentation.
+                  Include sections, data to query, and formatting guidelines.
+                </p>
+              </div>
             </div>
           </div>
 
-          {/* Footer */}
+          {/* Footer - Fixed at bottom */}
           <div className="flex justify-end gap-2 border-t border-border bg-muted/30 px-6 py-4">
             <Button
               type="button"

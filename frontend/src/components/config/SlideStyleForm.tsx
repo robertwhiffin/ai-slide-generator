@@ -103,98 +103,101 @@ export const SlideStyleForm: React.FC<SlideStyleFormProps> = ({
         </div>
 
         {/* Form */}
-        <form onSubmit={handleSubmit} className="flex flex-1 flex-col overflow-y-auto">
-          <div className="space-y-4 p-6">
-            {/* Error Message */}
-            {error && (
-              <div className="flex items-center gap-2 rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm text-destructive">
-                <AlertCircle className="size-4 shrink-0" />
-                <span>{error}</span>
-              </div>
-            )}
+        <form onSubmit={handleSubmit} className="flex flex-1 flex-col overflow-hidden">
+          {/* Scrollable Content */}
+          <div className="flex-1 overflow-y-auto">
+            <div className="space-y-4 p-6">
+              {/* Error Message */}
+              {error && (
+                <div className="flex items-center gap-2 rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm text-destructive">
+                  <AlertCircle className="size-4 shrink-0" />
+                  <span>{error}</span>
+                </div>
+              )}
 
-            {/* Name */}
-            <div>
-              <label htmlFor="style-name" className="mb-1 block text-sm font-medium text-foreground">
-                Name <span className="text-destructive">*</span>
-              </label>
-              <input
-                id="style-name"
-                type="text"
-                value={name}
-                onChange={(e) => setName(e.target.value)}
-                placeholder="e.g., Databricks Brand"
-                className="flex h-9 w-full rounded-md border border-input bg-background px-3 py-1 text-sm shadow-sm transition-colors file:border-0 file:bg-transparent file:text-sm file:font-medium placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
-                maxLength={100}
-                disabled={saving}
-              />
-            </div>
-
-            {/* Description */}
-            <div>
-              <label htmlFor="style-description" className="mb-1 block text-sm font-medium text-foreground">
-                Description
-              </label>
-              <textarea
-                id="style-description"
-                value={description}
-                onChange={(e) => setDescription(e.target.value)}
-                placeholder="Brief description of this style's look and feel..."
-                className="flex min-h-[60px] w-full rounded-md border border-input bg-background px-3 py-2 text-sm shadow-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
-                rows={2}
-                disabled={saving}
-              />
-            </div>
-
-            {/* Category */}
-            <div>
-              <label htmlFor="style-category" className="mb-1 block text-sm font-medium text-foreground">
-                Category
-              </label>
-              <input
-                id="style-category"
-                type="text"
-                value={category}
-                onChange={(e) => setCategory(e.target.value)}
-                placeholder="e.g., Brand, Minimal, Dark, Bold"
-                className="flex h-9 w-full rounded-md border border-input bg-background px-3 py-1 text-sm shadow-sm transition-colors file:border-0 file:bg-transparent file:text-sm file:font-medium placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
-                maxLength={50}
-                disabled={saving}
-              />
-              <p className="mt-1 text-xs text-muted-foreground">
-                Optional category for organizing styles.
-              </p>
-            </div>
-
-            {/* Style Content */}
-            <div>
-              <label className="mb-1 block text-sm font-medium text-foreground">
-                Style Content <span className="text-destructive">*</span>
-              </label>
-              <div className="overflow-hidden rounded-md border border-input">
-                <Editor
-                  height="300px"
-                  defaultLanguage="markdown"
-                  value={styleContent}
-                  onChange={(value) => setStyleContent(value || '')}
-                  options={{
-                    minimap: { enabled: false },
-                    wordWrap: 'on',
-                    lineNumbers: 'on',
-                    scrollBeyondLastLine: false,
-                    fontSize: 13,
-                    readOnly: saving,
-                  }}
+              {/* Name */}
+              <div>
+                <label htmlFor="style-name" className="mb-1 block text-sm font-medium text-foreground">
+                  Name <span className="text-destructive">*</span>
+                </label>
+                <input
+                  id="style-name"
+                  type="text"
+                  value={name}
+                  onChange={(e) => setName(e.target.value)}
+                  placeholder="e.g., Databricks Brand"
+                  className="flex h-9 w-full rounded-md border border-input bg-background px-3 py-1 text-sm shadow-sm transition-colors file:border-0 file:bg-transparent file:text-sm file:font-medium placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
+                  maxLength={100}
+                  disabled={saving}
                 />
               </div>
-              <p className="mt-1 text-xs text-muted-foreground">
-                Define typography, colors, layout rules, and visual guidelines.
-                Include font sizes, color codes, spacing, and chart color palettes.
-              </p>
+
+              {/* Description */}
+              <div>
+                <label htmlFor="style-description" className="mb-1 block text-sm font-medium text-foreground">
+                  Description
+                </label>
+                <textarea
+                  id="style-description"
+                  value={description}
+                  onChange={(e) => setDescription(e.target.value)}
+                  placeholder="Brief description of this style's look and feel..."
+                  className="flex min-h-[60px] w-full rounded-md border border-input bg-background px-3 py-2 text-sm shadow-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
+                  rows={2}
+                  disabled={saving}
+                />
+              </div>
+
+              {/* Category */}
+              <div>
+                <label htmlFor="style-category" className="mb-1 block text-sm font-medium text-foreground">
+                  Category
+                </label>
+                <input
+                  id="style-category"
+                  type="text"
+                  value={category}
+                  onChange={(e) => setCategory(e.target.value)}
+                  placeholder="e.g., Brand, Minimal, Dark, Bold"
+                  className="flex h-9 w-full rounded-md border border-input bg-background px-3 py-1 text-sm shadow-sm transition-colors file:border-0 file:bg-transparent file:text-sm file:font-medium placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
+                  maxLength={50}
+                  disabled={saving}
+                />
+                <p className="mt-1 text-xs text-muted-foreground">
+                  Optional category for organizing styles.
+                </p>
+              </div>
+
+              {/* Style Content */}
+              <div>
+                <label className="mb-1 block text-sm font-medium text-foreground">
+                  Style Content <span className="text-destructive">*</span>
+                </label>
+                <div className="overflow-hidden rounded-md border border-input">
+                  <Editor
+                    height="300px"
+                    defaultLanguage="markdown"
+                    value={styleContent}
+                    onChange={(value) => setStyleContent(value || '')}
+                    options={{
+                      minimap: { enabled: false },
+                      wordWrap: 'on',
+                      lineNumbers: 'on',
+                      scrollBeyondLastLine: false,
+                      fontSize: 13,
+                      readOnly: saving,
+                    }}
+                  />
+                </div>
+                <p className="mt-1 text-xs text-muted-foreground">
+                  Define typography, colors, layout rules, and visual guidelines.
+                  Include font sizes, color codes, spacing, and chart color palettes.
+                </p>
+              </div>
             </div>
           </div>
 
-          {/* Footer */}
+          {/* Footer - Fixed at bottom */}
           <div className="flex justify-end gap-2 border-t border-border bg-muted/30 px-6 py-4">
             <Button
               type="button"
