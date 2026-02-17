@@ -1,4 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
+import { Layers } from 'lucide-react';
+import { Button } from '@/ui/button';
 import type { SlideDeck } from '../../types/slide';
 import { useSelection } from '../../contexts/SelectionContext';
 import { SlideSelection } from './SlideSelection';
@@ -50,8 +52,11 @@ export const SelectionRibbon: React.FC<SelectionRibbonProps> = ({
   const renderBody = () => {
     if (!slideDeck || !slideDeck.slides || slideDeck.slides.length === 0) {
       return (
-        <div className="p-4 text-sm text-gray-500">
-          Generate slides to enable selection.
+        <div className="flex flex-col items-center justify-center h-32 text-center px-4">
+          <Layers className="size-8 text-muted-foreground/50 mb-2" />
+          <p className="text-sm text-muted-foreground">
+            Generate slides to enable selection
+          </p>
         </div>
       );
     }
@@ -70,34 +75,40 @@ export const SelectionRibbon: React.FC<SelectionRibbonProps> = ({
   };
 
   return (
-    <div className="w-64 border-r bg-slate-50 flex flex-col">
-      <div className="p-4 border-b bg-white">
-        <p className="text-sm font-semibold text-gray-900">Select slides</p>
-        <p className="text-xs text-gray-500">
-          Use the checkboxes to pick consecutive slides.
-        </p>
-        {warning && (
-          <div className="mt-2 text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded px-2 py-1">
-            {warning}
-          </div>
-        )}
+    <div className="w-64 border-r border-border bg-card flex flex-col">
+      <div className="flex items-center gap-3 border-b border-border bg-card px-4 py-3">
+        <div className="flex size-8 items-center justify-center rounded-lg bg-primary/10">
+          <Layers className="size-4 text-primary" />
+        </div>
+        <div className="flex-1">
+          <h2 className="text-sm font-medium text-foreground">Thumbnails</h2>
+          <p className="text-xs text-muted-foreground">
+            {slideDeck?.slides?.length || 0} slides
+          </p>
+        </div>
       </div>
+
+      {warning && (
+        <div className="mx-3 mt-3 text-xs text-amber-900 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
+          {warning}
+        </div>
+      )}
 
       <div className="flex-1 overflow-y-auto p-3">{renderBody()}</div>
 
       {selectedIndices.length > 0 && (
-        <div className="p-3 border-t bg-white">
-          <p className="text-xs text-gray-600 mb-2">
-            {selectedIndices.length} slide
-            {selectedIndices.length === 1 ? '' : 's'} selected
+        <div className="border-t border-border bg-card p-3">
+          <p className="text-xs text-muted-foreground mb-2">
+            {selectedIndices.length} slide{selectedIndices.length === 1 ? '' : 's'} selected
           </p>
-          <button
-            type="button"
+          <Button
+            variant="outline"
+            size="sm"
             onClick={clearSelection}
-            className="w-full px-3 py-1.5 text-xs font-medium text-blue-700 border border-blue-200 bg-blue-50 rounded hover:bg-blue-100 transition"
+            className="w-full"
           >
             Clear selection
-          </button>
+          </Button>
         </div>
       )}
     </div>
