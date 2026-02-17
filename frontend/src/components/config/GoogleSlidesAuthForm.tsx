@@ -335,15 +335,51 @@ export const GoogleSlidesAuthForm: React.FC<GoogleSlidesAuthFormProps> = ({ prof
         </section>
       )}
 
-      {/* Help text */}
-      <section className="bg-blue-50 border border-blue-200 rounded-lg p-4">
-        <h4 className="text-sm font-medium text-blue-900 mb-2">How to get credentials.json</h4>
-        <ol className="text-sm text-blue-700 space-y-1 list-decimal list-inside">
-          <li>Go to the <a href="https://console.cloud.google.com/apis/credentials" target="_blank" rel="noopener noreferrer" className="underline">Google Cloud Console &rarr; Credentials</a></li>
-          <li>Create an OAuth 2.0 Client ID (type: Web application or Desktop)</li>
-          <li>Add <code className="px-1 py-0.5 bg-blue-100 rounded text-xs">http://localhost:8000/api/export/google-slides/auth/callback</code> as an authorized redirect URI</li>
-          <li>Download the JSON file and upload it here</li>
-        </ol>
+      {/* Setup instructions */}
+      <section className="bg-blue-50 border border-blue-200 rounded-lg p-4 space-y-4">
+        <div>
+          <h4 className="text-sm font-semibold text-blue-900 mb-2">Setup: Google Cloud OAuth Credentials</h4>
+          <ol className="text-sm text-blue-800 space-y-1.5 list-decimal list-inside">
+            <li>
+              Go to{' '}
+              <a href="https://console.cloud.google.com/apis/credentials" target="_blank" rel="noopener noreferrer" className="underline font-medium">
+                Google Cloud Console &rarr; Credentials
+              </a>
+            </li>
+            <li>Create an <strong>OAuth 2.0 Client ID</strong> (type: <em>Web application</em>)</li>
+            <li>
+              Under <strong>Authorized redirect URIs</strong>, add the callback URL for your deployment (see below)
+            </li>
+            <li>
+              Enable the <strong>Google Slides API</strong> and <strong>Google Drive API</strong> in{' '}
+              <a href="https://console.cloud.google.com/apis/library" target="_blank" rel="noopener noreferrer" className="underline font-medium">
+                APIs &amp; Services &rarr; Library
+              </a>
+            </li>
+            <li>Download the JSON file and upload it above</li>
+          </ol>
+        </div>
+
+        <div className="border-t border-blue-200 pt-3">
+          <h4 className="text-xs font-semibold text-blue-900 mb-2 uppercase tracking-wide">Redirect URIs to register</h4>
+          <div className="space-y-2">
+            <div>
+              <span className="text-xs font-medium text-blue-700">Local development:</span>
+              <code className="ml-2 px-1.5 py-0.5 bg-blue-100 rounded text-xs text-blue-900 select-all">
+                http://localhost:8000/api/export/google-slides/auth/callback
+              </code>
+            </div>
+            <div>
+              <span className="text-xs font-medium text-blue-700">Databricks Apps:</span>
+              <code className="ml-2 px-1.5 py-0.5 bg-blue-100 rounded text-xs text-blue-900 select-all">
+                https://&lt;your-app-name&gt;.&lt;region&gt;.databricksapps.com/api/export/google-slides/auth/callback
+              </code>
+            </div>
+          </div>
+          <p className="text-xs text-blue-600 mt-2">
+            You can add multiple redirect URIs to the same Client ID. The app automatically uses the correct one based on how it's accessed.
+          </p>
+        </div>
       </section>
     </div>
   );
