@@ -98,6 +98,8 @@ export interface Session {
   slide_deck?: SlideDeck | null;
   profile_id?: number | null;
   profile_name?: string | null;
+  google_slides_url?: string | null;
+  google_slides_presentation_id?: string | null;
   profile_deleted?: boolean;
 }
 
@@ -126,6 +128,97 @@ interface PollResponse {
 
 // Session management
 let currentSessionId: string | null = null;
+
+// =========================================================================
+// Shared export helpers (used by PPTX and Google Slides exporters)
+// =========================================================================
+
+type ChartImageArray = Array<Array<{ canvas_id: string; base64_data: string }>>;
+type ProgressCallback = (progress: number, total: number, status: string) => void;
+
+interface ExportJobStatus {
+  job_id: string;
+  status: 'pending' | 'running' | 'completed' | 'error';
+  progress: number;
+  total_slides: number;
+  error?: string;
+  // Google Slides specific
+  presentation_id?: string;
+  presentation_url?: string;
+}
+
+/**
+ * Capture chart images from all slides in a deck.
+ * Returns the images in API-ready format, or undefined on failure.
+ */
+async function captureChartImages(
+  slideDeck: SlideDeck,
+  onProgress?: ProgressCallback,
+): Promise<ChartImageArray | undefined> {
+  try {
+    onProgress?.(0, slideDeck.slides.length, 'Capturing charts...');
+    const { captureSlideDeckCharts } = await import('./pptx_client');
+    const perSlide = await captureSlideDeckCharts(slideDeck);
+
+    const slidesWithCharts = perSlide.filter(s => Object.keys(s).length > 0).length;
+    console.log(`[EXPORT] Captured charts: ${slidesWithCharts} of ${perSlide.length} slides have charts`);
+
+    return perSlide.map((slideCharts) =>
+      Object.entries(slideCharts).map(([canvas_id, base64_data]) => ({
+        canvas_id,
+        base64_data,
+      }))
+    );
+  } catch (error) {
+    console.error('[EXPORT] Chart capture failed:', error);
+    return undefined;
+  }
+}
+
+/**
+ * Poll an export job until it reaches a terminal state (completed / error).
+ *
+ * @param pollUrl - Full URL to poll (e.g. /api/export/pptx/poll/{job_id})
+ * @param label  - Log label for console output (e.g. "PPTX" or "GSLIDES")
+ * @param onProgress - Optional progress callback
+ * @returns The final job status object when completed
+ */
+async function pollExportJob(
+  pollUrl: string,
+  label: string,
+  onProgress?: ProgressCallback,
+): Promise<ExportJobStatus> {
+  const pollIntervalMs = 2000;
+  const maxAttempts = 300; // 10 minutes max
+
+  for (let i = 0; i < maxAttempts; i++) {
+    await new Promise((resolve) => setTimeout(resolve, pollIntervalMs));
+
+    const response = await fetch(pollUrl);
+    if (!response.ok) {
+      throw new ApiError(response.status, 'Failed to poll export status');
+    }
+
+    const status: ExportJobStatus = await response.json();
+    console.log(`[${label}] Poll ${i + 1}: ${status.status} (${status.progress}/${status.total_slides})`);
+
+    onProgress?.(
+      status.progress,
+      status.total_slides,
+      `Processing slide ${status.progress} of ${status.total_slides}...`,
+    );
+
+    if (status.status === 'completed') {
+      return status;
+    }
+
+    if (status.status === 'error') {
+      throw new ApiError(500, status.error || 'Export failed');
+    }
+  }
+
+  throw new ApiError(408, 'Export timed out');
+}
 
 export const api = {
   /**
@@ -893,72 +986,108 @@ export const api = {
     onProgress?: (progress: number, total: number, status: string) => void,
   ): Promise<Blob> {
     // Step 1: Capture chart images client-side
-    let chartImages: Array<Array<{ canvas_id: string; base64_data: string }>> | undefined;
-    
-    if (useScreenshot && slideDeck) {
-      try {
-        console.log(`[EXPORT] Starting client-side chart capture for ${slideDeck.slides.length} slides`);
-        onProgress?.(0, slideDeck.slides.length, 'Capturing charts...');
-        
-        const { captureSlideDeckCharts } = await import('./pptx_client');
-        const chartImagesPerSlide = await captureSlideDeckCharts(slideDeck);
-        
-        // Log capture results
-        const slidesWithCharts = chartImagesPerSlide.filter(slide => Object.keys(slide).length > 0).length;
-        console.log(`[EXPORT] Captured charts: ${slidesWithCharts} of ${chartImagesPerSlide.length} slides have charts`);
-        
-        // Convert to API format
-        chartImages = chartImagesPerSlide.map((slideCharts) =>
-          Object.entries(slideCharts).map(([canvasId, base64Data]) => ({
-            canvas_id: canvasId,
-            base64_data: base64Data,
-          }))
-        );
-      } catch (error) {
-        console.error('[EXPORT] Failed to capture chart images client-side:', error);
-        // Continue without client images
-      }
-    }
+    const chartImages = (useScreenshot && slideDeck)
+      ? await captureChartImages(slideDeck, onProgress)
+      : undefined;
 
     // Step 2: Start async export
-    console.log('[EXPORT] Starting async export...');
     onProgress?.(0, slideDeck?.slides.length || 0, 'Starting export...');
-    
-    const { job_id, total_slides } = await this.startPPTXExport(
-      sessionId,
-      useScreenshot,
-      chartImages,
-    );
-    console.log(`[EXPORT] Export job started: ${job_id}, ${total_slides} slides`);
+    const { job_id } = await this.startPPTXExport(sessionId, useScreenshot, chartImages);
+    console.log(`[PPTX_EXPORT] Job started: ${job_id}`);
 
     // Step 3: Poll until complete
-    const pollIntervalMs = 2000;
-    const maxPollAttempts = 300; // 10 minutes max
-    let attempts = 0;
+    const status = await pollExportJob(
+      `${API_BASE_URL}/api/export/pptx/poll/${job_id}`,
+      'PPTX_EXPORT',
+      onProgress,
+    );
 
-    while (attempts < maxPollAttempts) {
-      await new Promise((resolve) => setTimeout(resolve, pollIntervalMs));
-      attempts++;
+    // Step 4: Download the file
+    onProgress?.(status.total_slides, status.total_slides, 'Downloading...');
+    return this.downloadPPTX(job_id);
+  },
 
-      const status = await this.pollPPTXExport(job_id);
-      console.log(`[EXPORT] Poll ${attempts}: ${status.status} (${status.progress}/${status.total_slides})`);
-      
-      onProgress?.(status.progress, status.total_slides, `Processing slide ${status.progress} of ${status.total_slides}...`);
+  // =========================================================================
+  // Google Slides Export API
+  // =========================================================================
 
-      if (status.status === 'completed') {
-        console.log('[EXPORT] Export completed, downloading...');
-        onProgress?.(status.total_slides, status.total_slides, 'Downloading...');
-        
-        // Step 4: Download the file
-        return this.downloadPPTX(job_id);
-      }
+  /**
+   * Check if the current user has a valid Google OAuth token for a profile.
+   */
+  async checkGoogleSlidesAuth(profileId: number): Promise<{ authorized: boolean }> {
+    const response = await fetch(
+      `${API_BASE_URL}/api/export/google-slides/auth/status?profile_id=${profileId}`
+    );
+    if (!response.ok) {
+      return { authorized: false };
+    }
+    return response.json();
+  },
 
-      if (status.status === 'error') {
-        throw new ApiError(500, status.error || 'Export failed');
-      }
+  /**
+   * Get the Google OAuth consent URL for a profile.
+   */
+  async getGoogleSlidesAuthUrl(profileId: number): Promise<{ url: string }> {
+    const response = await fetch(
+      `${API_BASE_URL}/api/export/google-slides/auth/url?profile_id=${profileId}`
+    );
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({}));
+      throw new ApiError(response.status, error.detail || 'Failed to get auth URL');
+    }
+    return response.json();
+  },
+
+  /**
+   * Export slides to Google Slides using async polling.
+   *
+   * Full flow: capture charts -> start job -> poll until done -> return URL.
+   * Uses the same async job pattern as PPTX export to avoid proxy timeouts.
+   */
+  async exportToGoogleSlides(
+    sessionId: string,
+    profileId: number,
+    slideDeck?: import('../types/slide').SlideDeck,
+    onProgress?: (progress: number, total: number, status: string) => void,
+  ): Promise<{ presentation_id: string; presentation_url: string }> {
+    // Step 1: Capture chart images client-side
+    const chartImages = slideDeck
+      ? await captureChartImages(slideDeck, onProgress)
+      : undefined;
+
+    // Step 2: Start async export job
+    onProgress?.(0, slideDeck?.slides.length || 0, 'Starting Google Slides export...');
+
+    const startResponse = await fetch(`${API_BASE_URL}/api/export/google-slides`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        session_id: sessionId,
+        profile_id: profileId,
+        chart_images: chartImages,
+      }),
+    });
+
+    if (!startResponse.ok) {
+      const error = await startResponse.json().catch(() => ({}));
+      throw new ApiError(startResponse.status, error.detail || 'Google Slides export failed');
     }
 
-    throw new ApiError(408, 'Export timed out');
+    const { job_id } = await startResponse.json();
+    console.log(`[GSLIDES_EXPORT] Job started: ${job_id}`);
+
+    // Step 3: Poll until complete
+    const status = await pollExportJob(
+      `${API_BASE_URL}/api/export/google-slides/poll/${job_id}`,
+      'GSLIDES_EXPORT',
+      onProgress,
+    );
+
+    onProgress?.(status.total_slides, status.total_slides, 'Done!');
+    return {
+      presentation_id: status.presentation_id!,
+      presentation_url: status.presentation_url!,
+    };
   },
 
   // =========================================================================

@@ -23,6 +23,9 @@ class ConfigProfile(Base):
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
     updated_by = Column(String(255))
 
+    # Encrypted Google OAuth client credentials (credentials.json content)
+    google_credentials_encrypted = Column(Text, nullable=True)
+
     # Relationships
     ai_infra = relationship("ConfigAIInfra", back_populates="profile", uselist=False, cascade="all, delete-orphan")
     genie_spaces = relationship("ConfigGenieSpace", back_populates="profile", cascade="all, delete-orphan")

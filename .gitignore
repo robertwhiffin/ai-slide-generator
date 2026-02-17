@@ -74,5 +74,16 @@ frontend/test-results/
 
 config/deployment.yaml
 
+# Google OAuth tokens (generated at runtime)
+token.json
+
+# Encryption key (auto-generated for local dev)
+.encryption_key
+
 # Git worktrees
 .worktrees/
+
+# OpenSkills / PRPM
+.openskills/
+AGENTS.md
+prpm.lock

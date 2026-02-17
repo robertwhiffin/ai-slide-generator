@@ -20,13 +20,15 @@ The AI Slide Generator uses a PostgreSQL database to manage configuration profil
 The database consists of configuration and session tables:
 
 **Configuration Tables:**
-1. **`config_profiles`** - Configuration profiles (e.g., "production", "development")
+1. **`config_profiles`** - Configuration profiles (e.g., "production", "development"). Includes `google_credentials_encrypted` column for Google OAuth credentials.
 2. **`config_ai_infra`** - AI/LLM settings (endpoint, temperature, max tokens)
 3. **`config_genie_spaces`** - Databricks Genie space configurations
-4. **`config_prompts`** - System prompts and deck prompt selection
-5. **`config_history`** - Audit trail of all configuration changes
-6. **`slide_deck_prompt_library`** - Global deck prompt templates (shared across profiles)
-7. **`slide_style_library`** - Global slide style library (CSS styles, image guidelines)
+4. **`config_mlflow`** - MLflow experiment settings
+5. **`config_prompts`** - System prompts and deck prompt selection
+6. **`config_history`** - Audit trail of all configuration changes
+7. **`slide_deck_prompt_library`** - Global deck prompt templates (shared across profiles)
+8. **`slide_style_library`** - Global slide style library (CSS styles, image guidelines)
+9. **`google_oauth_tokens`** - Per-user, per-profile encrypted Google OAuth tokens
 
 **Session Tables:**
 8. **`user_sessions`** - User conversation sessions with processing locks
@@ -45,9 +47,11 @@ The database consists of configuration and session tables:
 ```
 config_profiles (1) ──┬── (1) config_ai_infra
                       ├── (1) config_genie_spaces
+                      ├── (1) config_mlflow
                       ├── (1) config_prompts ──┬── (0..1) slide_deck_prompt_library
                       │                        └── (0..1) slide_style_library
-                      └── (n) config_history
+                      ├── (n) config_history
+                      └── (n) google_oauth_tokens (per user)
 
 slide_deck_prompt_library (global) ──── (n) config_prompts (via selected_deck_prompt_id FK)
 slide_style_library (global) ──── (n) config_prompts (via selected_slide_style_id FK)
@@ -150,6 +154,7 @@ class ConfigProfile(Base):
     created_by: str | None
     updated_at: datetime
     updated_by: str | None
+    google_credentials_encrypted: str | None  # Fernet-encrypted credentials.json
     
     # Relationships
     ai_infra: ConfigAIInfra

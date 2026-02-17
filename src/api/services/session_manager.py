@@ -149,6 +149,8 @@ class SessionManager:
                 "has_slide_deck": session.slide_deck is not None,
                 "profile_id": session.profile_id,
                 "profile_name": session.profile_name,
+                "google_slides_url": session.google_slides_url,
+                "google_slides_presentation_id": session.google_slides_presentation_id,
                 "profile_deleted": profile_deleted,
             }
 
@@ -332,6 +334,50 @@ class SessionManager:
                         "profile_name": profile_name,
                     },
                 )
+
+    def set_google_slides_info(
+        self,
+        session_id: str,
+        presentation_id: str,
+        presentation_url: str,
+    ) -> None:
+        """Store Google Slides presentation info on the session.
+
+        Called after a successful export so re-exports overwrite the same
+        presentation instead of creating a new one.
+
+        Args:
+            session_id: Session to update
+            presentation_id: Google Slides presentation ID
+            presentation_url: Full URL to the presentation
+        """
+        with get_db_session() as db:
+            session = self._get_session_or_raise(db, session_id)
+            session.google_slides_presentation_id = presentation_id
+            session.google_slides_url = presentation_url
+
+            logger.info(
+                "Stored Google Slides info on session",
+                extra={
+                    "session_id": session_id,
+                    "presentation_id": presentation_id,
+                },
+            )
+
+    def get_google_slides_info(self, session_id: str) -> Optional[Dict[str, str]]:
+        """Get the stored Google Slides presentation info for a session.
+
+        Returns:
+            Dict with ``presentation_id`` and ``presentation_url``, or None.
+        """
+        with get_db_session() as db:
+            session = self._get_session_or_raise(db, session_id)
+            if session.google_slides_presentation_id:
+                return {
+                    "presentation_id": session.google_slides_presentation_id,
+                    "presentation_url": session.google_slides_url,
+                }
+            return None
 
     def set_experiment_id(self, session_id: str, experiment_id: str) -> None:
         """Set the MLflow experiment ID for a session.
