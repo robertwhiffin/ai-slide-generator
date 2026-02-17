@@ -372,25 +372,30 @@ def init_db():
 
 
 def _run_migrations(engine, schema: str | None = None):
-    """Add columns that create_all() won't add to existing tables.
+    """Add columns and run data migrations that create_all() won't handle.
 
     SQLAlchemy's create_all() only creates new tables; it does not alter
-    existing ones. This function adds any missing columns via ALTER TABLE.
+    existing ones. This function:
+    - Adds missing columns via ALTER TABLE
+    - Migrates google_credentials_encrypted from config_profiles to google_global_credentials
+    - Removes profile_id from google_oauth_tokens (SQLite: recreate table)
+    All steps are idempotent.
     """
     from sqlalchemy import inspect, text
 
-    inspector = inspect(engine)
+    is_sqlite = engine.dialect.name == "sqlite"
+    _qual = lambda t: f'"{schema}"."{t}"' if schema else f'"{t}"'
 
+    # --- config_profiles: add is_deleted, deleted_at ---
     table_name = "config_profiles"
-    qualified_table = f'"{schema}"."{table_name}"' if schema else f'"{table_name}"'
-
-    try:
-        columns = {c["name"] for c in inspector.get_columns(table_name, schema=schema)}
-    except Exception:
-        # Table doesn't exist yet (will be created by create_all on next run)
-        return
+    qualified_table = _qual(table_name)
 
     with engine.begin() as conn:
+        inspector = inspect(conn)
+        try:
+            columns = {c["name"] for c in inspector.get_columns(table_name, schema=schema)}
+        except Exception:
+            return
         if "is_deleted" not in columns:
             logger.info(f"Migration: adding is_deleted column to {table_name}")
             conn.execute(text(
@@ -401,3 +406,97 @@ def _run_migrations(engine, schema: str | None = None):
             conn.execute(text(
                 f"ALTER TABLE {qualified_table} ADD COLUMN deleted_at TIMESTAMP NULL"
             ))
+
+        # --- Migrate google_credentials_encrypted to google_global_credentials ---
+        _migrate_google_credentials_to_global(conn, inspector, schema, _qual, is_sqlite)
+
+        # --- Remove profile_id from google_oauth_tokens ---
+        _migrate_drop_profile_id_from_oauth_tokens(conn, inspector, schema, _qual, is_sqlite)
+
+
+def _migrate_google_credentials_to_global(conn, inspector, schema, _qual, is_sqlite):
+    """Copy first non-null google_credentials_encrypted to global table, then null out profiles."""
+    from sqlalchemy import text
+
+    profiles_table = "config_profiles"
+    global_table = "google_global_credentials"
+
+    try:
+        profiles_cols = {c["name"] for c in inspector.get_columns(profiles_table, schema=schema)}
+    except Exception:
+        return
+
+    if "google_credentials_encrypted" not in profiles_cols:
+        return
+
+    try:
+        global_cols = {c["name"] for c in inspector.get_columns(global_table, schema=schema)}
+    except Exception:
+        return
+
+    if "credentials_encrypted" not in global_cols:
+        return
+
+    q_profiles = _qual(profiles_table)
+    q_global = _qual(global_table)
+
+    # Idempotent: only run if global table is empty and profiles have data
+    result = conn.execute(text(f"SELECT COUNT(*) FROM {q_global}")).scalar()
+    if result and result > 0:
+        return
+
+    row = conn.execute(text(
+        f"SELECT google_credentials_encrypted FROM {q_profiles} "
+        "WHERE google_credentials_encrypted IS NOT NULL LIMIT 1"
+    )).fetchone()
+
+    if not row or row[0] is None:
+        return
+
+    logger.info("Migration: copying google_credentials_encrypted to google_global_credentials")
+    conn.execute(
+        text(
+            f"INSERT INTO {q_global} (credentials_encrypted, uploaded_by, created_at, updated_at) "
+            "VALUES (:creds, 'migration', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+        ),
+        {"creds": row[0]},
+    )
+    conn.execute(text(f"UPDATE {q_profiles} SET google_credentials_encrypted = NULL"))
+
+
+def _migrate_drop_profile_id_from_oauth_tokens(conn, inspector, schema, _qual, is_sqlite):
+    """Remove profile_id column from google_oauth_tokens. SQLite: recreate table."""
+    from sqlalchemy import text
+
+    table_name = "google_oauth_tokens"
+
+    try:
+        columns = {c["name"] for c in inspector.get_columns(table_name, schema=schema)}
+    except Exception:
+        return
+
+    if "profile_id" not in columns:
+        return
+
+    q_table = _qual(table_name)
+
+    if is_sqlite:
+        tmp = f"{table_name}_new"
+        q_tmp = _qual(tmp) if schema else tmp
+        conn.execute(text(f"""
+            CREATE TABLE {q_tmp} (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_identity VARCHAR(255) NOT NULL,
+                token_encrypted TEXT NOT NULL,
+                created_at DATETIME NOT NULL,
+                updated_at DATETIME NOT NULL
+            )
+        """))
+        conn.execute(text(
+            f"INSERT INTO {q_tmp} (id, user_identity, token_encrypted, created_at, updated_at) "
+            f"SELECT id, user_identity, token_encrypted, created_at, updated_at FROM {q_table}"
+        ))
+        conn.execute(text(f"DROP TABLE {q_table}"))
+        conn.execute(text(f"ALTER TABLE {q_tmp} RENAME TO {table_name}"))
+    else:
+        conn.execute(text(f"ALTER TABLE {q_table} DROP COLUMN profile_id"))

@@ -116,7 +116,7 @@ The frontend sends the full conversation history each call (stateless on the ser
 | `frontend/src/components/Feedback/StarRating.tsx` | 5-star interactive rating |
 | `frontend/src/components/Feedback/NPSScale.tsx` | 0-10 numbered button row |
 | `frontend/src/components/Feedback/TimeSavedPills.tsx` | Pill buttons: 15min, 30min, 1hr, 2hrs, 4hrs, 8hrs |
-| `frontend/src/components/Feedback/FeedbackDashboard.tsx` | Hidden `/feedback` page — stats table, totals, AI summary (no nav link) |
+| `frontend/src/components/Feedback/FeedbackDashboard.tsx` | Hidden `/admin` page (Feedback tab) — stats table, totals, AI summary (no nav link) |
 | `frontend/src/hooks/useSurveyTrigger.ts` | 30s post-generation timer with 7-day localStorage cooldown |
 | `frontend/src/services/api.ts` | `feedbackChat()`, `submitFeedback()`, `submitSurvey()`, `getReportStats()`, `getReportSummary()` |
 
@@ -148,9 +148,9 @@ The frontend sends the full conversation history each call (stateless on the ser
 
 ### Feedback Dashboard (Hidden Page)
 
-The `/feedback` route renders a read-only dashboard that displays the reporting API data. It is **not linked** from the navigation bar — access it by typing the URL directly (e.g. `https://<host>/feedback`).
+The feedback dashboard is rendered on the `/admin` page as a tab, sharing the layout with Google Slides configuration. The `/feedback` route redirects to `/admin`. The admin page is **not linked** from the navigation bar — access it by typing the URL directly (e.g. `https://<host>/admin`).
 
-The page shows:
+The Feedback tab shows:
 - **Summary cards** — overall average star rating, NPS, total time saved, total responses.
 - **Weekly stats table** — one row per week with response count, avg stars, avg NPS, and time saved.
 - **AI-generated summary** — narrative analysis of feedback themes, category breakdown, and top themes.

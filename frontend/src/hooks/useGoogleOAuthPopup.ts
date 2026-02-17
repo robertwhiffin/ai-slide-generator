@@ -7,11 +7,11 @@ import { api } from '../services/api';
  * Opens a popup for Google consent, listens for a postMessage callback,
  * and falls back to polling the popup's closed state + auth status check.
  *
- * @returns `openOAuthPopup(profileId)` — resolves `true` if authorized, `false` otherwise.
+ * @returns `openOAuthPopup()` — resolves `true` if authorized, `false` otherwise.
  */
 export function useGoogleOAuthPopup() {
-  const openOAuthPopup = useCallback(async (profileId: number): Promise<boolean> => {
-    const { url } = await api.getGoogleSlidesAuthUrl(profileId);
+  const openOAuthPopup = useCallback(async (): Promise<boolean> => {
+    const { url } = await api.getGoogleSlidesAuthUrl();
 
     return new Promise<boolean>((resolve) => {
       const popup = window.open(url, 'google-slides-auth', 'width=600,height=700,popup=yes');
@@ -26,7 +26,7 @@ export function useGoogleOAuthPopup() {
       const pollTimer = setInterval(() => {
         if (popup?.closed) {
           cleanup();
-          api.checkGoogleSlidesAuth(profileId).then(({ authorized }) => resolve(authorized));
+          api.checkGoogleSlidesAuth().then(({ authorized }) => resolve(authorized));
         }
       }, 1000);
 

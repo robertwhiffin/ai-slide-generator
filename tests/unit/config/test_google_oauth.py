@@ -1,11 +1,9 @@
 """Tests for Google OAuth models, credential endpoints, and auth service.
 
 Covers:
-- GoogleOAuthToken model CRUD
-- ConfigProfile.google_credentials_encrypted column
-- Google credentials upload / status / delete API routes
-- GoogleSlidesAuth DB-backed mode (from_profile)
-- Google Slides auth status endpoint
+- GoogleOAuthToken model CRUD (user_identity only, no profile_id)
+- GoogleSlidesAuth DB-backed mode (from_global)
+- Google Slides auth status endpoint (no profile_id)
 """
 
 import json
@@ -17,7 +15,8 @@ from sqlalchemy.pool import StaticPool
 from fastapi.testclient import TestClient
 
 from src.core.database import Base, get_db
-from src.database.models import ConfigProfile, GoogleOAuthToken
+from src.core.encryption import encrypt_data
+from src.database.models import ConfigProfile, GoogleGlobalCredentials, GoogleOAuthToken
 
 
 # Sample credentials.json matching Google OAuth format.
@@ -96,6 +95,7 @@ def db_session(session_factory, db_engine):
     # Clean data between tests
     with db_engine.connect() as conn:
         conn.execute(text("DELETE FROM google_oauth_tokens"))
+        conn.execute(text("DELETE FROM google_global_credentials"))
         conn.execute(text("DELETE FROM config_history"))
         conn.execute(text("DELETE FROM config_genie_spaces"))
         conn.execute(text("DELETE FROM config_prompts"))
@@ -139,6 +139,7 @@ def _clean_data_for_api_tests(db_engine):
     yield
     with db_engine.connect() as conn:
         conn.execute(text("DELETE FROM google_oauth_tokens"))
+        conn.execute(text("DELETE FROM google_global_credentials"))
         conn.execute(text("DELETE FROM config_history"))
         conn.execute(text("DELETE FROM config_genie_spaces"))
         conn.execute(text("DELETE FROM config_prompts"))
@@ -163,27 +164,12 @@ def _seed_profile(session_factory) -> int:
 # ---------------------------------------------------------------------------
 
 class TestGoogleOAuthModels:
-    """Test the new DB model and column additions."""
+    """Test GoogleOAuthToken model (user_identity only, no profile_id)."""
 
-    def test_profile_google_credentials_column(self, db_session, profile):
-        """google_credentials_encrypted column stores and retrieves data."""
-        profile.google_credentials_encrypted = "encrypted-blob"
-        db_session.commit()
-
-        loaded = db_session.get(ConfigProfile, profile.id)
-        assert loaded.google_credentials_encrypted == "encrypted-blob"
-
-        # Null by default on a fresh profile
-        p2 = ConfigProfile(name="empty-creds", created_by="test")
-        db_session.add(p2)
-        db_session.commit()
-        assert p2.google_credentials_encrypted is None
-
-    def test_google_oauth_token_crud(self, db_session, profile):
+    def test_google_oauth_token_crud(self, db_session):
         """GoogleOAuthToken can be created, queried, and its repr works."""
         token = GoogleOAuthToken(
             user_identity="user@example.com",
-            profile_id=profile.id,
             token_encrypted="enc-token",
         )
         db_session.add(token)
@@ -191,20 +177,19 @@ class TestGoogleOAuthModels:
 
         loaded = (
             db_session.query(GoogleOAuthToken)
-            .filter_by(user_identity="user@example.com", profile_id=profile.id)
+            .filter_by(user_identity="user@example.com")
             .first()
         )
         assert loaded is not None
         assert loaded.token_encrypted == "enc-token"
         assert "user@example.com" in repr(loaded)
 
-    def test_google_oauth_token_unique_constraint(self, db_session, profile):
-        """Composite unique constraint on (user_identity, profile_id)."""
+    def test_google_oauth_token_unique_constraint(self, db_session):
+        """Unique constraint on user_identity only."""
         from sqlalchemy.exc import IntegrityError
 
         t1 = GoogleOAuthToken(
             user_identity="dup@test.com",
-            profile_id=profile.id,
             token_encrypted="a",
         )
         db_session.add(t1)
@@ -212,7 +197,6 @@ class TestGoogleOAuthModels:
 
         t2 = GoogleOAuthToken(
             user_identity="dup@test.com",
-            profile_id=profile.id,
             token_encrypted="b",
         )
         db_session.add(t2)
@@ -221,134 +205,86 @@ class TestGoogleOAuthModels:
 
 
 # ---------------------------------------------------------------------------
-# Credential upload / status / delete API tests
+# GoogleSlidesAuth.from_global tests
 # ---------------------------------------------------------------------------
 
-class TestGoogleCredentialsAPI:
-    """Test the /api/settings/profiles/{id}/google-credentials endpoints."""
-
-    def test_status_no_credentials(self, test_client, session_factory):
-        """Status returns has_credentials=false for a fresh profile."""
-        pid = _seed_profile(session_factory)
-        resp = test_client.get(f"/api/settings/profiles/{pid}/google-credentials/status")
-        assert resp.status_code == 200
-        assert resp.json()["has_credentials"] is False
-
-    def test_upload_valid_credentials(self, test_client, session_factory):
-        """Uploading valid credentials.json succeeds and status flips to true."""
-        pid = _seed_profile(session_factory)
-        resp = test_client.post(
-            f"/api/settings/profiles/{pid}/google-credentials",
-            files={"file": ("credentials.json", VALID_CREDENTIALS, "application/json")},
-        )
-        assert resp.status_code == 200
-        assert resp.json()["success"] is True
-
-        status = test_client.get(f"/api/settings/profiles/{pid}/google-credentials/status")
-        assert status.json()["has_credentials"] is True
-
-    def test_upload_invalid_json(self, test_client, session_factory):
-        """Uploading non-JSON is rejected with 400."""
-        pid = _seed_profile(session_factory)
-        resp = test_client.post(
-            f"/api/settings/profiles/{pid}/google-credentials",
-            files={"file": ("bad.json", "not json", "application/json")},
-        )
-        assert resp.status_code == 400
-
-    def test_upload_missing_keys(self, test_client, session_factory):
-        """JSON without 'installed' or 'web' key is rejected."""
-        pid = _seed_profile(session_factory)
-        bad = json.dumps({"some_key": "some_val"})
-        resp = test_client.post(
-            f"/api/settings/profiles/{pid}/google-credentials",
-            files={"file": ("creds.json", bad, "application/json")},
-        )
-        assert resp.status_code == 400
-        assert "installed" in resp.json()["detail"]
-
-    def test_delete_credentials(self, test_client, session_factory):
-        """Deleting credentials clears the stored data."""
-        pid = _seed_profile(session_factory)
-        # Upload first
-        test_client.post(
-            f"/api/settings/profiles/{pid}/google-credentials",
-            files={"file": ("credentials.json", VALID_CREDENTIALS, "application/json")},
-        )
-        # Delete
-        resp = test_client.delete(f"/api/settings/profiles/{pid}/google-credentials")
-        assert resp.status_code == 204
-
-        # Verify gone
-        status = test_client.get(f"/api/settings/profiles/{pid}/google-credentials/status")
-        assert status.json()["has_credentials"] is False
-
-    def test_upload_profile_not_found(self, test_client):
-        """Uploading to a non-existent profile returns 404."""
-        resp = test_client.post(
-            "/api/settings/profiles/999/google-credentials",
-            files={"file": ("creds.json", VALID_CREDENTIALS, "application/json")},
-        )
-        assert resp.status_code == 404
+def _seed_global_credentials(db_session) -> None:
+    """Insert global credentials into GoogleGlobalCredentials."""
+    creds = GoogleGlobalCredentials(
+        credentials_encrypted=encrypt_data(VALID_CREDENTIALS),
+        uploaded_by="admin@test.com",
+    )
+    db_session.add(creds)
+    db_session.commit()
 
 
-# ---------------------------------------------------------------------------
-# GoogleSlidesAuth.from_profile tests
-# ---------------------------------------------------------------------------
+class TestGoogleSlidesAuthFromGlobal:
+    """Test DB-backed GoogleSlidesAuth construction via from_global()."""
 
-class TestGoogleSlidesAuthFromProfile:
-    """Test DB-backed GoogleSlidesAuth construction."""
-
-    def test_from_profile_no_credentials_raises(self, db_session, profile):
-        """from_profile raises when profile has no credentials."""
-        from src.services.google_slides_auth import GoogleSlidesAuth, GoogleSlidesAuthError
-
-        with pytest.raises(GoogleSlidesAuthError, match="no Google OAuth credentials"):
-            GoogleSlidesAuth.from_profile(profile.id, "user@test.com", db_session)
-
-    def test_from_profile_with_credentials(self, db_session, profile):
-        """from_profile succeeds and returns a DB-mode auth instance."""
-        from src.core.encryption import encrypt_data
+    def test_from_global_loads_credentials_and_builds_auth(self, db_session):
+        """from_global loads global credentials from GoogleGlobalCredentials, builds auth instance."""
         from src.services.google_slides_auth import GoogleSlidesAuth
 
-        profile.google_credentials_encrypted = encrypt_data(VALID_CREDENTIALS)
-        db_session.commit()
+        _seed_global_credentials(db_session)
 
-        auth = GoogleSlidesAuth.from_profile(profile.id, "user@test.com", db_session)
+        auth = GoogleSlidesAuth.from_global("user@test.com", db_session)
         assert auth is not None
         assert auth._db_mode is True
         assert auth.is_authorized() is False  # No token yet
 
-    def test_from_profile_stale_token_deleted(self, db_session, profile):
-        """from_profile deletes a token it cannot decrypt instead of crashing."""
-        from src.core.encryption import encrypt_data
+    def test_from_global_raises_when_no_global_credentials(self, db_session):
+        """from_global raises GoogleSlidesAuthError when no global credentials exist."""
+        from src.services.google_slides_auth import GoogleSlidesAuth, GoogleSlidesAuthError
+
+        with pytest.raises(GoogleSlidesAuthError, match="No global Google OAuth credentials"):
+            GoogleSlidesAuth.from_global("user@test.com", db_session)
+
+    def test_from_global_loads_and_decrypts_existing_user_token(self, db_session):
+        """from_global loads and decrypts existing user token (user_identity only, no profile_id)."""
         from src.services.google_slides_auth import GoogleSlidesAuth
 
-        profile.google_credentials_encrypted = encrypt_data(VALID_CREDENTIALS)
+        _seed_global_credentials(db_session)
+        token_json = json.dumps({
+            "token": "valid",
+            "refresh_token": "rt",
+            "token_uri": "https://oauth2.googleapis.com/token",
+            "client_id": "x",
+            "client_secret": "y",
+            "scopes": ["https://www.googleapis.com/auth/presentations"],
+            "expiry": None,
+        })
         db_session.add(GoogleOAuthToken(
             user_identity="user@test.com",
-            profile_id=profile.id,
+            token_encrypted=encrypt_data(token_json),
+        ))
+        db_session.commit()
+
+        auth = GoogleSlidesAuth.from_global("user@test.com", db_session)
+        assert auth is not None
+        assert auth._token_json == token_json
+        assert auth._load_token() is not None  # Token loaded and decrypted
+
+    def test_from_global_deletes_stale_token_on_decryption_failure(self, db_session):
+        """from_global deletes stale tokens on decryption failure."""
+        from src.services.google_slides_auth import GoogleSlidesAuth
+
+        _seed_global_credentials(db_session)
+        db_session.add(GoogleOAuthToken(
+            user_identity="user@test.com",
             token_encrypted="not-a-valid-fernet-token",
         ))
         db_session.commit()
 
-        auth = GoogleSlidesAuth.from_profile(profile.id, "user@test.com", db_session)
+        auth = GoogleSlidesAuth.from_global("user@test.com", db_session)
         assert auth.is_authorized() is False
 
         # Stale token row should be cleaned up
         remaining = (
             db_session.query(GoogleOAuthToken)
-            .filter_by(user_identity="user@test.com", profile_id=profile.id)
+            .filter_by(user_identity="user@test.com")
             .first()
         )
         assert remaining is None
-
-    def test_from_profile_nonexistent_profile(self, db_session):
-        """from_profile raises for a missing profile ID."""
-        from src.services.google_slides_auth import GoogleSlidesAuth, GoogleSlidesAuthError
-
-        with pytest.raises(GoogleSlidesAuthError, match="not found"):
-            GoogleSlidesAuth.from_profile(999, "user@test.com", db_session)
 
 
 # ---------------------------------------------------------------------------
@@ -435,27 +371,29 @@ class TestGoogleSlidesAuthUnit:
 
 
 # ---------------------------------------------------------------------------
-# Google Slides auth status endpoint
+# Google Slides auth status endpoint (no profile_id)
 # ---------------------------------------------------------------------------
 
 class TestGoogleSlidesAuthStatusEndpoint:
-    """Test /api/export/google-slides/auth/status returns gracefully."""
+    """Test /api/export/google-slides/auth/status returns gracefully (no profile_id param)."""
 
-    def test_auth_status_no_credentials(self, test_client, session_factory):
-        """Returns authorized=false when no credentials are uploaded."""
-        pid = _seed_profile(session_factory)
-        resp = test_client.get(
-            "/api/export/google-slides/auth/status",
-            params={"profile_id": pid},
-        )
+    def test_auth_status_no_credentials(self, test_client):
+        """Returns authorized=false when no global credentials are uploaded."""
+        resp = test_client.get("/api/export/google-slides/auth/status")
         assert resp.status_code == 200
         assert resp.json()["authorized"] is False
 
-    def test_auth_status_nonexistent_profile(self, test_client):
-        """Returns authorized=false (not 500) for missing profile."""
-        resp = test_client.get(
-            "/api/export/google-slides/auth/status",
-            params={"profile_id": 999},
+    def test_auth_status_with_global_creds_but_no_token(self, test_client, session_factory):
+        """Returns authorized=false when global creds exist but user has no token."""
+        db = session_factory()
+        creds = GoogleGlobalCredentials(
+            credentials_encrypted=encrypt_data(VALID_CREDENTIALS),
+            uploaded_by="admin@test.com",
         )
+        db.add(creds)
+        db.commit()
+        db.close()
+
+        resp = test_client.get("/api/export/google-slides/auth/status")
         assert resp.status_code == 200
         assert resp.json()["authorized"] is False
