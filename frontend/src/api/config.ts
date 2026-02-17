@@ -453,6 +453,36 @@ export const configApi = {
       method: 'DELETE',
     }),
   
+  // Google OAuth Credentials (per-profile)
+
+  /**
+   * Upload a Google OAuth credentials.json file for a profile.
+   * Stored encrypted on the server.
+   */
+  uploadGoogleCredentials: async (profileId: number, file: File): Promise<{ success: boolean; has_credentials: boolean }> => {
+    const formData = new FormData();
+    formData.append('file', file);
+    const response = await fetch(`${API_BASE}/profiles/${profileId}/google-credentials`, {
+      method: 'POST',
+      body: formData,
+    });
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({ detail: 'Upload failed' }));
+      throw new ConfigApiError(response.status, error.detail || `HTTP ${response.status}`);
+    }
+    return response.json();
+  },
+
+  /** Check whether a profile has Google OAuth credentials uploaded. */
+  getGoogleCredentialsStatus: (profileId: number): Promise<{ has_credentials: boolean }> =>
+    fetchJson(`${API_BASE}/profiles/${profileId}/google-credentials/status`),
+
+  /** Remove stored Google OAuth credentials from a profile. */
+  deleteGoogleCredentials: (profileId: number): Promise<void> =>
+    fetchJson(`${API_BASE}/profiles/${profileId}/google-credentials`, {
+      method: 'DELETE',
+    }),
+
   // Validation
   
   validateProfile: (profileId: number): Promise<ValidationResponse> =>
