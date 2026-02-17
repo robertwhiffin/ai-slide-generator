@@ -75,7 +75,7 @@ export const SelectionRibbon: React.FC<SelectionRibbonProps> = ({
   };
 
   return (
-    <div className="w-64 border-r border-border bg-card flex flex-col">
+    <div className="flex h-full w-64 flex-col border-r border-border bg-card">
       <div className="flex items-center gap-3 border-b border-border bg-card px-4 py-3">
         <div className="flex size-8 items-center justify-center rounded-lg bg-primary/10">
           <Layers className="size-4 text-primary" />
