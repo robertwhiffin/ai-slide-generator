@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, forwardRef, useImperativeHandle } from 'react';
+import { Bot } from 'lucide-react';
 import type { Message } from '../../types/message';
 import type { ReplacementInfo, SlideDeck } from '../../types/slide';
 import { MessageList } from './MessageList';
@@ -313,15 +314,21 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(({
   }, [setIsGenerating]);
 
   return (
-    <div className="flex flex-col h-full bg-gray-50">
-      <div className="p-4 border-b bg-white flex items-center justify-between">
-        <h2 className="text-lg font-semibold">Chat</h2>
-        {hasSelection && (
-          <span className="text-sm text-blue-600 font-medium">
-            {selectedIndices.length} slide
-            {selectedIndices.length === 1 ? '' : 's'} selected
-          </span>
-        )}
+    <div className="flex flex-col h-full bg-background">
+      <div className="flex items-center gap-3 border-b border-border bg-card px-4 py-3">
+        <div className="flex size-8 items-center justify-center rounded-lg bg-primary/10">
+          <Bot className="size-4 text-primary" />
+        </div>
+        <div className="flex-1">
+          <h2 className="text-sm font-medium text-foreground">AI Assistant</h2>
+          {hasSelection ? (
+            <p className="text-xs text-primary font-medium">
+              {selectedIndices.length} slide{selectedIndices.length === 1 ? '' : 's'} selected
+            </p>
+          ) : (
+            <p className="text-xs text-muted-foreground">Ask me to create or edit slides</p>
+          )}
+        </div>
       </div>
 
       <div className="flex-1 overflow-y-auto">
