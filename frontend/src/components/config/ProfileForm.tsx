@@ -1,12 +1,14 @@
 /**
  * Form component for creating and editing profiles.
- * 
+ *
  * Supports:
  * - Creating new profiles
  * - Editing profile name and description
  */
 
 import React, { useState, useEffect } from 'react';
+import { X, AlertCircle } from 'lucide-react';
+import { Button } from '@/ui/button';
 import type { ProfileCreate, ProfileUpdate } from '../../api/config';
 
 interface ProfileFormProps {
@@ -100,33 +102,36 @@ export const ProfileForm: React.FC<ProfileFormProps> = ({
   const submitLabel = mode === 'create' ? 'Create' : 'Save';
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-50">
-      <div className="bg-white rounded-lg shadow-xl w-full max-w-lg mx-4">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm">
+      <div className="mx-4 w-full max-w-lg rounded-lg border border-border bg-card shadow-xl">
         {/* Header */}
-        <div className="px-6 py-4 border-b flex items-center justify-between">
-          <h2 className="text-xl font-semibold text-gray-900">{title}</h2>
-          <button
+        <div className="flex items-center justify-between border-b border-border px-6 py-4">
+          <h2 className="text-lg font-semibold text-foreground">{title}</h2>
+          <Button
+            variant="ghost"
+            size="icon"
             onClick={onCancel}
-            className="text-gray-500 hover:text-gray-700"
             disabled={isSubmitting}
+            className="size-8 p-0"
           >
-            ✕
-          </button>
+            <X className="size-4" />
+          </Button>
         </div>
 
         {/* Form */}
-        <form onSubmit={handleSubmit} className="px-6 py-4 space-y-4">
+        <form onSubmit={handleSubmit} className="space-y-4 px-6 py-4">
           {/* Error Display */}
           {error && (
-            <div className="p-3 bg-red-50 border border-red-200 rounded text-red-700 text-sm">
-              {error}
+            <div className="flex items-center gap-2 rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm text-destructive">
+              <AlertCircle className="size-4 shrink-0" />
+              <span>{error}</span>
             </div>
           )}
 
           {/* Name Field */}
           <div>
-            <label htmlFor="name" className="block text-sm font-medium text-gray-700 mb-1">
-              Name <span className="text-red-500">*</span>
+            <label htmlFor="name" className="mb-1 block text-sm font-medium text-foreground">
+              Name <span className="text-destructive">*</span>
             </label>
             <input
               id="name"
@@ -134,19 +139,19 @@ export const ProfileForm: React.FC<ProfileFormProps> = ({
               value={name}
               onChange={(e) => setName(e.target.value)}
               placeholder="e.g., Development, Production, Testing"
-              className="w-full px-3 py-2 border border-gray-300 rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
+              className="flex h-9 w-full rounded-md border border-input bg-background px-3 py-1 text-sm shadow-sm transition-colors file:border-0 file:bg-transparent file:text-sm file:font-medium placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
               disabled={isSubmitting}
               required
               maxLength={100}
             />
-            <p className="mt-1 text-xs text-gray-500">
+            <p className="mt-1 text-xs text-muted-foreground">
               {name.length}/100 characters
             </p>
           </div>
 
           {/* Description Field */}
           <div>
-            <label htmlFor="description" className="block text-sm font-medium text-gray-700 mb-1">
+            <label htmlFor="description" className="mb-1 block text-sm font-medium text-foreground">
               Description
             </label>
             <textarea
@@ -155,32 +160,28 @@ export const ProfileForm: React.FC<ProfileFormProps> = ({
               onChange={(e) => setDescription(e.target.value)}
               placeholder="Optional description"
               rows={3}
-              className="w-full px-3 py-2 border border-gray-300 rounded focus:outline-none focus:ring-2 focus:ring-blue-500 resize-none"
+              className="flex min-h-[60px] w-full resize-none rounded-md border border-input bg-background px-3 py-2 text-sm shadow-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
               disabled={isSubmitting}
               maxLength={500}
             />
-            <p className="mt-1 text-xs text-gray-500">
+            <p className="mt-1 text-xs text-muted-foreground">
               {description.length}/500 characters
             </p>
           </div>
 
           {/* Buttons */}
-          <div className="flex justify-end gap-3 pt-4">
-            <button
+          <div className="flex justify-end gap-2 pt-4">
+            <Button
               type="button"
+              variant="outline"
               onClick={onCancel}
-              className="px-4 py-2 bg-gray-200 hover:bg-gray-300 text-gray-800 rounded transition-colors"
               disabled={isSubmitting}
             >
               Cancel
-            </button>
-            <button
-              type="submit"
-              className="px-4 py-2 bg-blue-500 hover:bg-blue-600 text-white rounded transition-colors disabled:bg-blue-300"
-              disabled={isSubmitting}
-            >
+            </Button>
+            <Button type="submit" disabled={isSubmitting}>
               {isSubmitting ? 'Saving...' : submitLabel}
-            </button>
+            </Button>
           </div>
         </form>
       </div>
