@@ -108,6 +108,20 @@ Save points capture complete deck state plus verification results. Maximum 40 pe
 | `PUT` | `/api/settings/slide-styles/{id}` | Update slide style | `routes/settings/slide_styles.update_slide_style` |
 | `DELETE` | `/api/settings/slide-styles/{id}` | Delete slide style | `routes/settings/slide_styles.delete_slide_style` |
 | `PUT` | `/api/settings/prompts/{profile_id}` | Update prompts config (deck prompt, slide style selection) | `routes/settings/prompts.update_prompts_config` |
+| `POST` | `/api/settings/profiles/{id}/google-credentials` | Upload Google OAuth credentials.json | `routes/settings/google_credentials.upload` |
+| `GET` | `/api/settings/profiles/{id}/google-credentials/status` | Check if Google credentials configured | `routes/settings/google_credentials.status` |
+| `DELETE` | `/api/settings/profiles/{id}/google-credentials` | Remove stored Google credentials | `routes/settings/google_credentials.delete` |
+
+### Google Slides Export & Auth Endpoints
+
+| Method | Path | Purpose | Backend handler |
+| --- | --- | --- | --- |
+| `GET` | `/api/export/google-slides/auth/status` | Check user authorization for profile | `routes/google_slides.auth_status` |
+| `GET` | `/api/export/google-slides/auth/url` | Get Google OAuth consent URL | `routes/google_slides.auth_url` |
+| `GET` | `/api/export/google-slides/auth/callback` | OAuth callback (exchanges code for token) | `routes/google_slides.auth_callback` |
+| `POST` | `/api/export/google-slides` | Export deck to Google Slides presentation | `routes/google_slides.export_to_google_slides` |
+
+See [Google Slides Integration](google-slides-integration.md) for full details on the OAuth2 flow, encryption, and converter.
 
 **Deck Prompts** are global presentation templates stored in `slide_deck_prompt_library`. Profiles reference a selected prompt via `config_prompts.selected_deck_prompt_id`. When generating slides, the agent prepends the deck prompt content (WHAT to create).
 
@@ -180,6 +194,11 @@ Mutation endpoints return **409 Conflict** if the session is already processing 
 | `src/utils/html_utils.py` | Canvas/script analysis | Extracts `canvas` ids from HTML and JS for validation. |
 | `src/utils/css_utils.py` | CSS parsing & merging | Selector-level merge for edit responses using `tinycss2`. |
 | `src/utils/logging_config.py` | Structured logging | JSON/text formatters, RotatingFileHandler. |
+| `src/core/encryption.py` | Fernet encryption | Encrypt/decrypt Google OAuth credentials and tokens at rest. |
+| `src/services/google_slides_auth.py` | Google OAuth2 | DB-backed or file-backed credential/token management. |
+| `src/services/html_to_google_slides.py` | Google Slides converter | LLM code-gen HTML→Slides API, same pattern as PPTX converter. |
+| `src/api/routes/google_slides.py` | Google Slides endpoints | OAuth flow + export to Google Slides. |
+| `src/api/routes/settings/google_credentials.py` | Credential management | Upload, status, delete Google OAuth credentials per profile. |
 
 ---
 
@@ -310,4 +329,5 @@ Keep this doc synchronized whenever you add new modules, features (e.g., streami
 - [Slide Parser & Script Management](slide-parser-and-script-management.md) – HTML parsing flow
 - [Slide Editing Robustness](slide-editing-robustness-fixes.md) – Deck preservation, LLM validation, canvas deduplication, JS validation
 - [Save Points / Versioning](save-points-versioning.md) – Complete deck state snapshots with preview and restore
+- [Google Slides Integration](google-slides-integration.md) – OAuth2 flow, encrypted credential storage, LLM converter
 

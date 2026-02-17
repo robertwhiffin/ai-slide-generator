@@ -135,6 +135,8 @@ class SessionManager:
         with get_db_session() as db:
             session = self._get_session_or_raise(db, session_id)
 
+            profile_deleted = self._is_profile_deleted(db, session.profile_id)
+
             return {
                 "session_id": session.session_id,
                 "user_id": session.user_id,
@@ -147,6 +149,9 @@ class SessionManager:
                 "has_slide_deck": session.slide_deck is not None,
                 "profile_id": session.profile_id,
                 "profile_name": session.profile_name,
+                "google_slides_url": session.google_slides_url,
+                "google_slides_presentation_id": session.google_slides_presentation_id,
+                "profile_deleted": profile_deleted,
             }
 
     def list_sessions(
@@ -166,7 +171,7 @@ class SessionManager:
             List of session info dictionaries
         """
         with get_db_session() as db:
-            query = db.query(UserSession)
+            query = db.query(UserSession).filter(UserSession.messages.any())
 
             if created_by:
                 query = query.filter(UserSession.created_by == created_by)
@@ -177,6 +182,12 @@ class SessionManager:
                 query.order_by(UserSession.last_activity.desc())
                 .limit(limit)
                 .all()
+            )
+
+            # Batch-check which profiles are deleted to avoid N+1 queries
+            deleted_profiles = self._get_deleted_profile_ids(
+                db,
+                [s.profile_id for s in sessions if s.profile_id is not None],
             )
 
             return [
@@ -191,6 +202,7 @@ class SessionManager:
                     "has_slide_deck": s.slide_deck is not None,
                     "profile_id": s.profile_id,
                     "profile_name": s.profile_name,
+                    "profile_deleted": s.profile_id in deleted_profiles if s.profile_id else False,
                 }
                 for s in sessions
             ]
@@ -322,6 +334,50 @@ class SessionManager:
                         "profile_name": profile_name,
                     },
                 )
+
+    def set_google_slides_info(
+        self,
+        session_id: str,
+        presentation_id: str,
+        presentation_url: str,
+    ) -> None:
+        """Store Google Slides presentation info on the session.
+
+        Called after a successful export so re-exports overwrite the same
+        presentation instead of creating a new one.
+
+        Args:
+            session_id: Session to update
+            presentation_id: Google Slides presentation ID
+            presentation_url: Full URL to the presentation
+        """
+        with get_db_session() as db:
+            session = self._get_session_or_raise(db, session_id)
+            session.google_slides_presentation_id = presentation_id
+            session.google_slides_url = presentation_url
+
+            logger.info(
+                "Stored Google Slides info on session",
+                extra={
+                    "session_id": session_id,
+                    "presentation_id": presentation_id,
+                },
+            )
+
+    def get_google_slides_info(self, session_id: str) -> Optional[Dict[str, str]]:
+        """Get the stored Google Slides presentation info for a session.
+
+        Returns:
+            Dict with ``presentation_id`` and ``presentation_url``, or None.
+        """
+        with get_db_session() as db:
+            session = self._get_session_or_raise(db, session_id)
+            if session.google_slides_presentation_id:
+                return {
+                    "presentation_id": session.google_slides_presentation_id,
+                    "presentation_url": session.google_slides_url,
+                }
+            return None
 
     def set_experiment_id(self, session_id: str, experiment_id: str) -> None:
         """Set the MLflow experiment ID for a session.
@@ -1322,6 +1378,35 @@ class SessionManager:
                 )
 
             return count
+
+    @staticmethod
+    def _is_profile_deleted(db: Session, profile_id: Optional[int]) -> bool:
+        """Check if a profile has been soft-deleted or no longer exists."""
+        if profile_id is None:
+            return False
+        from src.database.models import ConfigProfile
+        profile = db.query(ConfigProfile).filter_by(id=profile_id).first()
+        if profile is None:
+            return True
+        return bool(profile.is_deleted)
+
+    @staticmethod
+    def _get_deleted_profile_ids(db: Session, profile_ids: List[int]) -> set:
+        """Return the subset of profile_ids that are deleted or missing."""
+        if not profile_ids:
+            return set()
+        from src.database.models import ConfigProfile
+        unique_ids = set(profile_ids)
+        active_profiles = (
+            db.query(ConfigProfile.id)
+            .filter(
+                ConfigProfile.id.in_(unique_ids),
+                ConfigProfile.is_deleted == False,  # noqa: E712
+            )
+            .all()
+        )
+        active_ids = {row[0] for row in active_profiles}
+        return unique_ids - active_ids
 
     def _get_session_or_raise(self, db: Session, session_id: str) -> UserSession:
         """Get session by ID or raise error.
