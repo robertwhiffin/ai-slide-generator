@@ -1275,4 +1275,51 @@ export const api = {
 
     return response.json();
   },
+
+  // --- Feedback Reports ---
+
+  async getReportStats(weeks: number = 12): Promise<{
+    weeks: Array<{
+      week_start: string;
+      week_end: string;
+      responses: number;
+      avg_star_rating: number | null;
+      avg_nps_score: number | null;
+      total_time_saved_minutes: number;
+      time_saved_display: string;
+    }>;
+    totals: {
+      total_responses: number;
+      avg_star_rating: number | null;
+      avg_nps_score: number | null;
+      total_time_saved_minutes: number;
+      time_saved_display: string;
+    };
+  }> {
+    const response = await fetch(`${API_BASE_URL}/api/feedback/report/stats?weeks=${weeks}`);
+
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({}));
+      throw new ApiError(response.status, error.detail || 'Failed to fetch stats report');
+    }
+
+    return response.json();
+  },
+
+  async getReportSummary(weeks: number = 4): Promise<{
+    period: string;
+    feedback_count: number;
+    summary: string;
+    category_breakdown: Record<string, number>;
+    top_themes: string[];
+  }> {
+    const response = await fetch(`${API_BASE_URL}/api/feedback/report/summary?weeks=${weeks}`);
+
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({}));
+      throw new ApiError(response.status, error.detail || 'Failed to fetch feedback summary');
+    }
+
+    return response.json();
+  },
 };
