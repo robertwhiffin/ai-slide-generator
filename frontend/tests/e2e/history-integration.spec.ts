@@ -150,7 +150,14 @@ async function createTestSessionViaAPI(
   if (!response.ok()) {
     throw new Error(`Failed to create session: ${response.status()}`);
   }
-  return response.json();
+  const session = await response.json();
+
+  // Add a placeholder message so the session passes the non-empty filter
+  await request.post(`${API_BASE}/sessions/${session.session_id}/messages`, {
+    data: { role: 'user', content: 'E2E test placeholder message' },
+  });
+
+  return session;
 }
 
 // ============================================

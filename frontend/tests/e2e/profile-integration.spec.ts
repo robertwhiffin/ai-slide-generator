@@ -604,12 +604,6 @@ test.describe('Profile Switching', () => {
         await confirmButton.click();
       }
 
-      // Wait for load to complete and redirect to generator page
-      await page.waitForURL(/\/sessions\/.*\/edit/, { timeout: 10000 });
-
-      // loading a profile takes you to the generator page - go back
-      await goToProfiles(page);
-      await page.waitForTimeout(1000);
 
       // Row should now show Loaded badge
       const updatedRow = page.locator('tr', { hasText: profileName });
@@ -694,11 +688,26 @@ test.describe('Profile Switching', () => {
 // ============================================
 
 test.describe('Session-Profile Association', () => {
-  test('session history shows profile name column', async ({ page }) => {
-    await goToHistory(page);
+  test('session history shows profile name column', async ({ page, request }) => {
+    const SESSION_API = 'http://127.0.0.1:8000/api/sessions';
 
-    // Should see Profile column header
-    await expect(page.getByRole('columnheader', { name: /Profile/i })).toBeVisible();
+    // Seed a session with a message so the table renders
+    const createRes = await request.post(SESSION_API, {
+      data: { title: `E2E Profile Column Test ${Date.now()}` },
+    });
+    const session = await createRes.json();
+    await request.post(`${SESSION_API}/${session.session_id}/messages`, {
+      data: { role: 'user', content: 'E2E test placeholder message' },
+    });
+
+    try {
+      await goToHistory(page);
+
+      // Should see Profile column header
+      await expect(page.getByRole('columnheader', { name: /Profile/i })).toBeVisible();
+    } finally {
+      await request.delete(`${SESSION_API}/${session.session_id}`);
+    }
   });
 
   test('new session is associated with current profile', async ({ page, request }) => {

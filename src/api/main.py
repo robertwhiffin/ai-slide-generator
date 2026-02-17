@@ -8,23 +8,17 @@ import asyncio
 import logging
 import os
 from contextlib import ExitStack, asynccontextmanager
-from pathlib import Path
 from importlib import resources
+from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from src.api.routes import chat, images, slides, export, sessions, verification, version, google_slides
+from src.api.routes import chat, images, slides, export, sessions, verification, version, google_slides, setup, local_version
 from src.core.databricks_client import create_user_client, set_user_client
 from src.core.user_context import get_current_user as get_ctx_user, set_current_user
-from src.core.database import (
-    init_db,
-    is_lakebase_environment,
-    start_token_refresh,
-    stop_token_refresh,
-)
 from src.api.routes.settings import (
     ai_infra_router,
     deck_prompts_router,
@@ -34,8 +28,15 @@ from src.api.routes.settings import (
     prompts_router,
     slide_styles_router,
 )
-from src.api.services.job_queue import recover_stuck_requests, start_worker
 from src.api.services.export_job_queue import start_export_worker
+from src.api.services.job_queue import recover_stuck_requests, start_worker
+from src.core.database import (
+    init_db,
+    is_lakebase_environment,
+    start_token_refresh,
+    stop_token_refresh,
+)
+from src.core.databricks_client import create_user_client, set_user_client
 
 logger = logging.getLogger(__name__)
 
@@ -290,6 +291,8 @@ app.include_router(sessions.router)
 app.include_router(verification.router)
 app.include_router(version.router)
 app.include_router(google_slides.router)
+app.include_router(setup.router)
+app.include_router(local_version.router)
 
 # Configuration management routers
 app.include_router(profiles_router, prefix="/api/settings", tags=["settings"])

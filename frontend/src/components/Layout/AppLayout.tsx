@@ -44,7 +44,45 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
   const { sessionId, sessionTitle, experimentUrl, createNewSession, switchSession, renameSession } = useSession();
   const { isGenerating } = useGeneration();
   const { currentProfile, loadProfile } = useProfiles();
-  const { updateAvailable, latestVersion, updateType, dismissed, dismiss } = useVersionCheck();
+  const { updateAvailable, installedVersion, latestVersion, updateType, dismissed, dismiss } = useVersionCheck();
+
+  // Local/Homebrew version check (only when PyPI version is unknown, i.e. not a pip install)
+  const [localUpdateAvailable, setLocalUpdateAvailable] = useState(false);
+  const [localLatestVersion, setLocalLatestVersion] = useState<string | null>(null);
+  const [localUpdateCommand, setLocalUpdateCommand] = useState('brew upgrade tellr');
+  const [localDismissed, setLocalDismissed] = useState(() => {
+    return sessionStorage.getItem('local_version_check_dismissed') === 'true';
+  });
+
+  const dismissLocal = useCallback(() => {
+    setLocalDismissed(true);
+    sessionStorage.setItem('local_version_check_dismissed', 'true');
+  }, []);
+
+  useEffect(() => {
+    // Only check local version if PyPI version is unknown (indicates local/Homebrew install)
+    if (installedVersion !== 'unknown') return;
+
+    const checkLocalVersion = async () => {
+      try {
+        const response = await fetch('/api/version/local-check');
+        if (!response.ok) return;
+        const data = await response.json();
+        if (data.update_available) {
+          setLocalUpdateAvailable(true);
+          setLocalLatestVersion(data.latest_version);
+          if (data.update_command) {
+            setLocalUpdateCommand(data.update_command);
+          }
+        }
+      } catch (err) {
+        // Fail silently - version check is non-critical
+        console.warn('Local version check failed:', err);
+      }
+    };
+
+    checkLocalVersion();
+  }, [installedVersion]);
 
   // Save Points / Versioning state
   const [versions, setVersions] = useState<SavePointVersion[]>([]);
@@ -61,6 +99,9 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
   // Loading state while validating session from URL
   const [isLoadingSession, setIsLoadingSession] = useState(false);
 
+  // Non-null when viewing a session whose profile has been deleted
+  const [deletedProfileName, setDeletedProfileName] = useState<string | null>(null);
+
   // Load session from URL parameter when on a session route
   // Skip if URL session ID matches current context (newly created session)
   useEffect(() => {
@@ -75,18 +116,24 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
 
     const loadSession = async () => {
       setIsLoadingSession(true);
+      setDeletedProfileName(null);
       try {
         // Get session info to check profile
         const sessionInfo = await api.getSession(urlSessionId);
         if (cancelled) return;
 
-        // Auto-switch profile if needed
-        if (sessionInfo.profile_id && currentProfile && sessionInfo.profile_id !== currentProfile.id) {
+        if (sessionInfo.profile_deleted) {
+          // Profile was soft-deleted -- show session in read-only mode
+          setDeletedProfileName(
+            sessionInfo.profile_name || `Profile ${sessionInfo.profile_id}`,
+          );
+        } else if (sessionInfo.profile_id && currentProfile && sessionInfo.profile_id !== currentProfile.id) {
+          // Auto-switch profile if needed
           await loadProfile(sessionInfo.profile_id);
         }
         if (cancelled) return;
 
-        // Load session data
+        // Load session data regardless of profile status
         const { slideDeck: restoredDeck, rawHtml: restoredRawHtml } = await switchSession(urlSessionId);
         if (cancelled) return;
 
@@ -117,15 +164,16 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
     chatPanelRef.current?.sendMessage(content, slideContext);
   }, []);
 
-  // Reset chat state and create new session when profile changes
+  // Reset chat state and create new session when profile changes.
+  // The user stays on the current page and navigates manually.
   const handleProfileChange = useCallback(async () => {
     setSlideDeck(null);
     setRawHtml(null);
+    setDeletedProfileName(null);
     setChatKey(prev => prev + 1);
     const newId = createNewSession();
     await api.createSession({ sessionId: newId });
-    navigate(`/sessions/${newId}/edit`);
-  }, [createNewSession, navigate]);
+  }, [createNewSession]);
 
   // Handle saving session with a custom name
   const handleSaveAs = useCallback(async (title: string) => {
@@ -147,6 +195,7 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
     setCurrentVersion(null);
     setPreviewVersion(null);
     setPreviewDeck(null);
+    setDeletedProfileName(null);
     const newId = createNewSession();
     await api.createSession({ sessionId: newId });
     navigate(`/sessions/${newId}/edit`);
@@ -491,12 +540,22 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
         </div>
       </header>
 
-      {/* Update Banner */}
+      {/* Update Banner (PyPI - Databricks App deployments) */}
       {updateAvailable && !dismissed && latestVersion && updateType && (
         <UpdateBanner
           latestVersion={latestVersion}
           updateType={updateType}
           onDismiss={dismiss}
+        />
+      )}
+
+      {/* Update Banner (Local/Homebrew installations) */}
+      {localUpdateAvailable && !localDismissed && localLatestVersion && (
+        <UpdateBanner
+          latestVersion={localLatestVersion}
+          updateType="patch"
+          onDismiss={dismissLocal}
+          customMessage={`A new version (v${localLatestVersion}) is available. Run \`${localUpdateCommand}\` in your terminal to update.`}
         />
       )}
 
@@ -508,6 +567,19 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
           onRevert={() => handleRevertClick()}
           onCancel={handleCancelPreview}
         />
+      )}
+
+      {/* Deleted profile warning banner */}
+      {deletedProfileName && (
+        <div className="bg-amber-50 border-b border-amber-200 px-4 py-2 text-sm text-amber-800 flex items-center gap-2">
+          <svg className="w-4 h-4 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20">
+            <path fillRule="evenodd" d="M8.485 2.495c.673-1.167 2.357-1.167 3.03 0l6.28 10.875c.673 1.167-.17 2.625-1.516 2.625H3.72c-1.347 0-2.189-1.458-1.515-2.625L8.485 2.495zM10 6a.75.75 0 01.75.75v3.5a.75.75 0 01-1.5 0v-3.5A.75.75 0 0110 6zm0 9a1 1 0 100-2 1 1 0 000 2z" clipRule="evenodd" />
+          </svg>
+          <span>
+            This session was created with profile &ldquo;{deletedProfileName}&rdquo; which has been deleted.
+            The session is read-only and cannot continue.
+          </span>
+        </div>
       )}
 
       {/* Main Content */}
@@ -527,7 +599,7 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
                   setPendingSavePointDescription(actionDescription);
                 }
               }}
-              disabled={viewOnly || !!previewVersion || isLoadingSession}
+              disabled={viewOnly || !!previewVersion || isLoadingSession || !!deletedProfileName}
               previewMessages={previewMessages}
             />
           </div>
@@ -540,10 +612,10 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
             <SlidePanel
               slideDeck={displayDeck}
               rawHtml={rawHtml}
-              onSlideChange={viewOnly || previewVersion ? undefined : setSlideDeck}
+              onSlideChange={viewOnly || previewVersion || deletedProfileName ? undefined : setSlideDeck}
               scrollToSlide={scrollTarget}
-              onSendMessage={viewOnly || previewVersion ? undefined : handleSendMessage}
-              readOnly={viewOnly || !!previewVersion}
+              onSendMessage={viewOnly || previewVersion || deletedProfileName ? undefined : handleSendMessage}
+              readOnly={viewOnly || !!previewVersion || !!deletedProfileName}
               onVerificationComplete={handleVerificationComplete}
               versionKey={versionKey}
             />
