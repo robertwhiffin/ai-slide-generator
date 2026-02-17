@@ -15,11 +15,14 @@ import { HelpPage } from '../Help';
 import { ImageLibrary } from '../ImageLibrary/ImageLibrary';
 import { UpdateBanner } from '../UpdateBanner';
 import { SavePointDropdown, PreviewBanner, RevertConfirmModal, type SavePointVersion } from '../SavePoints';
+import { FeedbackButton } from '../Feedback/FeedbackButton';
+import { SurveyModal } from '../Feedback/SurveyModal';
 import { useSession } from '../../contexts/SessionContext';
 import { useGeneration } from '../../contexts/GenerationContext';
 import { useProfiles } from '../../contexts/ProfileContext';
 import { useToast } from '../../contexts/ToastContext';
 import { useVersionCheck } from '../../hooks/useVersionCheck';
+import { useSurveyTrigger } from '../../hooks/useSurveyTrigger';
 import { api } from '../../services/api';
 
 type ViewMode = 'main' | 'profiles' | 'deck_prompts' | 'slide_styles' | 'images' | 'history' | 'help';
@@ -45,6 +48,16 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
   const { isGenerating } = useGeneration();
   const { currentProfile, loadProfile } = useProfiles();
   const { updateAvailable, installedVersion, latestVersion, updateType, dismissed, dismiss } = useVersionCheck();
+  const { showSurvey, closeSurvey, onGenerationComplete, onGenerationStart } = useSurveyTrigger();
+  const prevGeneratingRef = useRef(isGenerating);
+
+  // Call onGenerationStart when generation begins (isGenerating goes false -> true)
+  useEffect(() => {
+    if (isGenerating && !prevGeneratingRef.current) {
+      onGenerationStart();
+    }
+    prevGeneratingRef.current = isGenerating;
+  }, [isGenerating, onGenerationStart]);
 
   // Local/Homebrew version check (only when PyPI version is unknown, i.e. not a pip install)
   const [localUpdateAvailable, setLocalUpdateAvailable] = useState(false);
@@ -598,6 +611,7 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
                 if (actionDescription) {
                   setPendingSavePointDescription(actionDescription);
                 }
+                onGenerationComplete();
               }}
               disabled={viewOnly || !!previewVersion || isLoadingSession || !!deletedProfileName}
               previewMessages={previewMessages}
@@ -693,6 +707,12 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
           setRevertTargetVersion(null);
         }}
       />
+
+      {/* Feedback Widget */}
+      <FeedbackButton />
+
+      {/* Satisfaction Survey */}
+      <SurveyModal isOpen={showSurvey} onClose={closeSurvey} />
     </div>
   );
 };

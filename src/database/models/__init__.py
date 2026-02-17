@@ -1,6 +1,7 @@
 """Database models."""
 
 from src.database.models.ai_infra import ConfigAIInfra
+from src.database.models.feedback import FeedbackConversation, SurveyResponse
 from src.database.models.genie_space import ConfigGenieSpace
 from src.database.models.google_oauth_token import GoogleOAuthToken
 from src.database.models.history import ConfigHistory
@@ -20,6 +21,7 @@ from src.database.models.slide_style_library import SlideStyleLibrary
 
 __all__ = [
     "ChatRequest",
+    "FeedbackConversation",
     "ConfigAIInfra",
     "ExportJob",
     "ConfigGenieSpace",
@@ -33,6 +35,7 @@ __all__ = [
     "SlideDeckPromptLibrary",
     "SlideDeckVersion",
     "SlideStyleLibrary",
+    "SurveyResponse",
     "UserSession",
 ]
 
