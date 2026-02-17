@@ -17,7 +17,7 @@ export const FeedbackButton: React.FC = () => {
         onClick={() => setIsOpen((prev) => !prev)}
         className="fixed bottom-6 right-6 z-[60] w-12 h-12 rounded-full bg-blue-600 text-white shadow-lg hover:bg-blue-700 transition-colors flex items-center justify-center"
         data-testid="feedback-button"
-        aria-label="Send feedback"
+        aria-label="Feedback"
       >
         <FiMessageSquare size={20} />
       </button>
