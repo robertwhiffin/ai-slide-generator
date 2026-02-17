@@ -1,7 +1,8 @@
 import React, { useMemo, useRef, useState, useEffect } from 'react';
 import { useSortable } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
-import { FiEdit, FiTrash2, FiMove, FiMessageSquare, FiDatabase, FiMaximize2 } from 'react-icons/fi';
+import { GripVertical, Edit3, Trash2, MessageSquare, Database, Maximize2, Loader2 } from 'lucide-react';
+import { Button } from '@/ui/button';
 import { Tooltip } from '../common/Tooltip';
 import type { Slide, SlideDeck } from '../../types/slide';
 import type { VerificationResult } from '../../types/verification';
@@ -199,26 +200,26 @@ export const SlideTile: React.FC<SlideTileProps> = ({
         className={containerClassName}
       >
         {/* Slide Header with Actions */}
-      <div className="px-4 py-2 bg-gray-100 border-b flex items-center justify-between">
-          <div className="flex items-center space-x-2">
+      <div className="flex items-center gap-2 border-b border-border bg-card px-3 py-2">
+          <div className="flex items-center gap-2 flex-1">
             {/* Drag Handle */}
             <Tooltip text="Drag to reorder">
               <button
                 {...attributes}
                 {...listeners}
-                className="cursor-grab active:cursor-grabbing text-gray-500 hover:text-gray-700"
+                className="cursor-grab active:cursor-grabbing text-muted-foreground hover:text-foreground"
               >
-                <FiMove size={18} />
+                <GripVertical className="size-4" />
               </button>
             </Tooltip>
-            
-        <span className="text-sm font-medium text-gray-700">
-          Slide {index + 1}
-        </span>
+
+            <span className="text-sm font-medium text-foreground">
+              Slide {index + 1}
+            </span>
           </div>
 
           {/* Action Buttons */}
-          <div className="flex items-center space-x-1">
+          <div className="flex items-center gap-1">
             {/* Verification Badge/Button */}
             <VerificationBadge
               slideIndex={index}
@@ -228,74 +229,78 @@ export const SlideTile: React.FC<SlideTileProps> = ({
               onVerify={handleVerify}
               isStale={isStale}
             />
-            
+
             {/* Genie Source Data Link */}
             <Tooltip text="View source data">
-              <button
+              <Button
+                variant="ghost"
+                size="icon"
                 onClick={handleOpenGenieLink}
                 disabled={isLoadingGenieLink}
-                className="p-1 text-purple-600 hover:bg-purple-50 rounded disabled:opacity-50"
+                className="h-7 w-7"
               >
-                <FiDatabase size={16} />
-              </button>
+                <Database className="size-3.5" />
+              </Button>
             </Tooltip>
-            
+
             <Tooltip text={isSelected ? 'Selected for editing' : 'Add to chat context'}>
-              <button
+              <Button
+                variant={isSelected ? "secondary" : "ghost"}
+                size="icon"
                 onClick={() => setSelection([index], [slide])}
-                className={`p-1 rounded ${
-                  isSelected
-                    ? 'text-blue-700 bg-blue-50'
-                    : 'text-indigo-600 hover:bg-indigo-50'
-                }`}
+                className="h-7 w-7"
                 aria-pressed={isSelected}
               >
-                <FiMessageSquare size={16} />
-              </button>
+                <MessageSquare className="size-3.5" />
+              </Button>
             </Tooltip>
+
             {onOptimize && (
               <Tooltip text={isOptimizing ? 'Optimizing layout...' : 'Optimize layout'}>
-                <button
+                <Button
+                  variant="ghost"
+                  size="icon"
                   onClick={onOptimize}
                   disabled={isOptimizing}
-                  className={`p-1 rounded ${
-                    isOptimizing
-                      ? 'text-gray-400 cursor-not-allowed'
-                      : 'text-purple-600 hover:bg-purple-50'
-                  }`}
+                  className="h-7 w-7"
                 >
                   {isOptimizing ? (
-                    <div className="animate-spin rounded-full h-4 w-4 border-2 border-purple-600 border-t-transparent"></div>
+                    <Loader2 className="size-3.5 animate-spin" />
                   ) : (
-                    <FiMaximize2 size={16} />
+                    <Maximize2 className="size-3.5" />
                   )}
-                </button>
+                </Button>
               </Tooltip>
             )}
+
             <Tooltip text="Edit slide HTML">
-              <button
+              <Button
+                variant="ghost"
+                size="icon"
                 onClick={() => setIsEditing(true)}
-                className="p-1 text-blue-600 hover:bg-blue-50 rounded"
+                className="h-7 w-7"
               >
-                <FiEdit size={16} />
-              </button>
+                <Edit3 className="size-3.5" />
+              </Button>
             </Tooltip>
-            
+
             <Tooltip text="Delete slide" align="end">
-              <button
+              <Button
+                variant="ghost"
+                size="icon"
                 onClick={onDelete}
-                className="p-1 text-red-600 hover:bg-red-50 rounded"
+                className="h-7 w-7 text-destructive hover:text-destructive"
               >
-                <FiTrash2 size={16} />
-              </button>
+                <Trash2 className="size-3.5" />
+              </Button>
             </Tooltip>
           </div>
       </div>
 
       {/* Slide Preview */}
-      <div 
+      <div
         ref={containerRef}
-        className="relative bg-gray-200 overflow-hidden"
+        className="relative bg-muted/20 overflow-hidden"
         style={{ height: `${scaledHeight}px` }}
       >
         <iframe
