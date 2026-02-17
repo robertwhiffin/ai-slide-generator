@@ -8,11 +8,75 @@
  *      display the current authorization status.
  */
 
-import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { FiUploadCloud, FiCheck, FiX, FiTrash2, FiExternalLink, FiShield } from 'react-icons/fi';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { FiUploadCloud, FiCheck, FiX, FiTrash2, FiExternalLink, FiShield, FiCopy } from 'react-icons/fi';
 import { configApi, ConfigApiError } from '../../api/config';
 import { api } from '../../services/api';
 import { useGoogleOAuthPopup } from '../../hooks/useGoogleOAuthPopup';
+
+const CALLBACK_PATH = '/api/export/google-slides/auth/callback';
+
+/** Builds the redirect URI from the current browser origin, forcing http for localhost. */
+function buildRedirectUri(): string {
+  const origin = window.location.origin;
+  // Google rejects https://localhost — force http
+  if (origin.includes('localhost') || origin.includes('127.0.0.1')) {
+    return origin.replace('https://', 'http://').replace(':3000', ':8000') + CALLBACK_PATH;
+  }
+  return origin + CALLBACK_PATH;
+}
+
+/** Small self-contained component: shows the redirect URI with a copy button. */
+const RedirectUriCopyBox: React.FC = () => {
+  const redirectUri = useMemo(() => buildRedirectUri(), []);
+  const [copied, setCopied] = useState(false);
+
+  const handleCopy = async () => {
+    try {
+      await navigator.clipboard.writeText(redirectUri);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch {
+      // Fallback for non-HTTPS contexts
+      const ta = document.createElement('textarea');
+      ta.value = redirectUri;
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand('copy');
+      document.body.removeChild(ta);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    }
+  };
+
+  return (
+    <div className="border-t border-blue-200 pt-3">
+      <label className="text-xs font-semibold text-blue-900 uppercase tracking-wide block mb-1.5">
+        Redirect URI for this deployment
+      </label>
+      <div className="flex items-center gap-2">
+        <code className="flex-1 px-3 py-2 bg-white border border-blue-200 rounded text-sm text-blue-900 font-mono select-all truncate">
+          {redirectUri}
+        </code>
+        <button
+          type="button"
+          onClick={handleCopy}
+          className={`flex items-center gap-1.5 px-3 py-2 text-sm rounded border transition-colors whitespace-nowrap ${
+            copied
+              ? 'bg-green-50 border-green-300 text-green-700'
+              : 'bg-white border-blue-200 text-blue-700 hover:bg-blue-100'
+          }`}
+        >
+          {copied ? <FiCheck size={14} /> : <FiCopy size={14} />}
+          {copied ? 'Copied' : 'Copy'}
+        </button>
+      </div>
+      <p className="text-xs text-blue-600 mt-1.5">
+        Paste this exact URI into the <strong>Authorized redirect URIs</strong> field in the GCP console.
+      </p>
+    </div>
+  );
+};
 
 interface GoogleSlidesAuthFormProps {
   profileId: number;
@@ -337,49 +401,28 @@ export const GoogleSlidesAuthForm: React.FC<GoogleSlidesAuthFormProps> = ({ prof
 
       {/* Setup instructions */}
       <section className="bg-blue-50 border border-blue-200 rounded-lg p-4 space-y-4">
-        <div>
-          <h4 className="text-sm font-semibold text-blue-900 mb-2">Setup: Google Cloud OAuth Credentials</h4>
-          <ol className="text-sm text-blue-800 space-y-1.5 list-decimal list-inside">
-            <li>
-              Go to{' '}
-              <a href="https://console.cloud.google.com/apis/credentials" target="_blank" rel="noopener noreferrer" className="underline font-medium">
-                Google Cloud Console &rarr; Credentials
-              </a>
-            </li>
-            <li>Create an <strong>OAuth 2.0 Client ID</strong> (type: <em>Web application</em>)</li>
-            <li>
-              Under <strong>Authorized redirect URIs</strong>, add the callback URL for your deployment (see below)
-            </li>
-            <li>
-              Enable the <strong>Google Slides API</strong> and <strong>Google Drive API</strong> in{' '}
-              <a href="https://console.cloud.google.com/apis/library" target="_blank" rel="noopener noreferrer" className="underline font-medium">
-                APIs &amp; Services &rarr; Library
-              </a>
-            </li>
-            <li>Download the JSON file and upload it above</li>
-          </ol>
-        </div>
+        <h4 className="text-sm font-semibold text-blue-900 mb-2">Setup: Google Cloud OAuth Credentials</h4>
+        <ol className="text-sm text-blue-800 space-y-1.5 list-decimal list-inside">
+          <li>
+            Go to{' '}
+            <a href="https://console.cloud.google.com/apis/credentials" target="_blank" rel="noopener noreferrer" className="underline font-medium">
+              Google Cloud Console &rarr; Credentials
+            </a>
+          </li>
+          <li>Create an <strong>OAuth 2.0 Client ID</strong> (type: <em>Web application</em>)</li>
+          <li>
+            Copy the redirect URI below and add it under <strong>Authorized redirect URIs</strong>
+          </li>
+          <li>
+            Enable the <strong>Google Slides API</strong> and <strong>Google Drive API</strong> in{' '}
+            <a href="https://console.cloud.google.com/apis/library" target="_blank" rel="noopener noreferrer" className="underline font-medium">
+              APIs &amp; Services &rarr; Library
+            </a>
+          </li>
+          <li>Download the JSON file and upload it above</li>
+        </ol>
 
-        <div className="border-t border-blue-200 pt-3">
-          <h4 className="text-xs font-semibold text-blue-900 mb-2 uppercase tracking-wide">Redirect URIs to register</h4>
-          <div className="space-y-2">
-            <div>
-              <span className="text-xs font-medium text-blue-700">Local development:</span>
-              <code className="ml-2 px-1.5 py-0.5 bg-blue-100 rounded text-xs text-blue-900 select-all">
-                http://localhost:8000/api/export/google-slides/auth/callback
-              </code>
-            </div>
-            <div>
-              <span className="text-xs font-medium text-blue-700">Databricks Apps:</span>
-              <code className="ml-2 px-1.5 py-0.5 bg-blue-100 rounded text-xs text-blue-900 select-all">
-                https://&lt;your-app-name&gt;.&lt;region&gt;.databricksapps.com/api/export/google-slides/auth/callback
-              </code>
-            </div>
-          </div>
-          <p className="text-xs text-blue-600 mt-2">
-            You can add multiple redirect URIs to the same Client ID. The app automatically uses the correct one based on how it's accessed.
-          </p>
-        </div>
+        <RedirectUriCopyBox />
       </section>
     </div>
   );
