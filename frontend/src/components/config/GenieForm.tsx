@@ -1,11 +1,13 @@
 /**
  * Genie Space configuration form.
- * 
+ *
  * Allows selecting a single Genie space from available spaces in Databricks.
  * Replaces the multi-space manager with a simple dropdown selection.
  */
 
 import React, { useState, useEffect } from 'react';
+import { AlertCircle, CheckCircle } from 'lucide-react';
+import { Button } from '@/ui/button';
 import type { GenieSpace } from '../../api/config';
 import { configApi, ConfigApiError } from '../../api/config';
 
@@ -246,9 +248,12 @@ export const GenieForm: React.FC<GenieFormProps> = ({
 
   if (error) {
     return (
-      <div className="p-4 bg-red-50 border border-red-200 rounded text-red-700">
-        <p className="font-medium">Error loading Genie spaces</p>
-        <p className="text-sm mt-1">{error}</p>
+      <div className="flex items-start gap-2 rounded-md border border-destructive/30 bg-destructive/5 p-4 text-destructive">
+        <AlertCircle className="mt-0.5 size-4 shrink-0" />
+        <div>
+          <p className="font-medium">Error loading Genie spaces</p>
+          <p className="mt-1 text-sm">{error}</p>
+        </div>
       </div>
     );
   }
@@ -390,19 +395,25 @@ export const GenieForm: React.FC<GenieFormProps> = ({
 
       {/* Error Message */}
       {saveError && (
-        <div className="bg-red-50 border border-red-200 rounded-md p-3 text-sm text-red-700">
-          {saveError}
+        <div className="flex items-center gap-2 rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm text-destructive">
+          <AlertCircle className="size-4 shrink-0" />
+          <span>{saveError}</span>
         </div>
       )}
-      
+
       {/* Validation Result */}
       {validationResult && (
-        <div className={`border rounded-md p-3 text-sm ${
-          validationResult.success 
-            ? 'bg-green-50 border-green-200 text-green-700' 
-            : 'bg-yellow-50 border-yellow-200 text-yellow-700'
+        <div className={`flex items-center gap-2 rounded-md border px-3 py-2 text-sm ${
+          validationResult.success
+            ? 'border-green-200 bg-green-50 text-green-700'
+            : 'border-yellow-200 bg-yellow-50 text-yellow-700'
         }`}>
-          <strong>Validation:</strong> {validationResult.message}
+          {validationResult.success ? (
+            <CheckCircle className="size-4 shrink-0" />
+          ) : (
+            <AlertCircle className="size-4 shrink-0" />
+          )}
+          <span><strong>Validation:</strong> {validationResult.message}</span>
         </div>
       )}
 
@@ -427,20 +438,19 @@ export const GenieForm: React.FC<GenieFormProps> = ({
 
       {/* Action Buttons */}
       <div className="flex justify-between">
-        <button
+        <Button
+          variant="secondary"
           onClick={handleValidate}
           disabled={validating || saving || !selectedSpaceId}
-          className="px-4 py-2 bg-purple-500 hover:bg-purple-600 text-white rounded-md transition-colors disabled:bg-purple-300 disabled:cursor-not-allowed"
         >
           {validating ? 'Validating...' : 'Test Connection'}
-        </button>
-        <button
+        </Button>
+        <Button
           onClick={handleSave}
           disabled={saving || !selectedSpaceId || !description.trim()}
-          className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-md transition-colors disabled:bg-gray-400 disabled:cursor-not-allowed"
         >
           {saving ? 'Saving...' : 'Save Genie Configuration'}
-        </button>
+        </Button>
       </div>
 
       {/* Help Text */}
