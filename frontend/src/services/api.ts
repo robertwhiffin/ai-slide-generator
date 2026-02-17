@@ -98,6 +98,7 @@ export interface Session {
   slide_deck?: SlideDeck | null;
   profile_id?: number | null;
   profile_name?: string | null;
+  profile_deleted?: boolean;
 }
 
 interface SendMessageParams {
