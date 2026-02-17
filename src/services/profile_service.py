@@ -1,4 +1,5 @@
 """Profile management service."""
+from datetime import datetime
 from typing import List, Optional
 
 from sqlalchemy.orm import Session, joinedload
@@ -21,8 +22,13 @@ class ProfileService:
         self.db = db
 
     def list_profiles(self) -> List[ConfigProfile]:
-        """Get all profiles."""
-        return self.db.query(ConfigProfile).order_by(ConfigProfile.name).all()
+        """Get all active (non-deleted) profiles."""
+        return (
+            self.db.query(ConfigProfile)
+            .filter(ConfigProfile.is_deleted == False)  # noqa: E712
+            .order_by(ConfigProfile.name)
+            .all()
+        )
 
     def get_profile(self, profile_id: int) -> Optional[ConfigProfile]:
         """
@@ -46,7 +52,7 @@ class ProfileService:
         )
 
     def get_default_profile(self) -> Optional[ConfigProfile]:
-        """Get default profile."""
+        """Get default active (non-deleted) profile."""
         return (
             self.db.query(ConfigProfile)
             .options(
@@ -54,7 +60,7 @@ class ProfileService:
                 joinedload(ConfigProfile.genie_spaces),
                 joinedload(ConfigProfile.prompts),
             )
-            .filter(ConfigProfile.is_default == True)
+            .filter(ConfigProfile.is_default == True, ConfigProfile.is_deleted == False)  # noqa: E712
             .first()
         )
 
@@ -202,7 +208,11 @@ class ProfileService:
 
     def delete_profile(self, profile_id: int, user: str) -> None:
         """
-        Delete profile.
+        Soft-delete profile.
+        
+        Marks the profile as deleted rather than removing it, so sessions
+        that reference the profile can still display its name and be opened
+        in read-only mode.
         
         Args:
             profile_id: Profile to delete
@@ -218,18 +228,20 @@ class ProfileService:
         if profile.is_default:
             raise ValueError("Cannot delete default profile")
 
-        # Log deletion before deleting
+        profile.is_deleted = True
+        profile.deleted_at = datetime.utcnow()
+        profile.is_default = False
+        profile.updated_by = user
+
         history = ConfigHistory(
             profile_id=profile.id,
             domain="profile",
             action="delete",
             changed_by=user,
-            changes={"name": {"old": profile.name, "new": None}},
+            changes={"name": {"old": profile.name, "new": None}, "is_deleted": True},
         )
         self.db.add(history)
-        self.db.flush()
 
-        self.db.delete(profile)
         self.db.commit()
 
     def set_default_profile(self, profile_id: int, user: str) -> ConfigProfile:
@@ -246,6 +258,9 @@ class ProfileService:
         profile = self.get_profile(profile_id)
         if not profile:
             raise ValueError(f"Profile {profile_id} not found")
+
+        if profile.is_deleted:
+            raise ValueError("Cannot set a deleted profile as default")
 
         if profile.is_default:
             return profile  # Already default

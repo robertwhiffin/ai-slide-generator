@@ -135,6 +135,8 @@ class SessionManager:
         with get_db_session() as db:
             session = self._get_session_or_raise(db, session_id)
 
+            profile_deleted = self._is_profile_deleted(db, session.profile_id)
+
             return {
                 "session_id": session.session_id,
                 "user_id": session.user_id,
@@ -147,6 +149,7 @@ class SessionManager:
                 "has_slide_deck": session.slide_deck is not None,
                 "profile_id": session.profile_id,
                 "profile_name": session.profile_name,
+                "profile_deleted": profile_deleted,
             }
 
     def list_sessions(
@@ -179,6 +182,12 @@ class SessionManager:
                 .all()
             )
 
+            # Batch-check which profiles are deleted to avoid N+1 queries
+            deleted_profiles = self._get_deleted_profile_ids(
+                db,
+                [s.profile_id for s in sessions if s.profile_id is not None],
+            )
+
             return [
                 {
                     "session_id": s.session_id,
@@ -191,6 +200,7 @@ class SessionManager:
                     "has_slide_deck": s.slide_deck is not None,
                     "profile_id": s.profile_id,
                     "profile_name": s.profile_name,
+                    "profile_deleted": s.profile_id in deleted_profiles if s.profile_id else False,
                 }
                 for s in sessions
             ]
@@ -1322,6 +1332,35 @@ class SessionManager:
                 )
 
             return count
+
+    @staticmethod
+    def _is_profile_deleted(db: Session, profile_id: Optional[int]) -> bool:
+        """Check if a profile has been soft-deleted or no longer exists."""
+        if profile_id is None:
+            return False
+        from src.database.models import ConfigProfile
+        profile = db.query(ConfigProfile).filter_by(id=profile_id).first()
+        if profile is None:
+            return True
+        return bool(profile.is_deleted)
+
+    @staticmethod
+    def _get_deleted_profile_ids(db: Session, profile_ids: List[int]) -> set:
+        """Return the subset of profile_ids that are deleted or missing."""
+        if not profile_ids:
+            return set()
+        from src.database.models import ConfigProfile
+        unique_ids = set(profile_ids)
+        active_profiles = (
+            db.query(ConfigProfile.id)
+            .filter(
+                ConfigProfile.id.in_(unique_ids),
+                ConfigProfile.is_deleted == False,  # noqa: E712
+            )
+            .all()
+        )
+        active_ids = {row[0] for row in active_profiles}
+        return unique_ids - active_ids
 
     def _get_session_or_raise(self, db: Session, session_id: str) -> UserSession:
         """Get session by ID or raise error.
