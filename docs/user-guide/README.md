@@ -9,6 +9,7 @@ Welcome to the Databricks Tellr user guide. This documentation covers the main w
 | [Generating Slides](./01-generating-slides.md) | Learn how to create presentations using AI-powered slide generation |
 | [Creating Profiles](./02-creating-profiles.md) | Set up configuration profiles linking Genie rooms, styles, and prompts |
 | [Advanced Configuration](./03-advanced-configuration.md) | Manage deck prompts and slide styles for customized output |
+| [Retrieving Feedback](./04-retrieving-feedback.md) | Access user feedback, survey results, and productivity metrics via the reporting API |
 
 ## Quick Start
 
