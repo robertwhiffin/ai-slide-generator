@@ -79,6 +79,7 @@ async def process_chat_request(request_id: str, payload: dict) -> None:
     session_id = payload["session_id"]
     message = payload["message"]
     slide_context = payload.get("slide_context")
+    is_first_message = payload.get("is_first_message", False)
 
     chat_service = get_chat_service()
     session_manager = get_session_manager()
@@ -94,6 +95,7 @@ async def process_chat_request(request_id: str, payload: dict) -> None:
         # Run blocking agent in thread pool via the generator-based streaming
         # Use captured context if available to preserve user auth
         result = None
+        session_title = None
         if ctx:
             for event in await asyncio.to_thread(
                 ctx.run,
@@ -103,8 +105,8 @@ async def process_chat_request(request_id: str, payload: dict) -> None:
                 message,
                 slide_context,
                 request_id,
+                is_first_message,
             ):
-                # Capture the final COMPLETE event
                 if event.type == StreamEventType.COMPLETE:
                     result = {
                         "slides": event.slides,
@@ -112,6 +114,8 @@ async def process_chat_request(request_id: str, payload: dict) -> None:
                         "replacement_info": event.replacement_info,
                         "experiment_url": event.experiment_url,
                     }
+                elif event.type == StreamEventType.SESSION_TITLE:
+                    session_title = event.session_title
         else:
             # Fallback for jobs without context (e.g., recovery)
             for event in await asyncio.to_thread(
@@ -121,8 +125,8 @@ async def process_chat_request(request_id: str, payload: dict) -> None:
                 message,
                 slide_context,
                 request_id,
+                is_first_message,
             ):
-                # Capture the final COMPLETE event
                 if event.type == StreamEventType.COMPLETE:
                     result = {
                         "slides": event.slides,
@@ -130,6 +134,12 @@ async def process_chat_request(request_id: str, payload: dict) -> None:
                         "replacement_info": event.replacement_info,
                         "experiment_url": event.experiment_url,
                     }
+                elif event.type == StreamEventType.SESSION_TITLE:
+                    session_title = event.session_title
+
+        # Include session title in result so poll endpoint can deliver it
+        if result and session_title:
+            result["session_title"] = session_title
 
         session_manager.set_chat_request_result(request_id, result)
         session_manager.update_chat_request_status(request_id, "completed")
@@ -152,6 +162,7 @@ def _run_streaming_generator(
     message: str,
     slide_context: Optional[Dict[str, Any]],
     request_id: str,
+    is_first_message: bool = False,
 ) -> list:
     """Run the streaming generator and collect events.
 
@@ -163,6 +174,7 @@ def _run_streaming_generator(
         message: User message
         slide_context: Optional slide context
         request_id: Request ID for message tagging
+        is_first_message: Whether this is the first message in the session
 
     Returns:
         List of all events from the generator
@@ -173,6 +185,7 @@ def _run_streaming_generator(
         message=message,
         slide_context=slide_context,
         request_id=request_id,
+        is_first_message_override=is_first_message,
     ):
         events.append(event)
     return events

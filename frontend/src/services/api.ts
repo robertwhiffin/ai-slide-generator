@@ -122,6 +122,7 @@ interface PollResponse {
     raw_html?: string;
     replacement_info?: ReplacementInfo;
     experiment_url?: string;
+    session_title?: string;
   };
   error?: string;
 }
@@ -683,6 +684,13 @@ export const api = {
               if (response.status === 'error') {
                 onError(new Error(response.error || 'Request failed'));
               } else if (response.result) {
+                // Emit session_title event if title was generated
+                if (response.result.session_title) {
+                  onEvent({
+                    type: 'session_title',
+                    session_title: response.result.session_title,
+                  });
+                }
                 // Emit complete event
                 onEvent({
                   type: 'complete',
