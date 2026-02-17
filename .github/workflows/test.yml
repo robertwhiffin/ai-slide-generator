@@ -758,6 +758,8 @@ jobs:
       - integration-slides
       - integration-genie
       - e2e-tests
+      - deploy-integration
+      - deploy-cleanup
     if: always()
     steps:
       - name: Check test results
@@ -772,6 +774,8 @@ jobs:
           echo "Slides: ${{ needs.integration-slides.result }}"
           echo "Genie: ${{ needs.integration-genie.result }}"
           echo "E2E: ${{ needs.e2e-tests.result }}"
+          echo "Deploy Integration: ${{ needs.deploy-integration.result }}"
+          echo "Deploy Cleanup: ${{ needs.deploy-cleanup.result }}"
 
           # Fail if any required job failed (not skipped)
           failed=false
@@ -784,7 +788,9 @@ jobs:
                         "${{ needs.integration-streaming.result }}" \
                         "${{ needs.integration-slides.result }}" \
                         "${{ needs.integration-genie.result }}" \
-                        "${{ needs.e2e-tests.result }}"; do
+                        "${{ needs.e2e-tests.result }}" \
+                        "${{ needs.deploy-integration.result }}" \
+                        "${{ needs.deploy-cleanup.result }}"; do
             if [ "$result" == "failure" ]; then
               failed=true
               break
@@ -796,3 +802,201 @@ jobs:
             exit 1
           fi
           echo "All tests passed or were skipped!"
+
+  # Deploy integration test - full lifecycle against real Databricks workspace
+  deploy-integration:
+    name: "Deploy Integration Test"
+    runs-on: ubuntu-latest
+    needs:
+      - unit-tests
+      - frontend-build
+      - wheel-build
+      - integration-api-routes
+      - integration-config-api
+      - integration-export
+      - integration-streaming
+      - integration-slides
+      - integration-genie
+      - e2e-tests
+    if: |
+      always() &&
+      !contains(needs.*.result, 'failure')
+    environment: ci-build-workspace
+    outputs:
+      app_name: ${{ steps.names.outputs.app_name }}
+      lakebase_name: ${{ steps.names.outputs.lakebase_name }}
+      schema_name: ${{ steps.names.outputs.schema_name }}
+      workspace_path: ${{ steps.names.outputs.workspace_path }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install uv
+        run: pip install uv
+
+      - name: Install dependencies
+        run: |
+          uv pip install --system -e ".[dev]"
+          uv pip install --system build
+
+      - name: Generate unique resource names
+        id: names
+        run: |
+          RUN_ID="${{ github.run_id }}"
+          BASE_PATH="${DATABRICKS_CI_WORKSPACE_PATH:-/Workspace/Users/robert.whiffin@databricks.com/.apps/ci}"
+          echo "app_name=db-tellr-ci-${RUN_ID}" >> "$GITHUB_OUTPUT"
+          echo "lakebase_name=db-tellr-ci-${RUN_ID}" >> "$GITHUB_OUTPUT"
+          echo "schema_name=app_data_ci_${RUN_ID}" >> "$GITHUB_OUTPUT"
+          echo "workspace_path=${BASE_PATH}/tellr-${RUN_ID}" >> "$GITHUB_OUTPUT"
+
+      - name: Build wheels
+        run: |
+          # Build databricks-tellr wheel
+          uv build packages/databricks-tellr --wheel --out-dir packages/databricks-tellr/dist
+
+          # Copy src/ into app package for build (same as build_wheels.sh)
+          cp -r src packages/databricks-tellr-app/src
+
+          # Build databricks-tellr-app wheel
+          uv build packages/databricks-tellr-app --wheel --out-dir packages/databricks-tellr-app/dist
+
+          # Clean up copied src/
+          rm -rf packages/databricks-tellr-app/src
+
+          echo "Built wheels:"
+          ls -lh packages/databricks-tellr/dist/*.whl
+          ls -lh packages/databricks-tellr-app/dist/*.whl
+
+      - name: "Create: Deploy new app"
+        env:
+          DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
+          DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
+        run: |
+          python -m scripts.deploy_ci --create \
+            --app-name "${{ steps.names.outputs.app_name }}" \
+            --workspace-path "${{ steps.names.outputs.workspace_path }}" \
+            --lakebase-name "${{ steps.names.outputs.lakebase_name }}" \
+            --schema "${{ steps.names.outputs.schema_name }}"
+
+      - name: "Verify: App exists after create"
+        env:
+          DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
+          DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
+        run: |
+          python -c "
+          from databricks.sdk import WorkspaceClient
+          ws = WorkspaceClient()
+          app = ws.apps.get(name='${{ steps.names.outputs.app_name }}')
+          assert app is not None, 'App not found after create'
+          assert app.url, 'App has no URL after create'
+          print(f'Verified: app exists with URL {app.url}')
+          "
+
+      - name: "Update: Redeploy app"
+        env:
+          DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
+          DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
+        run: |
+          python -m scripts.deploy_ci --update \
+            --app-name "${{ steps.names.outputs.app_name }}" \
+            --workspace-path "${{ steps.names.outputs.workspace_path }}" \
+            --lakebase-name "${{ steps.names.outputs.lakebase_name }}" \
+            --schema "${{ steps.names.outputs.schema_name }}"
+
+      - name: "Verify: App updated"
+        env:
+          DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
+          DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
+        run: |
+          python -c "
+          from databricks.sdk import WorkspaceClient
+          ws = WorkspaceClient()
+          app = ws.apps.get(name='${{ steps.names.outputs.app_name }}')
+          assert app is not None, 'App not found after update'
+          print(f'Verified: app exists after update (URL: {app.url})')
+          "
+
+      - name: "Delete: Remove app and Lakebase"
+        env:
+          DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
+          DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
+        run: |
+          python -m scripts.deploy_ci --delete \
+            --app-name "${{ steps.names.outputs.app_name }}" \
+            --lakebase-name "${{ steps.names.outputs.lakebase_name }}" \
+            --schema "${{ steps.names.outputs.schema_name }}"
+
+      - name: "Verify: App deleted"
+        env:
+          DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
+          DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
+        run: |
+          python -m scripts.deploy_ci --verify-deleted \
+            --app-name "${{ steps.names.outputs.app_name }}"
+
+      - name: "Verify: Lakebase deleted"
+        env:
+          DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
+          DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
+        run: |
+          python -m scripts.deploy_ci --verify-lakebase-deleted \
+            --lakebase-name "${{ steps.names.outputs.lakebase_name }}"
+
+  # Safety net: ensure CI resources are always cleaned up
+  deploy-cleanup:
+    name: "Deploy Cleanup"
+    runs-on: ubuntu-latest
+    needs: [deploy-integration]
+    if: always() && needs.deploy-integration.result != 'skipped'
+    environment: ci-build-workspace
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install uv
+        run: pip install uv
+
+      - name: Install dependencies
+        run: uv pip install --system -e ".[dev]"
+
+      - name: "Cleanup: Delete app (if still exists)"
+        env:
+          DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
+          DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
+        run: |
+          python -m scripts.deploy_ci --delete \
+            --app-name "${{ needs.deploy-integration.outputs.app_name }}" \
+            --lakebase-name "${{ needs.deploy-integration.outputs.lakebase_name }}" \
+            --schema "${{ needs.deploy-integration.outputs.schema_name }}" \
+          || echo "Cleanup delete completed (may have already been deleted)"
+
+      - name: "Verify: App is gone"
+        env:
+          DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
+          DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
+        run: |
+          python -m scripts.deploy_ci --verify-deleted \
+            --app-name "${{ needs.deploy-integration.outputs.app_name }}"
+
+      - name: "Verify: Lakebase is gone"
+        env:
+          DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
+          DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
+        run: |
+          python -m scripts.deploy_ci --verify-lakebase-deleted \
+            --lakebase-name "${{ needs.deploy-integration.outputs.lakebase_name }}"
