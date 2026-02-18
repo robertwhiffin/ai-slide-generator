@@ -37,6 +37,15 @@ export const SlideStyleForm: React.FC<SlideStyleFormProps> = ({
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const imageGuidelinesEditorRef = useRef<any>(null);
 
+  useEffect(() => {
+    if (!isOpen) return;
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' && !saving && !showImagePicker) onCancel();
+    };
+    document.addEventListener('keydown', handleKeyDown);
+    return () => document.removeEventListener('keydown', handleKeyDown);
+  }, [isOpen, saving, showImagePicker, onCancel]);
+
   // Reset form when opening
   useEffect(() => {
     if (isOpen) {
