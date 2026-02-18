@@ -5,6 +5,14 @@ on:
     branches:
       - main
     paths:
+      - 'docs/**'
+      - 'docs-site/**'
+      - '.github/workflows/docs-deploy.yml'
+  pull_request:
+    branches:
+      - main
+    paths:
+      - 'docs/**'
       - 'docs-site/**'
       - '.github/workflows/docs-deploy.yml'
   workflow_dispatch:
@@ -49,6 +57,7 @@ jobs:
           path: docs-site/build
 
   deploy:
+    if: github.event_name == 'push'
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}

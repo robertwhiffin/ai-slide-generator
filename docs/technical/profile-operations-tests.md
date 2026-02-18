@@ -34,7 +34,7 @@ tests/e2e/profile-ui.spec.ts::ProfileSelector
 
 | Test | Validation |
 |------|------------|
-| `displays current profile name in button` | Button shows "Profile: {name}" |
+| `displays current profile name in button` | Button shows "Profile: \{name\}" |
 | `shows "Default" badge when current profile is default` | Blue badge visible |
 | `opens dropdown on click` | Dropdown menu appears |
 | `closes dropdown when clicking outside` | Dropdown disappears |
