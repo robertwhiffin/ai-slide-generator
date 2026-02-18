@@ -8,7 +8,6 @@ import { ProfileList } from '../config/ProfileList';
 import { DeckPromptList } from '../config/DeckPromptList';
 import { SlideStyleList } from '../config/SlideStyleList';
 import { SessionHistory } from '../History/SessionHistory';
-import { SaveAsDialog } from '../History/SaveAsDialog';
 import { HelpPage } from '../Help';
 import { UpdateBanner } from '../UpdateBanner';
 import { useSession } from '../../contexts/SessionContext';
@@ -27,7 +26,7 @@ export const AppLayout: React.FC = () => {
   const [slideDeck, setSlideDeck] = useState<SlideDeck | null>(null);
   const [rawHtml, setRawHtml] = useState<string | null>(null);
   const [viewMode, setViewMode] = useState<ViewMode>('help');
-  const [showSaveDialog, setShowSaveDialog] = useState(false);
+  const [lastSavedTime, setLastSavedTime] = useState<Date | null>(null);
   // Key to force remount ChatPanel when profile/session changes
   const [chatKey, setChatKey] = useState<number>(0);
   // Track which slide to scroll to in the main panel (uses key to allow re-scroll to same index)
@@ -54,6 +53,7 @@ export const AppLayout: React.FC = () => {
   const handleProfileChange = useCallback(() => {
     setSlideDeck(null);
     setRawHtml(null);
+    setLastSavedTime(null);
     setChatKey(prev => prev + 1);
     // Create new session for the new profile
     createNewSession();
@@ -76,6 +76,7 @@ export const AppLayout: React.FC = () => {
       const { slideDeck: restoredDeck, rawHtml: restoredRawHtml } = await switchSession(restoredSessionId);
       setSlideDeck(restoredDeck);
       setRawHtml(restoredRawHtml);
+      setLastSavedTime(new Date()); // Set as "just restored"
       setChatKey(prev => prev + 1);
       setViewMode('main');
     } catch (err) {
@@ -83,30 +84,49 @@ export const AppLayout: React.FC = () => {
     }
   }, [switchSession, currentProfile, loadProfile]);
 
-  // Handle saving session with a custom name
-  const handleSaveAs = useCallback(async (title: string) => {
+  // Auto-save session with slide deck title
+  const autoSaveSession = useCallback(async (deck: SlideDeck) => {
+    if (!sessionId || !deck.title) return;
+
     try {
-      await renameSession(title);
-      setShowSaveDialog(false);
+      await renameSession(deck.title);
+      setLastSavedTime(new Date());
     } catch (err) {
-      console.error('Failed to save session:', err);
-      alert('Failed to save session name');
+      console.error('Failed to auto-save session:', err);
     }
-  }, [renameSession]);
+  }, [sessionId, renameSession]);
 
   // Start a new session
   const handleNewSession = useCallback(() => {
     setSlideDeck(null);
     setRawHtml(null);
+    setLastSavedTime(null);
     setChatKey(prev => prev + 1);
     createNewSession();
     setViewMode('main');
   }, [createNewSession]);
 
+  // Format time ago string
+  const getTimeAgo = (date: Date) => {
+    const seconds = Math.floor((new Date().getTime() - date.getTime()) / 1000);
+    if (seconds < 60) return 'Just now';
+    const minutes = Math.floor(seconds / 60);
+    if (minutes < 60) return `${minutes}m ago`;
+    const hours = Math.floor(minutes / 60);
+    if (hours < 24) return `${hours}h ago`;
+    const days = Math.floor(hours / 24);
+    return `${days}d ago`;
+  };
+
   // Generate subtitle for page header with status
   const getSubtitle = () => {
     if (!slideDeck) return undefined;
     const parts = [`${slideDeck.slide_count} slide${slideDeck.slide_count !== 1 ? 's' : ''}`];
+
+    // Add last saved time
+    if (lastSavedTime) {
+      parts.push(`Saved ${getTimeAgo(lastSavedTime)}`);
+    }
 
     // Add status indicators
     if (isGenerating) parts.push('Generating...');
@@ -141,7 +161,6 @@ export const AppLayout: React.FC = () => {
               <PageHeader
                 title={slideDeck?.title || sessionTitle || 'Untitled session'}
                 subtitle={getSubtitle()}
-                onSave={() => setShowSaveDialog(true)}
                 onExport={slideDeck ? handleExport : undefined}
                 onPresent={slideDeck ? handlePresent : undefined}
                 isGenerating={isGenerating}
@@ -173,6 +192,7 @@ export const AppLayout: React.FC = () => {
                     onSlidesGenerated={(deck, raw) => {
                       setSlideDeck(deck);
                       setRawHtml(raw);
+                      autoSaveSession(deck);
                     }}
                   />
                 </div>
@@ -263,13 +283,6 @@ export const AppLayout: React.FC = () => {
           </div>
         )}
       </SidebarInset>
-
-      <SaveAsDialog
-        isOpen={showSaveDialog}
-        currentTitle={sessionTitle || ''}
-        onSave={handleSaveAs}
-        onCancel={() => setShowSaveDialog(false)}
-      />
     </SidebarProvider>
   );
 };

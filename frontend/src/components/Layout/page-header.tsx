@@ -78,10 +78,7 @@ export function PageHeader({
         {profileSelector && (
           <>
             <div className="mx-2 h-5 w-px bg-border" />
-            <div className="flex items-center gap-2 text-sm">
-              <span className="text-muted-foreground">Profile:</span>
-              {profileSelector}
-            </div>
+            {profileSelector}
           </>
         )}
       </div>
