@@ -27,6 +27,8 @@ export const AppLayout: React.FC = () => {
   const [rawHtml, setRawHtml] = useState<string | null>(null);
   const [viewMode, setViewMode] = useState<ViewMode>('help');
   const [lastSavedTime, setLastSavedTime] = useState<Date | null>(null);
+  // Key to trigger session list refresh in sidebar and history
+  const [sessionsRefreshKey, setSessionsRefreshKey] = useState<number>(0);
   // Key to force remount ChatPanel when profile/session changes
   const [chatKey, setChatKey] = useState<number>(0);
   // Track which slide to scroll to in the main panel (uses key to allow re-scroll to same index)
@@ -91,6 +93,8 @@ export const AppLayout: React.FC = () => {
     try {
       await renameSession(deck.title);
       setLastSavedTime(new Date());
+      // Trigger session list refresh in sidebar and history
+      setSessionsRefreshKey(prev => prev + 1);
     } catch (err) {
       console.error('Failed to auto-save session:', err);
     }
@@ -105,6 +109,8 @@ export const AppLayout: React.FC = () => {
       if (slideDeck) {
         setSlideDeck({ ...slideDeck, title: newTitle });
       }
+      // Trigger session list refresh in sidebar and history
+      setSessionsRefreshKey(prev => prev + 1);
     } catch (err) {
       console.error('Failed to update title:', err);
       alert('Failed to update title');
@@ -168,6 +174,7 @@ export const AppLayout: React.FC = () => {
         onNewSession={handleNewSession}
         currentSessionId={sessionId}
         profileName={currentProfile?.name}
+        sessionsRefreshKey={sessionsRefreshKey}
       />
       <SidebarInset className="h-full overflow-hidden">
         {viewMode === 'main' && (
@@ -241,6 +248,7 @@ export const AppLayout: React.FC = () => {
                 <SessionHistory
                   onSessionSelect={handleSessionRestore}
                   onBack={() => setViewMode('main')}
+                  refreshKey={sessionsRefreshKey}
                 />
               </div>
             </div>
