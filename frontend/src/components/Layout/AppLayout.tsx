@@ -108,7 +108,7 @@ export const AppLayout: React.FC = () => {
   };
 
   return (
-    <SidebarProvider>
+    <SidebarProvider className="h-svh max-h-svh">
       <AppSidebar
         currentView={viewMode}
         onViewChange={setViewMode}
@@ -117,62 +117,68 @@ export const AppLayout: React.FC = () => {
         currentSessionId={sessionId}
         profileName={currentProfile?.name}
       />
-      <SidebarInset className="flex flex-col overflow-hidden">
+      <SidebarInset className="h-full overflow-hidden">
         {viewMode === 'main' && (
-          <>
-            <PageHeader
-              title={sessionTitle || 'Untitled session'}
-              subtitle={getSubtitle()}
-              onSave={() => setShowSaveDialog(true)}
-              isGenerating={isGenerating}
-              profileSelector={
-                <ProfileSelector
-                  onManageClick={() => setViewMode('profiles')}
-                  onProfileChange={handleProfileChange}
-                  disabled={isGenerating}
-                />
-              }
-            />
-
-            {updateAvailable && !dismissed && latestVersion && updateType && (
-              <UpdateBanner
-                latestVersion={latestVersion}
-                updateType={updateType}
-                onDismiss={dismiss}
+          <div className="flex h-full flex-col">
+            <div className="shrink-0">
+              <PageHeader
+                title={sessionTitle || 'Untitled session'}
+                subtitle={getSubtitle()}
+                onSave={() => setShowSaveDialog(true)}
+                isGenerating={isGenerating}
+                profileSelector={
+                  <ProfileSelector
+                    onManageClick={() => setViewMode('profiles')}
+                    onProfileChange={handleProfileChange}
+                    disabled={isGenerating}
+                  />
+                }
               />
-            )}
 
-            <div className="flex min-h-0 flex-1 overflow-hidden">
-              <div className="flex min-h-0 w-[32%] min-w-[260px] flex-col border-r border-border bg-card">
-                <ChatPanel
-                  key={chatKey}
-                  ref={chatPanelRef}
-                  rawHtml={rawHtml}
-                  onSlidesGenerated={(deck, raw) => {
-                    setSlideDeck(deck);
-                    setRawHtml(raw);
-                  }}
+              {updateAvailable && !dismissed && latestVersion && updateType && (
+                <UpdateBanner
+                  latestVersion={latestVersion}
+                  updateType={updateType}
+                  onDismiss={dismiss}
                 />
-              </div>
+              )}
+            </div>
 
-              <SelectionRibbon slideDeck={slideDeck} onSlideNavigate={handleSlideNavigate} />
+            <div className="relative flex-1 overflow-hidden">
+              <div className="absolute inset-0 flex">
+                <div className="w-[32%] min-w-[260px] border-r border-border bg-card">
+                  <ChatPanel
+                    key={chatKey}
+                    ref={chatPanelRef}
+                    rawHtml={rawHtml}
+                    onSlidesGenerated={(deck, raw) => {
+                      setSlideDeck(deck);
+                      setRawHtml(raw);
+                    }}
+                  />
+                </div>
 
-              <div className="flex min-h-0 flex-1 flex-col bg-background">
-                <SlidePanel
-                  slideDeck={slideDeck}
-                  rawHtml={rawHtml}
-                  onSlideChange={setSlideDeck}
-                  scrollToSlide={scrollTarget}
-                  onSendMessage={handleSendMessage}
-                />
+                <SelectionRibbon slideDeck={slideDeck} onSlideNavigate={handleSlideNavigate} />
+
+                <div className="flex-1 bg-background">
+                  <SlidePanel
+                    slideDeck={slideDeck}
+                    rawHtml={rawHtml}
+                    onSlideChange={setSlideDeck}
+                    scrollToSlide={scrollTarget}
+                    onSendMessage={handleSendMessage}
+                  />
+                </div>
               </div>
             </div>
-          </>
+          </div>
         )}
 
         {viewMode === 'history' && (
-          <>
-            <SimplePageHeader title="History" />
+          <div className="flex h-full flex-col">
+            <div className="shrink-0">
+              <SimplePageHeader title="History" />
+            </div>
             <div className="flex-1 overflow-y-auto">
               <div className="mx-auto w-full max-w-4xl px-4 py-8">
                 <SessionHistory
@@ -181,51 +187,59 @@ export const AppLayout: React.FC = () => {
                 />
               </div>
             </div>
-          </>
+          </div>
         )}
 
         {viewMode === 'profiles' && (
-          <>
-            <SimplePageHeader title="Agent Profiles" />
+          <div className="flex h-full flex-col">
+            <div className="shrink-0">
+              <SimplePageHeader title="Agent Profiles" />
+            </div>
             <div className="flex-1 overflow-y-auto">
               <div className="mx-auto w-full max-w-4xl px-4 py-8">
                 <ProfileList onProfileChange={handleProfileChange} />
               </div>
             </div>
-          </>
+          </div>
         )}
 
         {viewMode === 'deck_prompts' && (
-          <>
-            <SimplePageHeader title="Deck Prompts" />
+          <div className="flex h-full flex-col">
+            <div className="shrink-0">
+              <SimplePageHeader title="Deck Prompts" />
+            </div>
             <div className="flex-1 overflow-y-auto">
               <div className="mx-auto w-full max-w-4xl px-4 py-8">
                 <DeckPromptList />
               </div>
             </div>
-          </>
+          </div>
         )}
 
         {viewMode === 'slide_styles' && (
-          <>
-            <SimplePageHeader title="Slide Styles" />
+          <div className="flex h-full flex-col">
+            <div className="shrink-0">
+              <SimplePageHeader title="Slide Styles" />
+            </div>
             <div className="flex-1 overflow-y-auto">
               <div className="mx-auto w-full max-w-4xl px-4 py-8">
                 <SlideStyleList />
               </div>
             </div>
-          </>
+          </div>
         )}
 
         {viewMode === 'help' && (
-          <>
-            <SimplePageHeader title="Help" />
+          <div className="flex h-full flex-col">
+            <div className="shrink-0">
+              <SimplePageHeader title="Help" />
+            </div>
             <div className="flex-1 overflow-y-auto">
               <div className="mx-auto w-full max-w-4xl px-4 py-8">
                 <HelpPage onBack={() => setViewMode('main')} />
               </div>
             </div>
-          </>
+          </div>
         )}
       </SidebarInset>
 
