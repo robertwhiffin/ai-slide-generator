@@ -50,7 +50,9 @@ fi
 
 echo "Building packages..."
 
-rm -rf "$TELLR_DIR/dist" "$APP_DIR/dist"
+rm -rf "$TELLR_DIR/dist" "$TELLR_DIR/build"
+rm -rf "$APP_DIR/dist" "$APP_DIR/build"
+rm -rf "$ROOT_DIR/frontend/dist"
 
 python -m build --sdist --wheel "$TELLR_DIR"
 

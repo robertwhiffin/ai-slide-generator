@@ -101,9 +101,11 @@ if ! python -m build --version >/dev/null 2>&1; then
     fi
 fi
 
-# Clean previous builds
+# Clean previous builds (including stale frontend assets and setuptools build cache)
 echo -e "${BLUE}Cleaning previous builds...${NC}"
-rm -rf "$TELLR_DIR/dist" "$APP_DIR/dist"
+rm -rf "$TELLR_DIR/dist" "$TELLR_DIR/build"
+rm -rf "$APP_DIR/dist" "$APP_DIR/build"
+rm -rf "$ROOT_DIR/frontend/dist"
 
 # Apply dev version suffix to both packages
 TELLR_DEV_VERSION="${TELLR_ORIG_VERSION}${DEV_SUFFIX}"
