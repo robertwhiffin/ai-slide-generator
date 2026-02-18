@@ -1,7 +1,7 @@
 import React, { useState, useCallback, useRef } from 'react';
 import type { SlideDeck } from '../../types/slide';
 import { ChatPanel, type ChatPanelHandle } from '../ChatPanel/ChatPanel';
-import { SlidePanel } from '../SlidePanel/SlidePanel';
+import { SlidePanel, type SlidePanelHandle } from '../SlidePanel/SlidePanel';
 import { SelectionRibbon } from '../SlidePanel/SelectionRibbon';
 import { ProfileSelector } from '../config/ProfileSelector';
 import { ProfileList } from '../config/ProfileList';
@@ -33,6 +33,7 @@ export const AppLayout: React.FC = () => {
   // Track which slide to scroll to in the main panel (uses key to allow re-scroll to same index)
   const [scrollTarget, setScrollTarget] = useState<{ index: number; key: number } | null>(null);
   const chatPanelRef = useRef<ChatPanelHandle>(null);
+  const slidePanelRef = useRef<SlidePanelHandle>(null);
   const { sessionTitle, sessionId, createNewSession, switchSession, renameSession } = useSession();
   const { isGenerating } = useGeneration();
   const { currentProfile, loadProfile } = useProfiles();
@@ -107,6 +108,15 @@ export const AppLayout: React.FC = () => {
     return `${slideDeck.slide_count} slides`;
   };
 
+  // Handle export and present via SlidePanel ref
+  const handleExport = useCallback(() => {
+    slidePanelRef.current?.exportPPTX();
+  }, []);
+
+  const handlePresent = useCallback(() => {
+    slidePanelRef.current?.openPresentationMode();
+  }, []);
+
   return (
     <SidebarProvider className="h-svh max-h-svh">
       <AppSidebar
@@ -122,9 +132,11 @@ export const AppLayout: React.FC = () => {
           <div className="flex h-full flex-col">
             <div className="shrink-0">
               <PageHeader
-                title={sessionTitle || 'Untitled session'}
+                title={slideDeck?.title || sessionTitle || 'Untitled session'}
                 subtitle={getSubtitle()}
                 onSave={() => setShowSaveDialog(true)}
+                onExport={slideDeck ? handleExport : undefined}
+                onPresent={slideDeck ? handlePresent : undefined}
                 isGenerating={isGenerating}
                 profileSelector={
                   <ProfileSelector
@@ -162,6 +174,7 @@ export const AppLayout: React.FC = () => {
 
                 <div className="flex-1 bg-background">
                   <SlidePanel
+                    ref={slidePanelRef}
                     slideDeck={slideDeck}
                     rawHtml={rawHtml}
                     onSlideChange={setSlideDeck}

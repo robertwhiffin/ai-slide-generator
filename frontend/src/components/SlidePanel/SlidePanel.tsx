@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useRef, useCallback } from 'react';
+import React, { useEffect, useState, useRef, useCallback, forwardRef, useImperativeHandle } from 'react';
 import {
   DndContext,
   closestCenter,
@@ -22,7 +22,6 @@ import { api } from '../../services/api';
 import { useSelection } from '../../contexts/SelectionContext';
 import { exportSlideDeckToPDF } from '../../services/pdf_client';
 import { useSession } from '../../contexts/SessionContext';
-import { useGoogleOAuthPopup } from '../../hooks/useGoogleOAuthPopup';
 
 const isDebugMode = (): boolean => {
   const urlParams = new URLSearchParams(window.location.search);
@@ -37,38 +36,37 @@ interface SlideContext {
 interface SlidePanelProps {
   slideDeck: SlideDeck | null;
   rawHtml: string | null;
-  onSlideChange?: (slideDeck: SlideDeck) => void;
+  onSlideChange: (slideDeck: SlideDeck) => void;
   scrollToSlide?: { index: number; key: number } | null;
   onSendMessage?: (content: string, slideContext?: SlideContext) => void;
-  readOnly?: boolean;
-  onVerificationComplete?: (description?: string) => void;
-  versionKey?: string;  // Used to force re-render when switching save point versions
+}
+
+export interface SlidePanelHandle {
+  exportPDF: () => void;
+  exportPPTX: () => void;
+  openPresentationMode: () => void;
 }
 
 type ViewMode = 'tiles' | 'rawhtml' | 'rawtext';
 
-export const SlidePanel: React.FC<SlidePanelProps> = ({ slideDeck, rawHtml, onSlideChange, scrollToSlide, onSendMessage, readOnly = false, onVerificationComplete, versionKey }) => {
+export const SlidePanel = forwardRef<SlidePanelHandle, SlidePanelProps>(function SlidePanel({ slideDeck, rawHtml, onSlideChange, scrollToSlide, onSendMessage }, ref) {
   const [isReordering, setIsReordering] = useState(false);
   const [viewMode, setViewMode] = useState<ViewMode>('tiles');
   const [isExportingPDF, setIsExportingPDF] = useState(false);
   const [isExportingPPTX, setIsExportingPPTX] = useState(false);
-  const [isExportingGoogleSlides, setIsExportingGoogleSlides] = useState(false);
   const [exportProgress, setExportProgress] = useState<{ current: number; total: number; status: string } | null>(null);
-  const [googleSlidesUrl, setGoogleSlidesUrl] = useState<string | null>(null);
   const [showExportMenu, setShowExportMenu] = useState(false);
   const exportMenuRef = useRef<HTMLDivElement>(null);
   const [isPresentationMode, setIsPresentationMode] = useState(false);
   const [optimizingSlideIndex, setOptimizingSlideIndex] = useState<number | null>(null);
   const { selectedIndices, setSelection, clearSelection } = useSelection();
   const { sessionId } = useSession();
-  const { openOAuthPopup } = useGoogleOAuthPopup();
   const slideRefs = useRef<Map<number, HTMLDivElement>>(new Map());
   
   // Auto-verification state
   const [isAutoVerifying, setIsAutoVerifying] = useState(false);
   const [verifyingSlides, setVerifyingSlides] = useState<Set<number>>(new Set());
   const autoVerifyTriggeredRef = useRef<Set<string>>(new Set()); // Track which content hashes we've tried to verify
-  const pendingEditDescriptionRef = useRef<string | null>(null); // Track description for panel edits
   
   const sensors = useSensors(
     useSensor(PointerSensor),
@@ -80,7 +78,7 @@ export const SlidePanel: React.FC<SlidePanelProps> = ({ slideDeck, rawHtml, onSl
   const handleDragEnd = async (event: DragEndEvent) => {
     const { active, over } = event;
 
-    if (!over || !slideDeck || readOnly || !onSlideChange) return;
+    if (!over || !slideDeck) return;
     
     if (active.id !== over.id) {
       const oldIndex = slideDeck.slides.findIndex(s => s.slide_id === active.id);
@@ -106,7 +104,7 @@ export const SlidePanel: React.FC<SlidePanelProps> = ({ slideDeck, rawHtml, onSl
         // Fetch full deck to get verification merged from verification_map
         const result = await api.getSlides(sessionId);
         if (result.slide_deck) {
-          onSlideChange?.(result.slide_deck);
+          onSlideChange(result.slide_deck);
         }
         clearSelection();
       } catch (error) {
@@ -121,7 +119,7 @@ export const SlidePanel: React.FC<SlidePanelProps> = ({ slideDeck, rawHtml, onSl
   };
 
   const handleDeleteSlide = async (index: number) => {
-    if (!slideDeck || !sessionId || readOnly || !onSlideChange) return;
+    if (!slideDeck || !sessionId) return;
     
     if (!confirm(`Delete slide ${index + 1}?`)) return;
 
@@ -130,7 +128,7 @@ export const SlidePanel: React.FC<SlidePanelProps> = ({ slideDeck, rawHtml, onSl
       // Fetch full deck to get verification merged from verification_map
       const result = await api.getSlides(sessionId);
       if (result.slide_deck) {
-        onSlideChange?.(result.slide_deck);
+        onSlideChange(result.slide_deck);
       }
       clearSelection();
     } catch (error) {
@@ -140,22 +138,18 @@ export const SlidePanel: React.FC<SlidePanelProps> = ({ slideDeck, rawHtml, onSl
   };
 
   const handleUpdateSlide = async (index: number, html: string) => {
-    if (!slideDeck || !sessionId || readOnly || !onSlideChange) return;
+    if (!slideDeck || !sessionId) return;
 
     try {
-      // Set pending description for save point creation after verification
-      pendingEditDescriptionRef.current = `Edited slide ${index + 1} (HTML)`;
-      
       await api.updateSlide(index, html, sessionId);
       // Fetch updated deck
       const result = await api.getSlides(sessionId);
       if (result.slide_deck) {
-        onSlideChange?.(result.slide_deck);
+        onSlideChange(result.slide_deck);
       }
       clearSelection();
     } catch (error) {
       console.error('Failed to update:', error);
-      pendingEditDescriptionRef.current = null; // Clear on error
       throw error; // Re-throw for editor to handle
     }
   };
@@ -171,7 +165,7 @@ export const SlidePanel: React.FC<SlidePanelProps> = ({ slideDeck, rawHtml, onSl
       // Update only the verification field locally
       const updatedSlides = [...slideDeck.slides];
       updatedSlides[index] = { ...updatedSlides[index], verification: verification || undefined };
-      onSlideChange?.({ ...slideDeck, slides: updatedSlides });
+      onSlideChange({ ...slideDeck, slides: updatedSlides });
     } catch (error) {
       console.error('Failed to update verification:', error);
       // Don't throw - verification persistence is non-critical
@@ -282,52 +276,12 @@ export const SlidePanel: React.FC<SlidePanelProps> = ({ slideDeck, rawHtml, onSl
     }
   };
 
-  const handleExportGoogleSlides = async () => {
-    if (!slideDeck || !sessionId || isExportingGoogleSlides) return;
-
-    setIsExportingGoogleSlides(true);
-    setShowExportMenu(false);
-    setExportProgress({ current: 0, total: slideDeck.slides.length, status: 'Checking authorization...' });
-
-    try {
-      // Check auth first
-      const { authorized } = await api.checkGoogleSlidesAuth();
-
-      if (!authorized) {
-        // Open OAuth popup
-        setExportProgress({ current: 0, total: slideDeck.slides.length, status: 'Waiting for Google authorization...' });
-
-        const authResult = await openOAuthPopup();
-        if (!authResult) {
-          alert('Google authorization was not completed. Please try again.');
-          return;
-        }
-      }
-
-      // Proceed with export
-      setExportProgress({ current: 0, total: slideDeck.slides.length, status: 'Exporting to Google Slides...' });
-
-      const result = await api.exportToGoogleSlides(
-        sessionId,
-        slideDeck,
-        (progress, total, status) => {
-          setExportProgress({ current: progress, total, status });
-        }
-      );
-
-      // Show the link instead of opening a popup
-      setGoogleSlidesUrl(result.presentation_url);
-    } catch (error) {
-      console.error('Google Slides export failed:', error);
-      const message = error instanceof Error
-        ? error.message
-        : 'Failed to export to Google Slides. Please try again.';
-      alert(message);
-    } finally {
-      setIsExportingGoogleSlides(false);
-      setExportProgress(null);
-    }
-  };
+  // Expose functions via ref
+  useImperativeHandle(ref, () => ({
+    exportPDF: handleExportPDF,
+    exportPPTX: handleExportPPTX,
+    openPresentationMode: () => setIsPresentationMode(true),
+  }));
 
   useEffect(() => {
     if (!slideDeck) {
@@ -346,23 +300,6 @@ export const SlidePanel: React.FC<SlidePanelProps> = ({ slideDeck, rawHtml, onSl
       setSelection(validIndices, slides);
     }
   }, [slideDeck, selectedIndices, clearSelection, setSelection]);
-
-  // Load Google Slides URL from session when session changes
-  useEffect(() => {
-    if (!sessionId) {
-      setGoogleSlidesUrl(null);
-      return;
-    }
-    let cancelled = false;
-    api.getSession(sessionId).then((session) => {
-      if (!cancelled) {
-        setGoogleSlidesUrl(session.google_slides_url ?? null);
-      }
-    }).catch(() => {
-      if (!cancelled) setGoogleSlidesUrl(null);
-    });
-    return () => { cancelled = true; };
-  }, [sessionId]);
 
   // Close export menu when clicking outside
   useEffect(() => {
@@ -420,7 +357,7 @@ export const SlidePanel: React.FC<SlidePanelProps> = ({ slideDeck, rawHtml, onSl
     try {
       const result = await api.getSlides(sessionId);
       if (result.slide_deck) {
-        onSlideChange?.(result.slide_deck);
+        onSlideChange(result.slide_deck);
       }
     } catch (error) {
       console.error('[Auto-verify] Failed to refresh slides:', error);
@@ -429,13 +366,7 @@ export const SlidePanel: React.FC<SlidePanelProps> = ({ slideDeck, rawHtml, onSl
     setVerifyingSlides(new Set());
     setIsAutoVerifying(false);
     console.log('[Auto-verify] Completed');
-
-    // Notify parent that verification is complete (for save point creation)
-    // Pass description from panel edit if available
-    const editDescription = pendingEditDescriptionRef.current;
-    pendingEditDescriptionRef.current = null; // Clear after use
-    onVerificationComplete?.(editDescription || undefined);
-  }, [sessionId, isAutoVerifying, onSlideChange, onVerificationComplete]);
+  }, [sessionId, isAutoVerifying, onSlideChange]);
 
   // Effect to trigger auto-verification when slides change
   useEffect(() => {
@@ -626,122 +557,17 @@ export const SlidePanel: React.FC<SlidePanelProps> = ({ slideDeck, rawHtml, onSl
     <div className="h-full flex flex-col bg-gray-50">
       {/* Header with Tabs */}
       <div className="bg-white border-b">
-        <div className="p-4 flex items-center justify-between">
-          <div>
-            <h2 className="text-lg font-semibold">{slideDeck.title}</h2>
+        <div className="p-4">
+          <div className="mb-2">
             <p className="text-sm text-gray-500">
               {slideDeck.slide_count} slide{slideDeck.slide_count !== 1 ? 's' : ''}
               {isReordering && ' • Reordering...'}
               {isExportingPDF && ' • Exporting PDF...'}
               {isExportingPPTX && exportProgress && ` • ${exportProgress.status}`}
               {isExportingPPTX && !exportProgress && ' • Exporting PowerPoint...'}
-              {isExportingGoogleSlides && exportProgress && ` • ${exportProgress.status}`}
-              {isExportingGoogleSlides && !exportProgress && ' • Exporting to Google Slides...'}
               {isAutoVerifying && ` • Verifying ${verifyingSlides.size} slide${verifyingSlides.size !== 1 ? 's' : ''}...`}
             </p>
           </div>
-          
-          {/* Export Dropdown Menu and Present Button */}
-          <div className="flex items-center">
-            <div className="relative" ref={exportMenuRef}>
-              <button
-                onClick={() => setShowExportMenu(!showExportMenu)}
-                disabled={!slideDeck || isExportingPDF || isExportingPPTX || isExportingGoogleSlides}
-                className={`
-                  flex items-center space-x-2 px-4 py-2 rounded-l-lg transition-colors
-                  ${!slideDeck || isExportingPDF || isExportingPPTX || isExportingGoogleSlides
-                    ? 'bg-gray-100 text-gray-400 cursor-not-allowed'
-                    : 'bg-blue-600 text-white hover:bg-blue-700'
-                  }
-                `}
-                title="Export slides"
-              >
-                {(isExportingPDF || isExportingPPTX || isExportingGoogleSlides) ? (
-                  <>
-                    <div className="animate-spin rounded-full h-4 w-4 border-2 border-white border-t-transparent"></div>
-                    <span>Exporting...</span>
-                  </>
-                ) : (
-                  <>
-                    <FiDownload size={18} />
-                    <span>Export</span>
-                  </>
-                )}
-              </button>
-              
-              {showExportMenu && !isExportingPDF && !isExportingPPTX && !isExportingGoogleSlides && (
-                <div className="absolute right-0 mt-2 w-56 bg-white rounded-lg shadow-lg border border-blue-200 py-1 z-50">
-                  <button
-                    onClick={handleExportPDF}
-                    className="w-full text-left px-4 py-2 hover:bg-blue-50 flex items-center space-x-2 text-gray-700 hover:text-blue-700 transition-colors"
-                  >
-                    <FiFileText size={18} className="text-blue-600" />
-                    <span>Export as PDF</span>
-                  </button>
-                  <button
-                    onClick={handleExportPPTX}
-                    className="w-full text-left px-4 py-2 hover:bg-blue-50 flex items-center space-x-2 text-gray-700 hover:text-blue-700 transition-colors"
-                  >
-                    <FiFile size={18} className="text-blue-600" />
-                    <span>Export as PowerPoint</span>
-                  </button>
-                  <button
-                    onClick={handleExportGoogleSlides}
-                    className="w-full text-left px-4 py-2 hover:bg-blue-50 flex items-center space-x-2 text-gray-700 hover:text-blue-700 transition-colors"
-                  >
-                    <svg width="18" height="18" viewBox="0 0 24 24" className="text-blue-600 flex-shrink-0" fill="currentColor">
-                      <path d="M7 2v2H3v16h18V4h-4V2H7zm0 2h10v2H7V4zM5 8h14v10H5V8zm2 2v2h4v-2H7zm6 0v2h4v-2h-4zm-6 4v2h4v-2H7zm6 0v2h4v-2h-4z"/>
-                    </svg>
-                    <span>Export to Google Slides</span>
-                  </button>
-                  <button
-                    onClick={handleSaveAsHTML}
-                    className="w-full text-left px-4 py-2 hover:bg-blue-50 flex items-center space-x-2 text-gray-700 hover:text-blue-700 transition-colors"
-                  >
-                    <FiCode size={18} className="text-blue-600" />
-                    <span>Save as HTML</span>
-                  </button>
-                </div>
-              )}
-            </div>
-            <button
-              onClick={() => setIsPresentationMode(true)}
-              className="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-r-lg hover:bg-blue-700 transition-colors border-l border-blue-500"
-            >
-              <FiPlay size={16} />
-              Present
-            </button>
-          </div>
-        </div>
-
-        {/* Google Slides link banner */}
-        {googleSlidesUrl && (
-          <div className="flex items-center justify-between px-4 py-2 bg-green-50 border-t border-green-200">
-            <div className="flex items-center space-x-2 text-sm">
-              <svg width="16" height="16" viewBox="0 0 24 24" className="text-green-600 flex-shrink-0" fill="currentColor">
-                <path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/>
-              </svg>
-              <span className="text-green-800">Google Slides created:</span>
-              <a
-                href={googleSlidesUrl}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="text-blue-600 hover:text-blue-800 underline font-medium truncate max-w-md"
-              >
-                Open in Google Slides
-              </a>
-            </div>
-            <button
-              onClick={() => setGoogleSlidesUrl(null)}
-              className="text-green-600 hover:text-green-800 p-1"
-              title="Dismiss"
-            >
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                <path d="M18 6L6 18M6 6l12 12"/>
-              </svg>
-            </button>
-          </div>
-        )}
 
         {/* Tab Navigation */}
         <div className="flex border-t">
@@ -804,12 +630,9 @@ export const SlidePanel: React.FC<SlidePanelProps> = ({ slideDeck, rawHtml, onSl
                   items={slideDeck.slides.map(s => s.slide_id)}
                   strategy={verticalListSortingStrategy}
                 >
-        {slideDeck.slides.map((slide, index) => {
-          // Include versionKey in key to force re-render when switching save point versions
-          const elementKey = versionKey ? `${versionKey}-${slide.slide_id}` : slide.slide_id;
-          return (
+        {slideDeck.slides.map((slide, index) => (
           <div
-            key={elementKey}
+            key={slide.slide_id}
             ref={(el) => {
               if (el) {
                 slideRefs.current.set(index, el);
@@ -831,8 +654,7 @@ export const SlidePanel: React.FC<SlidePanelProps> = ({ slideDeck, rawHtml, onSl
               isOptimizing={optimizingSlideIndex === index}
             />
           </div>
-          );
-        })}
+        ))}
                 </SortableContext>
               </DndContext>
             </div>
@@ -884,4 +706,4 @@ export const SlidePanel: React.FC<SlidePanelProps> = ({ slideDeck, rawHtml, onSl
       )}
     </div>
   );
-};
+});
