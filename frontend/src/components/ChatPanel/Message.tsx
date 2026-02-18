@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Bot, User } from 'lucide-react';
+import { Bot, User, ChevronRight, ChevronDown } from 'lucide-react';
 import type { Message as MessageType } from '../../types/message';
 
 interface MessageProps {
@@ -34,12 +34,22 @@ export const Message: React.FC<MessageProps> = ({ message }) => {
       <div className="max-w-[85%] rounded-xl bg-muted/50 px-3.5 py-2.5">
         <button
           onClick={() => setIsExpanded(prev => !prev)}
-          className="flex items-center space-x-2 text-sm font-medium text-foreground hover:text-foreground/80"
+          className="flex w-full items-center gap-2 text-left text-sm font-medium text-primary hover:text-primary/80 transition-colors"
           type="button"
         >
-          <span>{isExpanded ? '▼' : '▶'}</span>
-          <span>{label}</span>
-          <span className="text-xs text-muted-foreground">{preview}</span>
+          {isExpanded ? (
+            <ChevronDown className="size-4 shrink-0" />
+          ) : (
+            <ChevronRight className="size-4 shrink-0" />
+          )}
+          <span className="flex-1">
+            <span className="block">{label}</span>
+            {preview && (
+              <span className="block text-xs font-normal text-muted-foreground mt-0.5">
+                {preview}
+              </span>
+            )}
+          </span>
         </button>
 
         {isExpanded && (
