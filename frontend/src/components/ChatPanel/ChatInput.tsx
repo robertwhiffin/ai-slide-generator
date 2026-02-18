@@ -75,13 +75,17 @@ export const ChatInput: React.FC<ChatInputProps> = ({
     for (const item of Array.from(items)) {
       if (item.type.startsWith('image/')) {
         e.preventDefault();
-        const file = item.getAsFile();
-        if (!file) continue;
+        const rawFile = item.getAsFile();
+        if (!rawFile) continue;
 
-        if (file.size > MAX_FILE_SIZE) {
+        if (rawFile.size > MAX_FILE_SIZE) {
           setUploadError('Image too large (max 5MB)');
           continue;
         }
+
+        const ext = rawFile.name.split('.').pop() || 'png';
+        const uniqueName = `pasted-image-${Date.now()}.${ext}`;
+        const file = new File([rawFile], uniqueName, { type: rawFile.type });
 
         setUploading(true);
         setUploadError(null);
