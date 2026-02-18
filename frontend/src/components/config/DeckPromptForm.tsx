@@ -5,8 +5,8 @@
  */
 
 import React, { useState, useEffect } from 'react';
-import Editor from '@monaco-editor/react';
 import type { DeckPrompt, DeckPromptCreate, DeckPromptUpdate } from '../../api/config';
+import { ExpandableEditor } from './ExpandableEditor';
 
 interface DeckPromptFormProps {
   isOpen: boolean;
@@ -29,6 +29,15 @@ export const DeckPromptForm: React.FC<DeckPromptFormProps> = ({
   const [promptContent, setPromptContent] = useState('');
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!isOpen) return;
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' && !saving) onCancel();
+    };
+    document.addEventListener('keydown', handleKeyDown);
+    return () => document.removeEventListener('keydown', handleKeyDown);
+  }, [isOpen, saving, onCancel]);
 
   // Reset form when opening
   useEffect(() => {
@@ -168,22 +177,12 @@ export const DeckPromptForm: React.FC<DeckPromptFormProps> = ({
               <label className="block text-sm font-medium text-gray-700 mb-1">
                 Prompt Content <span className="text-red-500">*</span>
               </label>
-              <div className="border border-gray-300 rounded overflow-hidden">
-                <Editor
-                  height="300px"
-                  defaultLanguage="markdown"
-                  value={promptContent}
-                  onChange={(value) => setPromptContent(value || '')}
-                  options={{
-                    minimap: { enabled: false },
-                    wordWrap: 'on',
-                    lineNumbers: 'on',
-                    scrollBeyondLastLine: false,
-                    fontSize: 13,
-                    readOnly: saving,
-                  }}
-                />
-              </div>
+              <ExpandableEditor
+                value={promptContent}
+                onChange={setPromptContent}
+                readOnly={saving}
+                modalTitle="Prompt Content"
+              />
               <p className="text-xs text-gray-500 mt-1">
                 Instructions for the AI on how to create this type of presentation. 
                 Include sections, data to query, and formatting guidelines.

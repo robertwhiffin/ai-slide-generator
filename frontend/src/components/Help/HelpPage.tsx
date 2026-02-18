@@ -1,8 +1,9 @@
 import React, { useState } from 'react';
-import { FiMessageSquare, FiClock, FiSettings, FiInfo, FiShield, FiFileText, FiLayout, FiExternalLink } from 'react-icons/fi';
+import { FiMessageSquare, FiClock, FiSettings, FiInfo, FiShield, FiFileText, FiLayout, FiExternalLink, FiImage } from 'react-icons/fi';
 import { FaGavel } from 'react-icons/fa';
+import { DOCS_URLS } from '../../constants/docs';
 
-type HelpTab = 'overview' | 'generator' | 'history' | 'profiles' | 'deck_prompts' | 'slide_styles' | 'verification';
+type HelpTab = 'overview' | 'generator' | 'history' | 'profiles' | 'deck_prompts' | 'slide_styles' | 'images' | 'verification';
 
 export const HelpPage: React.FC = () => {
   const [activeTab, setActiveTab] = useState<HelpTab>('overview');
@@ -46,6 +47,7 @@ export const HelpPage: React.FC = () => {
         <TabButton tab="profiles" label="Profiles" icon={FiSettings} />
         <TabButton tab="deck_prompts" label="Deck Prompts" icon={FiFileText} />
         <TabButton tab="slide_styles" label="Slide Styles" icon={FiLayout} />
+        <TabButton tab="images" label="Images" icon={FiImage} />
       </div>
 
       {/* Content area */}
@@ -57,6 +59,7 @@ export const HelpPage: React.FC = () => {
         {activeTab === 'profiles' && <ProfilesTab />}
         {activeTab === 'deck_prompts' && <DeckPromptsTab />}
         {activeTab === 'slide_styles' && <SlideStylesTab />}
+        {activeTab === 'images' && <ImagesTab />}
       </div>
     </div>
   );
@@ -103,6 +106,7 @@ const OverviewTab: React.FC<{
         <QuickLinkButton tab="profiles" label="Learn about Profiles →" />
         <QuickLinkButton tab="deck_prompts" label="Learn about Deck Prompts →" />
         <QuickLinkButton tab="slide_styles" label="Learn about Slide Styles →" />
+        <QuickLinkButton tab="images" label="Learn about Images →" />
       </div>
     </section>
 
@@ -112,7 +116,7 @@ const OverviewTab: React.FC<{
         For detailed guides, API reference, and technical documentation:
       </p>
       <a
-        href="https://robertwhiffin.github.io/ai-slide-generator/"
+        href={DOCS_URLS.home}
         target="_blank"
         rel="noopener noreferrer"
         className="inline-flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors"
@@ -488,6 +492,27 @@ const SlideStylesTab: React.FC = () => (
     </section>
 
     <section>
+      <h2 className="text-lg font-semibold text-gray-800 mb-3">Why Use a Slide Style?</h2>
+      <div className="bg-purple-50 rounded-lg p-4">
+        <p className="text-gray-700 mb-3">
+          Think of a Slide Style as the equivalent of a <strong>PowerPoint template</strong>. In PowerPoint 
+          you pick a template that locks in fonts, colours, and layouts so every slide looks consistent 
+          without manual formatting. A Slide Style does the same thing here.
+        </p>
+        <p className="text-gray-700 mb-3">
+          You define the look <strong>once</strong> — corporate fonts, brand colours, spacing rules — and 
+          every slide the AI generates automatically follows those rules. Without a style, each generation 
+          starts from scratch and results will vary. With a style, output is professional and on-brand 
+          every time.
+        </p>
+        <p className="text-gray-600 text-sm">
+          Styles can be written in plain language ("use Roboto for headings, dark blue background") or as 
+          raw CSS for pixel-perfect control — or a mix of both.
+        </p>
+      </div>
+    </section>
+
+    <section>
       <h2 className="text-lg font-semibold text-gray-800 mb-3">How They Work</h2>
       <ol className="list-decimal list-inside text-gray-600 space-y-2">
         <li>Create slide styles in the <strong>Slide Styles</strong> page (top navigation)</li>
@@ -548,10 +573,67 @@ const SlideStylesTab: React.FC = () => (
     </section>
 
     <section>
+      <h2 className="text-lg font-semibold text-gray-800 mb-3">Using CSS in Styles</h2>
+      <p className="text-gray-600 mb-3">
+        Style content can be <strong>natural language</strong>, <strong>raw CSS</strong>, or a mix. 
+        The AI reads everything you provide and generates matching HTML + CSS.
+      </p>
+      <div className="grid md:grid-cols-2 gap-4">
+        <div className="bg-green-50 rounded-lg p-3">
+          <h4 className="font-medium text-green-800 mb-2">CSS Features That Work</h4>
+          <ul className="text-sm text-green-700 space-y-1">
+            <li>• CSS variables (<code className="bg-green-100 px-1 rounded">--brand-color</code>)</li>
+            <li>• Google Fonts via <code className="bg-green-100 px-1 rounded">@import</code></li>
+            <li>• Flexbox and CSS Grid</li>
+            <li>• Gradients, shadows, transforms</li>
+            <li>• Animations and transitions</li>
+            <li>• Class selectors and nesting</li>
+          </ul>
+        </div>
+        <div className="bg-red-50 rounded-lg p-3">
+          <h4 className="font-medium text-red-800 mb-2">What Doesn't Work</h4>
+          <ul className="text-sm text-red-700 space-y-1">
+            <li>• External <code className="bg-red-100 px-1 rounded">{'<link>'}</code> stylesheets</li>
+            <li>• Presentation frameworks (reveal.js, Slidev)</li>
+            <li>• JavaScript in slides</li>
+            <li>• Tailwind utility classes (unless via CDN)</li>
+          </ul>
+        </div>
+      </div>
+    </section>
+
+    <section>
+      <h2 className="text-lg font-semibold text-gray-800 mb-3">Fixed Constraints</h2>
+      <div className="bg-gray-50 rounded-lg p-4">
+        <ul className="list-disc list-inside text-gray-700 space-y-2">
+          <li>Slide dimensions are fixed at <strong>1280 x 720 px</strong></li>
+          <li>Each slide is a <code className="px-1.5 py-0.5 bg-gray-200 rounded text-xs font-mono">{'<div class="slide">'}</code> wrapper</li>
+          <li>CSS must go in <code className="px-1.5 py-0.5 bg-gray-200 rounded text-xs font-mono">{'<style>'}</code> blocks (no external links)</li>
+          <li>CSS is shared across all slides in the deck</li>
+        </ul>
+      </div>
+    </section>
+
+    <section>
+      <h2 className="text-lg font-semibold text-gray-800 mb-3">Chart Brand Colors</h2>
+      <p className="text-gray-600 mb-3">
+        Include a hex colour array in your style to brand Chart.js visualizations:
+      </p>
+      <div className="bg-gray-50 rounded-lg p-3">
+        <code className="text-sm text-gray-800">
+          Chart colors: ["#E94560", "#0F3460", "#16213E", "#533483", "#48CFCB"]
+        </code>
+      </div>
+      <p className="text-xs text-gray-500 mt-2">
+        The AI uses this palette for bar, line, pie, and doughnut charts.
+      </p>
+    </section>
+
+    <section>
       <h2 className="text-lg font-semibold text-gray-800 mb-3">Writing Good Style Definitions</h2>
       <div className="grid md:grid-cols-2 gap-4">
         <div className="bg-green-50 rounded-lg p-3">
-          <h4 className="font-medium text-green-800 mb-2">✓ Include</h4>
+          <h4 className="font-medium text-green-800 mb-2">Include</h4>
           <ul className="text-sm text-green-700 space-y-1">
             <li>• Specific font names and sizes</li>
             <li>• Hex or RGB color values</li>
@@ -561,7 +643,7 @@ const SlideStylesTab: React.FC = () => (
           </ul>
         </div>
         <div className="bg-red-50 rounded-lg p-3">
-          <h4 className="font-medium text-red-800 mb-2">✗ Avoid</h4>
+          <h4 className="font-medium text-red-800 mb-2">Avoid</h4>
           <ul className="text-sm text-red-700 space-y-1">
             <li>• Content or data instructions</li>
             <li>• Slide structure definitions</li>
@@ -588,5 +670,104 @@ const SlideStylesTab: React.FC = () => (
       </div>
     </section>
 
+    <DocLink href={DOCS_URLS.customStyles} label="Custom Styles Guide" />
   </div>
+);
+
+// Images Tab Content
+const ImagesTab: React.FC = () => (
+  <div className="space-y-6">
+    <section>
+      <h2 className="text-lg font-semibold text-gray-800 mb-3">Image Library</h2>
+      <p className="text-gray-600 mb-3">
+        The <strong>Images</strong> page stores logos, backgrounds, and content images for use across 
+        all profiles. Uploaded images are saved in the database and available to the AI when generating slides.
+      </p>
+      <div className="bg-gray-50 rounded-lg p-4">
+        <ul className="list-disc list-inside text-gray-700 space-y-2">
+          <li><span className="font-medium">Upload:</span> Drag and drop or browse — PNG, JPEG, GIF, SVG up to 5 MB</li>
+          <li><span className="font-medium">Categorise:</span> Tag images as <em>branding</em>, <em>content</em>, or <em>background</em></li>
+          <li><span className="font-medium">Metadata:</span> Add descriptions and tags so the AI can find the right image</li>
+          <li><span className="font-medium">Delete:</span> Soft-deletes the image and frees the filename for reuse</li>
+        </ul>
+      </div>
+    </section>
+
+    <section>
+      <h2 className="text-lg font-semibold text-gray-800 mb-3">Paste-to-Chat</h2>
+      <p className="text-gray-600 mb-3">
+        Paste an image from your clipboard directly into the chat input. It uploads immediately 
+        and appears as an attachment preview before you send.
+      </p>
+      <div className="bg-blue-50 rounded-lg p-4">
+        <p className="text-blue-800 text-sm mb-2">
+          <strong>Save to library</strong> — a checkbox controls whether pasted images persist:
+        </p>
+        <ul className="list-disc list-inside text-blue-700 text-sm space-y-1">
+          <li><strong>Checked:</strong> Saved to the library with a standard category</li>
+          <li><strong>Unchecked:</strong> Marked as ephemeral and hidden from the default library view</li>
+        </ul>
+      </div>
+    </section>
+
+    <section>
+      <h2 className="text-lg font-semibold text-gray-800 mb-3">Image Guidelines in Slide Styles</h2>
+      <p className="text-gray-600 mb-3">
+        Each Slide Style has an <strong>Image Guidelines</strong> field where you can tell the AI 
+        to place specific images automatically — for example, a company logo on every slide.
+      </p>
+      <div className="bg-amber-50 rounded-lg p-4">
+        <p className="text-gray-700 mb-2">
+          Reference images using <code className="px-1.5 py-0.5 bg-amber-100 rounded text-xs font-mono">{'{{image:ID}}'}</code> placeholders:
+        </p>
+        <pre className="text-sm text-gray-800 bg-amber-100 rounded p-2 mt-2">
+{`Place {{image:5}} as a logo in the top-right corner.
+Use {{image:12}} as the background for the title slide.`}
+        </pre>
+        <p className="text-sm text-gray-600 mt-2">
+          Use the <strong>Insert Image Ref</strong> button in the style editor to pick images from the library.
+        </p>
+      </div>
+    </section>
+
+    <section>
+      <h2 className="text-lg font-semibold text-gray-800 mb-3">How the AI Uses Images</h2>
+      <ol className="list-decimal list-inside text-gray-600 space-y-2">
+        <li>The AI has a <code className="px-1.5 py-0.5 bg-gray-100 rounded text-xs font-mono">search_images</code> tool that returns image metadata (ID, filename, description, tags)</li>
+        <li>It outputs <code className="px-1.5 py-0.5 bg-gray-100 rounded text-xs font-mono">{'{{image:ID}}'}</code> placeholders in the slide HTML</li>
+        <li>The backend substitutes placeholders with embedded image data before the slides reach the browser</li>
+        <li>When image guidelines are set, referenced images are used automatically on every generation</li>
+        <li>When the field is empty, the AI only searches for images if you ask in the chat</li>
+      </ol>
+    </section>
+
+    <section>
+      <h2 className="text-lg font-semibold text-gray-800 mb-3">Tips</h2>
+      <div className="bg-green-50 rounded-lg p-4">
+        <ul className="list-disc list-inside text-gray-700 space-y-2">
+          <li><strong>Use descriptive tags and descriptions</strong> — the AI searches by filename, description, and tags</li>
+          <li><strong>Organise by category</strong> — branding for logos, content for charts, background for slide backgrounds</li>
+          <li><strong>Image guidelines for consistency</strong> — if every deck needs a logo, add it to the style rather than asking each time</li>
+          <li><strong>Paste for one-off images</strong> — use paste-to-chat for images relevant to a single conversation</li>
+        </ul>
+      </div>
+    </section>
+
+    <DocLink href={DOCS_URLS.uploadingImages} label="Uploading Images Guide" />
+  </div>
+);
+
+// Reusable doc link component for tab footers
+const DocLink: React.FC<{ href: string; label: string }> = ({ href, label }) => (
+  <section className="pt-2 border-t border-gray-100">
+    <a
+      href={href}
+      target="_blank"
+      rel="noopener noreferrer"
+      className="inline-flex items-center gap-2 text-sm text-blue-600 hover:text-blue-800 transition-colors"
+    >
+      <FiExternalLink size={14} />
+      View full guide: {label}
+    </a>
+  </section>
 );

@@ -1,6 +1,8 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
+import { FiExternalLink } from 'react-icons/fi';
 import type { ImageAsset } from '../../types/image';
 import { api } from '../../services/api';
+import { DOCS_URLS } from '../../constants/docs';
 
 const MAX_FILE_SIZE = 5 * 1024 * 1024;
 const ALLOWED_TYPES = ['image/png', 'image/jpeg', 'image/gif', 'image/svg+xml'];
@@ -137,8 +139,21 @@ export const ImageLibrary: React.FC<ImageLibraryProps> = ({
   return (
     <div className="space-y-4" data-testid="image-library">
       <div className="flex items-center justify-between">
-        <h2 className="text-xl font-semibold text-gray-900">Image Library</h2>
-        <span className="text-sm text-gray-500">{images.length} image{images.length !== 1 ? 's' : ''}</span>
+        <div>
+          <h2 className="text-xl font-semibold text-gray-900">Image Library</h2>
+          <p className="text-sm text-gray-500 mt-0.5">
+            {images.length} image{images.length !== 1 ? 's' : ''}
+            {' · '}
+            <a
+              href={DOCS_URLS.uploadingImages}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="inline-flex items-center gap-1 text-blue-600 hover:text-blue-800"
+            >
+              View guide <FiExternalLink size={12} />
+            </a>
+          </p>
+        </div>
       </div>
 
       {/* Search + Category Filter */}
