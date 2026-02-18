@@ -453,16 +453,17 @@ export const configApi = {
       method: 'DELETE',
     }),
   
-  // Google OAuth Credentials (per-profile)
+  // Google OAuth Credentials (global, admin-only)
 
   /**
-   * Upload a Google OAuth credentials.json file for a profile.
+   * Upload a Google OAuth credentials.json file (app-wide).
    * Stored encrypted on the server.
    */
-  uploadGoogleCredentials: async (profileId: number, file: File): Promise<{ success: boolean; has_credentials: boolean }> => {
+  uploadGoogleCredentials: async (file: File): Promise<{ success: boolean; has_credentials: boolean }> => {
     const formData = new FormData();
     formData.append('file', file);
-    const response = await fetch(`${API_BASE}/profiles/${profileId}/google-credentials`, {
+    const adminBase = `${API_BASE_URL}/api/admin`;
+    const response = await fetch(`${adminBase}/google-credentials`, {
       method: 'POST',
       body: formData,
     });
@@ -473,15 +474,19 @@ export const configApi = {
     return response.json();
   },
 
-  /** Check whether a profile has Google OAuth credentials uploaded. */
-  getGoogleCredentialsStatus: (profileId: number): Promise<{ has_credentials: boolean }> =>
-    fetchJson(`${API_BASE}/profiles/${profileId}/google-credentials/status`),
+  /** Check whether app-wide Google OAuth credentials exist. */
+  getGoogleCredentialsStatus: (): Promise<{ has_credentials: boolean }> => {
+    const adminBase = `${API_BASE_URL}/api/admin`;
+    return fetchJson(`${adminBase}/google-credentials/status`);
+  },
 
-  /** Remove stored Google OAuth credentials from a profile. */
-  deleteGoogleCredentials: (profileId: number): Promise<void> =>
-    fetchJson(`${API_BASE}/profiles/${profileId}/google-credentials`, {
+  /** Remove stored app-wide Google OAuth credentials. */
+  deleteGoogleCredentials: (): Promise<void> => {
+    const adminBase = `${API_BASE_URL}/api/admin`;
+    return fetchJson(`${adminBase}/google-credentials`, {
       method: 'DELETE',
-    }),
+    });
+  },
 
   // Validation
   

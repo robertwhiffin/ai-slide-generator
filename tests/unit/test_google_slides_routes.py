@@ -17,7 +17,7 @@ from fastapi.testclient import TestClient
 
 from src.core.database import Base, get_db
 from src.core.encryption import encrypt_data
-from src.database.models import ConfigProfile
+from src.database.models import GoogleGlobalCredentials
 
 
 # Sample credentials.json — must include auth_uri/token_uri for Flow.from_client_config
@@ -97,6 +97,7 @@ def _clean_data(db_engine):
     yield
     with db_engine.connect() as conn:
         conn.execute(text("DELETE FROM google_oauth_tokens"))
+        conn.execute(text("DELETE FROM google_global_credentials"))
         conn.execute(text("DELETE FROM config_history"))
         conn.execute(text("DELETE FROM config_genie_spaces"))
         conn.execute(text("DELETE FROM config_prompts"))
@@ -105,29 +106,16 @@ def _clean_data(db_engine):
         conn.commit()
 
 
-def _seed_profile_with_creds(session_factory) -> int:
-    """Insert profile with encrypted Google credentials, return its ID."""
+def _seed_global_credentials(session_factory) -> None:
+    """Insert global Google credentials into GoogleGlobalCredentials table."""
     db = session_factory()
-    p = ConfigProfile(
-        name="creds-profile",
-        created_by="test",
-        google_credentials_encrypted=encrypt_data(VALID_CREDENTIALS),
+    creds = GoogleGlobalCredentials(
+        credentials_encrypted=encrypt_data(VALID_CREDENTIALS),
+        uploaded_by="admin@test.com",
     )
-    db.add(p)
+    db.add(creds)
     db.commit()
-    pid = p.id
     db.close()
-    return pid
-
-
-def _seed_profile(session_factory) -> int:
-    db = session_factory()
-    p = ConfigProfile(name="bare-profile", created_by="test")
-    db.add(p)
-    db.commit()
-    pid = p.id
-    db.close()
-    return pid
 
 
 # ---------------------------------------------------------------------------
@@ -168,22 +156,16 @@ class TestHelpers:
 
 class TestAuthStatus:
 
-    def test_returns_false_for_no_creds(self, test_client, session_factory):
-        pid = _seed_profile(session_factory)
-        resp = test_client.get(
-            "/api/export/google-slides/auth/status",
-            params={"profile_id": pid},
-        )
+    def test_returns_false_for_no_creds(self, test_client):
+        """No global credentials → authorized=false."""
+        resp = test_client.get("/api/export/google-slides/auth/status")
         assert resp.status_code == 200
         assert resp.json()["authorized"] is False
 
     def test_returns_false_with_creds_but_no_token(self, test_client, session_factory):
-        """Profile has credentials but user hasn't authorized yet."""
-        pid = _seed_profile_with_creds(session_factory)
-        resp = test_client.get(
-            "/api/export/google-slides/auth/status",
-            params={"profile_id": pid},
-        )
+        """Global credentials exist but user hasn't authorized yet."""
+        _seed_global_credentials(session_factory)
+        resp = test_client.get("/api/export/google-slides/auth/status")
         assert resp.status_code == 200
         assert resp.json()["authorized"] is False
 
@@ -194,34 +176,19 @@ class TestAuthStatus:
 
 class TestAuthUrl:
 
-    def test_auth_url_no_credentials_returns_400(self, test_client, session_factory):
-        """No credentials → 400."""
-        pid = _seed_profile(session_factory)
-        resp = test_client.get(
-            "/api/export/google-slides/auth/url",
-            params={"profile_id": pid},
-        )
+    def test_auth_url_no_credentials_returns_400(self, test_client):
+        """No global credentials → 400."""
+        resp = test_client.get("/api/export/google-slides/auth/url")
         assert resp.status_code == 400
 
     def test_auth_url_with_credentials(self, test_client, session_factory):
-        """Valid credentials → returns a Google auth URL."""
-        pid = _seed_profile_with_creds(session_factory)
-        resp = test_client.get(
-            "/api/export/google-slides/auth/url",
-            params={"profile_id": pid},
-        )
+        """Global credentials exist → returns a Google auth URL."""
+        _seed_global_credentials(session_factory)
+        resp = test_client.get("/api/export/google-slides/auth/url")
         assert resp.status_code == 200
         data = resp.json()
         assert "url" in data
         assert "accounts.google.com" in data["url"]
-
-    def test_auth_url_missing_profile(self, test_client):
-        """Non-existent profile → 400."""
-        resp = test_client.get(
-            "/api/export/google-slides/auth/url",
-            params={"profile_id": 9999},
-        )
-        assert resp.status_code == 400
 
 
 # ---------------------------------------------------------------------------
@@ -230,29 +197,20 @@ class TestAuthUrl:
 
 class TestExportEndpoint:
 
-    def test_export_no_credentials_returns_400(self, test_client, session_factory):
-        """No credentials → 400."""
-        pid = _seed_profile(session_factory)
+    def test_export_no_credentials_returns_400(self, test_client):
+        """No global credentials → 400."""
         resp = test_client.post(
             "/api/export/google-slides",
-            json={"session_id": "test-session", "profile_id": pid},
+            json={"session_id": "test-session"},
         )
         assert resp.status_code == 400
 
     def test_export_not_authorized_returns_401(self, test_client, session_factory):
-        """Credentials exist but no token → 401."""
-        pid = _seed_profile_with_creds(session_factory)
+        """Global credentials exist but no token → 401."""
+        _seed_global_credentials(session_factory)
         resp = test_client.post(
             "/api/export/google-slides",
-            json={"session_id": "test-session", "profile_id": pid},
+            json={"session_id": "test-session"},
         )
         assert resp.status_code == 401
         assert "OAuth" in resp.json()["detail"]
-
-    def test_export_missing_profile(self, test_client):
-        """Non-existent profile → 400."""
-        resp = test_client.post(
-            "/api/export/google-slides",
-            json={"session_id": "s", "profile_id": 9999},
-        )
-        assert resp.status_code == 400

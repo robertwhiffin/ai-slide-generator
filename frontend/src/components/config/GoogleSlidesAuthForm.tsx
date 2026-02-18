@@ -78,11 +78,7 @@ const RedirectUriCopyBox: React.FC = () => {
   );
 };
 
-interface GoogleSlidesAuthFormProps {
-  profileId: number;
-}
-
-export const GoogleSlidesAuthForm: React.FC<GoogleSlidesAuthFormProps> = ({ profileId }) => {
+export const GoogleSlidesAuthForm: React.FC = () => {
   // --- Credentials state ---
   const [hasCredentials, setHasCredentials] = useState<boolean | null>(null);
   const [loadingStatus, setLoadingStatus] = useState(true);
@@ -109,12 +105,12 @@ export const GoogleSlidesAuthForm: React.FC<GoogleSlidesAuthFormProps> = ({ prof
   const loadStatuses = useCallback(async () => {
     setLoadingStatus(true);
     try {
-      const { has_credentials } = await configApi.getGoogleCredentialsStatus(profileId);
+      const { has_credentials } = await configApi.getGoogleCredentialsStatus();
       setHasCredentials(has_credentials);
 
       if (has_credentials) {
         setCheckingAuth(true);
-        const { authorized: auth } = await api.checkGoogleSlidesAuth(profileId);
+        const { authorized: auth } = await api.checkGoogleSlidesAuth();
         setAuthorized(auth);
         setCheckingAuth(false);
       } else {
@@ -125,7 +121,7 @@ export const GoogleSlidesAuthForm: React.FC<GoogleSlidesAuthFormProps> = ({ prof
     } finally {
       setLoadingStatus(false);
     }
-  }, [profileId]);
+  }, []);
 
   useEffect(() => {
     loadStatuses();
@@ -146,12 +142,12 @@ export const GoogleSlidesAuthForm: React.FC<GoogleSlidesAuthFormProps> = ({ prof
     setCredSuccess(null);
 
     try {
-      await configApi.uploadGoogleCredentials(profileId, file);
+      await configApi.uploadGoogleCredentials(file);
       setHasCredentials(true);
       setCredSuccess('Credentials uploaded and encrypted successfully');
       // Re-check auth status (token may already exist from previous upload)
       setCheckingAuth(true);
-      const { authorized: auth } = await api.checkGoogleSlidesAuth(profileId);
+      const { authorized: auth } = await api.checkGoogleSlidesAuth();
       setAuthorized(auth);
       setCheckingAuth(false);
     } catch (err) {
@@ -170,13 +166,13 @@ export const GoogleSlidesAuthForm: React.FC<GoogleSlidesAuthFormProps> = ({ prof
   };
 
   const handleDeleteCredentials = async () => {
-    if (!confirm('Remove Google OAuth credentials from this profile? Existing user tokens will become unusable.')) return;
+    if (!confirm('Remove Google OAuth credentials? Existing user tokens will become unusable.')) return;
 
     setDeleting(true);
     setCredError(null);
     setCredSuccess(null);
     try {
-      await configApi.deleteGoogleCredentials(profileId);
+      await configApi.deleteGoogleCredentials();
       setHasCredentials(false);
       setAuthorized(null);
       setCredSuccess('Credentials removed');
@@ -217,7 +213,7 @@ export const GoogleSlidesAuthForm: React.FC<GoogleSlidesAuthFormProps> = ({ prof
     setAuthError(null);
 
     try {
-      const authResult = await openOAuthPopup(profileId);
+      const authResult = await openOAuthPopup();
       setAuthorized(authResult);
       if (!authResult) {
         setAuthError('Authorization was not completed');

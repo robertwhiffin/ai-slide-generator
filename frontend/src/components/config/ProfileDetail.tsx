@@ -12,7 +12,6 @@ import React, { useEffect, useState } from 'react';
 import type { ProfileDetail, DeckPrompt, SlideStyle } from '../../api/config';
 import { configApi, ConfigApiError } from '../../api/config';
 import { ConfigTabs } from './ConfigTabs';
-import { api } from '../../services/api';
 
 type ViewMode = 'view' | 'edit';
 
@@ -33,9 +32,6 @@ export const ProfileDetailView: React.FC<ProfileDetailProps> = ({
   const [mode, setMode] = useState<ViewMode>(initialMode);
   const [deckPrompt, setDeckPrompt] = useState<DeckPrompt | null>(null);
   const [slideStyle, setSlideStyle] = useState<SlideStyle | null>(null);
-  const [hasGoogleCreds, setHasGoogleCreds] = useState<boolean>(false);
-  const [googleAuthorized, setGoogleAuthorized] = useState<boolean>(false);
-  
   // Editable profile metadata
   const [editedName, setEditedName] = useState('');
   const [editedDescription, setEditedDescription] = useState('');
@@ -76,18 +72,6 @@ export const ProfileDetailView: React.FC<ProfileDetailProps> = ({
           }
         } else {
           setDeckPrompt(null);
-        }
-        
-        // Load Google credentials status
-        try {
-          const { has_credentials } = await configApi.getGoogleCredentialsStatus(profileId);
-          setHasGoogleCreds(has_credentials);
-          if (has_credentials) {
-            const { authorized } = await api.checkGoogleSlidesAuth(profileId);
-            setGoogleAuthorized(authorized);
-          }
-        } catch {
-          setHasGoogleCreds(false);
         }
       } catch (err) {
         const message = err instanceof ConfigApiError 
@@ -352,29 +336,6 @@ export const ProfileDetailView: React.FC<ProfileDetailProps> = ({
                 <div>
                   <label className="text-xs font-medium text-gray-500 uppercase">Max Tokens</label>
                   <p className="text-sm text-gray-900 mt-1">{profile.ai_infra.llm_max_tokens}</p>
-                </div>
-              </div>
-            </div>
-          </div>
-
-          {/* Google Slides */}
-          <div className="mb-6">
-            <h3 className="text-lg font-semibold text-gray-900 mb-3 flex items-center gap-2">
-              <span className="text-indigo-600">📊</span> Google Slides
-            </h3>
-            <div className="bg-gray-50 rounded p-4">
-              <div className="grid grid-cols-2 gap-4">
-                <div>
-                  <label className="text-xs font-medium text-gray-500 uppercase">Credentials</label>
-                  <p className={`text-sm mt-1 font-medium ${hasGoogleCreds ? 'text-green-600' : 'text-gray-400'}`}>
-                    {hasGoogleCreds ? 'Uploaded' : 'Not configured'}
-                  </p>
-                </div>
-                <div>
-                  <label className="text-xs font-medium text-gray-500 uppercase">Authorization</label>
-                  <p className={`text-sm mt-1 font-medium ${googleAuthorized ? 'text-green-600' : 'text-gray-400'}`}>
-                    {hasGoogleCreds ? (googleAuthorized ? 'Authorized' : 'Not authorized') : '—'}
-                  </p>
                 </div>
               </div>
             </div>
