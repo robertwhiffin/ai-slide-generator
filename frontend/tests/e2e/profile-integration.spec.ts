@@ -475,7 +475,7 @@ test.describe('Profile Validation', () => {
 
       // Should show error - use more specific selector to avoid matching "Duplicate" buttons
       await expect(
-        page.getByText(/already exists/i).or(page.locator('.text-red-500, .text-red-600, [role="alert"]'))
+        page.getByText(/already exists/i).or(page.locator('.text-red-600, [role="alert"]'))
       ).toBeVisible({ timeout: 5000 });
     } finally {
       await deleteTestProfileViaAPI(request, profile.id);
@@ -509,7 +509,7 @@ test.describe('Profile Validation', () => {
 
       // Should show error - use more specific selector to avoid matching "Duplicate" buttons
       await expect(
-        page.getByText(/already exists/i).or(page.locator('.text-red-500, .text-red-600, [role="alert"]'))
+        page.getByText(/already exists/i).or(page.locator('.text-red-600, [role="alert"]'))
       ).toBeVisible({ timeout: 5000 });
     } finally {
       await deleteTestProfileViaAPI(request, profile1.id);
