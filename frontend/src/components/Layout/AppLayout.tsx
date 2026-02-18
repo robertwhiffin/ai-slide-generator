@@ -117,9 +117,9 @@ export const AppLayout: React.FC = () => {
         currentSessionId={sessionId}
         profileName={currentProfile?.name}
       />
-      <SidebarInset className="overflow-hidden">
+      <SidebarInset className="flex flex-col overflow-hidden">
         {viewMode === 'main' && (
-          <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
+          <>
             <PageHeader
               title={sessionTitle || 'Untitled session'}
               subtitle={getSubtitle()}
@@ -142,8 +142,8 @@ export const AppLayout: React.FC = () => {
               />
             )}
 
-            <div className="flex min-h-0 h-0 flex-1 overflow-hidden">
-              <div className="h-full w-[32%] min-w-[260px] border-r border-border bg-card">
+            <div className="flex min-h-0 flex-1 overflow-hidden">
+              <div className="flex min-h-0 w-[32%] min-w-[260px] flex-col border-r border-border bg-card">
                 <ChatPanel
                   key={chatKey}
                   ref={chatPanelRef}
@@ -157,7 +157,7 @@ export const AppLayout: React.FC = () => {
 
               <SelectionRibbon slideDeck={slideDeck} onSlideNavigate={handleSlideNavigate} />
 
-              <div className="h-full flex-1 bg-background">
+              <div className="flex min-h-0 flex-1 flex-col bg-background">
                 <SlidePanel
                   slideDeck={slideDeck}
                   rawHtml={rawHtml}
@@ -167,11 +167,11 @@ export const AppLayout: React.FC = () => {
                 />
               </div>
             </div>
-          </div>
+          </>
         )}
 
         {viewMode === 'history' && (
-          <div className="flex flex-1 flex-col overflow-hidden">
+          <>
             <SimplePageHeader title="History" />
             <div className="flex-1 overflow-y-auto">
               <div className="mx-auto w-full max-w-4xl px-4 py-8">
@@ -181,51 +181,51 @@ export const AppLayout: React.FC = () => {
                 />
               </div>
             </div>
-          </div>
+          </>
         )}
 
         {viewMode === 'profiles' && (
-          <div className="flex flex-1 flex-col overflow-hidden">
+          <>
             <SimplePageHeader title="Agent Profiles" />
             <div className="flex-1 overflow-y-auto">
               <div className="mx-auto w-full max-w-4xl px-4 py-8">
                 <ProfileList onProfileChange={handleProfileChange} />
               </div>
             </div>
-          </div>
+          </>
         )}
 
         {viewMode === 'deck_prompts' && (
-          <div className="flex flex-1 flex-col overflow-hidden">
+          <>
             <SimplePageHeader title="Deck Prompts" />
             <div className="flex-1 overflow-y-auto">
               <div className="mx-auto w-full max-w-4xl px-4 py-8">
                 <DeckPromptList />
               </div>
             </div>
-          </div>
+          </>
         )}
 
         {viewMode === 'slide_styles' && (
-          <div className="flex flex-1 flex-col overflow-hidden">
+          <>
             <SimplePageHeader title="Slide Styles" />
             <div className="flex-1 overflow-y-auto">
               <div className="mx-auto w-full max-w-4xl px-4 py-8">
                 <SlideStyleList />
               </div>
             </div>
-          </div>
+          </>
         )}
 
         {viewMode === 'help' && (
-          <div className="flex flex-1 flex-col overflow-hidden">
+          <>
             <SimplePageHeader title="Help" />
             <div className="flex-1 overflow-y-auto">
               <div className="mx-auto w-full max-w-4xl px-4 py-8">
                 <HelpPage onBack={() => setViewMode('main')} />
               </div>
             </div>
-          </div>
+          </>
         )}
       </SidebarInset>
 
