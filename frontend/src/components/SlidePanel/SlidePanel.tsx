@@ -49,7 +49,8 @@ export interface SlidePanelHandle {
 
 type ViewMode = 'tiles' | 'rawhtml' | 'rawtext';
 
-export const SlidePanel = forwardRef<SlidePanelHandle, SlidePanelProps>(function SlidePanel({ slideDeck, rawHtml, onSlideChange, scrollToSlide, onSendMessage }, ref) {
+function SlidePanelComponent(props: SlidePanelProps, ref: React.Ref<SlidePanelHandle>) {
+  const { slideDeck, rawHtml, onSlideChange, scrollToSlide, onSendMessage } = props;
   const [isReordering, setIsReordering] = useState(false);
   const [viewMode, setViewMode] = useState<ViewMode>('tiles');
   const [isExportingPDF, setIsExportingPDF] = useState(false);
@@ -568,6 +569,7 @@ export const SlidePanel = forwardRef<SlidePanelHandle, SlidePanelProps>(function
               {isAutoVerifying && ` • Verifying ${verifyingSlides.size} slide${verifyingSlides.size !== 1 ? 's' : ''}...`}
             </p>
           </div>
+        </div>
 
         {/* Tab Navigation */}
         <div className="flex border-t">
@@ -706,4 +708,6 @@ export const SlidePanel = forwardRef<SlidePanelHandle, SlidePanelProps>(function
       )}
     </div>
   );
-});
+}
+
+export const SlidePanel = forwardRef(SlidePanelComponent);
