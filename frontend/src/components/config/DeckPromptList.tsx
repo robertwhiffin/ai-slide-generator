@@ -8,10 +8,12 @@
  */
 
 import React, { useState, useEffect, useCallback } from 'react';
+import { FiExternalLink } from 'react-icons/fi';
 import { configApi } from '../../api/config';
 import type { DeckPrompt, DeckPromptCreate, DeckPromptUpdate } from '../../api/config';
 import { DeckPromptForm } from './DeckPromptForm';
 import { ConfirmDialog } from './ConfirmDialog';
+import { DOCS_URLS } from '../../constants/docs';
 
 export const DeckPromptList: React.FC = () => {
   const [prompts, setPrompts] = useState<DeckPrompt[]>([]);
@@ -137,6 +139,15 @@ export const DeckPromptList: React.FC = () => {
           <h2 className="text-2xl font-semibold text-gray-900">Deck Prompt Library</h2>
           <p className="text-sm text-gray-600 mt-1">
             Manage reusable presentation templates. These prompts guide the AI in creating specific types of presentations.
+            {' '}
+            <a
+              href={DOCS_URLS.advancedConfig}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="inline-flex items-center gap-1 text-blue-600 hover:text-blue-800"
+            >
+              View guide <FiExternalLink size={12} />
+            </a>
           </p>
         </div>
         <button

@@ -5,9 +5,12 @@
  */
 
 import React, { useState, useEffect, useRef } from 'react';
+import { FiExternalLink } from 'react-icons/fi';
 import Editor from '@monaco-editor/react';
 import type { SlideStyle, SlideStyleCreate, SlideStyleUpdate } from '../../api/config';
 import { ImagePicker } from '../ImageLibrary/ImagePicker';
+import { ExpandableEditor } from './ExpandableEditor';
+import { DOCS_URLS } from '../../constants/docs';
 
 interface SlideStyleFormProps {
   isOpen: boolean;
@@ -34,6 +37,15 @@ export const SlideStyleForm: React.FC<SlideStyleFormProps> = ({
   const [showImagePicker, setShowImagePicker] = useState(false);
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const imageGuidelinesEditorRef = useRef<any>(null);
+
+  useEffect(() => {
+    if (!isOpen) return;
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' && !saving && !showImagePicker) onCancel();
+    };
+    document.addEventListener('keydown', handleKeyDown);
+    return () => document.removeEventListener('keydown', handleKeyDown);
+  }, [isOpen, saving, showImagePicker, onCancel]);
 
   // Reset form when opening
   useEffect(() => {
@@ -202,25 +214,24 @@ export const SlideStyleForm: React.FC<SlideStyleFormProps> = ({
               <label className="block text-sm font-medium text-gray-700 mb-1">
                 Style Content <span className="text-red-500">*</span>
               </label>
-              <div className="border border-gray-300 rounded overflow-hidden">
-                <Editor
-                  height="300px"
-                  defaultLanguage="markdown"
-                  value={styleContent}
-                  onChange={(value) => setStyleContent(value || '')}
-                  options={{
-                    minimap: { enabled: false },
-                    wordWrap: 'on',
-                    lineNumbers: 'on',
-                    scrollBeyondLastLine: false,
-                    fontSize: 13,
-                    readOnly: saving,
-                  }}
-                />
-              </div>
+              <ExpandableEditor
+                value={styleContent}
+                onChange={setStyleContent}
+                readOnly={saving}
+                modalTitle="Style Content"
+              />
               <p className="text-xs text-gray-500 mt-1">
                 Define typography, colors, layout rules, and visual guidelines.
                 Include font sizes, color codes, spacing, and chart color palettes.
+                {' '}
+                <a
+                  href={DOCS_URLS.customStylesCSS}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="inline-flex items-center gap-1 text-blue-600 hover:text-blue-800"
+                >
+                  CSS reference <FiExternalLink size={10} />
+                </a>
               </p>
             </div>
 
@@ -245,7 +256,7 @@ export const SlideStyleForm: React.FC<SlideStyleFormProps> = ({
                   Insert Image Ref
                 </button>
               </div>
-              <div className="border border-gray-300 rounded overflow-hidden">
+              <div className="relative border border-gray-300 rounded overflow-hidden">
                 <Editor
                   height="150px"
                   defaultLanguage="markdown"
@@ -266,6 +277,15 @@ export const SlideStyleForm: React.FC<SlideStyleFormProps> = ({
                 Specify which images to include on slides (e.g. logos, backgrounds).
                 Use "Insert Image Ref" to add image IDs. When set, the agent uses these images
                 automatically without searching. Leave blank to skip image injection.
+                {' '}
+                <a
+                  href={DOCS_URLS.imageGuidelines}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="inline-flex items-center gap-1 text-blue-600 hover:text-blue-800"
+                >
+                  Image guidelines guide <FiExternalLink size={10} />
+                </a>
               </p>
             </div>
           </div>

@@ -13,8 +13,9 @@
  */
 
 import React, { useState, useEffect } from 'react';
-import { FiCheck, FiChevronLeft, FiChevronRight, FiX, FiInfo } from 'react-icons/fi';
+import { FiCheck, FiChevronLeft, FiChevronRight, FiX, FiInfo, FiExternalLink } from 'react-icons/fi';
 import { configApi, type DeckPrompt, type SlideStyle, type AvailableGenieSpaces } from '../../api/config';
+import { DOCS_URLS } from '../../constants/docs';
 
 // Wizard step definitions (5 steps - LLM uses backend defaults)
 const STEPS = [
@@ -78,6 +79,15 @@ export const ProfileCreationWizard: React.FC<ProfileCreationWizardProps> = ({
   
   // Submission
   const [isSubmitting, setIsSubmitting] = useState(false);
+
+  useEffect(() => {
+    if (!isOpen) return;
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' && !isSubmitting) onClose();
+    };
+    document.addEventListener('keydown', handleKeyDown);
+    return () => document.removeEventListener('keydown', handleKeyDown);
+  }, [isOpen, isSubmitting, onClose]);
   const [error, setError] = useState<string | null>(null);
   
   // Manual Genie space lookup
@@ -508,6 +518,15 @@ export const ProfileCreationWizard: React.FC<ProfileCreationWizardProps> = ({
                 <h3 className="text-lg font-medium text-gray-900 mb-2">Slide Style <span className="text-red-500">*</span></h3>
                 <p className="text-sm text-gray-500 mb-4">
                   Choose a visual style for your slides. This controls typography, colors, and layout.
+                  {' '}
+                  <a
+                    href={DOCS_URLS.customStyles}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="inline-flex items-center gap-1 text-blue-600 hover:text-blue-800"
+                  >
+                    Learn about styles &amp; image guidelines <FiExternalLink size={12} />
+                  </a>
                 </p>
               </div>
 
