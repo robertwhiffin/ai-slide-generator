@@ -46,7 +46,7 @@ export class UserGuideCapture {
   private workflow: string;
   private steps: WorkflowStep[] = [];
 
-  constructor(page: Page, workflow: '01-generating-slides' | '02-creating-profiles' | '03-advanced-configuration') {
+  constructor(page: Page, workflow: '01-generating-slides' | '02-creating-profiles' | '03-advanced-configuration' | '04-retrieving-feedback' | '06-uploading-images' | '07-exporting-to-google-slides') {
     this.page = page;
     this.workflow = workflow;
   }
@@ -254,4 +254,21 @@ export async function goToSlideStyles(page: Page): Promise<void> {
   await page.goto('/');
   await page.getByRole('navigation').getByRole('button', { name: 'Slide Styles' }).click();
   await expect(page.getByRole('heading', { name: 'Slide Style Library' })).toBeVisible();
+}
+
+/**
+ * Navigate to the Image Library page.
+ */
+export async function goToImageLibrary(page: Page): Promise<void> {
+  await page.goto('/');
+  await page.getByRole('navigation').getByRole('button', { name: 'Images' }).click();
+  await expect(page.getByRole('heading', { name: 'Image Library' })).toBeVisible();
+}
+
+/**
+ * Navigate to the Admin page.
+ */
+export async function goToAdmin(page: Page): Promise<void> {
+  await page.goto('/admin');
+  await expect(page.getByRole('heading', { name: 'Admin' })).toBeVisible();
 }

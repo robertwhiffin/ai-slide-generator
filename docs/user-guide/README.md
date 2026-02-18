@@ -9,7 +9,10 @@ Welcome to the Databricks Tellr user guide. This documentation covers the main w
 | [Generating Slides](./01-generating-slides.md) | Learn how to create presentations using AI-powered slide generation |
 | [Creating Profiles](./02-creating-profiles.md) | Set up configuration profiles linking Genie rooms, styles, and prompts |
 | [Advanced Configuration](./03-advanced-configuration.md) | Manage deck prompts and slide styles for customized output |
-| [Retrieving Feedback](./04-retrieving-feedback.md) | Access user feedback, survey results, and productivity metrics via the reporting API |
+| [Creating Custom Styles](./05-creating-custom-styles.md) | CSS reference, constraints, and converting existing templates into styles |
+| [Uploading Images](./06-uploading-images.md) | Upload, organise, and embed images in AI-generated slides |
+| [Exporting to Google Slides](./07-exporting-to-google-slides.md) | Set up Google OAuth and export decks to Google Slides |
+| [Retrieving Feedback](./04-retrieving-feedback.md) | View the Feedback Dashboard, survey metrics, and AI-generated summaries |
 
 ## Quick Start
 
