@@ -117,9 +117,9 @@ export const AppLayout: React.FC = () => {
         currentSessionId={sessionId}
         profileName={currentProfile?.name}
       />
-      <SidebarInset>
+      <SidebarInset className="overflow-hidden">
         {viewMode === 'main' && (
-          <div className="flex flex-1 flex-col overflow-hidden">
+          <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
             <PageHeader
               title={sessionTitle || 'Untitled session'}
               subtitle={getSubtitle()}
@@ -142,7 +142,7 @@ export const AppLayout: React.FC = () => {
               />
             )}
 
-            <div className="flex flex-1 overflow-hidden">
+            <div className="flex min-h-0 h-0 flex-1 overflow-hidden">
               <div className="h-full w-[32%] min-w-[260px] border-r border-border bg-card">
                 <ChatPanel
                   key={chatKey}
