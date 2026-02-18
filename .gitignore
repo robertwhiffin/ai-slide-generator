@@ -50,6 +50,7 @@ output/
 # Database files (PostgreSQL via YAML is the source of truth)
 *.db
 *.db.backup*
+file:memdb_*
 
 # Auto-generated version file (setuptools-scm)
 src/_version.py
