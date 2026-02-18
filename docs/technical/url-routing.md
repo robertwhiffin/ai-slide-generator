@@ -204,7 +204,7 @@ Toasts auto-dismiss after 5 seconds. Rendered at `fixed bottom-4 right-4` with `
 1. User clicks "New Session" nav button
 2. `createNewSession()` generates local UUID (sync)
 3. `api.createSession({ sessionId: newId })` persists to database
-4. `navigate(`/sessions/${newId}/edit`)` updates URL
+4. `navigate()` updates URL to `/sessions/{newId}/edit`
 5. `AppLayout` mounts with `initialView="main"`, `urlSessionId` = new ID
 6. `urlSessionId === sessionId` → skip loading (already in context)
 7. User sees empty chat + empty slide panel
@@ -303,4 +303,4 @@ No additional configuration needed. The backend's existing SPA catch-all in `src
 - [Frontend Overview](frontend-overview.md) — UI/state patterns and backend touchpoints
 - [Save Points / Versioning](save-points-versioning.md) — Version preview and restore (interacts with session loading)
 - [Multi-User Concurrency](multi-user-concurrency.md) — Session locking (edit mode only, view mode is lock-free)
-- [Design Document](../plans/2026-02-11-url-routing-design.md) — Original brainstorming and design decisions
+- Design Document — Original brainstorming and design decisions (internal plan, not published)
