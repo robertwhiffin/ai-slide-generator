@@ -6,108 +6,151 @@ This guide explains how to access and analyse user feedback and satisfaction sur
 
 Tellr collects two types of user feedback:
 
-- **Feedback conversations** — Structured summaries from the AI feedback widget, categorised by type (Bug Report, Feature Request, UX Issue, Performance, Content Quality, Other) and severity (Low, Medium, High).
 - **Survey responses** — Star ratings (1-5), time-saved estimates, and NPS scores (0-10) from the post-generation satisfaction survey.
+- **Feedback conversations** — Structured summaries from the AI feedback widget, categorised by type (Bug Report, Feature Request, UX Issue, Performance, Content Quality, Other) and severity (Low, Medium, High).
 
-Both are stored anonymously in the database and accessible via the reporting API.
+Both are stored anonymously in the database. The primary way to view this data is the **Feedback Dashboard** on the Admin page. For programmatic access, a reporting API and direct database queries are also available.
 
 ## Prerequisites
 
-- Access to the Tellr application (or direct API access)
-- For direct API calls: a tool like `curl`, Postman, or a Python script
+- Access to the Tellr application
 
 ---
 
-## Option 1: Weekly Stats Report
+## The Feedback Dashboard
 
-The stats endpoint returns weekly aggregated metrics, useful for dashboards and trend tracking.
+The Admin page includes a Feedback Dashboard that displays aggregated survey metrics and an AI-generated summary of recent feedback.
 
-### Request
+### Step 01: Open the Admin Page
+
+Navigate to `/admin`. The Feedback tab is selected by default.
+
+![Admin page with Feedback tab](images/04-retrieving-feedback/01-admin-feedback-tab.png)
+
+### Step 02: Review Summary Metrics
+
+The top of the dashboard shows six summary cards covering the entire reporting period:
+
+![Summary metric cards](images/04-retrieving-feedback/02-summary-cards.png)
+
+| Card | Description |
+|------|-------------|
+| Distinct Users | Number of unique users who submitted surveys |
+| Total Sessions | Total slide generation sessions recorded |
+| Survey Responses | Total number of survey submissions |
+| Avg Star Rating | Overall satisfaction out of 5 |
+| Avg NPS Score | Net Promoter Score average (0-10) |
+| Total Time Saved | Cumulative self-reported time savings |
+
+### Step 03: View Weekly Survey Stats
+
+The **Weekly Survey Stats** table breaks down survey responses by week, showing average star rating, average NPS, and time saved per week. Use the **Weeks** dropdown to adjust the time window (4, 8, 12, 26, or 52 weeks).
+
+![Weekly Survey Stats table](images/04-retrieving-feedback/03-weekly-stats.png)
+
+### Step 04: Read the AI Feedback Summary
+
+The **AI Feedback Summary** section uses an LLM to analyse recent feedback conversations and produce a narrative summary. It includes:
+
+- A natural language summary of themes and common issues
+- **Top Themes** — The most frequently mentioned topics
+- **Category Breakdown** — Pill-style tags showing the count of feedback items per category
+
+Use the **Weeks** dropdown to adjust the summary period (2, 4, 8, or 12 weeks).
+
+![AI Feedback Summary](images/04-retrieving-feedback/04-ai-summary.png)
+
+### Understanding NPS Scores
+
+Net Promoter Score classifies respondents into three groups:
+
+| Score | Classification | Meaning |
+|-------|---------------|---------|
+| 9-10 | Promoter | Enthusiastic, likely to recommend |
+| 7-8 | Passive | Satisfied but not enthusiastic |
+| 0-6 | Detractor | Unhappy, unlikely to recommend |
+
+NPS = % Promoters minus % Detractors. A positive NPS indicates more promoters than detractors.
+
+---
+
+## Reporting API
+
+For programmatic access or automated reporting, the same data is available via REST endpoints.
+
+### Weekly Stats
 
 ```
 GET /api/feedback/report/stats?weeks=12
 ```
 
-The `weeks` parameter is optional and defaults to 12 (returns the last 12 weeks of data).
-
-### Response
+Returns weekly aggregated metrics and overall totals. The `weeks` parameter defaults to 12.
 
 ```json
 {
   "weeks": [
     {
-      "week_start": "2026-02-09T00:00:00",
+      "week_start": "2026-02-09",
+      "week_end": "2026-02-15",
+      "responses": 15,
       "avg_star_rating": 4.3,
       "avg_nps_score": 8.1,
       "total_time_saved_minutes": 960,
-      "survey_count": 15,
-      "feedback_count": 7
+      "time_saved_display": "16h 0m"
     }
   ],
   "totals": {
+    "total_responses": 87,
     "avg_star_rating": 4.2,
     "avg_nps_score": 7.8,
     "total_time_saved_minutes": 5400,
-    "total_surveys": 87,
-    "total_feedback": 34
+    "time_saved_display": "90h 0m"
+  },
+  "usage": {
+    "total_sessions": 142,
+    "distinct_users": 23
   }
 }
 ```
 
-### Key Metrics
-
-| Metric | Description | How to use it |
-|--------|-------------|---------------|
-| `avg_star_rating` | Average out of 5 | Overall satisfaction score |
-| `avg_nps_score` | Average 0-10 | Net Promoter Score (detractors: 0-6, passives: 7-8, promoters: 9-10) |
-| `total_time_saved_minutes` | Sum of self-reported time savings | Quantify productivity impact |
-| `survey_count` | Number of survey submissions that week | Track engagement |
-| `feedback_count` | Number of feedback conversations submitted | Track issue volume |
-
----
-
-## Option 2: AI-Generated Feedback Summary
-
-The summary endpoint uses an LLM to analyse recent feedback conversations and produce a narrative summary of themes, common issues, and suggestions.
-
-### Request
+### AI Summary
 
 ```
 GET /api/feedback/report/summary?weeks=4
 ```
 
-The `weeks` parameter is optional and defaults to 4.
-
-### Response
+Returns an LLM-generated narrative summary. The `weeks` parameter defaults to 4.
 
 ```json
 {
-  "summary": "Over the past 4 weeks, users submitted 12 feedback items. The most common theme was Feature Requests (5), primarily asking for template customisation options. Three Bug Reports mentioned text overflow on chart slides. Two UX Issues related to the profile switcher being hard to find. Overall sentiment is positive with users particularly appreciating the speed of generation.",
+  "period": "Last 4 weeks",
   "feedback_count": 12,
-  "period_weeks": 4
+  "summary": "Over the past 4 weeks, users submitted 12 feedback items...",
+  "top_themes": ["Template customisation", "Chart formatting"],
+  "category_breakdown": {"Feature Request": 5, "Bug Report": 3, "UX Issue": 2}
 }
 ```
 
 ---
 
-## Option 3: Direct Database Queries
+## Direct Database Queries
 
 For advanced analysis, query the database tables directly.
 
-### Feedback Conversations Table
-
-```sql
-SELECT category, severity, summary, created_at
-FROM feedback_conversations
-ORDER BY created_at DESC
-LIMIT 50;
-```
-
-### Survey Responses Table
+### Survey Responses
 
 ```sql
 SELECT star_rating, time_saved_minutes, nps_score, created_at
 FROM survey_responses
+ORDER BY created_at DESC
+LIMIT 50;
+```
+
+### Feedback Conversations
+
+```sql
+SELECT category, severity, summary, created_at
+FROM feedback_conversations
 ORDER BY created_at DESC
 LIMIT 50;
 ```
@@ -128,29 +171,18 @@ GROUP BY DATE_TRUNC('month', created_at)
 ORDER BY month DESC;
 ```
 
-### Example: Feedback by Category
-
-```sql
-SELECT
-  category,
-  severity,
-  COUNT(*) AS count
-FROM feedback_conversations
-GROUP BY category, severity
-ORDER BY count DESC;
-```
-
 ---
 
 ## Tips
 
-- **Automate weekly reports** — Call `GET /api/feedback/report/stats` from a scheduled job and post results to Slack or email.
-- **Track trends** — The `weeks` array in the stats response is chronologically ordered, making it easy to chart trends over time.
-- **NPS calculation** — NPS = % Promoters (9-10) minus % Detractors (0-6). Use the direct SQL query for precise calculations.
-- **Time savings ROI** — Multiply `total_time_saved_minutes` by an average hourly rate to quantify ROI in monetary terms.
-- **Combine both endpoints** — Use the stats endpoint for numbers and the summary endpoint for qualitative insights in management reports.
+- **Start with the dashboard** — The Admin page gives you an at-a-glance view without needing API tools
+- **Adjust time windows** — Use the Weeks dropdowns to focus on recent trends or longer-term patterns
+- **Automate weekly reports** — Call `GET /api/feedback/report/stats` from a scheduled job and post results to Slack or email
+- **Time savings ROI** — Multiply total time saved by an average hourly rate to quantify ROI in monetary terms
+- **Combine stats and summary** — Use the stats endpoint for numbers and the summary endpoint for qualitative insights in management reports
 
 ## Related Guides
 
 - [Generating Slides](./01-generating-slides.md) — The workflow that triggers the satisfaction survey
+- [Exporting to Google Slides](./07-exporting-to-google-slides.md) — The Admin page also hosts Google Slides configuration
 - [Advanced Configuration](./03-advanced-configuration.md) — Configure profiles and styles
