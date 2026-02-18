@@ -29,6 +29,7 @@ interface AppSidebarProps extends React.ComponentProps<typeof Sidebar> {
   onNewSession: () => void
   currentSessionId?: string | null
   profileName?: string
+  sessionsRefreshKey?: number
 }
 
 const navMainItems = [
@@ -69,6 +70,7 @@ export function AppSidebar({
   onNewSession,
   currentSessionId,
   profileName,
+  sessionsRefreshKey,
   ...props
 }: AppSidebarProps) {
   return (
@@ -92,6 +94,7 @@ export function AppSidebar({
           onSessionSelect={onSessionSelect}
           onViewAll={() => onViewChange('history')}
           currentSessionId={currentSessionId}
+          refreshKey={sessionsRefreshKey}
         />
       </SidebarContent>
       <SidebarFooter>

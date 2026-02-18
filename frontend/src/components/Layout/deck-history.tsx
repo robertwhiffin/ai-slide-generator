@@ -27,12 +27,14 @@ interface DeckHistoryProps {
   onSessionSelect: (sessionId: string) => void
   onViewAll: () => void
   currentSessionId?: string | null
+  refreshKey?: number
 }
 
 export function DeckHistory({
   onSessionSelect,
   onViewAll,
   currentSessionId,
+  refreshKey,
 }: DeckHistoryProps) {
   const { isMobile } = useSidebar()
   const [sessions, setSessions] = useState<Session[]>([])
@@ -42,7 +44,7 @@ export function DeckHistory({
     api.listSessions(5)
       .then(result => setSessions(result.sessions))
       .catch(err => console.error('Failed to load sessions:', err))
-  }, [currentSessionId]) // Reload when current session changes
+  }, [currentSessionId, refreshKey]) // Reload when current session changes or refresh is triggered
 
   const handleDelete = async (sessionId: string, e: React.MouseEvent) => {
     e.stopPropagation()
