@@ -128,27 +128,15 @@ The Corporate Theme style applies professional styling and typography.
 
 ### CSS Style Guidelines
 
-When creating custom styles, consider:
+A slide style can contain natural language guidance, raw CSS, or both. The AI reads the style and generates matching HTML and CSS.
 
-```css
-/* Slide container */
-.slide-container {
-  padding: 40px;
-  font-family: 'Inter', sans-serif;
-}
+Key points:
+- Slides are rendered at a fixed **1280×720px** canvas
+- All CSS lives in a shared `<style>` block across the entire deck
+- You can paste a complete stylesheet, use CSS variables, and `@import` Google Fonts
+- Do **not** instruct the AI to use presentation frameworks (reveal.js, Slidev, etc.) or change the slide wrapper from `<div class="slide">`
 
-/* Headers */
-h1 { color: #1B3A57; font-size: 32px; }
-h2 { color: #2D5A7B; font-size: 24px; }
-
-/* Data visualizations */
-.chart { max-width: 100%; }
-.stat { font-size: 48px; font-weight: bold; }
-
-/* Lists */
-ul { margin-left: 20px; }
-li { margin-bottom: 8px; }
-```
+For a full reference on what CSS is safe to include, fixed constraints, and how to convert an existing template into a style, see **[Creating Custom Styles](./05-creating-custom-styles.md)**.
 
 ---
 
