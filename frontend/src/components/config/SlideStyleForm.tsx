@@ -5,9 +5,11 @@
  */
 
 import React, { useState, useEffect, useRef } from 'react';
+import { FiExternalLink } from 'react-icons/fi';
 import Editor from '@monaco-editor/react';
 import type { SlideStyle, SlideStyleCreate, SlideStyleUpdate } from '../../api/config';
 import { ImagePicker } from '../ImageLibrary/ImagePicker';
+import { DOCS_URLS } from '../../constants/docs';
 
 interface SlideStyleFormProps {
   isOpen: boolean;
@@ -221,6 +223,15 @@ export const SlideStyleForm: React.FC<SlideStyleFormProps> = ({
               <p className="text-xs text-gray-500 mt-1">
                 Define typography, colors, layout rules, and visual guidelines.
                 Include font sizes, color codes, spacing, and chart color palettes.
+                {' '}
+                <a
+                  href={DOCS_URLS.customStylesCSS}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="inline-flex items-center gap-1 text-blue-600 hover:text-blue-800"
+                >
+                  CSS reference <FiExternalLink size={10} />
+                </a>
               </p>
             </div>
 
@@ -266,6 +277,15 @@ export const SlideStyleForm: React.FC<SlideStyleFormProps> = ({
                 Specify which images to include on slides (e.g. logos, backgrounds).
                 Use "Insert Image Ref" to add image IDs. When set, the agent uses these images
                 automatically without searching. Leave blank to skip image injection.
+                {' '}
+                <a
+                  href={DOCS_URLS.imageGuidelines}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="inline-flex items-center gap-1 text-blue-600 hover:text-blue-800"
+                >
+                  Image guidelines guide <FiExternalLink size={10} />
+                </a>
               </p>
             </div>
           </div>
