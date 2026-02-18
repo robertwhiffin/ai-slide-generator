@@ -10,9 +10,11 @@
  */
 
 import React, { useState, useEffect } from 'react';
+import { FiExternalLink } from 'react-icons/fi';
 import type { Profile, ProfileCreate, ProfileUpdate } from '../../api/config';
 import { useProfiles } from '../../hooks/useProfiles';
 import { ProfileForm } from './ProfileForm';
+import { DOCS_URLS } from '../../constants/docs';
 import { ProfileCreationWizard } from './ProfileCreationWizard';
 import { ConfirmDialog } from './ConfirmDialog';
 import { ProfileDetailView } from './ProfileDetail';
@@ -245,6 +247,15 @@ export const ProfileList: React.FC<ProfileListProps> = ({ onProfileChange }) => 
           <h2 className="text-2xl font-semibold text-gray-900">Configuration Profiles</h2>
           <p className="text-sm text-gray-600 mt-1">
             Manage your configuration profiles. Load different profiles to switch settings without restarting.
+            {' '}
+            <a
+              href={DOCS_URLS.creatingProfiles}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="inline-flex items-center gap-1 text-blue-600 hover:text-blue-800"
+            >
+              View guide <FiExternalLink size={12} />
+            </a>
           </p>
         </div>
         <button
