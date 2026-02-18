@@ -6,6 +6,7 @@ from io import BytesIO
 from typing import List, Optional
 
 from PIL import Image as PILImage
+from sqlalchemy import cast, String
 from sqlalchemy.orm import Session
 
 from src.database.models.image import ImageAsset
@@ -131,10 +132,13 @@ def search_images(
             (ImageAsset.original_filename.ilike(search))
             | (ImageAsset.description.ilike(search))
         )
-    # Tag filtering: PostgreSQL JSON containment: tags @> '["branding"]'
     if tags:
         for tag in tags:
-            q = q.filter(ImageAsset.tags.contains([tag]))
+            dialect = db.bind.dialect.name if db.bind else "default"
+            if dialect == "postgresql":
+                q = q.filter(ImageAsset.tags.contains([tag]))
+            else:
+                q = q.filter(cast(ImageAsset.tags, String).like(f'%"{tag}"%'))
 
     return q.order_by(ImageAsset.created_at.desc()).all()
 
@@ -152,16 +156,23 @@ def delete_image(db: Session, image_id: int, user: str) -> None:
     logger.info(f"Soft-deleted image: {image.filename} (id={image.id})")
 
 
+SVG_THUMBNAIL_MAX_BYTES = 100 * 1024  # 100KB — skip data-URI thumbnail for huge SVGs
+
+
 def _generate_thumbnail(content: bytes, mime_type: str) -> Optional[str]:
     """
     Generate 150x150 thumbnail as base64 data URI.
 
     - For raster images: resize with Pillow, maintain aspect ratio
     - For animated GIFs: extract first frame
-    - For SVGs: return None (render as-is in UI, they scale natively)
+    - For SVGs ≤100KB: encode the raw SVG as a data URI (they scale natively)
+    - For SVGs >100KB: return None to avoid bloating list responses
     """
     if mime_type == "image/svg+xml":
-        return None
+        if len(content) > SVG_THUMBNAIL_MAX_BYTES:
+            return None
+        b64 = base64.b64encode(content).decode("utf-8")
+        return f"data:image/svg+xml;base64,{b64}"
 
     img = PILImage.open(BytesIO(content))
 

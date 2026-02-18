@@ -120,7 +120,8 @@ class TestUploadValidation:
             user="test",
         )
         assert result.mime_type == "image/svg+xml"
-        assert result.thumbnail_base64 is None  # SVGs have no thumbnail
+        assert result.thumbnail_base64 is not None
+        assert result.thumbnail_base64.startswith("data:image/svg+xml;base64,")
 
 
 # ===== Upload Database Storage =====
@@ -198,8 +199,14 @@ class TestThumbnailGeneration:
         assert thumb is not None
         assert thumb.startswith("data:image/")
 
-    def test_returns_none_for_svg(self, svg_content):
+    def test_returns_data_uri_for_small_svg(self, svg_content):
         thumb = image_service._generate_thumbnail(svg_content, "image/svg+xml")
+        assert thumb is not None
+        assert thumb.startswith("data:image/svg+xml;base64,")
+
+    def test_returns_none_for_large_svg(self):
+        large_svg = b'<svg xmlns="http://www.w3.org/2000/svg">' + b'x' * 110_000 + b'</svg>'
+        thumb = image_service._generate_thumbnail(large_svg, "image/svg+xml")
         assert thumb is None
 
     def test_thumbnail_is_reasonable_size(self, png_100x100):

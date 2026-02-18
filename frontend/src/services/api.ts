@@ -772,10 +772,11 @@ export const api = {
     return response.json();
   },
 
-  async listImages(params?: { category?: string; query?: string }): Promise<ImageListResponse> {
+  async listImages(params?: { category?: string; query?: string; tags?: string[] }): Promise<ImageListResponse> {
     const searchParams = new URLSearchParams();
     if (params?.category) searchParams.set('category', params.category);
     if (params?.query) searchParams.set('query', params.query);
+    if (params?.tags && params.tags.length > 0) searchParams.set('tags', params.tags.join(','));
 
     const url = `${API_BASE_URL}/api/images${searchParams.toString() ? '?' + searchParams : ''}`;
     const response = await fetch(url);

@@ -169,6 +169,26 @@ class TestListEndpoint:
         assert response.status_code == 200
         assert response.json()["total"] == 1
 
+    def test_list_filter_by_tags(self, client, db_session):
+        create_test_image(db_session, original_filename="logo.png", tags=["branding", "logo"])
+        create_test_image(db_session, original_filename="chart.png", tags=["data"])
+
+        response = client.get("/api/images?tags=branding")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["total"] == 1
+        assert data["images"][0]["original_filename"] == "logo.png"
+
+    def test_list_filter_by_multiple_tags(self, client, db_session):
+        create_test_image(db_session, original_filename="logo.png", tags=["branding", "logo"])
+        create_test_image(db_session, original_filename="banner.png", tags=["branding"])
+
+        response = client.get("/api/images?tags=branding,logo")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["total"] == 1
+        assert data["images"][0]["original_filename"] == "logo.png"
+
     def test_list_excludes_inactive(self, client, db_session):
         create_test_image(db_session, is_active=True, original_filename="visible.png")
         create_test_image(db_session, is_active=False, original_filename="hidden.png")

@@ -75,7 +75,7 @@ class ImageAsset(Base):
 **Invariants:**
 - `image_data` stores raw bytes; base64 encoding happens on read
 - `original_filename` must be unique among active images (case-insensitive); soft-deleted images free their name for reuse
-- `thumbnail_base64` is a complete data URI ready for `<img src=...>`; `None` for SVGs (they scale natively)
+- `thumbnail_base64` is a complete data URI ready for `<img src=...>`; for SVGs ≤100KB the raw SVG is base64-encoded as `data:image/svg+xml;base64,...`; `None` only for SVGs >100KB
 - `category = "ephemeral"` means paste-to-chat images not saved to library (excluded from default library view)
 - No foreign key to profiles — images are independent library items shared across all profiles
 
@@ -116,7 +116,7 @@ The `SlideStyleLibrary` model has an `image_guidelines` column (`Text, nullable`
 | `src/services/agent.py` | Prompt construction | Conditional IMAGE GUIDELINES section; `search_images` tool binding |
 | `src/core/settings_db.py` | Settings loader | Extracts `image_guidelines` from selected slide style |
 | `src/api/routes/settings/slide_styles.py` | Slide style CRUD | `image_guidelines` field in schemas and handlers |
-| `frontend/src/components/ImageLibrary/ImageLibrary.tsx` | Image gallery | Grid view, multi-file drag-drop upload, category filter, search |
+| `frontend/src/components/ImageLibrary/ImageLibrary.tsx` | Image gallery | Grid view, multi-file drag-drop upload, category filter, tag filter, inline tag editing, search |
 | `frontend/src/components/ImageLibrary/ImagePicker.tsx` | Modal picker | Wraps ImageLibrary with select callback |
 | `frontend/src/components/ChatPanel/ChatInput.tsx` | Paste-to-chat | Clipboard paste, upload, attach preview, "Save to library" toggle |
 | `frontend/src/components/config/SlideStyleForm.tsx` | Style editor | Separate Image Guidelines Monaco editor + Insert Image Ref button |
@@ -132,7 +132,7 @@ The `SlideStyleLibrary` model has an `image_guidelines` column (`Text, nullable`
 1. User drops/selects one or more files in ImageLibrary (multi-file drag-drop and file picker supported), or pastes into ChatInput
 2. Frontend validates each file client-side (type + size), then sends one `POST /api/images/upload` per file (sequential, with progress indicator "Uploading 2 of 5...")
 3. `image_service.upload_image()` validates type, size, and **unique filename** (case-insensitive check against active images; rejects duplicates with 400)
-4. Pillow generates 150x150 thumbnail (PNG for RGBA, JPEG otherwise; `None` for SVG)
+4. Pillow generates 150x150 thumbnail (PNG for RGBA, JPEG otherwise); for SVGs ≤100KB the raw SVG is base64-encoded as a data URI thumbnail; SVGs >100KB get `None`
 5. Raw bytes + thumbnail + metadata saved to `image_assets` table
 6. Response returns `ImageResponse` with thumbnail for immediate display
 7. Per-file errors (validation failures, duplicate names) are collected and displayed together in the UI
@@ -176,7 +176,7 @@ The `SlideStyleLibrary` model has an `image_guidelines` column (`Text, nullable`
 | Method | Path | Purpose | Request | Response |
 |--------|------|---------|---------|----------|
 | POST | `/upload` | Upload image | Multipart: file, tags (JSON), description, category, save_to_library | `ImageResponse` (201) |
-| GET | `/` | List/search images | Query: category, query | `ImageListResponse` |
+| GET | `/` | List/search images | Query: category, query, tags (comma-separated) | `ImageListResponse` |
 | GET | `/{id}` | Get image metadata | — | `ImageResponse` |
 | GET | `/{id}/data` | Get full base64 data | — | `ImageDataResponse` |
 | PUT | `/{id}` | Update metadata | JSON: tags, description, category | `ImageResponse` |
@@ -207,7 +207,7 @@ search_images(
 | Max file size | 5MB | `image_service.py` + `ChatInput.tsx` + `ImageLibrary.tsx` |
 | Allowed MIME types | png, jpeg, gif, svg+xml | `image_service.py` + `ImageLibrary.tsx` |
 | Unique filename | Case-insensitive among active images | `image_service.py` (server-side) |
-| Thumbnail size | 150x150 | `image_service.py` |
+| Thumbnail size | 150x150 (raster); raw SVG data URI for SVGs ≤100KB | `image_service.py` |
 
 ### Error handling
 

@@ -142,11 +142,19 @@ async def upload_image(
 def list_images(
     category: Optional[str] = None,
     query: Optional[str] = None,
+    tags: Optional[str] = None,
     db: Session = Depends(get_db),
 ):
-    """List images with optional filtering."""
+    """List images with optional filtering.
+
+    Args:
+        tags: Comma-separated tag names, e.g. ``tags=branding,logo``.
+    """
     try:
-        images = image_service.search_images(db=db, category=category, query=query)
+        parsed_tags = [t.strip() for t in tags.split(",") if t.strip()] if tags else None
+        images = image_service.search_images(
+            db=db, category=category, query=query, tags=parsed_tags,
+        )
         return ImageListResponse(
             images=[_image_to_response(img) for img in images],
             total=len(images),
