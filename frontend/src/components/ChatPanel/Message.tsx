@@ -27,10 +27,7 @@ export const Message: React.FC<MessageProps> = ({ message }) => {
     preview: string,
     content: React.ReactNode,
   ) => (
-    <div className="flex gap-2.5">
-      <div className="flex size-7 shrink-0 items-center justify-center rounded-full bg-primary/10">
-        <Bot className="size-4 text-primary" />
-      </div>
+    <div className="flex justify-start">
       <div className="max-w-[85%] rounded-xl bg-muted/50 px-3.5 py-2.5">
         <button
           onClick={() => setIsExpanded(prev => !prev)}
@@ -124,20 +121,7 @@ export const Message: React.FC<MessageProps> = ({ message }) => {
   const isUser = message.role === 'user';
 
   return (
-    <div className={`flex gap-2.5 ${isUser ? 'flex-row-reverse' : ''}`}>
-      <div
-        className={`flex size-7 shrink-0 items-center justify-center rounded-full ${
-          message.role === 'assistant'
-            ? 'bg-primary/10'
-            : 'bg-muted'
-        }`}
-      >
-        {message.role === 'assistant' ? (
-          <Bot className="size-4 text-primary" />
-        ) : (
-          <User className="size-4 text-muted-foreground" />
-        )}
-      </div>
+    <div className={`flex ${isUser ? 'justify-end' : 'justify-start'}`}>
       <div
         className={`max-w-[85%] rounded-xl px-3.5 py-2.5 text-[13px] leading-relaxed ${
           message.role === 'assistant'
