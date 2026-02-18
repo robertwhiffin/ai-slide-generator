@@ -79,6 +79,15 @@ export const ProfileCreationWizard: React.FC<ProfileCreationWizardProps> = ({
   
   // Submission
   const [isSubmitting, setIsSubmitting] = useState(false);
+
+  useEffect(() => {
+    if (!isOpen) return;
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' && !isSubmitting) onClose();
+    };
+    document.addEventListener('keydown', handleKeyDown);
+    return () => document.removeEventListener('keydown', handleKeyDown);
+  }, [isOpen, isSubmitting, onClose]);
   const [error, setError] = useState<string | null>(null);
   
   // Manual Genie space lookup

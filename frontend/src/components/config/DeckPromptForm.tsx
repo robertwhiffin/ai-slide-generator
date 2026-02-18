@@ -30,6 +30,15 @@ export const DeckPromptForm: React.FC<DeckPromptFormProps> = ({
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  useEffect(() => {
+    if (!isOpen) return;
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' && !saving) onCancel();
+    };
+    document.addEventListener('keydown', handleKeyDown);
+    return () => document.removeEventListener('keydown', handleKeyDown);
+  }, [isOpen, saving, onCancel]);
+
   // Reset form when opening
   useEffect(() => {
     if (isOpen) {
