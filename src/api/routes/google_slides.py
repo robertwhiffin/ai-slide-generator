@@ -1,10 +1,10 @@
 """Google Slides export endpoints.
 
-Provides profile-scoped, user-scoped OAuth2 authorization flow and
-presentation creation using the V3 LLM code-gen approach.
+Provides user-scoped OAuth2 authorization flow and presentation creation
+using the V3 LLM code-gen approach.
 
-Credentials come from the profile's encrypted ``google_credentials_encrypted``
-column; user tokens are stored per-user in the ``google_oauth_tokens`` table.
+Credentials come from the global ``GoogleGlobalCredentials`` table;
+user tokens are stored per-user in the ``google_oauth_tokens`` table.
 """
 
 import json
@@ -48,10 +48,10 @@ def _get_user_identity() -> str:
         return "local_dev"
 
 
-def _get_auth(profile_id: int, db: Session) -> GoogleSlidesAuth:
-    """Build a DB-backed ``GoogleSlidesAuth`` for the current user + profile."""
+def _get_auth(db: Session) -> GoogleSlidesAuth:
+    """Build a DB-backed ``GoogleSlidesAuth`` for the current user."""
     user_identity = _get_user_identity()
-    return GoogleSlidesAuth.from_profile(profile_id, user_identity, db)
+    return GoogleSlidesAuth.from_global(user_identity, db)
 
 
 # -------------------------------------------------------------------------
@@ -68,7 +68,6 @@ class ChartImage(BaseModel):
 class ExportGoogleSlidesRequest(BaseModel):
     """Request to export slides to Google Slides."""
     session_id: str
-    profile_id: int
     chart_images: Optional[list[list[ChartImage]]] = None
 
 
@@ -116,44 +115,40 @@ def _build_redirect_uri(request: Request) -> str:
 
 
 @router.get("/auth/status", response_model=AuthStatusResponse)
-async def auth_status(
-    profile_id: int = Query(..., description="Profile ID to check"),
-    db: Session = Depends(get_db),
-):
-    """Check whether the current user has a valid Google OAuth token for a profile."""
+async def auth_status(db: Session = Depends(get_db)):
+    """Check whether the current user has a valid Google OAuth token."""
     try:
-        auth = _get_auth(profile_id, db)
+        auth = _get_auth(db)
         return AuthStatusResponse(authorized=auth.is_authorized())
     except (GoogleSlidesAuthError, Exception) as exc:
         # No credentials, bad encryption key, or any other issue → not authorized
-        logger.debug("auth_status check failed for profile %s: %s", profile_id, exc)
+        logger.debug("auth_status check failed: %s", exc)
         return AuthStatusResponse(authorized=False)
 
 
 @router.get("/auth/url", response_model=AuthUrlResponse)
 async def auth_url(
     request: Request,
-    profile_id: int = Query(..., description="Profile ID whose credentials to use"),
     db: Session = Depends(get_db),
 ):
-    """Generate the Google OAuth consent URL for a profile.
+    """Generate the Google OAuth consent URL.
 
-    The frontend should open this URL in a popup window.  Context (profile_id,
-    user) is passed via the OAuth ``state`` parameter so the callback can route
-    the token to the right profile — the redirect URI itself stays clean
+    The frontend should open this URL in a popup window.  User identity is
+    passed via the OAuth ``state`` parameter so the callback can persist the
+    token for the correct user — the redirect URI itself stays clean
     (no query params) to satisfy Google's exact-match requirement.
     """
     try:
-        auth = _get_auth(profile_id, db)
+        auth = _get_auth(db)
         redirect_uri = _build_redirect_uri(request)
-        state = json.dumps({"profile_id": profile_id, "user": _get_user_identity()})
+        state = json.dumps({"user": _get_user_identity()})
         url = auth.get_auth_url(redirect_uri=redirect_uri, state=state)
 
         return AuthUrlResponse(url=url)
     except GoogleSlidesAuthError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
-        logger.error("Failed to generate auth URL for profile %s: %s", profile_id, exc)
+        logger.error("Failed to generate auth URL: %s", exc)
         raise HTTPException(
             status_code=500,
             detail="Failed to generate authorization URL. Credentials may be corrupt — try re-uploading.",
@@ -164,12 +159,12 @@ async def auth_url(
 async def auth_callback(
     request: Request,
     code: str,
-    state: str = Query("", description="OAuth state carrying profile context"),
+    state: str = Query("", description="OAuth state carrying user identity"),
     db: Session = Depends(get_db),
 ):
     """Handle the OAuth callback from Google.
 
-    ``profile_id`` is extracted from the ``state`` parameter that was set
+    User identity is extracted from the ``state`` parameter that was set
     during the consent URL generation.  The redirect URI used here must
     match exactly what was registered in GCP (no query params).
 
@@ -179,16 +174,16 @@ async def auth_callback(
     """
     try:
         state_data = json.loads(state) if state else {}
-        profile_id = int(state_data.get("profile_id", 0))
-        if not profile_id:
-            raise ValueError("Missing profile_id in OAuth state")
+        user = state_data.get("user")
+        if not user:
+            raise ValueError("Missing user in OAuth state")
 
-        auth = _get_auth(profile_id, db)
+        auth = _get_auth(db)
         redirect_uri = _build_redirect_uri(request)
         auth.authorize(code=code, redirect_uri=redirect_uri)
         logger.info(
             "Google Slides OAuth callback successful",
-            extra={"profile_id": profile_id, "user": _get_user_identity()},
+            extra={"user": _get_user_identity()},
         )
     except (GoogleSlidesAuthError, ValueError, json.JSONDecodeError) as exc:
         logger.error("OAuth callback failed", exc_info=True)
@@ -257,7 +252,7 @@ async def start_google_slides_export(
     )
 
     try:
-        auth = _get_auth(request_body.profile_id, db)
+        auth = _get_auth(db)
     except GoogleSlidesAuthError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -305,7 +300,6 @@ async def start_google_slides_export(
     job_id = generate_job_id()
     payload = {
         "session_id": request_body.session_id,
-        "profile_id": request_body.profile_id,
         "user_identity": _get_user_identity(),
         "slides_html": slides_html,
         "title": title,

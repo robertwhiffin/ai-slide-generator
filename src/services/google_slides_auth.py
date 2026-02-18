@@ -5,7 +5,7 @@ and building authenticated Google API service objects.
 
 Supports two modes:
   1. **DB-backed** (production) — credentials JSON and user tokens are stored
-     encrypted in PostgreSQL via ``from_profile()``.
+     encrypted in PostgreSQL via ``from_global()``.
   2. **File-backed** (local dev) — reads ``credentials.json`` / ``token.json``
      from disk, same as the legacy behaviour.
 """
@@ -87,16 +87,17 @@ class GoogleSlidesAuth:
     # ------------------------------------------------------------------
 
     @classmethod
-    def from_profile(
+    def from_global(
         cls,
-        profile_id: int,
         user_identity: str,
         db_session,
     ) -> "GoogleSlidesAuth":
-        """Build a ``GoogleSlidesAuth`` from encrypted DB records.
+        """Build a ``GoogleSlidesAuth`` from global encrypted credentials.
+
+        Reads credentials from ``GoogleGlobalCredentials`` (single-row table)
+        and user token from ``GoogleOAuthToken`` by ``user_identity`` only.
 
         Args:
-            profile_id: The config profile whose credentials to use.
             user_identity: The Databricks username (email) of the current user.
             db_session: An active SQLAlchemy ``Session``.
 
@@ -104,26 +105,25 @@ class GoogleSlidesAuth:
             A fully initialised ``GoogleSlidesAuth`` instance.
 
         Raises:
-            GoogleSlidesAuthError: If the profile has no stored credentials.
+            GoogleSlidesAuthError: If no global credentials exist.
         """
         from src.core.encryption import decrypt_data
+        from src.database.models.google_global_credentials import GoogleGlobalCredentials
         from src.database.models.google_oauth_token import GoogleOAuthToken
-        from src.database.models.profile import ConfigProfile
 
-        profile = db_session.query(ConfigProfile).filter_by(id=profile_id).first()
-        if profile is None:
-            raise GoogleSlidesAuthError(f"Profile {profile_id} not found")
-        if not profile.google_credentials_encrypted:
+        global_row = db_session.query(GoogleGlobalCredentials).first()
+        if global_row is None:
             raise GoogleSlidesAuthError(
-                f"Profile '{profile.name}' has no Google OAuth credentials uploaded"
+                "No global Google OAuth credentials configured. "
+                "Upload credentials via the admin settings."
             )
 
-        credentials_json = decrypt_data(profile.google_credentials_encrypted)
+        credentials_json = decrypt_data(global_row.credentials_encrypted)
 
         # Load existing user token (may be None)
         token_row = (
             db_session.query(GoogleOAuthToken)
-            .filter_by(user_identity=user_identity, profile_id=profile_id)
+            .filter_by(user_identity=user_identity)
             .first()
         )
         token_json: Optional[str] = None
@@ -131,13 +131,9 @@ class GoogleSlidesAuth:
             try:
                 token_json = decrypt_data(token_row.token_encrypted)
             except Exception:
-                # Token encrypted with a stale key — discard it so the
-                # user can re-authorize cleanly.
                 logger.warning(
-                    "Could not decrypt token for user=%s profile=%s; "
-                    "deleting stale token row",
+                    "Could not decrypt token for user=%s; deleting stale token row",
                     user_identity,
-                    profile_id,
                 )
                 db_session.delete(token_row)
                 db_session.commit()
@@ -150,7 +146,7 @@ class GoogleSlidesAuth:
             encrypted = encrypt_data(new_token_json)
             existing = (
                 db_session.query(GoogleOAuthToken)
-                .filter_by(user_identity=user_identity, profile_id=profile_id)
+                .filter_by(user_identity=user_identity)
                 .first()
             )
             if existing:
@@ -159,7 +155,6 @@ class GoogleSlidesAuth:
                 db_session.add(
                     GoogleOAuthToken(
                         user_identity=user_identity,
-                        profile_id=profile_id,
                         token_encrypted=encrypted,
                     )
                 )
