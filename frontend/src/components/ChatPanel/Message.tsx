@@ -34,7 +34,7 @@ export const Message: React.FC<MessageProps> = ({ message }) => {
       <div className="max-w-[85%] rounded-xl bg-muted/50 px-3.5 py-2.5">
         <button
           onClick={() => setIsExpanded(prev => !prev)}
-          className="flex w-full items-center gap-2 text-left text-sm font-medium text-primary hover:text-primary/80 transition-colors"
+          className="flex w-full items-center gap-2 text-left text-sm font-medium text-foreground hover:text-foreground/70 transition-colors"
           type="button"
         >
           {isExpanded ? (
