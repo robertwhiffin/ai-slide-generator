@@ -102,10 +102,15 @@ export const AppLayout: React.FC = () => {
     setViewMode('main');
   }, [createNewSession]);
 
-  // Generate subtitle for page header
+  // Generate subtitle for page header with status
   const getSubtitle = () => {
     if (!slideDeck) return undefined;
-    return `${slideDeck.slide_count} slides`;
+    const parts = [`${slideDeck.slide_count} slide${slideDeck.slide_count !== 1 ? 's' : ''}`];
+
+    // Add status indicators
+    if (isGenerating) parts.push('Generating...');
+
+    return parts.join(' • ');
   };
 
   // Handle export and present via SlidePanel ref

@@ -556,73 +556,9 @@ function SlidePanelComponent(props: SlidePanelProps, ref: React.Ref<SlidePanelHa
 
   return (
     <div className="h-full flex flex-col bg-gray-50">
-      {/* Header with Tabs */}
-      <div className="bg-white border-b">
-        <div className="p-4">
-          <div className="mb-2">
-            <p className="text-sm text-gray-500">
-              {slideDeck.slide_count} slide{slideDeck.slide_count !== 1 ? 's' : ''}
-              {isReordering && ' • Reordering...'}
-              {isExportingPDF && ' • Exporting PDF...'}
-              {isExportingPPTX && exportProgress && ` • ${exportProgress.status}`}
-              {isExportingPPTX && !exportProgress && ' • Exporting PowerPoint...'}
-              {isAutoVerifying && ` • Verifying ${verifyingSlides.size} slide${verifyingSlides.size !== 1 ? 's' : ''}...`}
-            </p>
-          </div>
-        </div>
-
-        {/* Tab Navigation */}
-        <div className="flex border-t">
-          <button
-            onClick={() => setViewMode('tiles')}
-            className={`px-6 py-3 text-sm font-medium border-b-2 transition-colors ${
-              viewMode === 'tiles'
-                ? 'border-blue-600 text-blue-600'
-                : 'border-transparent text-gray-600 hover:text-gray-800 hover:border-gray-300'
-            }`}
-          >
-            Generated Slides
-          </button>
-          {isDebugMode() && (
-            <>
-              <button
-                onClick={() => rawHtml && setViewMode('rawhtml')}
-                className={`px-6 py-3 text-sm font-medium border-b-2 transition-colors ${
-                  !rawHtml
-                    ? 'border-transparent text-gray-300 cursor-not-allowed'
-                    : viewMode === 'rawhtml'
-                    ? 'border-blue-600 text-blue-600'
-                    : 'border-transparent text-gray-600 hover:text-gray-800 hover:border-gray-300'
-                }`}
-                disabled={!rawHtml}
-                title={!rawHtml ? 'Generate slides first to enable this view' : 'View raw HTML rendered in iframe'}
-              >
-                Raw HTML (Rendered)
-              </button>
-              <button
-                onClick={() => rawHtml && setViewMode('rawtext')}
-                className={`px-6 py-3 text-sm font-medium border-b-2 transition-colors ${
-                  !rawHtml
-                    ? 'border-transparent text-gray-300 cursor-not-allowed'
-                    : viewMode === 'rawtext'
-                    ? 'border-blue-600 text-blue-600'
-                    : 'border-transparent text-gray-600 hover:text-gray-800 hover:border-gray-300'
-                }`}
-                disabled={!rawHtml}
-                title={!rawHtml ? 'Generate slides first to enable this view' : 'View raw HTML source code'}
-              >
-                Raw HTML (Text)
-              </button>
-            </>
-          )}
-        </div>
-      </div>
-
-      {/* Content Area */}
-      <div className="flex-1 overflow-hidden">
-        {viewMode === 'tiles' && (
-          <div className="h-full overflow-y-auto">
-            <div className="p-4 space-y-4">
+      {/* Slides Content */}
+      <div className="h-full overflow-y-auto">
+        <div className="p-4 space-y-4">
               <DndContext
                 sensors={sensors}
                 collisionDetection={closestCenter}
@@ -661,43 +597,6 @@ function SlidePanelComponent(props: SlidePanelProps, ref: React.Ref<SlidePanelHa
               </DndContext>
             </div>
           </div>
-        )}
-
-        {viewMode === 'rawhtml' && rawHtml && (
-          <div className="h-full flex flex-col">
-            <div className="p-4 bg-yellow-50 border-b border-yellow-200">
-              <p className="text-sm text-yellow-800">
-                <strong>Raw HTML (Rendered):</strong> This is the original HTML returned by the AI, rendered in an iframe. Compare with "Parsed Slides" to identify parsing issues.
-              </p>
-            </div>
-            <div className="flex-1 p-4 overflow-hidden">
-              <div className="h-full bg-white rounded-lg shadow-md overflow-hidden">
-                <iframe
-                  srcDoc={rawHtml}
-                  title="Raw HTML Preview"
-                  className="w-full h-full border-0"
-                  sandbox="allow-scripts"
-                />
-              </div>
-            </div>
-          </div>
-        )}
-
-        {viewMode === 'rawtext' && rawHtml && (
-          <div className="h-full flex flex-col">
-            <div className="p-4 bg-purple-50 border-b border-purple-200">
-              <p className="text-sm text-purple-800">
-                <strong>Raw HTML (Text):</strong> The original HTML source code from the AI. Use this to inspect the structure and find issues.
-              </p>
-            </div>
-            <div className="flex-1 p-4 overflow-auto">
-              <pre className="bg-gray-900 text-gray-100 p-4 rounded-lg text-xs overflow-auto">
-                <code>{rawHtml}</code>
-              </pre>
-            </div>
-          </div>
-        )}
-      </div>
 
       {isPresentationMode && slideDeck && (
         <PresentationMode
