@@ -96,6 +96,21 @@ export const AppLayout: React.FC = () => {
     }
   }, [sessionId, renameSession]);
 
+  // Handle title change from header
+  const handleTitleChange = useCallback(async (newTitle: string) => {
+    try {
+      await renameSession(newTitle);
+      setLastSavedTime(new Date());
+      // Update slide deck title if it exists
+      if (slideDeck) {
+        setSlideDeck({ ...slideDeck, title: newTitle });
+      }
+    } catch (err) {
+      console.error('Failed to update title:', err);
+      alert('Failed to update title');
+    }
+  }, [renameSession, slideDeck]);
+
   // Start a new session
   const handleNewSession = useCallback(() => {
     setSlideDeck(null);
@@ -161,6 +176,7 @@ export const AppLayout: React.FC = () => {
               <PageHeader
                 title={slideDeck?.title || sessionTitle || 'Untitled session'}
                 subtitle={getSubtitle()}
+                onTitleChange={handleTitleChange}
                 onExport={slideDeck ? handleExport : undefined}
                 onPresent={slideDeck ? handlePresent : undefined}
                 isGenerating={isGenerating}
