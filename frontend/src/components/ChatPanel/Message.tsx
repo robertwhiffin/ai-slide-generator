@@ -34,14 +34,9 @@ export const Message: React.FC<MessageProps> = ({ message }) => {
       <div className="max-w-[85%] rounded-xl bg-muted/50 px-3.5 py-2.5">
         <button
           onClick={() => setIsExpanded(prev => !prev)}
-          className="flex w-full items-center gap-2 text-left text-sm font-medium text-foreground hover:text-foreground/70 transition-colors"
+          className="group flex w-full items-center justify-between gap-2 text-left text-sm font-medium text-foreground hover:text-foreground/70 transition-colors"
           type="button"
         >
-          {isExpanded ? (
-            <ChevronDown className="size-4 shrink-0" />
-          ) : (
-            <ChevronRight className="size-4 shrink-0" />
-          )}
           <span className="flex-1">
             <span className="block">{label}</span>
             {preview && (
@@ -50,6 +45,11 @@ export const Message: React.FC<MessageProps> = ({ message }) => {
               </span>
             )}
           </span>
+          {isExpanded ? (
+            <ChevronDown className="size-4 shrink-0 text-muted-foreground opacity-40 group-hover:opacity-100 transition-opacity" />
+          ) : (
+            <ChevronRight className="size-4 shrink-0 text-muted-foreground opacity-40 group-hover:opacity-100 transition-opacity" />
+          )}
         </button>
 
         {isExpanded && (
