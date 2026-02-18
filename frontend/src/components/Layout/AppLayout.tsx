@@ -32,6 +32,7 @@ export const AppLayout: React.FC = () => {
   const [chatKey, setChatKey] = useState<number>(0);
   // Track which slide to scroll to in the main panel (uses key to allow re-scroll to same index)
   const [scrollTarget, setScrollTarget] = useState<{ index: number; key: number } | null>(null);
+  const [exportStatus, setExportStatus] = useState<string | null>(null);
   const chatPanelRef = useRef<ChatPanelHandle>(null);
   const slidePanelRef = useRef<SlidePanelHandle>(null);
   const { sessionTitle, sessionId, createNewSession, switchSession, renameSession } = useSession();
@@ -109,6 +110,7 @@ export const AppLayout: React.FC = () => {
 
     // Add status indicators
     if (isGenerating) parts.push('Generating...');
+    if (exportStatus) parts.push(exportStatus);
 
     return parts.join(' • ');
   };
@@ -185,6 +187,7 @@ export const AppLayout: React.FC = () => {
                     onSlideChange={setSlideDeck}
                     scrollToSlide={scrollTarget}
                     onSendMessage={handleSendMessage}
+                    onExportStatusChange={setExportStatus}
                   />
                 </div>
               </div>
