@@ -39,6 +39,7 @@ interface SlidePanelProps {
   onSlideChange: (slideDeck: SlideDeck) => void;
   scrollToSlide?: { index: number; key: number } | null;
   onSendMessage?: (content: string, slideContext?: SlideContext) => void;
+  onExportStatusChange?: (status: string | null) => void;
 }
 
 export interface SlidePanelHandle {
@@ -50,7 +51,7 @@ export interface SlidePanelHandle {
 type ViewMode = 'tiles' | 'rawhtml' | 'rawtext';
 
 function SlidePanelComponent(props: SlidePanelProps, ref: React.Ref<SlidePanelHandle>) {
-  const { slideDeck, rawHtml, onSlideChange, scrollToSlide, onSendMessage } = props;
+  const { slideDeck, rawHtml, onSlideChange, scrollToSlide, onSendMessage, onExportStatusChange } = props;
   const [isReordering, setIsReordering] = useState(false);
   const [viewMode, setViewMode] = useState<ViewMode>('tiles');
   const [isExportingPDF, setIsExportingPDF] = useState(false);
@@ -215,6 +216,7 @@ function SlidePanelComponent(props: SlidePanelProps, ref: React.Ref<SlidePanelHa
 
     setIsExportingPDF(true);
     setShowExportMenu(false);
+    onExportStatusChange?.('Exporting PDF...');
     try {
       const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, -5);
       const filename = `${slideDeck.title || 'slides'}_${timestamp}.pdf`;
@@ -234,16 +236,18 @@ function SlidePanelComponent(props: SlidePanelProps, ref: React.Ref<SlidePanelHa
       alert(message);
     } finally {
       setIsExportingPDF(false);
+      onExportStatusChange?.(null);
     }
   };
 
   const handleExportPPTX = async () => {
     if (!slideDeck || !sessionId || isExportingPPTX) return;
-    
+
     setIsExportingPPTX(true);
     setShowExportMenu(false);
     setExportProgress({ current: 0, total: slideDeck.slides.length, status: 'Starting...' });
-    
+    onExportStatusChange?.('Starting export...');
+
     try {
       const blob = await api.exportToPPTX(
         sessionId, 
@@ -252,6 +256,7 @@ function SlidePanelComponent(props: SlidePanelProps, ref: React.Ref<SlidePanelHa
         // Progress callback
         (progress, total, status) => {
           setExportProgress({ current: progress, total, status });
+          onExportStatusChange?.(status);
         }
       );
       
@@ -274,6 +279,7 @@ function SlidePanelComponent(props: SlidePanelProps, ref: React.Ref<SlidePanelHa
     } finally {
       setIsExportingPPTX(false);
       setExportProgress(null);
+      onExportStatusChange?.(null);
     }
   };
 
