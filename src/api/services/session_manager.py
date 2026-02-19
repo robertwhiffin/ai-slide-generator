@@ -9,7 +9,7 @@ import secrets
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 
 from src.core.database import get_db_session
 from src.database.models.session import (
@@ -179,7 +179,8 @@ class SessionManager:
                 query = query.filter(UserSession.user_id == user_id)
 
             sessions = (
-                query.order_by(UserSession.last_activity.desc())
+                query.options(joinedload(UserSession.slide_deck))
+                .order_by(UserSession.last_activity.desc())
                 .limit(limit)
                 .all()
             )
@@ -200,6 +201,7 @@ class SessionManager:
                     "last_activity": s.last_activity.isoformat(),
                     "message_count": len(s.messages),
                     "has_slide_deck": s.slide_deck is not None,
+                    "slide_count": s.slide_deck.slide_count if s.slide_deck is not None else 0,
                     "profile_id": s.profile_id,
                     "profile_name": s.profile_name,
                     "profile_deleted": s.profile_id in deleted_profiles if s.profile_id else False,

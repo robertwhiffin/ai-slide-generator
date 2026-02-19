@@ -1,4 +1,5 @@
-import React, { useState, useCallback, useRef } from 'react';
+import React, { useState, useCallback, useRef, useEffect } from 'react';
+import { useParams, useNavigate } from 'react-router-dom';
 import type { SlideDeck } from '../../types/slide';
 import { ChatPanel, type ChatPanelHandle } from '../ChatPanel/ChatPanel';
 import { SlidePanel, type SlidePanelHandle } from '../SlidePanel/SlidePanel';
@@ -8,24 +9,40 @@ import { ProfileList } from '../config/ProfileList';
 import { DeckPromptList } from '../config/DeckPromptList';
 import { SlideStyleList } from '../config/SlideStyleList';
 import { SessionHistory } from '../History/SessionHistory';
+import { SaveAsDialog } from '../History/SaveAsDialog';
+import { ImageLibrary } from '../ImageLibrary/ImageLibrary';
 import { HelpPage } from '../Help';
 import { UpdateBanner } from '../UpdateBanner';
+import { SavePointDropdown, PreviewBanner, RevertConfirmModal } from '../SavePoints';
+import type { SavePointVersion } from '../SavePoints';
+import { FeedbackButton } from '../Feedback/FeedbackButton';
+import { SurveyModal } from '../Feedback/SurveyModal';
+import { useSurveyTrigger } from '../../hooks/useSurveyTrigger';
 import { useSession } from '../../contexts/SessionContext';
 import { useGeneration } from '../../contexts/GenerationContext';
 import { useProfiles } from '../../contexts/ProfileContext';
 import { useVersionCheck } from '../../hooks/useVersionCheck';
+import { useToast } from '../../contexts/ToastContext';
 import { api } from '../../services/api';
 import { SidebarProvider, SidebarInset } from '@/ui/sidebar';
 import { AppSidebar } from './app-sidebar';
 import { PageHeader } from './page-header';
 import { SimplePageHeader } from './simple-page-header';
 
-type ViewMode = 'main' | 'profiles' | 'deck_prompts' | 'slide_styles' | 'history' | 'help';
+type ViewMode = 'main' | 'profiles' | 'deck_prompts' | 'slide_styles' | 'images' | 'history' | 'help';
 
-export const AppLayout: React.FC = () => {
+interface AppLayoutProps {
+  initialView?: ViewMode;
+  viewOnly?: boolean;
+}
+
+export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', viewOnly = false }) => {
+  const { sessionId: urlSessionId } = useParams<{ sessionId?: string }>();
+  const navigate = useNavigate();
   const [slideDeck, setSlideDeck] = useState<SlideDeck | null>(null);
   const [rawHtml, setRawHtml] = useState<string | null>(null);
-  const [viewMode, setViewMode] = useState<ViewMode>('help');
+  const [viewMode, setViewMode] = useState<ViewMode>(initialView);
+  const [showSaveDialog, setShowSaveDialog] = useState(false);
   const [lastSavedTime, setLastSavedTime] = useState<Date | null>(null);
   // Key to trigger session list refresh in sidebar and history
   const [sessionsRefreshKey, setSessionsRefreshKey] = useState<number>(0);
@@ -34,12 +51,78 @@ export const AppLayout: React.FC = () => {
   // Track which slide to scroll to in the main panel (uses key to allow re-scroll to same index)
   const [scrollTarget, setScrollTarget] = useState<{ index: number; key: number } | null>(null);
   const [exportStatus, setExportStatus] = useState<string | null>(null);
+  // Save Points / versioning
+  const [versions, setVersions] = useState<SavePointVersion[]>([]);
+  const [currentVersion, setCurrentVersion] = useState<number | null>(null);
+  const [previewVersion, setPreviewVersion] = useState<number | null>(null);
+  const [previewDeck, setPreviewDeck] = useState<SlideDeck | null>(null);
+  const [previewDescription, setPreviewDescription] = useState<string>('');
+  const [showRevertModal, setShowRevertModal] = useState(false);
+  const [revertTargetVersion, setRevertTargetVersion] = useState<number | null>(null);
   const chatPanelRef = useRef<ChatPanelHandle>(null);
   const slidePanelRef = useRef<SlidePanelHandle>(null);
   const { sessionTitle, sessionId, createNewSession, switchSession, renameSession } = useSession();
   const { isGenerating } = useGeneration();
   const { currentProfile, loadProfile } = useProfiles();
   const { updateAvailable, latestVersion, updateType, dismissed, dismiss } = useVersionCheck();
+  const { showToast } = useToast();
+  const { showSurvey, closeSurvey, onGenerationComplete, onGenerationStart } = useSurveyTrigger();
+
+  // Sync viewMode when initialView changes (e.g. route change)
+  useEffect(() => {
+    setViewMode(initialView);
+  }, [initialView]);
+
+  // When URL has sessionId, restore that session
+  useEffect(() => {
+    if (!urlSessionId) return;
+    if (urlSessionId === sessionId) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const { slideDeck: restoredDeck, rawHtml: restoredRawHtml } = await switchSession(urlSessionId);
+        if (!cancelled) {
+          setSlideDeck(restoredDeck);
+          setRawHtml(restoredRawHtml);
+          setLastSavedTime(new Date());
+          setChatKey((k) => k + 1);
+          setViewMode('main');
+        }
+      } catch (err) {
+        console.error('Failed to restore session from URL:', err);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [urlSessionId]); // eslint-disable-line react-hooks/exhaustive-deps -- only run when URL segment changes
+
+  // Load save point versions when session or deck changes
+  const loadVersions = useCallback(async () => {
+    if (!sessionId) {
+      setVersions([]);
+      setCurrentVersion(null);
+      return;
+    }
+    try {
+      const { versions: v, current_version: cv } = await api.listVersions(sessionId);
+      setVersions(v);
+      setCurrentVersion(cv);
+    } catch (err) {
+      console.warn('Failed to list versions:', err);
+      setVersions([]);
+      setCurrentVersion(null);
+    }
+  }, [sessionId]);
+
+  useEffect(() => {
+    loadVersions();
+  }, [loadVersions]);
+
+  // Clear preview when leaving session or switching deck
+  useEffect(() => {
+    setPreviewVersion(null);
+    setPreviewDeck(null);
+    setPreviewDescription('');
+  }, [sessionId]);
 
   // Handle navigation from ribbon to main slide panel
   const handleSlideNavigate = useCallback((index: number) => {
@@ -70,21 +153,20 @@ export const AppLayout: React.FC = () => {
 
       // If session has a profile_id and it's different from current, switch profiles first
       if (sessionInfo.profile_id && currentProfile && sessionInfo.profile_id !== currentProfile.id) {
-        console.log(`Session belongs to profile ${sessionInfo.profile_name}, switching from ${currentProfile.name}`);
         await loadProfile(sessionInfo.profile_id);
       }
 
-      // Now restore the session
       const { slideDeck: restoredDeck, rawHtml: restoredRawHtml } = await switchSession(restoredSessionId);
       setSlideDeck(restoredDeck);
       setRawHtml(restoredRawHtml);
-      setLastSavedTime(new Date()); // Set as "just restored"
-      setChatKey(prev => prev + 1);
+      setLastSavedTime(new Date());
+      setChatKey((k) => k + 1);
       setViewMode('main');
+      navigate(`/sessions/${restoredSessionId}/edit`);
     } catch (err) {
       console.error('Failed to restore session:', err);
     }
-  }, [switchSession, currentProfile, loadProfile]);
+  }, [switchSession, currentProfile, loadProfile, navigate]);
 
   // Auto-save session with slide deck title
   const autoSaveSession = useCallback(async (deck: SlideDeck) => {
@@ -117,15 +199,98 @@ export const AppLayout: React.FC = () => {
     }
   }, [renameSession, slideDeck]);
 
-  // Start a new session
-  const handleNewSession = useCallback(() => {
+  // Start a new session and persist + navigate to edit URL
+  const handleNewSession = useCallback(async () => {
     setSlideDeck(null);
     setRawHtml(null);
     setLastSavedTime(null);
-    setChatKey(prev => prev + 1);
-    createNewSession();
+    setChatKey((k) => k + 1);
+    const newId = createNewSession();
     setViewMode('main');
-  }, [createNewSession]);
+    try {
+      await api.createSession({ sessionId: newId });
+      navigate(`/sessions/${newId}/edit`);
+    } catch (err) {
+      console.error('Failed to create session:', err);
+    }
+  }, [createNewSession, navigate]);
+
+  // Save As: rename session with custom title
+  const handleSaveAs = useCallback(async (title: string) => {
+    try {
+      await renameSession(title);
+      setShowSaveDialog(false);
+      setLastSavedTime(new Date());
+      setSessionsRefreshKey((k) => k + 1);
+    } catch (err) {
+      console.error('Failed to save session:', err);
+      alert('Failed to save session name');
+    }
+  }, [renameSession]);
+
+  // Share: copy view-only link to clipboard
+  const handleShare = useCallback(() => {
+    if (!sessionId) return;
+    const viewUrl = `${window.location.origin}/sessions/${sessionId}/view`;
+    navigator.clipboard.writeText(viewUrl).then(
+      () => showToast('Link copied to clipboard', 'success'),
+      () => showToast('Failed to copy link', 'error')
+    );
+  }, [sessionId, showToast]);
+
+  // Save Points: preview a version
+  const handlePreviewVersion = useCallback(async (versionNumber: number) => {
+    if (!sessionId) return;
+    try {
+      const result = await api.previewVersion(sessionId, versionNumber);
+      setPreviewVersion(result.version_number);
+      setPreviewDeck(result.deck);
+      setPreviewDescription(result.description || '');
+    } catch (err) {
+      console.error('Failed to preview version:', err);
+      showToast('Failed to load version', 'error');
+    }
+  }, [sessionId, showToast]);
+
+  // Save Points: open revert modal (from PreviewBanner)
+  const handleRevertClick = useCallback(() => {
+    if (previewVersion == null) return;
+    setRevertTargetVersion(previewVersion);
+    setShowRevertModal(true);
+  }, [previewVersion]);
+
+  // Save Points: cancel preview
+  const handlePreviewCancel = useCallback(() => {
+    setPreviewVersion(null);
+    setPreviewDeck(null);
+    setPreviewDescription('');
+  }, []);
+
+  // Save Points: confirm revert
+  const handleRevertConfirm = useCallback(async () => {
+    if (!sessionId || revertTargetVersion == null) return;
+    try {
+      const result = await api.restoreVersion(sessionId, revertTargetVersion);
+      setSlideDeck(result.deck);
+      setPreviewVersion(null);
+      setPreviewDeck(null);
+      setPreviewDescription('');
+      setShowRevertModal(false);
+      setRevertTargetVersion(null);
+      setLastSavedTime(new Date());
+      setSessionsRefreshKey((k) => k + 1);
+      await loadVersions();
+    } catch (err) {
+      console.error('Failed to revert:', err);
+      showToast('Failed to revert to version', 'error');
+    }
+  }, [sessionId, revertTargetVersion, loadVersions]);
+
+  // Version key and read-only for preview/view mode
+  const versionKey = previewVersion != null
+    ? `preview-v${previewVersion}`
+    : `current-v${currentVersion ?? 0}`;
+  const isReadOnly = !!previewVersion || viewOnly;
 
   // Format time ago string
   const getTimeAgo = (date: Date) => {
@@ -149,17 +314,44 @@ export const AppLayout: React.FC = () => {
       parts.push(`Saved ${getTimeAgo(lastSavedTime)}`);
     }
 
-    // Add status indicators
+    // Add status indicators (export status shown next to Export button in header)
     if (isGenerating) parts.push('Generating...');
-    if (exportStatus) parts.push(exportStatus);
 
     return parts.join(' • ');
   };
 
+  // Deck to show: preview snapshot or live (use preview only when we have the deck)
+  const displayDeck = previewVersion != null && previewDeck ? previewDeck : slideDeck;
+
   // Handle export and present via SlidePanel ref
-  const handleExport = useCallback(() => {
+  const handleExportPPTX = useCallback(() => {
     slidePanelRef.current?.exportPPTX();
   }, []);
+
+  const handleExportPDF = useCallback(() => {
+    slidePanelRef.current?.exportPDF();
+  }, []);
+
+  const handleExportGoogleSlides = useCallback(async () => {
+    if (!sessionId || !slideDeck) return;
+    try {
+      setExportStatus('Exporting to Google Slides…');
+      const { presentation_url } = await api.exportToGoogleSlides(
+        sessionId,
+        slideDeck,
+        (_progress, _total, status) => setExportStatus(status || 'Exporting…')
+      );
+      setExportStatus(null);
+      showToast('Export complete', 'success');
+      if (presentation_url) {
+        window.open(presentation_url, '_blank');
+      }
+    } catch (err) {
+      console.error('Google Slides export failed:', err);
+      setExportStatus(null);
+      showToast('Export to Google Slides failed', 'error');
+    }
+  }, [sessionId, slideDeck, showToast]);
 
   const handlePresent = useCallback(() => {
     slidePanelRef.current?.openPresentationMode();
@@ -173,6 +365,7 @@ export const AppLayout: React.FC = () => {
         onSessionSelect={handleSessionRestore}
         onNewSession={handleNewSession}
         currentSessionId={sessionId}
+        currentSlideCount={displayDeck?.slide_count ?? null}
         profileName={currentProfile?.name}
         sessionsRefreshKey={sessionsRefreshKey}
       />
@@ -184,9 +377,28 @@ export const AppLayout: React.FC = () => {
                 title={slideDeck?.title || sessionTitle || 'Untitled session'}
                 subtitle={getSubtitle()}
                 onTitleChange={handleTitleChange}
-                onExport={slideDeck ? handleExport : undefined}
+                onSave={() => setShowSaveDialog(true)}
+                onShare={sessionId ? handleShare : undefined}
+                onExportPPTX={slideDeck ? handleExportPPTX : undefined}
+                onExportPDF={slideDeck ? handleExportPDF : undefined}
+                onExportGoogleSlides={slideDeck ? handleExportGoogleSlides : undefined}
                 onPresent={slideDeck ? handlePresent : undefined}
                 isGenerating={isGenerating}
+                viewOnly={viewOnly}
+                exportStatus={exportStatus}
+                savePointDropdown={
+                  sessionId && slideDeck && versions.length > 0 ? (
+                    <SavePointDropdown
+                      versions={versions}
+                      currentVersion={currentVersion}
+                      previewVersion={previewVersion}
+                      onPreview={handlePreviewVersion}
+                      onRevert={handleRevertClick}
+                      disabled={isGenerating}
+                      minimal
+                    />
+                  ) : undefined
+                }
                 profileSelector={
                   <ProfileSelector
                     onManageClick={() => setViewMode('profiles')}
@@ -195,6 +407,15 @@ export const AppLayout: React.FC = () => {
                   />
                 }
               />
+
+              {previewVersion != null && (
+                <PreviewBanner
+                  versionNumber={previewVersion}
+                  description={previewDescription}
+                  onRevert={handleRevertClick}
+                  onCancel={handlePreviewCancel}
+                />
+              )}
 
               {updateAvailable && !dismissed && latestVersion && updateType && (
                 <UpdateBanner
@@ -212,25 +433,42 @@ export const AppLayout: React.FC = () => {
                     key={chatKey}
                     ref={chatPanelRef}
                     rawHtml={rawHtml}
-                    onSlidesGenerated={(deck, raw) => {
+                    disabled={isReadOnly}
+                    onGenerationStart={onGenerationStart}
+                    onSlidesGenerated={async (deck, raw, actionDescription) => {
+                      onGenerationComplete();
                       setSlideDeck(deck);
                       setRawHtml(raw);
                       autoSaveSession(deck);
+                      if (sessionId && actionDescription) {
+                        try {
+                          await api.createSavePoint(sessionId, actionDescription);
+                          await loadVersions();
+                        } catch (e) {
+                          console.warn('Create save point failed:', e);
+                        }
+                      }
                     }}
                   />
                 </div>
 
-                <SelectionRibbon slideDeck={slideDeck} onSlideNavigate={handleSlideNavigate} />
+                <SelectionRibbon
+                  slideDeck={displayDeck}
+                  onSlideNavigate={handleSlideNavigate}
+                  versionKey={versionKey}
+                />
 
                 <div className="flex-1 bg-background">
                   <SlidePanel
                     ref={slidePanelRef}
-                    slideDeck={slideDeck}
+                    slideDeck={displayDeck}
                     rawHtml={rawHtml}
                     onSlideChange={setSlideDeck}
                     scrollToSlide={scrollTarget}
                     onSendMessage={handleSendMessage}
                     onExportStatusChange={setExportStatus}
+                    versionKey={versionKey}
+                    readOnly={isReadOnly}
                   />
                 </div>
               </div>
@@ -241,7 +479,7 @@ export const AppLayout: React.FC = () => {
         {viewMode === 'history' && (
           <div className="flex h-full flex-col">
             <div className="shrink-0">
-              <SimplePageHeader title="History" />
+              <SimplePageHeader title="All Decks" />
             </div>
             <div className="flex-1 overflow-y-auto">
               <div className="mx-auto w-full max-w-4xl px-4 py-8">
@@ -294,6 +532,19 @@ export const AppLayout: React.FC = () => {
           </div>
         )}
 
+        {viewMode === 'images' && (
+          <div className="flex h-full flex-col">
+            <div className="shrink-0">
+              <SimplePageHeader title="Image library" />
+            </div>
+            <div className="flex-1 overflow-y-auto">
+              <div className="mx-auto w-full max-w-4xl px-4 py-8">
+                <ImageLibrary />
+              </div>
+            </div>
+          </div>
+        )}
+
         {viewMode === 'help' && (
           <div className="flex h-full flex-col">
             <div className="shrink-0">
@@ -301,12 +552,34 @@ export const AppLayout: React.FC = () => {
             </div>
             <div className="flex-1 overflow-y-auto">
               <div className="mx-auto w-full max-w-4xl px-4 py-8">
-                <HelpPage onBack={() => setViewMode('main')} />
+                <HelpPage />
               </div>
             </div>
           </div>
         )}
       </SidebarInset>
+
+      <SaveAsDialog
+        isOpen={showSaveDialog}
+        currentTitle={slideDeck?.title || sessionTitle || 'Untitled session'}
+        onSave={handleSaveAs}
+        onCancel={() => setShowSaveDialog(false)}
+      />
+
+      <RevertConfirmModal
+        isOpen={showRevertModal}
+        versionNumber={revertTargetVersion ?? 0}
+        description={previewDescription}
+        currentVersion={currentVersion ?? 0}
+        onConfirm={handleRevertConfirm}
+        onCancel={() => {
+          setShowRevertModal(false);
+          setRevertTargetVersion(null);
+        }}
+      />
+
+      <FeedbackButton />
+      <SurveyModal isOpen={showSurvey} onClose={closeSurvey} />
     </SidebarProvider>
   );
 };

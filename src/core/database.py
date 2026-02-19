@@ -386,12 +386,68 @@ def _run_migrations(engine, schema: str | None = None):
     is_sqlite = engine.dialect.name == "sqlite"
     _qual = lambda t: f'"{schema}"."{t}"' if schema else f'"{t}"'
 
-    # --- config_profiles: add is_deleted, deleted_at ---
-    table_name = "config_profiles"
-    qualified_table = _qual(table_name)
-
     with engine.begin() as conn:
         inspector = inspect(conn)
+
+        # --- user_sessions: add created_by, google_slides_* (from main) ---
+        table_name = "user_sessions"
+        qualified_table = _qual(table_name)
+        try:
+            us_columns = {c["name"] for c in inspector.get_columns(table_name, schema=schema)}
+        except Exception:
+            us_columns = set()
+        if "created_by" not in us_columns:
+            logger.info(f"Migration: adding created_by column to {table_name}")
+            conn.execute(text(
+                f"ALTER TABLE {qualified_table} ADD COLUMN created_by VARCHAR(255) NULL"
+            ))
+        if "google_slides_presentation_id" not in us_columns:
+            logger.info(f"Migration: adding google_slides_presentation_id column to {table_name}")
+            conn.execute(text(
+                f"ALTER TABLE {qualified_table} ADD COLUMN google_slides_presentation_id VARCHAR(255) NULL"
+            ))
+        if "google_slides_url" not in us_columns:
+            logger.info(f"Migration: adding google_slides_url column to {table_name}")
+            conn.execute(text(
+                f"ALTER TABLE {qualified_table} ADD COLUMN google_slides_url VARCHAR(512) NULL"
+            ))
+
+        # --- slide_style_library: add image_guidelines, is_system, created_by, updated_by, updated_at ---
+        table_name = "slide_style_library"
+        qualified_table = _qual(table_name)
+        try:
+            ssl_columns = {c["name"] for c in inspector.get_columns(table_name, schema=schema)}
+        except Exception:
+            ssl_columns = set()
+        if "image_guidelines" not in ssl_columns:
+            logger.info(f"Migration: adding image_guidelines column to {table_name}")
+            conn.execute(text(
+                f"ALTER TABLE {qualified_table} ADD COLUMN image_guidelines TEXT NULL"
+            ))
+        if "is_system" not in ssl_columns:
+            logger.info(f"Migration: adding is_system column to {table_name}")
+            conn.execute(text(
+                f"ALTER TABLE {qualified_table} ADD COLUMN is_system BOOLEAN DEFAULT FALSE NOT NULL"
+            ))
+        if "created_by" not in ssl_columns:
+            logger.info(f"Migration: adding created_by column to {table_name}")
+            conn.execute(text(
+                f"ALTER TABLE {qualified_table} ADD COLUMN created_by VARCHAR(255) NULL"
+            ))
+        if "updated_by" not in ssl_columns:
+            logger.info(f"Migration: adding updated_by column to {table_name}")
+            conn.execute(text(
+                f"ALTER TABLE {qualified_table} ADD COLUMN updated_by VARCHAR(255) NULL"
+            ))
+        if "updated_at" not in ssl_columns:
+            logger.info(f"Migration: adding updated_at column to {table_name}")
+            conn.execute(text(
+                f"ALTER TABLE {qualified_table} ADD COLUMN updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL"
+            ))
+
+        # --- config_profiles: add is_deleted, deleted_at ---
+        table_name = "config_profiles"
+        qualified_table = _qual(table_name)
         try:
             columns = {c["name"] for c in inspector.get_columns(table_name, schema=schema)}
         except Exception:

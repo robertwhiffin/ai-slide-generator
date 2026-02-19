@@ -5,13 +5,12 @@ import { useSession } from '../../contexts/SessionContext';
 
 interface SessionHistoryProps {
   onSessionSelect: (sessionId: string) => void;
-  onBack: () => void;
+  onBack?: () => void;
   refreshKey?: number;
 }
 
 export const SessionHistory: React.FC<SessionHistoryProps> = ({
   onSessionSelect,
-  onBack,
   refreshKey,
 }) => {
   const [sessions, setSessions] = useState<Session[]>([]);
@@ -91,19 +90,11 @@ export const SessionHistory: React.FC<SessionHistoryProps> = ({
 
   return (
     <div className="max-w-6xl mx-auto">
-      <div className="flex items-center justify-between mb-6">
-        <div>
-          <h2 className="text-2xl font-bold text-gray-900">Session History</h2>
-          <p className="text-sm text-gray-500 mt-1">
-            {sessions.length} session{sessions.length !== 1 ? 's' : ''} saved
-          </p>
-        </div>
-        <button
-          onClick={onBack}
-          className="px-4 py-2 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-md hover:bg-gray-50"
-        >
-          ← Back to Generator
-        </button>
+      <div className="mb-6">
+        <h2 className="text-2xl font-bold text-gray-900">All Decks</h2>
+        <p className="text-sm text-gray-500 mt-1">
+          {sessions.length} session{sessions.length !== 1 ? 's' : ''} saved
+        </p>
       </div>
 
       {error && (

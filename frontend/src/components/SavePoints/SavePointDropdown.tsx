@@ -14,6 +14,8 @@ interface SavePointDropdownProps {
   onPreview: (versionNumber: number) => void;
   onRevert: (versionNumber: number) => void;
   disabled?: boolean;
+  /** Minimal trigger: just "v1" + chevron, gray, no icon */
+  minimal?: boolean;
 }
 
 export const SavePointDropdown: React.FC<SavePointDropdownProps> = ({
@@ -23,6 +25,7 @@ export const SavePointDropdown: React.FC<SavePointDropdownProps> = ({
   onPreview,
   onRevert: _onRevert,
   disabled = false,
+  minimal = false,
 }) => {
   const [isOpen, setIsOpen] = useState(false);
   const dropdownRef = useRef<HTMLDivElement>(null);
@@ -55,40 +58,46 @@ export const SavePointDropdown: React.FC<SavePointDropdownProps> = ({
     return null;
   }
 
-  // Button styling based on state
+  // Button styling based on state (non-minimal)
   const getButtonClasses = () => {
     if (disabled) {
       return 'bg-blue-400 text-blue-200 cursor-not-allowed opacity-50';
     }
     if (previewVersion) {
-      // Indigo theme for preview state - stands out but readable
       return 'bg-indigo-100 text-indigo-800 hover:bg-indigo-200 active:bg-indigo-300 border-indigo-300 ring-2 ring-indigo-400';
     }
-    // Blue theme matching Save As/New buttons
     return 'bg-blue-500 hover:bg-blue-600 active:bg-blue-700 text-blue-100';
   };
+
+  const triggerLabel = previewVersion
+    ? `v${previewVersion}`
+    : `v${displayVersion ?? '-'}`;
 
   return (
     <div className="relative" ref={dropdownRef}>
       <button
         onClick={() => setIsOpen(!isOpen)}
         disabled={disabled}
-        className={`
-          flex items-center gap-2 px-3 py-1.5 text-sm rounded transition-colors
-          ${getButtonClasses()}
-        `}
+        className={
+          minimal
+            ? `flex items-center gap-0.5 rounded px-1.5 py-0.5 text-sm transition-colors ${
+                disabled
+                  ? 'cursor-not-allowed opacity-50 text-muted-foreground'
+                  : previewVersion
+                    ? 'text-indigo-600 dark:text-indigo-400 hover:text-indigo-700'
+                    : 'text-muted-foreground hover:text-foreground'
+              }`
+            : `flex items-center gap-2 px-3 py-1.5 text-sm rounded transition-colors ${getButtonClasses()}`
+        }
         title="Save Points"
       >
-        <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
-        </svg>
-        <span>
-          {previewVersion 
-            ? `Previewing v${previewVersion}` 
-            : `Save Point ${displayVersion || '-'}`
-          }
-        </span>
-        <svg className={`w-4 h-4 transition-transform ${isOpen ? 'rotate-180' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        {!minimal && (
+          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
+          </svg>
+        )}
+        <span>{minimal ? triggerLabel : (previewVersion ? `Previewing v${previewVersion}` : `Save Point ${displayVersion || '-'}`)}</span>
+        <svg className={`${minimal ? 'w-3.5 h-3.5' : 'w-4 h-4'} transition-transform ${isOpen ? 'rotate-180' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
         </svg>
       </button>

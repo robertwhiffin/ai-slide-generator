@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Bot, User, ChevronRight, ChevronDown } from 'lucide-react';
+import { ChevronRight, ChevronDown } from 'lucide-react';
 import type { Message as MessageType } from '../../types/message';
 
 interface MessageProps {

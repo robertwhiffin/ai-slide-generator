@@ -94,6 +94,8 @@ export interface Session {
   last_activity?: string;
   message_count?: number;
   has_slide_deck?: boolean;
+  /** Slide count from list response; may also be on slide_deck when present */
+  slide_count?: number;
   messages?: SessionMessage[];
   slide_deck?: SlideDeck | null;
   profile_id?: number | null;

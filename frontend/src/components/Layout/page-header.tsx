@@ -1,30 +1,54 @@
 import { useState, useRef, useEffect } from "react"
-import { Save, Download, Play } from "lucide-react"
+import { Save, Download, Play, Share2, ChevronDown, FileDown, FileText, Presentation } from "lucide-react"
 import { Button } from "@/ui/button"
 import { SidebarTrigger } from "@/ui/sidebar"
 import { Separator } from "@/ui/separator"
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/ui/dropdown-menu"
 
 interface PageHeaderProps {
   title: string
   subtitle?: string
   onSave?: () => void
+  onShare?: () => void
+  /** Single export action (legacy); ignored if export menu items are provided */
   onExport?: () => void
+  onExportPPTX?: () => void
+  onExportPDF?: () => void
+  onExportGoogleSlides?: () => void
   onPresent?: () => void
   onTitleChange?: (newTitle: string) => void
+  savePointDropdown?: React.ReactNode
   profileSelector?: React.ReactNode
+  /** Shown next to Export button (e.g. "Capturing charts...", "Exporting to Google Slides…") */
+  exportStatus?: string | null
   isGenerating?: boolean
+  /** When true, only show Share (copy view link); hide Save, Export, Present */
+  viewOnly?: boolean
 }
 
 export function PageHeader({
   title,
   subtitle,
   onSave,
+  onShare,
   onExport,
+  onExportPPTX,
+  onExportPDF,
+  onExportGoogleSlides,
   onPresent,
   onTitleChange,
+  savePointDropdown,
   profileSelector,
+  exportStatus,
   isGenerating = false,
+  viewOnly = false,
 }: PageHeaderProps) {
+  const hasExportMenu = !viewOnly && (onExportPPTX ?? onExportPDF ?? onExportGoogleSlides)
   const [isEditing, setIsEditing] = useState(false)
   const [editedTitle, setEditedTitle] = useState(title)
   const inputRef = useRef<HTMLInputElement>(null)
@@ -70,9 +94,9 @@ export function PageHeader({
       <SidebarTrigger className="-ml-1" />
       <Separator orientation="vertical" className="h-4" />
 
-      {/* Left: Title */}
-      <div className="flex flex-1 items-center">
-        <div className="flex flex-col">
+      {/* Left: Title row (title + Save + version) and subtitle below */}
+      <div className="flex min-w-0 flex-1 flex-col gap-0">
+        <div className="flex items-center gap-2 min-w-0 leading-tight">
           {isEditing ? (
             <input
               ref={inputRef}
@@ -81,49 +105,106 @@ export function PageHeader({
               onChange={(e) => setEditedTitle(e.target.value)}
               onBlur={handleSave}
               onKeyDown={handleKeyDown}
-              className="text-sm font-medium text-foreground bg-background border border-border rounded px-2 py-0.5 focus:outline-none focus:ring-2 focus:ring-primary"
+              className="min-w-0 max-w-xl py-0.5 text-sm font-medium text-foreground bg-background border border-border rounded px-2 focus:outline-none focus:ring-2 focus:ring-primary"
               disabled={isGenerating}
             />
           ) : (
             <button
               onClick={() => onTitleChange && setIsEditing(true)}
-              className="text-sm font-medium text-foreground hover:text-primary transition-colors text-left"
-              disabled={isGenerating || !onTitleChange}
+              className="min-w-0 max-w-xl truncate py-0.5 text-left text-sm font-medium leading-tight text-foreground hover:text-primary transition-colors"
+              disabled={isGenerating || !onTitleChange || viewOnly}
             >
               {title}
             </button>
           )}
-          {subtitle && <p className="text-xs text-muted-foreground">{subtitle}</p>}
+          {!viewOnly && onSave && (
+            <Button
+              variant="ghost"
+              size="icon"
+              className="h-7 w-7 shrink-0"
+              onClick={onSave}
+              disabled={isGenerating}
+              title="Save session name"
+            >
+              <Save className="size-3.5" />
+            </Button>
+          )}
+          {!viewOnly && savePointDropdown && (
+            <div className="shrink-0 leading-tight">{savePointDropdown}</div>
+          )}
         </div>
+        {subtitle && <p className="mt-px text-xs leading-none text-muted-foreground truncate">{subtitle}</p>}
       </div>
 
-      {/* Right: Actions and Profile */}
+      {/* Right: Export status, Export, Share, Present, Profile */}
       <div className="flex items-center gap-2">
-        {onSave && (
+        {exportStatus && (
+          <span className="text-xs text-muted-foreground whitespace-nowrap max-w-[140px] truncate" title={exportStatus}>
+            {exportStatus}
+          </span>
+        )}
+        {!viewOnly && (hasExportMenu || onExport) && (
+          hasExportMenu ? (
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="gap-1.5"
+                  disabled={isGenerating}
+                >
+                  <Download className="size-3.5" />
+                  Export
+                  <ChevronDown className="size-3.5" />
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end">
+                {onExportPPTX && (
+                  <DropdownMenuItem onClick={onExportPPTX} disabled={isGenerating}>
+                    <FileDown className="size-3.5 mr-2" />
+                    Download PPTX
+                  </DropdownMenuItem>
+                )}
+                {onExportPDF && (
+                  <DropdownMenuItem onClick={onExportPDF} disabled={isGenerating}>
+                    <FileText className="size-3.5 mr-2" />
+                    Download PDF
+                  </DropdownMenuItem>
+                )}
+                {onExportGoogleSlides && (
+                  <DropdownMenuItem onClick={onExportGoogleSlides} disabled={isGenerating}>
+                    <Presentation className="size-3.5 mr-2" />
+                    Export to Google Slides
+                  </DropdownMenuItem>
+                )}
+              </DropdownMenuContent>
+            </DropdownMenu>
+          ) : (
+            <Button
+              variant="outline"
+              size="sm"
+              className="gap-1.5"
+              onClick={onExport}
+              disabled={isGenerating}
+            >
+              <Download className="size-3.5" />
+              Export
+            </Button>
+          )
+        )}
+        {onShare && (
           <Button
             variant="outline"
             size="sm"
             className="gap-1.5"
-            onClick={onSave}
+            onClick={onShare}
             disabled={isGenerating}
           >
-            <Save className="size-3.5" />
-            Save
+            <Share2 className="size-3.5" />
+            Share
           </Button>
         )}
-        {onExport && (
-          <Button
-            variant="outline"
-            size="sm"
-            className="gap-1.5"
-            onClick={onExport}
-            disabled={isGenerating}
-          >
-            <Download className="size-3.5" />
-            Export
-          </Button>
-        )}
-        {onPresent && (
+        {!viewOnly && onPresent && (
           <Button
             variant="outline"
             size="sm"
