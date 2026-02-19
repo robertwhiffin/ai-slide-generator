@@ -14,7 +14,6 @@ import {
   sortableKeyboardCoordinates,
   verticalListSortingStrategy,
 } from '@dnd-kit/sortable';
-import { FiPlay, FiDownload, FiFile, FiFileText, FiCode } from 'react-icons/fi';
 import type { Slide, SlideDeck } from '../../types/slide';
 import { SlideTile } from './SlideTile';
 import { PresentationMode } from '../PresentationMode';
@@ -22,11 +21,6 @@ import { api } from '../../services/api';
 import { useSelection } from '../../contexts/SelectionContext';
 import { exportSlideDeckToPDF } from '../../services/pdf_client';
 import { useSession } from '../../contexts/SessionContext';
-
-const isDebugMode = (): boolean => {
-  const urlParams = new URLSearchParams(window.location.search);
-  return urlParams.get('debug')?.toLowerCase() === 'true' || localStorage.getItem('debug')?.toLowerCase() === 'true';
-};
 
 interface SlideContext {
   indices: number[];
@@ -40,6 +34,8 @@ interface SlidePanelProps {
   scrollToSlide?: { index: number; key: number } | null;
   onSendMessage?: (content: string, slideContext?: SlideContext) => void;
   onExportStatusChange?: (status: string | null) => void;
+  versionKey?: string;
+  readOnly?: boolean;
 }
 
 export interface SlidePanelHandle {
@@ -51,12 +47,12 @@ export interface SlidePanelHandle {
 type ViewMode = 'tiles' | 'rawhtml' | 'rawtext';
 
 function SlidePanelComponent(props: SlidePanelProps, ref: React.Ref<SlidePanelHandle>) {
-  const { slideDeck, rawHtml, onSlideChange, scrollToSlide, onSendMessage, onExportStatusChange } = props;
-  const [isReordering, setIsReordering] = useState(false);
-  const [viewMode, setViewMode] = useState<ViewMode>('tiles');
+  const { slideDeck, rawHtml: _rawHtml, onSlideChange, scrollToSlide, onSendMessage, onExportStatusChange, versionKey, readOnly = false } = props;
+  const [_isReordering, setIsReordering] = useState(false);
+  const [viewMode, _setViewMode] = useState<ViewMode>('tiles');
   const [isExportingPDF, setIsExportingPDF] = useState(false);
   const [isExportingPPTX, setIsExportingPPTX] = useState(false);
-  const [exportProgress, setExportProgress] = useState<{ current: number; total: number; status: string } | null>(null);
+  const [_exportProgress, setExportProgress] = useState<{ current: number; total: number; status: string } | null>(null);
   const [showExportMenu, setShowExportMenu] = useState(false);
   const exportMenuRef = useRef<HTMLDivElement>(null);
   const [isPresentationMode, setIsPresentationMode] = useState(false);
@@ -78,6 +74,7 @@ function SlidePanelComponent(props: SlidePanelProps, ref: React.Ref<SlidePanelHa
   );
 
   const handleDragEnd = async (event: DragEndEvent) => {
+    if (readOnly) return;
     const { active, over } = event;
 
     if (!over || !slideDeck) return;
@@ -121,7 +118,7 @@ function SlidePanelComponent(props: SlidePanelProps, ref: React.Ref<SlidePanelHa
   };
 
   const handleDeleteSlide = async (index: number) => {
-    if (!slideDeck || !sessionId) return;
+    if (readOnly || !slideDeck || !sessionId) return;
     
     if (!confirm(`Delete slide ${index + 1}?`)) return;
 
@@ -140,7 +137,7 @@ function SlidePanelComponent(props: SlidePanelProps, ref: React.Ref<SlidePanelHa
   };
 
   const handleUpdateSlide = async (index: number, html: string) => {
-    if (!slideDeck || !sessionId) return;
+    if (readOnly || !slideDeck || !sessionId) return;
 
     try {
       await api.updateSlide(index, html, sessionId);
@@ -157,7 +154,7 @@ function SlidePanelComponent(props: SlidePanelProps, ref: React.Ref<SlidePanelHa
   };
 
   const handleVerificationUpdate = async (index: number, verification: import('../../types/verification').VerificationResult | null) => {
-    if (!slideDeck || !sessionId) return;
+    if (readOnly || !slideDeck || !sessionId) return;
 
     try {
       // Save verification to backend but DON'T replace the whole deck
@@ -175,7 +172,7 @@ function SlidePanelComponent(props: SlidePanelProps, ref: React.Ref<SlidePanelHa
   };
 
   const handleOptimizeLayout = (index: number) => {
-    if (!slideDeck || !onSendMessage || optimizingSlideIndex !== null) return;
+    if (readOnly || !slideDeck || !onSendMessage || optimizingSlideIndex !== null) return;
 
     const slide = slideDeck.slides[index];
     if (!slide) return;
@@ -407,7 +404,7 @@ function SlidePanelComponent(props: SlidePanelProps, ref: React.Ref<SlidePanelHa
     autoVerifyTriggeredRef.current.clear();
   }, [sessionId]);
 
-  const handleSaveAsHTML = () => {
+  const _handleSaveAsHTML = () => {
     if (!slideDeck) return;
 
     // Generate HTML for each slide with its own container
@@ -549,6 +546,7 @@ function SlidePanelComponent(props: SlidePanelProps, ref: React.Ref<SlidePanelHa
     // Close the dropdown menu
     setShowExportMenu(false);
   };
+  void _handleSaveAsHTML; // reserved for export menu
   if (!slideDeck) {
     return (
       <div className="flex items-center justify-center h-full bg-gray-50">
@@ -564,7 +562,7 @@ function SlidePanelComponent(props: SlidePanelProps, ref: React.Ref<SlidePanelHa
     <div className="h-full flex flex-col bg-gray-50">
       {/* Slides Content */}
       <div className="h-full overflow-y-auto">
-        <div className="p-4 space-y-4">
+        <div className="p-4 space-y-4" key={versionKey}>
               <DndContext
                 sensors={sensors}
                 collisionDetection={closestCenter}
@@ -576,7 +574,7 @@ function SlidePanelComponent(props: SlidePanelProps, ref: React.Ref<SlidePanelHa
                 >
         {slideDeck.slides.map((slide, index) => (
           <div
-            key={slide.slide_id}
+            key={versionKey ? `${versionKey}-${slide.slide_id}` : slide.slide_id}
             ref={(el) => {
               if (el) {
                 slideRefs.current.set(index, el);
@@ -596,6 +594,7 @@ function SlidePanelComponent(props: SlidePanelProps, ref: React.Ref<SlidePanelHa
               isAutoVerifying={verifyingSlides.has(index)}
               onOptimize={() => handleOptimizeLayout(index)}
               isOptimizing={optimizingSlideIndex === index}
+              readOnly={readOnly}
             />
           </div>
         ))}

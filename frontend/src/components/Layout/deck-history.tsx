@@ -27,6 +27,8 @@ interface DeckHistoryProps {
   onSessionSelect: (sessionId: string) => void
   onViewAll: () => void
   currentSessionId?: string | null
+  /** Live slide count for the current session (from page state); overrides list data when set */
+  currentSlideCount?: number | null
   refreshKey?: number
 }
 
@@ -34,6 +36,7 @@ export function DeckHistory({
   onSessionSelect,
   onViewAll,
   currentSessionId,
+  currentSlideCount,
   refreshKey,
 }: DeckHistoryProps) {
   const { isMobile } = useSidebar()
@@ -60,17 +63,17 @@ export function DeckHistory({
     }
   }
 
-  const formatDate = (dateStr: string) => {
+  // Match page header format: Just now, Xm ago, Xh ago, Xd ago
+  const getTimeAgo = (dateStr: string) => {
     const date = new Date(dateStr)
-    const now = new Date()
-    const diff = now.getTime() - date.getTime()
-    const hours = Math.floor(diff / (1000 * 60 * 60))
-
-    if (hours < 1) return 'Just now'
-    if (hours < 24) return `${hours} hour${hours > 1 ? 's' : ''} ago`
-    if (hours < 48) return 'Yesterday'
-    if (hours < 168) return `${Math.floor(hours / 24)} days ago`
-    return 'Last week'
+    const seconds = Math.floor((new Date().getTime() - date.getTime()) / 1000)
+    if (seconds < 60) return 'Just now'
+    const minutes = Math.floor(seconds / 60)
+    if (minutes < 60) return `${minutes}m ago`
+    const hours = Math.floor(minutes / 60)
+    if (hours < 24) return `${hours}h ago`
+    const days = Math.floor(hours / 24)
+    return `${days}d ago`
   }
 
   if (sessions.length === 0) {
@@ -89,10 +92,14 @@ export function DeckHistory({
               isActive={session.session_id === currentSessionId}
             >
               <Layers className="size-4 shrink-0 text-sidebar-foreground/60" />
-              <div className="flex flex-col gap-0 leading-tight">
+              <div className="flex min-w-0 flex-1 flex-col gap-0 leading-tight overflow-hidden">
                 <span className="truncate">{session.title || 'Untitled'}</span>
                 <span className="text-[10px] text-sidebar-foreground/50">
-                  {session.slide_deck?.slide_count || 0} slides &middot; {formatDate(session.last_activity || session.created_at)}
+                  {session.session_id === currentSessionId && currentSlideCount != null
+                    ? currentSlideCount
+                    : session.slide_count ?? session.slide_deck?.slide_count ?? 0} slide{(session.session_id === currentSessionId && currentSlideCount != null
+                    ? currentSlideCount
+                    : session.slide_count ?? session.slide_deck?.slide_count ?? 0) !== 1 ? 's' : ''} · Saved {getTimeAgo(session.last_activity || session.created_at)}
                 </span>
               </div>
             </SidebarMenuButton>

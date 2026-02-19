@@ -80,10 +80,10 @@ export const SelectionRibbon: React.FC<SelectionRibbonProps> = ({
         <div className="flex size-8 items-center justify-center rounded-lg bg-primary/10">
           <Layers className="size-4 text-primary" />
         </div>
-        <div className="flex-1">
+        <div className="flex-1 min-w-0">
           <h2 className="text-sm font-medium text-foreground">Thumbnails</h2>
           <p className="text-xs text-muted-foreground">
-            {slideDeck?.slides?.length || 0} slides
+            Select consecutive slides
           </p>
         </div>
       </div>

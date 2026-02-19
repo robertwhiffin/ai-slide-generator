@@ -5,6 +5,7 @@ import {
   HelpCircle,
   FileText,
   Palette,
+  Image,
 } from "lucide-react"
 import { NavMain } from "@/components/Layout/nav-main"
 import { NavSecondary } from "@/components/Layout/nav-secondary"
@@ -20,7 +21,7 @@ import {
   SidebarGroupLabel,
 } from "@/ui/sidebar"
 
-type ViewMode = 'main' | 'profiles' | 'deck_prompts' | 'slide_styles' | 'history' | 'help'
+type ViewMode = 'main' | 'profiles' | 'deck_prompts' | 'slide_styles' | 'images' | 'history' | 'help'
 
 interface AppSidebarProps extends React.ComponentProps<typeof Sidebar> {
   currentView: ViewMode
@@ -28,6 +29,8 @@ interface AppSidebarProps extends React.ComponentProps<typeof Sidebar> {
   onSessionSelect: (sessionId: string) => void
   onNewSession: () => void
   currentSessionId?: string | null
+  /** Live slide count for current session (from page) so sidebar matches header */
+  currentSlideCount?: number | null
   profileName?: string
   sessionsRefreshKey?: number
 }
@@ -57,6 +60,11 @@ const navSecondaryItems = [
     icon: Palette,
   },
   {
+    title: "Images",
+    viewId: "images",
+    icon: Image,
+  },
+  {
     title: "Help",
     viewId: "help",
     icon: HelpCircle,
@@ -69,6 +77,7 @@ export function AppSidebar({
   onSessionSelect,
   onNewSession,
   currentSessionId,
+  currentSlideCount,
   profileName,
   sessionsRefreshKey,
   ...props
@@ -94,6 +103,7 @@ export function AppSidebar({
           onSessionSelect={onSessionSelect}
           onViewAll={() => onViewChange('history')}
           currentSessionId={currentSessionId}
+          currentSlideCount={currentSlideCount}
           refreshKey={sessionsRefreshKey}
         />
       </SidebarContent>

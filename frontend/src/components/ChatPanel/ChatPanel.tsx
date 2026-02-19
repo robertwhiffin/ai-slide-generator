@@ -27,6 +27,7 @@ export interface ChatPanelHandle {
 interface ChatPanelProps {
   rawHtml: string | null;
   onSlidesGenerated: (slideDeck: SlideDeck, rawHtml: string | null, actionDescription?: string) => void;
+  onGenerationStart?: () => void;
   disabled?: boolean;
   previewMessages?: Message[] | null;  // When provided, show these instead of live messages
 }
@@ -34,6 +35,7 @@ interface ChatPanelProps {
 export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(({
   rawHtml,
   onSlidesGenerated,
+  onGenerationStart,
   disabled = false,
   previewMessages = null,
 }, ref) => {
@@ -133,6 +135,7 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(({
 
     setIsLoading(true);
     setIsGenerating(true);
+    onGenerationStart?.();
     setError(null);
     setLastReplacement(null);
 
