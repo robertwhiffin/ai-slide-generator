@@ -559,7 +559,7 @@ function SlidePanelComponent(props: SlidePanelProps, ref: React.Ref<SlidePanelHa
   }
 
   return (
-    <div className="h-full flex flex-col bg-gray-50">
+    <div className="h-full flex flex-col bg-gray-50" data-testid="slide-panel">
       {/* Slides Content */}
       <div className="h-full overflow-y-auto">
         <div className="p-4 space-y-4" key={versionKey}>

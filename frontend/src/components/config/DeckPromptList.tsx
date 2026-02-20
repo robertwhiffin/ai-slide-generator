@@ -209,6 +209,7 @@ export const DeckPromptList: React.FC = () => {
                         size="sm"
                         className="size-8 p-0"
                         onClick={() => toggleExpanded(prompt.id)}
+                        aria-label={expandedPromptId === prompt.id ? 'Hide' : 'Preview'}
                       >
                         <ChevronDown
                           className={`size-4 text-muted-foreground transition-transform ${
@@ -222,6 +223,7 @@ export const DeckPromptList: React.FC = () => {
                         className="size-8 p-0"
                         onClick={() => handleEdit(prompt)}
                         disabled={actionLoading === prompt.id}
+                        aria-label="Edit"
                       >
                         <Edit className="size-4" />
                       </Button>
@@ -231,6 +233,7 @@ export const DeckPromptList: React.FC = () => {
                         className="size-8 p-0 text-muted-foreground hover:text-destructive"
                         onClick={() => handleDelete(prompt)}
                         disabled={actionLoading === prompt.id}
+                        aria-label="Delete"
                       >
                         <Trash2 className="size-4" />
                       </Button>

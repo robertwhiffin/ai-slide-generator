@@ -25,15 +25,13 @@ test.describe('User Guide: Creating Profiles', () => {
     await setupUserGuideMocks(page);
     const capture = new UserGuideCapture(page, '02-creating-profiles');
 
-    // Step 01: Navigate to Profiles
-    await page.goto('/');
-    await page.getByRole('navigation').getByRole('button', { name: 'Profiles' }).click();
-    await expect(page.getByRole('heading', { name: 'Configuration Profiles' })).toBeVisible();
+    // Step 01: Navigate to Profiles (shared helper uses direct URL)
+    await goToProfiles(page);
     await capture.capture({
       step: '01',
       name: 'profiles-page',
-      description: 'Navigate to Profiles from the navigation bar',
-      highlightSelector: 'nav button:has-text("Profiles")',
+      description: 'Navigate to Profiles from the sidebar or URL',
+      highlightSelector: 'button:has-text("Agent profiles")',
     });
 
     // Step 02: View existing profiles
@@ -48,11 +46,11 @@ test.describe('User Guide: Creating Profiles', () => {
       step: '03',
       name: 'create-profile-button',
       description: 'Click "+ Create Profile" to start the profile creation wizard',
-      highlightSelector: 'button:has-text("Create Profile")',
+      highlightSelector: 'button:has-text("New Agent")',
     });
 
     // Step 04: Open the creation wizard
-    await page.getByRole('button', { name: '+ Create Profile' }).click();
+    await page.getByRole('button', { name: 'New Agent' }).click();
     await page.waitForTimeout(500);
     
     // Wizard Step 1: Basic Info

@@ -214,6 +214,7 @@ export const SlideStyleList: React.FC = () => {
                         size="sm"
                         className="size-8 p-0"
                         onClick={() => toggleExpanded(style.id)}
+                        aria-label={expandedStyleId === style.id ? 'Hide' : 'Preview'}
                       >
                         <ChevronDown
                           className={`size-4 text-muted-foreground transition-transform ${
@@ -229,6 +230,7 @@ export const SlideStyleList: React.FC = () => {
                             className="size-8 p-0"
                             onClick={() => handleEdit(style)}
                             disabled={actionLoading === style.id}
+                            aria-label="Edit"
                           >
                             <Edit className="size-4" />
                           </Button>
@@ -238,6 +240,7 @@ export const SlideStyleList: React.FC = () => {
                             className="size-8 p-0 text-muted-foreground hover:text-destructive"
                             onClick={() => handleDelete(style)}
                             disabled={actionLoading === style.id}
+                            aria-label="Delete"
                           >
                             <Trash2 className="size-4" />
                           </Button>

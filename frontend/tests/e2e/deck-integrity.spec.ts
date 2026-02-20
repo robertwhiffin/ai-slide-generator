@@ -7,6 +7,15 @@ import {
   mockSlides,
   createStreamingResponse,
 } from '../fixtures/mocks';
+import {
+  goToGenerator,
+  NEW_DECK_BUTTON_LABEL,
+  AGENT_PROFILES_LABEL,
+  DECK_PROMPTS_LABEL,
+  SLIDE_STYLES_LABEL,
+  HELP_LABEL,
+  VIEW_ALL_DECKS_LABEL,
+} from '../helpers/new-ui';
 
 /**
  * Deck Integrity E2E Tests
@@ -72,8 +81,10 @@ class ConsoleErrorCollector {
  * Uses the same pattern as the existing slide-generator.spec.ts
  */
 async function setupMocks(page: Page) {
-  // Mock profiles endpoint
-  await page.route('http://127.0.0.1:8000/api/settings/profiles', (route) => {
+  await page.route('**/api/setup/status', (route) => {
+    route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ configured: true }) });
+  });
+  await page.route(/\/api\/settings\/profiles$/, (route) => {
     route.fulfill({
       status: 200,
       contentType: 'application/json',
@@ -168,15 +179,7 @@ async function setupMocks(page: Page) {
   });
 }
 
-/**
- * Helper to navigate to the Generator view
- */
-async function goToGenerator(page: Page) {
-  await page.goto('/');
-  await page.getByRole('navigation').getByRole('button', { name: 'New Session' }).click();
-  // Wait for the Generator view to load (Chat heading appears)
-  await expect(page.getByRole('heading', { name: 'Chat', level: 2 })).toBeVisible();
-}
+// goToGenerator imported from helpers/new-ui
 
 test.describe('Deck Integrity - Initial Load', () => {
   let consoleCollector: ConsoleErrorCollector;
@@ -203,7 +206,8 @@ test.describe('Deck Integrity - Initial Load', () => {
   test('app header renders correctly', async ({ page }) => {
     await page.goto('/');
 
-    await expect(page.getByRole('heading', { name: 'databricks tellr', exact: true })).toBeVisible();
+    // New UI: sidebar brand is "Tellr" and "AI slide generator"
+    await expect(page.getByText('Tellr').first()).toBeVisible();
 
     const errors = consoleCollector.getErrors();
     expect(errors).toHaveLength(0);
@@ -222,11 +226,11 @@ test.describe('Deck Integrity - Navigation', () => {
   test('navigating between views produces no errors', async ({ page }) => {
     await page.goto('/');
 
-    // Navigate to each view
-    const views = ['New Session', 'My Sessions', 'Profiles', 'Deck Prompts', 'Slide Styles', 'Help'];
+    // New UI: sidebar button labels
+    const views = [NEW_DECK_BUTTON_LABEL, VIEW_ALL_DECKS_LABEL, AGENT_PROFILES_LABEL, DECK_PROMPTS_LABEL, SLIDE_STYLES_LABEL, HELP_LABEL];
 
     for (const view of views) {
-      await page.getByRole('navigation').getByRole('button', { name: view }).click();
+      await page.getByRole('button', { name: view }).click();
       await page.waitForTimeout(200);
     }
 
@@ -236,9 +240,9 @@ test.describe('Deck Integrity - Navigation', () => {
 
   test('History view loads sessions without errors', async ({ page }) => {
     await page.goto('/');
-    await page.getByRole('navigation').getByRole('button', { name: 'My Sessions' }).click();
+    await page.getByRole('button', { name: VIEW_ALL_DECKS_LABEL }).click();
 
-    await expect(page.getByRole('heading', { name: 'My Sessions' })).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'All Decks' })).toBeVisible();
 
     const errors = consoleCollector.getErrors();
     expect(errors).toHaveLength(0);
@@ -255,18 +259,16 @@ test.describe('Deck Integrity - Settings Pages', () => {
   });
 
   test('Profiles page loads without errors', async ({ page }) => {
-    await page.goto('/');
-    await page.getByRole('navigation').getByRole('button', { name: 'Profiles' }).click();
+    await page.goto('/profiles');
 
-    await expect(page.getByRole('heading', { name: 'Configuration Profiles' })).toBeVisible();
+    await expect(page.getByRole('heading', { name: /Agent Profiles|Configuration Profiles/i })).toBeVisible();
 
     const errors = consoleCollector.getErrors();
     expect(errors).toHaveLength(0);
   });
 
   test('Deck Prompts page loads without errors', async ({ page }) => {
-    await page.goto('/');
-    await page.getByRole('navigation').getByRole('button', { name: 'Deck Prompts' }).click();
+    await page.goto('/deck-prompts');
 
     await expect(page.getByRole('heading', { name: 'Deck Prompt Library' })).toBeVisible();
 
@@ -275,8 +277,7 @@ test.describe('Deck Integrity - Settings Pages', () => {
   });
 
   test('Slide Styles page loads without errors', async ({ page }) => {
-    await page.goto('/');
-    await page.getByRole('navigation').getByRole('button', { name: 'Slide Styles' }).click();
+    await page.goto('/slide-styles');
 
     await expect(page.getByRole('heading', { name: 'Slide Style Library' })).toBeVisible();
 
@@ -297,7 +298,7 @@ test.describe('Deck Integrity - Generator Interactions', () => {
   test('chat input enables when text is entered', async ({ page }) => {
     await goToGenerator(page);
 
-    const chatInput = page.getByRole('textbox', { name: /Ask to generate or modify/ });
+    const chatInput = page.getByRole('textbox');
     await expect(chatInput).toBeVisible();
 
     // Send button should be disabled initially
@@ -334,13 +335,12 @@ test.describe('Deck Integrity - Modal Dialogs', () => {
   });
 
   test('opening and closing deck prompt modal produces no errors', async ({ page }) => {
-    await page.goto('/');
-    await page.getByRole('navigation').getByRole('button', { name: 'Deck Prompts' }).click();
+    await page.goto('/deck-prompts');
 
     await expect(page.getByRole('heading', { name: 'Deck Prompt Library' })).toBeVisible();
 
     // Open create modal
-    await page.getByRole('button', { name: '+ Create Prompt' }).click();
+    await page.getByRole('button', { name: 'New Prompt' }).click();
     await expect(page.getByRole('heading', { name: 'Create Deck Prompt' })).toBeVisible();
 
     // Close modal
@@ -352,13 +352,12 @@ test.describe('Deck Integrity - Modal Dialogs', () => {
   });
 
   test('opening and closing slide style modal produces no errors', async ({ page }) => {
-    await page.goto('/');
-    await page.getByRole('navigation').getByRole('button', { name: 'Slide Styles' }).click();
+    await page.goto('/slide-styles');
 
     await expect(page.getByRole('heading', { name: 'Slide Style Library' })).toBeVisible();
 
     // Open create modal
-    await page.getByRole('button', { name: '+ Create Style' }).click();
+    await page.getByRole('button', { name: 'New Style' }).click();
     await expect(page.getByRole('heading', { name: 'Create Slide Style' })).toBeVisible();
 
     // Close modal
@@ -380,10 +379,12 @@ test.describe('Deck Integrity - Profile Selection', () => {
   });
 
   test('profile selector displays current profile', async ({ page }) => {
-    await page.goto('/');
+    await goToGenerator(page);
 
-    // Check that profile selector shows current profile
-    await expect(page.getByRole('button', { name: /Profile:/ })).toBeVisible();
+    // Profile control: header dropdown (profile name) or sidebar "Agent profiles"; use .first() to avoid strict mode
+    await expect(
+      page.getByRole('button', { name: /Profile|Sales Analytics/i }).first()
+    ).toBeVisible({ timeout: 5000 });
 
     const errors = consoleCollector.getErrors();
     expect(errors).toHaveLength(0);

@@ -6,6 +6,7 @@ import {
   mockSessions,
   mockSlides,
 } from '../fixtures/mocks';
+import { goToGenerator } from '../helpers/new-ui';
 
 /**
  * Slide Operations UI Tests
@@ -59,7 +60,9 @@ function createStreamingResponseWithDeck(slideDeck: typeof mockSlideDeck): strin
 // ============================================
 
 async function setupWithSlides(page: Page) {
-  // Mock profiles endpoint
+  await page.route('**/api/setup/status', (route) => {
+    route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ configured: true }) });
+  });
   await page.route('http://127.0.0.1:8000/api/settings/profiles', (route, request) => {
     if (request.method() === 'GET') {
       route.fulfill({
@@ -227,11 +230,7 @@ async function setupWithSlides(page: Page) {
   });
 }
 
-async function goToGenerator(page: Page) {
-  await page.goto('/');
-  await page.getByRole('navigation').getByRole('button', { name: 'New Session' }).click();
-  await expect(page.getByRole('heading', { name: 'Chat', level: 2 })).toBeVisible();
-}
+// goToGenerator imported from helpers/new-ui
 
 async function generateSlides(page: Page) {
   const chatInput = page.getByRole('textbox', { name: /Ask to generate or modify/ });
@@ -256,7 +255,7 @@ test.describe('SlideDisplay', () => {
 
     // Should show all 3 slide headers - use the slide header text specifically
     // The slide header has class text-sm font-medium text-gray-700
-    const slideHeaders = page.locator('.text-sm.font-medium.text-gray-700');
+    const slideHeaders = page.locator('[data-testid="slide-tile-header"]');
     await expect(slideHeaders.getByText('Slide 1')).toBeVisible();
     await expect(slideHeaders.getByText('Slide 2')).toBeVisible();
     await expect(slideHeaders.getByText('Slide 3')).toBeVisible();
@@ -272,7 +271,7 @@ test.describe('SlideDisplay', () => {
 
     // Verify slide numbers are displayed (Slide 1, Slide 2, Slide 3)
     // Use more specific selector to avoid matching thumbnail previews
-    const slideHeaders = page.locator('.text-sm.font-medium.text-gray-700');
+    const slideHeaders = page.locator('[data-testid="slide-tile-header"]');
     await expect(slideHeaders.getByText('Slide 1')).toBeVisible();
     await expect(slideHeaders.getByText('Slide 2')).toBeVisible();
     await expect(slideHeaders.getByText('Slide 3')).toBeVisible();
@@ -283,15 +282,14 @@ test.describe('SlideDisplay', () => {
     await generateSlides(page);
 
     // Should show "3 slides" in the panel header - use the specific gray text element
-    await expect(page.locator('p.text-sm.text-gray-500').getByText('3 slides')).toBeVisible();
+    await expect(page.getByText('3 slides').first()).toBeVisible();
   });
 
   test('displays slide deck title in header', async ({ page }) => {
     await goToGenerator(page);
     await generateSlides(page);
 
-    // The deck title should appear in the slide panel header
-    await expect(page.getByRole('heading', { name: /Benefits of Cloud Computing/i })).toBeVisible();
+    await expect(page.locator('header').getByText(/Benefits of Cloud Computing/i)).toBeVisible();
   });
 });
 
@@ -310,7 +308,7 @@ test.describe('SlideSelection', () => {
 
     // Find the first slide's "Add to chat context" button (FiMessageSquare icon button)
     // The button is in the slide header actions area
-    const firstSlideHeader = page.locator('.bg-gray-100.border-b').first();
+    const firstSlideHeader = page.locator('[data-testid="slide-tile-header"]').first();
     const chatContextButton = firstSlideHeader.locator('button[aria-pressed]');
 
     await chatContextButton.click();
@@ -324,7 +322,7 @@ test.describe('SlideSelection', () => {
     await generateSlides(page);
 
     // Click the chat context button to select the slide
-    const firstSlideHeader = page.locator('.bg-gray-100.border-b').first();
+    const firstSlideHeader = page.locator('[data-testid="slide-tile-header"]').first();
     const chatContextButton = firstSlideHeader.locator('button[aria-pressed]');
     await chatContextButton.click();
 
@@ -338,7 +336,7 @@ test.describe('SlideSelection', () => {
     await generateSlides(page);
 
     // Select first slide
-    const firstSlideHeader = page.locator('.bg-gray-100.border-b').first();
+    const firstSlideHeader = page.locator('[data-testid="slide-tile-header"]').first();
     const firstChatContextButton = firstSlideHeader.locator('button[aria-pressed]');
     await firstChatContextButton.click();
 
@@ -346,7 +344,7 @@ test.describe('SlideSelection', () => {
     await expect(firstChatContextButton).toHaveAttribute('aria-pressed', 'true');
 
     // Select second slide
-    const secondSlideHeader = page.locator('.bg-gray-100.border-b').nth(1);
+    const secondSlideHeader = page.locator('[data-testid="slide-tile-header"]').nth(1);
     const secondChatContextButton = secondSlideHeader.locator('button[aria-pressed]');
     await secondChatContextButton.click();
 
@@ -370,9 +368,7 @@ test.describe('DeleteSlide', () => {
     await goToGenerator(page);
     await generateSlides(page);
 
-    // Each slide should have a delete button (trash icon)
-    // The delete buttons are in the slide header with red color
-    const deleteButtons = page.locator('button.text-red-600');
+    const deleteButtons = page.locator('[data-testid="slide-tile-header"]').getByRole('button', { name: 'Delete' });
     await expect(deleteButtons).toHaveCount(3);
   });
 
@@ -380,14 +376,12 @@ test.describe('DeleteSlide', () => {
     await goToGenerator(page);
     await generateSlides(page);
 
-    // Set up dialog listener before clicking delete
     page.on('dialog', async dialog => {
       expect(dialog.message()).toContain('Delete slide 1?');
       await dialog.dismiss();
     });
 
-    // Click the first delete button
-    const deleteButton = page.locator('button.text-red-600').first();
+    const deleteButton = page.locator('[data-testid="slide-tile-header"]').first().getByRole('button', { name: 'Delete' });
     await deleteButton.click();
   });
 
@@ -395,40 +389,61 @@ test.describe('DeleteSlide', () => {
     await goToGenerator(page);
     await generateSlides(page);
 
-    // Set up a mock for getSlides that returns 2 slides after deletion
     const slidesAfterDelete = mockSlides.slice(1);
-    await page.route(/http:\/\/127.0.0.1:8000\/api\/sessions\/.*\/slides/, (route) => {
-      route.fulfill({
-        status: 200,
-        contentType: 'application/json',
-        body: JSON.stringify({
-          slide_deck: {
-            title: 'Test Presentation',
-            css: '',
-            scripts: '',
-            external_scripts: [],
-            slide_count: 2,
-            slides: slidesAfterDelete.map((s, i) => ({
-              ...s,
-              slide_id: `slide-${i}`,
-              html: s.html_content,
-            })),
-          },
-        }),
-      });
+    const twoSlideDeck = {
+      title: 'Benefits of Cloud Computing',
+      slide_count: 2,
+      css: '',
+      scripts: '',
+      external_scripts: [],
+      slides: slidesAfterDelete.map((s, i) => ({
+        index: i,
+        slide_id: `slide-${i}`,
+        title: s.title,
+        html: s.html_content,
+        content_hash: s.hash,
+        scripts: '',
+        verification: null,
+      })),
+    };
+
+    // App calls DELETE then GET sessions/:id/slides; we must return 2-slide deck from GET
+    let deleteDone = false;
+    await page.route('**/api/slides/*', (route) => {
+      if (route.request().method() === 'DELETE') {
+        deleteDone = true;
+        route.fulfill({
+          status: 200,
+          contentType: 'application/json',
+          body: JSON.stringify({ status: 'deleted' }),
+        });
+      } else {
+        route.continue();
+      }
+    });
+    await page.route('**/api/sessions/*/slides', (route) => {
+      if (route.request().method() === 'GET') {
+        route.fulfill({
+          status: 200,
+          contentType: 'application/json',
+          body: JSON.stringify({
+            session_id: 'test-session-id',
+            slide_deck: deleteDone ? twoSlideDeck : mockSlideDeck,
+          }),
+        });
+      } else {
+        route.continue();
+      }
     });
 
-    // Handle the confirmation dialog
     page.on('dialog', async dialog => {
       await dialog.accept();
     });
 
-    // Click delete on first slide
-    const deleteButton = page.locator('button.text-red-600').first();
+    const deleteButton = page.locator('[data-testid="slide-tile-header"]').first().getByRole('button', { name: 'Delete' });
     await deleteButton.click();
 
-    // Wait for slide count to update - use specific selector
-    await expect(page.locator('p.text-sm.text-gray-500').getByText('2 slides')).toBeVisible({ timeout: 5000 });
+    await expect(page.getByText('2 slides').first()).toBeVisible({ timeout: 5000 });
   });
 
   test('canceling delete keeps the slide', async ({ page }) => {
@@ -440,15 +455,13 @@ test.describe('DeleteSlide', () => {
       await dialog.dismiss();
     });
 
-    // Click delete
-    const deleteButton = page.locator('button.text-red-600').first();
+    const deleteButton = page.locator('[data-testid="slide-tile-header"]').first().getByRole('button', { name: 'Delete' });
     await deleteButton.click();
 
     // Slide count should remain 3 - use specific selector
-    await expect(page.locator('p.text-sm.text-gray-500').getByText('3 slides')).toBeVisible();
+    await expect(page.getByText('3 slides').first()).toBeVisible();
 
-    // Deck title should still be visible
-    await expect(page.getByRole('heading', { name: /Benefits of Cloud Computing/i })).toBeVisible();
+    await expect(page.locator('header').getByText(/Benefits of Cloud Computing/i)).toBeVisible();
   });
 });
 
@@ -468,7 +481,7 @@ test.describe('EditSlide', () => {
     // Each slide should have an edit button (blue color, FiEdit icon)
     const editButtons = page.locator('button.text-blue-600').filter({ has: page.locator('svg') });
     // Filter to only include edit buttons (not other blue buttons)
-    const slideEditButtons = page.locator('.bg-gray-100.border-b button.text-blue-600');
+    const slideEditButtons = page.locator('[data-testid="slide-tile-header"] button');
     await expect(slideEditButtons.first()).toBeVisible();
   });
 
@@ -476,12 +489,9 @@ test.describe('EditSlide', () => {
     await goToGenerator(page);
     await generateSlides(page);
 
-    // Click the edit button on the first slide
-    const firstSlideHeader = page.locator('.bg-gray-100.border-b').first();
-    const editButton = firstSlideHeader.locator('button.text-blue-600').first();
-    await editButton.click();
+    const firstSlideHeader = page.locator('[data-testid="slide-tile-header"]').first();
+    await firstSlideHeader.getByRole('button', { name: 'Edit' }).click();
 
-    // Modal should open with "Edit Slide" heading
     await expect(page.getByRole('heading', { name: 'Edit Slide' })).toBeVisible();
   });
 
@@ -489,12 +499,9 @@ test.describe('EditSlide', () => {
     await goToGenerator(page);
     await generateSlides(page);
 
-    // Open edit modal
-    const firstSlideHeader = page.locator('.bg-gray-100.border-b').first();
-    const editButton = firstSlideHeader.locator('button.text-blue-600').first();
-    await editButton.click();
+    const firstSlideHeader = page.locator('[data-testid="slide-tile-header"]').first();
+    await firstSlideHeader.getByRole('button', { name: 'Edit' }).click();
 
-    // Should have Save Changes and Cancel buttons
     await expect(page.getByRole('button', { name: 'Save Changes' })).toBeVisible();
     await expect(page.getByRole('button', { name: 'Cancel' })).toBeVisible();
   });
@@ -503,18 +510,11 @@ test.describe('EditSlide', () => {
     await goToGenerator(page);
     await generateSlides(page);
 
-    // Open edit modal
-    const firstSlideHeader = page.locator('.bg-gray-100.border-b').first();
-    const editButton = firstSlideHeader.locator('button.text-blue-600').first();
-    await editButton.click();
+    const firstSlideHeader = page.locator('[data-testid="slide-tile-header"]').first();
+    await firstSlideHeader.getByRole('button', { name: 'Edit' }).click();
 
-    // Verify modal is open
     await expect(page.getByRole('heading', { name: 'Edit Slide' })).toBeVisible();
-
-    // Click Cancel
     await page.getByRole('button', { name: 'Cancel' }).click();
-
-    // Modal should close
     await expect(page.getByRole('heading', { name: 'Edit Slide' })).not.toBeVisible();
   });
 
@@ -522,19 +522,11 @@ test.describe('EditSlide', () => {
     await goToGenerator(page);
     await generateSlides(page);
 
-    // Open edit modal
-    const firstSlideHeader = page.locator('.bg-gray-100.border-b').first();
-    const editButton = firstSlideHeader.locator('button.text-blue-600').first();
-    await editButton.click();
+    const firstSlideHeader = page.locator('[data-testid="slide-tile-header"]').first();
+    await firstSlideHeader.getByRole('button', { name: 'Edit' }).click();
 
-    // Verify modal is open
     await expect(page.getByRole('heading', { name: 'Edit Slide' })).toBeVisible();
-
-    // Click the X button (close button in header)
-    const closeButton = page.locator('.fixed.inset-0 button:has-text("\u2715")');
-    await closeButton.click();
-
-    // Modal should close
+    await page.getByRole('button', { name: 'Close' }).click();
     await expect(page.getByRole('heading', { name: 'Edit Slide' })).not.toBeVisible();
   });
 });
@@ -673,12 +665,9 @@ test.describe('SlideExport', () => {
     await goToGenerator(page);
     await generateSlides(page);
 
-    // Click Export button
     await page.getByRole('button', { name: 'Export' }).click();
 
-    // Export menu should show options
-    await expect(page.getByText('Export as PDF')).toBeVisible();
-    await expect(page.getByText('Export as PowerPoint')).toBeVisible();
-    await expect(page.getByText('Save as HTML')).toBeVisible();
+    await expect(page.getByText('Download PDF')).toBeVisible();
+    await expect(page.getByText('Download PPTX')).toBeVisible();
   });
 });

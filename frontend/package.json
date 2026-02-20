@@ -10,9 +10,12 @@
     "lint": "eslint .",
     "preview": "vite preview",
     "test": "playwright test",
+    "test:report": "rm -rf playwright-report && playwright test && playwright show-report --port 9324",
     "test:ui": "playwright test --ui",
     "test:headed": "playwright test --headed",
-    "test:debug": "playwright test --debug"
+    "test:debug": "playwright test --debug",
+    "show-report": "playwright show-report --port 9324",
+    "kill-report-ports": "for p in $(lsof -t -i :9323 -i :9324 -i :9325 2>/dev/null); do kill -9 $p; done"
   },
   "dependencies": {
     "@dnd-kit/core": "^6.3.1",
