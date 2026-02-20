@@ -10,8 +10,7 @@ test.describe('Session Recovery', () => {
   test('New Session always creates a fresh DB-persisted session', async ({ page }) => {
     await page.goto('/help');
 
-    // Click New Session — should create a new session and navigate
-    await page.click('button:has-text("New Session")');
+    await page.getByRole('button', { name: 'New Deck' }).click();
     await expect(page).toHaveURL(/\/sessions\/[^/]+\/edit/);
     await expect(page.locator('[data-testid="chat-panel"]')).toBeVisible();
   });
@@ -22,26 +21,23 @@ test.describe('Session Recovery', () => {
 
     // Navigate directly to the stale session URL
     await page.goto(`/sessions/${staleSessionId}/edit`);
-    await expect(page).toHaveURL('/help');
+    await expect(page).toHaveURL(/\/help/);
     await expect(page.locator('[data-testid="toast"]').first()).toContainText('Session not found');
   });
 
   test('clicking New Session multiple times creates distinct sessions', async ({ page }) => {
     await page.goto('/help');
 
-    // Click New Session first time — wait for navigation to complete
-    await page.click('button:has-text("New Session")');
+    await page.getByRole('button', { name: 'New Deck' }).click();
     await page.waitForURL(/\/sessions\/[^/]+\/edit/);
     const firstUrl = page.url();
     const firstSessionId = firstUrl.match(/\/sessions\/([^/]+)\/edit/)?.[1];
     expect(firstSessionId).toBeTruthy();
 
-    // Navigate away
-    await page.click('button:has-text("Help")');
+    await page.getByRole('button', { name: 'Help' }).click();
     await expect(page).toHaveURL('/help');
 
-    // Click New Session second time — wait for navigation to complete
-    await page.click('button:has-text("New Session")');
+    await page.getByRole('button', { name: 'New Deck' }).click();
     await page.waitForURL(/\/sessions\/[^/]+\/edit/);
     const secondUrl = page.url();
     const secondSessionId = secondUrl.match(/\/sessions\/([^/]+)\/edit/)?.[1];

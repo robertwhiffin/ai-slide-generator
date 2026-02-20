@@ -285,6 +285,7 @@ export const ProfileList: React.FC<ProfileListProps> = ({ onProfileChange }) => 
           {profiles.map((profile) => (
             <div
               key={profile.id}
+              data-testid="profile-card"
               className="rounded-lg border border-border bg-card transition-colors hover:bg-accent/5"
             >
               {/* Profile Header */}
@@ -325,6 +326,7 @@ export const ProfileList: React.FC<ProfileListProps> = ({ onProfileChange }) => 
                         size="sm"
                         className="size-8 p-0"
                         onClick={() => toggleExpand(profile.id)}
+                        aria-label="Expand"
                       >
                         <ChevronDown
                           className={`size-4 text-muted-foreground transition-transform ${
@@ -339,6 +341,7 @@ export const ProfileList: React.FC<ProfileListProps> = ({ onProfileChange }) => 
                           className="size-8 p-0 text-muted-foreground hover:text-destructive"
                           onClick={() => handleDelete(profile)}
                           disabled={actionLoading === profile.id}
+                          aria-label="Delete"
                         >
                           <Trash2 className="size-4" />
                         </Button>

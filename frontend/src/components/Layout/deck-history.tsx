@@ -27,8 +27,6 @@ interface DeckHistoryProps {
   onSessionSelect: (sessionId: string) => void
   onViewAll: () => void
   currentSessionId?: string | null
-  /** Live slide count for the current session (from page state); overrides list data when set */
-  currentSlideCount?: number | null
   refreshKey?: number
 }
 
@@ -36,7 +34,6 @@ export function DeckHistory({
   onSessionSelect,
   onViewAll,
   currentSessionId,
-  currentSlideCount,
   refreshKey,
 }: DeckHistoryProps) {
   const { isMobile } = useSidebar()
@@ -95,11 +92,10 @@ export function DeckHistory({
               <div className="flex min-w-0 flex-1 flex-col gap-0 leading-tight overflow-hidden">
                 <span className="truncate">{session.title || 'Untitled'}</span>
                 <span className="text-[10px] text-sidebar-foreground/50">
-                  {session.session_id === currentSessionId && currentSlideCount != null
-                    ? currentSlideCount
-                    : session.slide_count ?? session.slide_deck?.slide_count ?? 0} slide{(session.session_id === currentSessionId && currentSlideCount != null
-                    ? currentSlideCount
-                    : session.slide_count ?? session.slide_deck?.slide_count ?? 0) !== 1 ? 's' : ''} · Saved {getTimeAgo(session.last_activity || session.created_at)}
+                  {(() => {
+                    const count = session.slide_count ?? session.slide_deck?.slide_count ?? 0;
+                    return `${count} slide${count !== 1 ? 's' : ''} · Saved ${getTimeAgo(session.last_activity || session.created_at)}`;
+                  })()}
                 </span>
               </div>
             </SidebarMenuButton>

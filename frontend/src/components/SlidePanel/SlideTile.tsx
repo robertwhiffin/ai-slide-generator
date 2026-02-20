@@ -234,7 +234,7 @@ export const SlideTile: React.FC<SlideTileProps> = ({
         className={containerClassName}
       >
         {/* Slide Header with Actions */}
-      <div className="flex items-center gap-2 border-b border-border bg-card px-3 py-2">
+      <div className="flex items-center gap-2 border-b border-border bg-card px-3 py-2" data-testid="slide-tile-header">
           <div className="flex items-center gap-2 flex-1">
             {/* Drag Handle */}
             {!readOnly && (
@@ -317,6 +317,7 @@ export const SlideTile: React.FC<SlideTileProps> = ({
                     size="icon"
                     onClick={() => setIsEditing(true)}
                     className="h-7 w-7"
+                    aria-label="Edit"
                   >
                     <Edit3 className="size-3.5" />
                   </Button>
@@ -328,6 +329,7 @@ export const SlideTile: React.FC<SlideTileProps> = ({
                     size="icon"
                     onClick={onDelete}
                     className="h-7 w-7 text-destructive hover:text-destructive"
+                    aria-label="Delete"
                   >
                     <Trash2 className="size-3.5" />
                   </Button>

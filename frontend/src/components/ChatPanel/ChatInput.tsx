@@ -175,6 +175,7 @@ export const ChatInput: React.FC<ChatInputProps> = ({
               }}
               placeholder={placeholder ?? 'Ask me to create slides...'}
               disabled={disabled}
+              data-testid="chat-input"
               className="w-full px-3 py-2 pr-20 border border-input bg-background rounded-lg focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-0 resize-none transition-all duration-150 text-sm"
               style={{
                 minHeight: `${MIN_ROWS * LINE_HEIGHT}px`,
@@ -219,6 +220,7 @@ export const ChatInput: React.FC<ChatInputProps> = ({
                 disabled={disabled || !canSend}
                 className="h-7 w-7"
                 title="Send message (Enter)"
+                aria-label="Send"
               >
                 <Send className="h-3.5 w-3.5" />
               </Button>

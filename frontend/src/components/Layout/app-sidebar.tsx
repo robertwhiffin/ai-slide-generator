@@ -29,8 +29,6 @@ interface AppSidebarProps extends React.ComponentProps<typeof Sidebar> {
   onSessionSelect: (sessionId: string) => void
   onNewSession: () => void
   currentSessionId?: string | null
-  /** Live slide count for current session (from page) so sidebar matches header */
-  currentSlideCount?: number | null
   profileName?: string
   sessionsRefreshKey?: number
 }
@@ -77,7 +75,6 @@ export function AppSidebar({
   onSessionSelect,
   onNewSession,
   currentSessionId,
-  currentSlideCount,
   profileName,
   sessionsRefreshKey,
   ...props
@@ -103,7 +100,6 @@ export function AppSidebar({
           onSessionSelect={onSessionSelect}
           onViewAll={() => onViewChange('history')}
           currentSessionId={currentSessionId}
-          currentSlideCount={currentSlideCount}
           refreshKey={sessionsRefreshKey}
         />
       </SidebarContent>

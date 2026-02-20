@@ -18,8 +18,17 @@ import {
  * Call this in beforeEach for any test that loads the app.
  */
 export async function setupMocks(page: Page) {
-  // Mock profiles endpoint
-  await page.route('http://127.0.0.1:8000/api/settings/profiles', (route) => {
+  // Mock setup status so app skips welcome screen (uses baseURL in browser)
+  await page.route('**/api/setup/status', (route) => {
+    route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ configured: true }),
+    });
+  });
+
+  // Mock profiles endpoint (match any origin for same-origin or proxy)
+  await page.route(/\/api\/settings\/profiles$/, (route) => {
     route.fulfill({
       status: 200,
       contentType: 'application/json',

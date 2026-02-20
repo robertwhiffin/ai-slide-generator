@@ -1,5 +1,5 @@
 import React, { createContext, useContext, useState, useCallback } from 'react';
-import { api } from '../services/api';
+import { api, ApiError } from '../services/api';
 import type { SlideDeck } from '../types/slide';
 
 function generateLocalSessionId(): string {
@@ -19,7 +19,7 @@ interface SessionContextType {
   error: string | null;
   createNewSession: () => string;
   switchSession: (sessionId: string) => Promise<SessionRestoreResult>;
-  renameSession: (title: string) => Promise<void>;
+  renameSession: (title: string, slideCount?: number) => Promise<void>;
   setSessionTitle: (title: string | null) => void;
   setExperimentUrl: (url: string | null) => void;
 }
@@ -81,9 +81,12 @@ export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ child
 
       return { slideDeck, rawHtml };
     } catch (err) {
+      // Let 404 (session not found) propagate so caller can redirect to /help
+      if (err instanceof ApiError && err.status === 404) {
+        throw err;
+      }
       console.error('Failed to switch session:', err);
       setError('Failed to restore session. Starting new session.');
-      // Fall back to creating new local session
       createNewSession();
       return { slideDeck: null, rawHtml: null };
     } finally {
@@ -92,14 +95,14 @@ export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ child
   }, [createNewSession]);
 
   /**
-   * Rename the current session.
+   * Rename the current session (optionally update slide count for sidebar/list).
    * Note: This only works for sessions that have been persisted (have sent at least one message).
    */
-  const renameSession = useCallback(async (title: string) => {
+  const renameSession = useCallback(async (title: string, slideCount?: number) => {
     if (!sessionId) return;
 
     try {
-      await api.renameSession(sessionId, title);
+      await api.renameSession(sessionId, title, slideCount);
       setSessionTitle(title);
     } catch (err) {
       console.error('Failed to rename session:', err);

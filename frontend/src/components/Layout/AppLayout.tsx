@@ -88,12 +88,17 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
           setChatKey((k) => k + 1);
           setViewMode('main');
         }
-      } catch (err) {
+      } catch (err: unknown) {
+        if (!cancelled && err && typeof err === 'object' && 'status' in err && (err as { status: number }).status === 404) {
+          showToast('Session not found', 'error');
+          navigate('/help');
+          return;
+        }
         console.error('Failed to restore session from URL:', err);
       }
     })();
     return () => { cancelled = true; };
-  }, [urlSessionId]); // eslint-disable-line react-hooks/exhaustive-deps -- only run when URL segment changes
+  }, [urlSessionId, showToast, navigate]); // eslint-disable-line react-hooks/exhaustive-deps -- only run when URL segment changes
 
   // Load save point versions when session or deck changes
   const loadVersions = useCallback(async () => {
@@ -168,17 +173,24 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
     }
   }, [switchSession, currentProfile, loadProfile, navigate]);
 
-  // Auto-save session with slide deck title
+  // After generation: save deck name + slide count so sidebar/list show correct name and count
   const autoSaveSession = useCallback(async (deck: SlideDeck) => {
-    if (!sessionId || !deck.title) return;
+    if (!sessionId) return;
 
     try {
-      await renameSession(deck.title);
+      const title = deck.title?.trim();
+      const count = deck.slide_count ?? deck.slides?.length;
+      if (title) {
+        await renameSession(title, count);
+      } else if (count != null) {
+        await api.updateSession(sessionId, { slide_count: count });
+      } else {
+        return;
+      }
       setLastSavedTime(new Date());
-      // Trigger session list refresh in sidebar and history
-      setSessionsRefreshKey(prev => prev + 1);
+      setSessionsRefreshKey((prev) => prev + 1);
     } catch (err) {
-      console.error('Failed to auto-save session:', err);
+      console.error('Failed to save session after generation:', err);
     }
   }, [sessionId, renameSession]);
 
@@ -357,15 +369,28 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
     slidePanelRef.current?.openPresentationMode();
   }, []);
 
+  const handleViewChange = useCallback(
+    (view: ViewMode) => {
+      setViewMode(view);
+      if (view === 'help') navigate('/help');
+      else if (view === 'profiles') navigate('/profiles');
+      else if (view === 'deck_prompts') navigate('/deck-prompts');
+      else if (view === 'slide_styles') navigate('/slide-styles');
+      else if (view === 'images') navigate('/images');
+      else if (view === 'history') navigate('/history');
+      // 'main' is handled by New Deck button -> handleNewSession
+    },
+    [navigate]
+  );
+
   return (
     <SidebarProvider className="h-svh max-h-svh">
       <AppSidebar
         currentView={viewMode}
-        onViewChange={setViewMode}
+        onViewChange={handleViewChange}
         onSessionSelect={handleSessionRestore}
         onNewSession={handleNewSession}
         currentSessionId={sessionId}
-        currentSlideCount={displayDeck?.slide_count ?? null}
         profileName={currentProfile?.name}
         sessionsRefreshKey={sessionsRefreshKey}
       />
@@ -378,7 +403,7 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
                 subtitle={getSubtitle()}
                 onTitleChange={handleTitleChange}
                 onSave={() => setShowSaveDialog(true)}
-                onShare={sessionId ? handleShare : undefined}
+                onShare={!viewOnly && sessionId ? handleShare : undefined}
                 onExportPPTX={slideDeck ? handleExportPPTX : undefined}
                 onExportPDF={slideDeck ? handleExportPDF : undefined}
                 onExportGoogleSlides={slideDeck ? handleExportGoogleSlides : undefined}

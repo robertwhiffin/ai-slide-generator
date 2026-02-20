@@ -25,7 +25,9 @@ import {
 // ============================================
 
 async function setupMocks(page: Page) {
-  // Mock sessions endpoint
+  await page.route('**/api/setup/status', (route) => {
+    route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ configured: true }) });
+  });
   await page.route('http://127.0.0.1:8000/api/sessions**', (route, request) => {
     const url = request.url();
     const method = request.method();
@@ -146,9 +148,8 @@ async function setupEmptySessionsMock(page: Page) {
 }
 
 async function goToHistory(page: Page) {
-  await page.goto('/');
-  await page.getByRole('navigation').getByRole('button', { name: 'My Sessions' }).click();
-  await expect(page.getByRole('heading', { name: 'My Sessions' })).toBeVisible();
+  await page.goto('/history');
+  await expect(page.getByRole('heading', { name: 'All Decks' })).toBeVisible({ timeout: 10000 });
 }
 
 // ============================================
@@ -163,9 +164,9 @@ test.describe('SessionHistoryList', () => {
   test('renders page heading and session count', async ({ page }) => {
     await goToHistory(page);
 
-    await expect(page.getByRole('heading', { name: 'My Sessions' })).toBeVisible();
-    // Check for session count text
-    await expect(page.getByText(/\d+ sessions?$/)).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'All Decks' })).toBeVisible();
+    // Check for session count text (e.g. "2 sessions saved")
+    await expect(page.getByText(/\d+ sessions? saved/)).toBeVisible();
   });
 
   test('renders all sessions in table', async ({ page }) => {
@@ -174,9 +175,8 @@ test.describe('SessionHistoryList', () => {
     const table = page.getByRole('table');
     await expect(table).toBeVisible();
 
-    // Verify mock sessions are displayed
-    await expect(page.getByText('Session 2026-01-08 20:38')).toBeVisible();
-    await expect(page.getByText('Session 2026-01-08 20:20')).toBeVisible();
+    await expect(page.getByText('Session 2026-01-08 20:38').first()).toBeVisible();
+    await expect(page.getByText('Session 2026-01-08 20:20').first()).toBeVisible();
   });
 
   test('shows correct table columns', async ({ page }) => {
