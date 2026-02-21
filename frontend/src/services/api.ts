@@ -9,8 +9,8 @@ const API_BASE_URL = import.meta.env.VITE_API_URL || (
   import.meta.env.MODE === 'production' ? '' : 'http://127.0.0.1:8000'
 );
 
-// Polling interval in milliseconds
-const POLL_INTERVAL_MS = 2000;
+// Polling interval in milliseconds (higher = fewer requests during generation; 3s is a balance)
+const POLL_INTERVAL_MS = 3000;
 
 export class ApiError extends Error {
   status: number;

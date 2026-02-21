@@ -11,6 +11,12 @@ interface SessionRestoreResult {
   rawHtml: string | null;
 }
 
+/** Optional session info to avoid duplicate getSession when caller already has it */
+export interface OptionalSessionInfo {
+  title: string | null;
+  has_slide_deck?: boolean;
+}
+
 interface SessionContextType {
   sessionId: string | null;
   sessionTitle: string | null;
@@ -18,7 +24,7 @@ interface SessionContextType {
   isInitializing: boolean;
   error: string | null;
   createNewSession: () => string;
-  switchSession: (sessionId: string) => Promise<SessionRestoreResult>;
+  switchSession: (sessionId: string, existingSessionInfo?: OptionalSessionInfo) => Promise<SessionRestoreResult>;
   renameSession: (title: string, slideCount?: number) => Promise<void>;
   setSessionTitle: (title: string | null) => void;
   setExperimentUrl: (url: string | null) => void;
@@ -56,43 +62,55 @@ export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ child
   /**
    * Switch to an existing (persisted) session from history.
    * Returns both the slide deck and raw HTML for debug view.
+   * When existingSessionInfo is provided (e.g. from a prior getSession), skips the getSession call.
    */
-  const switchSession = useCallback(async (newSessionId: string): Promise<SessionRestoreResult> => {
-    setIsInitializing(true);
-    setError(null);
-    try {
-      // Validate session exists and get its info
-      const sessionInfo = await api.getSession(newSessionId);
+  const switchSession = useCallback(
+    async (newSessionId: string, existingSessionInfo?: OptionalSessionInfo): Promise<SessionRestoreResult> => {
+      setIsInitializing(true);
+      setError(null);
+      try {
+        let sessionInfo: { title: string | null; has_slide_deck?: boolean };
+        if (existingSessionInfo != null) {
+          sessionInfo = {
+            title: existingSessionInfo.title ?? null,
+            has_slide_deck: existingSessionInfo.has_slide_deck,
+          };
+        } else {
+          const full = await api.getSession(newSessionId);
+          sessionInfo = { title: full.title, has_slide_deck: full.has_slide_deck };
+        }
 
-      // Get slide deck if it has one
-      let slideDeck: SlideDeck | null = null;
-      let rawHtml: string | null = null;
-      if (sessionInfo.has_slide_deck) {
-        const result = await api.getSlides(newSessionId);
-        slideDeck = result.slide_deck;
-        // Extract raw HTML from the slide deck (stored as html_content in DB)
-        rawHtml = slideDeck?.html_content || null;
+        // Get slide deck if it has one
+        let slideDeck: SlideDeck | null = null;
+        let rawHtml: string | null = null;
+        if (sessionInfo.has_slide_deck) {
+          const result = await api.getSlides(newSessionId);
+          slideDeck = result.slide_deck;
+          // Extract raw HTML from the slide deck (stored as html_content in DB)
+          rawHtml = slideDeck?.html_content || null;
+        }
+
+        // Update state
+        setSessionId(newSessionId);
+        setSessionTitle(sessionInfo.title);
+        api.setCurrentSessionId(newSessionId);
+
+        return { slideDeck, rawHtml };
+      } catch (err) {
+        // Let 404 (session not found) propagate so caller can redirect to /help
+        if (err instanceof ApiError && err.status === 404) {
+          throw err;
+        }
+        console.error('Failed to switch session:', err);
+        setError('Failed to restore session. Starting new session.');
+        createNewSession();
+        return { slideDeck: null, rawHtml: null };
+      } finally {
+        setIsInitializing(false);
       }
-
-      // Update state
-      setSessionId(newSessionId);
-      setSessionTitle(sessionInfo.title);
-      api.setCurrentSessionId(newSessionId);
-
-      return { slideDeck, rawHtml };
-    } catch (err) {
-      // Let 404 (session not found) propagate so caller can redirect to /help
-      if (err instanceof ApiError && err.status === 404) {
-        throw err;
-      }
-      console.error('Failed to switch session:', err);
-      setError('Failed to restore session. Starting new session.');
-      createNewSession();
-      return { slideDeck: null, rawHtml: null };
-    } finally {
-      setIsInitializing(false);
-    }
-  }, [createNewSession]);
+    },
+    [createNewSession],
+  );
 
   /**
    * Rename the current session (optionally update slide count for sidebar/list).
