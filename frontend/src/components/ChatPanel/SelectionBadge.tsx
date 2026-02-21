@@ -25,7 +25,7 @@ export const SelectionBadge: React.FC<SelectionBadgeProps> = ({
       <span className="badge-icon" aria-hidden="true">
         📎
       </span>
-      <span className="badge-text">{rangeText}</span>
+      <span className="selection-badge__text" style={{ color: '#171717' }}>{rangeText}</span>
       <button
         className="badge-clear"
         onClick={onClear}

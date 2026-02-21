@@ -1,18 +1,24 @@
 import React, { useEffect, useState } from 'react';
 import { api } from '../../services/api';
 import type { Session } from '../../services/api';
+import { useSession } from '../../contexts/SessionContext';
+
 interface SessionHistoryProps {
   onSessionSelect: (sessionId: string) => void;
+  onBack?: () => void;
+  refreshKey?: number;
 }
 
 export const SessionHistory: React.FC<SessionHistoryProps> = ({
   onSessionSelect,
+  refreshKey,
 }) => {
   const [sessions, setSessions] = useState<Session[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editTitle, setEditTitle] = useState('');
+  const { sessionId: currentSessionId } = useSession();
 
   const loadSessions = async () => {
     try {
@@ -30,7 +36,7 @@ export const SessionHistory: React.FC<SessionHistoryProps> = ({
 
   useEffect(() => {
     loadSessions();
-  }, []);
+  }, [refreshKey]); // Reload when refresh is triggered
 
   const handleRename = async (sessionId: string) => {
     if (!editTitle.trim()) return;
@@ -85,9 +91,9 @@ export const SessionHistory: React.FC<SessionHistoryProps> = ({
   return (
     <div className="max-w-6xl mx-auto">
       <div className="mb-6">
-        <h2 className="text-2xl font-bold text-gray-900">My Sessions</h2>
+        <h2 className="text-2xl font-bold text-gray-900">All Decks</h2>
         <p className="text-sm text-gray-500 mt-1">
-          {sessions.length} session{sessions.length !== 1 ? 's' : ''}
+          {sessions.length} session{sessions.length !== 1 ? 's' : ''} saved
         </p>
       </div>
 
@@ -146,7 +152,9 @@ export const SessionHistory: React.FC<SessionHistoryProps> = ({
               {sessions.map((session) => (
                 <tr
                   key={session.session_id}
-                  className="hover:bg-gray-50"
+                  className={`hover:bg-gray-50 ${
+                    session.session_id === currentSessionId ? 'bg-blue-50' : ''
+                  }`}
                 >
                   <td className="px-3 py-3">
                     {session.profile_name ? (
@@ -189,6 +197,11 @@ export const SessionHistory: React.FC<SessionHistoryProps> = ({
                         <span className="text-sm font-medium text-gray-900 truncate" title={session.title}>
                           {session.title}
                         </span>
+                        {session.session_id === currentSessionId && (
+                          <span className="flex-shrink-0 px-1.5 py-0.5 text-xs font-medium bg-blue-100 text-blue-800 rounded">
+                            Current
+                          </span>
+                        )}
                       </div>
                     )}
                   </td>
@@ -209,7 +222,7 @@ export const SessionHistory: React.FC<SessionHistoryProps> = ({
                   </td>
                   <td className="px-3 py-3 text-center text-sm font-medium">
                     <div className="flex items-center justify-center gap-2">
-                      {session.has_slide_deck && (
+                      {session.session_id !== currentSessionId && session.has_slide_deck && (
                         <button
                           onClick={() => handleRestore(session.session_id)}
                           className="text-blue-600 hover:text-blue-900 text-xs"

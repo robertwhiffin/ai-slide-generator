@@ -45,8 +45,8 @@ async function setupMocks(page: Page) {
 
 async function goToHelp(page: Page) {
   await page.goto('/');
-  await page.getByRole('navigation').getByRole('button', { name: 'Help' }).click();
-  await expect(page.getByRole('heading', { name: 'How to Use databricks tellr' })).toBeVisible();
+  await page.getByRole('button', { name: 'Help' }).click();
+  await expect(page.getByRole('heading', { name: /How to Use.*[Tt]ellr/ })).toBeVisible();
 }
 
 // ============================================
@@ -61,15 +61,15 @@ test.describe('HelpNavigation', () => {
   test('Help button navigates to help page', async ({ page }) => {
     await page.goto('/');
 
-    await page.getByRole('navigation').getByRole('button', { name: 'Help' }).click();
+    await page.getByRole('button', { name: 'Help' }).click();
 
-    await expect(page.getByRole('heading', { name: 'How to Use databricks tellr' })).toBeVisible();
+    await expect(page.getByRole('heading', { name: /How to Use.*[Tt]ellr/ })).toBeVisible();
   });
 
   test('shows Overview tab by default', async ({ page }) => {
     await goToHelp(page);
 
-    await expect(page.getByRole('heading', { name: 'What is databricks tellr?' })).toBeVisible();
+    await expect(page.getByRole('heading', { name: /What is .*[Tt]ellr\?/ })).toBeVisible();
   });
 });
 

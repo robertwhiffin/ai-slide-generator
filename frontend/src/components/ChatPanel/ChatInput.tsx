@@ -1,6 +1,7 @@
-import React, { useState, useRef, useLayoutEffect } from 'react';
+import React, { useState, useRef, useLayoutEffect, useCallback } from 'react';
+import { Send, Maximize2, ImagePlus, X } from 'lucide-react';
+import { Button } from '@/ui/button';
 import { PromptEditorModal } from './PromptEditorModal';
-import type { ImageAsset } from '../../types/image';
 import { api } from '../../services/api';
 
 interface ChatInputProps {
@@ -10,10 +11,14 @@ interface ChatInputProps {
   badge?: React.ReactNode;
 }
 
+interface AttachedImage {
+  id: number;
+  previewUrl?: string;
+}
+
 const MIN_ROWS = 2;
 const MAX_ROWS = 10;
 const LINE_HEIGHT = 24; // Approximate line height in pixels
-const MAX_FILE_SIZE = 5 * 1024 * 1024; // 5MB
 
 export const ChatInput: React.FC<ChatInputProps> = ({
   onSend,
@@ -23,11 +28,67 @@ export const ChatInput: React.FC<ChatInputProps> = ({
 }) => {
   const [message, setMessage] = useState('');
   const [isModalOpen, setIsModalOpen] = useState(false);
-  const [attachedImages, setAttachedImages] = useState<ImageAsset[]>([]);
-  const [saveToLibrary, setSaveToLibrary] = useState(false);
-  const [uploadError, setUploadError] = useState<string | null>(null);
+  const [attachedImages, setAttachedImages] = useState<AttachedImage[]>([]);
   const [uploading, setUploading] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+
+  const addUploadedImage = useCallback((id: number, previewUrl?: string) => {
+    setAttachedImages((prev) => (prev.some((a) => a.id === id) ? prev : [...prev, { id, previewUrl }]));
+  }, []);
+
+  const removeAttachment = useCallback((id: number) => {
+    setAttachedImages((prev) => prev.filter((a) => a.id !== id));
+  }, []);
+
+  const handlePaste = useCallback(
+    async (e: React.ClipboardEvent) => {
+      const items = e.clipboardData?.items;
+      if (!items || disabled || uploading) return;
+      const file = Array.from(items).find((item) => item.kind === 'file' && item.type.startsWith('image/'));
+      if (!file) return;
+      e.preventDefault();
+      const f = file.getAsFile();
+      if (!f) return;
+      setUploading(true);
+      try {
+        const asset = await api.uploadImage(f, { saveToLibrary: false });
+        const previewUrl = asset.thumbnail_base64
+          ? `data:${asset.mime_type};base64,${asset.thumbnail_base64}`
+          : undefined;
+        addUploadedImage(asset.id, previewUrl);
+      } catch (err) {
+        console.warn('Paste image upload failed:', err);
+      } finally {
+        setUploading(false);
+      }
+    },
+    [disabled, uploading, addUploadedImage]
+  );
+
+  const handleFileSelect = useCallback(
+    async (e: React.ChangeEvent<HTMLInputElement>) => {
+      const files = e.target.files;
+      if (!files?.length || disabled || uploading) return;
+      setUploading(true);
+      try {
+        for (const file of Array.from(files)) {
+          if (!file.type.startsWith('image/')) continue;
+          const asset = await api.uploadImage(file, { saveToLibrary: false });
+          const previewUrl = asset.thumbnail_base64
+            ? `data:${asset.mime_type};base64,${asset.thumbnail_base64}`
+            : undefined;
+          addUploadedImage(asset.id, previewUrl);
+        }
+      } catch (err) {
+        console.warn('Image upload failed:', err);
+      } finally {
+        setUploading(false);
+      }
+      e.target.value = '';
+    },
+    [disabled, uploading, addUploadedImage]
+  );
 
   // Use useLayoutEffect to avoid visual flicker and prevent infinite loops
   useLayoutEffect(() => {
@@ -36,31 +97,29 @@ export const ChatInput: React.FC<ChatInputProps> = ({
 
     // Reset height to auto to measure scrollHeight
     textarea.style.height = 'auto';
-
+    
     const minHeight = MIN_ROWS * LINE_HEIGHT;
     const maxHeight = MAX_ROWS * LINE_HEIGHT;
-
+    
     // Calculate new height based on content
     const scrollHeight = textarea.scrollHeight;
     const newHeight = Math.min(Math.max(scrollHeight, minHeight), maxHeight);
-
+    
     textarea.style.height = `${newHeight}px`;
-
+    
     // Enable scrolling if content exceeds max height
     textarea.style.overflowY = scrollHeight > maxHeight ? 'auto' : 'hidden';
   }, [message]);
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    if (message.trim() && !disabled) {
-      const imageIds = attachedImages.length > 0
-        ? attachedImages.map(img => img.id)
-        : undefined;
-      onSend(message.trim(), imageIds);
-      setMessage('');
-      setAttachedImages([]);
-      setUploadError(null);
-    }
+    const text = message.trim();
+    if (!text && attachedImages.length === 0) return;
+    if (disabled) return;
+    const imageIds = attachedImages.length > 0 ? attachedImages.map((a) => a.id) : undefined;
+    onSend(text || 'Use these images', imageIds);
+    setMessage('');
+    setAttachedImages([]);
   };
 
   const handleModalSave = (text: string) => {
@@ -68,165 +127,111 @@ export const ChatInput: React.FC<ChatInputProps> = ({
     setIsModalOpen(false);
   };
 
-  const handlePaste = async (e: React.ClipboardEvent) => {
-    const items = e.clipboardData?.items;
-    if (!items) return;
-
-    for (const item of Array.from(items)) {
-      if (item.type.startsWith('image/')) {
-        e.preventDefault();
-        const rawFile = item.getAsFile();
-        if (!rawFile) continue;
-
-        if (rawFile.size > MAX_FILE_SIZE) {
-          setUploadError('Image too large (max 5MB)');
-          continue;
-        }
-
-        const ext = rawFile.name.split('.').pop() || 'png';
-        const uniqueName = `pasted-image-${Date.now()}.${ext}`;
-        const file = new File([rawFile], uniqueName, { type: rawFile.type });
-
-        setUploading(true);
-        setUploadError(null);
-        try {
-          const uploaded = await api.uploadImage(file, {
-            category: saveToLibrary ? 'content' : undefined,
-            saveToLibrary: saveToLibrary,
-          });
-          setAttachedImages(prev => [...prev, uploaded]);
-        } catch {
-          setUploadError('Failed to upload pasted image');
-        } finally {
-          setUploading(false);
-        }
-      }
-    }
-  };
-
-  const removeAttachment = (imageId: number) => {
-    setAttachedImages(prev => prev.filter(img => img.id !== imageId));
-  };
-
   const lineCount = message.split('\n').length;
   const charCount = message.length;
 
+  const canSend = message.trim() || attachedImages.length > 0;
+
   return (
     <>
-      <form onSubmit={handleSubmit} className="p-4 bg-white border-t">
-        {/* Attachment Preview */}
+      <form onSubmit={handleSubmit} className="border-t border-border bg-card px-4 py-3">
+        {badge && <div className="mb-2">{badge}</div>}
         {attachedImages.length > 0 && (
-          <div className="flex items-center gap-2 mb-2 p-2 bg-gray-50 rounded-lg">
-            {attachedImages.map(img => (
-              <div key={img.id} className="relative group">
-                {img.thumbnail_base64 ? (
-                  <img
-                    src={img.thumbnail_base64}
-                    alt={img.original_filename}
-                    className="w-12 h-12 object-cover rounded border border-gray-200"
-                  />
+          <div className="mb-2 flex flex-wrap gap-2">
+            {attachedImages.map(({ id, previewUrl }) => (
+              <div
+                key={id}
+                className="relative h-14 w-14 rounded-lg border border-border bg-muted overflow-hidden"
+              >
+                {previewUrl ? (
+                  <img src={previewUrl} alt="" className="h-full w-full object-cover" />
                 ) : (
-                  <div className="w-12 h-12 bg-gray-200 rounded flex items-center justify-center text-xs text-gray-500">
-                    IMG
-                  </div>
+                  <div className="h-full w-full flex items-center justify-center text-muted-foreground text-xs">#{id}</div>
                 )}
                 <button
                   type="button"
-                  onClick={() => removeAttachment(img.id)}
-                  className="absolute -top-1 -right-1 bg-red-500 text-white rounded-full w-4 h-4 text-xs leading-none flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity"
+                  onClick={() => removeAttachment(id)}
+                  className="absolute top-0.5 right-0.5 rounded-full bg-background/80 p-0.5 hover:bg-destructive hover:text-destructive-foreground"
+                  aria-label="Remove"
                 >
-                  &times;
+                  <X className="h-3 w-3" />
                 </button>
               </div>
             ))}
-            <label className="flex items-center gap-1 text-xs text-gray-500 ml-2 cursor-pointer select-none">
+          </div>
+        )}
+        <div className="relative flex items-end gap-2">
+          <div className="flex-1 relative">
+            <textarea
+              ref={textareaRef}
+              value={message}
+              onChange={(e) => setMessage(e.target.value)}
+              onPaste={handlePaste}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' && !e.shiftKey) {
+                  e.preventDefault();
+                  handleSubmit(e);
+                }
+              }}
+              placeholder={placeholder ?? 'Ask me to create slides...'}
+              disabled={disabled}
+              data-testid="chat-input"
+              className="w-full px-3 py-2 pr-20 border border-input bg-background rounded-lg focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-0 resize-none transition-all duration-150 text-sm"
+              style={{
+                minHeight: `${MIN_ROWS * LINE_HEIGHT}px`,
+                maxHeight: `${MAX_ROWS * LINE_HEIGHT}px`,
+                lineHeight: `${LINE_HEIGHT}px`,
+              }}
+            />
+            <div className="absolute right-2 top-2 flex gap-1">
               <input
-                type="checkbox"
-                checked={saveToLibrary}
-                onChange={(e) => setSaveToLibrary(e.target.checked)}
-                className="rounded border-gray-300"
+                ref={fileInputRef}
+                type="file"
+                accept="image/*"
+                multiple
+                className="hidden"
+                onChange={handleFileSelect}
               />
-              Save to library
-            </label>
-          </div>
-        )}
-
-        {/* Upload Error */}
-        {uploadError && (
-          <div className="mb-2 p-2 bg-red-50 text-red-700 rounded text-xs flex items-center justify-between">
-            <span>{uploadError}</span>
-            <button type="button" onClick={() => setUploadError(null)} className="text-red-500 hover:text-red-700 ml-2">
-              &times;
-            </button>
-          </div>
-        )}
-
-        <div className="flex items-end space-x-2">
-          <div className="flex-1">
-            {badge && <div className="mb-2">{badge}</div>}
-            <div className="relative">
-              <textarea
-                ref={textareaRef}
-                data-testid="chat-input"
-                value={message}
-                onChange={(e) => setMessage(e.target.value)}
-                onPaste={handlePaste}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter' && !e.shiftKey) {
-                    e.preventDefault();
-                    handleSubmit(e);
-                  }
-                }}
-                placeholder={uploading ? 'Uploading image...' : (placeholder ?? 'Ask me to create slides...')}
-                disabled={disabled}
-                className="w-full px-3 py-2 pr-10 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 resize-none transition-all duration-150"
-                style={{
-                  minHeight: `${MIN_ROWS * LINE_HEIGHT}px`,
-                  maxHeight: `${MAX_ROWS * LINE_HEIGHT}px`,
-                  lineHeight: `${LINE_HEIGHT}px`,
-                }}
-              />
-              {/* Expand button */}
-              <button
+              <Button
                 type="button"
+                size="icon"
+                variant="ghost"
+                onClick={() => fileInputRef.current?.click()}
+                disabled={disabled || uploading}
+                className="h-7 w-7"
+                title="Attach image"
+              >
+                <ImagePlus className="h-3.5 w-3.5" />
+              </Button>
+              <Button
+                type="button"
+                size="icon"
+                variant="ghost"
                 onClick={() => setIsModalOpen(true)}
                 disabled={disabled}
-                className="absolute right-2 top-2 p-1.5 text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded transition-colors disabled:opacity-50"
+                className="h-7 w-7"
                 title="Expand editor (for long prompts)"
               >
-                <svg
-                  xmlns="http://www.w3.org/2000/svg"
-                  width="16"
-                  height="16"
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="currentColor"
-                  strokeWidth="2"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                >
-                  <polyline points="15 3 21 3 21 9" />
-                  <polyline points="9 21 3 21 3 15" />
-                  <line x1="21" y1="3" x2="14" y2="10" />
-                  <line x1="3" y1="21" x2="10" y2="14" />
-                </svg>
-              </button>
+                <Maximize2 className="h-3.5 w-3.5" />
+              </Button>
+              <Button
+                type="submit"
+                size="icon"
+                disabled={disabled || !canSend}
+                className="h-7 w-7"
+                title="Send message (Enter)"
+                aria-label="Send"
+              >
+                <Send className="h-3.5 w-3.5" />
+              </Button>
             </div>
           </div>
-
-          <button
-            type="submit"
-            disabled={disabled || !message.trim()}
-            className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:bg-gray-300 disabled:cursor-not-allowed"
-          >
-            Send
-          </button>
         </div>
 
-        <div className="mt-1 flex items-center justify-between text-xs text-gray-500">
+        <div className="mt-1.5 flex items-center justify-between text-xs text-muted-foreground">
           <span>Press Enter to send, Shift+Enter for new line</span>
           {message.length > 0 && (
-            <span className="text-gray-400">
+            <span>
               {lineCount} {lineCount === 1 ? 'line' : 'lines'} · {charCount} chars
             </span>
           )}
@@ -241,12 +246,8 @@ export const ChatInput: React.FC<ChatInputProps> = ({
           onCancel={() => setIsModalOpen(false)}
           onSend={(text) => {
             if (text.trim() && !disabled) {
-              const imageIds = attachedImages.length > 0
-                ? attachedImages.map(img => img.id)
-                : undefined;
-              onSend(text.trim(), imageIds);
+              onSend(text.trim(), undefined);
               setMessage('');
-              setAttachedImages([]);
               setIsModalOpen(false);
             }
           }}

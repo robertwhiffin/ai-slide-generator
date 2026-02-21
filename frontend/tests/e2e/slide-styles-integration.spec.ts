@@ -206,8 +206,7 @@ async function fillMonacoEditor(page: Page, content: string): Promise<void> {
 // ============================================
 
 async function goToSlideStyles(page: Page): Promise<void> {
-  await page.goto('/');
-  await page.getByRole('navigation').getByRole('button', { name: 'Slide Styles' }).click();
+  await page.goto('/slide-styles');
   await expect(page.getByRole('heading', { name: 'Slide Style Library' })).toBeVisible();
 }
 
@@ -224,7 +223,7 @@ test.describe('Slide Style CRUD Operations', () => {
       await goToSlideStyles(page);
 
       // Open create modal
-      await page.getByRole('button', { name: '+ Create Style' }).click();
+      await page.getByRole('button', { name: 'New Style' }).click();
       await expect(page.getByRole('heading', { name: 'Create Slide Style' })).toBeVisible();
 
       // Fill form
@@ -270,17 +269,14 @@ test.describe('Slide Style CRUD Operations', () => {
   test('created style appears in style list', async ({ page, request }) => {
     const styleName = testStyleName('List');
 
-    // Create style via API
     const style = await createTestStyleViaAPI(request, styleName);
 
     try {
       await goToSlideStyles(page);
 
-      // Should see the new style in the list
-      await expect(page.getByRole('heading', { name: styleName, level: 3 })).toBeVisible();
-      await expect(page.getByText('E2E test style')).toBeVisible();
+      await expect(page.getByRole('heading', { name: styleName, level: 3 })).toBeVisible({ timeout: 10000 });
+      await expect(page.getByText('E2E test style').first()).toBeVisible();
     } finally {
-      // Cleanup
       await deleteTestStyleViaAPI(request, style.id);
     }
   });
@@ -487,11 +483,8 @@ test.describe('System Style Protection', () => {
   test('system style has System badge', async ({ page }) => {
     await goToSlideStyles(page);
 
-    // Find the System Default style card
-    const systemCard = page.locator('div.border.rounded-lg').filter({ hasText: 'System Default' }).filter({ hasText: 'Protected system style' });
-
-    // Should have System badge (use .first() since 'System' appears in both badge and category)
-    await expect(systemCard.locator('span').filter({ hasText: 'System' }).first()).toBeVisible();
+    const systemCard = page.locator('div.rounded-lg').filter({ hasText: 'System Default' }).first();
+    await expect(systemCard.getByText('System').first()).toBeVisible();
   });
 });
 
@@ -510,7 +503,7 @@ test.describe('Slide Style Validation', () => {
       await goToSlideStyles(page);
 
       // Try to create another with same name
-      await page.getByRole('button', { name: '+ Create Style' }).click();
+      await page.getByRole('button', { name: 'New Style' }).click();
 
       // Fill form with duplicate name
       await page.getByLabel(/Name/i).fill(styleName);
@@ -567,7 +560,7 @@ test.describe('Slide Style Validation', () => {
   test('form requires name field', async ({ page }) => {
     await goToSlideStyles(page);
 
-    await page.getByRole('button', { name: '+ Create Style' }).click();
+    await page.getByRole('button', { name: 'New Style' }).click();
 
     // Try to submit without name
     await page.getByRole('button', { name: 'Create Style', exact: true }).click();
@@ -579,7 +572,7 @@ test.describe('Slide Style Validation', () => {
   test('form requires style content field', async ({ page }) => {
     await goToSlideStyles(page);
 
-    await page.getByRole('button', { name: '+ Create Style' }).click();
+    await page.getByRole('button', { name: 'New Style' }).click();
 
     // Fill only name
     await page.getByLabel(/Name/i).fill('Test Style');
@@ -604,7 +597,7 @@ test.describe('Slide Style Edge Cases', () => {
     try {
       await goToSlideStyles(page);
 
-      await page.getByRole('button', { name: '+ Create Style' }).click();
+      await page.getByRole('button', { name: 'New Style' }).click();
 
       // Fill form with special characters
       await page.getByLabel(/Name/i).fill(styleName);
@@ -638,7 +631,7 @@ test.describe('Slide Style Edge Cases', () => {
     try {
       await goToSlideStyles(page);
 
-      await page.getByRole('button', { name: '+ Create Style' }).click();
+      await page.getByRole('button', { name: 'New Style' }).click();
 
       // Fill form with unicode
       await page.getByLabel(/Name/i).fill(styleName);
@@ -673,7 +666,7 @@ test.describe('Slide Style Edge Cases', () => {
     try {
       await goToSlideStyles(page);
 
-      await page.getByRole('button', { name: '+ Create Style' }).click();
+      await page.getByRole('button', { name: 'New Style' }).click();
 
       await page.getByLabel(/Name/i).fill(styleName);
       await page.getByLabel(/Description/i).fill(longDescription);

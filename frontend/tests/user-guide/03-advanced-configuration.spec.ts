@@ -25,15 +25,13 @@ test.describe('User Guide: Advanced Configuration', () => {
       await setupUserGuideMocks(page);
       const capture = new UserGuideCapture(page, '03-advanced-configuration');
 
-      // Step 01: Navigate to Deck Prompts
-      await page.goto('/');
-      await page.getByRole('navigation').getByRole('button', { name: 'Deck Prompts' }).click();
-      await expect(page.getByRole('heading', { name: 'Deck Prompt Library' })).toBeVisible();
+      // Step 01: Navigate to Deck Prompts (shared helper uses direct URL)
+      await goToDeckPrompts(page);
       await capture.capture({
         step: '01',
         name: 'deck-prompts-page',
-        description: 'Navigate to Deck Prompts from the navigation bar',
-        highlightSelector: 'nav button:has-text("Deck Prompts")',
+        description: 'Navigate to Deck Prompts from the sidebar or URL',
+        highlightSelector: 'button:has-text("Deck prompts")',
       });
 
       // Step 02: View prompt library
@@ -48,11 +46,11 @@ test.describe('User Guide: Advanced Configuration', () => {
         step: '03',
         name: 'create-prompt-button',
         description: 'Click "+ Create Prompt" to create a new deck prompt template',
-        highlightSelector: 'button:has-text("Create Prompt")',
+        highlightSelector: 'button:has-text("New Prompt")',
       });
 
       // Step 04: Open creation modal
-      await page.getByRole('button', { name: '+ Create Prompt' }).click();
+      await page.getByRole('button', { name: 'New Prompt' }).click();
       await expect(page.getByRole('heading', { name: 'Create Deck Prompt' })).toBeVisible();
       await capture.capture({
         step: '04',
@@ -117,15 +115,13 @@ test.describe('User Guide: Advanced Configuration', () => {
       await setupUserGuideMocks(page);
       const capture = new UserGuideCapture(page, '03-advanced-configuration');
 
-      // Step 09: Navigate to Slide Styles
-      await page.goto('/');
-      await page.getByRole('navigation').getByRole('button', { name: 'Slide Styles' }).click();
-      await expect(page.getByRole('heading', { name: 'Slide Style Library' })).toBeVisible();
+      // Step 09: Navigate to Slide Styles (shared helper uses direct URL)
+      await goToSlideStyles(page);
       await capture.capture({
         step: '09',
         name: 'slide-styles-page',
-        description: 'Navigate to Slide Styles from the navigation bar',
-        highlightSelector: 'nav button:has-text("Slide Styles")',
+        description: 'Navigate to Slide Styles from the sidebar or URL',
+        highlightSelector: 'button:has-text("Slide styles")',
       });
 
       // Step 10: View style library
@@ -140,11 +136,11 @@ test.describe('User Guide: Advanced Configuration', () => {
         step: '11',
         name: 'create-style-button',
         description: 'Click "+ Create Style" to create a custom slide style',
-        highlightSelector: 'button:has-text("Create Style")',
+        highlightSelector: 'button:has-text("New Style")',
       });
 
       // Step 12: Open creation modal
-      await page.getByRole('button', { name: '+ Create Style' }).click();
+      await page.getByRole('button', { name: 'New Style' }).click();
       await expect(page.getByRole('heading', { name: 'Create Slide Style' })).toBeVisible();
       await capture.capture({
         step: '12',

@@ -8,12 +8,13 @@
  */
 
 import React, { useState, useEffect, useCallback } from 'react';
-import { FiExternalLink } from 'react-icons/fi';
+import { Palette, Plus, ChevronDown, Edit, Trash2 } from 'lucide-react';
+import { Button } from '@/ui/button';
+import { Badge } from '@/ui/badge';
 import { configApi } from '../../api/config';
 import type { SlideStyle, SlideStyleCreate, SlideStyleUpdate } from '../../api/config';
 import { SlideStyleForm } from './SlideStyleForm';
 import { ConfirmDialog } from './ConfirmDialog';
-import { DOCS_URLS } from '../../constants/docs';
 
 export const SlideStyleList: React.FC = () => {
   const [styles, setStyles] = useState<SlideStyle[]>([]);
@@ -112,137 +113,159 @@ export const SlideStyleList: React.FC = () => {
   if (loading) {
     return (
       <div className="flex items-center justify-center h-64">
-        <div className="text-gray-600">Loading slide styles...</div>
+        <div className="text-muted-foreground">Loading slide styles...</div>
       </div>
     );
   }
 
   if (error) {
     return (
-      <div className="p-4 bg-red-50 border border-red-200 rounded text-red-700">
+      <div className="rounded-lg border border-destructive/30 bg-destructive/5 p-4 text-destructive">
         Error: {error}
-        <button 
+        <Button
+          variant="outline"
+          size="sm"
           onClick={loadStyles}
-          className="ml-4 px-3 py-1 bg-red-100 hover:bg-red-200 text-red-700 rounded text-sm"
+          className="ml-4"
         >
           Retry
-        </button>
+        </Button>
       </div>
     );
   }
 
   return (
-    <div className="space-y-4">
+    <div className="flex flex-col gap-6">
       {/* Header */}
-      <div className="flex justify-between items-center">
+      <div className="flex items-start justify-between">
         <div>
-          <h2 className="text-2xl font-semibold text-gray-900">Slide Style Library</h2>
-          <p className="text-sm text-gray-600 mt-1">
+          <h1 className="text-xl font-bold text-foreground">Slide Style Library</h1>
+          <p className="mt-1 text-sm text-muted-foreground">
             Manage visual styles for slide generation. These styles control typography, colors, layout, and overall appearance.
-            {' '}
-            <a
-              href={DOCS_URLS.customStyles}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="inline-flex items-center gap-1 text-blue-600 hover:text-blue-800"
-            >
-              View guide <FiExternalLink size={12} />
-            </a>
           </p>
         </div>
-        <button
-          onClick={handleCreate}
-          className="px-4 py-2 bg-blue-500 hover:bg-blue-600 text-white rounded transition-colors"
-        >
-          + Create Style
-        </button>
+        <Button size="sm" onClick={handleCreate} className="gap-1.5">
+          <Plus className="size-3.5" />
+          New Style
+        </Button>
       </div>
 
       {/* Styles Grid */}
-      <div className="grid gap-4">
-        {styles.map((style) => (
-          <div 
-            key={style.id} 
-            className="border rounded-lg bg-white shadow-sm hover:shadow-md transition-shadow"
-          >
-            {/* Header Row */}
-            <div className="p-4 flex items-start justify-between">
-              <div className="flex-1">
-                <div className="flex items-center gap-3">
-                  <h3 className="text-lg font-medium text-gray-900">{style.name}</h3>
-                  {style.category && (
-                    <span className="px-2 py-0.5 bg-emerald-100 text-emerald-700 text-xs rounded-full">
-                      {style.category}
-                    </span>
-                  )}
-                  {style.is_system && (
-                    <span className="px-2 py-0.5 bg-blue-100 text-blue-700 text-xs rounded-full">
-                      System
-                    </span>
-                  )}
-                  {!style.is_active && (
-                    <span className="px-2 py-0.5 bg-gray-100 text-gray-500 text-xs rounded-full">
-                      Inactive
-                    </span>
+      {styles.length === 0 ? (
+        <div className="flex flex-col items-center justify-center rounded-lg border border-dashed border-border bg-muted/20 p-12 text-center">
+          <Palette className="mb-3 size-12 text-muted-foreground/50" />
+          <p className="text-sm text-muted-foreground">
+            No slide styles found. Create your first style to get started.
+          </p>
+        </div>
+      ) : (
+        <div className="flex flex-col gap-3">
+          {styles.map((style) => (
+            <div
+              key={style.id}
+              className="rounded-lg border border-border bg-card transition-colors hover:bg-accent/5"
+            >
+              {/* Header Row */}
+              <div className="flex items-start gap-4 p-4">
+                {/* Icon */}
+                <div className="flex size-10 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary">
+                  <Palette className="size-5" />
+                </div>
+
+                {/* Content */}
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <h3 className="text-sm font-medium text-foreground">
+                          {style.name}
+                        </h3>
+                        {style.category && (
+                          <Badge variant="secondary" className="text-xs">
+                            {style.category}
+                          </Badge>
+                        )}
+                        {style.is_system && (
+                          <Badge className="text-xs bg-blue-500/10 text-blue-700 hover:bg-blue-500/20">
+                            System
+                          </Badge>
+                        )}
+                        {!style.is_active && (
+                          <Badge variant="outline" className="text-xs">
+                            Inactive
+                          </Badge>
+                        )}
+                      </div>
+                      {style.description && (
+                        <p className="mt-0.5 text-sm text-muted-foreground">
+                          {style.description}
+                        </p>
+                      )}
+                      <p className="mt-1.5 text-xs text-muted-foreground">
+                        Created by {style.created_by || 'system'} •{' '}
+                        Updated {new Date(style.updated_at).toLocaleDateString()}
+                      </p>
+                    </div>
+
+                    {/* Actions */}
+                    <div className="flex shrink-0 items-center gap-1">
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        className="size-8 p-0"
+                        onClick={() => toggleExpanded(style.id)}
+                        aria-label={expandedStyleId === style.id ? 'Hide' : 'Preview'}
+                      >
+                        <ChevronDown
+                          className={`size-4 text-muted-foreground transition-transform ${
+                            expandedStyleId === style.id ? 'rotate-180' : ''
+                          }`}
+                        />
+                      </Button>
+                      {!style.is_system && (
+                        <>
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            className="size-8 p-0"
+                            onClick={() => handleEdit(style)}
+                            disabled={actionLoading === style.id}
+                            aria-label="Edit"
+                          >
+                            <Edit className="size-4" />
+                          </Button>
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            className="size-8 p-0 text-muted-foreground hover:text-destructive"
+                            onClick={() => handleDelete(style)}
+                            disabled={actionLoading === style.id}
+                            aria-label="Delete"
+                          >
+                            <Trash2 className="size-4" />
+                          </Button>
+                        </>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* Expanded Content */}
+                  {expandedStyleId === style.id && (
+                    <div className="mt-3 rounded-md border border-border bg-muted/30 p-3">
+                      <label className="text-xs font-medium uppercase text-muted-foreground">
+                        Style Content
+                      </label>
+                      <pre className="mt-2 max-h-64 overflow-y-auto whitespace-pre-wrap rounded-md border border-border bg-background p-3 font-mono text-xs text-foreground">
+                        {style.style_content}
+                      </pre>
+                    </div>
                   )}
                 </div>
-                {style.description && (
-                  <p className="text-sm text-gray-600 mt-1">{style.description}</p>
-                )}
-                <p className="text-xs text-gray-400 mt-2">
-                  Created by {style.created_by || 'system'} • 
-                  Updated {new Date(style.updated_at).toLocaleDateString()}
-                </p>
-              </div>
-              
-              <div className="flex gap-2 ml-4">
-                <button
-                  onClick={() => toggleExpanded(style.id)}
-                  className="px-3 py-1 bg-gray-100 hover:bg-gray-200 text-gray-700 text-xs rounded transition-colors"
-                >
-                  {expandedStyleId === style.id ? 'Hide' : 'Preview'}
-                </button>
-                {!style.is_system && (
-                  <>
-                    <button
-                      onClick={() => handleEdit(style)}
-                      disabled={actionLoading === style.id}
-                      className="px-3 py-1 bg-indigo-500 hover:bg-indigo-600 text-white text-xs rounded transition-colors disabled:bg-gray-300"
-                    >
-                      Edit
-                    </button>
-                    <button
-                      onClick={() => handleDelete(style)}
-                      disabled={actionLoading === style.id}
-                      className="px-3 py-1 bg-red-500 hover:bg-red-600 text-white text-xs rounded transition-colors disabled:bg-gray-300"
-                    >
-                      Delete
-                    </button>
-                  </>
-                )}
               </div>
             </div>
-
-            {/* Expanded Content */}
-            {expandedStyleId === style.id && (
-              <div className="px-4 pb-4 border-t bg-gray-50">
-                <div className="mt-3">
-                  <label className="text-xs font-medium text-gray-500 uppercase">Style Content</label>
-                  <pre className="mt-1 p-3 bg-white border rounded text-xs text-gray-800 whitespace-pre-wrap font-mono max-h-64 overflow-y-auto">
-                    {style.style_content}
-                  </pre>
-                </div>
-              </div>
-            )}
-          </div>
-        ))}
-
-        {styles.length === 0 && (
-          <div className="p-8 text-center text-gray-500 border rounded-lg bg-gray-50">
-            No slide styles found. Create your first style to get started.
-          </div>
-        )}
-      </div>
+          ))}
+        </div>
+      )}
 
       {/* Form Modal */}
       <SlideStyleForm

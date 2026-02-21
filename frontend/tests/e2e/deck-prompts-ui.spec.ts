@@ -24,8 +24,10 @@ import {
 // ============================================
 
 async function setupMocks(page: Page) {
-  // Mock deck prompts endpoint
-  await page.route('http://127.0.0.1:8000/api/settings/deck-prompts', (route, request) => {
+  await page.route('**/api/setup/status', (route) => {
+    route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ configured: true }) });
+  });
+  await page.route(/\/api\/settings\/deck-prompts$/, (route, request) => {
     if (request.method() === 'GET') {
       route.fulfill({
         status: 200,
@@ -139,9 +141,8 @@ async function setupMocks(page: Page) {
 }
 
 async function goToDeckPrompts(page: Page) {
-  await page.goto('/');
-  await page.getByRole('navigation').getByRole('button', { name: 'Deck Prompts' }).click();
-  await expect(page.getByRole('heading', { name: 'Deck Prompt Library' })).toBeVisible();
+  await page.goto('/deck-prompts');
+  await expect(page.getByRole('heading', { name: 'Deck Prompt Library' })).toBeVisible({ timeout: 10000 });
 }
 
 // ============================================
@@ -185,14 +186,14 @@ test.describe('DeckPromptList', () => {
   test('Create Prompt button opens modal', async ({ page }) => {
     await goToDeckPrompts(page);
 
-    await page.getByRole('button', { name: '+ Create Prompt' }).click();
+    await page.getByRole('button', { name: 'New Prompt' }).click();
     await expect(page.getByRole('heading', { name: 'Create Deck Prompt' })).toBeVisible();
   });
 
   test('modal closes on Cancel', async ({ page }) => {
     await goToDeckPrompts(page);
 
-    await page.getByRole('button', { name: '+ Create Prompt' }).click();
+    await page.getByRole('button', { name: 'New Prompt' }).click();
     await expect(page.getByRole('heading', { name: 'Create Deck Prompt' })).toBeVisible();
 
     await page.getByRole('button', { name: 'Cancel' }).click();
@@ -291,7 +292,7 @@ test.describe('DeckPromptForm', () => {
 
   test('shows required fields with asterisks', async ({ page }) => {
     await goToDeckPrompts(page);
-    await page.getByRole('button', { name: '+ Create Prompt' }).click();
+    await page.getByRole('button', { name: 'New Prompt' }).click();
 
     // Name and Prompt Content are required
     await expect(page.getByText('Name *')).toBeVisible();
@@ -300,7 +301,7 @@ test.describe('DeckPromptForm', () => {
 
   test('shows optional fields without asterisks', async ({ page }) => {
     await goToDeckPrompts(page);
-    await page.getByRole('button', { name: '+ Create Prompt' }).click();
+    await page.getByRole('button', { name: 'New Prompt' }).click();
 
     // Description and Category are optional
     const descLabel = page.locator('label', { hasText: 'Description' });
@@ -314,7 +315,7 @@ test.describe('DeckPromptForm', () => {
 
   test('shows validation error for empty name', async ({ page }) => {
     await goToDeckPrompts(page);
-    await page.getByRole('button', { name: '+ Create Prompt' }).click();
+    await page.getByRole('button', { name: 'New Prompt' }).click();
 
     // Try to submit without name - use exact match to avoid matching the header button
     await page.getByRole('button', { name: 'Create Prompt', exact: true }).click();
@@ -325,7 +326,7 @@ test.describe('DeckPromptForm', () => {
 
   test('shows validation error for empty prompt content', async ({ page }) => {
     await goToDeckPrompts(page);
-    await page.getByRole('button', { name: '+ Create Prompt' }).click();
+    await page.getByRole('button', { name: 'New Prompt' }).click();
 
     // Fill name but not prompt content
     await page.locator('#prompt-name').fill('Test Name');
@@ -337,7 +338,7 @@ test.describe('DeckPromptForm', () => {
 
   test('form has placeholder text', async ({ page }) => {
     await goToDeckPrompts(page);
-    await page.getByRole('button', { name: '+ Create Prompt' }).click();
+    await page.getByRole('button', { name: 'New Prompt' }).click();
 
     // Check placeholders
     await expect(page.getByPlaceholder('e.g., Quarterly Business Review')).toBeVisible();
@@ -347,7 +348,7 @@ test.describe('DeckPromptForm', () => {
 
   test('Create Prompt modal shows correct title', async ({ page }) => {
     await goToDeckPrompts(page);
-    await page.getByRole('button', { name: '+ Create Prompt' }).click();
+    await page.getByRole('button', { name: 'New Prompt' }).click();
 
     await expect(page.getByRole('heading', { name: 'Create Deck Prompt' })).toBeVisible();
     // Use exact match to find the submit button in the modal
@@ -386,7 +387,7 @@ test.describe('Form Submission', () => {
 
   test('successful create closes modal', async ({ page }) => {
     await goToDeckPrompts(page);
-    await page.getByRole('button', { name: '+ Create Prompt' }).click();
+    await page.getByRole('button', { name: 'New Prompt' }).click();
 
     // Fill required fields
     await page.locator('#prompt-name').fill('New Test Prompt');
@@ -450,7 +451,7 @@ test.describe('Form Submission', () => {
     });
 
     await goToDeckPrompts(page);
-    await page.getByRole('button', { name: '+ Create Prompt' }).click();
+    await page.getByRole('button', { name: 'New Prompt' }).click();
 
     // Fill form
     await page.locator('#prompt-name').fill('Duplicate Name');

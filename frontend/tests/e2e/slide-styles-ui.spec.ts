@@ -26,8 +26,10 @@ import {
 // ============================================
 
 async function setupMocks(page: Page) {
-  // Mock slide styles endpoint
-  await page.route('http://127.0.0.1:8000/api/settings/slide-styles', (route, request) => {
+  await page.route('**/api/setup/status', (route) => {
+    route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ configured: true }) });
+  });
+  await page.route(/\/api\/settings\/slide-styles$/, (route, request) => {
     if (request.method() === 'GET') {
       route.fulfill({
         status: 200,
@@ -162,9 +164,8 @@ async function setupMocks(page: Page) {
 }
 
 async function goToSlideStyles(page: Page) {
-  await page.goto('/');
-  await page.getByRole('navigation').getByRole('button', { name: 'Slide Styles' }).click();
-  await expect(page.getByRole('heading', { name: 'Slide Style Library' })).toBeVisible();
+  await page.goto('/slide-styles');
+  await expect(page.getByRole('heading', { name: 'Slide Style Library' })).toBeVisible({ timeout: 10000 });
 }
 
 // ============================================
@@ -187,22 +188,15 @@ test.describe('SlideStyleList', () => {
   test('shows System badge for system styles', async ({ page }) => {
     await goToSlideStyles(page);
 
-    // Find the System Default style card and verify it has System badge
-    const systemStyleCard = page.locator('div').filter({ hasText: 'System Default' }).first();
-    await expect(systemStyleCard).toBeVisible();
-
-    // System badge should be visible on the page (scoped to system style)
-    const systemBadge = page.locator('span', { hasText: 'System' }).first();
-    await expect(systemBadge).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'System Default', level: 3 })).toBeVisible();
+    await expect(page.getByText('System').first()).toBeVisible();
   });
 
   test('shows category badges', async ({ page }) => {
     await goToSlideStyles(page);
 
-    // System Default has "System" category
-    await expect(page.locator('span').filter({ hasText: 'System' }).first()).toBeVisible();
-    // Corporate Theme has "Brand" category
-    await expect(page.locator('span').filter({ hasText: 'Brand' }).first()).toBeVisible();
+    await expect(page.getByText('System').first()).toBeVisible();
+    await expect(page.getByText('Brand').first()).toBeVisible();
   });
 
   test('shows Edit and Delete buttons for non-system styles', async ({ page }) => {
@@ -289,14 +283,14 @@ test.describe('Create Style Modal', () => {
   test('Create Style button opens modal', async ({ page }) => {
     await goToSlideStyles(page);
 
-    await page.getByRole('button', { name: '+ Create Style' }).click();
+    await page.getByRole('button', { name: 'New Style' }).click();
 
     await expect(page.getByRole('heading', { name: 'Create Slide Style' })).toBeVisible();
   });
 
   test('modal shows all form fields', async ({ page }) => {
     await goToSlideStyles(page);
-    await page.getByRole('button', { name: '+ Create Style' }).click();
+    await page.getByRole('button', { name: 'New Style' }).click();
 
     // Name field
     await expect(page.getByLabel(/Name/i)).toBeVisible();
@@ -310,7 +304,7 @@ test.describe('Create Style Modal', () => {
 
   test('modal shows Cancel and Create Style buttons', async ({ page }) => {
     await goToSlideStyles(page);
-    await page.getByRole('button', { name: '+ Create Style' }).click();
+    await page.getByRole('button', { name: 'New Style' }).click();
 
     await expect(page.getByRole('button', { name: 'Cancel' })).toBeVisible();
     // Use exact: true to avoid matching the "+ Create Style" button
@@ -319,7 +313,7 @@ test.describe('Create Style Modal', () => {
 
   test('Cancel button closes modal', async ({ page }) => {
     await goToSlideStyles(page);
-    await page.getByRole('button', { name: '+ Create Style' }).click();
+    await page.getByRole('button', { name: 'New Style' }).click();
 
     await expect(page.getByRole('heading', { name: 'Create Slide Style' })).toBeVisible();
 
@@ -330,21 +324,21 @@ test.describe('Create Style Modal', () => {
 
   test('shows placeholder text for name field', async ({ page }) => {
     await goToSlideStyles(page);
-    await page.getByRole('button', { name: '+ Create Style' }).click();
+    await page.getByRole('button', { name: 'New Style' }).click();
 
     await expect(page.getByPlaceholder('e.g., Databricks Brand')).toBeVisible();
   });
 
   test('shows placeholder text for description field', async ({ page }) => {
     await goToSlideStyles(page);
-    await page.getByRole('button', { name: '+ Create Style' }).click();
+    await page.getByRole('button', { name: 'New Style' }).click();
 
     await expect(page.getByPlaceholder(/Brief description/i)).toBeVisible();
   });
 
   test('shows placeholder text for category field', async ({ page }) => {
     await goToSlideStyles(page);
-    await page.getByRole('button', { name: '+ Create Style' }).click();
+    await page.getByRole('button', { name: 'New Style' }).click();
 
     await expect(page.getByPlaceholder(/Brand, Minimal, Dark, Bold/i)).toBeVisible();
   });
@@ -498,7 +492,7 @@ test.describe('Form Validation', () => {
 
   test('shows error when submitting empty name', async ({ page }) => {
     await goToSlideStyles(page);
-    await page.getByRole('button', { name: '+ Create Style' }).click();
+    await page.getByRole('button', { name: 'New Style' }).click();
 
     // Don't fill name, just click Create (use exact match to avoid "+ Create Style" button)
     await page.getByRole('button', { name: 'Create Style', exact: true }).click();
@@ -509,7 +503,7 @@ test.describe('Form Validation', () => {
 
   test('shows error when submitting empty style content', async ({ page }) => {
     await goToSlideStyles(page);
-    await page.getByRole('button', { name: '+ Create Style' }).click();
+    await page.getByRole('button', { name: 'New Style' }).click();
 
     // Fill only name
     await page.getByLabel(/Name/i).fill('Test Style');
@@ -543,7 +537,7 @@ test.describe('Form Validation', () => {
     await setupMocks(page);
 
     await goToSlideStyles(page);
-    await page.getByRole('button', { name: '+ Create Style' }).click();
+    await page.getByRole('button', { name: 'New Style' }).click();
 
     // Fill form
     await page.getByLabel(/Name/i).fill('System Default');
@@ -562,7 +556,7 @@ test.describe('Form Validation', () => {
 
   test('name field enforces maximum length', async ({ page }) => {
     await goToSlideStyles(page);
-    await page.getByRole('button', { name: '+ Create Style' }).click();
+    await page.getByRole('button', { name: 'New Style' }).click();
 
     const nameInput = page.getByLabel(/Name/i);
 

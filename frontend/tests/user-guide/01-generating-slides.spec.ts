@@ -28,21 +28,20 @@ test.describe('User Guide: Generating Slides', () => {
 
     // Step 01: App Landing / Home Page
     await page.goto('/');
-    await expect(page.getByRole('heading', { name: 'databricks tellr', exact: true })).toBeVisible();
+    await expect(page.getByText('Tellr').first()).toBeVisible();
     await capture.capture({
       step: '01',
       name: 'app-landing',
       description: 'Open the app - you\'ll see the main navigation and Help page by default',
     });
 
-    // Step 02: Navigate to Generator
-    await page.getByRole('navigation').getByRole('button', { name: 'New Session' }).click();
-    await expect(page.getByRole('heading', { name: 'Chat', level: 2 })).toBeVisible();
+    // Step 02: Navigate to Generator (new UI: New Deck)
+    await goToGenerator(page);
     await capture.capture({
       step: '02',
       name: 'generator-view',
-      description: 'Navigate to the New Session view using the navigation bar',
-      highlightSelector: 'nav button:has-text("New Session")',
+      description: 'Navigate to the New Deck view using the sidebar',
+      highlightSelector: 'button:has-text("New Deck")',
     });
 
     // Step 03: Profile Selector
@@ -50,11 +49,11 @@ test.describe('User Guide: Generating Slides', () => {
       step: '03',
       name: 'profile-selector',
       description: 'The current profile is shown in the header - click to change profiles',
-      highlightSelector: 'button:has-text("Profile:")',
+      highlightSelector: '[data-testid="chat-panel"]',
     });
 
-    // Step 04: Open Profile Dropdown
-    await page.getByRole('button', { name: /Profile:/ }).click();
+    // Step 04: Open Profile Dropdown (new UI: profile button may show profile name)
+    await page.locator('header').getByRole('button', { name: /Profile|Sales Analytics/i }).click();
     // Wait for dropdown to appear
     await page.waitForTimeout(300);
     await capture.capture({
@@ -68,7 +67,7 @@ test.describe('User Guide: Generating Slides', () => {
     await page.waitForTimeout(200);
 
     // Step 05: Chat Input
-    const chatInput = page.getByRole('textbox', { name: /Ask to generate or modify/ });
+    const chatInput = page.getByRole('textbox');
     await chatInput.click();
     await capture.capture({
       step: '05',

@@ -27,6 +27,13 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/sessions", tags=["sessions"])
 
 
+class UpdateSessionRequest(BaseModel):
+    """Optional body for PATCH /api/sessions/{session_id}."""
+
+    title: Optional[str] = Field(None, description="Session/deck title")
+    slide_count: Optional[int] = Field(None, ge=0, description="Deck slide count")
+
+
 def _substitute_deck_images(deck_dict: dict) -> None:
     """Substitute {{image:ID}} placeholders in a deck dict with base64 data URIs."""
     from src.core.database import get_db_session
@@ -157,27 +164,36 @@ async def get_session(session_id: str):
 
 
 @router.patch("/{session_id}")
-async def update_session(session_id: str, title: str = None):
-    """Update session (rename).
+async def update_session(
+    session_id: str,
+    title: Optional[str] = Query(None, description="Session title (legacy query)"),
+    body: Optional[UpdateSessionRequest] = None,
+):
+    """Update session metadata (title and/or slide_count).
 
-    Args:
-        session_id: Session to update
-        title: New session title
-
-    Returns:
-        Updated session info
+    At least one of title (query or body) or body.slide_count is required.
     """
+    title_val = body.title if body else None
+    if title_val is None and title is not None:
+        title_val = title
+    slide_count_val = body.slide_count if body else None
+    if title_val is None and slide_count_val is None:
+        raise HTTPException(
+            status_code=400,
+            detail="At least one of title or slide_count is required",
+        )
     try:
         session_manager = get_session_manager()
         result = await asyncio.to_thread(
-            session_manager.rename_session,
+            session_manager.update_session,
             session_id,
-            title,
+            title=title_val,
+            slide_count=slide_count_val,
         )
 
         logger.info(
-            "Session renamed via API",
-            extra={"session_id": session_id, "new_title": title},
+            "Session updated via API",
+            extra={"session_id": session_id, "title": title_val, "slide_count": slide_count_val},
         )
 
         return result
