@@ -46,8 +46,6 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
   const [lastSavedTime, setLastSavedTime] = useState<Date | null>(null);
   // Key to trigger session list refresh in sidebar and history
   const [sessionsRefreshKey, setSessionsRefreshKey] = useState<number>(0);
-  // Key to force remount ChatPanel when profile/session changes
-  const [chatKey, setChatKey] = useState<number>(0);
   // Track which slide to scroll to in the main panel (uses key to allow re-scroll to same index)
   const [scrollTarget, setScrollTarget] = useState<{ index: number; key: number } | null>(null);
   const [exportStatus, setExportStatus] = useState<string | null>(null);
@@ -61,6 +59,8 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
   const [revertTargetVersion, setRevertTargetVersion] = useState<number | null>(null);
   const chatPanelRef = useRef<ChatPanelHandle>(null);
   const slidePanelRef = useRef<SlidePanelHandle>(null);
+  /** When set, we're in the middle of handleSessionRestore(restoredSessionId); skip urlSessionId effect so it doesn't restore the old URL session and overwrite. */
+  const restoringSessionIdRef = useRef<string | null>(null);
   const { sessionTitle, sessionId, createNewSession, switchSession, renameSession } = useSession();
   const { isGenerating } = useGeneration();
   const { currentProfile, loadProfile } = useProfiles();
@@ -73,10 +73,13 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
     setViewMode(initialView);
   }, [initialView]);
 
-  // When URL has sessionId, restore that session
+  // When URL has sessionId, restore that session (load deck if we don't have it yet).
+  // Skip when we're already on this session AND have deck data, or when we're in the middle of
+  // handleSessionRestore (sessionId just changed to target; effect would otherwise restore the *old* urlSessionId and overwrite).
   useEffect(() => {
     if (!urlSessionId) return;
-    if (urlSessionId === sessionId) return;
+    if (urlSessionId === sessionId && slideDeck != null) return;
+    if (restoringSessionIdRef.current !== null && restoringSessionIdRef.current === sessionId) return;
     let cancelled = false;
     (async () => {
       try {
@@ -85,7 +88,6 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
           setSlideDeck(restoredDeck);
           setRawHtml(restoredRawHtml);
           setLastSavedTime(new Date());
-          setChatKey((k) => k + 1);
           setViewMode('main');
         }
       } catch (err: unknown) {
@@ -98,7 +100,7 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
       }
     })();
     return () => { cancelled = true; };
-  }, [urlSessionId, showToast, navigate]); // eslint-disable-line react-hooks/exhaustive-deps -- only run when URL segment changes
+  }, [urlSessionId, sessionId, slideDeck, showToast, navigate, switchSession]);
 
   // Load save point versions when session or deck changes
   const loadVersions = useCallback(async () => {
@@ -144,34 +146,45 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
     setSlideDeck(null);
     setRawHtml(null);
     setLastSavedTime(null);
-    setChatKey(prev => prev + 1);
-    // Create new session for the new profile
+    // Create new session for the new profile (ChatPanel cancels in-flight poll when sessionId changes)
     createNewSession();
   }, [createNewSession]);
 
   // Handle restoring a session from history
   // Auto-switches profile if the session belongs to a different profile
-  const handleSessionRestore = useCallback(async (restoredSessionId: string) => {
-    try {
-      // First, get the session info to check its profile
-      const sessionInfo = await api.getSession(restoredSessionId);
+  const handleSessionRestore = useCallback(
+    async (restoredSessionId: string) => {
+      restoringSessionIdRef.current = restoredSessionId;
+      try {
+        // Single getSession: used for profile check and passed to switchSession to avoid duplicate call
+        // (ChatPanel cancels in-flight polling when sessionId changes, so no need to remount it)
+        const sessionInfo = await api.getSession(restoredSessionId);
 
-      // If session has a profile_id and it's different from current, switch profiles first
-      if (sessionInfo.profile_id && currentProfile && sessionInfo.profile_id !== currentProfile.id) {
-        await loadProfile(sessionInfo.profile_id);
+        if (sessionInfo.profile_id && currentProfile && sessionInfo.profile_id !== currentProfile.id) {
+          try {
+            await loadProfile(sessionInfo.profile_id);
+          } catch {
+            // Profile may have been deleted; continue with current profile so the deck still loads
+          }
+        }
+
+        const { slideDeck: restoredDeck, rawHtml: restoredRawHtml } = await switchSession(restoredSessionId, {
+          title: sessionInfo.title,
+          has_slide_deck: sessionInfo.has_slide_deck,
+        });
+        setSlideDeck(restoredDeck);
+        setRawHtml(restoredRawHtml);
+        setLastSavedTime(new Date());
+        setViewMode('main');
+        navigate(`/sessions/${restoredSessionId}/edit`);
+      } catch (err) {
+        console.error('Failed to restore session:', err);
+      } finally {
+        restoringSessionIdRef.current = null;
       }
-
-      const { slideDeck: restoredDeck, rawHtml: restoredRawHtml } = await switchSession(restoredSessionId);
-      setSlideDeck(restoredDeck);
-      setRawHtml(restoredRawHtml);
-      setLastSavedTime(new Date());
-      setChatKey((k) => k + 1);
-      setViewMode('main');
-      navigate(`/sessions/${restoredSessionId}/edit`);
-    } catch (err) {
-      console.error('Failed to restore session:', err);
-    }
-  }, [switchSession, currentProfile, loadProfile, navigate]);
+    },
+    [switchSession, currentProfile, loadProfile, navigate],
+  );
 
   // After generation: save deck name + slide count so sidebar/list show correct name and count
   const autoSaveSession = useCallback(async (deck: SlideDeck) => {
@@ -216,7 +229,6 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
     setSlideDeck(null);
     setRawHtml(null);
     setLastSavedTime(null);
-    setChatKey((k) => k + 1);
     const newId = createNewSession();
     setViewMode('main');
     try {
@@ -455,7 +467,7 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
               <div className="absolute inset-0 flex">
                 <div className="w-[32%] min-w-[260px] border-r border-border bg-card">
                   <ChatPanel
-                    key={chatKey}
+                    key="chat-panel"
                     ref={chatPanelRef}
                     rawHtml={rawHtml}
                     disabled={isReadOnly}

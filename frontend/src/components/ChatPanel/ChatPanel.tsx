@@ -67,6 +67,23 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(({
     }
   }, [sessionError]);
 
+  // Cancel in-flight polling/stream when session changes so parent doesn't need to remount us
+  useEffect(() => {
+    return () => {
+      if (intervalRef.current) {
+        clearInterval(intervalRef.current);
+        intervalRef.current = null;
+      }
+      if (cancelStreamRef.current) {
+        cancelStreamRef.current();
+        cancelStreamRef.current = null;
+      }
+      setIsGenerating(false);
+      setIsLoading(false);
+      setLoadingMessage('');
+    };
+  }, [sessionId, setIsGenerating]);
+
   // Load messages when session changes (for restored sessions)
   useEffect(() => {
     if (!sessionId) return;

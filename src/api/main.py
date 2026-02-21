@@ -17,7 +17,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from src.api.routes import admin, chat, export, feedback, images, sessions, slides, verification, version, google_slides, setup, local_version
-from src.core.databricks_client import create_user_client, set_user_client
+from src.core.databricks_client import get_or_create_user_client, set_user_client
 from src.core.user_context import get_current_user as get_ctx_user, set_current_user
 from src.api.routes.settings import (
     ai_infra_router,
@@ -236,10 +236,10 @@ async def user_auth_middleware(request: Request, call_next):
     client_id = os.getenv("DATABRICKS_CLIENT_ID", "")
 
     if token:
-        # Diagnostic logging: check if token is service principal ID
+        # Diagnostic logging: check if token is service principal ID (debug to avoid log spam on every request/poll)
         token_prefix = token[:20] if len(token) > 20 else token
         is_sp_token = client_id and token.startswith(client_id)
-        logger.warning(
+        logger.debug(
             "OBO auth: extracted token from header",
             extra={
                 "token_prefix": token_prefix,
@@ -251,9 +251,9 @@ async def user_auth_middleware(request: Request, call_next):
         if is_sp_token:
             logger.warning("OBO auth: token appears to be service principal ID, not user token!")
         try:
-            user_client = create_user_client(token)
+            user_client = get_or_create_user_client(token)
             set_user_client(user_client)
-            logger.warning("OBO auth: user client set successfully")
+            logger.debug("OBO auth: user client set successfully")
             # Extract username from the token-scoped client
             try:
                 me = user_client.current_user.me()
