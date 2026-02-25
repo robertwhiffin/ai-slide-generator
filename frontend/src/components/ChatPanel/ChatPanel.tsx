@@ -25,7 +25,7 @@ export interface ChatPanelHandle {
 
 interface ChatPanelProps {
   rawHtml: string | null;
-  onSlidesGenerated: (slideDeck: SlideDeck, rawHtml: string | null, actionDescription?: string) => void;
+  onSlidesGenerated: (slideDeck: SlideDeck, rawHtml: string | null) => void;
   disabled?: boolean;
   previewMessages?: Message[] | null;  // When provided, show these instead of live messages
 }
@@ -237,31 +237,17 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(({
           }
 
           if (event.slides) {
-            // Generate action description for save point
-            let actionDescription: string;
-            if (slideContext) {
-              const slideNums = slideContext.indices.map(i => i + 1);
-              if (event.replacement_info?.is_add_operation) {
-                actionDescription = `Added ${event.slides.slides?.length || 1} slide(s)`;
-              } else {
-                actionDescription = `Edited slide ${slideNums.join(', ')}`;
-              }
-            } else {
-              actionDescription = `Generated ${event.slides.slides?.length || event.slides.slide_count || 0} slide(s)`;
-            }
-
             // Fetch slides from API to get content_hash for auto-verification
             // The API returns slides with content_hash computed and verification merged
+            // Save point is now created by the backend during chat processing
             api.getSlides(sessionId).then(result => {
               if (result.slide_deck) {
-                onSlidesGenerated(result.slide_deck, nextRawHtml, actionDescription);
+                onSlidesGenerated(result.slide_deck, nextRawHtml);
               } else {
-                // Fallback to event.slides if API fails
-                onSlidesGenerated(event.slides!, nextRawHtml, actionDescription);
+                onSlidesGenerated(event.slides!, nextRawHtml);
               }
             }).catch(() => {
-              // Fallback to event.slides if API fails
-              onSlidesGenerated(event.slides!, nextRawHtml, actionDescription);
+              onSlidesGenerated(event.slides!, nextRawHtml);
             });
             clearSelection();
           }

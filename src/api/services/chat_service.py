@@ -497,8 +497,20 @@ class ChatService:
                     deck_dict=slide_deck_dict,
                 )
 
-                # NOTE: Save point creation moved to frontend after auto-verification completes
-                # Frontend calls POST /api/slides/versions/create after verification
+                # Create save point immediately after persisting (sync path)
+                try:
+                    if slide_context:
+                        slide_nums = [i + 1 for i in slide_context.get("indices", [])]
+                        sp_desc = f"Edited slide {', '.join(map(str, slide_nums))}"
+                    else:
+                        sp_desc = f"Generated {len(current_deck.slides)} slide(s)"
+                    self.create_save_point(
+                        session_id=session_id,
+                        description=sp_desc,
+                        deck=current_deck,
+                    )
+                except Exception as e:
+                    logger.warning(f"Failed to create save point (sync): {e}")
 
             # Update session activity
             session_manager.update_last_activity(session_id)
@@ -1176,8 +1188,20 @@ class ChatService:
                 deck_dict=slide_deck_dict,
             )
 
-            # NOTE: Save point creation moved to frontend after auto-verification completes
-            # Frontend calls POST /api/slides/versions/create after verification
+            # Create save point immediately after persisting (streaming path)
+            try:
+                if slide_context:
+                    slide_nums = [i + 1 for i in slide_context.get("indices", [])]
+                    sp_desc = f"Edited slide {', '.join(map(str, slide_nums))}"
+                else:
+                    sp_desc = f"Generated {len(current_deck.slides)} slide(s)"
+                self.create_save_point(
+                    session_id=session_id,
+                    description=sp_desc,
+                    deck=current_deck,
+                )
+            except Exception as e:
+                logger.warning(f"Failed to create save point (streaming): {e}")
 
         # Update session activity
         session_manager.update_last_activity(session_id)
@@ -2401,8 +2425,15 @@ class ChatService:
             deck_dict=deck_dict,
         )
 
-        # NOTE: Save point creation moved to frontend after auto-verification completes
-        # Frontend calls POST /api/slides/versions/create after verification
+        # Create save point immediately after persisting
+        try:
+            self.create_save_point(
+                session_id=session_id,
+                description=f"Edited slide {index + 1} (HTML)",
+                deck=current_deck,
+            )
+        except Exception as e:
+            logger.warning(f"Failed to create save point (update_slide): {e}")
 
         logger.info(
             "Updated slide",
