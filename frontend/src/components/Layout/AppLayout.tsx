@@ -106,8 +106,6 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
   const [previewMessages, setPreviewMessages] = useState<Message[] | null>(null);
   const [showRevertModal, setShowRevertModal] = useState(false);
   const [revertTargetVersion, setRevertTargetVersion] = useState<number | null>(null);
-  // Pending save point - created after verification completes
-  const [pendingSavePointDescription, setPendingSavePointDescription] = useState<string | null>(null);
 
   // Loading state while validating session from URL
   const [isLoadingSession, setIsLoadingSession] = useState(false);
@@ -313,32 +311,23 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
     }
   }, [sessionId, revertTargetVersion]);
 
-  // Handle verification complete - create save point with captured verification
-  const handleVerificationComplete = useCallback(async (panelEditDescription?: string) => {
-    // Use panel edit description if provided, otherwise use pending description from chat
-    const description = panelEditDescription || pendingSavePointDescription;
-
-    if (!sessionId || !description) return;
+  // Handle verification complete - sync verification onto latest save point, then refresh
+  const handleVerificationComplete = useCallback(async () => {
+    if (!sessionId) return;
 
     try {
-      console.log(`[SavePoint] Creating save point after verification: "${description}"`);
-      await api.createSavePoint(sessionId, description);
+      // Backfill verification results onto the latest save point
+      await api.syncVersionVerification(sessionId);
 
-      // Clear pending description
-      setPendingSavePointDescription(null);
-
-      // Reload versions to show the new save point
+      // Refresh version list
       const { versions: loadedVersions, current_version } = await api.listVersions(sessionId);
       setVersions(loadedVersions);
       setCurrentVersion(current_version);
-
-      console.log(`[SavePoint] Created save point v${current_version}`);
+      console.log(`[SavePoint] Synced verification and refreshed versions, latest: v${current_version}`);
     } catch (err) {
-      console.error('Failed to create save point:', err);
-      // Clear pending to prevent retry loops
-      setPendingSavePointDescription(null);
+      console.error('Failed to sync verification to save point:', err);
     }
-  }, [sessionId, pendingSavePointDescription]);
+  }, [sessionId]);
 
   // Determine which deck to display
   const displayDeck = previewVersion ? previewDeck : slideDeck;
@@ -604,14 +593,17 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
               key={chatKey}
               ref={chatPanelRef}
               rawHtml={rawHtml}
-              onSlidesGenerated={(deck, raw, actionDescription) => {
+              onSlidesGenerated={(deck, raw) => {
                 setSlideDeck(deck);
                 setRawHtml(raw);
-                // Set pending save point description - will be created after verification
-                if (actionDescription) {
-                  setPendingSavePointDescription(actionDescription);
-                }
                 onGenerationComplete();
+                // Refresh versions -- backend creates save point during chat processing
+                if (sessionId) {
+                  api.listVersions(sessionId).then(({ versions: v, current_version: cv }) => {
+                    setVersions(v);
+                    setCurrentVersion(cv);
+                  }).catch(() => {});
+                }
               }}
               disabled={viewOnly || !!previewVersion || isLoadingSession || !!deletedProfileName}
               previewMessages={previewMessages}

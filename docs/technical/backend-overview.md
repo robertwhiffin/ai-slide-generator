@@ -83,8 +83,10 @@ Frontend fetch -> FastAPI router ->   │ ChatService (singleton)│
 | `GET` | `/api/slides/versions/{n}` | Preview specific version (no state change) | `routes/slides.preview_version` |
 | `POST` | `/api/slides/versions/create` | Create new save point | `routes/slides.create_version` |
 | `POST` | `/api/slides/versions/{n}/restore` | Restore version, delete newer versions | `routes/slides.restore_version` |
+| `PATCH` | `/api/slides/versions/{n}/verification` | Update verification on existing save point | `routes/slides.update_version_verification` |
+| `POST` | `/api/slides/versions/sync-verification` | Backfill latest save point with current verification | `routes/slides.sync_version_verification` |
 
-Save points capture complete deck state plus verification results. Maximum 40 per session; oldest deleted on overflow. See [Save Points / Versioning](save-points-versioning.md).
+Save points are created on the backend immediately after deck persistence (in `ChatService.send_message`, `send_message_streaming`, and `update_slide`). Verification scores are backfilled via `sync-verification` after auto-verification completes. Maximum 40 per session; oldest deleted on overflow. See [Save Points / Versioning](save-points-versioning.md).
 
 ### Settings & Configuration Endpoints
 
