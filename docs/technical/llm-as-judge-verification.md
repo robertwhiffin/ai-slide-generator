@@ -192,6 +192,15 @@ See `src/services/evaluation/llm_judge.py::_build_judge_prompt()` for full promp
 | Reorder slides | All slides keep verification (position-independent) |
 | Restore session | Verification merged back by hash match |
 
+### Verification and Save Points
+
+Save points use a two-phase approach to ensure both deck content integrity and verification score preservation:
+
+1. **Backend creates save point** immediately after deck persistence (no verification yet for new edits)
+2. **Frontend calls sync-verification** after auto-verification completes, backfilling scores onto the latest save point via `POST /api/slides/versions/sync-verification`
+
+This decoupling prevents the race condition where verification timing (especially fast `unable_to_verify` in no-Genie mode) could cause save points to capture stale deck state.
+
 ### Human Feedback Flow
 
 1. User clicks verification badge → popup shows details

@@ -41,7 +41,7 @@ interface SlidePanelProps {
   scrollToSlide?: { index: number; key: number } | null;
   onSendMessage?: (content: string, slideContext?: SlideContext) => void;
   readOnly?: boolean;
-  onVerificationComplete?: (description?: string) => void;
+  onVerificationComplete?: () => void;
   versionKey?: string;  // Used to force re-render when switching save point versions
 }
 
@@ -68,7 +68,6 @@ export const SlidePanel: React.FC<SlidePanelProps> = ({ slideDeck, rawHtml, onSl
   const [isAutoVerifying, setIsAutoVerifying] = useState(false);
   const [verifyingSlides, setVerifyingSlides] = useState<Set<number>>(new Set());
   const autoVerifyTriggeredRef = useRef<Set<string>>(new Set()); // Track which content hashes we've tried to verify
-  const pendingEditDescriptionRef = useRef<string | null>(null); // Track description for panel edits
   
   const sensors = useSensors(
     useSensor(PointerSensor),
@@ -143,9 +142,6 @@ export const SlidePanel: React.FC<SlidePanelProps> = ({ slideDeck, rawHtml, onSl
     if (!slideDeck || !sessionId || readOnly || !onSlideChange) return;
 
     try {
-      // Set pending description for save point creation after verification
-      pendingEditDescriptionRef.current = `Edited slide ${index + 1} (HTML)`;
-      
       await api.updateSlide(index, html, sessionId);
       // Fetch updated deck
       const result = await api.getSlides(sessionId);
@@ -155,7 +151,6 @@ export const SlidePanel: React.FC<SlidePanelProps> = ({ slideDeck, rawHtml, onSl
       clearSelection();
     } catch (error) {
       console.error('Failed to update:', error);
-      pendingEditDescriptionRef.current = null; // Clear on error
       throw error; // Re-throw for editor to handle
     }
   };
@@ -430,11 +425,8 @@ export const SlidePanel: React.FC<SlidePanelProps> = ({ slideDeck, rawHtml, onSl
     setIsAutoVerifying(false);
     console.log('[Auto-verify] Completed');
 
-    // Notify parent that verification is complete (for save point creation)
-    // Pass description from panel edit if available
-    const editDescription = pendingEditDescriptionRef.current;
-    pendingEditDescriptionRef.current = null; // Clear after use
-    onVerificationComplete?.(editDescription || undefined);
+    // Notify parent that verification is complete (refresh version list)
+    onVerificationComplete?.();
   }, [sessionId, isAutoVerifying, onSlideChange, onVerificationComplete]);
 
   // Effect to trigger auto-verification when slides change
