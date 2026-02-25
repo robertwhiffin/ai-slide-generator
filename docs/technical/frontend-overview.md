@@ -202,7 +202,8 @@ const versionKey = previewVersion
 | `RevertConfirmModal` | Confirmation dialog before deleting newer versions |
 
 **Key behaviors:**
-- Save points created automatically after slide operations (generation, edit, delete, etc.)
+- Save points created on the **backend** immediately after deck persistence (not driven by frontend)
+- After auto-verification completes, frontend calls `api.syncVersionVerification()` to backfill scores onto the latest save point
 - Maximum 40 save points per session; oldest deleted on overflow
 - Preview mode disables chat input and slide editing
 - Restoring deletes all newer versions permanently
@@ -377,6 +378,7 @@ The optimization prompt explicitly instructs the agent to:
 | `previewVersion` | GET | `/api/slides/versions/{n}` | query: `session_id` | `{ version_number, deck, verification_map }` |
 | `restoreVersion` | POST | `/api/slides/versions/{n}/restore` | `{ session_id }` | `{ version_number, deck, deleted_versions }` |
 | `createSavePoint` | POST | `/api/slides/versions/create` | `{ session_id, description }` | `{ version_number }` |
+| `syncVersionVerification` | POST | `/api/slides/versions/sync-verification` | `{ session_id }` | `void` |
 | `updateSlide` | PATCH | `/api/slides/{index}` | `{ session_id, html }` | `Slide` |
 | `deleteSlide` | DELETE | `/api/slides/{index}` | query: `session_id` | `SlideDeck` |
 | `updateSlideVerification` | PATCH | `/api/slides/{index}/verification` | `{ session_id, verification }` | `SlideDeck` |

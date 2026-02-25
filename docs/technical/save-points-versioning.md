@@ -44,7 +44,8 @@ Users can preview any save point without committing, then either revert (deletin
 │  ┌────────────────────────────────────────────────────────────────┐ │
 │  │ services/session_manager.py - Version CRUD operations          │ │
 │  │   create_version(), list_versions(), get_version(),            │ │
-│  │   restore_version(), VERSION_LIMIT = 40                        │ │
+│  │   restore_version(), update_version_verification(),            │ │
+│  │   VERSION_LIMIT = 40                                           │ │
 │  └────────────────────────────────────────────────────────────────┘ │
 │                          │                                           │
 │  ┌────────────────────────────────────────────────────────────────┐ │
@@ -97,6 +98,8 @@ class SlideDeckVersion(Base):
 | `GET` | `/api/slides/versions/{n}` | Preview specific version (no DB changes) | `routes/slides.preview_version` |
 | `POST` | `/api/slides/versions/create` | Create new save point | `routes/slides.create_version` |
 | `POST` | `/api/slides/versions/{n}/restore` | Restore version, delete newer | `routes/slides.restore_version` |
+| `PATCH` | `/api/slides/versions/{n}/verification` | Update verification on existing save point | `routes/slides.update_version_verification` |
+| `POST` | `/api/slides/versions/sync-verification` | Backfill latest save point with current verification | `routes/slides.sync_version_verification` |
 
 ### Request/Response Examples
 
@@ -223,23 +226,27 @@ Step 4b: User clicks "Cancel Preview"
 
 ### Save Point Creation Triggers
 
-Save points are created automatically after:
-- Slide generation (via chat)
-- Slide editing (HTML edit in panel)
-- Slide deletion
-- Slide duplication
-- Slide reordering
+Save points are created **on the backend** immediately after the deck is persisted. This eliminates race conditions that previously caused stale data in save points when the frontend drove creation asynchronously.
 
-**Timing:** Save points are created AFTER auto-verification completes, ensuring verification results are captured.
+**Backend triggers** (in `ChatService`):
+- `send_message` / `send_message_streaming` -- after slide generation or chat-driven edits
+- `update_slide` -- after HTML panel edits
+
+**Verification backfill:** Save points initially capture the deck without verification scores. After auto-verification completes, the frontend calls `POST /api/slides/versions/sync-verification` to retroactively update the latest save point's `verification_map_json` with current results. This two-phase approach ensures deck content is never lost due to timing issues while still preserving verification data.
 
 ---
 
 ## 8. Verification Persistence
 
-Each save point captures the `verification_map` at the time of creation:
+Save points use a two-phase approach for verification:
+
+1. **Phase 1 (immediate):** When the backend creates a save point, it captures the current `verification_map` from the session. For brand-new edits, some or all slides may not yet have verification scores.
+2. **Phase 2 (backfill):** After auto-verification completes, the frontend calls `POST /api/slides/versions/sync-verification`. The backend fetches the latest save point and updates its `verification_map_json` with the current verification results.
+
 - Verification results are keyed by content hash (SHA256 of normalized HTML)
 - When previewing/restoring, verification badges reflect that version's state
 - This allows comparison of verification status across versions
+- In no-Genie mode, verification returns `unable_to_verify` but the sync still fires
 
 ---
 

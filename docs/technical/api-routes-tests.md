@@ -223,9 +223,45 @@ These invariants must NEVER be violated:
 
 ---
 
+### 3.6 Save Point / Versioning Tests
+
+**Goal:** Validate save point creation, cumulative deck preservation, and verification backfill.
+
+**Unit tests:** `tests/unit/test_save_points_no_genie.py`
+
+| Test | Scenario | Validation |
+|------|----------|------------|
+| Sequential edits | Multiple edits in sequence | Each save point contains ALL prior edits |
+| Verification carry-forward | Edit after verified slide | Verification map includes scores for unedited slides |
+| No-Genie mode | Prompt-only without Genie | Save points created with unable_to_verify status |
+
+**Integration tests:** `tests/integration/test_savepoint_e2e.py`
+
+| Test | Scenario | Validation |
+|------|----------|------------|
+| Sequential edits via API | Full HTTP flow with TestClient | Version preview returns cumulative deck state |
+| Rapid edits | Quick successive PATCH calls | No save point data lost |
+| Mixed operations | Reorder + duplicate + delete + edit | Cumulative state preserved across operation types |
+| Version preview/restore | Preview then restore older version | Correct deck content and version deletion |
+
+**Playwright E2E tests:** `frontend/tests/e2e/save-points-versioning.spec.ts` (18 tests)
+
+| Category | Test Count | Coverage |
+|----------|-----------|----------|
+| No-Genie Mode | 4 | Version list loading, dropdown entries, sequential edits, sync-verification |
+| Genie Mode | 3 | Sync-verification firing, version list refresh, verification scores |
+| Version Preview | 1 | Preview fetch on dropdown click |
+| Mixed Operations | 2 | Different slide counts, version number display |
+| User Journey - No-Genie cumulative | 4 | Edit slide 2 then slide 1 (core bug scenario), 5 rapid edits, reorder+edit, duplicate+edit+delete |
+| User Journey - Genie verification | 3 | Verification map completeness, sync refresh, multi-edit verification |
+| Edge Cases | 2 | Rapid preview switches, 10-version dropdown |
+
+---
+
 ## 7. Cross-References
 
 - [Backend Overview](./backend-overview.md) - FastAPI architecture
 - [Streaming Tests](./streaming-tests.md) - SSE endpoint testing
 - [Export Tests](./export-tests.md) - Export endpoint testing
 - [Database Configuration](./database-configuration.md) - Session persistence
+- [Save Points / Versioning](./save-points-versioning.md) - Save point architecture and flow

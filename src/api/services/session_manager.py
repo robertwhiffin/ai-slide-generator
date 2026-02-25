@@ -788,6 +788,62 @@ class SessionManager:
                 "message_count": len(chat_history) if chat_history else 0,
             }
 
+    def update_version_verification(
+        self,
+        session_id: str,
+        version_number: int,
+        verification_map: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Update the verification_map on an existing save point.
+
+        Called after auto-verification completes to backfill results onto
+        a save point that was created before verification ran.
+
+        Args:
+            session_id: Session that owns the version
+            version_number: Version to update
+            verification_map: New verification results to store
+
+        Returns:
+            Updated version info
+
+        Raises:
+            SessionNotFoundError: If session doesn't exist
+            ValueError: If version not found
+        """
+        with get_db_session() as db:
+            session = self._get_session_or_raise(db, session_id)
+
+            version = (
+                db.query(SlideDeckVersion)
+                .filter(
+                    SlideDeckVersion.session_id == session.id,
+                    SlideDeckVersion.version_number == version_number,
+                )
+                .first()
+            )
+
+            if not version:
+                raise ValueError(f"Version {version_number} not found")
+
+            version.verification_map_json = json.dumps(verification_map)
+            db.flush()
+
+            logger.info(
+                "Updated verification on save point",
+                extra={
+                    "session_id": session_id,
+                    "version_number": version_number,
+                    "verification_entries": len(verification_map),
+                },
+            )
+
+            return {
+                "version_number": version.version_number,
+                "description": version.description,
+                "verification_entries": len(verification_map),
+            }
+
     def list_versions(self, session_id: str) -> List[Dict[str, Any]]:
         """List all save points for a session.
 
