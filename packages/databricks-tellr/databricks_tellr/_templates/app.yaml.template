@@ -6,9 +6,7 @@ command:
   - "sh"
   - "-c"
   - |
-    pip install --upgrade --no-cache-dir -r requirements.txt && \
-    python -c "from databricks_tellr_app.run import init_database; ${INIT_DATABASE_CALL}" && \
-    python -m databricks_tellr_app.run
+    pip install --upgrade --no-cache-dir -r requirements.txt && python -c "from databricks_tellr_app.run import init_database; ${INIT_DATABASE_CALL}" && python -m databricks_tellr_app.run
 
 env:
   - name: ENVIRONMENT
@@ -19,6 +17,14 @@ env:
     value: "${LAKEBASE_SCHEMA}"
   - name: GOOGLE_OAUTH_ENCRYPTION_KEY
     value: "${GOOGLE_OAUTH_ENCRYPTION_KEY}"
+  - name: LAKEBASE_TYPE
+    value: "${LAKEBASE_TYPE}"
+  - name: LAKEBASE_PG_HOST
+    value: "${LAKEBASE_PG_HOST}"
+  - name: LAKEBASE_PROJECT_ID
+    value: "${LAKEBASE_PROJECT_ID}"
+  - name: LAKEBASE_ENDPOINT_NAME
+    value: "${LAKEBASE_ENDPOINT_NAME}"
   - name: DATABRICKS_HOST
     valueFrom: "system.databricks_host"
   - name: DATABRICKS_TOKEN
