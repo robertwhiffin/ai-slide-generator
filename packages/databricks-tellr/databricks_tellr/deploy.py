@@ -29,6 +29,27 @@ from databricks.sdk.service.apps import (
 from databricks.sdk.service.database import DatabaseInstance
 from databricks.sdk.service.workspace import ImportFormat
 
+# Autoscaling imports (Lakebase next-gen)
+try:
+    from databricks.sdk.service.postgres import Project, ProjectDefaultEndpointSettings, ProjectSpec
+    HAS_AUTOSCALING_SDK = True
+except ImportError:
+    HAS_AUTOSCALING_SDK = False
+
+# Role management imports (requires newer SDK — >=0.91.0 for RoleMembershipRole)
+HAS_ROLE_SDK = False
+try:
+    from databricks.sdk.service.postgres import (
+        Role,
+        RoleAuthMethod,
+        RoleIdentityType,
+        RoleMembershipRole,
+        RoleRoleSpec,
+    )
+    HAS_ROLE_SDK = True
+except ImportError:
+    pass
+
 logger = logging.getLogger(__name__)
 
 
@@ -261,10 +282,11 @@ def _create_databricks(
     print()
 
     try:
-        # Step 1: Create/get Lakebase instance
+        # Step 1: Create/get Lakebase (autoscaling first, fallback to provisioned)
         print("Setting up Lakebase database...")
         lakebase_result = _get_or_create_lakebase(ws, lakebase_name, lakebase_compute)
-        print(f"   Lakebase: {lakebase_result['name']} ({lakebase_result['status']})")
+        lakebase_type = lakebase_result.get("type", "provisioned")
+        print(f"   Lakebase: {lakebase_result['name']} ({lakebase_result['status']}, type={lakebase_type})")
         print()
 
         # Step 2: Generate and upload files
@@ -279,6 +301,7 @@ def _create_databricks(
                 schema_name,
                 seed_databricks_defaults=seed_databricks_defaults,
                 encryption_key=encryption_key,
+                lakebase_result=lakebase_result,
             )
             print("   Generated app.yaml (with encryption key)")
 
@@ -296,14 +319,24 @@ def _create_databricks(
             workspace_path=app_file_workspace_path,
             compute_size=app_compute,
             lakebase_name=lakebase_name,
+            lakebase_type=lakebase_type,
         )
         print("   App registered")
         print()
 
+        # Step 3b: For autoscaling, create SP role via Postgres API
+        if lakebase_type == "autoscaling":
+            client_id = _get_app_client_id(app)
+            if client_id:
+                print("Configuring SP role on autoscaling project...")
+                _ensure_sp_autoscaling_role(ws, lakebase_name, client_id)
+            else:
+                print("   Warning: Could not get SP client ID — role setup skipped")
+
         # Step 4: Set up database schema (before deployment)
         # This ensures the schema and permissions are ready before the app starts
         print("Setting up database schema...")
-        _setup_database_schema(ws, app, lakebase_name, schema_name)
+        _setup_database_schema(ws, app, lakebase_name, schema_name, lakebase_result=lakebase_result)
         print(f"   Schema '{schema_name}' configured")
         print()
 
@@ -320,6 +353,7 @@ def _create_databricks(
             "url": app.url,
             "app_name": app_name,
             "lakebase_name": lakebase_name,
+            "lakebase_type": lakebase_type,
             "schema_name": schema_name,
             "status": "created",
         }
@@ -543,16 +577,194 @@ def _load_deployment_config(config_yaml_path: str) -> dict[str, str]:
     }
 
 
-def _get_or_create_lakebase(
+def _capacity_to_autoscaling_cu(capacity: str) -> tuple[float, float]:
+    """Map provisioned capacity to autoscaling CU range.
+
+    Returns (min_cu, max_cu) tuple, clamped to valid limits.
+    """
+    mapping = {
+        "CU_1": (0.5, 2.0),
+        "CU_2": (1.0, 4.0),
+        "CU_4": (2.0, 8.0),
+        "CU_8": (4.0, 12.0),
+    }
+    min_cu, max_cu = mapping.get(capacity, (0.5, 2.0))
+    # Clamp to product limits: 0.5-112 CU, max-min gap <= 8
+    min_cu = max(0.5, min(min_cu, 112.0))
+    max_cu = max(min_cu, min(max_cu, 112.0))
+    if max_cu - min_cu > 8:
+        max_cu = min_cu + 8
+        logger.warning(f"Clamped autoscaling CU range to {min_cu}-{max_cu} (max gap is 8)")
+    return min_cu, max_cu
+
+
+def _probe_autoscaling_available(ws: WorkspaceClient) -> bool:
+    """Check if Lakebase Autoscaling API is available in this workspace."""
+    if not HAS_AUTOSCALING_SDK:
+        logger.info("Autoscaling SDK not available (databricks-sdk too old)")
+        return False
+    try:
+        list(ws.postgres.list_projects())
+        return True
+    except Exception as e:
+        logger.info(f"Autoscaling API not available: {type(e).__name__}: {e}")
+        return False
+
+
+def _get_or_create_lakebase_autoscaling(
     ws: WorkspaceClient, database_name: str, capacity: str
 ) -> dict[str, Any]:
-    """Get or create a Lakebase database instance."""
+    """Get or create a Lakebase Autoscaling project.
+
+    Returns dict with type, name, status, host, endpoint_name, project_id.
+    """
+    project_name = f"projects/{database_name}"
+
+    # Try to get existing project
+    try:
+        project = ws.postgres.get_project(name=project_name)
+        logger.info(f"Found existing autoscaling project: {project_name}")
+    except Exception:
+        # Create new project with CU range from capacity mapping
+        min_cu, max_cu = _capacity_to_autoscaling_cu(capacity)
+        logger.info(f"Creating autoscaling project: {database_name} ({min_cu}-{max_cu} CU)")
+        operation = ws.postgres.create_project(
+            project=Project(
+                spec=ProjectSpec(
+                    display_name=database_name,
+                    pg_version="17",
+                    default_endpoint_settings=ProjectDefaultEndpointSettings(
+                        autoscaling_limit_min_cu=min_cu,
+                        autoscaling_limit_max_cu=max_cu,
+                    ),
+                )
+            ),
+            project_id=database_name,
+        )
+        project = operation.wait()
+        logger.info(f"Autoscaling project created: {project.name} ({min_cu}-{max_cu} CU)")
+
+    # Get the primary endpoint for connection info
+    endpoints = list(ws.postgres.list_endpoints(
+        parent=f"projects/{database_name}/branches/production"
+    ))
+    if not endpoints:
+        raise DeploymentError(
+            f"No endpoints found for autoscaling project {database_name}"
+        )
+
+    endpoint = ws.postgres.get_endpoint(name=endpoints[0].name)
+    host = endpoint.status.hosts.host
+    endpoint_name = endpoints[0].name
+
+    return {
+        "name": database_name,
+        "type": "autoscaling",
+        "status": "exists" if project else "created",
+        "host": host,
+        "endpoint_name": endpoint_name,
+        "project_id": database_name,
+        "instance_name": None,
+    }
+
+
+def _ensure_sp_autoscaling_role(
+    ws: WorkspaceClient, project_name: str, client_id: str
+) -> None:
+    """Create or verify the SP's Postgres role on an autoscaling project.
+
+    For autoscaling Lakebase, we skip AppResourceDatabase so the platform doesn't
+    auto-create the SP's Postgres role. We must create it via the ws.postgres API
+    with LAKEBASE_OAUTH_V1 auth so the SP can authenticate using minted tokens.
+
+    Requires SDK >=0.91.0 for RoleMembershipRole. Falls back to warning if unavailable.
+
+    Idempotent: skips if the role already exists.
+
+    Args:
+        ws: WorkspaceClient
+        project_name: Autoscaling project name (e.g. "teller-dev-mohamed")
+        client_id: The app service principal's client ID (UUID)
+    """
+    if not HAS_ROLE_SDK:
+        logger.warning(
+            "Role SDK not available (databricks-sdk too old for RoleMembershipRole). "
+            "SP role must be created manually via Databricks UI or CLI."
+        )
+        print("   Warning: SDK too old for role API — SP role must be configured manually")
+        return
+
+    branch_path = f"projects/{project_name}/branches/production"
+    role_id = f"sp-{client_id}"
+    role_path = f"{branch_path}/roles/{role_id}"
+
+    # Check if role already exists
+    try:
+        existing = ws.postgres.get_role(name=role_path)
+        logger.info(f"SP role already exists on autoscaling project: {role_path}")
+        # Verify auth method is correct
+        if existing.status and existing.status.auth_method == RoleAuthMethod.LAKEBASE_OAUTH_V1:
+            logger.info("SP role auth_method is LAKEBASE_OAUTH_V1 — OK")
+            return
+        logger.warning(
+            f"SP role exists but auth_method is {existing.status.auth_method if existing.status else 'unknown'} "
+            f"(expected LAKEBASE_OAUTH_V1) — will attempt to recreate"
+        )
+        # Delete the misconfigured role so we can recreate it
+        try:
+            ws.postgres.delete_role(name=role_path).wait()
+            logger.info(f"Deleted misconfigured SP role: {role_path}")
+        except Exception as e:
+            logger.warning(f"Could not delete misconfigured role: {e}")
+            return
+    except Exception:
+        # Role doesn't exist — create it
+        pass
+
+    # Create the role via the Postgres API with correct auth
+    logger.info(f"Creating SP role on autoscaling project: {role_path}")
+    print(f"   Creating SP Postgres role via API: {client_id}")
+    try:
+        operation = ws.postgres.create_role(
+            parent=branch_path,
+            role=Role(
+                spec=RoleRoleSpec(
+                    postgres_role=client_id,
+                    identity_type=RoleIdentityType.SERVICE_PRINCIPAL,
+                    auth_method=RoleAuthMethod.LAKEBASE_OAUTH_V1,
+                    membership_roles=[RoleMembershipRole.DATABRICKS_SUPERUSER],
+                ),
+            ),
+            # role_id must match ^[a-z]([a-z0-9-]{0,61}[a-z0-9])?$ — prefix UUID
+            role_id=f"sp-{client_id}",
+        )
+        role = operation.wait()
+        logger.info(f"SP role created: {role.name}")
+        print(f"   SP role configured with LAKEBASE_OAUTH_V1 auth")
+    except Exception as e:
+        raise DeploymentError(
+            f"Failed to create SP role on autoscaling project: {e}"
+        ) from e
+
+
+def _get_or_create_lakebase_provisioned(
+    ws: WorkspaceClient, database_name: str, capacity: str
+) -> dict[str, Any]:
+    """Get or create a Lakebase Provisioned instance.
+
+    Returns dict with type, name, status, instance_name.
+    """
     try:
         existing = ws.database.get_database_instance(name=database_name)
         return {
             "name": existing.name,
+            "type": "provisioned",
             "status": "exists",
             "state": existing.state.value if existing.state else "UNKNOWN",
+            "host": None,
+            "endpoint_name": None,
+            "project_id": None,
+            "instance_name": existing.name,
         }
     except Exception as e:
         error_str = str(e).lower()
@@ -564,9 +776,36 @@ def _get_or_create_lakebase(
     )
     return {
         "name": instance.name,
+        "type": "provisioned",
         "status": "created",
         "state": instance.state.value if instance.state else "RUNNING",
+        "host": None,
+        "endpoint_name": None,
+        "project_id": None,
+        "instance_name": instance.name,
     }
+
+
+def _get_or_create_lakebase(
+    ws: WorkspaceClient, database_name: str, capacity: str
+) -> dict[str, Any]:
+    """Get or create a Lakebase database — autoscaling first, fallback to provisioned."""
+    # Try autoscaling first
+    if _probe_autoscaling_available(ws):
+        try:
+            result = _get_or_create_lakebase_autoscaling(ws, database_name, capacity)
+            logger.info(f"Using Lakebase Autoscaling: {result['name']}")
+            return result
+        except Exception as e:
+            logger.warning(
+                f"Autoscaling failed, falling back to provisioned: "
+                f"{type(e).__name__}: {e}"
+            )
+
+    # Fallback to provisioned
+    result = _get_or_create_lakebase_provisioned(ws, database_name, capacity)
+    logger.info(f"Using Lakebase Provisioned: {result['name']}")
+    return result
 
 
 def _write_requirements(
@@ -623,9 +862,10 @@ def _write_app_yaml(
     schema_name: str,
     seed_databricks_defaults: bool = False,
     encryption_key: str | None = None,
+    lakebase_result: dict[str, Any] | None = None,
 ) -> None:
     """Generate app.yaml with environment variables.
-    
+
     Args:
         staging_dir: Directory to write the app.yaml file
         lakebase_name: Lakebase instance name
@@ -633,6 +873,7 @@ def _write_app_yaml(
         seed_databricks_defaults: If True, include Databricks-specific content seeding
         encryption_key: Fernet encryption key for Google OAuth credentials/tokens.
             Auto-generated if not provided.
+        lakebase_result: Result dict from _get_or_create_lakebase() with type info.
     """
     # Build init_database call - only show seed_databricks_defaults when True
     if seed_databricks_defaults:
@@ -645,15 +886,26 @@ def _write_app_yaml(
 
         encryption_key = Fernet.generate_key().decode()
         logger.info("Auto-generated GOOGLE_OAUTH_ENCRYPTION_KEY for deployment")
-    
+
+    # Determine lakebase type info for env vars
+    lakebase_type = (lakebase_result or {}).get("type", "provisioned")
+    lakebase_pg_host = (lakebase_result or {}).get("host", "")
+    lakebase_project_id = (lakebase_result or {}).get("project_id", "")
+    lakebase_endpoint_name = (lakebase_result or {}).get("endpoint_name", "")
+
     template_content = _load_template("app.yaml.template")
     content = Template(template_content).substitute(
         LAKEBASE_INSTANCE=lakebase_name,
         LAKEBASE_SCHEMA=schema_name,
         INIT_DATABASE_CALL=init_call,
         GOOGLE_OAUTH_ENCRYPTION_KEY=encryption_key,
+        LAKEBASE_TYPE=lakebase_type,
+        LAKEBASE_PG_HOST=lakebase_pg_host,
+        LAKEBASE_PROJECT_ID=lakebase_project_id,
+        LAKEBASE_ENDPOINT_NAME=lakebase_endpoint_name,
     )
     (staging_dir / "app.yaml").write_text(content)
+
 
 
 def _load_template(template_name: str) -> str:
@@ -721,25 +973,35 @@ def _create_app(
     workspace_path: str,
     compute_size: str,
     lakebase_name: str,
+    lakebase_type: str = "provisioned",
 ) -> App:
     """Create Databricks App with database resource (without deploying).
-    
+
     This creates the app and waits for it to be ready, but does NOT deploy.
     The app's service principal is available after creation, which is needed
     for setting up database schema permissions before deployment.
+
+    For autoscaling, AppResourceDatabase is not supported — connection info
+    is passed via env vars instead.
     """
     compute_size_enum = ComputeSize(compute_size)
 
-    app_resources = [
-        AppResource(
-            name="app_database",
-            database=AppResourceDatabase(
-                instance_name=lakebase_name,
-                database_name="databricks_postgres",
-                permission=AppResourceDatabaseDatabasePermission.CAN_CONNECT_AND_CREATE,
-            ),
-        )
-    ]
+    # AppResourceDatabase only works with provisioned Lakebase
+    if lakebase_type == "provisioned":
+        app_resources = [
+            AppResource(
+                name="app_database",
+                database=AppResourceDatabase(
+                    instance_name=lakebase_name,
+                    database_name="databricks_postgres",
+                    permission=AppResourceDatabaseDatabasePermission.CAN_CONNECT_AND_CREATE,
+                ),
+            )
+        ]
+    else:
+        # Autoscaling: no AppResourceDatabase, connection via env vars
+        app_resources = []
+        logger.info("Autoscaling mode: skipping AppResourceDatabase (using env vars)")
 
     app = App(
         name=app_name,
@@ -788,9 +1050,11 @@ def _get_app_client_id(app: App) -> str | None:
 
 
 def _get_lakebase_connection(
-    ws: WorkspaceClient, lakebase_name: str
+    ws: WorkspaceClient, lakebase_name: str, lakebase_result: dict[str, Any] | None = None,
 ) -> tuple[Any, str]:
     """Get a psycopg2 connection to Lakebase and the current username.
+
+    Supports both provisioned and autoscaling Lakebase.
 
     Returns:
         Tuple of (connection, username)
@@ -802,16 +1066,25 @@ def _get_lakebase_connection(
             "psycopg2-binary is required for database operations"
         ) from exc
 
-    instance = ws.database.get_database_instance(name=lakebase_name)
+    lakebase_type = (lakebase_result or {}).get("type", "provisioned")
     user = ws.current_user.me().user_name
 
-    cred = ws.database.generate_database_credential(
-        request_id=str(uuid.uuid4()),
-        instance_names=[lakebase_name],
-    )
+    if lakebase_type == "autoscaling":
+        endpoint_name = lakebase_result["endpoint_name"]
+        host = lakebase_result["host"]
+        cred = ws.postgres.generate_database_credential(endpoint=endpoint_name)
+        logger.info(f"Connecting to autoscaling Lakebase at {host}")
+    else:
+        instance = ws.database.get_database_instance(name=lakebase_name)
+        host = instance.read_write_dns
+        cred = ws.database.generate_database_credential(
+            request_id=str(uuid.uuid4()),
+            instance_names=[lakebase_name],
+        )
+        logger.info(f"Connecting to provisioned Lakebase at {host}")
 
     conn = psycopg2.connect(
-        host=instance.read_write_dns,
+        host=host,
         port=5432,
         user=user,
         password=cred.token,
@@ -824,7 +1097,8 @@ def _get_lakebase_connection(
 
 
 def _setup_database_schema(
-    ws: WorkspaceClient, app: App, lakebase_name: str, schema_name: str
+    ws: WorkspaceClient, app: App, lakebase_name: str, schema_name: str,
+    lakebase_result: dict[str, Any] | None = None,
 ) -> None:
     """Set up database schema and grant permissions to app."""
     client_id = _get_app_client_id(app)
@@ -833,7 +1107,7 @@ def _setup_database_schema(
         print("   Warning: Could not get app client ID - schema setup skipped")
         return
 
-    conn, _ = _get_lakebase_connection(ws, lakebase_name)
+    conn, _ = _get_lakebase_connection(ws, lakebase_name, lakebase_result=lakebase_result)
 
     try:
         with conn.cursor() as cur:
@@ -849,6 +1123,7 @@ def _reset_schema(
     lakebase_name: str,
     schema_name: str,
     drop_only: bool = False,
+    lakebase_result: dict[str, Any] | None = None,
 ) -> None:
     """Drop and recreate schema (tables will be recreated by app on startup).
 
@@ -858,10 +1133,11 @@ def _reset_schema(
         lakebase_name: Lakebase instance name
         schema_name: Schema to reset
         drop_only: If True, only drop the schema without recreating
+        lakebase_result: Result dict from _get_or_create_lakebase()
     """
     client_id = _get_app_client_id(app)
 
-    conn, _ = _get_lakebase_connection(ws, lakebase_name)
+    conn, _ = _get_lakebase_connection(ws, lakebase_name, lakebase_result=lakebase_result)
 
     try:
         with conn.cursor() as cur:
@@ -880,7 +1156,21 @@ def _reset_schema(
 
 
 def _grant_schema_permissions(cur: Any, schema_name: str, client_id: str) -> None:
-    """Grant schema permissions to an app's service principal."""
+    """Grant schema permissions to an app's service principal.
+
+    The SP role should already exist:
+    - Provisioned: created by AppResourceDatabase (platform-managed)
+    - Autoscaling: created by _ensure_sp_autoscaling_role() via ws.postgres API
+
+    This function only grants schema/table permissions — it does NOT create roles.
+    """
+    # Verify the role exists before granting
+    cur.execute(
+        "SELECT 1 FROM pg_roles WHERE rolname = %s", (client_id,)
+    )
+    if not cur.fetchone():
+        logger.warning(f"SP role {client_id} not found in pg_roles — grants may fail")
+
     cur.execute(f'GRANT USAGE ON SCHEMA "{schema_name}" TO "{client_id}"')
     cur.execute(f'GRANT CREATE ON SCHEMA "{schema_name}" TO "{client_id}"')
     cur.execute(
