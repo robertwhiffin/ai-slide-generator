@@ -40,85 +40,95 @@ _token_refresh_task: Optional[asyncio.Task] = None
 TOKEN_REFRESH_INTERVAL_SECONDS = 50 * 60
 
 
+def _get_lakebase_type() -> str:
+    """Get the Lakebase type: 'autoscaling', 'provisioned', or '' (not Lakebase)."""
+    return os.getenv("LAKEBASE_TYPE", "")
+
+
 def is_lakebase_environment() -> bool:
     """Check if running in a Lakebase environment (Databricks Apps).
-    
+
     Returns:
-        True if PGHOST and PGUSER are set (auto-injected by Databricks Apps)
+        True if LAKEBASE_TYPE is set, or PGHOST and PGUSER are set (provisioned auto-inject)
     """
+    if os.getenv("LAKEBASE_TYPE"):
+        return True
     return bool(os.getenv("PGHOST") and os.getenv("PGUSER"))
 
 
 def _generate_lakebase_token() -> str:
     """Generate a fresh OAuth token for Lakebase authentication.
-    
-    Uses the system client (service principal) for database authentication.
-    User tokens are not valid for Lakebase access.
-    
+
+    Uses ws.database.generate_database_credential() which works for both
+    provisioned and autoscaling endpoints (tokens are cross-compatible).
+
     Returns:
         OAuth token string to use as PostgreSQL password
-        
+
     Raises:
-        Exception: If token generation fails
+        RuntimeError: If LAKEBASE_INSTANCE not set or token generation fails
     """
     from src.core.databricks_client import get_system_client
 
     ws = get_system_client()
     instance_name = os.getenv("LAKEBASE_INSTANCE")
-
-    if instance_name:
-        # Generate credential for specific instance
-        cred = ws.database.generate_database_credential(
-            request_id=str(uuid.uuid4()),
-            instance_names=[instance_name],
+    if not instance_name:
+        raise RuntimeError(
+            "LAKEBASE_INSTANCE not set — cannot generate Lakebase token."
         )
-        return cred.token
-    else:
-        # Fallback: use workspace authentication token
-        # This works when the app has database resource attached
-        token = ws.config.authenticate()
-        if hasattr(token, "token"):
-            return token.token
-        return str(token)
+
+    cred = ws.database.generate_database_credential(
+        request_id=str(uuid.uuid4()),
+        instance_names=[instance_name],
+    )
+    logger.info("Generated Lakebase OAuth token via ws.database")
+    return cred.token
 
 
 def _get_lakebase_token() -> str:
     """Get the current OAuth token for Lakebase authentication.
-    
+
     Returns the cached token if available, otherwise generates a new one.
     For production use, the token is refreshed by the background task.
-    
+
     Returns:
         OAuth token string
     """
     global _postgres_token, _last_token_refresh
-    
+
     # If we have a cached token, return it
     if _postgres_token is not None:
         return _postgres_token
-    
+
     # Generate initial token
-    try:
-        _postgres_token = _generate_lakebase_token()
-        _last_token_refresh = time.time()
-        logger.info("Generated initial Lakebase OAuth token")
-        return _postgres_token
-    except Exception as e:
-        logger.error(f"Failed to get Lakebase token: {e}")
-        raise
+    _postgres_token = _generate_lakebase_token()
+    _last_token_refresh = time.time()
+    logger.info("Generated initial Lakebase OAuth token")
+    return _postgres_token
 
 
 async def _refresh_token_background() -> None:
-    """Background task to refresh Lakebase OAuth tokens every 50 minutes.
-    
-    Tokens expire after 1 hour, so we refresh at 50 minutes to ensure
-    continuous connectivity with a 10-minute buffer.
+    """Background task to refresh Lakebase OAuth tokens periodically.
+
+    Tokens expire after 1 hour, so we refresh at ~50 minutes with jitter
+    (+-5 min) to avoid synchronized refresh spikes across replicas.
     """
+    import random
+
     global _postgres_token, _last_token_refresh
 
     while True:
         try:
-            await asyncio.sleep(TOKEN_REFRESH_INTERVAL_SECONDS)
+            # Add jitter: 45-55 minutes
+            jitter = random.uniform(-5 * 60, 5 * 60)
+            sleep_time = TOKEN_REFRESH_INTERVAL_SECONDS + jitter
+            await asyncio.sleep(sleep_time)
+
+            # Check remaining TTL — refresh early if under 10 min
+            elapsed = time.time() - _last_token_refresh
+            if elapsed < (TOKEN_REFRESH_INTERVAL_SECONDS - 10 * 60):
+                continue  # Token still fresh enough
+
             logger.info("Background token refresh: Generating fresh Lakebase OAuth token")
 
             _postgres_token = _generate_lakebase_token()
@@ -146,13 +156,9 @@ async def start_token_refresh() -> None:
         return
 
     # Generate initial token before starting background refresh
-    try:
-        _postgres_token = _generate_lakebase_token()
-        _last_token_refresh = time.time()
-        logger.info("Initial Lakebase OAuth token generated")
-    except Exception as e:
-        logger.error(f"Failed to generate initial Lakebase token: {e}")
-        raise
+    _postgres_token = _generate_lakebase_token()
+    _last_token_refresh = time.time()
+    logger.info("Initial Lakebase OAuth token generated")
 
     # Start background refresh task
     if _token_refresh_task is None or _token_refresh_task.done():
@@ -196,13 +202,37 @@ def _get_database_url() -> str:
     if explicit_url and not explicit_url.startswith("jdbc:"):
         return explicit_url
 
-    # Check for Lakebase environment (PGHOST auto-set by Databricks Apps)
+    # Check for autoscaling Lakebase (env vars set by deployment)
+    lakebase_type = _get_lakebase_type()
+    if lakebase_type == "autoscaling":
+        pg_host = os.getenv("LAKEBASE_PG_HOST")
+        if not pg_host:
+            raise RuntimeError(
+                "LAKEBASE_PG_HOST required when LAKEBASE_TYPE=autoscaling"
+            )
+        # Use PGUSER if set (from AppResourceDatabase), otherwise resolve from SDK
+        pg_user = os.getenv("PGUSER")
+        if not pg_user:
+            from src.core.databricks_client import get_system_client
+            ws = get_system_client()
+            pg_user = ws.current_user.me().user_name
+
+        database = "databricks_postgres"
+        schema = os.getenv("LAKEBASE_SCHEMA", "app_data")
+        logger.info(f"Detected autoscaling Lakebase environment (host: {pg_host}, user: {pg_user})")
+
+        url = f"postgresql://{pg_user}@{pg_host}:5432/{database}?sslmode=require"
+        if schema:
+            url += f"&options=-csearch_path%3D{schema}"
+        return url
+
+    # Check for provisioned Lakebase (PGHOST auto-set by Databricks Apps)
     pg_host = os.getenv("PGHOST")
     pg_user = os.getenv("PGUSER")
 
     if pg_host and pg_user:
-        # Running on Databricks Apps with Lakebase
-        logger.info(f"Detected Lakebase environment (PGHOST: {pg_host})")
+        # Running on Databricks Apps with provisioned Lakebase
+        logger.info(f"Detected provisioned Lakebase environment (PGHOST: {pg_host})")
 
         # Build PostgreSQL connection URL WITHOUT password
         # Password is injected dynamically via do_connect event for token refresh
