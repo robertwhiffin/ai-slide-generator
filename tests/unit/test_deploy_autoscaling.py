@@ -15,6 +15,8 @@ from unittest.mock import MagicMock, Mock, patch, call
 
 import pytest
 
+pytest.importorskip("databricks_tellr", reason="databricks-tellr package not installed")
+
 from databricks_tellr.deploy import (
     DeploymentError,
     _capacity_to_autoscaling_cu,
