@@ -19,10 +19,16 @@ from fastapi.staticfiles import StaticFiles
 from src.api.routes import admin, chat, export, feedback, images, sessions, slides, verification, version, google_slides, setup, local_version
 from src.core.databricks_client import create_user_client, set_user_client
 from src.core.user_context import get_current_user as get_ctx_user, set_current_user
+from src.core.permission_context import (
+    build_permission_context,
+    set_permission_context,
+)
 from src.api.routes.settings import (
     ai_infra_router,
+    contributors_router,
     deck_prompts_router,
     genie_router,
+    identities_router,
     profiles_router,
     prompts_router,
     slide_styles_router,
@@ -220,14 +226,19 @@ async def user_auth_middleware(request: Request, call_next):
     token in the x-forwarded-access-token header. This middleware extracts that
     token and creates a request-scoped WorkspaceClient for Genie/LLM/MLflow calls.
 
-    It also populates the request-scoped user identity (``set_current_user``) so
-    that downstream handlers can access the username without an extra API call.
+    It also populates:
+    - Request-scoped user identity (``set_current_user``) for username access
+    - Permission context (``set_permission_context``) with user ID and group IDs
+      for permission checks on profiles/sessions
 
     In local development (no token header), the identity falls back to the
     ``DEV_USER_ID`` environment variable.
     """
     token = request.headers.get("x-forwarded-access-token")
     client_id = os.getenv("DATABRICKS_CLIENT_ID", "")
+
+    user_id = None
+    user_name = None
 
     if token:
         # Diagnostic logging: check if token is service principal ID
@@ -248,19 +259,34 @@ async def user_auth_middleware(request: Request, call_next):
             user_client = create_user_client(token)
             set_user_client(user_client)
             logger.warning("OBO auth: user client set successfully")
-            # Extract username from the token-scoped client
+            # Extract user info from the token-scoped client
             try:
                 me = user_client.current_user.me()
-                set_current_user(me.user_name)
+                user_id = me.id
+                user_name = me.user_name
+                set_current_user(user_name)
             except Exception as e:
-                logger.warning(f"OBO auth: failed to resolve username from token: {e}")
+                logger.warning(f"OBO auth: failed to resolve user info from token: {e}")
         except Exception as e:
             logger.warning(f"Failed to create user client from token: {e}")
     else:
         # Local / dev fallback: use DEV_USER_ID env var
         dev_user = os.getenv("DEV_USER_ID", "dev@local.dev")
+        user_name = dev_user
+        user_id = os.getenv("DEV_USER_DATABRICKS_ID")  # Optional: set for testing
         set_current_user(dev_user)
         logger.debug("OBO auth: no token header — using dev identity %s", dev_user)
+
+    # Build and set permission context (includes group memberships)
+    # Skip group fetching in dev/test to avoid API calls
+    fetch_groups = ENVIRONMENT not in ("development", "test")
+    permission_ctx = build_permission_context(
+        user_id=user_id,
+        user_name=user_name,
+        fetch_groups=fetch_groups,
+    )
+    set_permission_context(permission_ctx)
+
     try:
         response = await call_next(request)
         return response
@@ -268,6 +294,7 @@ async def user_auth_middleware(request: Request, call_next):
         # Always clean up request-scoped state
         set_user_client(None)
         set_current_user(None)
+        set_permission_context(None)
 
 
 # Include API routers
@@ -287,8 +314,10 @@ app.include_router(local_version.router)
 # Configuration management routers
 app.include_router(profiles_router, prefix="/api/settings", tags=["settings"])
 app.include_router(ai_infra_router, prefix="/api/settings", tags=["settings"])
+app.include_router(contributors_router, prefix="/api/settings", tags=["settings"])
 app.include_router(deck_prompts_router, prefix="/api/settings", tags=["settings"])
 app.include_router(genie_router, prefix="/api/settings", tags=["settings"])
+app.include_router(identities_router, prefix="/api/settings", tags=["settings"])
 app.include_router(prompts_router, prefix="/api/settings", tags=["settings"])
 app.include_router(slide_styles_router, prefix="/api/settings", tags=["settings"])
 
@@ -305,19 +334,31 @@ async def health():
 
 @app.get("/api/user/current")
 async def get_current_user():
-    """Return the current user's identity.
+    """Return the current user's identity and permission context.
 
     The middleware already resolved the username (from the Databricks token in
     production, or ``DEV_USER_ID`` in local dev) and stored it via
     ``set_current_user``.  This endpoint simply reads that value, avoiding an
     extra Databricks API call.
+    
+    Also includes the user's Databricks ID and group IDs from the permission
+    context, which are used for profile permission checks.
     """
+    from src.core.permission_context import get_permission_context
+    
     ctx_user = get_ctx_user()
+    perm_ctx = get_permission_context()
+    
     if ctx_user:
-        return {
+        result = {
             "username": ctx_user,
             "display_name": ctx_user,
         }
+        # Include permission context info if available
+        if perm_ctx:
+            result["user_id"] = perm_ctx.user_id
+            result["group_count"] = len(perm_ctx.group_ids)
+        return result
 
     # Fallback: resolve from Databricks client (production without middleware hit)
     try:
@@ -328,6 +369,7 @@ async def get_current_user():
         return {
             "username": user.user_name,
             "display_name": user.display_name or user.user_name,
+            "user_id": user.id,
         }
     except Exception as e:
         logger.warning(f"Failed to get current user: {e}")

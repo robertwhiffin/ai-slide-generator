@@ -200,7 +200,7 @@ export const ProfileDetailView: React.FC<ProfileDetailProps> = ({
             </div>
             
             <div className="flex items-center gap-3">
-              {/* View/Edit Toggle */}
+              {/* View/Edit Toggle - only show Edit if user has CAN_EDIT or CAN_MANAGE */}
               <div className="flex gap-1 bg-white rounded border border-gray-300">
                 <button
                   onClick={() => setMode('view')}
@@ -212,16 +212,18 @@ export const ProfileDetailView: React.FC<ProfileDetailProps> = ({
                 >
                   View
                 </button>
-                <button
-                  onClick={() => setMode('edit')}
-                  className={`px-3 py-1 text-sm rounded transition-colors ${
-                    mode === 'edit'
-                      ? 'bg-blue-500 text-white'
-                      : 'text-gray-600 hover:text-gray-900'
-                  }`}
-                >
-                  Edit
-                </button>
+                {(profile.my_permission === 'CAN_EDIT' || profile.my_permission === 'CAN_MANAGE') && (
+                  <button
+                    onClick={() => setMode('edit')}
+                    className={`px-3 py-1 text-sm rounded transition-colors ${
+                      mode === 'edit'
+                        ? 'bg-blue-500 text-white'
+                        : 'text-gray-600 hover:text-gray-900'
+                    }`}
+                  >
+                    Edit
+                  </button>
+                )}
               </div>
               
               <button

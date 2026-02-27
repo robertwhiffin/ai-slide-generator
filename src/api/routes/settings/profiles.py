@@ -16,7 +16,9 @@ from src.api.schemas.settings import (
 )
 from src.api.services.chat_service import ChatService, get_chat_service
 from src.core.database import get_db
+from src.core.permission_context import get_permission_context
 from src.services import ProfileService
+from src.services.permission_service import PermissionService
 
 logger = logging.getLogger(__name__)
 
@@ -28,17 +30,66 @@ def get_profile_service(db: Session = Depends(get_db)) -> ProfileService:
     return ProfileService(db)
 
 
+def get_permission_service(db: Session = Depends(get_db)) -> PermissionService:
+    """Dependency to get PermissionService."""
+    return PermissionService(db)
+
+
+def _get_current_user_info() -> tuple[str, Optional[str]]:
+    """Get current user's username and Databricks ID.
+    
+    Returns:
+        Tuple of (username, user_databricks_id)
+    """
+    ctx = get_permission_context()
+    if ctx and ctx.user_name:
+        return ctx.user_name, ctx.user_id
+    
+    # Fallback for dev/test
+    if os.getenv("ENVIRONMENT") in ("development", "test"):
+        return "system", None
+    
+    # Try to get from Databricks client
+    try:
+        from src.core.databricks_client import get_user_client
+        client = get_user_client()
+        me = client.current_user.me()
+        return me.user_name, me.id
+    except Exception:
+        return "system", None
+
+
 @router.get("", response_model=List[ProfileSummary])
 def list_profiles(service: ProfileService = Depends(get_profile_service)):
     """
-    List all configuration profiles.
+    List configuration profiles accessible to the current user.
+    
+    Returns profiles where the user has at least CAN_VIEW permission,
+    including the user's permission level on each profile.
     
     Returns:
-        List of profile summaries
+        List of profile summaries with permission levels
     """
     try:
-        profiles = service.list_profiles()
-        return profiles
+        profiles_with_perms = service.list_accessible_profiles()
+        
+        # Convert to response model with permission
+        result = []
+        for profile, permission in profiles_with_perms:
+            summary = ProfileSummary(
+                id=profile.id,
+                name=profile.name,
+                description=profile.description,
+                is_default=profile.is_default,
+                created_at=profile.created_at,
+                created_by=profile.created_by,
+                updated_at=profile.updated_at,
+                updated_by=profile.updated_by,
+                my_permission=permission.value,
+            )
+            result.append(summary)
+        
+        return result
     except Exception as e:
         logger.error(f"Error listing profiles: {e}", exc_info=True)
         raise HTTPException(
@@ -80,27 +131,50 @@ def get_default_profile(service: ProfileService = Depends(get_profile_service)):
 def get_profile(
     profile_id: int,
     service: ProfileService = Depends(get_profile_service),
+    perm_service: PermissionService = Depends(get_permission_service),
 ):
     """
     Get profile by ID with all configurations.
+    
+    Requires at least CAN_VIEW permission on the profile.
     
     Args:
         profile_id: Profile ID
         
     Returns:
-        Profile detail with all configurations
+        Profile detail with all configurations and user's permission level
         
     Raises:
+        403: No permission to view this profile
         404: Profile not found
     """
     try:
+        # Check permission first and get the permission level
+        perm_service.require_view(profile_id)
+        permission = perm_service.get_current_user_permission(profile_id)
+        
         profile = service.get_profile(profile_id)
         if not profile:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"Profile {profile_id} not found",
             )
-        return profile
+        
+        # Convert ORM object to response with permission
+        return ProfileDetail(
+            id=profile.id,
+            name=profile.name,
+            description=profile.description,
+            is_default=profile.is_default,
+            created_at=profile.created_at,
+            created_by=profile.created_by,
+            updated_at=profile.updated_at,
+            updated_by=profile.updated_by,
+            ai_infra=profile.ai_infra,
+            genie_spaces=profile.genie_spaces,
+            prompts=profile.prompts,
+            my_permission=permission.value if permission else None,
+        )
     except HTTPException:
         raise
     except Exception as e:
@@ -119,35 +193,27 @@ def create_profile(
     """
     Create a new configuration profile.
     
+    The creator is automatically added as a CAN_MANAGE contributor.
+    
     Args:
         request: Profile creation request
         
     Returns:
         Created profile with default configurations.
         Note: Genie space must be configured separately after creation.
-        MLflow experiment name is auto-set based on creator's username.
         
     Raises:
         400: Invalid request
         409: Profile name already exists
     """
     try:
-        # Get the current user from Databricks for MLflow experiment path
-        # (skip Databricks call in test/dev to avoid network timeout)
-        if os.getenv("ENVIRONMENT") in ("development", "test"):
-            user = "system"
-        else:
-            try:
-                from src.core.databricks_client import get_user_client
-                client = get_user_client()
-                user = client.current_user.me().user_name
-            except Exception:
-                user = "system"
+        user, user_databricks_id = _get_current_user_info()
 
         profile = service.create_profile(
             name=request.name,
             description=request.description,
             user=user,
+            user_databricks_id=user_databricks_id,
         )
         return profile
     except ValueError as e:
@@ -172,7 +238,7 @@ def create_profile_with_config(
     Create a new profile with all configurations in one request.
     
     Used by the creation wizard for complete profile setup.
-    Genie space is required; other configurations have defaults.
+    The creator is automatically added as a CAN_MANAGE contributor.
     
     Args:
         request: Profile creation request with inline configurations
@@ -185,17 +251,7 @@ def create_profile_with_config(
         409: Profile name already exists
     """
     try:
-        # Get the current user from Databricks
-        # (skip Databricks call in test/dev to avoid network timeout)
-        if os.getenv("ENVIRONMENT") in ("development", "test"):
-            user = "system"
-        else:
-            try:
-                from src.core.databricks_client import get_user_client
-                client = get_user_client()
-                user = client.current_user.me().user_name
-            except Exception:
-                user = "system"
+        user, user_databricks_id = _get_current_user_info()
 
         profile = service.create_profile_with_config(
             name=request.name,
@@ -217,6 +273,7 @@ def create_profile_with_config(
                 "slide_editing_instructions": request.prompts.slide_editing_instructions,
             } if request.prompts else None,
             user=user,
+            user_databricks_id=user_databricks_id,
         )
         return profile
     except ValueError as e:
@@ -237,9 +294,12 @@ def update_profile(
     profile_id: int,
     request: ProfileUpdate,
     service: ProfileService = Depends(get_profile_service),
+    perm_service: PermissionService = Depends(get_permission_service),
 ):
     """
     Update profile metadata.
+    
+    Requires CAN_EDIT permission on the profile.
     
     Args:
         profile_id: Profile ID
@@ -249,12 +309,15 @@ def update_profile(
         Updated profile
         
     Raises:
+        403: No permission to edit this profile
         404: Profile not found
         400: Invalid request
     """
     try:
-        # TODO: Get actual user from authentication
-        user = "system"
+        # Check permission first
+        perm_service.require_edit(profile_id)
+        
+        user, _ = _get_current_user_info()
 
         profile = service.update_profile(
             profile_id=profile_id,
@@ -263,6 +326,8 @@ def update_profile(
             user=user,
         )
         return profile
+    except HTTPException:
+        raise
     except ValueError as e:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND if "not found" in str(e).lower() else status.HTTP_400_BAD_REQUEST,
@@ -280,22 +345,29 @@ def update_profile(
 def delete_profile(
     profile_id: int,
     service: ProfileService = Depends(get_profile_service),
+    perm_service: PermissionService = Depends(get_permission_service),
 ):
     """
     Delete a configuration profile.
+    
+    Requires CAN_MANAGE permission on the profile.
     
     Args:
         profile_id: Profile ID
         
     Raises:
+        403: No permission to manage this profile / Cannot delete default
         404: Profile not found
-        403: Cannot delete default profile
     """
     try:
-        # TODO: Get actual user from authentication
-        user = "system"
+        # Check permission first
+        perm_service.require_manage(profile_id)
+        
+        user, _ = _get_current_user_info()
 
         service.delete_profile(profile_id=profile_id, user=user)
+    except HTTPException:
+        raise
     except ValueError as e:
         error_msg = str(e).lower()
         if "not found" in error_msg:
@@ -325,9 +397,12 @@ def delete_profile(
 def set_default_profile(
     profile_id: int,
     service: ProfileService = Depends(get_profile_service),
+    perm_service: PermissionService = Depends(get_permission_service),
 ):
     """
-    Set profile as the default.
+    Set profile as the user's default.
+    
+    Any user with at least CAN_VIEW permission can set a profile as their default.
     
     Args:
         profile_id: Profile ID to set as default
@@ -336,14 +411,19 @@ def set_default_profile(
         Updated profile
         
     Raises:
+        403: No permission to view this profile
         404: Profile not found
     """
     try:
-        # TODO: Get actual user from authentication
-        user = "system"
+        # Only need view permission to set as default
+        perm_service.require_view(profile_id)
+        
+        user, _ = _get_current_user_info()
 
         profile = service.set_default_profile(profile_id=profile_id, user=user)
         return profile
+    except HTTPException:
+        raise
     except ValueError as e:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -362,9 +442,13 @@ def duplicate_profile(
     profile_id: int,
     request: ProfileDuplicate,
     service: ProfileService = Depends(get_profile_service),
+    perm_service: PermissionService = Depends(get_permission_service),
 ):
     """
     Duplicate a profile with a new name.
+    
+    Requires CAN_VIEW permission on the source profile.
+    The current user becomes the owner (CAN_MANAGE) of the new profile.
     
     Args:
         profile_id: Source profile ID
@@ -374,12 +458,15 @@ def duplicate_profile(
         New profile with copied configurations
         
     Raises:
+        403: No permission to view source profile
         404: Source profile not found
         409: Profile name already exists
     """
     try:
-        # TODO: Get actual user from authentication
-        user = "system"
+        # Need view permission on source profile
+        perm_service.require_view(profile_id)
+        
+        user, _ = _get_current_user_info()
 
         profile = service.duplicate_profile(
             profile_id=profile_id,
@@ -387,6 +474,8 @@ def duplicate_profile(
             user=user,
         )
         return profile
+    except HTTPException:
+        raise
     except ValueError as e:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND if "not found" in str(e).lower() else status.HTTP_400_BAD_REQUEST,
@@ -405,10 +494,12 @@ def load_profile(
     profile_id: int,
     service: ProfileService = Depends(get_profile_service),
     chat_service: ChatService = Depends(get_chat_service),
+    perm_service: PermissionService = Depends(get_permission_service),
 ):
     """
     Load profile and reload application with new configuration.
     
+    Requires CAN_VIEW permission on the profile.
     This performs a hot-reload of the application configuration from the database,
     updating the LLM, Genie, MLflow, and prompts settings to match the specified profile.
     Active sessions and conversation state are preserved during the reload.
@@ -420,11 +511,14 @@ def load_profile(
         Dictionary with reload status and profile information
         
     Raises:
+        403: No permission to view this profile
         404: Profile not found
         500: Reload failed
     """
-    # Verify profile exists and is not deleted
     try:
+        # Check permission first
+        perm_service.require_view(profile_id)
+        
         profile = service.get_profile(profile_id)
         if not profile:
             raise HTTPException(

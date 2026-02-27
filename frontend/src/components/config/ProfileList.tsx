@@ -368,8 +368,8 @@ export const ProfileList: React.FC<ProfileListProps> = ({ onProfileChange }) => 
                         Duplicate
                       </button>
 
-                      {/* Delete Button */}
-                      {profiles.length > 1 && (
+                      {/* Delete Button - only show for CAN_MANAGE permission */}
+                      {profile.my_permission === 'CAN_MANAGE' && !profile.is_default && (
                         <button
                           onClick={() => handleDelete(profile)}
                           disabled={actionLoading === profile.id}

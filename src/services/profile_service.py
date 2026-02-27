@@ -1,18 +1,21 @@
 """Profile management service."""
 from datetime import datetime
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 from sqlalchemy.orm import Session, joinedload
 
 from src.core.defaults import DEFAULT_CONFIG
+from src.core.permission_context import get_permission_context
 from src.database.models import (
     ConfigAIInfra,
     ConfigGenieSpace,
     ConfigHistory,
     ConfigProfile,
+    ConfigProfileContributor,
     ConfigPrompts,
     SlideStyleLibrary,
 )
+from src.database.models.profile_contributor import PermissionLevel
 
 
 class ProfileService:
@@ -22,12 +25,38 @@ class ProfileService:
         self.db = db
 
     def list_profiles(self) -> List[ConfigProfile]:
-        """Get all active (non-deleted) profiles."""
+        """Get all active (non-deleted) profiles.
+        
+        WARNING: This returns ALL profiles without permission filtering.
+        Use list_accessible_profiles() for user-filtered results.
+        """
         return (
             self.db.query(ConfigProfile)
             .filter(ConfigProfile.is_deleted == False)  # noqa: E712
             .order_by(ConfigProfile.name)
             .all()
+        )
+
+    def list_accessible_profiles(self) -> List[Tuple[ConfigProfile, PermissionLevel]]:
+        """Get profiles the current user has access to, with permission levels.
+        
+        Checks the permission context from the current request and returns
+        only profiles where the user has at least CAN_VIEW permission.
+        
+        Returns:
+            List of (profile, permission_level) tuples
+        """
+        from src.services.permission_service import PermissionService
+        
+        ctx = get_permission_context()
+        if not ctx:
+            return []
+        
+        perm_service = PermissionService(self.db)
+        return perm_service.get_profiles_with_permissions(
+            user_id=ctx.user_id,
+            user_name=ctx.user_name,
+            group_ids=ctx.group_ids,
         )
 
     def get_profile(self, profile_id: int) -> Optional[ConfigProfile]:
@@ -69,17 +98,20 @@ class ProfileService:
         name: str,
         description: Optional[str],
         user: str,
+        user_databricks_id: Optional[str] = None,
     ) -> ConfigProfile:
         """
         Create new profile.
         
         If no default profile exists, the new profile will be set as default.
         New profiles require explicit Genie space configuration - no default is created.
+        The creator is automatically added as a CAN_MANAGE contributor.
         
         Args:
             name: Profile name
             description: Profile description
-            user: User creating the profile
+            user: User creating the profile (username/email)
+            user_databricks_id: Optional Databricks user ID for contributor entry
             
         Returns:
             Created profile
@@ -114,6 +146,18 @@ class ProfileService:
         )
         self.db.add(profile)
         self.db.flush()
+
+        # Auto-add creator as CAN_MANAGE contributor
+        # Use databricks_id if available, otherwise use username as identity_id
+        contributor = ConfigProfileContributor(
+            profile_id=profile.id,
+            identity_id=user_databricks_id or user,
+            identity_type="USER",
+            identity_name=user,
+            permission_level=PermissionLevel.CAN_MANAGE.value,
+            created_by=user,
+        )
+        self.db.add(contributor)
 
         # Use defaults for AI infrastructure
         ai_infra = ConfigAIInfra(
@@ -296,11 +340,13 @@ class ProfileService:
         ai_infra: Optional[dict],
         prompts: Optional[dict],
         user: str,
+        user_databricks_id: Optional[str] = None,
     ) -> ConfigProfile:
         """
         Create profile with all configurations in one transaction.
         
         Used by the creation wizard for complete profile setup.
+        The creator is automatically added as a CAN_MANAGE contributor.
         
         Args:
             name: Profile name
@@ -308,7 +354,8 @@ class ProfileService:
             genie_space: Genie space config (optional - enables data queries)
             ai_infra: AI infrastructure config (optional, uses defaults)
             prompts: Prompts config (optional, uses defaults)
-            user: User creating the profile
+            user: User creating the profile (username/email)
+            user_databricks_id: Optional Databricks user ID for contributor entry
             
         Returns:
             Created profile with all configurations
@@ -343,6 +390,17 @@ class ProfileService:
         )
         self.db.add(profile)
         self.db.flush()
+
+        # Auto-add creator as CAN_MANAGE contributor
+        contributor = ConfigProfileContributor(
+            profile_id=profile.id,
+            identity_id=user_databricks_id or user,
+            identity_type="USER",
+            identity_name=user,
+            permission_level=PermissionLevel.CAN_MANAGE.value,
+            created_by=user,
+        )
+        self.db.add(contributor)
 
         # Create AI infrastructure (use provided or defaults)
         ai_config = ai_infra or {}

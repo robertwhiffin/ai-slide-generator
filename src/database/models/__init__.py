@@ -8,6 +8,12 @@ from src.database.models.google_oauth_token import GoogleOAuthToken
 from src.database.models.history import ConfigHistory
 from src.database.models.image import ImageAsset
 from src.database.models.profile import ConfigProfile
+from src.database.models.profile_contributor import (
+    ConfigProfileContributor,
+    IdentityType,
+    PermissionLevel,
+    ProfileContributor,  # Backward compatibility alias
+)
 from src.database.models.prompts import ConfigPrompts
 from src.database.models.session import (
     ChatRequest,
@@ -22,16 +28,20 @@ from src.database.models.slide_style_library import SlideStyleLibrary
 
 __all__ = [
     "ChatRequest",
-    "FeedbackConversation",
     "ConfigAIInfra",
-    "ExportJob",
     "ConfigGenieSpace",
-    "GoogleGlobalCredentials",
-    "GoogleOAuthToken",
     "ConfigHistory",
     "ConfigProfile",
+    "ConfigProfileContributor",
     "ConfigPrompts",
+    "ExportJob",
+    "FeedbackConversation",
+    "GoogleGlobalCredentials",
+    "GoogleOAuthToken",
+    "IdentityType",
     "ImageAsset",
+    "PermissionLevel",
+    "ProfileContributor",  # Backward compatibility alias
     "SessionMessage",
     "SessionSlideDeck",
     "SlideDeckPromptLibrary",

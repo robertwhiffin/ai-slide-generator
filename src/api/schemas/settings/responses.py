@@ -18,6 +18,9 @@ class ProfileSummary(BaseModel):
     created_by: Optional[str]
     updated_at: datetime
     updated_by: Optional[str]
+    # Permission level of the current user on this profile
+    # Only populated by endpoints that check permissions
+    my_permission: Optional[str] = None
 
 
 class AIInfraConfig(BaseModel):
@@ -83,6 +86,8 @@ class ProfileDetail(BaseModel):
     ai_infra: AIInfraConfig
     genie_spaces: List[GenieSpace]
     prompts: PromptsConfig
+    # Permission level of the current user on this profile
+    my_permission: Optional[str] = None
 
 
 class ConfigHistoryEntry(BaseModel):
