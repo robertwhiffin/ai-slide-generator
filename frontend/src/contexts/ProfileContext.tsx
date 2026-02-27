@@ -220,6 +220,13 @@ export const ProfileProvider: React.FC<React.PropsWithChildren> = ({ children })
         await loadProfiles();
       }
     } catch (err) {
+      // Profile was deleted: clear stored id, fall back to default, show friendly message
+      if (err instanceof ConfigApiError && err.status === 404 && err.message.includes('deleted')) {
+        setLoadedProfileId(null);
+        await loadProfiles();
+        setError('That profile was deleted. Switched to default profile.');
+        return;
+      }
       const message = err instanceof ConfigApiError 
         ? err.message 
         : 'Failed to load profile';
