@@ -176,6 +176,67 @@ To clear verification, set `verification` to `null`:
 
 Returns the updated slide deck with verification result persisted.
 
+## Sync Version Verification
+
+Backfill the latest save point with current verification results. Called by the frontend after auto-verification completes.
+
+**POST** `/api/slides/versions/sync-verification`
+
+### Request Body
+
+```json
+{
+  "session_id": "abc123"
+}
+```
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `session_id` | string | Yes | Session identifier |
+
+### Response
+
+```json
+{
+  "version_number": 5,
+  "description": "Edited slide 2 (HTML)",
+  "verification_entries": 3
+}
+```
+
+## Update Version Verification
+
+Update the verification map on a specific existing save point.
+
+**PATCH** `/api/slides/versions/{version_number}/verification`
+
+### Path Parameters
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `version_number` | integer | Yes | Save point version number |
+
+### Request Body
+
+```json
+{
+  "session_id": "abc123",
+  "verification_map": {
+    "hash1": { "score": 95, "rating": "excellent" },
+    "hash2": { "score": 80, "rating": "good" }
+  }
+}
+```
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `session_id` | string | Yes | Session identifier |
+| `verification_map` | object | Yes | Verification results keyed by content hash |
+
+### Response
+
+Returns the updated version details with verification entry count.
+
 ## Error Responses
 
 ### No Slides Available (404)

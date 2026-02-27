@@ -313,6 +313,18 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
     }
   }, [sessionId, revertTargetVersion, loadVersions]);
 
+  const handleVerificationComplete = useCallback(async () => {
+    if (!sessionId) return;
+    try {
+      await api.syncVersionVerification(sessionId);
+      const { versions: v, current_version: cv } = await api.listVersions(sessionId);
+      setVersions(v);
+      setCurrentVersion(cv);
+    } catch (err) {
+      console.error('Failed to sync verification to save point:', err);
+    }
+  }, [sessionId]);
+
   // Version key and read-only for preview/view mode
   const versionKey = previewVersion != null
     ? `preview-v${previewVersion}`
@@ -475,17 +487,16 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
                     rawHtml={rawHtml}
                     disabled={isReadOnly}
                     onGenerationStart={onGenerationStart}
-                    onSlidesGenerated={async (deck, raw, actionDescription) => {
+                    onSlidesGenerated={async (deck, raw) => {
                       onGenerationComplete();
                       setSlideDeck(deck);
                       setRawHtml(raw);
                       autoSaveSession(deck);
-                      if (sessionId && actionDescription) {
+                      if (sessionId) {
                         try {
-                          await api.createSavePoint(sessionId, actionDescription);
                           await loadVersions();
                         } catch (e) {
-                          console.warn('Create save point failed:', e);
+                          console.warn('Failed to refresh versions:', e);
                         }
                       }
                     }}
@@ -509,6 +520,7 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
                     onExportStatusChange={setExportStatus}
                     versionKey={versionKey}
                     readOnly={isReadOnly}
+                    onVerificationComplete={handleVerificationComplete}
                   />
                 </div>
               </div>

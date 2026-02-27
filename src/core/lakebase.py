@@ -20,6 +20,13 @@ from databricks.sdk.service.database import DatabaseInstance
 
 from src.core.databricks_client import get_databricks_client
 
+# Autoscaling imports (Lakebase next-gen)
+try:
+    from databricks.sdk.service.postgres import Project, ProjectSpec
+    _HAS_AUTOSCALING = True
+except ImportError:
+    _HAS_AUTOSCALING = False
+
 logger = logging.getLogger(__name__)
 
 
@@ -105,18 +112,19 @@ def get_or_create_lakebase_instance(
 def generate_lakebase_credential(
     instance_name: str,
     client: Optional[WorkspaceClient] = None,
+    endpoint_name: Optional[str] = None,
+    lakebase_type: str = "provisioned",
 ) -> str:
     """
     Generate a database credential (OAuth token) for Lakebase authentication.
 
-    Uses the Databricks SDK to generate a short-lived OAuth token that can be
-    used as the Postgres password for connecting to Lakebase.
-
-    See: https://docs.databricks.com/aws/en/oltp/instances/query/notebook#sqlalchemy
+    Supports both provisioned (ws.database) and autoscaling (ws.postgres) APIs.
 
     Args:
-        instance_name: Name of the Lakebase instance
+        instance_name: Name of the Lakebase instance (provisioned)
         client: Optional WorkspaceClient (uses singleton if not provided)
+        endpoint_name: Full endpoint resource name (autoscaling only)
+        lakebase_type: 'autoscaling' or 'provisioned'
 
     Returns:
         OAuth token string to use as password
@@ -127,11 +135,15 @@ def generate_lakebase_credential(
     ws = client or get_databricks_client()
 
     try:
-        cred = ws.database.generate_database_credential(
-            request_id=str(uuid.uuid4()),
-            instance_names=[instance_name],
-        )
-        return cred.token
+        if lakebase_type == "autoscaling" and endpoint_name:
+            cred = ws.postgres.generate_database_credential(endpoint=endpoint_name)
+            return cred.token
+        else:
+            cred = ws.database.generate_database_credential(
+                request_id=str(uuid.uuid4()),
+                instance_names=[instance_name],
+            )
+            return cred.token
     except Exception as e:
         logger.error(f"Failed to generate database credential: {e}", exc_info=True)
         raise LakebaseError(f"Credential generation failed: {e}") from e
@@ -141,20 +153,26 @@ def get_lakebase_connection_info(
     instance_name: str,
     user: Optional[str] = None,
     client: Optional[WorkspaceClient] = None,
+    endpoint_name: Optional[str] = None,
+    host: Optional[str] = None,
+    lakebase_type: str = "provisioned",
 ) -> dict:
     """
     Get all connection information for a Lakebase instance.
 
-    Retrieves instance details and generates a fresh OAuth credential.
+    Supports both provisioned and autoscaling Lakebase.
 
     Args:
-        instance_name: Name of the Lakebase instance
+        instance_name: Name of the Lakebase instance (provisioned)
         user: Postgres username (uses PGUSER env var or current user if not provided)
         client: Optional WorkspaceClient (uses singleton if not provided)
+        endpoint_name: Full endpoint resource name (autoscaling only)
+        host: Pre-resolved host (autoscaling only)
+        lakebase_type: 'autoscaling' or 'provisioned'
 
     Returns:
         Dictionary with connection details:
-        - host: Database hostname (read_write_dns)
+        - host: Database hostname
         - port: Database port (5432)
         - database: Database name (databricks_postgres)
         - user: Postgres username
@@ -166,8 +184,11 @@ def get_lakebase_connection_info(
     ws = client or get_databricks_client()
 
     try:
-        # Get instance to retrieve the DNS hostname
-        instance = ws.database.get_database_instance(name=instance_name)
+        if lakebase_type == "autoscaling" and host:
+            resolved_host = host
+        else:
+            instance = ws.database.get_database_instance(name=instance_name)
+            resolved_host = instance.read_write_dns
 
         # Get user from env var or current Databricks user
         if not user:
@@ -184,10 +205,13 @@ def get_lakebase_connection_info(
             )
 
         # Generate credential
-        password = generate_lakebase_credential(instance_name, client=ws)
+        password = generate_lakebase_credential(
+            instance_name, client=ws,
+            endpoint_name=endpoint_name, lakebase_type=lakebase_type,
+        )
 
         return {
-            "host": instance.read_write_dns,
+            "host": resolved_host,
             "port": 5432,
             "database": "databricks_postgres",
             "user": user,
@@ -206,11 +230,14 @@ def get_lakebase_connection_url(
     user: Optional[str] = None,
     schema: Optional[str] = None,
     client: Optional[WorkspaceClient] = None,
+    endpoint_name: Optional[str] = None,
+    host: Optional[str] = None,
+    lakebase_type: str = "provisioned",
 ) -> str:
     """
     Generate PostgreSQL connection URL for Lakebase.
 
-    Uses the Databricks SDK to get instance details and generate credentials.
+    Supports both provisioned and autoscaling Lakebase.
     See: https://docs.databricks.com/aws/en/oltp/instances/query/notebook#sqlalchemy
 
     Args:
@@ -218,6 +245,9 @@ def get_lakebase_connection_url(
         user: Postgres username (uses PGUSER env var or current user if not provided)
         schema: Optional schema to set in search_path
         client: Optional WorkspaceClient (uses singleton if not provided)
+        endpoint_name: Full endpoint resource name (autoscaling only)
+        host: Pre-resolved host (autoscaling only)
+        lakebase_type: 'autoscaling' or 'provisioned'
 
     Returns:
         SQLAlchemy-compatible PostgreSQL connection URL
@@ -229,6 +259,9 @@ def get_lakebase_connection_url(
         instance_name=instance_name,
         user=user,
         client=client,
+        endpoint_name=endpoint_name,
+        host=host,
+        lakebase_type=lakebase_type,
     )
 
     # URL-encode the password in case it contains special characters
@@ -253,9 +286,14 @@ def setup_lakebase_schema(
     client_id: str,
     user: Optional[str] = None,
     client: Optional[WorkspaceClient] = None,
+    endpoint_name: Optional[str] = None,
+    host: Optional[str] = None,
+    lakebase_type: str = "provisioned",
 ) -> None:
     """
     Set up schema and grant permissions in Lakebase for an app.
+
+    Supports both provisioned and autoscaling Lakebase.
 
     This function connects to the Lakebase instance and:
     1. Creates the schema if it doesn't exist
@@ -270,13 +308,19 @@ def setup_lakebase_schema(
         client_id: App's service principal client ID (becomes Postgres role)
         user: Postgres username for connection (uses default if not provided)
         client: Optional WorkspaceClient
+        endpoint_name: Full endpoint resource name (autoscaling only)
+        host: Pre-resolved host (autoscaling only)
+        lakebase_type: 'autoscaling' or 'provisioned'
 
     Raises:
         LakebaseError: If schema setup fails
     """
     logger.info(
         "Setting up Lakebase schema",
-        extra={"instance_name": instance_name, "schema": schema, "client_id": client_id},
+        extra={
+            "instance_name": instance_name, "schema": schema,
+            "client_id": client_id, "lakebase_type": lakebase_type,
+        },
     )
 
     try:
@@ -285,6 +329,9 @@ def setup_lakebase_schema(
             instance_name=instance_name,
             user=user,
             client=client,
+            endpoint_name=endpoint_name,
+            host=host,
+            lakebase_type=lakebase_type,
         )
 
         # Use psycopg2 directly for DDL operations
@@ -352,6 +399,9 @@ def initialize_lakebase_tables(
     schema: str,
     user: Optional[str] = None,
     client: Optional[WorkspaceClient] = None,
+    endpoint_name: Optional[str] = None,
+    host: Optional[str] = None,
+    lakebase_type: str = "provisioned",
 ) -> None:
     """
     Initialize SQLAlchemy tables in Lakebase.
@@ -359,11 +409,16 @@ def initialize_lakebase_tables(
     Creates all tables defined in the application's SQLAlchemy models.
     Should be called after schema setup and permissions are configured.
 
+    Supports both provisioned and autoscaling Lakebase.
+
     Args:
         instance_name: Name of the Lakebase instance
         schema: Schema name where tables should be created
         user: Postgres username for connection (uses default if not provided)
         client: Optional WorkspaceClient
+        endpoint_name: Full endpoint resource name (autoscaling only)
+        host: Pre-resolved host (autoscaling only)
+        lakebase_type: 'autoscaling' or 'provisioned'
 
     Raises:
         LakebaseError: If table initialization fails
@@ -379,6 +434,9 @@ def initialize_lakebase_tables(
             user=user,
             schema=schema,
             client=client,
+            endpoint_name=endpoint_name,
+            host=host,
+            lakebase_type=lakebase_type,
         )
 
         # Create engine

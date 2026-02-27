@@ -1257,6 +1257,26 @@ export const api = {
     return response.json();
   },
 
+  /**
+   * Sync the current verification results onto the latest save point.
+   * Called after auto-verification completes.
+   */
+  async syncVersionVerification(sessionId: string): Promise<void> {
+    const response = await fetch(
+      `${API_BASE_URL}/api/slides/versions/sync-verification`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ session_id: sessionId }),
+      }
+    );
+
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({ detail: 'Failed to sync verification' }));
+      throw new ApiError(response.status, error.detail || 'Failed to sync verification');
+    }
+  },
+
   // --- Feedback ---
 
   async feedbackChat(messages: Array<{ role: string; content: string }>): Promise<{ content: string; summary_ready: boolean }> {

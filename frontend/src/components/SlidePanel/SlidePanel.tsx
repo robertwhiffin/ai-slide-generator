@@ -36,6 +36,7 @@ interface SlidePanelProps {
   onExportStatusChange?: (status: string | null) => void;
   versionKey?: string;
   readOnly?: boolean;
+  onVerificationComplete?: () => void;
 }
 
 export interface SlidePanelHandle {
@@ -47,7 +48,7 @@ export interface SlidePanelHandle {
 type ViewMode = 'tiles' | 'rawhtml' | 'rawtext';
 
 function SlidePanelComponent(props: SlidePanelProps, ref: React.Ref<SlidePanelHandle>) {
-  const { slideDeck, rawHtml: _rawHtml, onSlideChange, scrollToSlide, onSendMessage, onExportStatusChange, versionKey, readOnly = false } = props;
+  const { slideDeck, rawHtml: _rawHtml, onSlideChange, scrollToSlide, onSendMessage, onExportStatusChange, versionKey, readOnly = false, onVerificationComplete } = props;
   const [_isReordering, setIsReordering] = useState(false);
   const [viewMode, _setViewMode] = useState<ViewMode>('tiles');
   const [isExportingPDF, setIsExportingPDF] = useState(false);
@@ -370,7 +371,10 @@ function SlidePanelComponent(props: SlidePanelProps, ref: React.Ref<SlidePanelHa
     setVerifyingSlides(new Set());
     setIsAutoVerifying(false);
     console.log('[Auto-verify] Completed');
-  }, [sessionId, isAutoVerifying, onSlideChange]);
+
+    // Notify parent that verification is complete (refresh version list)
+    onVerificationComplete?.();
+  }, [sessionId, isAutoVerifying, onSlideChange, onVerificationComplete]);
 
   // Effect to trigger auto-verification when slides change
   useEffect(() => {

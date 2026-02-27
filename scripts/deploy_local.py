@@ -41,6 +41,7 @@ from databricks_tellr.deploy import (
     _setup_database_schema,
     _reset_schema,
     _get_app_client_id,
+    _ensure_sp_autoscaling_role,
     delete,
 )
 
@@ -199,12 +200,14 @@ def create_local(
         print(f"   Uploaded: {local_wheel_ref}")
         print()
 
-        # Create Lakebase instance
+        # Create Lakebase instance (autoscaling first with fallback)
         print("Setting up Lakebase database...")
         lakebase_result = _get_or_create_lakebase(
             ws, lakebase_name, config["lakebase_capacity"]
         )
+        lakebase_type = lakebase_result.get("type", "provisioned")
         print(f"   Lakebase: {lakebase_result['name']} ({lakebase_result['status']})")
+        print(f"   Type: {lakebase_type}")
         print()
 
         # Generate and upload deployment files
@@ -219,6 +222,7 @@ def create_local(
                 lakebase_name,
                 schema_name,
                 seed_databricks_defaults=seed_databricks_defaults,
+                lakebase_result=lakebase_result,
             )
             print("   Generated app.yaml")
 
@@ -238,13 +242,26 @@ def create_local(
             workspace_path=workspace_path,
             compute_size=config["compute_size"],
             lakebase_name=lakebase_name,
+            lakebase_type=lakebase_type,
         )
         print("   App registered")
         print()
 
+        # For autoscaling, create SP role via Postgres API before schema setup
+        if lakebase_type == "autoscaling":
+            client_id = _get_app_client_id(app)
+            if client_id:
+                print("Configuring SP role on autoscaling project...")
+                _ensure_sp_autoscaling_role(ws, lakebase_name, client_id)
+            else:
+                print("   Warning: Could not get SP client ID — role setup skipped")
+
         # Set up database schema
         print("Setting up database schema...")
-        _setup_database_schema(ws, app, lakebase_name, schema_name)
+        _setup_database_schema(
+            ws, app, lakebase_name, schema_name,
+            lakebase_result=lakebase_result,
+        )
         print(f"   Schema '{schema_name}' configured")
         print()
 
@@ -299,11 +316,23 @@ def update_local(
     print()
 
     try:
+        # Get current Lakebase state (needed for connection info and type)
+        print("Checking Lakebase database...")
+        lakebase_result = _get_or_create_lakebase(
+            ws, lakebase_name, config["lakebase_capacity"]
+        )
+        lakebase_type = lakebase_result.get("type", "provisioned")
+        print(f"   Lakebase: {lakebase_result['name']} (type={lakebase_type})")
+        print()
+
         # Reset database if requested
         if reset_database:
             print("Resetting database schema...")
             app = ws.apps.get(name=app_name)
-            _reset_schema(ws, app, lakebase_name, schema_name)
+            _reset_schema(
+                ws, app, lakebase_name, schema_name,
+                lakebase_result=lakebase_result,
+            )
             print(f"   Schema '{schema_name}' reset")
             print()
 
@@ -329,6 +358,7 @@ def update_local(
                 lakebase_name,
                 schema_name,
                 seed_databricks_defaults=seed_databricks_defaults,
+                lakebase_result=lakebase_result,
             )
             print("   Generated app.yaml")
 
@@ -388,11 +418,19 @@ def main() -> None:
         description="Deploy AI Slide Generator to Databricks Apps using local wheels"
     )
 
+    # Load available environments from config
+    config_path = PROJECT_ROOT / "config" / "deployment.yaml"
+    available_envs = []
+    if config_path.exists():
+        with open(config_path, "r", encoding="utf-8") as f:
+            _cfg = yaml.safe_load(f) or {}
+        available_envs = list(_cfg.get("environments", {}).keys())
+
     parser.add_argument(
         "--env",
         type=str,
         required=True,
-        choices=["development", "staging", "production"],
+        choices=available_envs or ["development", "staging", "production"],
         help="Environment to deploy to",
     )
 

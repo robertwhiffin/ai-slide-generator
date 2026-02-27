@@ -68,13 +68,7 @@ async def lifespan(app: FastAPI):
             raise
 
     # Initialize database tables (idempotent - only creates tables that don't exist)
-    # Skip only when running under pytest (pytest sets PYTEST_CURRENT_TEST automatically).
-    # E2E tests run the app as a real server and need init_db() to create tables.
     is_pytest = os.getenv("PYTEST_CURRENT_TEST") is not None
-    logger.warning(
-        f"LIFESPAN DEBUG: PYTEST_CURRENT_TEST={os.getenv('PYTEST_CURRENT_TEST')}, "
-        f"ENVIRONMENT={ENVIRONMENT}, IS_TESTING={IS_TESTING}, is_pytest={is_pytest}"
-    )
     if not is_pytest:
         try:
             init_db()
@@ -83,7 +77,7 @@ async def lifespan(app: FastAPI):
             logger.error(f"Failed to initialize database: {e}")
             raise
     else:
-        logger.info("Pytest detected: skipping database initialization (tests manage their own)")
+        logger.info("Pytest detected: skipping database initialization")
 
     if IS_PRODUCTION:
         logger.info("Production mode: serving frontend from package assets")

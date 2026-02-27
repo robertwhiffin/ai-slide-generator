@@ -408,6 +408,13 @@ class CreateVersionRequest(BaseModel):
     description: str
 
 
+class UpdateVersionVerificationRequest(BaseModel):
+    """Request to update verification on an existing version."""
+
+    session_id: str
+    verification_map: dict
+
+
 @router.post("/versions/create")
 async def create_version(request: CreateVersionRequest):
     """Create a save point for the current deck state.
@@ -447,6 +454,117 @@ async def create_version(request: CreateVersionRequest):
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         logger.error(f"Failed to create version: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.patch("/versions/{version_number}/verification")
+async def update_version_verification(
+    version_number: int,
+    request: UpdateVersionVerificationRequest,
+):
+    """Update verification results on an existing save point.
+
+    Called by the frontend after auto-verification completes to backfill
+    verification results onto a save point that was created before
+    verification ran.
+
+    Args:
+        version_number: Version to update
+        request: UpdateVersionVerificationRequest with session_id and verification_map
+
+    Returns:
+        Updated version info
+
+    Raises:
+        HTTPException: 400 if version not found, 500 on error
+    """
+    try:
+        session_manager = get_session_manager()
+        result = await asyncio.to_thread(
+            session_manager.update_version_verification,
+            request.session_id,
+            version_number,
+            request.verification_map,
+        )
+
+        logger.info(
+            "Updated version verification via API",
+            extra={
+                "session_id": request.session_id,
+                "version_number": version_number,
+            },
+        )
+        return result
+
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(f"Failed to update version verification: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+class SyncVerificationRequest(BaseModel):
+    """Request to sync verification onto the latest save point."""
+
+    session_id: str
+
+
+@router.post("/versions/sync-verification")
+async def sync_latest_version_verification(request: SyncVerificationRequest):
+    """Sync the current session verification_map onto the latest save point.
+
+    Called by the frontend after auto-verification completes. The backend
+    reads the current verification_map from the session and updates the
+    most recent version with it.
+
+    Args:
+        request: SyncVerificationRequest with session_id
+
+    Returns:
+        Updated version info, or empty dict if no versions exist
+    """
+    try:
+        session_manager = get_session_manager()
+
+        # Get latest version number
+        versions = await asyncio.to_thread(
+            session_manager.list_versions,
+            request.session_id,
+        )
+        if not versions:
+            return {}
+
+        latest_version = versions[0]["version_number"]
+
+        # Get current verification map from session
+        verification_map = await asyncio.to_thread(
+            session_manager.get_verification_map,
+            request.session_id,
+        )
+
+        if not verification_map:
+            return {}
+
+        # Update the latest version
+        result = await asyncio.to_thread(
+            session_manager.update_version_verification,
+            request.session_id,
+            latest_version,
+            verification_map,
+        )
+
+        logger.info(
+            "Synced verification to latest version",
+            extra={
+                "session_id": request.session_id,
+                "version_number": latest_version,
+                "verification_entries": len(verification_map),
+            },
+        )
+        return result
+
+    except Exception as e:
+        logger.error(f"Failed to sync version verification: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 
