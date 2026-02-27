@@ -61,6 +61,9 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
   const slidePanelRef = useRef<SlidePanelHandle>(null);
   /** When set, we're in the middle of handleSessionRestore(restoredSessionId); skip urlSessionId effect so it doesn't restore the old URL session and overwrite. */
   const restoringSessionIdRef = useRef<string | null>(null);
+  /** Ref-tracked slideDeck so the URL restoration effect doesn't re-fire on setSlideDeck(null) during new-session creation. */
+  const slideDeckRef = useRef(slideDeck);
+  slideDeckRef.current = slideDeck;
   const { sessionTitle, sessionId, createNewSession, switchSession, renameSession } = useSession();
   const { isGenerating } = useGeneration();
   const { currentProfile, loadProfile } = useProfiles();
@@ -78,7 +81,7 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
   // handleSessionRestore (sessionId just changed to target; effect would otherwise restore the *old* urlSessionId and overwrite).
   useEffect(() => {
     if (!urlSessionId) return;
-    if (urlSessionId === sessionId && slideDeck != null) return;
+    if (urlSessionId === sessionId && slideDeckRef.current != null) return;
     if (restoringSessionIdRef.current !== null && restoringSessionIdRef.current === sessionId) return;
     let cancelled = false;
     (async () => {
@@ -100,7 +103,7 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
       }
     })();
     return () => { cancelled = true; };
-  }, [urlSessionId, sessionId, slideDeck, showToast, navigate, switchSession]);
+  }, [urlSessionId, sessionId, showToast, navigate, switchSession]);
 
   // Load save point versions when session or deck changes
   const loadVersions = useCallback(async () => {
