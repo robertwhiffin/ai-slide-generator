@@ -406,11 +406,16 @@ def _update_databricks(
         encryption_key = _read_existing_encryption_key(ws, app_file_workspace_path)
 
     try:
+        # Read current Lakebase state so app.yaml gets correct env vars
+        lakebase_result = _get_or_create_lakebase(ws, lakebase_name, "CU_1")
+        lakebase_type = lakebase_result.get("type", "provisioned")
+
         # Reset database if requested
         if reset_database:
             print("Resetting database schema...")
             app = ws.apps.get(name=app_name)
-            _reset_schema(ws, app, lakebase_name, schema_name)
+            _reset_schema(ws, app, lakebase_name, schema_name,
+                          lakebase_result=lakebase_result)
             print(f"   Schema '{schema_name}' reset (tables will be recreated on app startup)")
             print()
 
@@ -423,6 +428,7 @@ def _update_databricks(
                 schema_name,
                 seed_databricks_defaults=seed_databricks_defaults,
                 encryption_key=encryption_key,
+                lakebase_result=lakebase_result,
             )
             _upload_files(ws, staging, app_file_workspace_path)
             print("   Files updated")
@@ -441,6 +447,7 @@ def _update_databricks(
             "url": app.url,
             "app_name": app_name,
             "deployment_id": result.deployment_id,
+            "lakebase_type": lakebase_type,
             "status": "updated",
             "database_reset": reset_database,
         }
