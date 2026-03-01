@@ -27,6 +27,7 @@ from databricks_tellr.deploy import (
     _get_or_create_lakebase_autoscaling,
     _grant_schema_permissions,
     _probe_autoscaling_available,
+    _update_databricks,
 )
 
 
@@ -437,3 +438,114 @@ class TestGrantSchemaPermissions:
         for call_args in cur.execute.call_args_list:
             sql = str(call_args[0][0]).upper()
             assert "CREATE ROLE" not in sql
+
+
+# ---------------------------------------------------------------------------
+# _update_databricks: reads current Lakebase type for correct env vars
+# ---------------------------------------------------------------------------
+
+class TestUpdateDatabricks:
+    """Tests that _update_databricks reads Lakebase state before regenerating app.yaml."""
+
+    AUTOSCALING_RESULT = {
+        "name": "test-db",
+        "type": "autoscaling",
+        "host": "pg.example.com",
+        "endpoint_name": "ep",
+        "project_id": "test-db",
+        "status": "exists",
+    }
+
+    PROVISIONED_RESULT = {
+        "name": "test-db",
+        "type": "provisioned",
+        "host": None,
+        "endpoint_name": None,
+        "project_id": None,
+        "instance_name": "test-db",
+        "status": "exists",
+    }
+
+    @patch("databricks_tellr.deploy._upload_files")
+    @patch("databricks_tellr.deploy._write_app_yaml")
+    @patch("databricks_tellr.deploy._write_requirements")
+    @patch("databricks_tellr.deploy._get_or_create_lakebase")
+    @patch("databricks_tellr.deploy._read_existing_encryption_key", return_value="key")
+    def test_update_fetches_lakebase_state(
+        self, _mock_key, mock_get_lakebase, _mock_req, _mock_yaml, _mock_upload
+    ):
+        mock_get_lakebase.return_value = self.AUTOSCALING_RESULT
+        ws = MagicMock()
+        ws.apps.deploy_and_wait.return_value = Mock(deployment_id="d1")
+        ws.apps.get.return_value = Mock(url="https://app.test")
+
+        _update_databricks(
+            app_name="app", app_file_workspace_path="/path",
+            lakebase_name="test-db", schema_name="schema", client=ws,
+        )
+
+        mock_get_lakebase.assert_called_once_with(ws, "test-db", "CU_1")
+
+    @patch("databricks_tellr.deploy._upload_files")
+    @patch("databricks_tellr.deploy._write_app_yaml")
+    @patch("databricks_tellr.deploy._write_requirements")
+    @patch("databricks_tellr.deploy._get_or_create_lakebase")
+    @patch("databricks_tellr.deploy._read_existing_encryption_key", return_value="key")
+    def test_update_passes_lakebase_result_to_write_app_yaml(
+        self, _mock_key, mock_get_lakebase, _mock_req, mock_yaml, _mock_upload
+    ):
+        mock_get_lakebase.return_value = self.AUTOSCALING_RESULT
+        ws = MagicMock()
+        ws.apps.deploy_and_wait.return_value = Mock(deployment_id="d1")
+        ws.apps.get.return_value = Mock(url="https://app.test")
+
+        _update_databricks(
+            app_name="app", app_file_workspace_path="/path",
+            lakebase_name="test-db", schema_name="schema", client=ws,
+        )
+
+        _, kwargs = mock_yaml.call_args
+        assert kwargs["lakebase_result"] == self.AUTOSCALING_RESULT
+
+    @patch("databricks_tellr.deploy._upload_files")
+    @patch("databricks_tellr.deploy._write_app_yaml")
+    @patch("databricks_tellr.deploy._write_requirements")
+    @patch("databricks_tellr.deploy._reset_schema")
+    @patch("databricks_tellr.deploy._get_or_create_lakebase")
+    @patch("databricks_tellr.deploy._read_existing_encryption_key", return_value="key")
+    def test_update_passes_lakebase_result_to_reset_schema(
+        self, _mock_key, mock_get_lakebase, mock_reset, _mock_req, _mock_yaml, _mock_upload
+    ):
+        mock_get_lakebase.return_value = self.PROVISIONED_RESULT
+        ws = MagicMock()
+        ws.apps.deploy_and_wait.return_value = Mock(deployment_id="d1")
+        ws.apps.get.return_value = Mock(url="https://app.test")
+
+        _update_databricks(
+            app_name="app", app_file_workspace_path="/path",
+            lakebase_name="test-db", schema_name="schema",
+            reset_database=True, client=ws,
+        )
+
+        _, kwargs = mock_reset.call_args
+        assert kwargs["lakebase_result"] == self.PROVISIONED_RESULT
+
+    @patch("databricks_tellr.deploy._upload_files")
+    @patch("databricks_tellr.deploy._write_app_yaml")
+    @patch("databricks_tellr.deploy._write_requirements")
+    @patch("databricks_tellr.deploy._get_or_create_lakebase")
+    @patch("databricks_tellr.deploy._read_existing_encryption_key", return_value="key")
+    def test_update_returns_lakebase_type(
+        self, _mock_key, mock_get_lakebase, _mock_req, _mock_yaml, _mock_upload
+    ):
+        mock_get_lakebase.return_value = self.AUTOSCALING_RESULT
+        ws = MagicMock()
+        ws.apps.deploy_and_wait.return_value = Mock(deployment_id="d1")
+        ws.apps.get.return_value = Mock(url="https://app.test")
+
+        result = _update_databricks(
+            app_name="app", app_file_workspace_path="/path",
+            lakebase_name="test-db", schema_name="schema", client=ws,
+        )
+
+        assert result["lakebase_type"] == "autoscaling"
