@@ -195,6 +195,13 @@ async def process_export_job(job_id: str, payload: dict) -> None:
         if not slide_deck or not slide_deck.get("slides"):
             raise ValueError("No slides available")
 
+        # Substitute {{image:ID}} placeholders with base64 data URIs
+        # so the PPTX converter can extract and embed the actual images
+        from src.utils.image_utils import substitute_deck_dict_images
+        from src.core.database import get_db_session
+        with get_db_session() as db:
+            substitute_deck_dict_images(slide_deck, db)
+
         slides = slide_deck.get("slides", [])
         total_slides = len(slides)
         _update_job_field(job_id, total_slides=total_slides)
