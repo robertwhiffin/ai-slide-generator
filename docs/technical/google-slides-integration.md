@@ -168,10 +168,12 @@ Key methods:
 LLM-powered converter following the same pattern as `HtmlToPptxConverterV3`:
 
 1. Creates a blank Google Slides presentation via the API.
-2. For each slide, sends the HTML to the LLM with a detailed system prompt.
-3. LLM generates Python code that calls `slides_service.presentations().batchUpdate()`.
-4. Code is executed server-side with sanitization (smart quote replacement, function wrapping, import injection).
-5. On failure, retries once with error context. Falls back to a placeholder text box.
+2. Extracts base64-embedded content images from HTML, converting SVGs to PNG via `_svg_to_png()` (`svgpathtools` + `Pillow`).
+3. For each slide, sends the HTML to the LLM with a detailed system prompt.
+4. LLM generates Python code that calls `slides_service.presentations().batchUpdate()`.
+5. Content images are uploaded to Google Drive and embedded via `createImage` requests.
+6. Code is executed server-side with sanitization (smart quote replacement, function wrapping, import injection).
+7. On failure, retries once with error context. Falls back to a placeholder text box.
 
 ### Prompts (`src/services/google_slides_prompts_defaults.py`)
 
@@ -223,7 +225,7 @@ Does **not** display Google Slides status. That is shown on the admin page.
 | `tests/unit/config/test_google_oauth.py` | 26 | Models, credentials API, `from_global`, auth service, auth endpoint |
 | `tests/unit/config/test_admin_routes.py` | — | Admin credential upload, status, delete |
 | `tests/unit/test_database_migrations.py` | 2 | Migration from profile credentials to global |
-| `tests/unit/test_google_slides_converter.py` | 17 | Static methods: extract, strip fences, chart notes, code prep, image save |
+| `tests/unit/test_google_slides_converter.py` | 25 | Static methods: extract, strip fences, chart notes, code prep, image save, SVG-to-PNG, content image extraction |
 | `tests/unit/test_prompts_defaults.py` | 7 | PPTX + Google Slides prompt constant validation |
 | `tests/unit/test_app_wiring.py` | 8 | Model registration, router exports, route registration |
 | `tests/unit/test_google_slides_routes.py` | 14 | Auth endpoints, export endpoint, helper functions |
@@ -262,6 +264,8 @@ google-api-python-client>=2.100.0
 google-auth-oauthlib>=1.2.0
 google-auth-httplib2>=0.2.0
 cryptography>=42.0.0
+svgpathtools>=1.6.0   # Pure-Python SVG-to-PNG conversion for image library assets
+Pillow>=10.0.0         # Image rasterization (also used by PPTX export)
 ```
 
 ---
