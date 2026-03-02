@@ -13,6 +13,7 @@ The export test suite validates the `/api/export` endpoints for converting slide
 | File | Test Count | Purpose |
 |------|------------|---------|
 | `tests/integration/test_export.py` | ~27 | PPTX export, async jobs, error handling |
+| `tests/unit/test_html_to_pptx.py` | 16 | Base64 image extraction, SVG-to-PNG conversion, LLM prompt validation |
 
 ---
 
@@ -288,7 +289,7 @@ The Google Slides integration has dedicated unit test suites covering the full f
 | `tests/unit/test_encryption.py` | 4 | Fernet encryption roundtrip, key management |
 | `tests/unit/config/test_google_oauth.py` | 26 | Models, credential API, auth service, endpoints |
 | `tests/unit/test_google_slides_routes.py` | 14 | Auth endpoints, export endpoint, helpers |
-| `tests/unit/test_google_slides_converter.py` | 17 | Converter static methods (extract, strip, prep) |
+| `tests/unit/test_google_slides_converter.py` | 25 | Converter static methods (extract, strip, prep), SVG-to-PNG, content image extraction |
 | `tests/unit/test_prompts_defaults.py` | 7 | PPTX + Google Slides prompt validation |
 | `tests/unit/test_app_wiring.py` | 8 | Route and model registration |
 | `tests/unit/test_database_migrations.py` | 2 | Column migration idempotency |

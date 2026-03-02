@@ -87,6 +87,14 @@ CHARTS (CRITICAL):
 - Chart + metrics: use CHART + METRICS SIDE-BY-SIDE layout above.
 - If NO chart images are listed, skip chart rendering entirely — do not attempt to recreate.
 
+CONTENT IMAGES (logos, icons — CRITICAL):
+- If content images are listed in the user message, you MUST upload and add them to the slide.
+- These are pre-extracted image files (PNG) saved in assets_dir — ready to upload.
+- Upload to Drive the same way as charts: MediaFileUpload → files().create → permissions().create → createImage.
+- Position to match the HTML layout (e.g. a logo in the top-right header area → right-aligned near the title).
+- Typical logo sizes: width=0.6"-1.0", height=0.3"-0.5". Do NOT make logos larger than needed.
+- Place logos/icons in the header zone (top=0.15"-0.4") so they don't overlap body content.
+
 HYPERLINKS (<a href="...">):
 - Extract ALL <a> tags from HTML and preserve their href URLs.
 - Insert the link text via insertText, then apply the link via updateTextStyle with FIXED_RANGE:

@@ -91,6 +91,7 @@ All export options are accessible through a unified dropdown menu in the slide p
 **Technology Stack**:
 - `python-pptx`: Creates PowerPoint presentations
 - `asyncio`: Background job queue with thread pool execution
+- `svgpathtools` + `Pillow`: Pure-Python SVG-to-PNG conversion for image library assets
 - LLM (Databricks Claude Sonnet 4.5): Analyzes HTML and generates slide layouts
 
 **Process**:
@@ -174,6 +175,7 @@ All export options are accessible through a unified dropdown menu in the slide p
 - `HtmlToPptxConverterV3` class
 - LLM-powered HTML to PPTX conversion
 - Extracts base64-embedded content images (`_extract_and_save_content_images()`) before sending HTML to LLM
+- Converts SVG images to PNG via `_svg_to_png()` using `svgpathtools` + `Pillow` (pure Python, no system dependencies)
 - Generates and executes Python code for slide creation
 - Ensures proper positioning and no overlaps
 
@@ -253,6 +255,7 @@ The PPTX converter uses strict positioning constraints to prevent overlapping el
 - Slides may contain `<img>` tags with base64 data URIs (e.g. uploaded logos or photos injected via `{{image:ID}}` placeholders)
 - Before the LLM call, `_extract_and_save_content_images()` scans the HTML for `<img src="data:image/...;base64,...">` tags
 - Each image is decoded and saved to the assets directory as `content_image_0.png`, `content_image_1.jpg`, etc.
+- **SVG-to-PNG conversion**: SVG images (`image/svg+xml`) are automatically converted to PNG using `svgpathtools` + `Pillow` (pure Python). The converter parses SVG `<path>` elements, samples bezier curves to polygon points, and rasterizes them onto a Pillow RGBA canvas. This is required because `python-pptx` and Google Slides API only support raster image formats.
 - The HTML `src` attribute is replaced with the filename so the LLM receives clean, compact HTML
 - Extracted content image filenames are merged into the chart images list, so the LLM receives unified `add_picture()` instructions for all image assets
 
