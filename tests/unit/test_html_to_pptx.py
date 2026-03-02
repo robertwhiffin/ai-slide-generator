@@ -1,11 +1,15 @@
-"""Tests for PPTX export base64 image extraction.
+"""Tests for PPTX export base64 image extraction and SVG-to-PNG conversion.
 
 Regression tests ensuring base64 data URIs are extracted from HTML
 before being sent to the LLM, preventing truncation of image data
 and ensuring the LLM receives clean HTML with file references.
+
+Also tests `_svg_to_png()` which converts SVG images to PNG using
+svgpathtools + Pillow (pure Python) for PPTX compatibility.
 """
 
 import base64
+import io
 import os
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -167,3 +171,135 @@ class TestLLMPromptHasNoBase64:
         assert len(captured_prompts) == 1
         assert "data:image" not in captured_prompts[0]
         assert "content_image_" in captured_prompts[0]
+
+
+# -----------------------------------------------------------------------
+# SVG-to-PNG conversion
+# -----------------------------------------------------------------------
+
+# Minimal SVG with a single filled path (a 50x50 red square)
+SIMPLE_SVG = (
+    b'<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100">'
+    b'<path d="M 10 10 L 60 10 L 60 60 L 10 60 Z" fill="#FF0000"/>'
+    b'</svg>'
+)
+
+# SVG with a translate transform on the path
+SVG_WITH_TRANSFORM = (
+    b'<svg xmlns="http://www.w3.org/2000/svg" width="200" height="200">'
+    b'<path d="M 0 0 L 50 0 L 50 50 L 0 50 Z" fill="#00FF00" transform="translate(10,20)"/>'
+    b'</svg>'
+)
+
+# SVG with no filled paths (fill="none")
+SVG_NO_FILL = (
+    b'<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100">'
+    b'<path d="M 10 10 L 60 10 L 60 60 L 10 60 Z" fill="none"/>'
+    b'</svg>'
+)
+
+# SVG with multiple paths of different colors
+SVG_MULTI_PATH = (
+    b'<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100">'
+    b'<path d="M 0 0 L 50 0 L 50 50 L 0 50 Z" fill="#FF0000"/>'
+    b'<path d="M 50 50 L 100 50 L 100 100 L 50 100 Z" fill="#0000FF"/>'
+    b'</svg>'
+)
+
+
+class TestSvgToPng:
+    """Unit tests for _svg_to_png() pure-Python SVG-to-PNG conversion."""
+
+    def test_returns_valid_png_bytes(self):
+        """Output is valid PNG with correct header bytes."""
+        png_bytes = HtmlToPptxConverterV3._svg_to_png(SIMPLE_SVG)
+        assert png_bytes[:8] == b'\x89PNG\r\n\x1a\n'
+
+    def test_output_dimensions_match_svg(self):
+        """PNG dimensions match the SVG width/height attributes."""
+        from PIL import Image
+
+        png_bytes = HtmlToPptxConverterV3._svg_to_png(SIMPLE_SVG)
+        img = Image.open(io.BytesIO(png_bytes))
+        assert img.size == (100, 100)
+
+    def test_filled_path_produces_non_transparent_pixels(self):
+        """A filled path produces visible (non-transparent) pixels in the output."""
+        from PIL import Image
+
+        png_bytes = HtmlToPptxConverterV3._svg_to_png(SIMPLE_SVG)
+        img = Image.open(io.BytesIO(png_bytes))
+        pixels = list(img.getdata())
+        non_transparent = [p for p in pixels if p[3] > 0]
+        assert len(non_transparent) > 0, "Expected non-transparent pixels from filled path"
+
+    def test_red_fill_produces_red_pixels(self):
+        """A #FF0000 filled path produces red pixels."""
+        from PIL import Image
+
+        png_bytes = HtmlToPptxConverterV3._svg_to_png(SIMPLE_SVG)
+        img = Image.open(io.BytesIO(png_bytes))
+        pixels = list(img.getdata())
+        red_pixels = [p for p in pixels if p[0] == 255 and p[1] == 0 and p[2] == 0 and p[3] > 0]
+        assert len(red_pixels) > 0, "Expected red pixels from #FF0000 fill"
+
+    def test_no_fill_produces_transparent_image(self):
+        """SVG with fill='none' produces an all-transparent PNG."""
+        from PIL import Image
+
+        png_bytes = HtmlToPptxConverterV3._svg_to_png(SVG_NO_FILL)
+        img = Image.open(io.BytesIO(png_bytes))
+        pixels = list(img.getdata())
+        non_transparent = [p for p in pixels if p[3] > 0]
+        assert len(non_transparent) == 0, "Expected fully transparent image for fill='none'"
+
+    def test_translate_transform_applied(self):
+        """A translate transform shifts the path position."""
+        from PIL import Image
+
+        png_bytes = HtmlToPptxConverterV3._svg_to_png(SVG_WITH_TRANSFORM)
+        img = Image.open(io.BytesIO(png_bytes))
+        assert img.size == (200, 200)
+        # Pixel at (10, 20) should be within the translated green square
+        pixel = img.getpixel((25, 35))  # Center of translated 50x50 square at (10,20)
+        assert pixel[1] == 255 and pixel[3] > 0, "Expected green pixel in translated region"
+
+    def test_multiple_paths_both_rendered(self):
+        """Multiple paths with different fills both produce colored pixels."""
+        from PIL import Image
+
+        png_bytes = HtmlToPptxConverterV3._svg_to_png(SVG_MULTI_PATH)
+        img = Image.open(io.BytesIO(png_bytes))
+        pixels = list(img.getdata())
+        red_pixels = [p for p in pixels if p[0] == 255 and p[1] == 0 and p[2] == 0 and p[3] > 0]
+        blue_pixels = [p for p in pixels if p[0] == 0 and p[1] == 0 and p[2] == 255 and p[3] > 0]
+        assert len(red_pixels) > 0, "Expected red pixels from first path"
+        assert len(blue_pixels) > 0, "Expected blue pixels from second path"
+
+    def test_large_dimensions_from_svg_attributes(self):
+        """SVG with custom width/height produces matching PNG dimensions."""
+        from PIL import Image
+
+        svg = b'<svg xmlns="http://www.w3.org/2000/svg" width="500" height="300"><path d="M 0 0 L 100 0 L 100 100 L 0 100 Z" fill="#333333"/></svg>'
+        png_bytes = HtmlToPptxConverterV3._svg_to_png(svg)
+        img = Image.open(io.BytesIO(png_bytes))
+        assert img.size == (500, 300)
+
+
+class TestSvgContentImageExtraction:
+    """Integration test: SVG base64 images are extracted, converted to PNG, and saved."""
+
+    def test_svg_base64_extracted_and_converted_to_png(self, tmp_path):
+        """An SVG data URI is extracted, converted to PNG, and saved as .png file."""
+        converter = _make_converter()
+        svg_b64 = base64.b64encode(SIMPLE_SVG).decode("ascii")
+        html = f'<img src="data:image/svg+xml;base64,{svg_b64}" alt="icon" />'
+
+        cleaned, filenames = converter._extract_and_save_content_images(html, str(tmp_path))
+
+        assert len(filenames) == 1
+        assert filenames[0].endswith(".png")
+        assert "data:image" not in cleaned
+        # Verify the saved file is valid PNG (not raw SVG bytes)
+        saved_bytes = (tmp_path / filenames[0]).read_bytes()
+        assert saved_bytes[:8] == b'\x89PNG\r\n\x1a\n', "SVG should be converted to PNG"
