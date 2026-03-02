@@ -239,6 +239,7 @@ search_images(
 
 - **Adding new image categories**: Add to `CATEGORIES` in `ImageLibrary.tsx`, update `search_images` tool description, and agent prompt if needed
 - **Supporting new image formats**: Add MIME type to `ALLOWED_TYPES` in both `image_service.py` and `ImageLibrary.tsx`; update thumbnail generation if non-standard format
+- **SVG export handling**: SVG images from the library are automatically converted to PNG during PPTX and Google Slides export via `_svg_to_png()` in both converters. The conversion uses `svgpathtools` + `Pillow` (pure Python) to parse `<path>` elements and rasterize them. This is transparent to the user — SVGs are stored as-is in the database and only converted at export time.
 - **Deferred column loading**: If `image_data` column causes performance issues with many images, add `deferred(image_data)` to the model or use explicit column selection in search queries
 - **Image guidelines format**: The `image_guidelines` field is free-text — admins can use any format. The agent receives it verbatim. Consider adding structured validation if misuse becomes common
 - **Adding image editing (crop/resize)**: Would go in `image_service.py`; existing `image_data` column can be updated in place

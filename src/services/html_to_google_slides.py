@@ -223,7 +223,13 @@ class HtmlToGoogleSlidesConverter:
             if chart_images:
                 print(f"[GSLIDES_CONVERTER] Slide {slide_num}: saved {len(chart_images)} chart images")
 
-        code = await self._generate_code(html_str, chart_images)
+        # Extract base64 content images (logos, icons, etc.) from HTML
+        html_str, content_images = self._extract_and_save_content_images(html_str, str(assets_dir))
+        if content_images:
+            print(f"[GSLIDES_CONVERTER] Slide {slide_num}: extracted {len(content_images)} content images: {content_images}")
+        print(f"[GSLIDES_CONVERTER] Slide {slide_num}: HTML length after image extraction: {len(html_str)}")
+
+        code = await self._generate_code(html_str, chart_images, content_images)
         if not code:
             logger.warning("LLM returned no code for slide %d", slide_num)
             return
@@ -237,7 +243,7 @@ class HtmlToGoogleSlidesConverter:
 
         # Retry with error context + original HTML so LLM doesn't hallucinate
         logger.info("Retrying slide %d with error context", slide_num)
-        fixed = await self._retry_with_error(code, error, html_str, chart_images)
+        fixed = await self._retry_with_error(code, error, html_str, chart_images, content_images)
         if fixed:
             retry_err = self._execute_code(
                 fixed, slides_service, drive_service, pres_id, page_id,
@@ -251,12 +257,15 @@ class HtmlToGoogleSlidesConverter:
 
     # -- LLM calls ---------------------------------------------------------
 
-    async def _generate_code(self, html_str, chart_images):
+    async def _generate_code(self, html_str, chart_images, content_images=None):
         """Generate Google Slides API code from HTML."""
+        content_images = content_images or []
         # Pass raw HTML — the LLM needs full CSS context for faithful styling.
         # Only truncate if excessively large.
         html_content = html_str if len(html_str) <= 25000 else html_str[:25000] + "\n<!-- truncated -->"
         screenshot_note = self._build_chart_note(chart_images)
+        if content_images:
+            screenshot_note += self._build_content_image_note(content_images)
         prompt = self.USER_PROMPT.format(
             html_content=html_content, screenshot_note=screenshot_note,
         )
@@ -279,6 +288,22 @@ class HtmlToGoogleSlidesConverter:
             f"If chart + metrics side-by-side, use left=0.4\", top=1.1\", width=4.5\", height=3.0\"."
         )
 
+    def _build_content_image_note(self, content_images):
+        files = ", ".join(content_images)
+        return (
+            f"\nCONTENT IMAGES (logos/icons) in assets_dir: {files}\n"
+            f"These are logos/icons extracted from <img> tags in the HTML.\n"
+            f"CRITICAL: You MUST upload and add each content image to the slide.\n"
+            f"Steps for each content image:\n"
+            f"  1. from googleapiclient.http import MediaFileUpload\n"
+            f"  2. media = MediaFileUpload(os.path.join(assets_dir, filename), mimetype='image/png')\n"
+            f"  3. Upload: file = drive_service.files().create(body={{'name': filename, 'mimeType': 'image/png'}}, media_body=media, fields='id').execute()\n"
+            f"  4. Permission: drive_service.permissions().create(fileId=file['id'], body={{'type':'anyone','role':'reader'}}).execute()\n"
+            f"  5. createImage request: {{'createImage': {{'objectId': 'img_' + str(uuid.uuid4())[:8], 'url': f'https://drive.google.com/uc?id={{file[\"id\"]}}', 'elementProperties': {{'pageObjectId': page_id, 'size': {{'width': {{'magnitude': emu(w), 'unit': 'EMU'}}, 'height': {{'magnitude': emu(h), 'unit': 'EMU'}}}}, 'transform': {{'scaleX': 1, 'scaleY': 1, 'translateX': emu(left), 'translateY': emu(top), 'unit': 'EMU'}}}}}}}}\n"
+            f"Position the image to match its placement in the HTML layout. "
+            f"For logos/icons typically in the header area, use small sizes (e.g. width=0.6\"-1.0\", height=0.3\"-0.5\").\n"
+        )
+
     async def _call_llm(self, system_prompt, user_prompt):
         """Call Databricks LLM and return code string."""
         try:
@@ -298,7 +323,7 @@ class HtmlToGoogleSlidesConverter:
             logger.error("LLM call failed", exc_info=True)
             return None
 
-    async def _retry_with_error(self, original_code, error_msg, html_str=None, chart_images=None):
+    async def _retry_with_error(self, original_code, error_msg, html_str=None, chart_images=None, content_images=None):
         """Re-prompt LLM with error + original HTML context so it doesn't hallucinate."""
         html_content = ""
         if html_str:
@@ -308,6 +333,8 @@ class HtmlToGoogleSlidesConverter:
         chart_note = ""
         if chart_images:
             chart_note = f"\n{self._build_chart_note(chart_images)}\n"
+        if content_images:
+            chart_note += f"\n{self._build_content_image_note(content_images)}\n"
 
         fix_prompt = (
             f"Your previously generated code produced this error:\n\n"
@@ -492,6 +519,129 @@ class HtmlToGoogleSlidesConverter:
             ).execute()
         except Exception:
             logger.error("Fallback content also failed", exc_info=True)
+
+    # -- Content image helpers ---------------------------------------------
+
+    # Regex matching <img> tags whose src is a base64 data URI.
+    _BASE64_IMG_RE = re.compile(
+        r'(<img\b[^>]*?\bsrc=")data:image/(png|jpeg|jpg|gif|svg\+xml);base64,([A-Za-z0-9+/=\s]+)(")',
+        re.IGNORECASE,
+    )
+    _EXT_MAP = {"png": ".png", "jpeg": ".jpg", "jpg": ".jpg", "gif": ".gif", "svg+xml": ".svg"}
+
+    @staticmethod
+    def _svg_to_png(svg_bytes: bytes) -> bytes:
+        """Convert SVG bytes to PNG using svgpathtools + Pillow (pure Python).
+
+        Parses SVG ``<path>`` elements, samples bezier curves to polygons,
+        and rasterises them onto a Pillow RGBA canvas.
+
+        Args:
+            svg_bytes: Raw SVG file content.
+
+        Returns:
+            PNG image bytes.
+        """
+        import io
+        import xml.etree.ElementTree as ET
+
+        from PIL import Image, ImageDraw
+        from svgpathtools import parse_path
+
+        root = ET.fromstring(svg_bytes)
+        w = int(float(root.get("width", "100")))
+        h = int(float(root.get("height", "100")))
+
+        img = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(img)
+
+        paths = (
+            root.findall("{http://www.w3.org/2000/svg}path")
+            or root.findall("path")
+        )
+
+        for elem in paths:
+            d = elem.get("d", "")
+            fill = elem.get("fill", "none")
+            transform = elem.get("transform", "")
+
+            if fill == "none" or not d:
+                continue
+            if not (fill.startswith("#") and len(fill) >= 7):
+                continue
+
+            r_c = int(fill[1:3], 16)
+            g_c = int(fill[3:5], 16)
+            b_c = int(fill[5:7], 16)
+
+            tx, ty = 0.0, 0.0
+            tm = re.match(r"translate\(([^,]+),([^)]+)\)", transform)
+            if tm:
+                tx, ty = float(tm.group(1)), float(tm.group(2))
+
+            try:
+                path = parse_path(d)
+                length = path.length()
+                n = max(200, int(length))
+                n = min(n, 5000)
+                points = []
+                for i in range(n):
+                    pt = path.point(i / n)
+                    points.append((pt.real + tx, pt.imag + ty))
+                if len(points) >= 3:
+                    draw.polygon(points, fill=(r_c, g_c, b_c, 255))
+            except Exception:
+                continue
+
+        buf = io.BytesIO()
+        img.save(buf, format="PNG")
+        return buf.getvalue()
+
+    def _extract_and_save_content_images(
+        self, html_str: str, assets_dir: str,
+    ) -> tuple[str, list[str]]:
+        """Extract base64-embedded images from HTML, save as files, replace src.
+
+        This prevents huge base64 blobs from being sent to the LLM and makes
+        the images available as files that can be uploaded to Google Drive.
+
+        Returns:
+            Tuple of (cleaned_html, list_of_saved_filenames).
+        """
+        filenames: list[str] = []
+        counter = 0
+
+        def _replace(match: re.Match) -> str:
+            nonlocal counter
+            prefix = match.group(1)
+            mime_sub = match.group(2)
+            b64_data = match.group(3)
+            suffix = match.group(4)
+
+            ext = self._EXT_MAP.get(mime_sub.lower(), ".png")
+            filename = f"content_image_{counter}{ext}"
+            counter += 1
+
+            try:
+                image_bytes = base64.b64decode(b64_data)
+
+                # Google Slides createImage needs a raster format; SVG won't work.
+                if ext == ".svg":
+                    image_bytes = self._svg_to_png(image_bytes)
+                    filename = filename.rsplit(".", 1)[0] + ".png"
+
+                filepath = Path(assets_dir) / filename
+                filepath.write_bytes(image_bytes)
+                filenames.append(filename)
+                logger.info("Extracted content image", extra={"filename": filename, "size": len(image_bytes)})
+            except Exception as e:
+                logger.warning("Failed to extract content image", exc_info=True, extra={"error": str(e)})
+                return match.group(0)
+
+            return f"{prefix}{filename}{suffix}"
+
+        cleaned = self._BASE64_IMG_RE.sub(_replace, html_str)
+        return cleaned, filenames
 
     # -- Chart image helpers -----------------------------------------------
 
