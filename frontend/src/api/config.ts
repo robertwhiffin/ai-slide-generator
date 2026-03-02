@@ -260,8 +260,6 @@ export interface IdentityListResponse {
 
 // Profile Contributors (Sharing)
 
-export type PermissionLevel = 'CAN_MANAGE' | 'CAN_EDIT' | 'CAN_VIEW';
-
 export interface Contributor {
   id: number;
   identity_id: string;

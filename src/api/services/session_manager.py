@@ -226,6 +226,67 @@ class SessionManager:
         """
         return self.list_sessions(created_by=created_by, limit=limit)
 
+    def list_sessions_by_profile_ids(
+        self,
+        profile_ids: List[int],
+        exclude_created_by: Optional[str] = None,
+        limit: int = 50,
+    ) -> List[Dict[str, Any]]:
+        """List sessions belonging to specific profiles.
+
+        Used for permission-based session listing where users can see sessions
+        from profiles they have access to.
+
+        Args:
+            profile_ids: List of profile IDs to include
+            exclude_created_by: Optionally exclude sessions by this creator
+                (to avoid duplicates when combining with own sessions)
+            limit: Maximum number of sessions to return
+
+        Returns:
+            List of session info dictionaries
+        """
+        if not profile_ids:
+            return []
+
+        with get_db_session() as db:
+            query = db.query(UserSession).filter(
+                UserSession.messages.any(),
+                UserSession.profile_id.in_(profile_ids),
+            )
+
+            if exclude_created_by:
+                query = query.filter(UserSession.created_by != exclude_created_by)
+
+            sessions = (
+                query.order_by(UserSession.last_activity.desc())
+                .limit(limit)
+                .all()
+            )
+
+            # Batch-check which profiles are deleted to avoid N+1 queries
+            deleted_profiles = self._get_deleted_profile_ids(
+                db,
+                [s.profile_id for s in sessions if s.profile_id is not None],
+            )
+
+            return [
+                {
+                    "session_id": s.session_id,
+                    "user_id": s.user_id,
+                    "created_by": s.created_by,
+                    "title": s.title,
+                    "created_at": s.created_at.isoformat(),
+                    "last_activity": s.last_activity.isoformat(),
+                    "message_count": len(s.messages),
+                    "has_slide_deck": s.slide_deck is not None,
+                    "profile_id": s.profile_id,
+                    "profile_name": s.profile_name,
+                    "profile_deleted": s.profile_id in deleted_profiles if s.profile_id else False,
+                }
+                for s in sessions
+            ]
+
     def delete_session(self, session_id: str) -> bool:
         """Delete a session and all associated data.
 

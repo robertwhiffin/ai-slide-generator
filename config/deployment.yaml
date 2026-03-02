@@ -21,21 +21,21 @@ environments:
       capacity: "CU_1"  # Options: CU_1, CU_2, CU_4, CU_8
 
   development:
-    app_name: "db-tellr-dev"
-    description: "AI Slide Generator - dev Environment"
-    workspace_path: "/Workspace/Users/robert.whiffin@databricks.com/.apps/dev/tellr"
+    app_name: "try"
+    description: "AI Slide Generator - Kholoud Dev Environment"
+    workspace_path: "/Workspace/Users/kholoud.ibrahim@databricks.com/.apps/dev/try"
     permissions:
-      - user_name: "robert.whiffin@databricks.com"
+      - user_name: "kholoud.ibrahim@databricks.com"
         permission_level: "CAN_MANAGE"
     compute_size: "MEDIUM"  # Options: MEDIUM, LARGE, LIQUID
     env_vars:
       ENVIRONMENT: "development"
       LOG_LEVEL: "DEBUG"
-      LAKEBASE_INSTANCE: "db-tellr"
-      LAKEBASE_SCHEMA: "app_data_dev"
+      LAKEBASE_INSTANCE: "try-db"
+      LAKEBASE_SCHEMA: "app_data"
     lakebase:
-      database_name: "db-tellr"
-      schema: "app_data_dev"
+      database_name: "try-db"
+      schema: "app_data"
       capacity: "CU_1"  # Options: CU_1, CU_2, CU_4, CU_8
 
   production:

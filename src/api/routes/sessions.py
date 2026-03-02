@@ -2,6 +2,10 @@
 
 Provides CRUD operations for managing user sessions with persistent storage.
 All blocking database calls are wrapped with asyncio.to_thread to avoid blocking the event loop.
+
+Session access is controlled by:
+1. Being the session creator (created_by)
+2. Having permission on the session's profile (CAN_VIEW, CAN_EDIT, CAN_MANAGE)
 """
 
 import asyncio
@@ -9,22 +13,106 @@ import json
 import logging
 from datetime import datetime
 from pathlib import Path
-from typing import List, Optional
+from typing import Optional, Tuple
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 
 from pydantic import BaseModel, Field
+from sqlalchemy.orm import Session
 
 from src.api.schemas.requests import CreateSessionRequest
 from src.api.services.session_manager import (
     SessionNotFoundError,
     get_session_manager,
 )
+from src.core.database import get_db
+from src.core.permission_context import get_permission_context
 from src.core.user_context import get_current_user
+from src.database.models.profile_contributor import PermissionLevel
+from src.services.permission_service import PermissionService
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/sessions", tags=["sessions"])
+
+
+def _get_session_permission(
+    session_info: dict,
+    db: Session,
+) -> Tuple[bool, Optional[PermissionLevel]]:
+    """Check if current user has access to a session and return their permission level.
+    
+    Access is granted if:
+    1. User is the session creator (implicit CAN_MANAGE)
+    2. User has permission on the session's profile
+    
+    Args:
+        session_info: Session dict with created_by and profile_id
+        db: Database session
+        
+    Returns:
+        Tuple of (has_access, permission_level)
+        - has_access: True if user can access the session
+        - permission_level: The user's permission level (CAN_VIEW, CAN_EDIT, CAN_MANAGE)
+    """
+    current_user = get_current_user()
+    ctx = get_permission_context()
+    
+    # Check 1: Is user the session creator?
+    if session_info.get("created_by") == current_user:
+        return True, PermissionLevel.CAN_MANAGE
+    
+    # Check 2: Does user have permission on the profile?
+    profile_id = session_info.get("profile_id")
+    if profile_id and ctx:
+        perm_service = PermissionService(db)
+        permission = perm_service.get_user_permission(
+            profile_id=profile_id,
+            user_id=ctx.user_id,
+            user_name=ctx.user_name,
+            group_ids=ctx.group_ids,
+        )
+        if permission:
+            return True, permission
+    
+    return False, None
+
+
+def _require_session_access(
+    session_info: dict,
+    db: Session,
+    min_permission: PermissionLevel = PermissionLevel.CAN_VIEW,
+) -> PermissionLevel:
+    """Require user has at least the specified permission level on a session.
+    
+    Args:
+        session_info: Session dict with created_by and profile_id
+        db: Database session
+        min_permission: Minimum required permission (default: CAN_VIEW)
+        
+    Returns:
+        The user's actual permission level
+        
+    Raises:
+        HTTPException 403: If user doesn't have required permission
+    """
+    from src.services.permission_service import PERMISSION_PRIORITY
+    
+    has_access, permission = _get_session_permission(session_info, db)
+    
+    if not has_access or permission is None:
+        raise HTTPException(
+            status_code=403,
+            detail="You don't have permission to access this session",
+        )
+    
+    if PERMISSION_PRIORITY[permission] < PERMISSION_PRIORITY[min_permission]:
+        raise HTTPException(
+            status_code=403,
+            detail=f"This action requires {min_permission.value} permission",
+        )
+    
+    return permission
 
 
 def _substitute_deck_images(deck_dict: dict) -> None:
@@ -80,10 +168,12 @@ async def create_session(request: CreateSessionRequest = None):
 async def list_sessions(
     limit: int = Query(50, ge=1, le=100, description="Maximum sessions to return"),
 ):
-    """List sessions for the current user.
+    """List sessions created by the current user.
 
-    Sessions are implicitly scoped to the authenticated user resolved by the
-    middleware.  No ``user_id`` query parameter is needed.
+    Sessions are scoped to the authenticated user only.
+    Other users' sessions are not visible even if you have profile access.
+    
+    To access another user's session, they must share the session URL directly.
 
     Args:
         limit: Maximum number of sessions to return
@@ -100,6 +190,10 @@ async def list_sessions(
             created_by=current_user,
             limit=limit,
         )
+        
+        # Add permission info (creator always has CAN_MANAGE)
+        for session in sessions:
+            session["my_permission"] = "CAN_MANAGE"
 
         return {"sessions": sessions, "count": len(sessions)}
 
@@ -112,20 +206,25 @@ async def list_sessions(
 
 
 @router.get("/{session_id}")
-async def get_session(session_id: str):
+async def get_session(session_id: str, db: Session = Depends(get_db)):
     """Get session details including messages and slides.
+
+    Requires at least CAN_VIEW permission (via ownership or profile access).
 
     Args:
         session_id: Session identifier
 
     Returns:
-        Session information with messages and slide_deck
+        Session information with messages, slide_deck, and user's permission level
     """
     try:
         session_manager = get_session_manager()
 
         # Get session info
         session = await asyncio.to_thread(session_manager.get_session, session_id)
+
+        # Check permission
+        permission = _require_session_access(session, db, PermissionLevel.CAN_VIEW)
 
         # Get messages for conversation restoration
         messages = await asyncio.to_thread(session_manager.get_messages, session_id)
@@ -141,6 +240,7 @@ async def get_session(session_id: str):
             **session,
             "messages": messages,
             "slide_deck": slide_deck,
+            "my_permission": permission.value,
         }
 
     except SessionNotFoundError:
@@ -148,6 +248,8 @@ async def get_session(session_id: str):
             status_code=404,
             detail=f"Session not found: {session_id}",
         )
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Failed to get session: {e}", exc_info=True)
         raise HTTPException(
@@ -157,8 +259,10 @@ async def get_session(session_id: str):
 
 
 @router.patch("/{session_id}")
-async def update_session(session_id: str, title: str = None):
+async def update_session(session_id: str, title: str = None, db: Session = Depends(get_db)):
     """Update session (rename).
+
+    Requires CAN_EDIT permission (via ownership or profile access).
 
     Args:
         session_id: Session to update
@@ -169,6 +273,11 @@ async def update_session(session_id: str, title: str = None):
     """
     try:
         session_manager = get_session_manager()
+        
+        # Get session and check permission
+        session = await asyncio.to_thread(session_manager.get_session, session_id)
+        _require_session_access(session, db, PermissionLevel.CAN_EDIT)
+        
         result = await asyncio.to_thread(
             session_manager.rename_session,
             session_id,
@@ -187,6 +296,8 @@ async def update_session(session_id: str, title: str = None):
             status_code=404,
             detail=f"Session not found: {session_id}",
         )
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Failed to update session: {e}", exc_info=True)
         raise HTTPException(
@@ -196,8 +307,10 @@ async def update_session(session_id: str, title: str = None):
 
 
 @router.delete("/{session_id}")
-async def delete_session(session_id: str):
+async def delete_session(session_id: str, db: Session = Depends(get_db)):
     """Delete a session.
+
+    Requires CAN_MANAGE permission (via ownership or profile access).
 
     Args:
         session_id: Session to delete
@@ -207,6 +320,11 @@ async def delete_session(session_id: str):
     """
     try:
         session_manager = get_session_manager()
+        
+        # Get session and check permission
+        session = await asyncio.to_thread(session_manager.get_session, session_id)
+        _require_session_access(session, db, PermissionLevel.CAN_MANAGE)
+        
         await asyncio.to_thread(session_manager.delete_session, session_id)
 
         logger.info("Session deleted via API", extra={"session_id": session_id})
@@ -218,6 +336,8 @@ async def delete_session(session_id: str):
             status_code=404,
             detail=f"Session not found: {session_id}",
         )
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Failed to delete session: {e}", exc_info=True)
         raise HTTPException(

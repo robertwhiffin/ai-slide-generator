@@ -59,30 +59,44 @@ def is_lakebase_environment() -> bool:
 def _generate_lakebase_token() -> str:
     """Generate a fresh OAuth token for Lakebase authentication.
 
-    Uses ws.database.generate_database_credential() which works for both
-    provisioned and autoscaling endpoints (tokens are cross-compatible).
+    Uses the appropriate API based on LAKEBASE_TYPE:
+    - autoscaling: ws.postgres.generate_database_credential(endpoint=...)
+    - provisioned: ws.database.generate_database_credential(instance_names=[...])
 
     Returns:
         OAuth token string to use as PostgreSQL password
 
     Raises:
-        RuntimeError: If LAKEBASE_INSTANCE not set or token generation fails
+        RuntimeError: If required env vars not set or token generation fails
     """
     from src.core.databricks_client import get_system_client
 
     ws = get_system_client()
-    instance_name = os.getenv("LAKEBASE_INSTANCE")
-    if not instance_name:
-        raise RuntimeError(
-            "LAKEBASE_INSTANCE not set — cannot generate Lakebase token."
-        )
+    lakebase_type = _get_lakebase_type()
 
-    cred = ws.database.generate_database_credential(
-        request_id=str(uuid.uuid4()),
-        instance_names=[instance_name],
-    )
-    logger.info("Generated Lakebase OAuth token via ws.database")
-    return cred.token
+    if lakebase_type == "autoscaling":
+        # Autoscaling Lakebase uses ws.postgres API
+        endpoint_name = os.getenv("LAKEBASE_ENDPOINT_NAME")
+        if not endpoint_name:
+            raise RuntimeError(
+                "LAKEBASE_ENDPOINT_NAME not set — cannot generate autoscaling Lakebase token."
+            )
+        cred = ws.postgres.generate_database_credential(endpoint=endpoint_name)
+        logger.info("Generated Lakebase OAuth token via ws.postgres (autoscaling)")
+        return cred.token
+    else:
+        # Provisioned Lakebase uses ws.database API
+        instance_name = os.getenv("LAKEBASE_INSTANCE")
+        if not instance_name:
+            raise RuntimeError(
+                "LAKEBASE_INSTANCE not set — cannot generate Lakebase token."
+            )
+        cred = ws.database.generate_database_credential(
+            request_id=str(uuid.uuid4()),
+            instance_names=[instance_name],
+        )
+        logger.info("Generated Lakebase OAuth token via ws.database (provisioned)")
+        return cred.token
 
 
 def _get_lakebase_token() -> str:
