@@ -59,14 +59,20 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
   const [revertTargetVersion, setRevertTargetVersion] = useState<number | null>(null);
   const chatPanelRef = useRef<ChatPanelHandle>(null);
   const slidePanelRef = useRef<SlidePanelHandle>(null);
-  /** When set, we're in the middle of handleSessionRestore(restoredSessionId); skip urlSessionId effect so it doesn't restore the old URL session and overwrite. */
-  const restoringSessionIdRef = useRef<string | null>(null);
   /** Ref-tracked slideDeck so the URL restoration effect doesn't re-fire on setSlideDeck(null) during new-session creation. */
   const slideDeckRef = useRef(slideDeck);
   slideDeckRef.current = slideDeck;
   const { sessionTitle, sessionId, createNewSession, switchSession, renameSession } = useSession();
   const { isGenerating } = useGeneration();
   const { currentProfile, loadProfile } = useProfiles();
+  /** Ref-tracked sessionId so the URL effect guard doesn't need sessionId as a dep (which would cause it to re-fire when switchSession internally calls setSessionId). */
+  const sessionIdRef = useRef(sessionId);
+  sessionIdRef.current = sessionId;
+  /** Refs for profile-related values so the URL effect can access them without adding them as deps. */
+  const currentProfileRef = useRef(currentProfile);
+  currentProfileRef.current = currentProfile;
+  const loadProfileRef = useRef(loadProfile);
+  loadProfileRef.current = loadProfile;
   const { updateAvailable, latestVersion, updateType, dismissed, dismiss } = useVersionCheck();
   const { showToast } = useToast();
   const { showSurvey, closeSurvey, onGenerationComplete, onGenerationStart } = useSurveyTrigger();
@@ -77,16 +83,36 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
   }, [initialView]);
 
   // When URL has sessionId, restore that session (load deck if we don't have it yet).
-  // Skip when we're already on this session AND have deck data, or when we're in the middle of
-  // handleSessionRestore (sessionId just changed to target; effect would otherwise restore the *old* urlSessionId and overwrite).
+  // sessionId is intentionally NOT in deps — we use sessionIdRef.current in the guard instead.
+  // This prevents the effect from re-firing when switchSession internally calls setSessionId,
+  // which would cancel the in-flight load and trigger another one, causing chat to reload 3×.
+  // currentProfile/loadProfile are also excluded — accessed via refs so they don't cause re-runs.
   useEffect(() => {
     if (!urlSessionId) return;
-    if (urlSessionId === sessionId && slideDeckRef.current != null) return;
-    if (restoringSessionIdRef.current !== null && restoringSessionIdRef.current === sessionId) return;
+    if (urlSessionId === sessionIdRef.current && slideDeckRef.current != null) return;
     let cancelled = false;
     (async () => {
       try {
-        const { slideDeck: restoredDeck, rawHtml: restoredRawHtml } = await switchSession(urlSessionId);
+        // Fetch session info first so we can check the profile before loading the deck.
+        // Pass it to switchSession as existingSessionInfo to avoid a second getSession call.
+        const sessionInfo = await api.getSession(urlSessionId);
+        if (cancelled) return;
+
+        // Auto-switch profile if the session was created with a different profile
+        if (sessionInfo.profile_id && currentProfileRef.current && sessionInfo.profile_id !== currentProfileRef.current.id) {
+          try {
+            await loadProfileRef.current(sessionInfo.profile_id);
+          } catch {
+            // Profile may have been deleted; continue with current profile
+          }
+        }
+        if (cancelled) return;
+
+        const { slideDeck: restoredDeck, rawHtml: restoredRawHtml } = await switchSession(
+          urlSessionId,
+          { title: sessionInfo.title, has_slide_deck: sessionInfo.has_slide_deck },
+          () => cancelled,
+        );
         if (!cancelled) {
           setSlideDeck(restoredDeck);
           setRawHtml(restoredRawHtml);
@@ -103,7 +129,7 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
       }
     })();
     return () => { cancelled = true; };
-  }, [urlSessionId, sessionId, showToast, navigate, switchSession]);
+  }, [urlSessionId, showToast, navigate, switchSession]);
 
   // Load save point versions when session or deck changes
   const loadVersions = useCallback(async () => {
@@ -153,40 +179,13 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
     createNewSession();
   }, [createNewSession]);
 
-  // Handle restoring a session from history
-  // Auto-switches profile if the session belongs to a different profile
+  // Handle selecting a session from sidebar or history — just navigate.
+  // The URL effect is the single source of truth for session loading.
   const handleSessionRestore = useCallback(
-    async (restoredSessionId: string) => {
-      restoringSessionIdRef.current = restoredSessionId;
-      try {
-        // Single getSession: used for profile check and passed to switchSession to avoid duplicate call
-        // (ChatPanel cancels in-flight polling when sessionId changes, so no need to remount it)
-        const sessionInfo = await api.getSession(restoredSessionId);
-
-        if (sessionInfo.profile_id && currentProfile && sessionInfo.profile_id !== currentProfile.id) {
-          try {
-            await loadProfile(sessionInfo.profile_id);
-          } catch {
-            // Profile may have been deleted; continue with current profile so the deck still loads
-          }
-        }
-
-        const { slideDeck: restoredDeck, rawHtml: restoredRawHtml } = await switchSession(restoredSessionId, {
-          title: sessionInfo.title,
-          has_slide_deck: sessionInfo.has_slide_deck,
-        });
-        setSlideDeck(restoredDeck);
-        setRawHtml(restoredRawHtml);
-        setLastSavedTime(new Date());
-        setViewMode('main');
-        navigate(`/sessions/${restoredSessionId}/edit`);
-      } catch (err) {
-        console.error('Failed to restore session:', err);
-      } finally {
-        restoringSessionIdRef.current = null;
-      }
+    (restoredSessionId: string) => {
+      navigate(`/sessions/${restoredSessionId}/edit`);
     },
-    [switchSession, currentProfile, loadProfile, navigate],
+    [navigate],
   );
 
   // After generation: save deck name + slide count so sidebar/list show correct name and count
@@ -236,6 +235,7 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
     setViewMode('main');
     try {
       await api.createSession({ sessionId: newId });
+      setSessionsRefreshKey(prev => prev + 1);
       navigate(`/sessions/${newId}/edit`);
     } catch (err) {
       console.error('Failed to create session:', err);
@@ -328,7 +328,7 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
   // Version key and read-only for preview/view mode
   const versionKey = previewVersion != null
     ? `preview-v${previewVersion}`
-    : `current-v${currentVersion ?? 0}`;
+    : 'current';
   const isReadOnly = !!previewVersion || viewOnly;
 
   // Format time ago string
@@ -426,7 +426,7 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
           <div className="flex h-full flex-col">
             <div className="shrink-0">
               <PageHeader
-                title={slideDeck?.title || sessionTitle || 'Untitled session'}
+                title={sessionTitle || slideDeck?.title || 'Untitled session'}
                 subtitle={getSubtitle()}
                 onTitleChange={handleTitleChange}
                 onSave={() => setShowSaveDialog(true)}
@@ -613,7 +613,7 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
 
       <SaveAsDialog
         isOpen={showSaveDialog}
-        currentTitle={slideDeck?.title || sessionTitle || 'Untitled session'}
+        currentTitle={sessionTitle || slideDeck?.title || 'Untitled session'}
         onSave={handleSaveAs}
         onCancel={() => setShowSaveDialog(false)}
       />

@@ -66,6 +66,8 @@ function SlidePanelComponent(props: SlidePanelProps, ref: React.Ref<SlidePanelHa
   const [isAutoVerifying, setIsAutoVerifying] = useState(false);
   const [verifyingSlides, setVerifyingSlides] = useState<Set<number>>(new Set());
   const autoVerifyTriggeredRef = useRef<Set<string>>(new Set()); // Track which content hashes we've tried to verify
+  const sessionIdRef = useRef(sessionId);
+  sessionIdRef.current = sessionId;
   
   const sensors = useSensors(
     useSensor(PointerSensor),
@@ -333,6 +335,7 @@ function SlidePanelComponent(props: SlidePanelProps, ref: React.Ref<SlidePanelHa
   // Auto-verify slides that don't have verification
   const runAutoVerification = useCallback(async (slidesToVerify: Array<{ index: number; contentHash: string }>) => {
     if (!sessionId || slidesToVerify.length === 0 || isAutoVerifying) return;
+    const capturedSessionId = sessionId;
 
     setIsAutoVerifying(true);
     console.log(`[Auto-verify] Starting verification for ${slidesToVerify.length} slides`);
@@ -345,9 +348,9 @@ function SlidePanelComponent(props: SlidePanelProps, ref: React.Ref<SlidePanelHa
       try {
         // Mark this content hash as attempted (prevent re-triggering)
         autoVerifyTriggeredRef.current.add(contentHash);
-        
+
         console.log(`[Auto-verify] Verifying slide ${index + 1} (hash: ${contentHash.substring(0, 8)}...)`);
-        await api.verifySlide(sessionId, index);
+        await api.verifySlide(capturedSessionId, index);
         console.log(`[Auto-verify] Slide ${index + 1} verified`);
         return { index, success: true };
       } catch (error) {
@@ -358,10 +361,21 @@ function SlidePanelComponent(props: SlidePanelProps, ref: React.Ref<SlidePanelHa
 
     await Promise.all(verificationPromises);
 
+    // If the user switched sessions while verification was in-flight, discard
+    // results. Calling onSlideChange with a stale deck would overwrite the
+    // current session's tiles with the old session's content, causing all
+    // tiles to remount (their keys change when slide IDs differ between sessions).
+    if (sessionIdRef.current !== capturedSessionId) {
+      console.log('[Auto-verify] Session changed, discarding stale results');
+      setIsAutoVerifying(false);
+      setVerifyingSlides(new Set());
+      return;
+    }
+
     // Refresh slides to get updated verification results (merged from verification_map)
     try {
-      const result = await api.getSlides(sessionId);
-      if (result.slide_deck) {
+      const result = await api.getSlides(capturedSessionId);
+      if (result.slide_deck && sessionIdRef.current === capturedSessionId) {
         onSlideChange(result.slide_deck);
       }
     } catch (error) {
@@ -406,6 +420,8 @@ function SlidePanelComponent(props: SlidePanelProps, ref: React.Ref<SlidePanelHa
   // Clear auto-verify tracking when session changes
   useEffect(() => {
     autoVerifyTriggeredRef.current.clear();
+    setIsAutoVerifying(false);
+    setVerifyingSlides(new Set());
   }, [sessionId]);
 
   const _handleSaveAsHTML = () => {

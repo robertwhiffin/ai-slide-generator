@@ -44,7 +44,7 @@ export function DeckHistory({
     api.listSessions(5)
       .then(result => setSessions(result.sessions))
       .catch(err => console.error('Failed to load sessions:', err))
-  }, [currentSessionId, refreshKey]) // Reload when current session changes or refresh is triggered
+  }, [refreshKey]) // Reload only when refresh is explicitly triggered; active highlight is render-driven
 
   const handleDelete = async (sessionId: string, e: React.MouseEvent) => {
     e.stopPropagation()
