@@ -7,7 +7,7 @@ Python deployment tooling for Tellr on Databricks Apps.
 ```python
 import databricks_tellr as tellr
 
-!pip install --upgrade databricks-sdk==0.73.0
+!pip install --upgrade databricks-sdk==0.96.0
 
 result = tellr.setup(
     lakebase_name="ai-slide-generator-db-dev",

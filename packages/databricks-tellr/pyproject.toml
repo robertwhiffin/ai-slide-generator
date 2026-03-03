@@ -9,7 +9,7 @@ description = "Tellr deployment tooling for Databricks Apps"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
-    "databricks-sdk>=0.85.0",
+    "databricks-sdk>=0.91.0",
     "psycopg2-binary>=2.9.0",
     "pyyaml>=6.0.0",
 ]
