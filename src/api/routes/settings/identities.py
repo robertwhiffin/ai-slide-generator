@@ -1,13 +1,20 @@
-"""API endpoints for Databricks workspace identities (users and groups)."""
+"""API endpoints for Databricks identities (users and groups).
+
+Uses the multi-source identity provider which automatically selects:
+1. Account API (if DATABRICKS_ACCOUNT_ADMIN_TOKEN configured)
+2. Workspace API (if DATABRICKS_WORKSPACE_ADMIN_TOKEN configured)
+3. Local identity table (default fallback)
+"""
+
 import logging
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Query, status
 from pydantic import BaseModel, Field
 
-from src.services.databricks_identity_service import (
-    DatabricksIdentityError,
-    DatabricksIdentityService,
+from src.services.identity_provider import (
+    IdentityProviderMode,
+    get_identity_provider,
 )
 
 logger = logging.getLogger(__name__)
@@ -29,11 +36,36 @@ class IdentityListResponse(BaseModel):
 
     identities: list[IdentityResponse]
     total: int
+    source: str = Field(..., description="Identity source: account, workspace, or local")
 
 
-def get_identity_service() -> DatabricksIdentityService:
-    """Get Databricks identity service instance."""
-    return DatabricksIdentityService()
+class IdentityProviderInfoResponse(BaseModel):
+    """Information about the current identity provider."""
+
+    mode: str = Field(..., description="Current mode: account, workspace, or local")
+    description: str = Field(..., description="Human-readable description of the mode")
+
+
+@router.get("/provider", response_model=IdentityProviderInfoResponse)
+def get_provider_info():
+    """
+    Get information about the current identity provider.
+    
+    Returns:
+        Current provider mode and description
+    """
+    provider = get_identity_provider()
+    
+    descriptions = {
+        IdentityProviderMode.ACCOUNT: "Using Databricks Account SCIM API (all account users/groups)",
+        IdentityProviderMode.WORKSPACE: "Using Databricks Workspace SCIM API (workspace users/groups)",
+        IdentityProviderMode.LOCAL: "Using local identity table (only users who have signed in)",
+    }
+    
+    return IdentityProviderInfoResponse(
+        mode=provider.mode.value,
+        description=descriptions.get(provider.mode, "Unknown provider mode"),
+    )
 
 
 @router.get("/users", response_model=IdentityListResponse)
@@ -42,7 +74,7 @@ def list_users(
     max_results: int = Query(100, ge=1, le=500, description="Maximum results to return"),
 ):
     """
-    List Databricks workspace users.
+    List users from the configured identity source.
     
     Args:
         query: Optional search string to filter by email or display name
@@ -52,13 +84,9 @@ def list_users(
         List of users with their IDs and display names
     """
     try:
-        service = get_identity_service()
+        provider = get_identity_provider()
         
-        filter_query = None
-        if query:
-            filter_query = f'userName co "{query}" or displayName co "{query}"'
-        
-        users = service.list_users(filter_query=filter_query, max_results=max_results)
+        users = provider.list_users(filter_query=query, max_results=max_results)
         
         return IdentityListResponse(
             identities=[
@@ -70,18 +98,13 @@ def list_users(
                 for u in users
             ],
             total=len(users),
-        )
-    except DatabricksIdentityError as e:
-        logger.error(f"Failed to list users: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail=str(e),
+            source=provider.mode.value,
         )
     except Exception as e:
-        logger.error(f"Unexpected error listing users: {e}", exc_info=True)
+        logger.error(f"Failed to list users: {e}", exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to list users",
+            detail=f"Failed to list users: {e}",
         )
 
 
@@ -91,7 +114,7 @@ def list_groups(
     max_results: int = Query(100, ge=1, le=500, description="Maximum results to return"),
 ):
     """
-    List Databricks workspace groups.
+    List groups from the configured identity source.
     
     Args:
         query: Optional search string to filter by group name
@@ -101,13 +124,9 @@ def list_groups(
         List of groups with their IDs and display names
     """
     try:
-        service = get_identity_service()
+        provider = get_identity_provider()
         
-        filter_query = None
-        if query:
-            filter_query = f'displayName co "{query}"'
-        
-        groups = service.list_groups(filter_query=filter_query, max_results=max_results)
+        groups = provider.list_groups(filter_query=query, max_results=max_results)
         
         return IdentityListResponse(
             identities=[
@@ -119,18 +138,13 @@ def list_groups(
                 for g in groups
             ],
             total=len(groups),
-        )
-    except DatabricksIdentityError as e:
-        logger.error(f"Failed to list groups: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail=str(e),
+            source=provider.mode.value,
         )
     except Exception as e:
-        logger.error(f"Unexpected error listing groups: {e}", exc_info=True)
+        logger.error(f"Failed to list groups: {e}", exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to list groups",
+            detail=f"Failed to list groups: {e}",
         )
 
 
@@ -154,9 +168,9 @@ def search_identities(
         Combined list of matching users and groups
     """
     try:
-        service = get_identity_service()
+        provider = get_identity_provider()
         
-        results = service.search_identities(
+        results = provider.search_identities(
             query=query,
             include_users=include_users,
             include_groups=include_groups,
@@ -173,17 +187,11 @@ def search_identities(
                 for r in results
             ],
             total=len(results),
-        )
-    except DatabricksIdentityError as e:
-        logger.error(f"Failed to search identities: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail=str(e),
+            source=provider.mode.value,
         )
     except Exception as e:
-        logger.error(f"Unexpected error searching identities: {e}", exc_info=True)
+        logger.error(f"Failed to search identities: {e}", exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to search identities",
+            detail=f"Failed to search identities: {e}",
         )
-

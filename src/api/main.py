@@ -287,6 +287,19 @@ async def user_auth_middleware(request: Request, call_next):
     )
     set_permission_context(permission_ctx)
 
+    # Record user login for local identity table (non-blocking)
+    if user_id and user_name and IS_PRODUCTION:
+        try:
+            from src.services.identity_provider import get_identity_provider
+            provider = get_identity_provider()
+            provider.record_user_login(
+                user_id=user_id,
+                user_name=user_name,
+                display_name=user_name,  # Could get from me.display_name if available
+            )
+        except Exception as e:
+            logger.debug(f"Failed to record user login: {e}")
+
     try:
         response = await call_next(request)
         return response

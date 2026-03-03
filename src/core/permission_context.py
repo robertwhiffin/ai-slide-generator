@@ -166,14 +166,14 @@ def build_permission_context(
             group_ids = cached
             logger.debug(f"Using cached groups for user {user_id}: {len(group_ids)} groups")
         else:
-            # Fetch from Databricks
+            # Fetch from identity provider (Account API, Workspace API, or Local table)
             try:
-                from src.services.databricks_identity_service import DatabricksIdentityService
-                service = DatabricksIdentityService()
-                group_ids = service.get_user_groups(user_id)
+                from src.services.identity_provider import get_identity_provider
+                provider = get_identity_provider()
+                group_ids = provider.get_user_groups(user_id)
                 cache_groups(user_id, group_ids)
                 fetched_at = time.time()
-                logger.info(f"Fetched {len(group_ids)} groups for user {user_id}")
+                logger.info(f"Fetched {len(group_ids)} groups for user {user_id} via {provider.mode.value} provider")
             except Exception as e:
                 logger.warning(f"Failed to fetch groups for user {user_id}: {e}")
     

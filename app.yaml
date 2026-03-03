@@ -26,6 +26,41 @@ env:
     value: "INFO"
   - name: MLFLOW_TRACKING_URI
     value: "databricks"
+  
+  # ============================================================================
+  # Identity Provider Configuration (for listing users/groups as contributors)
+  # Choose ONE of the following options. Priority: Account > Workspace > Local
+  # 
+  # SECURITY: Use Databricks secrets instead of plain text values!
+  # Create secrets with: databricks secrets put-secret <scope> <key>
+  # ============================================================================
+  
+  # Option 1: Account Admin (recommended for multi-workspace deployments)
+  # Create secrets first:
+  #   databricks secrets create-scope tellr-secrets
+  #   databricks secrets put-secret tellr-secrets account-admin-token
+  #   databricks secrets put-secret tellr-secrets account-id
+  # Then uncomment:
+  # - name: DATABRICKS_ACCOUNT_HOST
+  #   value: "https://accounts.cloud.databricks.com"
+  # - name: DATABRICKS_ACCOUNT_ID
+  #   valueFrom: "secrets/tellr-secrets/account-id"
+  # - name: DATABRICKS_ACCOUNT_ADMIN_TOKEN
+  #   valueFrom: "secrets/tellr-secrets/account-admin-token"
+  
+  # Option 2: Workspace Admin (for single workspace deployments)
+  # Create secret first:
+  #   databricks secrets put-secret tellr-secrets workspace-admin-token
+  # Then uncomment:
+  # - name: DATABRICKS_WORKSPACE_ADMIN_TOKEN
+  #   valueFrom: "secrets/tellr-secrets/workspace-admin-token"
+  
+  # Option 3: Local Identity Table (default - no admin token needed)
+  # If neither option above is configured, the app will only show users
+  # who have previously signed into the app. Limited but requires no admin setup.
+  
+  # ============================================================================
+  
   # Required for Google Slides OAuth credential/token encryption.
   # Generate with: python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
   # - name: GOOGLE_OAUTH_ENCRYPTION_KEY
