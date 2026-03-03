@@ -24,7 +24,7 @@ interface SessionContextType {
   isInitializing: boolean;
   error: string | null;
   createNewSession: () => string;
-  switchSession: (sessionId: string, existingSessionInfo?: OptionalSessionInfo) => Promise<SessionRestoreResult>;
+  switchSession: (sessionId: string, existingSessionInfo?: OptionalSessionInfo, isCancelled?: () => boolean) => Promise<SessionRestoreResult>;
   renameSession: (title: string, slideCount?: number) => Promise<void>;
   setSessionTitle: (title: string | null) => void;
   setExperimentUrl: (url: string | null) => void;
@@ -63,9 +63,14 @@ export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ child
    * Switch to an existing (persisted) session from history.
    * Returns both the slide deck and raw HTML for debug view.
    * When existingSessionInfo is provided (e.g. from a prior getSession), skips the getSession call.
+   *
+   * isCancelled: optional predicate called before each side-effectful state update. If it returns
+   * true (e.g. a newer restore has started), setSessionTitle and setSessionId are skipped so that
+   * a superseded concurrent load doesn't bounce sessionId through a stale intermediate value —
+   * which would cause ChatPanel to clear+reload messages and SlidePanel effects to fire spuriously.
    */
   const switchSession = useCallback(
-    async (newSessionId: string, existingSessionInfo?: OptionalSessionInfo): Promise<SessionRestoreResult> => {
+    async (newSessionId: string, existingSessionInfo?: OptionalSessionInfo, isCancelled?: () => boolean): Promise<SessionRestoreResult> => {
       setIsInitializing(true);
       setError(null);
       try {
@@ -90,10 +95,18 @@ export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ child
           rawHtml = slideDeck?.html_content || null;
         }
 
-        // Update state
-        setSessionId(newSessionId);
-        setSessionTitle(sessionInfo.title);
-        api.setCurrentSessionId(newSessionId);
+        // Commit all session state atomically — title, sessionId, and the caller's setSlideDeck
+        // all happen in the same microtask continuation, so React 18 batches them into ONE render.
+        // Previously setSessionTitle was called before api.getSlides (an "early update"), which
+        // created an intermediate render showing the new title with the old slides. Moving it here
+        // means isCancelled() is also evaluated AFTER the async gap where racing can occur —
+        // if the user clicked a different session during api.getSlides, isCancelled() returns true
+        // and none of the stale state is committed.
+        if (!isCancelled?.()) {
+          setSessionTitle(sessionInfo.title);
+          setSessionId(newSessionId);
+          api.setCurrentSessionId(newSessionId);
+        }
 
         return { slideDeck, rawHtml };
       } catch (err) {

@@ -58,6 +58,15 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(({
   const { sessionId, isInitializing, error: sessionError, setExperimentUrl, setSessionTitle } = useSession();
   const { setIsGenerating } = useGeneration();
 
+  // Synchronously clear messages when sessionId changes (avoids old-message flash on session switch).
+  // React discards the intermediate render and immediately re-renders with empty messages,
+  // so the user never sees old messages from the previous session.
+  const [clearedForSessionId, setClearedForSessionId] = useState<string | null>(sessionId);
+  if (clearedForSessionId !== sessionId) {
+    setClearedForSessionId(sessionId);
+    setMessages([]);
+  }
+
   useKeyboardShortcuts();
 
   // Show session error
@@ -85,6 +94,7 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(({
   }, [sessionId, setIsGenerating]);
 
   // Load messages when session changes (for restored sessions)
+  // Messages are already cleared synchronously in the render body above.
   useEffect(() => {
     if (!sessionId) return;
 

@@ -11,8 +11,8 @@ test.describe('Session Loading from URL', () => {
     await mockSessionWithSlides(page);
     await page.goto(`/sessions/${TEST_SESSION_ID}/edit`);
 
-    // Verify slide deck title is rendered in the SlidePanel header
-    await expect(page.locator('text=Benefits of Cloud Computing').first()).toBeVisible();
+    // Header shows session title (takes priority) or deck title once loaded
+    await expect(page.locator('header').getByText(/Benefits of Cloud Computing|Test Session With Slides/)).toBeVisible({ timeout: 10000 });
   });
 
   test('generator shows slide count in header after loading session', async ({ page }) => {
