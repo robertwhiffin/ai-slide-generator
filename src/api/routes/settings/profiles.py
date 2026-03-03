@@ -149,16 +149,17 @@ def get_profile(
         404: Profile not found
     """
     try:
-        # Check permission first and get the permission level
-        perm_service.require_view(profile_id)
-        permission = perm_service.get_current_user_permission(profile_id)
-        
+        # Check existence first
         profile = service.get_profile(profile_id)
         if not profile:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"Profile {profile_id} not found",
             )
+        
+        # Then check permission
+        perm_service.require_view(profile_id)
+        permission = perm_service.get_current_user_permission(profile_id)
         
         # Convert ORM object to response with permission
         return ProfileDetail(
