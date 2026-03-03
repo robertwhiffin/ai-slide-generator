@@ -89,7 +89,7 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
   // currentProfile/loadProfile are also excluded — accessed via refs so they don't cause re-runs.
   useEffect(() => {
     if (!urlSessionId) return;
-    if (urlSessionId === sessionIdRef.current && slideDeckRef.current != null) return;
+    if (urlSessionId === sessionIdRef.current) return;
     let cancelled = false;
     (async () => {
       try {
