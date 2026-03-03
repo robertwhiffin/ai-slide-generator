@@ -37,6 +37,6 @@ env:
   #   valueFrom: "secrets/tellr-secrets/account-id"
   # - name: DATABRICKS_ACCOUNT_ADMIN_TOKEN
   #   valueFrom: "secrets/tellr-secrets/account-admin-token"
-  # Option 2: Workspace Admin (single workspace)
-  # - name: DATABRICKS_WORKSPACE_ADMIN_TOKEN
-  #   valueFrom: "secrets/tellr-secrets/workspace-admin-token"
+  # Option 2: Workspace Admin (single workspace) - ENABLED
+  - name: DATABRICKS_WORKSPACE_ADMIN_TOKEN
+    valueFrom: "secrets/tellr-secrets/workspace-admin-token"
