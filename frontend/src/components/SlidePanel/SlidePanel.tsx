@@ -821,6 +821,7 @@ export const SlidePanel: React.FC<SlidePanelProps> = ({ slideDeck, rawHtml, onSl
               isAutoVerifying={verifyingSlides.has(index)}
               onOptimize={() => handleOptimizeLayout(index)}
               isOptimizing={optimizingSlideIndex === index}
+              readOnly={readOnly}
             />
           </div>
           );

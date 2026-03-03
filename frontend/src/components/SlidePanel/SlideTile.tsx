@@ -21,6 +21,7 @@ interface SlideTileProps {
   isAutoVerifying?: boolean;  // True when auto-verification is running for this slide
   onOptimize?: () => void;
   isOptimizing?: boolean;
+  readOnly?: boolean;  // When true, hide edit/delete/reorder controls
 }
 
 const SLIDE_WIDTH = 1280;
@@ -38,6 +39,7 @@ export const SlideTile: React.FC<SlideTileProps> = ({
   isAutoVerifying = false,
   onOptimize,
   isOptimizing = false,
+  readOnly = false,
 }) => {
   const [isEditing, setIsEditing] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -201,16 +203,18 @@ export const SlideTile: React.FC<SlideTileProps> = ({
         {/* Slide Header with Actions */}
       <div className="px-4 py-2 bg-gray-100 border-b flex items-center justify-between">
           <div className="flex items-center space-x-2">
-            {/* Drag Handle */}
-            <Tooltip text="Drag to reorder">
-              <button
-                {...attributes}
-                {...listeners}
-                className="cursor-grab active:cursor-grabbing text-gray-500 hover:text-gray-700"
-              >
-                <FiMove size={18} />
-              </button>
-            </Tooltip>
+            {/* Drag Handle - hidden in readOnly mode */}
+            {!readOnly && (
+              <Tooltip text="Drag to reorder">
+                <button
+                  {...attributes}
+                  {...listeners}
+                  className="cursor-grab active:cursor-grabbing text-gray-500 hover:text-gray-700"
+                >
+                  <FiMove size={18} />
+                </button>
+              </Tooltip>
+            )}
             
         <span className="text-sm font-medium text-gray-700">
           Slide {index + 1}
@@ -240,20 +244,25 @@ export const SlideTile: React.FC<SlideTileProps> = ({
               </button>
             </Tooltip>
             
-            <Tooltip text={isSelected ? 'Selected for editing' : 'Add to chat context'}>
-              <button
-                onClick={() => setSelection([index], [slide])}
-                className={`p-1 rounded ${
-                  isSelected
-                    ? 'text-blue-700 bg-blue-50'
-                    : 'text-indigo-600 hover:bg-indigo-50'
-                }`}
-                aria-pressed={isSelected}
-              >
-                <FiMessageSquare size={16} />
-              </button>
-            </Tooltip>
-            {onOptimize && (
+            {/* Selection for chat context - hidden in readOnly mode */}
+            {!readOnly && (
+              <Tooltip text={isSelected ? 'Selected for editing' : 'Add to chat context'}>
+                <button
+                  onClick={() => setSelection([index], [slide])}
+                  className={`p-1 rounded ${
+                    isSelected
+                      ? 'text-blue-700 bg-blue-50'
+                      : 'text-indigo-600 hover:bg-indigo-50'
+                  }`}
+                  aria-pressed={isSelected}
+                >
+                  <FiMessageSquare size={16} />
+                </button>
+              </Tooltip>
+            )}
+            
+            {/* Optimize button - hidden in readOnly mode */}
+            {!readOnly && onOptimize && (
               <Tooltip text={isOptimizing ? 'Optimizing layout...' : 'Optimize layout'}>
                 <button
                   onClick={onOptimize}
@@ -272,23 +281,30 @@ export const SlideTile: React.FC<SlideTileProps> = ({
                 </button>
               </Tooltip>
             )}
-            <Tooltip text="Edit slide HTML">
-              <button
-                onClick={() => setIsEditing(true)}
-                className="p-1 text-blue-600 hover:bg-blue-50 rounded"
-              >
-                <FiEdit size={16} />
-              </button>
-            </Tooltip>
             
-            <Tooltip text="Delete slide" align="end">
-              <button
-                onClick={onDelete}
-                className="p-1 text-red-600 hover:bg-red-50 rounded"
-              >
-                <FiTrash2 size={16} />
-              </button>
-            </Tooltip>
+            {/* Edit button - hidden in readOnly mode */}
+            {!readOnly && (
+              <Tooltip text="Edit slide HTML">
+                <button
+                  onClick={() => setIsEditing(true)}
+                  className="p-1 text-blue-600 hover:bg-blue-50 rounded"
+                >
+                  <FiEdit size={16} />
+                </button>
+              </Tooltip>
+            )}
+            
+            {/* Delete button - hidden in readOnly mode */}
+            {!readOnly && (
+              <Tooltip text="Delete slide" align="end">
+                <button
+                  onClick={onDelete}
+                  className="p-1 text-red-600 hover:bg-red-50 rounded"
+                >
+                  <FiTrash2 size={16} />
+                </button>
+              </Tooltip>
+            )}
           </div>
       </div>
 
