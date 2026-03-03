@@ -112,6 +112,9 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
 
   // Non-null when viewing a session whose profile has been deleted
   const [deletedProfileName, setDeletedProfileName] = useState<string | null>(null);
+  
+  // Permission level for the current session (CAN_VIEW, CAN_EDIT, CAN_MANAGE)
+  const [sessionPermission, setSessionPermission] = useState<'CAN_VIEW' | 'CAN_EDIT' | 'CAN_MANAGE'>('CAN_MANAGE');
 
   // Load session from URL parameter when on a session route
   // Skip if URL session ID matches current context (newly created session)
@@ -132,6 +135,9 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
         // Get session info to check profile
         const sessionInfo = await api.getSession(urlSessionId);
         if (cancelled) return;
+
+        // Store permission level from session info
+        setSessionPermission(sessionInfo.my_permission || 'CAN_MANAGE');
 
         if (sessionInfo.profile_deleted) {
           // Profile was soft-deleted -- show session in read-only mode
@@ -181,6 +187,7 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
     setSlideDeck(null);
     setRawHtml(null);
     setDeletedProfileName(null);
+    setSessionPermission('CAN_MANAGE'); // User owns new sessions
     setChatKey(prev => prev + 1);
     const newId = createNewSession();
     await api.createSession({ sessionId: newId });
@@ -207,6 +214,7 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
     setPreviewVersion(null);
     setPreviewDeck(null);
     setDeletedProfileName(null);
+    setSessionPermission('CAN_MANAGE'); // User owns new sessions
     const newId = createNewSession();
     await api.createSession({ sessionId: newId });
     navigate(`/sessions/${newId}/edit`);
@@ -605,8 +613,9 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
                   }).catch(() => {});
                 }
               }}
-              disabled={viewOnly || !!previewVersion || isLoadingSession || !!deletedProfileName}
+              disabled={viewOnly || !!previewVersion || isLoadingSession || !!deletedProfileName || sessionPermission === 'CAN_VIEW'}
               previewMessages={previewMessages}
+              viewOnlyReason={sessionPermission === 'CAN_VIEW' ? 'You have view-only access to this session' : undefined}
             />
           </div>
 
@@ -618,10 +627,10 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
             <SlidePanel
               slideDeck={displayDeck}
               rawHtml={rawHtml}
-              onSlideChange={viewOnly || previewVersion || deletedProfileName ? undefined : setSlideDeck}
+              onSlideChange={viewOnly || previewVersion || deletedProfileName || sessionPermission === 'CAN_VIEW' ? undefined : setSlideDeck}
               scrollToSlide={scrollTarget}
-              onSendMessage={viewOnly || previewVersion || deletedProfileName ? undefined : handleSendMessage}
-              readOnly={viewOnly || !!previewVersion || !!deletedProfileName}
+              onSendMessage={viewOnly || previewVersion || deletedProfileName || sessionPermission === 'CAN_VIEW' ? undefined : handleSendMessage}
+              readOnly={viewOnly || !!previewVersion || !!deletedProfileName || sessionPermission === 'CAN_VIEW'}
               onVerificationComplete={handleVerificationComplete}
               versionKey={versionKey}
             />

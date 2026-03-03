@@ -168,18 +168,16 @@ async def create_session(request: CreateSessionRequest = None):
 async def list_sessions(
     limit: int = Query(50, ge=1, le=100, description="Maximum sessions to return"),
 ):
-    """List sessions created by the current user.
+    """List sessions created by the current user (My Sessions).
 
     Sessions are scoped to the authenticated user only.
-    Other users' sessions are not visible even if you have profile access.
-    
-    To access another user's session, they must share the session URL directly.
+    Use /api/sessions/shared for sessions shared with you via profile access.
 
     Args:
         limit: Maximum number of sessions to return
 
     Returns:
-        List of session summaries
+        List of session summaries with my_permission = CAN_MANAGE
     """
     current_user = get_current_user()
 
@@ -202,6 +200,73 @@ async def list_sessions(
         raise HTTPException(
             status_code=500,
             detail=f"Failed to list sessions: {str(e)}",
+        ) from e
+
+
+@router.get("/shared")
+async def list_shared_sessions(
+    limit: int = Query(50, ge=1, le=100, description="Maximum sessions to return"),
+    db: Session = Depends(get_db),
+):
+    """List sessions shared with the current user via profile access.
+
+    Returns sessions from profiles where the user has CAN_VIEW, CAN_EDIT, or CAN_MANAGE
+    permission, excluding sessions created by the user themselves (those appear in /api/sessions).
+
+    Args:
+        limit: Maximum number of sessions to return
+
+    Returns:
+        List of session summaries with my_permission indicating access level
+    """
+    current_user = get_current_user()
+    ctx = get_permission_context()
+
+    if not ctx:
+        return {"sessions": [], "count": 0}
+
+    try:
+        # Get all profile IDs the user has access to
+        perm_service = PermissionService(db)
+        accessible_profile_ids = perm_service.get_accessible_profile_ids(
+            user_id=ctx.user_id,
+            user_name=ctx.user_name,
+            group_ids=ctx.group_ids,
+        )
+
+        if not accessible_profile_ids:
+            return {"sessions": [], "count": 0}
+
+        # Get sessions from those profiles, excluding user's own sessions
+        session_manager = get_session_manager()
+        sessions = await asyncio.to_thread(
+            session_manager.list_sessions_by_profile_ids,
+            profile_ids=accessible_profile_ids,
+            exclude_created_by=current_user,
+            limit=limit,
+        )
+
+        # Add permission level for each session based on its profile
+        for session in sessions:
+            profile_id = session.get("profile_id")
+            if profile_id:
+                permission = perm_service.get_user_permission(
+                    profile_id=profile_id,
+                    user_id=ctx.user_id,
+                    user_name=ctx.user_name,
+                    group_ids=ctx.group_ids,
+                )
+                session["my_permission"] = permission.value if permission else "CAN_VIEW"
+            else:
+                session["my_permission"] = "CAN_VIEW"
+
+        return {"sessions": sessions, "count": len(sessions)}
+
+    except Exception as e:
+        logger.error(f"Failed to list shared sessions: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to list shared sessions: {str(e)}",
         ) from e
 
 

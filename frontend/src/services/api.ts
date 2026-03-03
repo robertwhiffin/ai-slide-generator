@@ -101,6 +101,8 @@ export interface Session {
   google_slides_url?: string | null;
   google_slides_presentation_id?: string | null;
   profile_deleted?: boolean;
+  /** User's permission level on this session (CAN_VIEW, CAN_EDIT, CAN_MANAGE) */
+  my_permission?: 'CAN_VIEW' | 'CAN_EDIT' | 'CAN_MANAGE';
 }
 
 interface SendMessageParams {
@@ -276,13 +278,26 @@ export const api = {
   },
 
   /**
-   * List all sessions
+   * List user's own sessions (My Sessions)
    */
   async listSessions(limit = 50): Promise<{ sessions: Session[]; count: number }> {
     const response = await fetch(`${API_BASE_URL}/api/sessions?limit=${limit}`);
 
     if (!response.ok) {
       throw new ApiError(response.status, 'Failed to list sessions');
+    }
+
+    return response.json();
+  },
+
+  /**
+   * List sessions shared with the user via profile access (Shared with Me)
+   */
+  async listSharedSessions(limit = 50): Promise<{ sessions: Session[]; count: number }> {
+    const response = await fetch(`${API_BASE_URL}/api/sessions/shared?limit=${limit}`);
+
+    if (!response.ok) {
+      throw new ApiError(response.status, 'Failed to list shared sessions');
     }
 
     return response.json();

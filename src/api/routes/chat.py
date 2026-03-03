@@ -7,15 +7,19 @@ Supports:
 - POST /api/chat/stream - Server-Sent Events for real-time updates
 - POST /api/chat/async - Submit for async processing (polling-based)
 - GET /api/chat/poll/{request_id} - Poll for async request status
+
+Chat access is controlled by session permissions:
+- CAN_EDIT or CAN_MANAGE required to send messages (creates/modifies slides)
 """
 
 import asyncio
 import contextvars
 import logging
-from typing import AsyncGenerator
+from typing import AsyncGenerator, Optional, Tuple
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
+from sqlalchemy.orm import Session as DBSession
 
 from src.api.schemas.requests import ChatRequest
 from src.api.schemas.responses import ChatResponse
@@ -24,17 +28,69 @@ from src.api.services.chat_service import get_chat_service
 from src.api.services.job_queue import enqueue_job
 from src.api.services.session_manager import SessionNotFoundError, get_session_manager
 from src.core.context_utils import run_in_thread_with_context
+from src.core.database import get_db
+from src.core.permission_context import get_permission_context
+from src.core.user_context import get_current_user
+from src.database.models.profile_contributor import PermissionLevel
+from src.services.permission_service import PermissionService, PERMISSION_PRIORITY
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api", tags=["chat"])
 
 
+def _check_chat_permission(session_id: str, db: DBSession) -> None:
+    """Verify user has CAN_EDIT or higher permission to send chat messages.
+    
+    Args:
+        session_id: Session identifier
+        db: Database session
+        
+    Raises:
+        HTTPException 403: If user doesn't have required permission
+    """
+    session_manager = get_session_manager()
+    current_user = get_current_user()
+    ctx = get_permission_context()
+    
+    try:
+        session_info = session_manager.get_session(session_id)
+    except SessionNotFoundError:
+        # Let the main handler deal with missing sessions
+        return
+    
+    # Session creator has full access
+    if session_info.get("created_by") == current_user:
+        return
+    
+    # Check profile-based permission
+    profile_id = session_info.get("profile_id")
+    if profile_id and ctx:
+        perm_service = PermissionService(db)
+        permission = perm_service.get_user_permission(
+            profile_id=profile_id,
+            user_id=ctx.user_id,
+            user_name=ctx.user_name,
+            group_ids=ctx.group_ids,
+        )
+        if permission and PERMISSION_PRIORITY[permission] >= PERMISSION_PRIORITY[PermissionLevel.CAN_EDIT]:
+            return
+    
+    raise HTTPException(
+        status_code=403,
+        detail="You don't have permission to send messages in this session. CAN_EDIT or higher required.",
+    )
+
+
 @router.post("/chat", response_model=ChatResponse)
-async def send_message(request: ChatRequest) -> ChatResponse:
+async def send_message(
+    request: ChatRequest,
+    db: DBSession = Depends(get_db),
+) -> ChatResponse:
     """Send a message to the AI agent and receive response with slides.
 
     Requires a valid session_id. Create sessions via POST /api/sessions first.
+    Requires CAN_EDIT or higher permission on the session.
     Uses asyncio.to_thread to avoid blocking the event loop during LLM calls.
 
     Args:
@@ -44,7 +100,7 @@ async def send_message(request: ChatRequest) -> ChatResponse:
         Chat response with messages, slide_deck, and metadata
 
     Raises:
-        HTTPException: 404 if session not found, 409 if session busy, 500 if agent fails
+        HTTPException: 403 if no permission, 404 if session not found, 409 if session busy, 500 if agent fails
     """
     logger.info(
         "Received chat request",
@@ -53,6 +109,9 @@ async def send_message(request: ChatRequest) -> ChatResponse:
             "session_id": request.session_id,
         },
     )
+
+    # Check permission before processing
+    _check_chat_permission(request.session_id, db)
 
     session_manager = get_session_manager()
 
@@ -101,7 +160,10 @@ async def send_message(request: ChatRequest) -> ChatResponse:
 
 
 @router.post("/chat/stream")
-async def send_message_streaming(request: ChatRequest) -> StreamingResponse:
+async def send_message_streaming(
+    request: ChatRequest,
+    db: DBSession = Depends(get_db),
+) -> StreamingResponse:
     """Send a message and receive real-time streaming updates via SSE.
 
     This endpoint yields Server-Sent Events as the agent executes:
@@ -111,6 +173,8 @@ async def send_message_streaming(request: ChatRequest) -> StreamingResponse:
     - error: Error occurred
     - complete: Generation finished with final slides
 
+    Requires CAN_EDIT or higher permission on the session.
+
     Args:
         request: Chat request with session_id and message
 
@@ -118,7 +182,7 @@ async def send_message_streaming(request: ChatRequest) -> StreamingResponse:
         StreamingResponse with SSE events
 
     Raises:
-        HTTPException: 409 if session busy
+        HTTPException: 403 if no permission, 409 if session busy
     """
     logger.info(
         "Received streaming chat request",
@@ -127,6 +191,9 @@ async def send_message_streaming(request: ChatRequest) -> StreamingResponse:
             "session_id": request.session_id,
         },
     )
+
+    # Check permission before processing
+    _check_chat_permission(request.session_id, db)
 
     session_manager = get_session_manager()
 
@@ -231,11 +298,16 @@ async def health_check():
 
 
 @router.post("/chat/async")
-async def submit_chat_async(request: ChatRequest):
+async def submit_chat_async(
+    request: ChatRequest,
+    db: DBSession = Depends(get_db),
+):
     """Submit a chat request for async processing (polling-based).
 
     Use this endpoint when SSE streaming is not available (e.g., Databricks Apps
     behind a reverse proxy with connection timeouts).
+
+    Requires CAN_EDIT or higher permission on the session.
 
     Flow:
     1. POST /api/chat/async -> returns request_id
@@ -248,7 +320,7 @@ async def submit_chat_async(request: ChatRequest):
         Dictionary with request_id and initial status
 
     Raises:
-        HTTPException: 409 if session busy
+        HTTPException: 403 if no permission, 409 if session busy
     """
     logger.info(
         "Received async chat request",
@@ -257,6 +329,9 @@ async def submit_chat_async(request: ChatRequest):
             "session_id": request.session_id,
         },
     )
+
+    # Check permission before processing
+    _check_chat_permission(request.session_id, db)
 
     session_manager = get_session_manager()
 
