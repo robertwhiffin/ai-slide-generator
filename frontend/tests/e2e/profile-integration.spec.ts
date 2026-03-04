@@ -241,6 +241,7 @@ test.describe('Profile CRUD Operations', () => {
     await skipWizardStep2(page);
     await completeWizardStep3(page);
     await skipWizardStep4(page);
+    await skipWizardStep5(page);
     await submitWizard(page);
 
     // Wait for wizard to close
@@ -471,6 +472,7 @@ test.describe('Profile Validation', () => {
       await skipWizardStep2(page);
       await completeWizardStep3(page);
       await skipWizardStep4(page);
+    await skipWizardStep5(page);
       await submitWizard(page);
 
       // Should show error - use more specific selector to avoid matching "Duplicate" buttons
@@ -885,6 +887,7 @@ test.describe('Profile Edge Cases', () => {
     await skipWizardStep2(page);
     await completeWizardStep3(page);
     await skipWizardStep4(page);
+    await skipWizardStep5(page);
     await submitWizard(page);
 
     // Wait for wizard to close
@@ -915,6 +918,7 @@ test.describe('Profile Edge Cases', () => {
     await skipWizardStep2(page);
     await completeWizardStep3(page);
     await skipWizardStep4(page);
+    await skipWizardStep5(page);
     await submitWizard(page);
 
     // Wait for wizard to close
