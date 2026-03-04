@@ -5,7 +5,7 @@
 
 ## Overview
 
-The AI Slide Generator implements role-based access control (RBAC) for sharing configuration profiles and their associated content with Databricks users and groups.
+The AI Slide Generator implements a permissions model for sharing configuration profiles and their associated content with Databricks users and groups.
 
 ## Permission Levels
 
@@ -72,17 +72,18 @@ The system needs to look up Databricks users and groups when adding contributors
 
 **When to use:** Organizations that want to share profiles across multiple workspaces.
 
+**Requires:** A Personal Access Token (PAT) from a **Databricks Account Admin**. This is a user with account-level administrative privileges, not just workspace access.
+
 **Configuration:**
 ```yaml
 DATABRICKS_ACCOUNT_HOST: "https://accounts.cloud.databricks.com"
 DATABRICKS_ACCOUNT_ID: "your-account-id"
-DATABRICKS_ACCOUNT_ADMIN_TOKEN: "dapi..."
+DATABRICKS_ACCOUNT_ADMIN_TOKEN: "dapi..."  # Account admin PAT
 ```
 
 **Capabilities:**
 - Lists all users and groups in the Databricks account
 - Works across all workspaces in the account
-- Requires an account admin PAT
 
 **API Used:** [Account SCIM API](https://docs.databricks.com/api/account/accountusers/list)
 
@@ -92,16 +93,17 @@ DATABRICKS_ACCOUNT_ADMIN_TOKEN: "dapi..."
 
 **When to use:** Single-workspace deployments where account-level access isn't available.
 
+**Requires:** A Personal Access Token (PAT) from a **Workspace Admin**. This is a user with administrative privileges on the specific workspace (member of the `admins` group).
+
 **Configuration:**
 ```yaml
-DATABRICKS_WORKSPACE_ADMIN_TOKEN: "dapi..."
+DATABRICKS_WORKSPACE_ADMIN_TOKEN: "dapi..."  # Workspace admin PAT
 # DATABRICKS_HOST is auto-injected by Databricks Apps
 ```
 
 **Capabilities:**
 - Lists all users and groups in the specific workspace
 - Only sees users/groups assigned to that workspace
-- Requires a workspace admin PAT
 
 **API Used:** [Workspace SCIM API](https://docs.databricks.com/api/workspace/users/list)
 
