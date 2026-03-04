@@ -89,7 +89,12 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
   // currentProfile/loadProfile are also excluded — accessed via refs so they don't cause re-runs.
   useEffect(() => {
     if (!urlSessionId) return;
-    if (urlSessionId === sessionIdRef.current) return;
+    // Skip if the URL already matches the current session AND we have a deck loaded.
+    // This prevents a spurious getSession call for newly-created sessions (deck=null)
+    // that would otherwise return 404 in tests (or redundantly call switchSession in prod).
+    // Note: if deck is null (new session), we DO fire so switchSession can run and restore
+    // api.setCurrentSessionId(newId) after api.createSession may have overwritten it.
+    if (urlSessionId === sessionIdRef.current && slideDeckRef.current != null) return;
     let cancelled = false;
     (async () => {
       try {

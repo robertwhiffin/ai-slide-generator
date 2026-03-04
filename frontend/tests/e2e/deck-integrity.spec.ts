@@ -136,8 +136,9 @@ async function setupMocks(page: Page) {
         body: JSON.stringify(mockSlides)
       });
     } else {
-      // Session details - return 404 for new sessions
-      route.fulfill({ status: 404 });
+      // Individual session GET — return a valid empty session so the URL effect
+      // doesn't 404 and navigate away when a new session is loaded.
+      route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ session_id: 'test-session-id', title: null, has_slide_deck: false, messages: [] }) });
     }
   });
 
