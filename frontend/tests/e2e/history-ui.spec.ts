@@ -164,8 +164,8 @@ test.describe('SessionHistoryList', () => {
     await goToHistory(page);
 
     await expect(page.getByRole('heading', { name: 'Sessions', exact: true })).toBeVisible();
-    // Check for "My Sessions" tab with count
-    await expect(page.getByRole('button', { name: /My Sessions/ })).toBeVisible();
+    // Check for "My Sessions" tab (using exact match to avoid nav button)
+    await expect(page.getByRole('button', { name: 'My Sessions', exact: true }).first()).toBeVisible();
   });
 
   test('renders all sessions in table', async ({ page }) => {
