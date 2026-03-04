@@ -6,7 +6,7 @@ from sqlalchemy.pool import StaticPool
 
 from src.core.database import Base
 from src.core.defaults import DEFAULT_CONFIG
-from src.core.settings_db import get_settings, load_settings_from_database, reload_settings
+from src.core.settings_db import fetch_prompt_content, get_settings, load_settings_from_database, reload_settings
 from src.database.models import (
     ConfigAIInfra,
     ConfigGenieSpace,
@@ -202,7 +202,6 @@ def test_load_settings_profile_not_found(test_db, monkeypatch):
 
 def test_settings_validation(test_db, test_profile, monkeypatch):
     """Test that Pydantic validation works on loaded settings."""
-    # Mock get_db_session
     def mock_get_db_session():
         class MockContextManager:
             def __enter__(self):
@@ -215,7 +214,44 @@ def test_settings_validation(test_db, test_profile, monkeypatch):
     
     settings = load_settings_from_database()
     
-    # Verify Pydantic validation worked
     assert 0.0 <= settings.llm.temperature <= 2.0
     assert settings.llm.max_tokens > 0
+
+
+def test_fetch_prompt_content(test_db, test_profile, monkeypatch):
+    """Test fetching prompt content returns expected keys and values."""
+    def mock_get_db_session():
+        class MockContextManager:
+            def __enter__(self):
+                return test_db
+            def __exit__(self, *args):
+                pass
+        return MockContextManager()
+
+    monkeypatch.setattr("src.core.settings_db.get_db_session", mock_get_db_session)
+
+    content = fetch_prompt_content(profile_id=test_profile.id)
+
+    assert "system_prompt" in content
+    assert "slide_style" in content
+    assert "deck_prompt" in content
+    assert "image_guidelines" in content
+    assert "slide_editing_instructions" in content
+    assert content["system_prompt"] != ""
+
+
+def test_fetch_prompt_content_profile_not_found(test_db, monkeypatch):
+    """Test fetch_prompt_content raises for missing profile."""
+    def mock_get_db_session():
+        class MockContextManager:
+            def __enter__(self):
+                return test_db
+            def __exit__(self, *args):
+                pass
+        return MockContextManager()
+
+    monkeypatch.setattr("src.core.settings_db.get_db_session", mock_get_db_session)
+
+    with pytest.raises(ValueError, match="Profile 9999 not found"):
+        fetch_prompt_content(profile_id=9999)
 
