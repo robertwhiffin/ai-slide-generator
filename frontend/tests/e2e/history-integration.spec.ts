@@ -167,7 +167,7 @@ async function createTestSessionViaAPI(
 async function goToHistory(page: Page): Promise<void> {
   await page.goto('/');
   await page.getByRole('navigation').getByRole('button', { name: 'My Sessions' }).click();
-  await expect(page.getByRole('heading', { name: 'My Sessions' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Sessions' })).toBeVisible();
 }
 
 async function goToGenerator(page: Page): Promise<void> {
@@ -185,7 +185,9 @@ test.describe('Session History Display', () => {
     await goToHistory(page);
 
     // Page heading should be visible
-    await expect(page.getByRole('heading', { name: 'My Sessions' })).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'Sessions' })).toBeVisible();
+    // My Sessions tab should be visible
+    await expect(page.getByRole('button', { name: /My Sessions/ })).toBeVisible();
 
     // Either shows table or empty state
     const table = page.getByRole('table');
@@ -451,7 +453,7 @@ test.describe('Session Restore', () => {
       await restoreButton.click();
 
       // Should navigate away from History
-      await expect(page.getByRole('heading', { name: 'My Sessions' })).not.toBeVisible({ timeout: 5000 });
+      await expect(page.getByRole('heading', { name: 'Sessions' })).not.toBeVisible({ timeout: 5000 });
     }
   });
 });
@@ -512,7 +514,7 @@ test.describe('Session History Navigation', () => {
 
     // Navigate back to History via nav
     await page.getByRole('navigation').getByRole('button', { name: 'My Sessions' }).click();
-    await expect(page.getByRole('heading', { name: 'My Sessions' })).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'Sessions' })).toBeVisible();
   });
 });
 
