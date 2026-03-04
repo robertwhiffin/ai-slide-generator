@@ -37,10 +37,14 @@ class WorkspaceIdentityProvider:
         Initialize the workspace identity provider.
         
         Args:
-            host: Databricks workspace URL
+            host: Databricks workspace URL (with or without https://)
             token: Workspace admin PAT
         """
-        self.host = host.rstrip("/")
+        # Ensure host has https:// scheme
+        host = host.rstrip("/")
+        if not host.startswith("https://") and not host.startswith("http://"):
+            host = f"https://{host}"
+        self.host = host
         self.token = token
         logger.info(f"WorkspaceIdentityProvider initialized for {self.host}")
     
@@ -176,16 +180,16 @@ class WorkspaceIdentityProvider:
             try:
                 users = self.list_users(filter_query=user_filter, max_results=max_results)
                 results.extend(users)
-            except WorkspaceIdentityError:
-                logger.warning("Failed to search users in Workspace SCIM API")
+            except WorkspaceIdentityError as e:
+                logger.warning(f"Failed to search users in Workspace SCIM API: {e}")
         
         if include_groups:
             group_filter = f'displayName co "{query}"'
             try:
                 groups = self.list_groups(filter_query=group_filter, max_results=max_results)
                 results.extend(groups)
-            except WorkspaceIdentityError:
-                logger.warning("Failed to search groups in Workspace SCIM API")
+            except WorkspaceIdentityError as e:
+                logger.warning(f"Failed to search groups in Workspace SCIM API: {e}")
         
         # Sort by display name and limit
         results.sort(key=lambda x: x.get("displayName") or x.get("userName", ""))

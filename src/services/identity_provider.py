@@ -80,7 +80,7 @@ class IdentityProvider:
         account_token = os.getenv("DATABRICKS_ACCOUNT_ADMIN_TOKEN")
         
         if account_host and account_id and account_token:
-            logger.info("Account admin credentials found - using Account API mode")
+            logger.info("Using Account API mode for identity provider")
             return IdentityProviderMode.ACCOUNT
         
         # Check for Workspace API credentials
@@ -88,11 +88,11 @@ class IdentityProvider:
         workspace_host = os.getenv("DATABRICKS_HOST")
         
         if workspace_token and workspace_host:
-            logger.info("Workspace admin token found - using Workspace API mode")
+            logger.info("Using Workspace API mode for identity provider")
             return IdentityProviderMode.WORKSPACE
         
         # Fall back to local table
-        logger.info("No admin tokens configured - using Local table mode")
+        logger.info("Using Local table mode for identity provider")
         return IdentityProviderMode.LOCAL
     
     def _create_provider(self):

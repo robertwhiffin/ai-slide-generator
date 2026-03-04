@@ -43,11 +43,15 @@ class AccountIdentityProvider:
         Initialize the account identity provider.
         
         Args:
-            account_host: Account console URL (e.g., https://accounts.cloud.databricks.com)
+            account_host: Account console URL (with or without https://)
             account_id: Databricks account ID
             token: Account admin PAT
         """
-        self.account_host = account_host.rstrip("/")
+        # Ensure host has https:// scheme
+        account_host = account_host.rstrip("/")
+        if not account_host.startswith("https://") and not account_host.startswith("http://"):
+            account_host = f"https://{account_host}"
+        self.account_host = account_host
         self.account_id = account_id
         self.token = token
         self.base_url = f"{self.account_host}/api/2.0/accounts/{self.account_id}"
