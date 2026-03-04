@@ -217,6 +217,11 @@ async function skipWizardStep4(page: Page): Promise<void> {
   await page.getByRole('button', { name: /Next/i }).click();
 }
 
+async function skipWizardStep5(page: Page): Promise<void> {
+  // Step 5: Share (contributors) - skip by clicking Next
+  await page.getByRole('button', { name: /Next/i }).click();
+}
+
 async function submitWizard(page: Page): Promise<void> {
   // Step 5: Review - click Create Profile (exact match to avoid matching "+ Create Profile" button)
   await page.getByRole('button', { name: 'Create Profile', exact: true }).click();

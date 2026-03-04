@@ -215,13 +215,12 @@ test.describe('SessionHistoryList', () => {
     await expect(page.getByRole('button', { name: 'Delete' }).first()).toBeVisible();
   });
 
-  test('shows Restore button for non-current sessions with slides', async ({ page }) => {
+  test('shows Open button for sessions with slides', async ({ page }) => {
     await goToHistory(page);
 
-    // At least one session should have a Restore button
-    // (depends on which session is "current" - mock shows none as current)
-    const restoreButtons = await page.getByRole('button', { name: 'Restore' }).count();
-    expect(restoreButtons).toBeGreaterThan(0);
+    // Sessions with slides should have an Open button
+    const openButtons = await page.getByRole('button', { name: 'Open' }).count();
+    expect(openButtons).toBeGreaterThan(0);
   });
 
 });
