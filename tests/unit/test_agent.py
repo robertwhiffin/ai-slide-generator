@@ -113,32 +113,13 @@ class TestSlideGeneratorAgent:
 
             agent = SlideGeneratorAgent()
 
-            # Verify MLflow tracking setup called (experiment creation moved to per-session)
             mock_mlflow.set_tracking_uri.assert_called_once_with("databricks")
 
-            # Verify components created
             assert agent.settings == mock_settings
             assert agent.client == mock_client
-            # Note: model is now created per-request for user context
-            assert agent.prompt is not None
-            # Note: tools and agent_executor are now created per-request for thread safety
+            # Prompt is no longer built at init — it is built per-request
+            assert not hasattr(agent, "prompt")
             assert agent.sessions == {}
-
-    def test_agent_initialization_missing_prompt(
-        self, mock_settings, mock_client, mock_mlflow, mock_langchain_components
-    ):
-        """Test agent initialization fails with missing system prompt."""
-        mock_settings.prompts = {}  # Empty prompts
-
-        with patch("src.services.agent.get_settings") as mock_get_settings, \
-             patch("src.services.agent.get_databricks_client") as mock_get_client, \
-             patch("src.services.agent.initialize_genie_conversation") as mock_init_genie:
-            mock_get_settings.return_value = mock_settings
-            mock_get_client.return_value = mock_client
-            mock_init_genie.return_value = "test-genie-conv-id"
-
-            with pytest.raises(AgentError, match="System prompt not found"):
-                SlideGeneratorAgent()
 
     def test_create_model_valid(self, agent_with_mocks):
         """Test model creation with valid settings."""
