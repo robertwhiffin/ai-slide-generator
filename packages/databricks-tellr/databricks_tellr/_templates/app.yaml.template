@@ -29,14 +29,19 @@ env:
     valueFrom: "system.databricks_host"
   - name: DATABRICKS_TOKEN
     valueFrom: "system.databricks_token"
-  # Identity Provider: Uncomment ONE option below to enable user/group listing
-  # Option 1: Account Admin (cross-workspace)
-  # - name: DATABRICKS_ACCOUNT_HOST
-  #   value: "https://accounts.cloud.databricks.com"
-  # - name: DATABRICKS_ACCOUNT_ID
-  #   valueFrom: "secrets/tellr-secrets/account-id"
-  # - name: DATABRICKS_ACCOUNT_ADMIN_TOKEN
-  #   valueFrom: "secrets/tellr-secrets/account-admin-token"
-  # Option 2: Workspace Admin (single workspace) - ENABLED
+  
+  # Identity Provider Configuration
+  # Priority: Account API > Workspace API > Local table
+  # Set the appropriate token to enable that mode (leave empty for local mode)
+  
+  # Option 1: Account Admin (for cross-workspace user/group listing)
+  - name: DATABRICKS_ACCOUNT_HOST
+    value: ""
+  - name: DATABRICKS_ACCOUNT_ID
+    value: ""
+  - name: DATABRICKS_ACCOUNT_ADMIN_TOKEN
+    value: ""
+  
+  # Option 2: Workspace Admin (for single workspace user/group listing)
   - name: DATABRICKS_WORKSPACE_ADMIN_TOKEN
-    valueFrom: "secrets/tellr-secrets/workspace-admin-token"
+    value: ""
