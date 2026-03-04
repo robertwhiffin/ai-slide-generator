@@ -8,7 +8,6 @@ settings API endpoints.
 
 import logging
 import os
-from functools import lru_cache
 from typing import Any, Optional
 
 from pydantic import Field, field_validator
@@ -163,6 +162,95 @@ def get_active_profile_id() -> Optional[int]:
     return _active_profile_id
 
 
+def _resolve_profile(db, profile_id: Optional[int] = None) -> "ConfigProfile":
+    """Resolve a profile by ID, falling back to active then default.
+
+    Args:
+        db: SQLAlchemy session
+        profile_id: Specific profile ID, or None for active/default
+
+    Returns:
+        ConfigProfile instance
+
+    Raises:
+        ValueError: If no matching profile is found
+    """
+    if profile_id is None and _active_profile_id is not None:
+        profile = db.query(ConfigProfile).filter_by(id=_active_profile_id).first()
+        if not profile:
+            logger.warning(
+                f"Active profile {_active_profile_id} not found, falling back to default"
+            )
+            profile = db.query(ConfigProfile).filter_by(is_default=True).first()
+    elif profile_id is None:
+        profile = db.query(ConfigProfile).filter_by(is_default=True).first()
+        if not profile:
+            raise ValueError("No default profile found in database")
+    else:
+        profile = db.query(ConfigProfile).filter_by(id=profile_id).first()
+        if not profile:
+            raise ValueError(f"Profile {profile_id} not found")
+    return profile
+
+
+def fetch_prompt_content(profile_id: Optional[int] = None) -> dict[str, str]:
+    """Fetch the latest prompt content from the database for a profile.
+
+    This is a lightweight query (3 SELECTs) designed to be called per-request
+    so that prompt edits take effect immediately without agent reload.
+
+    Args:
+        profile_id: Profile ID to fetch for, or None for active/default
+
+    Returns:
+        Dict with keys: deck_prompt, slide_style, image_guidelines,
+        system_prompt, slide_editing_instructions
+    """
+    try:
+        with get_db_session() as db:
+            profile = _resolve_profile(db, profile_id)
+
+            prompts = db.query(ConfigPrompts).filter_by(profile_id=profile.id).first()
+            if not prompts:
+                raise ValueError(f"Prompts settings not found for profile {profile.id}")
+
+            deck_prompt_content = None
+            if prompts.selected_deck_prompt_id:
+                from src.database.models import SlideDeckPromptLibrary
+
+                deck_prompt = db.query(SlideDeckPromptLibrary).filter_by(
+                    id=prompts.selected_deck_prompt_id,
+                    is_active=True,
+                ).first()
+                if deck_prompt:
+                    deck_prompt_content = deck_prompt.prompt_content
+
+            slide_style_content = None
+            image_guidelines = None
+            if prompts.selected_slide_style_id:
+                from src.database.models import SlideStyleLibrary
+
+                slide_style = db.query(SlideStyleLibrary).filter_by(
+                    id=prompts.selected_slide_style_id,
+                    is_active=True,
+                ).first()
+                if slide_style:
+                    slide_style_content = slide_style.style_content
+                    image_guidelines = slide_style.image_guidelines
+
+            return {
+                "deck_prompt": deck_prompt_content or "",
+                "slide_style": slide_style_content or "",
+                "image_guidelines": image_guidelines or "",
+                "system_prompt": prompts.system_prompt,
+                "slide_editing_instructions": prompts.slide_editing_instructions,
+            }
+
+    except Exception as e:
+        logger.error(f"Failed to fetch prompt content: {e}", exc_info=True)
+        raise
+
+
 def load_settings_from_database(profile_id: Optional[int] = None) -> AppSettings:
     """
     Load settings from database profile.
@@ -176,84 +264,25 @@ def load_settings_from_database(profile_id: Optional[int] = None) -> AppSettings
     Raises:
         ValueError: If profile not found or required settings missing
     """
-    global _active_profile_id
-
     try:
         with get_db_session() as db:
-            # Get profile (priority: specified > active > default)
-            if profile_id is None and _active_profile_id is not None:
-                # Use the currently active profile
-                profile = db.query(ConfigProfile).filter_by(id=_active_profile_id).first()
-                if not profile:
-                    # Fallback to default if active profile not found
-                    logger.warning(
-                        f"Active profile {_active_profile_id} not found, falling back to default"
-                    )
-                    profile = db.query(ConfigProfile).filter_by(is_default=True).first()
-            elif profile_id is None:
-                # No profile specified and no active profile - use default
-                profile = db.query(ConfigProfile).filter_by(is_default=True).first()
-                if not profile:
-                    raise ValueError("No default profile found in database")
-            else:
-                # Specific profile requested
-                profile = db.query(ConfigProfile).filter_by(id=profile_id).first()
-                if not profile:
-                    raise ValueError(f"Profile {profile_id} not found")
+            profile = _resolve_profile(db, profile_id)
 
             logger.info(
                 "Loading configuration from database",
                 extra={"profile_id": profile.id, "profile_name": profile.name},
             )
 
-            # Load all configs
             ai_infra = db.query(ConfigAIInfra).filter_by(profile_id=profile.id).first()
             if not ai_infra:
                 raise ValueError(f"AI infra settings not found for profile {profile.id}")
 
-            # Get the Genie space for this profile (optional - one per profile)
             genie_space = db.query(ConfigGenieSpace).filter_by(
                 profile_id=profile.id
             ).first()
-            # Genie space is optional - profiles without Genie run in prompt-only mode
 
-            prompts = db.query(ConfigPrompts).filter_by(profile_id=profile.id).first()
-            if not prompts:
-                raise ValueError(f"Prompts settings not found for profile {profile.id}")
+            prompt_content = fetch_prompt_content(profile.id)
 
-            # Load deck prompt content if selected
-            deck_prompt_content = None
-            if prompts.selected_deck_prompt_id:
-                from src.database.models import SlideDeckPromptLibrary
-                deck_prompt = db.query(SlideDeckPromptLibrary).filter_by(
-                    id=prompts.selected_deck_prompt_id,
-                    is_active=True
-                ).first()
-                if deck_prompt:
-                    deck_prompt_content = deck_prompt.prompt_content
-                    logger.info(
-                        "Loaded deck prompt",
-                        extra={"deck_prompt_name": deck_prompt.name, "deck_prompt_id": deck_prompt.id}
-                    )
-
-            # Load slide style content if selected
-            slide_style_content = None
-            image_guidelines = None
-            if prompts.selected_slide_style_id:
-                from src.database.models import SlideStyleLibrary
-                slide_style = db.query(SlideStyleLibrary).filter_by(
-                    id=prompts.selected_slide_style_id,
-                    is_active=True
-                ).first()
-                if slide_style:
-                    slide_style_content = slide_style.style_content
-                    image_guidelines = slide_style.image_guidelines
-                    logger.info(
-                        "Loaded slide style",
-                        extra={"slide_style_name": slide_style.name, "slide_style_id": slide_style.id}
-                    )
-
-            # Create settings
             llm_settings = LLMSettings(
                 endpoint=ai_infra.llm_endpoint,
                 temperature=float(ai_infra.llm_temperature),
@@ -276,13 +305,7 @@ def load_settings_from_database(profile_id: Optional[int] = None) -> AppSettings
                 profile_name=profile.name,
                 llm=llm_settings,
                 genie=genie_settings,
-                prompts={
-                    "deck_prompt": deck_prompt_content or "",
-                    "slide_style": slide_style_content or "",
-                    "image_guidelines": image_guidelines or "",
-                    "system_prompt": prompts.system_prompt,
-                    "slide_editing_instructions": prompts.slide_editing_instructions,
-                },
+                prompts=prompt_content,
                 environment=os.getenv("ENVIRONMENT", "development"),
             )
 
@@ -304,16 +327,16 @@ def load_settings_from_database(profile_id: Optional[int] = None) -> AppSettings
         raise
 
 
-@lru_cache(maxsize=1)
 def get_settings() -> AppSettings:
     """
-    Get the application settings singleton (database-backed).
+    Load application settings from the database.
 
-    This function is cached, so subsequent calls return the same instance.
-    Use reload_settings() to force a reload.
+    Each call queries the database for the active (or default) profile.
+    There is no caching — callers that need to hold onto settings should
+    store the returned object themselves.
 
     Returns:
-        Cached AppSettings instance from database
+        AppSettings instance from database
 
     Raises:
         ValueError: If configuration cannot be loaded
@@ -323,40 +346,25 @@ def get_settings() -> AppSettings:
 
 def reload_settings(profile_id: Optional[int] = None) -> AppSettings:
     """
-    Reload settings from database.
+    Switch the active profile and reload settings from database.
 
-    Clears the cache and loads fresh settings from the specified profile
-    or the default profile.
+    Updates the global active profile ID so that subsequent calls to
+    ``get_settings()`` and ``fetch_prompt_content()`` target the new profile.
 
     Args:
-        profile_id: Profile ID to load, or None for default
+        profile_id: Profile ID to activate, or None for default
 
     Returns:
-        New AppSettings instance
+        New AppSettings instance for the activated profile
     """
     logger.info("Reloading settings from database", extra={"profile_id": profile_id})
 
-    # Log cache state before clearing
-    cache_info_before = get_settings.cache_info()
-    logger.info(f"Cache info BEFORE clear: {cache_info_before}")
-
-    # Store the active profile ID globally BEFORE clearing cache
-    # This ensures get_settings() knows which profile to load
     if profile_id is not None:
         global _active_profile_id
         _active_profile_id = profile_id
         logger.info(f"Set active profile ID to {profile_id}")
 
-    # Clear the cache
-    get_settings.cache_clear()
-    cache_info_after_clear = get_settings.cache_info()
-    logger.info(f"Cache info AFTER clear: {cache_info_after_clear}")
-
-    # Force immediate cache repopulation by calling get_settings()
-    # This ensures the cache contains the correct profile
     settings = get_settings()
-    cache_info_after_reload = get_settings.cache_info()
-    logger.info(f"Cache info AFTER reload: {cache_info_after_reload}")
 
     logger.info(
         "Settings reloaded successfully",

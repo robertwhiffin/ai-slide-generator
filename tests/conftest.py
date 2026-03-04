@@ -34,17 +34,17 @@ def reset_singleton_client():
 
 
 @pytest.fixture(autouse=True)
-def clear_settings_cache():
-    """
-    Clear settings cache before each test.
+def reset_active_profile():
+    """Reset the active profile ID before each test.
 
-    This ensures each test gets fresh settings.
+    This ensures each test starts with no active profile assumption,
+    so it falls back to the default profile when loading settings.
     """
-    from src.core.settings_db import get_settings
+    import src.core.settings_db as _settings_mod
 
-    get_settings.cache_clear()
+    _settings_mod._active_profile_id = None
     yield
-    get_settings.cache_clear()
+    _settings_mod._active_profile_id = None
 
 
 @pytest.fixture
