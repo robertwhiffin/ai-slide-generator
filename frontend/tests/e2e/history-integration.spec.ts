@@ -167,7 +167,7 @@ async function createTestSessionViaAPI(
 async function goToHistory(page: Page): Promise<void> {
   await page.goto('/');
   await page.getByRole('navigation').getByRole('button', { name: 'My Sessions' }).click();
-  await expect(page.getByRole('heading', { name: 'Sessions' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Sessions', exact: true })).toBeVisible();
 }
 
 async function goToGenerator(page: Page): Promise<void> {
@@ -185,9 +185,7 @@ test.describe('Session History Display', () => {
     await goToHistory(page);
 
     // Page heading should be visible
-    await expect(page.getByRole('heading', { name: 'Sessions' })).toBeVisible();
-    // My Sessions tab should be visible
-    await expect(page.getByRole('button', { name: /My Sessions/ })).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'Sessions', exact: true })).toBeVisible();
 
     // Either shows table or empty state
     const table = page.getByRole('table');
@@ -514,7 +512,7 @@ test.describe('Session History Navigation', () => {
 
     // Navigate back to History via nav
     await page.getByRole('navigation').getByRole('button', { name: 'My Sessions' }).click();
-    await expect(page.getByRole('heading', { name: 'Sessions' })).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'Sessions', exact: true })).toBeVisible();
   });
 });
 
@@ -564,9 +562,13 @@ test.describe('Session History Edge Cases', () => {
       // Get session count from API
       const apiData = await getSessionsViaAPI(request);
 
-      // Get count from page
-      const countText = await page.getByText(/^\d+ sessions?$/).textContent();
-      const countMatch = countText?.match(/(\d+) sessions?/);
+      // The count is now shown in the "My Sessions" tab badge
+      // Find the My Sessions tab button (not the nav button)
+      const mySessionsTab = page.locator('button', { hasText: 'My Sessions' }).filter({
+        has: page.locator('span.rounded-full'),
+      });
+      const tabText = await mySessionsTab.textContent();
+      const countMatch = tabText?.match(/(\d+)/);
       const uiCount = countMatch ? parseInt(countMatch[1]) : 0;
 
       // The UI count should match the API count
