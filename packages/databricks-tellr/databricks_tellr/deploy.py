@@ -883,8 +883,36 @@ def _get_or_create_lakebase_provisioned(
 def _get_or_create_lakebase(
     ws: WorkspaceClient, database_name: str, capacity: str
 ) -> dict[str, Any]:
-    """Get or create a Lakebase database — autoscaling first, fallback to provisioned."""
-    # Try autoscaling first
+    """Get or create a Lakebase database.
+
+    Detection order for existing databases:
+    1. Check provisioned (ws.database) -- fast, definitive
+    2. Check autoscaling (ws.postgres) -- only if provisioned not found
+
+    Creation order for new databases:
+    1. Try autoscaling first (preferred)
+    2. Fall back to provisioned
+    """
+    # Check if it already exists as provisioned
+    try:
+        existing = ws.database.get_database_instance(name=database_name)
+        logger.info(f"Found existing provisioned Lakebase: {database_name}")
+        return {
+            "name": existing.name,
+            "type": "provisioned",
+            "status": "exists",
+            "state": existing.state.value if existing.state else "UNKNOWN",
+            "host": None,
+            "endpoint_name": None,
+            "project_id": None,
+            "instance_name": existing.name,
+        }
+    except Exception as e:
+        error_str = str(e).lower()
+        if "not found" not in error_str and "does not exist" not in error_str:
+            raise
+
+    # Check if it exists as autoscaling, or create new (autoscaling preferred)
     if _probe_autoscaling_available(ws):
         try:
             result = _get_or_create_lakebase_autoscaling(ws, database_name, capacity)
@@ -896,7 +924,7 @@ def _get_or_create_lakebase(
                 f"{type(e).__name__}: {e}"
             )
 
-    # Fallback to provisioned
+    # Create new provisioned instance
     result = _get_or_create_lakebase_provisioned(ws, database_name, capacity)
     logger.info(f"Using Lakebase Provisioned: {result['name']}")
     return result
