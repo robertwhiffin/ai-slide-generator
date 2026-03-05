@@ -563,64 +563,55 @@ def _migrate_drop_profile_id_from_oauth_tokens(conn, inspector, schema, _qual, i
 
 
 def _migrate_to_v0_2(conn, inspector, schema, _qual, is_sqlite):
-    """v0.2 schema migration: image_guidelines, session truncation, created_by.
+    """v0.2 schema migration — all column additions are independently idempotent.
 
-    Handles all breaking changes introduced in v0.2:
-    - Adds image_guidelines column to slide_style_library
-    - Truncates session tables (incompatible with old schema)
-    - Adds created_by column and indexes to user_sessions
-    All steps are idempotent.
+    Steps (each gated by its own column-existence check):
+    1. Add image_guidelines to slide_style_library + truncate sessions (breaking)
+    2. Add created_by + indexes to user_sessions
+    3. Add google_slides_presentation_id to user_sessions
+    4. Add google_slides_url to user_sessions
+    5. Add is_deleted to config_profiles
+    6. Add deleted_at to config_profiles
     """
     from sqlalchemy import text
 
-    table_name = "slide_style_library"
+    def _get_columns(table):
+        try:
+            return {c["name"] for c in inspector.get_columns(table, schema=schema)}
+        except Exception:
+            return set()
 
-    try:
-        columns = {c["name"] for c in inspector.get_columns(table_name, schema=schema)}
-    except Exception:
-        return
+    # --- 1. image_guidelines on slide_style_library (breaking: truncates sessions) ---
+    ssl_cols = _get_columns("slide_style_library")
+    if ssl_cols and "image_guidelines" not in ssl_cols:
+        q_ssl = _qual("slide_style_library")
+        logger.info("Migration: adding image_guidelines column to slide_style_library")
+        conn.execute(text(
+            f"ALTER TABLE {q_ssl} ADD COLUMN image_guidelines TEXT NULL"
+        ))
 
-    if "image_guidelines" in columns:
-        return
+        session_tables = [
+            "session_messages", "chat_requests", "slide_deck_versions",
+            "session_slide_decks", "export_jobs", "user_sessions",
+        ]
+        if is_sqlite:
+            for t in session_tables:
+                try:
+                    conn.execute(text(f'DELETE FROM {_qual(t)}'))
+                except Exception:
+                    pass
+        else:
+            existing_tables = set(inspector.get_table_names(schema=schema))
+            tables_to_truncate = [t for t in session_tables if t in existing_tables]
+            if tables_to_truncate:
+                qualified = ", ".join(_qual(t) for t in tables_to_truncate)
+                conn.execute(text(f"TRUNCATE {qualified} CASCADE"))
 
-    qualified_table = _qual(table_name)
-    logger.info(f"Migration: adding image_guidelines column to {table_name}")
-    conn.execute(text(
-        f"ALTER TABLE {qualified_table} ADD COLUMN image_guidelines TEXT NULL"
-    ))
-
-    session_tables = [
-        "session_messages",
-        "chat_requests",
-        "slide_deck_versions",
-        "session_slide_decks",
-        "export_jobs",
-        "user_sessions",
-    ]
-
-    if is_sqlite:
-        for t in session_tables:
-            try:
-                conn.execute(text(f'DELETE FROM {_qual(t)}'))
-            except Exception:
-                pass
-    else:
-        existing_tables = set(inspector.get_table_names(schema=schema))
-        tables_to_truncate = [t for t in session_tables if t in existing_tables]
-        if tables_to_truncate:
-            qualified = ", ".join(_qual(t) for t in tables_to_truncate)
-            conn.execute(text(f"TRUNCATE {qualified} CASCADE"))
-
-    # Add created_by column to user_sessions if missing
-    us_table = "user_sessions"
-    try:
-        us_columns = {c["name"] for c in inspector.get_columns(us_table, schema=schema)}
-    except Exception:
-        us_columns = set()
-
-    if us_columns and "created_by" not in us_columns:
-        q_us = _qual(us_table)
-        logger.info(f"Migration: adding created_by column to {us_table}")
+    # --- 2. created_by on user_sessions ---
+    us_cols = _get_columns("user_sessions")
+    if us_cols and "created_by" not in us_cols:
+        q_us = _qual("user_sessions")
+        logger.info("Migration: adding created_by column to user_sessions")
         conn.execute(text(
             f"ALTER TABLE {q_us} ADD COLUMN created_by VARCHAR(255) NULL"
         ))
@@ -633,5 +624,44 @@ def _migrate_to_v0_2(conn, inspector, schema, _qual, is_sqlite):
                 f"CREATE INDEX IF NOT EXISTS ix_user_sessions_created_by_last_activity "
                 f"ON {q_us} (created_by, last_activity)"
             ))
+
+    # --- 3. google_slides_presentation_id on user_sessions ---
+    us_cols = _get_columns("user_sessions")
+    if us_cols and "google_slides_presentation_id" not in us_cols:
+        q_us = _qual("user_sessions")
+        logger.info("Migration: adding google_slides_presentation_id column to user_sessions")
+        conn.execute(text(
+            f"ALTER TABLE {q_us} ADD COLUMN google_slides_presentation_id VARCHAR(255) NULL"
+        ))
+
+    # --- 4. google_slides_url on user_sessions ---
+    if us_cols and "google_slides_url" not in us_cols:
+        q_us = _qual("user_sessions")
+        logger.info("Migration: adding google_slides_url column to user_sessions")
+        conn.execute(text(
+            f"ALTER TABLE {q_us} ADD COLUMN google_slides_url VARCHAR(512) NULL"
+        ))
+
+    # --- 5. is_deleted on config_profiles ---
+    cp_cols = _get_columns("config_profiles")
+    if cp_cols and "is_deleted" not in cp_cols:
+        q_cp = _qual("config_profiles")
+        logger.info("Migration: adding is_deleted column to config_profiles")
+        conn.execute(text(
+            f"ALTER TABLE {q_cp} ADD COLUMN is_deleted BOOLEAN NOT NULL DEFAULT FALSE"
+        ))
+        if not is_sqlite:
+            conn.execute(text(
+                f"CREATE INDEX IF NOT EXISTS ix_config_profiles_is_deleted "
+                f"ON {q_cp} (is_deleted)"
+            ))
+
+    # --- 6. deleted_at on config_profiles ---
+    if cp_cols and "deleted_at" not in cp_cols:
+        q_cp = _qual("config_profiles")
+        logger.info("Migration: adding deleted_at column to config_profiles")
+        conn.execute(text(
+            f"ALTER TABLE {q_cp} ADD COLUMN deleted_at TIMESTAMP NULL"
+        ))
 
     logger.info("Migration: v0.2 schema migration complete")
