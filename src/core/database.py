@@ -470,8 +470,8 @@ def _run_migrations(engine, schema: str | None = None):
         # --- Remove profile_id from google_oauth_tokens ---
         _migrate_drop_profile_id_from_oauth_tokens(conn, inspector, schema, _qual, is_sqlite)
 
-        # --- slide_style_library: add image_guidelines, truncate sessions ---
-        _migrate_slide_style_library(conn, inspector, schema, _qual, is_sqlite)
+        # --- v0.2 breaking changes: image_guidelines, session truncation, created_by ---
+        _migrate_to_v0_2(conn, inspector, schema, _qual, is_sqlite)
 
 
 def _migrate_google_credentials_to_global(conn, inspector, schema, _qual, is_sqlite):
@@ -562,14 +562,14 @@ def _migrate_drop_profile_id_from_oauth_tokens(conn, inspector, schema, _qual, i
         conn.execute(text(f"ALTER TABLE {q_table} DROP COLUMN profile_id"))
 
 
-def _migrate_slide_style_library(conn, inspector, schema, _qual, is_sqlite):
-    """Add image_guidelines column to slide_style_library and truncate session tables.
+def _migrate_to_v0_2(conn, inspector, schema, _qual, is_sqlite):
+    """v0.2 schema migration: image_guidelines, session truncation, created_by.
 
-    This is a one-time migration for the image_guidelines breaking change.
-    When the column is missing (upgrading from an older version), it is added
-    and all session tables are cleared because existing session data is
-    incompatible with the new schema. Idempotent: if the column already
-    exists, nothing happens.
+    Handles all breaking changes introduced in v0.2:
+    - Adds image_guidelines column to slide_style_library
+    - Truncates session tables (incompatible with old schema)
+    - Adds created_by column and indexes to user_sessions
+    All steps are idempotent.
     """
     from sqlalchemy import text
 
@@ -611,6 +611,27 @@ def _migrate_slide_style_library(conn, inspector, schema, _qual, is_sqlite):
             qualified = ", ".join(_qual(t) for t in tables_to_truncate)
             conn.execute(text(f"TRUNCATE {qualified} CASCADE"))
 
-    logger.info(
-        "Migration: added image_guidelines column and cleared session data"
-    )
+    # Add created_by column to user_sessions if missing
+    us_table = "user_sessions"
+    try:
+        us_columns = {c["name"] for c in inspector.get_columns(us_table, schema=schema)}
+    except Exception:
+        us_columns = set()
+
+    if us_columns and "created_by" not in us_columns:
+        q_us = _qual(us_table)
+        logger.info(f"Migration: adding created_by column to {us_table}")
+        conn.execute(text(
+            f"ALTER TABLE {q_us} ADD COLUMN created_by VARCHAR(255) NULL"
+        ))
+        if not is_sqlite:
+            conn.execute(text(
+                f"CREATE INDEX IF NOT EXISTS ix_user_sessions_created_by "
+                f"ON {q_us} (created_by)"
+            ))
+            conn.execute(text(
+                f"CREATE INDEX IF NOT EXISTS ix_user_sessions_created_by_last_activity "
+                f"ON {q_us} (created_by, last_activity)"
+            ))
+
+    logger.info("Migration: v0.2 schema migration complete")
