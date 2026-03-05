@@ -410,6 +410,9 @@ def _update_databricks(
         lakebase_result = _get_or_create_lakebase(ws, lakebase_name, "CU_1")
         lakebase_type = lakebase_result.get("type", "provisioned")
 
+        # Check for breaking migrations and prompt before proceeding
+        _check_breaking_migrations(ws, lakebase_name, schema_name, lakebase_result)
+
         # Reset database if requested
         if reset_database:
             print("Resetting database schema...")
@@ -515,6 +518,90 @@ def delete(
 # -----------------------------------------------------------------------------
 # Internal functions
 # -----------------------------------------------------------------------------
+
+
+def _check_breaking_migrations(
+    ws: WorkspaceClient,
+    lakebase_name: str,
+    schema_name: str,
+    lakebase_result: dict[str, Any] | None = None,
+) -> None:
+    """Check if the update requires breaking migrations and prompt for confirmation.
+
+    Connects to the live database, inspects the schema, and warns the user
+    if session data will be truncated during the upgrade.
+
+    Raises:
+        DeploymentError: If the user declines the migration.
+    """
+    try:
+        conn, _ = _get_lakebase_connection(ws, lakebase_name, lakebase_result=lakebase_result)
+    except Exception as e:
+        logger.warning("Could not connect to Lakebase for migration check: %s", e)
+        print(f"   Warning: Could not check for breaking migrations ({e})")
+        return
+
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_schema = %s AND table_name = %s AND column_name = %s",
+                (schema_name, "slide_style_library", "image_guidelines"),
+            )
+            has_column = cur.fetchone() is not None
+
+            if has_column:
+                return
+
+            session_tables = [
+                "user_sessions",
+                "session_messages",
+                "chat_requests",
+                "session_slide_decks",
+                "slide_deck_versions",
+                "export_jobs",
+            ]
+
+            row_counts = {}
+            for table in session_tables:
+                try:
+                    cur.execute(
+                        f'SELECT COUNT(*) FROM "{schema_name}"."{table}"'
+                    )
+                    row_counts[table] = cur.fetchone()[0]
+                except Exception:
+                    row_counts[table] = 0
+
+            total_rows = sum(row_counts.values())
+
+            print()
+            print("=" * 60)
+            print("  BREAKING MIGRATION DETECTED")
+            print("=" * 60)
+            print()
+            print("  This update adds a new column (image_guidelines) to")
+            print("  slide_style_library. Existing chat session data is")
+            print("  incompatible and will be permanently deleted:")
+            print()
+            for table, count in row_counts.items():
+                if count > 0:
+                    print(f"    {table}: {count} rows")
+            if total_rows == 0:
+                print("    (all session tables are empty)")
+            print()
+            print("  Configuration data (profiles, prompts, styles,")
+            print("  credentials) will NOT be affected.")
+            print("=" * 60)
+            print()
+
+            confirm = input("  Continue with update? [yes/no]: ").strip().lower()
+            if confirm != "yes":
+                raise DeploymentError(
+                    "Update aborted by user due to breaking migration."
+                )
+            print()
+    finally:
+        conn.close()
 
 
 def _read_existing_encryption_key(

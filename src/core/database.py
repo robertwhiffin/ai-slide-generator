@@ -470,6 +470,9 @@ def _run_migrations(engine, schema: str | None = None):
         # --- Remove profile_id from google_oauth_tokens ---
         _migrate_drop_profile_id_from_oauth_tokens(conn, inspector, schema, _qual, is_sqlite)
 
+        # --- slide_style_library: add image_guidelines, truncate sessions ---
+        _migrate_slide_style_library(conn, inspector, schema, _qual, is_sqlite)
+
 
 def _migrate_google_credentials_to_global(conn, inspector, schema, _qual, is_sqlite):
     """Copy first non-null google_credentials_encrypted to global table, then null out profiles."""
@@ -557,3 +560,57 @@ def _migrate_drop_profile_id_from_oauth_tokens(conn, inspector, schema, _qual, i
         conn.execute(text(f"ALTER TABLE {q_tmp} RENAME TO {table_name}"))
     else:
         conn.execute(text(f"ALTER TABLE {q_table} DROP COLUMN profile_id"))
+
+
+def _migrate_slide_style_library(conn, inspector, schema, _qual, is_sqlite):
+    """Add image_guidelines column to slide_style_library and truncate session tables.
+
+    This is a one-time migration for the image_guidelines breaking change.
+    When the column is missing (upgrading from an older version), it is added
+    and all session tables are cleared because existing session data is
+    incompatible with the new schema. Idempotent: if the column already
+    exists, nothing happens.
+    """
+    from sqlalchemy import text
+
+    table_name = "slide_style_library"
+
+    try:
+        columns = {c["name"] for c in inspector.get_columns(table_name, schema=schema)}
+    except Exception:
+        return
+
+    if "image_guidelines" in columns:
+        return
+
+    qualified_table = _qual(table_name)
+    logger.info(f"Migration: adding image_guidelines column to {table_name}")
+    conn.execute(text(
+        f"ALTER TABLE {qualified_table} ADD COLUMN image_guidelines TEXT NULL"
+    ))
+
+    session_tables = [
+        "session_messages",
+        "chat_requests",
+        "slide_deck_versions",
+        "session_slide_decks",
+        "export_jobs",
+        "user_sessions",
+    ]
+
+    if is_sqlite:
+        for t in session_tables:
+            try:
+                conn.execute(text(f'DELETE FROM {_qual(t)}'))
+            except Exception:
+                pass
+    else:
+        existing_tables = set(inspector.get_table_names(schema=schema))
+        tables_to_truncate = [t for t in session_tables if t in existing_tables]
+        if tables_to_truncate:
+            qualified = ", ".join(_qual(t) for t in tables_to_truncate)
+            conn.execute(text(f"TRUNCATE {qualified} CASCADE"))
+
+    logger.info(
+        "Migration: added image_guidelines column and cleared session data"
+    )
