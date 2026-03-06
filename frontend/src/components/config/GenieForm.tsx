@@ -157,8 +157,10 @@ export const GenieForm: React.FC<GenieFormProps> = ({
       // Reload data
       const space = await configApi.getGenieSpace(profileId);
       setCurrentSpace(space);
+
+      // Hot-reload the agent so the new Genie config takes effect immediately
+      await configApi.loadProfile(profileId);
       
-      // Show success message with reminder to load profile
       setSaveSuccess(true);
     } catch (err) {
       const message = err instanceof ConfigApiError 
@@ -408,20 +410,8 @@ export const GenieForm: React.FC<GenieFormProps> = ({
 
       {/* Save Success with Reminder */}
       {saveSuccess && (
-        <div className="bg-blue-50 border border-blue-200 rounded-md p-4">
-          <div className="flex items-start gap-3">
-            <span className="text-blue-500 text-lg">✓</span>
-            <div>
-              <p className="text-sm font-medium text-blue-800">
-                Genie configuration saved successfully!
-              </p>
-              <p className="text-sm text-blue-700 mt-1">
-                <strong>Important:</strong> To apply these changes to the running application, 
-                you must <strong>Load this profile</strong> from the profile list. 
-                Close this dialog and click the "Load" button next to this profile.
-              </p>
-            </div>
-          </div>
+        <div className="bg-green-50 border border-green-200 rounded-md p-3 text-sm text-green-700">
+          Genie configuration saved and applied successfully.
         </div>
       )}
 
