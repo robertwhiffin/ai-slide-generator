@@ -102,6 +102,7 @@ def create(
     profile: str | None = None,
     config_yaml_path: str | None = None,
     encryption_key: str | None = None,
+    use_test_pypi: bool = False,
 ) -> dict[str, Any]:
     """Deploy Tellr to Databricks Apps.
 
@@ -131,6 +132,7 @@ def create(
         profile: Databricks CLI profile name (optional)
         config_yaml_path: Path to deployment config YAML (mutually exclusive with other args)
         encryption_key: Fernet key for Google OAuth encryption. Auto-generated if not provided.
+        use_test_pypi: If True, install app package from Test PyPI instead of real PyPI.
 
     Returns:
         Dictionary with deployment info:
@@ -158,6 +160,7 @@ def create(
         config_yaml_path=config_yaml_path,
         seed_databricks_defaults=False,
         encryption_key=encryption_key,
+        use_test_pypi=use_test_pypi,
     )
 
 
@@ -171,6 +174,7 @@ def update(
     client: WorkspaceClient | None = None,
     profile: str | None = None,
     encryption_key: str | None = None,
+    use_test_pypi: bool = False,
 ) -> dict[str, Any]:
     """Deploy a new version of an existing Tellr app.
 
@@ -187,6 +191,7 @@ def update(
         profile: Databricks CLI profile name (optional)
         encryption_key: Fernet key for Google OAuth encryption. If not provided, the
             existing key is read from the deployed app.yaml to preserve encrypted data.
+        use_test_pypi: If True, install app package from Test PyPI instead of real PyPI.
 
     Returns:
         Dictionary with deployment info
@@ -205,6 +210,7 @@ def update(
         profile=profile,
         seed_databricks_defaults=False,
         encryption_key=encryption_key,
+        use_test_pypi=use_test_pypi,
     )
 
 
@@ -227,6 +233,7 @@ def _create_databricks(
     config_yaml_path: str | None = None,
     seed_databricks_defaults: bool = True,
     encryption_key: str | None = None,
+    use_test_pypi: bool = False,
 ) -> dict[str, Any]:
     """Deploy Tellr to Databricks Apps with configurable seeding.
     
@@ -246,6 +253,7 @@ def _create_databricks(
         config_yaml_path: Path to deployment config YAML (mutually exclusive with other args)
         seed_databricks_defaults: If True, seed Databricks-specific content on startup
         encryption_key: Fernet key for Google OAuth encryption. Auto-generated if not provided.
+        use_test_pypi: If True, install app package from Test PyPI instead of real PyPI.
 
     Returns:
         Dictionary with deployment info
@@ -302,6 +310,7 @@ def _create_databricks(
                 seed_databricks_defaults=seed_databricks_defaults,
                 encryption_key=encryption_key,
                 lakebase_result=lakebase_result,
+                use_test_pypi=use_test_pypi,
             )
             print("   Generated app.yaml (with encryption key)")
 
@@ -373,6 +382,7 @@ def _update_databricks(
     profile: str | None = None,
     seed_databricks_defaults: bool = True,
     encryption_key: str | None = None,
+    use_test_pypi: bool = False,
 ) -> dict[str, Any]:
     """Deploy a new version of an existing Tellr app with configurable seeding.
     
@@ -390,6 +400,7 @@ def _update_databricks(
         seed_databricks_defaults: If True, seed Databricks-specific content on startup
         encryption_key: Fernet key for Google OAuth encryption. If not provided, reads
             the existing key from the deployed app.yaml to preserve encrypted data.
+        use_test_pypi: If True, install app package from Test PyPI instead of real PyPI.
 
     Returns:
         Dictionary with deployment info
@@ -432,6 +443,7 @@ def _update_databricks(
                 seed_databricks_defaults=seed_databricks_defaults,
                 encryption_key=encryption_key,
                 lakebase_result=lakebase_result,
+                use_test_pypi=use_test_pypi,
             )
             _upload_files(ws, staging, app_file_workspace_path)
             print("   Files updated")
@@ -985,6 +997,7 @@ def _write_app_yaml(
     seed_databricks_defaults: bool = False,
     encryption_key: str | None = None,
     lakebase_result: dict[str, Any] | None = None,
+    use_test_pypi: bool = False,
 ) -> None:
     """Generate app.yaml with environment variables.
 
@@ -996,6 +1009,7 @@ def _write_app_yaml(
         encryption_key: Fernet encryption key for Google OAuth credentials/tokens.
             Auto-generated if not provided.
         lakebase_result: Result dict from _get_or_create_lakebase() with type info.
+        use_test_pypi: If True, install from Test PyPI instead of real PyPI.
     """
     # Build init_database call - only show seed_databricks_defaults when True
     if seed_databricks_defaults:
@@ -1015,6 +1029,11 @@ def _write_app_yaml(
     lakebase_project_id = (lakebase_result or {}).get("project_id", "")
     lakebase_endpoint_name = (lakebase_result or {}).get("endpoint_name", "")
 
+    pip_index_args = (
+        "--index-url https://test.pypi.org/simple/ --extra-index-url https://pypi.org/simple/ "
+        if use_test_pypi else ""
+    )
+
     template_content = _load_template("app.yaml.template")
     content = Template(template_content).substitute(
         LAKEBASE_INSTANCE=lakebase_name,
@@ -1025,6 +1044,7 @@ def _write_app_yaml(
         LAKEBASE_PG_HOST=lakebase_pg_host,
         LAKEBASE_PROJECT_ID=lakebase_project_id,
         LAKEBASE_ENDPOINT_NAME=lakebase_endpoint_name,
+        PIP_INDEX_ARGS=pip_index_args,
     )
     (staging_dir / "app.yaml").write_text(content)
 
