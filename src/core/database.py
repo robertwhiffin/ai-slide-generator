@@ -570,8 +570,9 @@ def _migrate_to_v0_2(conn, inspector, schema, _qual, is_sqlite):
     2. Add created_by + indexes to user_sessions
     3. Add google_slides_presentation_id to user_sessions
     4. Add google_slides_url to user_sessions
-    5. Add is_deleted to config_profiles
-    6. Add deleted_at to config_profiles
+
+    Note: config_profiles columns (is_deleted, deleted_at) are handled
+    earlier in _run_migrations() with a fresh inspector read.
     """
     from sqlalchemy import text
 
@@ -640,28 +641,6 @@ def _migrate_to_v0_2(conn, inspector, schema, _qual, is_sqlite):
         logger.info("Migration: adding google_slides_url column to user_sessions")
         conn.execute(text(
             f"ALTER TABLE {q_us} ADD COLUMN google_slides_url VARCHAR(512) NULL"
-        ))
-
-    # --- 5. is_deleted on config_profiles ---
-    cp_cols = _get_columns("config_profiles")
-    if cp_cols and "is_deleted" not in cp_cols:
-        q_cp = _qual("config_profiles")
-        logger.info("Migration: adding is_deleted column to config_profiles")
-        conn.execute(text(
-            f"ALTER TABLE {q_cp} ADD COLUMN is_deleted BOOLEAN NOT NULL DEFAULT FALSE"
-        ))
-        if not is_sqlite:
-            conn.execute(text(
-                f"CREATE INDEX IF NOT EXISTS ix_config_profiles_is_deleted "
-                f"ON {q_cp} (is_deleted)"
-            ))
-
-    # --- 6. deleted_at on config_profiles ---
-    if cp_cols and "deleted_at" not in cp_cols:
-        q_cp = _qual("config_profiles")
-        logger.info("Migration: adding deleted_at column to config_profiles")
-        conn.execute(text(
-            f"ALTER TABLE {q_cp} ADD COLUMN deleted_at TIMESTAMP NULL"
         ))
 
     logger.info("Migration: v0.2 schema migration complete")
