@@ -1923,7 +1923,7 @@ class SessionManager:
                     raise ValueError("Parent comment not found")
 
             import re
-            mentioned = re.findall(r"@([\w.\-]+)", content)
+            mentioned = re.findall(r"@([\w.\-]+(?:@[\w.\-]+)?)", content)
             mentioned = list(dict.fromkeys(mentioned))  # dedupe, preserve order
 
             comment = SlideComment(
@@ -1987,7 +1987,7 @@ class SessionManager:
             if comment.user_name != user_name:
                 raise PermissionError("Only the author can edit a comment")
             comment.content = content
-            mentioned = re.findall(r"@([\w.\-]+)", content)
+            mentioned = re.findall(r"@([\w.\-]+(?:@[\w.\-]+)?)", content)
             comment.mentions = list(dict.fromkeys(mentioned)) or None
             db.flush()
             return self._comment_to_dict(comment)
