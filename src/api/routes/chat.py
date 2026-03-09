@@ -451,6 +451,7 @@ async def submit_chat_async(
                     request.slide_context.model_dump() if request.slide_context else None
                 ),
                 "is_first_message": is_first_message,
+                "image_ids": request.image_ids,
             },
         )
 

@@ -455,6 +455,9 @@ def _run_migrations(engine, schema: str | None = None):
         # --- Remove profile_id from google_oauth_tokens ---
         _migrate_drop_profile_id_from_oauth_tokens(conn, inspector, schema, _qual, is_sqlite)
 
+        # --- v0.2 breaking changes: image_guidelines, session truncation, created_by ---
+        _migrate_to_v0_2(conn, inspector, schema, _qual, is_sqlite)
+
 
 def _migrate_google_credentials_to_global(conn, inspector, schema, _qual, is_sqlite):
     """Copy first non-null google_credentials_encrypted to global table, then null out profiles."""
@@ -542,3 +545,87 @@ def _migrate_drop_profile_id_from_oauth_tokens(conn, inspector, schema, _qual, i
         conn.execute(text(f"ALTER TABLE {q_tmp} RENAME TO {table_name}"))
     else:
         conn.execute(text(f"ALTER TABLE {q_table} DROP COLUMN profile_id"))
+
+
+def _migrate_to_v0_2(conn, inspector, schema, _qual, is_sqlite):
+    """v0.2 schema migration — all column additions are independently idempotent.
+
+    Steps (each gated by its own column-existence check):
+    1. Add image_guidelines to slide_style_library + truncate sessions (breaking)
+    2. Add created_by + indexes to user_sessions
+    3. Add google_slides_presentation_id to user_sessions
+    4. Add google_slides_url to user_sessions
+
+    Note: config_profiles columns (is_deleted, deleted_at) are handled
+    earlier in _run_migrations() with a fresh inspector read.
+    """
+    from sqlalchemy import text
+
+    def _get_columns(table):
+        try:
+            return {c["name"] for c in inspector.get_columns(table, schema=schema)}
+        except Exception:
+            return set()
+
+    # --- 1. image_guidelines on slide_style_library (breaking: truncates sessions) ---
+    ssl_cols = _get_columns("slide_style_library")
+    if ssl_cols and "image_guidelines" not in ssl_cols:
+        q_ssl = _qual("slide_style_library")
+        logger.info("Migration: adding image_guidelines column to slide_style_library")
+        conn.execute(text(
+            f"ALTER TABLE {q_ssl} ADD COLUMN image_guidelines TEXT NULL"
+        ))
+
+        session_tables = [
+            "session_messages", "chat_requests", "slide_deck_versions",
+            "session_slide_decks", "export_jobs", "user_sessions",
+        ]
+        if is_sqlite:
+            for t in session_tables:
+                try:
+                    conn.execute(text(f'DELETE FROM {_qual(t)}'))
+                except Exception:
+                    pass
+        else:
+            existing_tables = set(inspector.get_table_names(schema=schema))
+            tables_to_truncate = [t for t in session_tables if t in existing_tables]
+            if tables_to_truncate:
+                qualified = ", ".join(_qual(t) for t in tables_to_truncate)
+                conn.execute(text(f"TRUNCATE {qualified} CASCADE"))
+
+    # --- 2. created_by on user_sessions ---
+    us_cols = _get_columns("user_sessions")
+    if us_cols and "created_by" not in us_cols:
+        q_us = _qual("user_sessions")
+        logger.info("Migration: adding created_by column to user_sessions")
+        conn.execute(text(
+            f"ALTER TABLE {q_us} ADD COLUMN created_by VARCHAR(255) NULL"
+        ))
+        if not is_sqlite:
+            conn.execute(text(
+                f"CREATE INDEX IF NOT EXISTS ix_user_sessions_created_by "
+                f"ON {q_us} (created_by)"
+            ))
+            conn.execute(text(
+                f"CREATE INDEX IF NOT EXISTS ix_user_sessions_created_by_last_activity "
+                f"ON {q_us} (created_by, last_activity)"
+            ))
+
+    # --- 3. google_slides_presentation_id on user_sessions ---
+    us_cols = _get_columns("user_sessions")
+    if us_cols and "google_slides_presentation_id" not in us_cols:
+        q_us = _qual("user_sessions")
+        logger.info("Migration: adding google_slides_presentation_id column to user_sessions")
+        conn.execute(text(
+            f"ALTER TABLE {q_us} ADD COLUMN google_slides_presentation_id VARCHAR(255) NULL"
+        ))
+
+    # --- 4. google_slides_url on user_sessions ---
+    if us_cols and "google_slides_url" not in us_cols:
+        q_us = _qual("user_sessions")
+        logger.info("Migration: adding google_slides_url column to user_sessions")
+        conn.execute(text(
+            f"ALTER TABLE {q_us} ADD COLUMN google_slides_url VARCHAR(512) NULL"
+        ))
+
+    logger.info("Migration: v0.2 schema migration complete")
