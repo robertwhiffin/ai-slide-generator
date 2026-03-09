@@ -114,7 +114,10 @@ export interface SharedPresentation {
   session_id: string;
   title: string | null;
   created_by: string | null;
+  created_at: string | null;
   last_activity: string | null;
+  modified_by: string | null;
+  modified_at: string | null;
   profile_id: number | null;
   profile_name: string | null;
   my_permission: 'CAN_VIEW' | 'CAN_EDIT' | 'CAN_MANAGE';

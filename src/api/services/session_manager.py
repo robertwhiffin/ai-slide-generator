@@ -391,8 +391,10 @@ class SessionManager:
                 [s.profile_id for s in sessions if s.profile_id is not None],
             )
 
-            return [
-                {
+            result = []
+            for s in sessions:
+                deck = s.slide_deck
+                info = {
                     "session_id": s.session_id,
                     "user_id": s.user_id,
                     "created_by": s.created_by,
@@ -400,13 +402,15 @@ class SessionManager:
                     "created_at": s.created_at.isoformat(),
                     "last_activity": s.last_activity.isoformat(),
                     "message_count": len(s.messages),
-                    "has_slide_deck": s.slide_deck is not None,
+                    "has_slide_deck": deck is not None,
                     "profile_id": s.profile_id,
                     "profile_name": s.profile_name,
                     "profile_deleted": s.profile_id in deleted_profiles if s.profile_id else False,
+                    "modified_by": getattr(deck, "modified_by", None) or s.created_by if deck else None,
+                    "modified_at": deck.updated_at.isoformat() if deck and deck.updated_at else None,
                 }
-                for s in sessions
-            ]
+                result.append(info)
+            return result
 
     def delete_session(self, session_id: str) -> bool:
         """Delete a session and all associated data.

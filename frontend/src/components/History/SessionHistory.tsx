@@ -253,12 +253,14 @@ export const SessionHistory: React.FC<SessionHistoryProps> = ({
             <table className="w-full divide-y divide-gray-200 table-fixed">
               <thead className="bg-gray-50">
                 <tr>
-                  <th className="w-[13%] px-3 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Profile</th>
-                  <th className="w-[12%] px-3 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Owner</th>
-                  <th className="w-[25%] px-3 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Presentation</th>
-                  <th className="w-[14%] px-3 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Last Activity</th>
-                  <th className="w-[10%] px-3 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Access</th>
-                  <th className="w-[14%] px-3 py-3 text-center text-xs font-medium text-gray-500 uppercase tracking-wider">Actions</th>
+                  <th className="w-[10%] px-3 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Profile</th>
+                  <th className="w-[20%] px-3 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Presentation</th>
+                  <th className="w-[14%] px-3 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Created by</th>
+                  <th className="w-[12%] px-3 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Created at</th>
+                  <th className="w-[14%] px-3 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Last modified by</th>
+                  <th className="w-[12%] px-3 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Last modified at</th>
+                  <th className="w-[8%] px-3 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Access</th>
+                  <th className="w-[10%] px-3 py-3 text-center text-xs font-medium text-gray-500 uppercase tracking-wider">Actions</th>
                 </tr>
               </thead>
               <tbody className="bg-white divide-y divide-gray-200">
@@ -273,16 +275,22 @@ export const SessionHistory: React.FC<SessionHistoryProps> = ({
                         <span className="text-gray-400 text-xs">—</span>
                       )}
                     </td>
-                    <td className="px-3 py-3 text-xs text-gray-600 truncate" title={pres.created_by || ''}>
-                      {pres.created_by?.split('@')[0] || '—'}
-                    </td>
                     <td className="px-3 py-3 overflow-hidden max-w-0">
                       <span className="block text-sm font-medium text-gray-900 truncate" title={pres.title || ''}>
                         {pres.title || 'Untitled'}
                       </span>
                     </td>
+                    <td className="px-3 py-3 text-xs text-gray-600 truncate" title={pres.created_by || ''}>
+                      {pres.created_by || '—'}
+                    </td>
                     <td className="px-3 py-3 text-xs text-gray-500">
-                      {pres.last_activity ? formatDate(pres.last_activity) : '-'}
+                      {pres.created_at ? formatDate(pres.created_at) : '—'}
+                    </td>
+                    <td className="px-3 py-3 text-xs text-gray-600 truncate" title={pres.modified_by || ''}>
+                      {pres.modified_by || '—'}
+                    </td>
+                    <td className="px-3 py-3 text-xs text-gray-500">
+                      {pres.modified_at ? formatDate(pres.modified_at) : '—'}
                     </td>
                     <td className="px-3 py-3">
                       <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium ${
