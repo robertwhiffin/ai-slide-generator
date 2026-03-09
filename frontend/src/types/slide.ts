@@ -7,6 +7,10 @@ export interface Slide {
   scripts: string;  // JavaScript for this slide's charts (e.g., Chart.js initialization)
   verification?: VerificationResult;  // LLM as Judge verification result (merged from verification_map)
   content_hash?: string;  // Hash of slide content for verification lookup
+  created_by?: string;
+  created_at?: string;   // ISO 8601 timestamp
+  modified_by?: string;
+  modified_at?: string;  // ISO 8601 timestamp
 }
 
 export interface SlideDeck {
@@ -16,7 +20,12 @@ export interface SlideDeck {
   external_scripts: string[];
   scripts: string;
   slides: Slide[];
-  html_content?: string; // Raw HTML for debug view (only present when restoring from history)
+  html_content?: string;
+  created_by?: string;
+  created_at?: string;
+  modified_by?: string;
+  modified_at?: string;
+  version?: number;
 }
 
 export interface SlideContext {

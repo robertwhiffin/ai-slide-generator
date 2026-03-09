@@ -14,6 +14,8 @@ const API_BASE = `${API_BASE_URL}/api/settings`;
 
 // Types
 
+export type PermissionLevel = 'CAN_MANAGE' | 'CAN_EDIT' | 'CAN_VIEW';
+
 export interface Profile {
   id: number;
   name: string;
@@ -23,6 +25,9 @@ export interface Profile {
   created_by: string | null;
   updated_at: string;
   updated_by: string | null;
+  my_permission?: PermissionLevel;
+  /** True if this is the current user's personal default profile */
+  is_my_default?: boolean;
 }
 
 export interface ProfileDetail extends Profile {
@@ -237,6 +242,49 @@ export interface ReloadResponse {
   profile_name: string;
   llm_endpoint: string;
   sessions_preserved: number;
+}
+
+// Databricks Identities (Users/Groups)
+
+export type IdentityType = 'USER' | 'GROUP';
+
+export interface Identity {
+  id: string;
+  display_name: string;
+  type: IdentityType;
+}
+
+export interface IdentityListResponse {
+  identities: Identity[];
+  total: number;
+}
+
+// Profile Contributors (Sharing)
+
+export interface Contributor {
+  id: number;
+  identity_id: string;
+  identity_type: IdentityType;
+  identity_name: string;
+  permission_level: PermissionLevel;
+  created_at: string;
+  created_by: string | null;
+}
+
+export interface ContributorCreate {
+  identity_id: string;
+  identity_type: IdentityType;
+  identity_name: string;
+  permission_level: PermissionLevel;
+}
+
+export interface ContributorUpdate {
+  permission_level: PermissionLevel;
+}
+
+export interface ContributorListResponse {
+  contributors: Contributor[];
+  total: number;
 }
 
 export class ConfigApiError extends Error {
@@ -503,6 +551,97 @@ export const configApi = {
   validateGenie: (spaceId: string): Promise<{ success: boolean; message: string; details?: any }> =>
     fetchJson(`${API_BASE}/genie/validate?space_id=${encodeURIComponent(spaceId)}`, {
       method: 'POST',
+    }),
+
+  // Databricks Identities (Users/Groups)
+
+  /**
+   * Search for Databricks workspace users and groups.
+   */
+  searchIdentities: (
+    query: string,
+    includeUsers = true,
+    includeGroups = true,
+    maxResults = 50
+  ): Promise<IdentityListResponse> => {
+    const params = new URLSearchParams({
+      query,
+      include_users: String(includeUsers),
+      include_groups: String(includeGroups),
+      max_results: String(maxResults),
+    });
+    return fetchJson(`${API_BASE}/identities/search?${params}`);
+  },
+
+  /**
+   * List Databricks workspace users.
+   */
+  listUsers: (query?: string, maxResults = 100): Promise<IdentityListResponse> => {
+    const params = new URLSearchParams({ max_results: String(maxResults) });
+    if (query) params.set('query', query);
+    return fetchJson(`${API_BASE}/identities/users?${params}`);
+  },
+
+  /**
+   * List Databricks workspace groups.
+   */
+  listGroups: (query?: string, maxResults = 100): Promise<IdentityListResponse> => {
+    const params = new URLSearchParams({ max_results: String(maxResults) });
+    if (query) params.set('query', query);
+    return fetchJson(`${API_BASE}/identities/groups?${params}`);
+  },
+
+  // Profile Contributors (Sharing)
+
+  /**
+   * List contributors for a profile.
+   */
+  listContributors: (profileId: number): Promise<ContributorListResponse> =>
+    fetchJson(`${API_BASE}/profiles/${profileId}/contributors`),
+
+  /**
+   * Add a contributor to a profile.
+   */
+  addContributor: (profileId: number, data: ContributorCreate): Promise<Contributor> =>
+    fetchJson(`${API_BASE}/profiles/${profileId}/contributors`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(data),
+    }),
+
+  /**
+   * Add multiple contributors to a profile at once.
+   */
+  addContributorsBulk: (
+    profileId: number,
+    contributors: ContributorCreate[]
+  ): Promise<ContributorListResponse> =>
+    fetchJson(`${API_BASE}/profiles/${profileId}/contributors/bulk`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ contributors }),
+    }),
+
+  /**
+   * Update a contributor's permission level.
+   */
+  updateContributor: (
+    profileId: number,
+    contributorId: number,
+    data: ContributorUpdate
+  ): Promise<Contributor> =>
+    fetchJson(`${API_BASE}/profiles/${profileId}/contributors/${contributorId}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(data),
+    }),
+
+  /**
+   * Remove a contributor from a profile.
+   */
+  removeContributor: (profileId: number, contributorId: number): Promise<void> =>
+    fetchJson(`${API_BASE}/profiles/${profileId}/contributors/${contributorId}`, {
+      method: 'DELETE',
     }),
 };
 

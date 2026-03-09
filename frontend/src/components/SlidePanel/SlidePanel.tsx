@@ -14,7 +14,7 @@ import {
   sortableKeyboardCoordinates,
   verticalListSortingStrategy,
 } from '@dnd-kit/sortable';
-import { FiPlay, FiDownload, FiFile, FiFileText, FiCode } from 'react-icons/fi';
+import { FiPlay, FiDownload, FiFile, FiFileText, FiCode, FiUser, FiClock } from 'react-icons/fi';
 import type { Slide, SlideDeck } from '../../types/slide';
 import { SlideTile } from './SlideTile';
 import { PresentationMode } from '../PresentationMode';
@@ -47,6 +47,18 @@ interface SlidePanelProps {
 
 type ViewMode = 'tiles' | 'rawhtml' | 'rawtext';
 
+function formatRelativeTime(iso: string): string {
+  const diff = Date.now() - new Date(iso).getTime();
+  const mins = Math.floor(diff / 60000);
+  if (mins < 1) return 'just now';
+  if (mins < 60) return `${mins}m ago`;
+  const hrs = Math.floor(mins / 60);
+  if (hrs < 24) return `${hrs}h ago`;
+  const days = Math.floor(hrs / 24);
+  if (days < 30) return `${days}d ago`;
+  return new Date(iso).toLocaleDateString();
+}
+
 export const SlidePanel: React.FC<SlidePanelProps> = ({ slideDeck, rawHtml, onSlideChange, scrollToSlide, onSendMessage, readOnly = false, onVerificationComplete, versionKey }) => {
   const [isReordering, setIsReordering] = useState(false);
   const [viewMode, setViewMode] = useState<ViewMode>('tiles');
@@ -76,6 +88,15 @@ export const SlidePanel: React.FC<SlidePanelProps> = ({ slideDeck, rawHtml, onSl
     })
   );
 
+  const refreshDeck = async () => {
+    if (!sessionId || !onSlideChange) return;
+    const result = await api.getSlides(sessionId);
+    if (result.slide_deck) onSlideChange(result.slide_deck);
+  };
+
+  const isVersionConflict = (error: unknown): boolean =>
+    error instanceof Error && 'status' in error && (error as any).status === 409;
+
   const handleDragEnd = async (event: DragEndEvent) => {
     const { active, over } = event;
 
@@ -101,18 +122,18 @@ export const SlidePanel: React.FC<SlidePanelProps> = ({ slideDeck, rawHtml, onSl
         const newOrder = newSlides.map((_, idx) => 
           slideDeck.slides.findIndex(s => s.slide_id === newSlides[idx].slide_id)
         );
-        await api.reorderSlides(newOrder, sessionId);
-        // Fetch full deck to get verification merged from verification_map
-        const result = await api.getSlides(sessionId);
-        if (result.slide_deck) {
-          onSlideChange?.(result.slide_deck);
-        }
+        await api.reorderSlides(newOrder, sessionId, slideDeck.version);
+        await refreshDeck();
         clearSelection();
       } catch (error) {
         console.error('Failed to reorder:', error);
-        // Revert on error
-        onSlideChange(slideDeck);
-        alert('Failed to reorder slides');
+        if (isVersionConflict(error)) {
+          alert('This deck was modified by another user. Refreshing to latest version.');
+          await refreshDeck();
+        } else {
+          onSlideChange(slideDeck);
+          alert('Failed to reorder slides');
+        }
       } finally {
         setIsReordering(false);
       }
@@ -125,16 +146,17 @@ export const SlidePanel: React.FC<SlidePanelProps> = ({ slideDeck, rawHtml, onSl
     if (!confirm(`Delete slide ${index + 1}?`)) return;
 
     try {
-      await api.deleteSlide(index, sessionId);
-      // Fetch full deck to get verification merged from verification_map
-      const result = await api.getSlides(sessionId);
-      if (result.slide_deck) {
-        onSlideChange?.(result.slide_deck);
-      }
+      await api.deleteSlide(index, sessionId, slideDeck.version);
+      await refreshDeck();
       clearSelection();
     } catch (error) {
       console.error('Failed to delete:', error);
-      alert('Failed to delete slide');
+      if (isVersionConflict(error)) {
+        alert('This deck was modified by another user. Refreshing to latest version.');
+        await refreshDeck();
+      } else {
+        alert('Failed to delete slide');
+      }
     }
   };
 
@@ -142,16 +164,16 @@ export const SlidePanel: React.FC<SlidePanelProps> = ({ slideDeck, rawHtml, onSl
     if (!slideDeck || !sessionId || readOnly || !onSlideChange) return;
 
     try {
-      await api.updateSlide(index, html, sessionId);
-      // Fetch updated deck
-      const result = await api.getSlides(sessionId);
-      if (result.slide_deck) {
-        onSlideChange?.(result.slide_deck);
-      }
+      await api.updateSlide(index, html, sessionId, slideDeck.version);
+      await refreshDeck();
       clearSelection();
     } catch (error) {
       console.error('Failed to update:', error);
-      throw error; // Re-throw for editor to handle
+      if (isVersionConflict(error)) {
+        alert('This deck was modified by another user. Refreshing to latest version.');
+        await refreshDeck();
+      }
+      throw error;
     }
   };
 
@@ -619,8 +641,8 @@ export const SlidePanel: React.FC<SlidePanelProps> = ({ slideDeck, rawHtml, onSl
       {/* Header with Tabs */}
       <div className="bg-white border-b">
         <div className="p-4 flex items-center justify-between">
-          <div>
-            <h2 className="text-lg font-semibold">{slideDeck.title}</h2>
+          <div className="min-w-0 flex-1 mr-4">
+            <h2 className="text-lg font-semibold truncate">{slideDeck.title}</h2>
             <p className="text-sm text-gray-500">
               {slideDeck.slide_count} slide{slideDeck.slide_count !== 1 ? 's' : ''}
               {isReordering && ' • Reordering...'}
@@ -735,6 +757,35 @@ export const SlidePanel: React.FC<SlidePanelProps> = ({ slideDeck, rawHtml, onSl
           </div>
         )}
 
+        {/* Deck Metadata */}
+        <div className="px-4 py-1.5 bg-gray-50 border-t text-xs text-gray-500 flex flex-wrap items-center gap-x-4 gap-y-0.5">
+          <span className="inline-flex items-center gap-1 whitespace-nowrap">
+            <FiUser size={10} className="text-gray-400" />
+            <span className="text-gray-400">Created by</span>
+            <span className="text-gray-700 font-medium">{slideDeck.created_by || '—'}</span>
+          </span>
+          <span className="inline-flex items-center gap-1 whitespace-nowrap">
+            <FiClock size={10} className="text-gray-400" />
+            <span className="text-gray-400">Created</span>
+            <span className="text-gray-700" title={slideDeck.created_at ? new Date(slideDeck.created_at).toLocaleString() : ''}>
+              {slideDeck.created_at ? formatRelativeTime(slideDeck.created_at) : '—'}
+            </span>
+          </span>
+          <span className="text-gray-300">|</span>
+          <span className="inline-flex items-center gap-1 whitespace-nowrap">
+            <FiUser size={10} className="text-gray-400" />
+            <span className="text-gray-400">Last modified by</span>
+            <span className="text-gray-700 font-medium">{slideDeck.modified_by || '—'}</span>
+          </span>
+          <span className="inline-flex items-center gap-1 whitespace-nowrap">
+            <FiClock size={10} className="text-gray-400" />
+            <span className="text-gray-400">Modified</span>
+            <span className="text-gray-700" title={slideDeck.modified_at ? new Date(slideDeck.modified_at).toLocaleString() : ''}>
+              {slideDeck.modified_at ? formatRelativeTime(slideDeck.modified_at) : '—'}
+            </span>
+          </span>
+        </div>
+
         {/* Tab Navigation */}
         <div className="flex border-t">
           <button
@@ -821,6 +872,7 @@ export const SlidePanel: React.FC<SlidePanelProps> = ({ slideDeck, rawHtml, onSl
               isAutoVerifying={verifyingSlides.has(index)}
               onOptimize={() => handleOptimizeLayout(index)}
               isOptimizing={optimizingSlideIndex === index}
+              readOnly={readOnly}
             />
           </div>
           );

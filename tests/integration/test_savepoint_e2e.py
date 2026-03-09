@@ -124,8 +124,10 @@ def reset_singletons():
 def mock_user():
     """Patch the user context so API calls don't fail on auth."""
     with patch("src.api.routes.sessions.get_current_user", return_value="test-user"):
-        with patch("src.core.user_context.get_current_user", return_value="test-user"):
-            yield
+        with patch("src.api.routes.slides.get_current_user", return_value="test-user"):
+            with patch("src.api.routes.chat.get_current_user", return_value="test-user"):
+                with patch("src.core.user_context.get_current_user", return_value="test-user"):
+                    yield
 
 
 # ---------------------------------------------------------------------------

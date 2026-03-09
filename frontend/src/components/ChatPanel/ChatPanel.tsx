@@ -28,6 +28,7 @@ interface ChatPanelProps {
   onSlidesGenerated: (slideDeck: SlideDeck, rawHtml: string | null) => void;
   disabled?: boolean;
   previewMessages?: Message[] | null;  // When provided, show these instead of live messages
+  viewOnlyReason?: string;  // When provided, show why the user cannot edit
 }
 
 export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(({
@@ -35,6 +36,7 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(({
   onSlidesGenerated,
   disabled = false,
   previewMessages = null,
+  viewOnlyReason,
 }, ref) => {
   const [messages, setMessages] = useState<Message[]>([]);
   const [isLoading, setIsLoading] = useState(false);
@@ -324,7 +326,9 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(({
         onSend={handleSendMessage}
         disabled={isLoading || isInitializing || !sessionId || disabled}
         placeholder={
-          disabled
+          viewOnlyReason
+            ? viewOnlyReason
+            : disabled
             ? 'Exit preview mode to send messages...'
             : isInitializing
             ? 'Initializing session...'

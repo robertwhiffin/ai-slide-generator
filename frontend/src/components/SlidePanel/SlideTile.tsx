@@ -1,14 +1,29 @@
 import React, { useMemo, useRef, useState, useEffect } from 'react';
 import { useSortable } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
-import { FiEdit, FiTrash2, FiMove, FiMessageSquare, FiDatabase, FiMaximize2 } from 'react-icons/fi';
+import { FiEdit, FiTrash2, FiMove, FiMessageSquare, FiMessageCircle, FiDatabase, FiMaximize2, FiUser, FiClock } from 'react-icons/fi';
 import { Tooltip } from '../common/Tooltip';
 import type { Slide, SlideDeck } from '../../types/slide';
 import type { VerificationResult } from '../../types/verification';
 import { HTMLEditorModal } from './HTMLEditorModal';
+import { CommentThread } from './CommentThread';
 import { useSelection } from '../../contexts/SelectionContext';
 import { VerificationBadge } from './VerificationBadge';
 import { api } from '../../services/api';
+
+function formatRelativeTime(iso: string): string {
+  const date = new Date(iso);
+  const now = new Date();
+  const diffMs = now.getTime() - date.getTime();
+  const diffMin = Math.floor(diffMs / 60_000);
+  if (diffMin < 1) return 'just now';
+  if (diffMin < 60) return `${diffMin}m ago`;
+  const diffHr = Math.floor(diffMin / 60);
+  if (diffHr < 24) return `${diffHr}h ago`;
+  const diffDays = Math.floor(diffHr / 24);
+  if (diffDays < 7) return `${diffDays}d ago`;
+  return date.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+}
 
 interface SlideTileProps {
   slide: Slide;
@@ -21,6 +36,7 @@ interface SlideTileProps {
   isAutoVerifying?: boolean;  // True when auto-verification is running for this slide
   onOptimize?: () => void;
   isOptimizing?: boolean;
+  readOnly?: boolean;  // When true, hide edit/delete/reorder controls
 }
 
 const SLIDE_WIDTH = 1280;
@@ -38,8 +54,11 @@ export const SlideTile: React.FC<SlideTileProps> = ({
   isAutoVerifying = false,
   onOptimize,
   isOptimizing = false,
+  readOnly = false,
 }) => {
   const [isEditing, setIsEditing] = useState(false);
+  const [showComments, setShowComments] = useState(false);
+  const [commentCount, setCommentCount] = useState<number | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const [scale, setScale] = useState(1);
   const { selectedIndices, setSelection } = useSelection();
@@ -74,6 +93,16 @@ export const SlideTile: React.FC<SlideTileProps> = ({
       setIsLoadingGenieLink(false);
     }
   };
+
+  // Fetch comment count on mount and when comments panel closes
+  useEffect(() => {
+    if (!sessionId || !slide.slide_id) return;
+    let cancelled = false;
+    api.listComments(sessionId, slide.slide_id).then(({ count }) => {
+      if (!cancelled) setCommentCount(count);
+    }).catch(() => {});
+    return () => { cancelled = true; };
+  }, [sessionId, slide.slide_id, showComments]);
 
   // Sync verification state when slide.verification changes (e.g., session restore)
   useEffect(() => {
@@ -201,16 +230,18 @@ export const SlideTile: React.FC<SlideTileProps> = ({
         {/* Slide Header with Actions */}
       <div className="px-4 py-2 bg-gray-100 border-b flex items-center justify-between">
           <div className="flex items-center space-x-2">
-            {/* Drag Handle */}
-            <Tooltip text="Drag to reorder">
-              <button
-                {...attributes}
-                {...listeners}
-                className="cursor-grab active:cursor-grabbing text-gray-500 hover:text-gray-700"
-              >
-                <FiMove size={18} />
-              </button>
-            </Tooltip>
+            {/* Drag Handle - hidden in readOnly mode */}
+            {!readOnly && (
+              <Tooltip text="Drag to reorder">
+                <button
+                  {...attributes}
+                  {...listeners}
+                  className="cursor-grab active:cursor-grabbing text-gray-500 hover:text-gray-700"
+                >
+                  <FiMove size={18} />
+                </button>
+              </Tooltip>
+            )}
             
         <span className="text-sm font-medium text-gray-700">
           Slide {index + 1}
@@ -239,21 +270,45 @@ export const SlideTile: React.FC<SlideTileProps> = ({
                 <FiDatabase size={16} />
               </button>
             </Tooltip>
-            
-            <Tooltip text={isSelected ? 'Selected for editing' : 'Add to chat context'}>
+
+            {/* Comments toggle */}
+            <Tooltip text={showComments ? 'Hide comments' : 'Comments'}>
               <button
-                onClick={() => setSelection([index], [slide])}
-                className={`p-1 rounded ${
-                  isSelected
-                    ? 'text-blue-700 bg-blue-50'
-                    : 'text-indigo-600 hover:bg-indigo-50'
+                onClick={() => setShowComments((v) => !v)}
+                className={`relative p-1 rounded ${
+                  showComments
+                    ? 'text-orange-700 bg-orange-50'
+                    : 'text-orange-600 hover:bg-orange-50'
                 }`}
-                aria-pressed={isSelected}
               >
-                <FiMessageSquare size={16} />
+                <FiMessageCircle size={16} />
+                {commentCount != null && commentCount > 0 && (
+                  <span className="absolute -top-1 -right-1 bg-orange-500 text-white text-[10px] leading-none font-bold rounded-full min-w-[16px] h-4 flex items-center justify-center px-0.5">
+                    {commentCount}
+                  </span>
+                )}
               </button>
             </Tooltip>
-            {onOptimize && (
+            
+            {/* Selection for chat context - hidden in readOnly mode */}
+            {!readOnly && (
+              <Tooltip text={isSelected ? 'Selected for editing' : 'Add to chat context'}>
+                <button
+                  onClick={() => setSelection([index], [slide])}
+                  className={`p-1 rounded ${
+                    isSelected
+                      ? 'text-blue-700 bg-blue-50'
+                      : 'text-indigo-600 hover:bg-indigo-50'
+                  }`}
+                  aria-pressed={isSelected}
+                >
+                  <FiMessageSquare size={16} />
+                </button>
+              </Tooltip>
+            )}
+            
+            {/* Optimize button - hidden in readOnly mode */}
+            {!readOnly && onOptimize && (
               <Tooltip text={isOptimizing ? 'Optimizing layout...' : 'Optimize layout'}>
                 <button
                   onClick={onOptimize}
@@ -272,23 +327,30 @@ export const SlideTile: React.FC<SlideTileProps> = ({
                 </button>
               </Tooltip>
             )}
-            <Tooltip text="Edit slide HTML">
-              <button
-                onClick={() => setIsEditing(true)}
-                className="p-1 text-blue-600 hover:bg-blue-50 rounded"
-              >
-                <FiEdit size={16} />
-              </button>
-            </Tooltip>
             
-            <Tooltip text="Delete slide" align="end">
-              <button
-                onClick={onDelete}
-                className="p-1 text-red-600 hover:bg-red-50 rounded"
-              >
-                <FiTrash2 size={16} />
-              </button>
-            </Tooltip>
+            {/* Edit button - hidden in readOnly mode */}
+            {!readOnly && (
+              <Tooltip text="Edit slide HTML">
+                <button
+                  onClick={() => setIsEditing(true)}
+                  className="p-1 text-blue-600 hover:bg-blue-50 rounded"
+                >
+                  <FiEdit size={16} />
+                </button>
+              </Tooltip>
+            )}
+            
+            {/* Delete button - hidden in readOnly mode */}
+            {!readOnly && (
+              <Tooltip text="Delete slide" align="end">
+                <button
+                  onClick={onDelete}
+                  className="p-1 text-red-600 hover:bg-red-50 rounded"
+                >
+                  <FiTrash2 size={16} />
+                </button>
+              </Tooltip>
+            )}
           </div>
       </div>
 
@@ -311,6 +373,40 @@ export const SlideTile: React.FC<SlideTileProps> = ({
           }}
         />
       </div>
+
+      {/* Slide Metadata Footer */}
+      <div className="px-3 py-1.5 bg-gray-50 border-t text-xs text-gray-500 flex flex-wrap items-center gap-x-3 gap-y-0.5">
+        <span className="inline-flex items-center gap-1 whitespace-nowrap">
+          <FiUser size={10} className="text-gray-400" />
+          <span className="text-gray-400">Created by</span>
+          <span className="text-gray-700 font-medium">{slide.created_by || '—'}</span>
+        </span>
+        <span className="inline-flex items-center gap-1 whitespace-nowrap">
+          <FiClock size={10} className="text-gray-400" />
+          <span className="text-gray-400">Created</span>
+          <span className="text-gray-700" title={slide.created_at ? new Date(slide.created_at).toLocaleString() : ''}>
+            {slide.created_at ? formatRelativeTime(slide.created_at) : '—'}
+          </span>
+        </span>
+        <span className="text-gray-300">|</span>
+        <span className="inline-flex items-center gap-1 whitespace-nowrap">
+          <FiUser size={10} className="text-gray-400" />
+          <span className="text-gray-400">Last modified by</span>
+          <span className="text-gray-700 font-medium">{slide.modified_by || '—'}</span>
+        </span>
+        <span className="inline-flex items-center gap-1 whitespace-nowrap">
+          <FiClock size={10} className="text-gray-400" />
+          <span className="text-gray-400">Modified</span>
+          <span className="text-gray-700" title={slide.modified_at ? new Date(slide.modified_at).toLocaleString() : ''}>
+            {slide.modified_at ? formatRelativeTime(slide.modified_at) : '—'}
+          </span>
+        </span>
+      </div>
+
+      {/* Comments Panel */}
+      {showComments && (
+        <CommentThread sessionId={sessionId} slideId={slide.slide_id} />
+      )}
     </div>
 
       {/* HTML Editor Modal */}

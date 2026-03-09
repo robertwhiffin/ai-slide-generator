@@ -455,22 +455,33 @@ class SlideDeck:
             Dictionary representation of the slide deck including:
             - Aggregated scripts (IIFE-wrapped) at deck level
             - Individual scripts on each slide
+            - Per-slide authorship metadata (created_by, modified_by, etc.)
         """
+        slides_list = []
+        for idx, slide in enumerate(self.slides):
+            slide_dict: Dict[str, Any] = {
+                'index': idx,
+                'html': slide.to_html(),
+                'slide_id': slide.slide_id,
+                'scripts': slide.scripts,
+            }
+            if slide.created_by:
+                slide_dict['created_by'] = slide.created_by
+            if slide.created_at:
+                slide_dict['created_at'] = slide.created_at
+            if slide.modified_by:
+                slide_dict['modified_by'] = slide.modified_by
+            if slide.modified_at:
+                slide_dict['modified_at'] = slide.modified_at
+            slides_list.append(slide_dict)
+
         return {
             'title': self.title,
             'slide_count': len(self.slides),
             'css': self.css,
             'external_scripts': self.external_scripts,
-            'scripts': self.scripts,  # Aggregated, IIFE-wrapped
-            'slides': [
-                {
-                    'index': idx,
-                    'html': slide.to_html(),
-                    'slide_id': slide.slide_id,
-                    'scripts': slide.scripts,  # Individual slide scripts
-                }
-                for idx, slide in enumerate(self.slides)
-            ]
+            'scripts': self.scripts,
+            'slides': slides_list,
         }
 
     def __len__(self) -> int:

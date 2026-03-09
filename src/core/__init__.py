@@ -13,7 +13,7 @@ from src.core.databricks_client import (
     reset_client,
     verify_connection,
 )
-from src.core.settings_db import AppSettings, fetch_prompt_content, get_settings, load_settings_from_database, reload_settings
+from src.core.settings_db import AppSettings, get_settings, load_settings_from_database, reload_settings
 
 __all__ = [
     # Config loader
@@ -32,7 +32,6 @@ __all__ = [
     "verify_connection",
     # Settings
     "AppSettings",
-    "fetch_prompt_content",
     "get_settings",
     "load_settings_from_database",
     "reload_settings",
