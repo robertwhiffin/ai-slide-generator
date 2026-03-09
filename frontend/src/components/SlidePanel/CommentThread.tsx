@@ -9,6 +9,7 @@ import {
   FiX,
   FiEye,
   FiEyeOff,
+  FiAtSign,
 } from 'react-icons/fi';
 import type { SlideComment } from '../../types/comment';
 import { api } from '../../services/api';
@@ -25,6 +26,109 @@ function timeAgo(iso: string): string {
   return new Date(iso).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
 }
 
+function renderContentWithMentions(content: string): React.ReactNode {
+  const parts = content.split(/(@[\w.\-]+)/g);
+  return parts.map((part, i) =>
+    part.startsWith('@') ? (
+      <span key={i} className="text-blue-600 font-medium">{part}</span>
+    ) : (
+      <span key={i}>{part}</span>
+    )
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Mention-aware text input
+// ---------------------------------------------------------------------------
+
+interface MentionInputProps {
+  value: string;
+  onChange: (v: string) => void;
+  onSubmit: () => void;
+  placeholder?: string;
+  users: string[];
+  autoFocus?: boolean;
+  className?: string;
+}
+
+const MentionInput: React.FC<MentionInputProps> = ({
+  value, onChange, onSubmit, placeholder, users, autoFocus, className,
+}) => {
+  const inputRef = useRef<HTMLInputElement>(null);
+  const [showDropdown, setShowDropdown] = useState(false);
+  const [mentionQuery, setMentionQuery] = useState('');
+  const [mentionStart, setMentionStart] = useState(-1);
+  const [selectedIdx, setSelectedIdx] = useState(0);
+
+  const filtered = mentionQuery
+    ? users.filter(u => u.toLowerCase().includes(mentionQuery.toLowerCase())).slice(0, 8)
+    : users.slice(0, 8);
+
+  const handleChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const v = e.target.value;
+    onChange(v);
+    const pos = e.target.selectionStart ?? v.length;
+    const before = v.slice(0, pos);
+    const atMatch = before.match(/@([\w.\-]*)$/);
+    if (atMatch) {
+      setShowDropdown(true);
+      setMentionQuery(atMatch[1]);
+      setMentionStart(atMatch.index!);
+      setSelectedIdx(0);
+    } else {
+      setShowDropdown(false);
+    }
+  };
+
+  const insertMention = (user: string) => {
+    const before = value.slice(0, mentionStart);
+    const afterCursor = value.slice(mentionStart + 1 + mentionQuery.length);
+    onChange(`${before}@${user} ${afterCursor}`);
+    setShowDropdown(false);
+    inputRef.current?.focus();
+  };
+
+  const handleKeyDown = (e: React.KeyboardEvent) => {
+    if (showDropdown && filtered.length > 0) {
+      if (e.key === 'ArrowDown') { e.preventDefault(); setSelectedIdx(i => Math.min(i + 1, filtered.length - 1)); return; }
+      if (e.key === 'ArrowUp') { e.preventDefault(); setSelectedIdx(i => Math.max(i - 1, 0)); return; }
+      if (e.key === 'Tab' || e.key === 'Enter') { e.preventDefault(); insertMention(filtered[selectedIdx]); return; }
+      if (e.key === 'Escape') { setShowDropdown(false); return; }
+    }
+    if (e.key === 'Enter' && !showDropdown) onSubmit();
+  };
+
+  return (
+    <div className="relative flex-1">
+      <input
+        ref={inputRef}
+        className={className}
+        placeholder={placeholder}
+        value={value}
+        onChange={handleChange}
+        onKeyDown={handleKeyDown}
+        autoFocus={autoFocus}
+      />
+      {showDropdown && filtered.length > 0 && (
+        <div className="absolute bottom-full left-0 mb-1 w-full bg-white border border-gray-200 rounded-lg shadow-lg z-50 max-h-40 overflow-y-auto">
+          {filtered.map((user, idx) => (
+            <button
+              key={user}
+              onMouseDown={(e) => { e.preventDefault(); insertMention(user); }}
+              className={`w-full text-left px-3 py-1.5 text-sm flex items-center gap-2 ${
+                idx === selectedIdx ? 'bg-blue-50 text-blue-700' : 'text-gray-700 hover:bg-gray-50'
+              }`}
+            >
+              <FiAtSign size={12} className="text-gray-400" />
+              {user}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+};
+
 // ---------------------------------------------------------------------------
 // Single comment bubble
 // ---------------------------------------------------------------------------
@@ -34,6 +138,7 @@ interface CommentBubbleProps {
   sessionId: string;
   slideId: string;
   onRefresh: () => void;
+  mentionableUsers: string[];
   depth?: number;
 }
 
@@ -42,6 +147,7 @@ const CommentBubble: React.FC<CommentBubbleProps> = ({
   sessionId,
   slideId,
   onRefresh,
+  mentionableUsers,
   depth = 0,
 }) => {
   const [isEditing, setIsEditing] = useState(false);
@@ -191,7 +297,7 @@ const CommentBubble: React.FC<CommentBubbleProps> = ({
             </button>
           </div>
         ) : (
-          <p className="text-gray-800 whitespace-pre-wrap break-words">{comment.content}</p>
+          <p className="text-gray-800 whitespace-pre-wrap break-words">{renderContentWithMentions(comment.content)}</p>
         )}
 
         {/* Reply trigger */}
@@ -207,12 +313,13 @@ const CommentBubble: React.FC<CommentBubbleProps> = ({
         {/* Reply input */}
         {isReplying && (
           <div className="mt-2 flex gap-1">
-            <input
+            <MentionInput
               className="flex-1 text-sm border rounded px-2 py-1 focus:outline-none focus:ring-1 focus:ring-blue-400"
-              placeholder="Write a reply..."
+              placeholder="Write a reply... (type @ to mention)"
               value={replyContent}
-              onChange={(e) => setReplyContent(e.target.value)}
-              onKeyDown={(e) => e.key === 'Enter' && handleReply()}
+              onChange={setReplyContent}
+              onSubmit={handleReply}
+              users={mentionableUsers}
               autoFocus
             />
             <button
@@ -242,6 +349,7 @@ const CommentBubble: React.FC<CommentBubbleProps> = ({
               sessionId={sessionId}
               slideId={slideId}
               onRefresh={onRefresh}
+              mentionableUsers={mentionableUsers}
               depth={depth + 1}
             />
           ))}
@@ -266,7 +374,7 @@ export const CommentThread: React.FC<CommentThreadProps> = ({ sessionId, slideId
   const [newContent, setNewContent] = useState('');
   const [posting, setPosting] = useState(false);
   const [showResolved, setShowResolved] = useState(false);
-  const inputRef = useRef<HTMLInputElement>(null);
+  const [mentionableUsers, setMentionableUsers] = useState<string[]>([]);
 
   const fetchComments = useCallback(async () => {
     try {
@@ -283,6 +391,10 @@ export const CommentThread: React.FC<CommentThreadProps> = ({ sessionId, slideId
     fetchComments();
   }, [fetchComments]);
 
+  useEffect(() => {
+    api.getMentionableUsers(sessionId).then(setMentionableUsers).catch(() => {});
+  }, [sessionId]);
+
   const handleAdd = async () => {
     if (!newContent.trim() || posting) return;
     setPosting(true);
@@ -290,7 +402,6 @@ export const CommentThread: React.FC<CommentThreadProps> = ({ sessionId, slideId
       await api.addComment(sessionId, slideId, newContent.trim());
       setNewContent('');
       await fetchComments();
-      inputRef.current?.focus();
     } catch (err) {
       console.error('Failed to add comment:', err);
     } finally {
@@ -328,6 +439,7 @@ export const CommentThread: React.FC<CommentThreadProps> = ({ sessionId, slideId
               sessionId={sessionId}
               slideId={slideId}
               onRefresh={fetchComments}
+              mentionableUsers={mentionableUsers}
             />
           ))}
         </div>
@@ -335,13 +447,13 @@ export const CommentThread: React.FC<CommentThreadProps> = ({ sessionId, slideId
 
       {/* New comment input */}
       <div className="flex gap-1.5">
-        <input
-          ref={inputRef}
-          className="flex-1 text-sm border border-gray-300 rounded-lg px-3 py-1.5 focus:outline-none focus:ring-2 focus:ring-blue-400"
-          placeholder="Add a comment..."
+        <MentionInput
+          className="w-full text-sm border border-gray-300 rounded-lg px-3 py-1.5 focus:outline-none focus:ring-2 focus:ring-blue-400"
+          placeholder="Add a comment... (type @ to mention)"
           value={newContent}
-          onChange={(e) => setNewContent(e.target.value)}
-          onKeyDown={(e) => e.key === 'Enter' && handleAdd()}
+          onChange={setNewContent}
+          onSubmit={handleAdd}
+          users={mentionableUsers}
         />
         <button
           onClick={handleAdd}

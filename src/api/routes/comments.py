@@ -49,6 +49,51 @@ class UpdateCommentRequest(BaseModel):
 # ---------------------------------------------------------------------------
 
 
+@router.get("/mentionable-users")
+async def mentionable_users(
+    session_id: str = Query(..., description="Session ID"),
+):
+    """List users who can be @mentioned in comments for a session.
+
+    Returns the session owner plus all profile contributors.
+    """
+    current_user = get_current_user()
+    if not current_user:
+        raise HTTPException(status_code=401, detail="Authentication required")
+
+    session_manager = get_session_manager()
+    try:
+        users = await asyncio.to_thread(
+            session_manager.get_mentionable_users,
+            session_id,
+        )
+        return {"users": users}
+    except SessionNotFoundError:
+        raise HTTPException(status_code=404, detail="Session not found")
+    except Exception as e:
+        logger.error(f"Failed to list mentionable users: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/mentions")
+async def list_mentions():
+    """List comments that @mention the current user (for notifications)."""
+    current_user = get_current_user()
+    if not current_user:
+        raise HTTPException(status_code=401, detail="Authentication required")
+
+    session_manager = get_session_manager()
+    try:
+        mentions = await asyncio.to_thread(
+            session_manager.list_mentions,
+            current_user,
+        )
+        return {"mentions": mentions, "count": len(mentions)}
+    except Exception as e:
+        logger.error(f"Failed to list mentions: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.get("")
 async def list_comments(
     session_id: str = Query(..., description="Session ID"),
