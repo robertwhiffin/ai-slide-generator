@@ -40,45 +40,60 @@ router = APIRouter(prefix="/api", tags=["chat"])
 
 
 def _check_chat_permission(session_id: str, db: DBSession) -> None:
-    """Verify user has CAN_EDIT or higher permission to send chat messages.
-    
+    """Verify user can send chat messages in this session.
+
+    Conversations are always private. A user can chat only if:
+    1. They are the session creator (owner session), OR
+    2. This is their own contributor session AND they have CAN_EDIT or CAN_MANAGE
+
+    Viewers get a contributor session so they can see the shared slide deck,
+    but they cannot chat (which would modify slides).
+
     Args:
         session_id: Session identifier
         db: Database session
-        
+
     Raises:
-        HTTPException 403: If user doesn't have required permission
+        HTTPException 403: If user doesn't have permission
     """
     session_manager = get_session_manager()
     current_user = get_current_user()
-    ctx = get_permission_context()
-    
+
     try:
         session_info = session_manager.get_session(session_id)
     except SessionNotFoundError:
-        # Let the main handler deal with missing sessions
         return
-    
-    # Session creator has full access
-    if session_info.get("created_by") == current_user:
+
+    is_creator = session_info.get("created_by") == current_user
+    is_contributor = session_info.get("is_contributor_session", False)
+
+    # Owner of a root session can always chat
+    if is_creator and not is_contributor:
         return
-    
-    # Check profile-based permission
-    profile_id = session_info.get("profile_id")
-    if profile_id and ctx:
-        perm_service = PermissionService(db)
-        permission = perm_service.get_user_permission(
-            profile_id=profile_id,
-            user_id=ctx.user_id,
-            user_name=ctx.user_name,
-            group_ids=ctx.group_ids,
+
+    # Contributor session: must be the creator AND have at least CAN_EDIT on the profile
+    if is_creator and is_contributor:
+        profile_id = session_info.get("profile_id")
+        ctx = get_permission_context()
+        if profile_id and ctx:
+            perm_service = PermissionService(db)
+            permission = perm_service.get_user_permission(
+                profile_id=profile_id,
+                user_id=ctx.user_id,
+                user_name=ctx.user_name,
+                group_ids=ctx.group_ids,
+            )
+            if permission and PERMISSION_PRIORITY.get(permission, 0) >= PERMISSION_PRIORITY.get(PermissionLevel.CAN_EDIT, 0):
+                return
+
+        raise HTTPException(
+            status_code=403,
+            detail="You have view-only access to this presentation. Editors and managers can use chat to modify slides.",
         )
-        if permission and PERMISSION_PRIORITY[permission] >= PERMISSION_PRIORITY[PermissionLevel.CAN_EDIT]:
-            return
-    
+
     raise HTTPException(
         status_code=403,
-        detail="You don't have permission to send messages in this session. CAN_EDIT or higher required.",
+        detail="You can only chat in your own session. Use your contributor session for shared presentations.",
     )
 
 
@@ -114,17 +129,38 @@ async def send_message(
     _check_chat_permission(request.session_id, db)
 
     session_manager = get_session_manager()
+    current_user = get_current_user()
 
-    # Acquire session lock to prevent concurrent modifications
+    # Acquire deck-level lock (prevents concurrent slide modifications
+    # across owner + contributor sessions sharing the same deck)
+    deck_locked = await asyncio.to_thread(
+        session_manager.acquire_deck_lock,
+        request.session_id,
+        current_user or "unknown",
+    )
+    if not deck_locked:
+        lock_holder = await asyncio.to_thread(
+            session_manager.get_deck_lock_holder,
+            request.session_id,
+        )
+        raise HTTPException(
+            status_code=409,
+            detail=f"Slides are being updated by {lock_holder or 'another user'}. Please wait.",
+        )
+
+    # Also acquire per-session lock
     locked = await asyncio.to_thread(
         session_manager.acquire_session_lock,
         request.session_id,
     )
     if not locked:
+        await asyncio.to_thread(
+            session_manager.release_deck_lock, request.session_id, current_user or "unknown",
+        )
         raise HTTPException(
             status_code=409,
             detail="Session is currently processing another request. Please wait.",
-    )
+        )
 
     try:
         chat_service = get_chat_service()
@@ -152,10 +188,14 @@ async def send_message(
             detail=f"Failed to process message: {str(e)}",
         ) from e
     finally:
-        # Always release the lock
         await asyncio.to_thread(
             session_manager.release_session_lock,
             request.session_id,
+        )
+        await asyncio.to_thread(
+            session_manager.release_deck_lock,
+            request.session_id,
+            current_user or "unknown",
         )
 
 
@@ -196,13 +236,33 @@ async def send_message_streaming(
     _check_chat_permission(request.session_id, db)
 
     session_manager = get_session_manager()
+    current_user = get_current_user()
 
-    # Acquire session lock to prevent concurrent modifications
+    # Acquire deck-level lock
+    deck_locked = await asyncio.to_thread(
+        session_manager.acquire_deck_lock,
+        request.session_id,
+        current_user or "unknown",
+    )
+    if not deck_locked:
+        lock_holder = await asyncio.to_thread(
+            session_manager.get_deck_lock_holder,
+            request.session_id,
+        )
+        raise HTTPException(
+            status_code=409,
+            detail=f"Slides are being updated by {lock_holder or 'another user'}. Please wait.",
+        )
+
+    # Also acquire per-session lock
     locked = await asyncio.to_thread(
         session_manager.acquire_session_lock,
         request.session_id,
     )
     if not locked:
+        await asyncio.to_thread(
+            session_manager.release_deck_lock, request.session_id, current_user or "unknown",
+        )
         raise HTTPException(
             status_code=409,
             detail="Session is currently processing another request. Please wait.",
@@ -267,10 +327,14 @@ async def send_message_streaming(
                 yield error_event.to_sse()
 
         finally:
-            # Always release the lock
             await asyncio.to_thread(
                 session_manager.release_session_lock,
                 request.session_id,
+            )
+            await asyncio.to_thread(
+                session_manager.release_deck_lock,
+                request.session_id,
+                current_user or "unknown",
             )
 
     return StreamingResponse(

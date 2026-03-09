@@ -21,6 +21,24 @@ environments:
       schema: "tellr_app_data_dev"
       capacity: "CU_1"  # Options: CU_1, CU_2, CU_4, CU_8
 
+  test:
+    app_name: "test-tellr"
+    description: "AI Slide Generator - Test Environment"
+    workspace_path: "/Workspace/Users/kholoud.ibrahim@databricks.com/.apps/test/test-tellr"
+    permissions:
+      - user_name: "kholoud.ibrahim@databricks.com"
+        permission_level: "CAN_MANAGE"
+    compute_size: "MEDIUM"
+    env_vars:
+      ENVIRONMENT: "test"
+      LOG_LEVEL: "DEBUG"
+      LAKEBASE_INSTANCE: "test-tellr-db"
+      LAKEBASE_SCHEMA: "app_data"
+    lakebase:
+      database_name: "test-tellr-db"
+      schema: "tellr_app_data_test"
+      capacity: "CU_1"
+
   production:
     app_name: "db-tellr-prod"
     description: "Databricks tellr AI Slide Generator - Production"

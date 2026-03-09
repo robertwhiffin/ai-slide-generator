@@ -14,6 +14,7 @@ from src.database.models import (
     ConfigProfileContributor,
     ConfigPrompts,
     SlideStyleLibrary,
+    UserProfilePreference,
 )
 from src.database.models.profile_contributor import PermissionLevel
 
@@ -81,7 +82,37 @@ class ProfileService:
         )
 
     def get_default_profile(self) -> Optional[ConfigProfile]:
-        """Get default active (non-deleted) profile."""
+        """Get the default profile for the current user.
+
+        Resolution order:
+        1. User's personal preference (user_profile_preferences table)
+        2. Global is_default flag (system fallback)
+        3. First accessible profile (final fallback)
+        """
+        ctx = get_permission_context()
+        if ctx and ctx.user_name:
+            pref = (
+                self.db.query(UserProfilePreference)
+                .filter(UserProfilePreference.user_name == ctx.user_name)
+                .first()
+            )
+            if pref and pref.default_profile_id:
+                profile = (
+                    self.db.query(ConfigProfile)
+                    .options(
+                        joinedload(ConfigProfile.ai_infra),
+                        joinedload(ConfigProfile.genie_spaces),
+                        joinedload(ConfigProfile.prompts),
+                    )
+                    .filter(
+                        ConfigProfile.id == pref.default_profile_id,
+                        ConfigProfile.is_deleted == False,  # noqa: E712
+                    )
+                    .first()
+                )
+                if profile:
+                    return profile
+
         return (
             self.db.query(ConfigProfile)
             .options(
@@ -92,6 +123,15 @@ class ProfileService:
             .filter(ConfigProfile.is_default == True, ConfigProfile.is_deleted == False)  # noqa: E712
             .first()
         )
+
+    def get_user_default_profile_id(self, user_name: str) -> Optional[int]:
+        """Get the profile ID that a user has set as their personal default."""
+        pref = (
+            self.db.query(UserProfilePreference)
+            .filter(UserProfilePreference.user_name == user_name)
+            .first()
+        )
+        return pref.default_profile_id if pref else None
 
     def create_profile(
         self,
@@ -289,15 +329,17 @@ class ProfileService:
         self.db.commit()
 
     def set_default_profile(self, profile_id: int, user: str) -> ConfigProfile:
-        """
-        Mark profile as default.
-        
+        """Set a profile as the current user's personal default.
+
+        Writes to the per-user user_profile_preferences table instead of
+        toggling the global is_default flag.
+
         Args:
-            profile_id: Profile to mark as default
-            user: User making the change
+            profile_id: Profile to set as default
+            user: Username making the change
             
         Returns:
-            Updated profile
+            The profile that was set as default
         """
         profile = self.get_profile(profile_id)
         if not profile:
@@ -306,24 +348,26 @@ class ProfileService:
         if profile.is_deleted:
             raise ValueError("Cannot set a deleted profile as default")
 
-        if profile.is_default:
-            return profile  # Already default
-
-        # Unmark other default profiles
-        self.db.query(ConfigProfile).filter(
-            ConfigProfile.is_default == True
-        ).update({"is_default": False})
-
-        # Mark this as default
-        profile.is_default = True
-        profile.updated_by = user
+        pref = (
+            self.db.query(UserProfilePreference)
+            .filter(UserProfilePreference.user_name == user)
+            .first()
+        )
+        if pref:
+            pref.default_profile_id = profile_id
+        else:
+            pref = UserProfilePreference(
+                user_name=user,
+                default_profile_id=profile_id,
+            )
+            self.db.add(pref)
 
         history = ConfigHistory(
             profile_id=profile.id,
             domain="profile",
-            action="set_default",
+            action="set_user_default",
             changed_by=user,
-            changes={"is_default": {"old": False, "new": True}},
+            changes={"user_default_profile_id": {"old": None, "new": profile_id}},
         )
         self.db.add(history)
 

@@ -1,14 +1,29 @@
 import React, { useMemo, useRef, useState, useEffect } from 'react';
 import { useSortable } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
-import { FiEdit, FiTrash2, FiMove, FiMessageSquare, FiDatabase, FiMaximize2 } from 'react-icons/fi';
+import { FiEdit, FiTrash2, FiMove, FiMessageSquare, FiMessageCircle, FiDatabase, FiMaximize2, FiUser, FiClock } from 'react-icons/fi';
 import { Tooltip } from '../common/Tooltip';
 import type { Slide, SlideDeck } from '../../types/slide';
 import type { VerificationResult } from '../../types/verification';
 import { HTMLEditorModal } from './HTMLEditorModal';
+import { CommentThread } from './CommentThread';
 import { useSelection } from '../../contexts/SelectionContext';
 import { VerificationBadge } from './VerificationBadge';
 import { api } from '../../services/api';
+
+function formatRelativeTime(iso: string): string {
+  const date = new Date(iso);
+  const now = new Date();
+  const diffMs = now.getTime() - date.getTime();
+  const diffMin = Math.floor(diffMs / 60_000);
+  if (diffMin < 1) return 'just now';
+  if (diffMin < 60) return `${diffMin}m ago`;
+  const diffHr = Math.floor(diffMin / 60);
+  if (diffHr < 24) return `${diffHr}h ago`;
+  const diffDays = Math.floor(diffHr / 24);
+  if (diffDays < 7) return `${diffDays}d ago`;
+  return date.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+}
 
 interface SlideTileProps {
   slide: Slide;
@@ -42,6 +57,8 @@ export const SlideTile: React.FC<SlideTileProps> = ({
   readOnly = false,
 }) => {
   const [isEditing, setIsEditing] = useState(false);
+  const [showComments, setShowComments] = useState(false);
+  const [commentCount, setCommentCount] = useState<number | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const [scale, setScale] = useState(1);
   const { selectedIndices, setSelection } = useSelection();
@@ -76,6 +93,16 @@ export const SlideTile: React.FC<SlideTileProps> = ({
       setIsLoadingGenieLink(false);
     }
   };
+
+  // Fetch comment count on mount and when comments panel closes
+  useEffect(() => {
+    if (!sessionId || !slide.slide_id) return;
+    let cancelled = false;
+    api.listComments(sessionId, slide.slide_id).then(({ count }) => {
+      if (!cancelled) setCommentCount(count);
+    }).catch(() => {});
+    return () => { cancelled = true; };
+  }, [sessionId, slide.slide_id, showComments]);
 
   // Sync verification state when slide.verification changes (e.g., session restore)
   useEffect(() => {
@@ -243,6 +270,25 @@ export const SlideTile: React.FC<SlideTileProps> = ({
                 <FiDatabase size={16} />
               </button>
             </Tooltip>
+
+            {/* Comments toggle */}
+            <Tooltip text={showComments ? 'Hide comments' : 'Comments'}>
+              <button
+                onClick={() => setShowComments((v) => !v)}
+                className={`relative p-1 rounded ${
+                  showComments
+                    ? 'text-orange-700 bg-orange-50'
+                    : 'text-orange-600 hover:bg-orange-50'
+                }`}
+              >
+                <FiMessageCircle size={16} />
+                {commentCount != null && commentCount > 0 && (
+                  <span className="absolute -top-1 -right-1 bg-orange-500 text-white text-[10px] leading-none font-bold rounded-full min-w-[16px] h-4 flex items-center justify-center px-0.5">
+                    {commentCount}
+                  </span>
+                )}
+              </button>
+            </Tooltip>
             
             {/* Selection for chat context - hidden in readOnly mode */}
             {!readOnly && (
@@ -327,6 +373,41 @@ export const SlideTile: React.FC<SlideTileProps> = ({
           }}
         />
       </div>
+
+      {/* Slide Metadata Footer */}
+      {(slide.created_by || slide.modified_by) && (
+        <div className="px-4 py-1.5 bg-gray-50 border-t text-xs text-gray-500 flex items-center justify-between">
+          {slide.created_by && (
+            <span className="flex items-center gap-1">
+              <FiUser size={12} />
+              {slide.created_by}
+              {slide.created_at && (
+                <Tooltip text={new Date(slide.created_at).toLocaleString()}>
+                  <span className="text-gray-400 cursor-default">
+                    &middot; created {formatRelativeTime(slide.created_at)}
+                  </span>
+                </Tooltip>
+              )}
+            </span>
+          )}
+          {slide.modified_by && slide.modified_at && slide.modified_at !== slide.created_at && (
+            <span className="flex items-center gap-1">
+              <FiClock size={12} />
+              edited by {slide.modified_by}
+              <Tooltip text={new Date(slide.modified_at).toLocaleString()}>
+                <span className="text-gray-400 cursor-default">
+                  {formatRelativeTime(slide.modified_at)}
+                </span>
+              </Tooltip>
+            </span>
+          )}
+        </div>
+      )}
+
+      {/* Comments Panel */}
+      {showComments && (
+        <CommentThread sessionId={sessionId} slideId={slide.slide_id} />
+      )}
     </div>
 
       {/* HTML Editor Modal */}

@@ -189,9 +189,9 @@ export const ProfileDetailView: React.FC<ProfileDetailProps> = ({
                     <p className="text-sm text-gray-600 mt-1">{profile.description}</p>
                   )}
                   <div className="flex gap-2 mt-2">
-                    {profile.is_default && (
+                    {profile.is_my_default && (
                       <span className="px-2 py-1 bg-blue-100 text-blue-700 text-xs rounded">
-                        Default
+                        My Default
                       </span>
                     )}
                   </div>

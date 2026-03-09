@@ -65,17 +65,23 @@ def list_profiles(service: ProfileService = Depends(get_profile_service)):
     List configuration profiles accessible to the current user.
     
     Returns profiles where the user has at least CAN_VIEW permission,
-    including the user's permission level on each profile.
+    including the user's permission level and personal default flag.
     
     Returns:
         List of profile summaries with permission levels
     """
     try:
         profiles_with_perms = service.list_accessible_profiles()
-        
-        # Convert to response model with permission
+
+        user, _ = _get_current_user_info()
+        user_default_id = service.get_user_default_profile_id(user) if user else None
+
         result = []
         for profile, permission in profiles_with_perms:
+            is_my_default = (
+                profile.id == user_default_id if user_default_id
+                else profile.is_default
+            )
             summary = ProfileSummary(
                 id=profile.id,
                 name=profile.name,
@@ -86,6 +92,7 @@ def list_profiles(service: ProfileService = Depends(get_profile_service)):
                 updated_at=profile.updated_at,
                 updated_by=profile.updated_by,
                 my_permission=permission.value,
+                is_my_default=is_my_default,
             )
             result.append(summary)
         

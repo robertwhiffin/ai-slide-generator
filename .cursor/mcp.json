@@ -1,10 +1,20 @@
 {
-    "mcpServers": {
-      "playwright": {
-        "command": "npx",
-        "args": [
-          "@playwright/mcp@latest"
-        ]
+  "mcpServers": {
+    "playwright": {
+      "command": "npx",
+      "args": [
+        "@playwright/mcp@latest"
+      ]
+    },
+    "databricks": {
+      "command": "/Users/kholoud.ibrahim/.ai-dev-kit/.venv/bin/python",
+      "args": [
+        "/Users/kholoud.ibrahim/.ai-dev-kit/repo/databricks-mcp-server/run_server.py"
+      ],
+      "defer_loading": true,
+      "env": {
+        "DATABRICKS_CONFIG_PROFILE": "e2-demo-field-eng-aws"
       }
     }
   }
+}

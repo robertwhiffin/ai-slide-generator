@@ -16,7 +16,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from src.api.routes import admin, chat, export, feedback, images, sessions, slides, verification, version, google_slides, setup, local_version
+from src.api.routes import admin, chat, comments, export, feedback, images, sessions, slides, verification, version, google_slides, setup, local_version
 from src.core.databricks_client import create_user_client, set_user_client
 from src.core.user_context import get_current_user as get_ctx_user, set_current_user
 from src.core.permission_context import (
@@ -316,6 +316,7 @@ app.include_router(chat.router)
 app.include_router(feedback.router)
 app.include_router(images.router)
 app.include_router(slides.router)
+app.include_router(comments.router)
 app.include_router(export.router)
 app.include_router(sessions.router)
 app.include_router(verification.router)

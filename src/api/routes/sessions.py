@@ -41,28 +41,26 @@ def _get_session_permission(
     db: Session,
 ) -> Tuple[bool, Optional[PermissionLevel]]:
     """Check if current user has access to a session and return their permission level.
-    
-    Access is granted if:
-    1. User is the session creator (implicit CAN_MANAGE)
-    2. User has permission on the session's profile
+
+    For root (owner) sessions, the creator gets CAN_MANAGE.
+    For contributor sessions, permission comes from the profile.
     
     Args:
-        session_info: Session dict with created_by and profile_id
+        session_info: Session dict with created_by, profile_id, is_contributor_session
         db: Database session
         
     Returns:
         Tuple of (has_access, permission_level)
-        - has_access: True if user can access the session
-        - permission_level: The user's permission level (CAN_VIEW, CAN_EDIT, CAN_MANAGE)
     """
     current_user = get_current_user()
     ctx = get_permission_context()
+    is_contributor = session_info.get("is_contributor_session", False)
     
-    # Check 1: Is user the session creator?
-    if session_info.get("created_by") == current_user:
+    # For root sessions, creator gets full control
+    if not is_contributor and session_info.get("created_by") == current_user:
         return True, PermissionLevel.CAN_MANAGE
     
-    # Check 2: Does user have permission on the profile?
+    # For contributor sessions (or non-creator access), use profile permission
     profile_id = session_info.get("profile_id")
     if profile_id and ctx:
         perm_service = PermissionService(db)
@@ -74,6 +72,10 @@ def _get_session_permission(
         )
         if permission:
             return True, permission
+    
+    # Fallback: contributor session creator can at least view
+    if is_contributor and session_info.get("created_by") == current_user:
+        return True, PermissionLevel.CAN_VIEW
     
     return False, None
 
@@ -204,29 +206,29 @@ async def list_sessions(
 
 
 @router.get("/shared")
-async def list_shared_sessions(
-    limit: int = Query(50, ge=1, le=100, description="Maximum sessions to return"),
+async def list_shared_presentations(
+    limit: int = Query(50, ge=1, le=100, description="Maximum presentations to return"),
     db: Session = Depends(get_db),
 ):
-    """List sessions shared with the current user via profile access.
+    """List presentations (slide decks) shared with the current user via profile access.
 
-    Returns sessions from profiles where the user has CAN_VIEW, CAN_EDIT, or CAN_MANAGE
-    permission, excluding sessions created by the user themselves (those appear in /api/sessions).
+    Returns presentation-only data from profiles where the user has CAN_VIEW, CAN_EDIT,
+    or CAN_MANAGE permission. Conversations (chat messages) are never exposed —
+    contributors only see the slide decks.
 
     Args:
-        limit: Maximum number of sessions to return
+        limit: Maximum number of presentations to return
 
     Returns:
-        List of session summaries with my_permission indicating access level
+        List of presentation summaries with my_permission and slide metadata
     """
     current_user = get_current_user()
     ctx = get_permission_context()
 
     if not ctx:
-        return {"sessions": [], "count": 0}
+        return {"presentations": [], "count": 0}
 
     try:
-        # Get all profile IDs the user has access to
         perm_service = PermissionService(db)
         accessible_profile_ids = perm_service.get_accessible_profile_ids(
             user_id=ctx.user_id,
@@ -235,9 +237,8 @@ async def list_shared_sessions(
         )
 
         if not accessible_profile_ids:
-            return {"sessions": [], "count": 0}
+            return {"presentations": [], "count": 0}
 
-        # Get sessions from those profiles, excluding user's own sessions
         session_manager = get_session_manager()
         sessions = await asyncio.to_thread(
             session_manager.list_sessions_by_profile_ids,
@@ -246,9 +247,13 @@ async def list_shared_sessions(
             limit=limit,
         )
 
-        # Add permission level for each session based on its profile
+        presentations = []
         for session in sessions:
+            if not session.get("has_slide_deck"):
+                continue
+
             profile_id = session.get("profile_id")
+            permission = None
             if profile_id:
                 permission = perm_service.get_user_permission(
                     profile_id=profile_id,
@@ -256,23 +261,105 @@ async def list_shared_sessions(
                     user_name=ctx.user_name,
                     group_ids=ctx.group_ids,
                 )
-                session["my_permission"] = permission.value if permission else "CAN_VIEW"
-            else:
-                session["my_permission"] = "CAN_VIEW"
 
-        return {"sessions": sessions, "count": len(sessions)}
+            presentations.append({
+                "session_id": session["session_id"],
+                "title": session.get("title"),
+                "created_by": session.get("created_by"),
+                "last_activity": session.get("last_activity"),
+                "profile_id": profile_id,
+                "profile_name": session.get("profile_name"),
+                "my_permission": permission.value if permission else "CAN_VIEW",
+            })
+
+        return {"presentations": presentations, "count": len(presentations)}
 
     except Exception as e:
-        logger.error(f"Failed to list shared sessions: {e}", exc_info=True)
+        logger.error(f"Failed to list shared presentations: {e}", exc_info=True)
         raise HTTPException(
             status_code=500,
-            detail=f"Failed to list shared sessions: {str(e)}",
+            detail=f"Failed to list shared presentations: {str(e)}",
+        ) from e
+
+
+@router.post("/{session_id}/contribute")
+async def get_or_create_contributor_session(
+    session_id: str,
+    db: Session = Depends(get_db),
+):
+    """Get or create a contributor session for a shared presentation.
+
+    When a contributor opens a shared presentation, this endpoint creates
+    their private session that shares the parent's slide deck. The contributor
+    can chat through this session to modify slides, but their conversation
+    is private and never visible to other users.
+
+    Requires at least CAN_VIEW permission on the parent session's profile.
+
+    Args:
+        session_id: The owner's session ID (parent)
+
+    Returns:
+        Contributor session info with session_id for chat/slide operations
+    """
+    current_user = get_current_user()
+
+    if not current_user:
+        raise HTTPException(status_code=401, detail="Authentication required")
+
+    try:
+        session_manager = get_session_manager()
+
+        # Get parent session to check permissions
+        parent_session = await asyncio.to_thread(
+            session_manager.get_session, session_id
+        )
+
+        # Don't allow creating contributor session on your own session
+        if parent_session.get("created_by") == current_user:
+            raise HTTPException(
+                status_code=400,
+                detail="You are the owner of this session. Use it directly.",
+            )
+
+        # Check profile-level permission
+        profile_id = parent_session.get("profile_id")
+        if not profile_id:
+            raise HTTPException(
+                status_code=403,
+                detail="This session has no profile — cannot determine access.",
+            )
+
+        permission = _require_session_access(parent_session, db, PermissionLevel.CAN_VIEW)
+
+        # Create or retrieve contributor session
+        result = await asyncio.to_thread(
+            session_manager.get_or_create_contributor_session,
+            parent_session_id=session_id,
+            created_by=current_user,
+        )
+        result["my_permission"] = permission.value
+
+        return result
+
+    except SessionNotFoundError:
+        raise HTTPException(status_code=404, detail=f"Session not found: {session_id}")
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to create contributor session: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to create contributor session: {str(e)}",
         ) from e
 
 
 @router.get("/{session_id}")
 async def get_session(session_id: str, db: Session = Depends(get_db)):
-    """Get session details including messages and slides.
+    """Get session details including slides, and messages if user is session creator.
+
+    Conversations are private: only the session creator can see chat messages.
+    Contributors (via profile sharing) see the slide deck only.
 
     Requires at least CAN_VIEW permission (via ownership or profile access).
 
@@ -280,10 +367,12 @@ async def get_session(session_id: str, db: Session = Depends(get_db)):
         session_id: Session identifier
 
     Returns:
-        Session information with messages, slide_deck, and user's permission level
+        Session information with slide_deck, user's permission level,
+        and messages (only if user is the session creator)
     """
     try:
         session_manager = get_session_manager()
+        current_user = get_current_user()
 
         # Get session info
         session = await asyncio.to_thread(session_manager.get_session, session_id)
@@ -291,8 +380,11 @@ async def get_session(session_id: str, db: Session = Depends(get_db)):
         # Check permission
         permission = _require_session_access(session, db, PermissionLevel.CAN_VIEW)
 
-        # Get messages for conversation restoration
-        messages = await asyncio.to_thread(session_manager.get_messages, session_id)
+        # Only the session creator sees chat messages — conversations are private
+        is_creator = session.get("created_by") == current_user
+        messages = []
+        if is_creator:
+            messages = await asyncio.to_thread(session_manager.get_messages, session_id)
 
         # Get slide deck if it exists
         slide_deck = await asyncio.to_thread(session_manager.get_slide_deck, session_id)
@@ -418,15 +510,30 @@ async def get_session_messages(
 ):
     """Get messages for a session.
 
+    Conversations are private: only the session creator can read messages.
+
     Args:
         session_id: Session identifier
         limit: Optional limit on messages
 
     Returns:
         List of messages
+
+    Raises:
+        HTTPException 403: If user is not the session creator
     """
+    current_user = get_current_user()
+
     try:
         session_manager = get_session_manager()
+        session = await asyncio.to_thread(session_manager.get_session, session_id)
+
+        if session.get("created_by") != current_user:
+            raise HTTPException(
+                status_code=403,
+                detail="Conversations are private. Only the session creator can view messages.",
+            )
+
         messages = await asyncio.to_thread(
             session_manager.get_messages,
             session_id,
@@ -440,6 +547,8 @@ async def get_session_messages(
             status_code=404,
             detail=f"Session not found: {session_id}",
         )
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Failed to get session messages: {e}", exc_info=True)
         raise HTTPException(
@@ -459,6 +568,8 @@ class AddMessageRequest(BaseModel):
 async def add_message(session_id: str, request: AddMessageRequest):
     """Add a message to a session.
 
+    Only the session creator can add messages — conversations are private.
+
     Args:
         session_id: Session to add message to
         request: Message role and content
@@ -466,8 +577,18 @@ async def add_message(session_id: str, request: AddMessageRequest):
     Returns:
         Created message info
     """
+    current_user = get_current_user()
+
     try:
         session_manager = get_session_manager()
+        session = await asyncio.to_thread(session_manager.get_session, session_id)
+
+        if session.get("created_by") != current_user:
+            raise HTTPException(
+                status_code=403,
+                detail="Only the session creator can add messages.",
+            )
+
         result = await asyncio.to_thread(
             session_manager.add_message,
             session_id=session_id,
@@ -482,6 +603,8 @@ async def add_message(session_id: str, request: AddMessageRequest):
             status_code=404,
             detail=f"Session not found: {session_id}",
         )
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Failed to add message: {e}", exc_info=True)
         raise HTTPException(

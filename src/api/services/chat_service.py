@@ -488,6 +488,19 @@ class ChatService:
 
             # Persist slide deck to database
             if current_deck and slide_deck_dict:
+                try:
+                    _user = get_current_username()
+                except Exception:
+                    _user = None
+
+                # Stamp authorship on every slide that lacks it
+                if _user:
+                    for slide in current_deck.slides:
+                        if not slide.created_by:
+                            slide.stamp_created(_user)
+                    # Regenerate dict so stamps are included
+                    slide_deck_dict = current_deck.to_dict()
+
                 session_manager.save_slide_deck(
                     session_id=session_id,
                     title=current_deck.title,
@@ -495,6 +508,7 @@ class ChatService:
                     scripts_content=current_deck.scripts,
                     slide_count=len(current_deck.slides),
                     deck_dict=slide_deck_dict,
+                    modified_by=_user,
                 )
 
                 # Create save point immediately after persisting (sync path)
@@ -1179,6 +1193,19 @@ class ChatService:
 
         # Persist slide deck to database
         if current_deck and slide_deck_dict:
+            try:
+                _user = get_current_username()
+            except Exception:
+                _user = None
+
+            # Stamp authorship on every slide that lacks it
+            if _user:
+                for slide in current_deck.slides:
+                    if not slide.created_by:
+                        slide.stamp_created(_user)
+                # Regenerate dict so stamps are included
+                slide_deck_dict = current_deck.to_dict()
+
             session_manager.save_slide_deck(
                 session_id=session_id,
                 title=current_deck.title,
@@ -1186,6 +1213,7 @@ class ChatService:
                 scripts_content=current_deck.scripts,
                 slide_count=len(current_deck.slides),
                 deck_dict=slide_deck_dict,
+                modified_by=_user,
             )
 
             # Create save point immediately after persisting (streaming path)
@@ -1898,7 +1926,7 @@ class ChatService:
             deck_data: Dictionary from get_slide_deck with slides array
             
         Returns:
-            Reconstructed SlideDeck with proper per-slide scripts
+            Reconstructed SlideDeck with proper per-slide scripts and metadata
         """
         slides = []
         for slide_data in deck_data.get("slides", []):
@@ -1906,6 +1934,10 @@ class ChatService:
                 html=slide_data.get("html", ""),
                 slide_id=slide_data.get("slide_id", f"slide_{len(slides)}"),
                 scripts=slide_data.get("scripts", ""),
+                created_by=slide_data.get("created_by"),
+                created_at=slide_data.get("created_at"),
+                modified_by=slide_data.get("modified_by"),
+                modified_at=slide_data.get("modified_at"),
             )
             slides.append(slide)
         
@@ -2403,15 +2435,25 @@ class ChatService:
         if '<div class="slide"' not in html:
             raise ValueError("HTML must contain <div class='slide'> wrapper")
 
-        # Preserve original slide's scripts (charts, etc.) before updating
-        original_scripts = current_deck.slides[index].scripts
+        # Preserve original slide's metadata and scripts before updating
+        original_slide = current_deck.slides[index]
+        original_scripts = original_slide.scripts
 
-        # Update slide with preserved scripts
-        current_deck.slides[index] = Slide(
+        # Update slide with preserved scripts and original creation metadata
+        new_slide = Slide(
             html=html,
             slide_id=f"slide_{index}",
             scripts=original_scripts,
+            created_by=original_slide.created_by,
+            created_at=original_slide.created_at,
         )
+        try:
+            _user = get_current_username()
+        except Exception:
+            _user = None
+        if _user:
+            new_slide.stamp_modified(_user)
+        current_deck.slides[index] = new_slide
 
         # Persist to database
         deck_dict = current_deck.to_dict()
@@ -2462,8 +2504,15 @@ class ChatService:
         if index < 0 or index >= len(current_deck.slides):
             raise ValueError(f"Invalid slide index: {index}")
 
-        # Clone slide
+        # Clone slide and stamp as newly created by current user
         cloned = current_deck.slides[index].clone()
+        try:
+            _user = get_current_username()
+        except Exception:
+            _user = None
+        if _user:
+            cloned.stamp_created(_user)
+            cloned.created_by = _user  # override original author
 
         # Insert after original
         current_deck.insert_slide(cloned, index + 1)

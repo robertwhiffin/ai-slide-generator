@@ -25,8 +25,9 @@ export interface Profile {
   created_by: string | null;
   updated_at: string;
   updated_by: string | null;
-  /** User's permission level on this profile (from backend) */
   my_permission?: PermissionLevel;
+  /** True if this is the current user's personal default profile */
+  is_my_default?: boolean;
 }
 
 export interface ProfileDetail extends Profile {

@@ -35,6 +35,10 @@ def _get_session_permission(
     db: Session,
 ) -> Tuple[bool, Optional[PermissionLevel]]:
     """Check if current user has access to a session's slides.
+
+    For contributor sessions, permission is derived from the profile — not
+    from session creation. For root (owner) sessions, the creator gets
+    CAN_MANAGE.
     
     Args:
         session_id: Session identifier
@@ -52,11 +56,13 @@ def _get_session_permission(
     except SessionNotFoundError:
         return False, None
     
-    # Check 1: Is user the session creator?
-    if session_info.get("created_by") == current_user:
+    is_contributor = session_info.get("is_contributor_session", False)
+
+    # For root sessions, creator gets full control
+    if not is_contributor and session_info.get("created_by") == current_user:
         return True, PermissionLevel.CAN_MANAGE
     
-    # Check 2: Does user have permission on the profile?
+    # For contributor sessions (or non-creator access), use profile permission
     profile_id = session_info.get("profile_id")
     if profile_id and ctx:
         perm_service = PermissionService(db)
@@ -68,6 +74,11 @@ def _get_session_permission(
         )
         if permission:
             return True, permission
+    
+    # Allow contributor session creator even without explicit profile permission
+    # (they were granted access when the contributor session was created)
+    if is_contributor and session_info.get("created_by") == current_user:
+        return True, PermissionLevel.CAN_VIEW
     
     return False, None
 

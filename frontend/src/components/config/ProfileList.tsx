@@ -136,8 +136,8 @@ export const ProfileList: React.FC<ProfileListProps> = ({ onProfileChange }) => 
   const handleSetDefault = (profile: Profile) => {
     setConfirmDialog({
       isOpen: true,
-      title: 'Set Default Profile',
-      message: `Set "${profile.name}" as the default profile?\n\nThe default profile is loaded when the application starts.`,
+      title: 'Set My Default Profile',
+      message: `Set "${profile.name}" as your default profile?\n\nThis profile will load when you open the application. Other users are not affected.`,
       error: null,
       loading: false,
       onConfirm: async () => {
@@ -271,7 +271,7 @@ export const ProfileList: React.FC<ProfileListProps> = ({ onProfileChange }) => 
         <div className="p-3 bg-blue-50 border border-blue-200 rounded">
           <span className="text-sm text-blue-700">
             <strong>Currently Loaded:</strong> {currentProfile.name}
-            {currentProfile.is_default && ' (Default)'}
+            {currentProfile.is_my_default && ' (My Default)'}
           </span>
         </div>
       )}
@@ -307,9 +307,9 @@ export const ProfileList: React.FC<ProfileListProps> = ({ onProfileChange }) => 
                   </td>
                   <td className="px-4 py-3 text-sm">
                     <div className="flex gap-2">
-                      {profile.is_default && (
+                      {profile.is_my_default && (
                         <span className="px-2 py-1 bg-blue-100 text-blue-700 text-xs rounded">
-                          Default
+                          My Default
                         </span>
                       )}
                       {currentProfile?.id === profile.id && (
@@ -347,7 +347,7 @@ export const ProfileList: React.FC<ProfileListProps> = ({ onProfileChange }) => 
                       )}
 
                       {/* Set Default Button */}
-                      {!profile.is_default && (
+                      {!profile.is_my_default && (
                         <button
                           onClick={() => handleSetDefault(profile)}
                           disabled={actionLoading === profile.id}
@@ -369,7 +369,7 @@ export const ProfileList: React.FC<ProfileListProps> = ({ onProfileChange }) => 
                       </button>
 
                       {/* Delete Button - only show for CAN_MANAGE permission */}
-                      {profile.my_permission === 'CAN_MANAGE' && !profile.is_default && (
+                      {profile.my_permission === 'CAN_MANAGE' && !profile.is_my_default && (
                         <button
                           onClick={() => handleDelete(profile)}
                           disabled={actionLoading === profile.id}

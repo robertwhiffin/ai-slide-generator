@@ -85,6 +85,11 @@ class UserSession(Base):
 
     Each session represents an independent conversation context with its own
     chat history and slide deck state.
+
+    Contributor sessions (parent_session_id != NULL) share the parent's slide
+    deck but have their own private chat history. This enables multiple users
+    to collaboratively edit a presentation via chat while keeping each user's
+    conversation private.
     """
 
     __tablename__ = "user_sessions"
@@ -93,6 +98,15 @@ class UserSession(Base):
     session_id = Column(String(64), unique=True, nullable=False, index=True)
     user_id = Column(String(255), nullable=True, index=True)  # Legacy — kept for backward compat
     created_by = Column(String(255), nullable=True, index=True)  # Username of session creator
+
+    # Contributor session support: links to the owner's session whose slide
+    # deck this contributor reads/writes. NULL = owner (root) session.
+    parent_session_id = Column(
+        Integer,
+        ForeignKey("user_sessions.id", ondelete="CASCADE"),
+        nullable=True,
+        index=True,
+    )
 
     # Session metadata
     title = Column(String(255))  # Optional session title/name
@@ -136,14 +150,26 @@ class UserSession(Base):
         cascade="all, delete-orphan",
         order_by="SlideDeckVersion.version_number.desc()",
     )
+    parent_session = relationship(
+        "UserSession",
+        remote_side=[id],
+        foreign_keys=[parent_session_id],
+        backref="contributor_sessions",
+    )
 
     # Indexes for common queries
     __table_args__ = (
         Index("ix_user_sessions_created_by_last_activity", "created_by", "last_activity"),
+        Index("ix_user_sessions_parent_created_by", "parent_session_id", "created_by"),
     )
 
+    @property
+    def is_contributor_session(self) -> bool:
+        return self.parent_session_id is not None
+
     def __repr__(self):
-        return f"<UserSession(session_id='{self.session_id}', created_by='{self.created_by}')>"
+        suffix = f", parent={self.parent_session_id}" if self.parent_session_id else ""
+        return f"<UserSession(session_id='{self.session_id}', created_by='{self.created_by}'{suffix})>"
 
 
 class SessionMessage(Base):
@@ -187,6 +213,11 @@ class SessionSlideDeck(Base):
     Stores the current slide deck HTML and metadata for persistence.
     Verification results are stored separately in verification_map to survive
     deck regeneration when chat modifies slides.
+
+    For shared presentations, multiple contributor sessions read/write this
+    same deck. The locked_by/locked_at fields provide deck-level locking to
+    prevent concurrent modifications, and the version counter enables
+    optimistic locking for direct (non-chat) edits.
     """
 
     __tablename__ = "session_slide_decks"
@@ -212,6 +243,17 @@ class SessionSlideDeck(Base):
     # Verification results keyed by content hash (survives deck regeneration)
     # JSON format: {"content_hash": {"score": 95, "rating": "excellent", ...}}
     verification_map = Column(Text, nullable=True)
+
+    # Deck-level editing lock for chat-based edits (long-running operations).
+    # When an agent is modifying slides, locked_by holds the username and
+    # locked_at records when the lock was acquired. Auto-expires after timeout.
+    locked_by = Column(String(255), nullable=True)
+    locked_at = Column(DateTime, nullable=True)
+
+    # Optimistic locking counter for direct (non-chat) edits.
+    # Incremented on every write; clients send the version they read so the
+    # server can detect and reject stale writes (HTTP 409).
+    version = Column(Integer, default=0, nullable=False)
 
     # Timestamps
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)

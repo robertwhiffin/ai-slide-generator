@@ -2,6 +2,7 @@ import type { ChatResponse } from '../types/message';
 import type { ImageAsset, ImageListResponse, ImageDataResponse } from '../types/image';
 import type { SlideDeck, Slide, SlideContext, ReplacementInfo } from '../types/slide';
 import type { VerificationResult } from '../types/verification';
+import type { SlideComment } from '../types/comment';
 
 // Use relative URLs in production, explicit IPv4 in development
 // Note: Using 127.0.0.1 instead of localhost to avoid IPv6 resolution issues in CI
@@ -103,6 +104,20 @@ export interface Session {
   profile_deleted?: boolean;
   /** User's permission level on this session (CAN_VIEW, CAN_EDIT, CAN_MANAGE) */
   my_permission?: 'CAN_VIEW' | 'CAN_EDIT' | 'CAN_MANAGE';
+  /** True if this is a contributor session (shares parent's slide deck) */
+  is_contributor_session?: boolean;
+  /** Parent session ID for contributor sessions */
+  parent_session_id?: string | null;
+}
+
+export interface SharedPresentation {
+  session_id: string;
+  title: string | null;
+  created_by: string | null;
+  last_activity: string | null;
+  profile_id: number | null;
+  profile_name: string | null;
+  my_permission: 'CAN_VIEW' | 'CAN_EDIT' | 'CAN_MANAGE';
 }
 
 interface SendMessageParams {
@@ -291,13 +306,37 @@ export const api = {
   },
 
   /**
-   * List sessions shared with the user via profile access (Shared with Me)
+   * List presentations shared with the user via profile access (Shared with Me).
+   * Returns slide deck metadata only — conversations are never exposed.
    */
-  async listSharedSessions(limit = 50): Promise<{ sessions: Session[]; count: number }> {
+  async listSharedPresentations(limit = 50): Promise<{ presentations: SharedPresentation[]; count: number }> {
     const response = await fetch(`${API_BASE_URL}/api/sessions/shared?limit=${limit}`);
 
     if (!response.ok) {
-      throw new ApiError(response.status, 'Failed to list shared sessions');
+      throw new ApiError(response.status, 'Failed to list shared presentations');
+    }
+
+    return response.json();
+  },
+
+  /**
+   * Get or create a contributor session for a shared presentation.
+   * The contributor session shares the parent's slide deck but has its own private chat.
+   */
+  async getOrCreateContributorSession(parentSessionId: string): Promise<{
+    session_id: string;
+    created_by: string;
+    title: string;
+    parent_session_id: string;
+    is_contributor_session: boolean;
+    my_permission: string;
+  }> {
+    const response = await fetch(`${API_BASE_URL}/api/sessions/${parentSessionId}/contribute`, {
+      method: 'POST',
+    });
+
+    if (!response.ok) {
+      throw new ApiError(response.status, 'Failed to create contributor session');
     }
 
     return response.json();
@@ -1259,6 +1298,84 @@ export const api = {
       const error = await response.json().catch(() => ({ detail: 'Failed to sync verification' }));
       throw new ApiError(response.status, error.detail || 'Failed to sync verification');
     }
+  },
+
+  // ============ Comments API ============
+
+  async listComments(
+    sessionId: string,
+    slideId?: string,
+    includeResolved = false,
+  ): Promise<{ comments: SlideComment[]; count: number }> {
+    const params = new URLSearchParams({ session_id: sessionId });
+    if (slideId) params.set('slide_id', slideId);
+    if (includeResolved) params.set('include_resolved', 'true');
+
+    const response = await fetch(`${API_BASE_URL}/api/comments?${params}`);
+    if (!response.ok) throw new ApiError(response.status, 'Failed to list comments');
+    return response.json();
+  },
+
+  async addComment(
+    sessionId: string,
+    slideId: string,
+    content: string,
+    parentCommentId?: number,
+  ): Promise<SlideComment> {
+    const response = await fetch(`${API_BASE_URL}/api/comments`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        session_id: sessionId,
+        slide_id: slideId,
+        content,
+        parent_comment_id: parentCommentId ?? null,
+      }),
+    });
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({}));
+      throw new ApiError(response.status, error.detail || 'Failed to add comment');
+    }
+    return response.json();
+  },
+
+  async updateComment(commentId: number, content: string): Promise<SlideComment> {
+    const response = await fetch(`${API_BASE_URL}/api/comments/${commentId}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ content }),
+    });
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({}));
+      throw new ApiError(response.status, error.detail || 'Failed to update comment');
+    }
+    return response.json();
+  },
+
+  async deleteComment(commentId: number): Promise<void> {
+    const response = await fetch(`${API_BASE_URL}/api/comments/${commentId}`, {
+      method: 'DELETE',
+    });
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({}));
+      throw new ApiError(response.status, error.detail || 'Failed to delete comment');
+    }
+  },
+
+  async resolveComment(commentId: number): Promise<SlideComment> {
+    const response = await fetch(`${API_BASE_URL}/api/comments/${commentId}/resolve`, {
+      method: 'POST',
+    });
+    if (!response.ok) throw new ApiError(response.status, 'Failed to resolve comment');
+    return response.json();
+  },
+
+  async unresolveComment(commentId: number): Promise<SlideComment> {
+    const response = await fetch(`${API_BASE_URL}/api/comments/${commentId}/unresolve`, {
+      method: 'POST',
+    });
+    if (!response.ok) throw new ApiError(response.status, 'Failed to unresolve comment');
+    return response.json();
   },
 
   // --- Feedback ---

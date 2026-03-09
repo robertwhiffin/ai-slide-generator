@@ -5,20 +5,22 @@
 
 ## Overview
 
-The AI Slide Generator implements a permissions model for sharing configuration profiles and their associated content with Databricks users and groups.
+The AI Slide Generator implements a permissions model for sharing configuration profiles and their associated presentations with Databricks users and groups.
+
+**Key principle:** Conversations are always private. Profile sharing controls access to **presentations (slide decks)**, never to chat history.
 
 ## Permission Levels
 
 Three permission levels control what users can do:
 
 ### CAN_VIEW
-Read-only access. Users can see content but not modify it.
+Read-only access. Users can see presentations but not modify them.
 
 ### CAN_EDIT  
-Modification access. Users can change content but not delete it or manage access.
+Modification access. Users can change slide content but not delete presentations or manage assets.
 
 ### CAN_MANAGE
-Full administrative control. Users can do everything including delete and manage contributors.
+Full administrative control over the profile. Users can do everything including delete and manage assets.
 
 ---
 
@@ -35,32 +37,43 @@ Full administrative control. Users can do everything including delete and manage
 | **Manage contributors** | ❌ | ✅ | ✅ |
 | **Delete profile** | ❌ | ❌ | ✅ |
 
-### Session Permissions
+### Presentation Permissions (Shared Slide Decks)
 
-Sessions inherit permissions from their associated profile.
+Contributors see presentations only — never conversations.
 
-| Action | CAN_VIEW | CAN_EDIT | CAN_MANAGE |
-|--------|:--------:|:--------:|:----------:|
-| View session in "Shared with Me" | ✅ | ✅ | ✅ |
-| View session content | ✅ | ✅ | ✅ |
-| Create new sessions | ✅ | ✅ | ✅ |
-| **Rename session** | ❌ | ✅ | ✅ |
-| **Delete session** | ❌ | ❌ | ✅ |
+| Action | Session Creator | CAN_VIEW | CAN_EDIT | CAN_MANAGE |
+|--------|:--------------:|:--------:|:--------:|:----------:|
+| View slide deck | ✅ | ✅ | ✅ | ✅ |
+| View slide metadata (created_by, modified_by) | ✅ | ✅ | ✅ | ✅ |
+| Export (PPTX/Google Slides) | ✅ | ✅ | ✅ | ✅ |
+| **Edit slides directly** | ✅ | ❌ | ✅ | ✅ |
+| **Edit slides via chat** | ✅ | ❌ | ✅ | ✅ |
+| **Reorder / duplicate slides** | ✅ | ❌ | ✅ | ✅ |
+| **Delete slides** | ✅ | ❌ | ❌ | ✅ |
 
-> **Note:** Users always have full control over sessions they created, regardless of profile permissions.
+### Slide Comments
 
-### Slide Permissions
+Comments are shared across all contributors — stored on the deck-owner session.
 
-Slides inherit permissions from the session's profile.
+| Action | Session Creator | CAN_VIEW | CAN_EDIT | CAN_MANAGE |
+|--------|:--------------:|:--------:|:--------:|:----------:|
+| View comments | ✅ | ✅ | ✅ | ✅ |
+| Add comment / reply | ✅ | ✅ | ✅ | ✅ |
+| Edit own comment | ✅ | ✅ | ✅ | ✅ |
+| Delete own comment | ✅ | ✅ | ✅ | ✅ |
+| Resolve / unresolve comments | ✅ | ❌ | ✅ | ✅ |
 
-| Action | CAN_VIEW | CAN_EDIT | CAN_MANAGE |
-|--------|:--------:|:--------:|:----------:|
-| View slides | ✅ | ✅ | ✅ |
-| **Edit slide content** | ❌ | ✅ | ✅ |
-| **Reorder slides** | ❌ | ✅ | ✅ |
-| **Duplicate slides** | ❌ | ✅ | ✅ |
-| **Use chat to regenerate** | ❌ | ✅ | ✅ |
-| **Delete slides** | ❌ | ❌ | ✅ |
+### Conversation Privacy
+
+Conversations (chat messages) are **always private** to the session creator.
+
+| Action | Session Creator | Any Contributor |
+|--------|:--------------:|:---------------:|
+| View chat messages | ✅ | ❌ |
+| Send chat messages | ✅ | ❌ (uses own contributor session) |
+| View other users' conversations | ❌ | ❌ |
+
+> **Note:** When a CAN_EDIT contributor uses chat to modify slides, they do so through their own **contributor session** — a private session that shares the parent's slide deck but has its own chat history. The original session creator never sees the contributor's chat, and the contributor never sees the creator's chat.
 
 ---
 
@@ -97,8 +110,7 @@ DATABRICKS_ACCOUNT_ADMIN_TOKEN: "dapi..."  # Account admin PAT
 
 **Configuration:**
 ```yaml
-DATABRICKS_WORKSPACE_ADMIN_TOKEN: "dapi..."  # Workspace admin PAT
-# DATABRICKS_HOST is auto-injected by Databricks Apps
+DATABRICKS_WORKSPACE_ADMIN_TOKEN: "dapi..." 
 ```
 
 **Capabilities:**
@@ -161,6 +173,42 @@ The system checks environment variables in order and uses the first available mo
 
 ---
 
+## Contributor Sessions
+
+When a contributor opens a shared presentation, the system creates a **contributor session** — a private session linked to the owner's session.
+
+```
+Owner's Session (parent)
+  ├── SessionSlideDeck (shared)
+  ├── SessionMessage (owner's private chat)
+  └── SlideDeckVersion (shared version history)
+
+Contributor Session (parent_session_id → owner)
+  └── SessionMessage (contributor's private chat)
+      (reads/writes slides from parent's deck)
+```
+
+### Flow
+
+1. Owner creates a session, chats, generates slides
+2. Contributor opens shared presentation → `POST /api/sessions/{id}/contribute`
+3. System creates contributor session with `parent_session_id` pointing to owner's session
+4. Contributor chats in their session → messages stored privately, slide changes applied to parent's deck
+5. Neither user sees the other's chat messages
+
+### Concurrent Editing
+
+When multiple users edit the same deck simultaneously:
+
+| Conflict Type | Mechanism | User Experience |
+|---|---|---|
+| Two chat edits at once | Deck-level lock (`locked_by` on `session_slide_decks`) | "Slides are being updated by [user]. Please wait." |
+| Chat + direct edit | Lock blocks direct edits while agent is running | Same message |
+| Two direct edits at once | Version counter (optimistic lock) | Auto-refresh + re-apply |
+| Stale lock (crash) | 2-minute auto-expiry | Self-healing |
+
+---
+
 ## Database Schema
 
 ### ConfigProfileContributor
@@ -182,6 +230,71 @@ class ConfigProfileContributor(Base):
     
     # Unique constraint: (profile_id, identity_id)
 ```
+
+### UserSession (Contributor Support)
+
+Sessions now support a parent-child relationship for shared presentations:
+
+```python
+class UserSession(Base):
+    __tablename__ = "user_sessions"
+    
+    # ... existing fields ...
+    parent_session_id: int | None    # FK to self — NULL = owner, set = contributor
+```
+
+### SessionSlideDeck (Locking Support)
+
+Slide decks include concurrency control fields:
+
+```python
+class SessionSlideDeck(Base):
+    __tablename__ = "session_slide_decks"
+    
+    # ... existing fields ...
+    locked_by: str | None            # Username holding the edit lock
+    locked_at: datetime | None       # When lock was acquired (auto-expires after 2 min)
+    version: int                     # Optimistic lock counter for direct edits
+```
+
+### SlideComment
+
+Per-slide threaded comments shared across all contributors:
+
+```python
+class SlideComment(Base):
+    __tablename__ = "slide_comments"
+    
+    id: int                          # Primary key
+    session_id: int                  # FK to user_sessions (deck owner)
+    slide_id: str                    # e.g. "slide_0"
+    user_name: str                   # Comment author
+    content: str                     # Comment body
+    resolved: bool                   # Whether comment is resolved
+    resolved_by: str | None          # Who resolved it
+    resolved_at: datetime | None
+    parent_comment_id: int | None    # FK to self — for threaded replies
+    created_at: datetime
+    updated_at: datetime
+```
+
+### Slide Metadata (in deck_json)
+
+Each slide in the JSON `slides` array now carries authorship metadata:
+
+```json
+{
+  "slide_id": "slide_0",
+  "html": "...",
+  "created_by": "matt@example.com",
+  "created_at": "2026-03-09T10:00:00Z",
+  "modified_by": "tariq@example.com",
+  "modified_at": "2026-03-09T11:30:00Z"
+}
+```
+
+- `created_by`/`created_at` — stamped when a slide is first persisted
+- `modified_by`/`modified_at` — updated on direct edits and AI chat modifications
 
 ### AppIdentity (Local Mode Only)
 
@@ -274,11 +387,14 @@ GET    /api/settings/identities/groups
 GET    /api/settings/identities/provider    # Returns current mode
 ```
 
-### Sessions
+### Sessions & Presentations
 
 ```
-GET    /api/sessions                        # My sessions only
-GET    /api/sessions/shared                 # Sessions from profiles I have access to
+GET    /api/sessions                           # My sessions (owner sessions only)
+GET    /api/sessions/shared                    # Shared presentations (slides only, no chat)
+POST   /api/sessions/{id}/contribute           # Get/create contributor session for a shared presentation
+GET    /api/sessions/{id}                      # Session detail — messages only if you are the creator
+GET    /api/sessions/{id}/messages             # 403 unless you are the session creator
 ```
 
 ---
