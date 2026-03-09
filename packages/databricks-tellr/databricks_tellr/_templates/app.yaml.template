@@ -29,19 +29,3 @@ env:
     valueFrom: "system.databricks_host"
   - name: DATABRICKS_TOKEN
     valueFrom: "system.databricks_token"
-  
-  # Identity Provider Configuration
-  # Priority: Account API > Workspace API > Local table
-  # Set the appropriate token to enable that mode (leave empty for local mode)
-  
-  # Option 1: Account Admin (for cross-workspace user/group listing)
-  - name: DATABRICKS_ACCOUNT_HOST
-    value: ""
-  - name: DATABRICKS_ACCOUNT_ID
-    value: ""
-  - name: DATABRICKS_ACCOUNT_ADMIN_TOKEN
-    value: ""
-  
-  # Option 2: Workspace Admin (for single workspace user/group listing)
-  - name: DATABRICKS_WORKSPACE_ADMIN_TOKEN
-    value: ""

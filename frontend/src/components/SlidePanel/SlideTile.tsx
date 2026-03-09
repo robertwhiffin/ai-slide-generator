@@ -375,31 +375,32 @@ export const SlideTile: React.FC<SlideTileProps> = ({
       </div>
 
       {/* Slide Metadata Footer */}
-      <div className="px-4 py-2 bg-gray-50 border-t text-xs text-gray-500 grid grid-cols-2 gap-x-6 gap-y-1">
-        <div className="flex items-center gap-1">
-          <FiUser size={11} className="text-gray-400 flex-shrink-0" />
-          <span className="text-gray-400">Created by:</span>
-          <span className="text-gray-700 font-medium truncate">{slide.created_by || '—'}</span>
-        </div>
-        <div className="flex items-center gap-1">
-          <FiClock size={11} className="text-gray-400 flex-shrink-0" />
-          <span className="text-gray-400">Created at:</span>
+      <div className="px-3 py-1.5 bg-gray-50 border-t text-xs text-gray-500 flex flex-wrap items-center gap-x-3 gap-y-0.5">
+        <span className="inline-flex items-center gap-1 whitespace-nowrap">
+          <FiUser size={10} className="text-gray-400" />
+          <span className="text-gray-400">Created by</span>
+          <span className="text-gray-700 font-medium">{slide.created_by || '—'}</span>
+        </span>
+        <span className="inline-flex items-center gap-1 whitespace-nowrap">
+          <FiClock size={10} className="text-gray-400" />
+          <span className="text-gray-400">Created</span>
           <span className="text-gray-700" title={slide.created_at ? new Date(slide.created_at).toLocaleString() : ''}>
             {slide.created_at ? formatRelativeTime(slide.created_at) : '—'}
           </span>
-        </div>
-        <div className="flex items-center gap-1">
-          <FiUser size={11} className="text-gray-400 flex-shrink-0" />
-          <span className="text-gray-400">Last modified by:</span>
-          <span className="text-gray-700 font-medium truncate">{slide.modified_by || '—'}</span>
-        </div>
-        <div className="flex items-center gap-1">
-          <FiClock size={11} className="text-gray-400 flex-shrink-0" />
-          <span className="text-gray-400">Last modified at:</span>
+        </span>
+        <span className="text-gray-300">|</span>
+        <span className="inline-flex items-center gap-1 whitespace-nowrap">
+          <FiUser size={10} className="text-gray-400" />
+          <span className="text-gray-400">Last modified by</span>
+          <span className="text-gray-700 font-medium">{slide.modified_by || '—'}</span>
+        </span>
+        <span className="inline-flex items-center gap-1 whitespace-nowrap">
+          <FiClock size={10} className="text-gray-400" />
+          <span className="text-gray-400">Modified</span>
           <span className="text-gray-700" title={slide.modified_at ? new Date(slide.modified_at).toLocaleString() : ''}>
             {slide.modified_at ? formatRelativeTime(slide.modified_at) : '—'}
           </span>
-        </div>
+        </span>
       </div>
 
       {/* Comments Panel */}
