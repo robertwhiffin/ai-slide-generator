@@ -129,6 +129,7 @@ def test_db(_session_factory, test_db_engine):
         conn.execute(text("DELETE FROM config_genie_spaces"))
         conn.execute(text("DELETE FROM config_prompts"))
         conn.execute(text("DELETE FROM config_ai_infra"))
+        conn.execute(text("DELETE FROM config_profile_contributors"))
         conn.execute(text("DELETE FROM config_profiles"))
         conn.commit()
 

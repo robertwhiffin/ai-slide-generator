@@ -57,7 +57,9 @@ def initialize_genie_conversation() -> str:
     # Log with safe attribute access
     extra_info = {
         "space_id": space_id,
+        "cache_info": str(get_settings.cache_info()),
     }
+    # Safely add profile info if available
     if hasattr(settings, 'profile_id'):
         extra_info['profile_id'] = settings.profile_id
     if hasattr(settings, 'profile_name'):
@@ -139,8 +141,10 @@ def query_genie_space(
     # Log with safe attribute access
     extra_info = {
         "space_id": space_id,
-        "query": query[:100],
+        "query": query[:100],  # First 100 chars
+        "cache_info": str(get_settings.cache_info()),
     }
+    # Safely add profile info if available
     if hasattr(settings, 'profile_id'):
         extra_info['profile_id'] = settings.profile_id
     if hasattr(settings, 'profile_name'):

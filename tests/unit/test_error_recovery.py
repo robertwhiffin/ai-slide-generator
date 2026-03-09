@@ -234,16 +234,13 @@ class TestLLMErrorHandling:
             "src.services.agent.get_service_principal_folder"
         ) as mock_get_sp_folder, patch(
             "src.services.agent.get_user_client"
-        ) as mock_get_user, patch(
-            "src.services.agent.fetch_prompt_content"
-        ) as mock_fetch_prompts:
+        ) as mock_get_user:
             mock_get_settings.return_value = mock_settings
             mock_get_client.return_value = mock_client
             mock_init_genie.return_value = "test-genie-conv-id"
             mock_get_username.return_value = "test-user@example.com"
             mock_get_sp_folder.return_value = None
             mock_get_user.return_value = mock_client
-            mock_fetch_prompts.return_value = mock_settings.prompts
 
             agent = SlideGeneratorAgent()
 
@@ -321,16 +318,13 @@ class TestLLMErrorHandling:
             "src.services.agent.get_service_principal_folder"
         ) as mock_get_sp_folder, patch(
             "src.services.agent.get_user_client"
-        ) as mock_get_user, patch(
-            "src.services.agent.fetch_prompt_content"
-        ) as mock_fetch_prompts:
+        ) as mock_get_user:
             mock_get_settings.return_value = mock_settings
             mock_get_client.return_value = mock_client
             mock_init_genie.return_value = "test-genie-conv-id"
             mock_get_username.return_value = "test-user@example.com"
             mock_get_sp_folder.return_value = None
             mock_get_user.return_value = mock_client
-            mock_fetch_prompts.return_value = mock_settings.prompts
 
             agent = SlideGeneratorAgent()
 
@@ -367,16 +361,13 @@ class TestLLMErrorHandling:
             "src.services.agent.get_service_principal_folder"
         ) as mock_get_sp_folder, patch(
             "src.services.agent.get_user_client"
-        ) as mock_get_user, patch(
-            "src.services.agent.fetch_prompt_content"
-        ) as mock_fetch_prompts:
+        ) as mock_get_user:
             mock_get_settings.return_value = mock_settings
             mock_get_client.return_value = mock_client
             mock_init_genie.return_value = "test-genie-conv-id"
             mock_get_username.return_value = "test-user@example.com"
             mock_get_sp_folder.return_value = None
             mock_get_user.return_value = mock_client
-            mock_fetch_prompts.return_value = mock_settings.prompts
 
             agent = SlideGeneratorAgent()
 
@@ -408,16 +399,13 @@ class TestLLMErrorHandling:
             "src.services.agent.get_service_principal_folder"
         ) as mock_get_sp_folder, patch(
             "src.services.agent.get_user_client"
-        ) as mock_get_user, patch(
-            "src.services.agent.fetch_prompt_content"
-        ) as mock_fetch_prompts:
+        ) as mock_get_user:
             mock_get_settings.return_value = mock_settings
             mock_get_client.return_value = mock_client
             mock_init_genie.return_value = "test-genie-conv-id"
             mock_get_username.return_value = "test-user@example.com"
             mock_get_sp_folder.return_value = None
             mock_get_user.return_value = mock_client
-            mock_fetch_prompts.return_value = mock_settings.prompts
 
             agent = SlideGeneratorAgent()
 
@@ -719,16 +707,13 @@ class TestStateRecovery:
             "src.services.agent.get_service_principal_folder"
         ) as mock_get_sp_folder, patch(
             "src.services.agent.get_user_client"
-        ) as mock_get_user, patch(
-            "src.services.agent.fetch_prompt_content"
-        ) as mock_fetch_prompts:
+        ) as mock_get_user:
             mock_get_settings.return_value = mock_settings
             mock_get_client.return_value = mock_client
             mock_init_genie.return_value = "test-genie-conv-id"
             mock_get_username.return_value = "test-user@example.com"
             mock_get_sp_folder.return_value = None
             mock_get_user.return_value = mock_client
-            mock_fetch_prompts.return_value = mock_settings.prompts
 
             agent = SlideGeneratorAgent()
 
@@ -769,16 +754,13 @@ class TestStateRecovery:
             "src.services.agent.get_service_principal_folder"
         ) as mock_get_sp_folder, patch(
             "src.services.agent.get_user_client"
-        ) as mock_get_user, patch(
-            "src.services.agent.fetch_prompt_content"
-        ) as mock_fetch_prompts:
+        ) as mock_get_user:
             mock_get_settings.return_value = mock_settings
             mock_get_client.return_value = mock_client
             mock_init_genie.return_value = "test-genie-conv-id"
             mock_get_username.return_value = "test-user@example.com"
             mock_get_sp_folder.return_value = None
             mock_get_user.return_value = mock_client
-            mock_fetch_prompts.return_value = mock_settings.prompts
 
             agent = SlideGeneratorAgent()
 

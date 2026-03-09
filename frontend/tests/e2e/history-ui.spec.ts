@@ -148,7 +148,7 @@ async function setupEmptySessionsMock(page: Page) {
 async function goToHistory(page: Page) {
   await page.goto('/');
   await page.getByRole('navigation').getByRole('button', { name: 'My Sessions' }).click();
-  await expect(page.getByRole('heading', { name: 'My Sessions' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Sessions', exact: true })).toBeVisible();
 }
 
 // ============================================
@@ -163,9 +163,9 @@ test.describe('SessionHistoryList', () => {
   test('renders page heading and session count', async ({ page }) => {
     await goToHistory(page);
 
-    await expect(page.getByRole('heading', { name: 'My Sessions' })).toBeVisible();
-    // Check for session count text
-    await expect(page.getByText(/\d+ sessions?$/)).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'Sessions', exact: true })).toBeVisible();
+    // Check for "My Sessions" tab (using exact match to avoid nav button)
+    await expect(page.getByRole('button', { name: 'My Sessions', exact: true }).first()).toBeVisible();
   });
 
   test('renders all sessions in table', async ({ page }) => {
@@ -215,13 +215,12 @@ test.describe('SessionHistoryList', () => {
     await expect(page.getByRole('button', { name: 'Delete' }).first()).toBeVisible();
   });
 
-  test('shows Restore button for non-current sessions with slides', async ({ page }) => {
+  test('shows Open button for sessions with slides', async ({ page }) => {
     await goToHistory(page);
 
-    // At least one session should have a Restore button
-    // (depends on which session is "current" - mock shows none as current)
-    const restoreButtons = await page.getByRole('button', { name: 'Restore' }).count();
-    expect(restoreButtons).toBeGreaterThan(0);
+    // Sessions with slides should have an Open button
+    const openButtons = await page.getByRole('button', { name: 'Open' }).count();
+    expect(openButtons).toBeGreaterThan(0);
   });
 
 });

@@ -182,7 +182,7 @@ async function goToGenerator(page: Page): Promise<void> {
 async function goToHistory(page: Page): Promise<void> {
   await page.goto('/');
   await page.getByRole('navigation').getByRole('button', { name: 'My Sessions' }).click();
-  await expect(page.getByRole('heading', { name: 'My Sessions' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Sessions', exact: true })).toBeVisible();
 }
 
 // ============================================
@@ -217,6 +217,11 @@ async function skipWizardStep4(page: Page): Promise<void> {
   await page.getByRole('button', { name: /Next/i }).click();
 }
 
+async function skipWizardStep5(page: Page): Promise<void> {
+  // Step 5: Share (contributors) - skip by clicking Next
+  await page.getByRole('button', { name: /Next/i }).click();
+}
+
 async function submitWizard(page: Page): Promise<void> {
   // Step 5: Review - click Create Profile (exact match to avoid matching "+ Create Profile" button)
   await page.getByRole('button', { name: 'Create Profile', exact: true }).click();
@@ -241,6 +246,7 @@ test.describe('Profile CRUD Operations', () => {
     await skipWizardStep2(page);
     await completeWizardStep3(page);
     await skipWizardStep4(page);
+    await skipWizardStep5(page);
     await submitWizard(page);
 
     // Wait for wizard to close
@@ -471,6 +477,7 @@ test.describe('Profile Validation', () => {
       await skipWizardStep2(page);
       await completeWizardStep3(page);
       await skipWizardStep4(page);
+    await skipWizardStep5(page);
       await submitWizard(page);
 
       // Should show error - use more specific selector to avoid matching "Duplicate" buttons
@@ -771,7 +778,7 @@ test.describe('Session-Profile Association', () => {
 
       // Go to History
       await page.getByRole('navigation').getByRole('button', { name: 'My Sessions' }).click();
-      await expect(page.getByRole('heading', { name: 'My Sessions' })).toBeVisible();
+      await expect(page.getByRole('heading', { name: 'Sessions', exact: true })).toBeVisible();
 
       // The most recent session should show the profile name
       await expect(page.getByText(profileName).first()).toBeVisible();
@@ -885,6 +892,7 @@ test.describe('Profile Edge Cases', () => {
     await skipWizardStep2(page);
     await completeWizardStep3(page);
     await skipWizardStep4(page);
+    await skipWizardStep5(page);
     await submitWizard(page);
 
     // Wait for wizard to close
@@ -915,6 +923,7 @@ test.describe('Profile Edge Cases', () => {
     await skipWizardStep2(page);
     await completeWizardStep3(page);
     await skipWizardStep4(page);
+    await skipWizardStep5(page);
     await submitWizard(page);
 
     // Wait for wizard to close

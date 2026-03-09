@@ -73,14 +73,14 @@ export const ProfileProvider: React.FC<React.PropsWithChildren> = ({ children })
         if (loadedProfile) {
           setCurrentProfile(loadedProfile);
         } else {
-          // Loaded profile no longer exists, fall back to default
-          const defaultProfile = data.find(p => p.is_default);
+          // Loaded profile no longer exists, fall back to user's default
+          const defaultProfile = data.find(p => p.is_my_default) || data.find(p => p.is_default);
           setCurrentProfile(defaultProfile || null);
           setLoadedProfileId(null);
         }
       } else {
-        // No loaded profile, use default
-        const defaultProfile = data.find(p => p.is_default);
+        // No loaded profile, use user's personal default (then system default)
+        const defaultProfile = data.find(p => p.is_my_default) || data.find(p => p.is_default);
         setCurrentProfile(defaultProfile || null);
       }
     } catch (err) {

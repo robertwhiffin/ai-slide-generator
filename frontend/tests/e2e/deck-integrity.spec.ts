@@ -238,7 +238,8 @@ test.describe('Deck Integrity - Navigation', () => {
     await page.goto('/');
     await page.getByRole('navigation').getByRole('button', { name: 'My Sessions' }).click();
 
-    await expect(page.getByRole('heading', { name: 'My Sessions' })).toBeVisible();
+    // Sessions page has "Sessions" heading with "My Sessions" and "Shared with Me" tabs
+    await expect(page.getByRole('heading', { name: 'Sessions' })).toBeVisible();
 
     const errors = consoleCollector.getErrors();
     expect(errors).toHaveLength(0);

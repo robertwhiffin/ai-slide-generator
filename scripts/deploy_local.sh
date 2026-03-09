@@ -28,7 +28,7 @@ usage() {
     echo "  delete    Delete a Databricks App"
     echo ""
     echo "Required Arguments:"
-    echo "  --env <environment>    Environment: development, staging, or production"
+    echo "  --env <environment>    Environment from deployment.yaml (e.g., development, staging, production)"
     echo "  --profile <profile>    Databricks CLI profile from ~/.databrickscfg"
     echo ""
     echo "Options:"
@@ -110,10 +110,11 @@ if [ -z "$PROFILE" ]; then
     usage
 fi
 
-# Validate environment
-if [[ ! "$ENV" =~ ^(development|staging|production)$ ]]; then
+# Note: Environment names must match keys in config/deployment.yaml
+# Add new environments to the regex below when adding to deployment.yaml
+if [[ ! "$ENV" =~ ^(development|staging|production|test)$ ]]; then
     echo -e "${RED}Invalid environment: $ENV${NC}"
-    echo "   Valid options: development, staging, production"
+    echo "   Check config/deployment.yaml for valid environment names"
     exit 1
 fi
 

@@ -19,6 +19,7 @@ from src.database.models.session import (
     SlideDeckVersion,
     UserSession,
 )
+from src.database.models.slide_comment import SlideComment
 
 logger = logging.getLogger(__name__)
 
@@ -27,6 +28,17 @@ class SessionNotFoundError(Exception):
     """Raised when a session is not found."""
 
     pass
+
+
+class VersionConflictError(Exception):
+    """Raised when a write is rejected due to stale deck version."""
+
+    def __init__(self, current_version: int, expected_version: int):
+        self.current_version = current_version
+        self.expected_version = expected_version
+        super().__init__(
+            f"Version conflict: expected {expected_version}, current is {current_version}"
+        )
 
 
 class SessionManager:
@@ -137,6 +149,17 @@ class SessionManager:
 
             profile_deleted = self._is_profile_deleted(db, session.profile_id)
 
+            # Resolve parent session and shared slide deck for contributor sessions
+            parent_session_id_str = None
+            deck_owner = session
+            if session.parent_session_id:
+                parent = db.query(UserSession).filter(
+                    UserSession.id == session.parent_session_id
+                ).first()
+                parent_session_id_str = parent.session_id if parent else None
+                if parent:
+                    deck_owner = parent
+
             return {
                 "session_id": session.session_id,
                 "user_id": session.user_id,
@@ -146,13 +169,118 @@ class SessionManager:
                 "last_activity": session.last_activity.isoformat(),
                 "genie_conversation_id": session.genie_conversation_id,
                 "message_count": len(session.messages),
-                "has_slide_deck": session.slide_deck is not None,
+                "has_slide_deck": deck_owner.slide_deck is not None,
                 "profile_id": session.profile_id,
                 "profile_name": session.profile_name,
-                "google_slides_url": session.google_slides_url,
-                "google_slides_presentation_id": session.google_slides_presentation_id,
+                "google_slides_url": deck_owner.google_slides_url,
+                "google_slides_presentation_id": deck_owner.google_slides_presentation_id,
                 "profile_deleted": profile_deleted,
+                "is_contributor_session": session.is_contributor_session,
+                "parent_session_id": parent_session_id_str,
             }
+
+    def get_or_create_contributor_session(
+        self,
+        parent_session_id: str,
+        created_by: str,
+    ) -> Dict[str, Any]:
+        """Get or create a contributor session for a user on a shared presentation.
+
+        Contributor sessions share the parent's slide deck but have their own
+        private chat history. Idempotent: returns existing session if one exists.
+
+        Args:
+            parent_session_id: The owner's session_id (string)
+            created_by: Username of the contributor
+
+        Returns:
+            Contributor session info dictionary
+
+        Raises:
+            SessionNotFoundError: If parent session doesn't exist
+        """
+        with get_db_session() as db:
+            parent = self._get_session_or_raise(db, parent_session_id)
+
+            # Don't allow contributor sessions on other contributor sessions
+            if parent.is_contributor_session:
+                raise ValueError("Cannot create contributor session on another contributor session")
+
+            # Check for existing contributor session
+            existing = (
+                db.query(UserSession)
+                .filter(
+                    UserSession.parent_session_id == parent.id,
+                    UserSession.created_by == created_by,
+                )
+                .first()
+            )
+            if existing:
+                return {
+                    "session_id": existing.session_id,
+                    "created_by": existing.created_by,
+                    "title": parent.title,
+                    "parent_session_id": parent.session_id,
+                    "is_contributor_session": True,
+                    "profile_id": parent.profile_id,
+                    "profile_name": parent.profile_name,
+                    "created_at": existing.created_at.isoformat(),
+                }
+
+            contributor = UserSession(
+                session_id=secrets.token_urlsafe(32),
+                created_by=created_by,
+                title=parent.title,
+                parent_session_id=parent.id,
+                profile_id=parent.profile_id,
+                profile_name=parent.profile_name,
+            )
+            db.add(contributor)
+            db.flush()
+
+            logger.info(
+                "Created contributor session",
+                extra={
+                    "contributor_session_id": contributor.session_id,
+                    "parent_session_id": parent_session_id,
+                    "created_by": created_by,
+                },
+            )
+
+            return {
+                "session_id": contributor.session_id,
+                "created_by": created_by,
+                "title": parent.title,
+                "parent_session_id": parent.session_id,
+                "is_contributor_session": True,
+                "profile_id": parent.profile_id,
+                "profile_name": parent.profile_name,
+                "created_at": contributor.created_at.isoformat(),
+            }
+
+    def _get_deck_owner_session(self, db: Session, session: UserSession) -> UserSession:
+        """Resolve the session that owns the slide deck.
+
+        For root sessions, returns the session itself.
+        For contributor sessions, follows parent_session_id to the owner.
+
+        Args:
+            db: Database session
+            session: The session to resolve
+
+        Returns:
+            The root session that owns the slide deck
+        """
+        if not session.is_contributor_session:
+            return session
+        parent = db.query(UserSession).filter(
+            UserSession.id == session.parent_session_id
+        ).first()
+        if not parent:
+            raise SessionNotFoundError(
+                f"Parent session not found for contributor session {session.session_id}"
+            )
+        return parent
 
     def list_sessions(
         self,
@@ -171,7 +299,10 @@ class SessionManager:
             List of session info dictionaries
         """
         with get_db_session() as db:
-            query = db.query(UserSession).filter(UserSession.messages.any())
+            query = db.query(UserSession).filter(
+                UserSession.messages.any(),
+                UserSession.parent_session_id.is_(None),  # Exclude contributor sessions
+            )
 
             if created_by:
                 query = query.filter(UserSession.created_by == created_by)
@@ -225,6 +356,72 @@ class SessionManager:
             List of session info dictionaries
         """
         return self.list_sessions(created_by=created_by, limit=limit)
+
+    def list_sessions_by_profile_ids(
+        self,
+        profile_ids: List[int],
+        exclude_created_by: Optional[str] = None,
+        limit: int = 50,
+    ) -> List[Dict[str, Any]]:
+        """List sessions belonging to specific profiles.
+
+        Used for permission-based session listing where users can see sessions
+        from profiles they have access to.
+
+        Args:
+            profile_ids: List of profile IDs to include
+            exclude_created_by: Optionally exclude sessions by this creator
+                (to avoid duplicates when combining with own sessions)
+            limit: Maximum number of sessions to return
+
+        Returns:
+            List of session info dictionaries
+        """
+        if not profile_ids:
+            return []
+
+        with get_db_session() as db:
+            query = db.query(UserSession).filter(
+                UserSession.messages.any(),
+                UserSession.profile_id.in_(profile_ids),
+                UserSession.parent_session_id.is_(None),  # Only root sessions
+            )
+
+            if exclude_created_by:
+                query = query.filter(UserSession.created_by != exclude_created_by)
+
+            sessions = (
+                query.order_by(UserSession.last_activity.desc())
+                .limit(limit)
+                .all()
+            )
+
+            # Batch-check which profiles are deleted to avoid N+1 queries
+            deleted_profiles = self._get_deleted_profile_ids(
+                db,
+                [s.profile_id for s in sessions if s.profile_id is not None],
+            )
+
+            result = []
+            for s in sessions:
+                deck = s.slide_deck
+                info = {
+                    "session_id": s.session_id,
+                    "user_id": s.user_id,
+                    "created_by": s.created_by,
+                    "title": s.title,
+                    "created_at": s.created_at.isoformat(),
+                    "last_activity": s.last_activity.isoformat(),
+                    "message_count": len(s.messages),
+                    "has_slide_deck": deck is not None,
+                    "profile_id": s.profile_id,
+                    "profile_name": s.profile_name,
+                    "profile_deleted": s.profile_id in deleted_profiles if s.profile_id else False,
+                    "modified_by": getattr(deck, "modified_by", None) or s.created_by if deck else None,
+                    "modified_at": deck.updated_at.isoformat() if deck and deck.updated_at else None,
+                }
+                result.append(info)
+            return result
 
     def delete_session(self, session_id: str) -> bool:
         """Delete a session and all associated data.
@@ -341,41 +538,41 @@ class SessionManager:
         presentation_id: str,
         presentation_url: str,
     ) -> None:
-        """Store Google Slides presentation info on the session.
+        """Store Google Slides presentation info on the deck owner session.
 
-        Called after a successful export so re-exports overwrite the same
-        presentation instead of creating a new one.
-
-        Args:
-            session_id: Session to update
-            presentation_id: Google Slides presentation ID
-            presentation_url: Full URL to the presentation
+        For contributor sessions the info is written to the parent so
+        re-exports by any contributor overwrite the same presentation.
         """
         with get_db_session() as db:
             session = self._get_session_or_raise(db, session_id)
-            session.google_slides_presentation_id = presentation_id
-            session.google_slides_url = presentation_url
+            deck_owner = self._get_deck_owner_session(db, session)
+            deck_owner.google_slides_presentation_id = presentation_id
+            deck_owner.google_slides_url = presentation_url
 
             logger.info(
-                "Stored Google Slides info on session",
+                "Stored Google Slides info on deck owner session",
                 extra={
                     "session_id": session_id,
+                    "deck_owner_session_id": deck_owner.session_id,
                     "presentation_id": presentation_id,
                 },
             )
 
     def get_google_slides_info(self, session_id: str) -> Optional[Dict[str, str]]:
-        """Get the stored Google Slides presentation info for a session.
+        """Get the stored Google Slides presentation info.
+
+        For contributor sessions reads from the deck owner.
 
         Returns:
             Dict with ``presentation_id`` and ``presentation_url``, or None.
         """
         with get_db_session() as db:
             session = self._get_session_or_raise(db, session_id)
-            if session.google_slides_presentation_id:
+            deck_owner = self._get_deck_owner_session(db, session)
+            if deck_owner.google_slides_presentation_id:
                 return {
-                    "presentation_id": session.google_slides_presentation_id,
-                    "presentation_url": session.google_slides_url,
+                    "presentation_id": deck_owner.google_slides_presentation_id,
+                    "presentation_url": deck_owner.google_slides_url,
                 }
             return None
 
@@ -499,8 +696,16 @@ class SessionManager:
         scripts_content: Optional[str] = None,
         slide_count: int = 0,
         deck_dict: Optional[Dict[str, Any]] = None,
+        modified_by: Optional[str] = None,
+        expected_version: Optional[int] = None,
     ) -> Dict[str, Any]:
         """Save or update slide deck for a session.
+
+        For contributor sessions, writes to the parent's slide deck.
+
+        When *modified_by* is provided, any slide in *deck_dict* that is
+        missing ``created_by`` will be stamped with creation metadata
+        automatically.
 
         Args:
             session_id: Session to save deck for
@@ -509,43 +714,80 @@ class SessionManager:
             scripts_content: JavaScript content
             slide_count: Number of slides
             deck_dict: Full SlideDeck structure for restoration
+            modified_by: Username to stamp on slides missing authorship
+            expected_version: If provided, reject write when the current
+                DB version doesn't match (optimistic locking). Raises
+                ``VersionConflictError`` on mismatch.
 
         Returns:
             Slide deck info dictionary
+
+        Raises:
+            VersionConflictError: If expected_version doesn't match current version
         """
+        # Auto-stamp creation metadata on slides that have none yet
+        if deck_dict and modified_by:
+            now = datetime.utcnow().isoformat() + "Z"
+            for slide in deck_dict.get("slides", []):
+                if not slide.get("created_by"):
+                    slide["created_by"] = modified_by
+                    slide["created_at"] = now
+                    slide["modified_by"] = modified_by
+                    slide["modified_at"] = now
+
         with get_db_session() as db:
             session = self._get_session_or_raise(db, session_id)
+            deck_owner = self._get_deck_owner_session(db, session)
 
             # Serialize deck structure to JSON
             deck_json = json.dumps(deck_dict) if deck_dict else None
 
-            if session.slide_deck:
+            if deck_owner.slide_deck:
                 # Update existing
-                deck = session.slide_deck
+                deck = deck_owner.slide_deck
+
+                # Optimistic locking: reject stale writes
+                if expected_version is not None and deck.version != expected_version:
+                    raise VersionConflictError(
+                        current_version=deck.version,
+                        expected_version=expected_version,
+                    )
+
                 deck.title = title
                 deck.html_content = html_content
                 deck.scripts_content = scripts_content
                 deck.slide_count = slide_count
                 deck.deck_json = deck_json
+                deck.version += 1
+                if modified_by:
+                    deck.modified_by = modified_by
             else:
                 # Create new
                 deck = SessionSlideDeck(
-                    session_id=session.id,
+                    session_id=deck_owner.id,
                     title=title,
                     html_content=html_content,
                     scripts_content=scripts_content,
                     slide_count=slide_count,
                     deck_json=deck_json,
+                    version=1,
                 )
                 db.add(deck)
                 db.flush()
 
-            # Update session activity
+            # Update activity on both the requesting session and the deck owner
             session.last_activity = datetime.utcnow()
+            if session.id != deck_owner.id:
+                deck_owner.last_activity = datetime.utcnow()
 
             logger.info(
                 "Saved slide deck",
-                extra={"session_id": session_id, "slide_count": slide_count},
+                extra={
+                    "session_id": session_id,
+                    "deck_owner_session_id": deck_owner.session_id,
+                    "slide_count": slide_count,
+                    "version": deck.version,
+                },
             )
 
             return {
@@ -553,13 +795,14 @@ class SessionManager:
                 "title": deck.title,
                 "slide_count": deck.slide_count,
                 "updated_at": deck.updated_at.isoformat(),
+                "version": deck.version,
             }
 
     def get_slide_deck(self, session_id: str) -> Optional[Dict[str, Any]]:
         """Get slide deck for a session with verification merged by content hash.
 
-        Verification results are stored separately in verification_map and
-        merged back into slides based on content hash matching.
+        For contributor sessions, follows parent_session_id to read the
+        shared slide deck from the owner's session.
 
         Args:
             session_id: Session to get deck for
@@ -571,11 +814,12 @@ class SessionManager:
         
         with get_db_session() as db:
             session = self._get_session_or_raise(db, session_id)
+            deck_owner = self._get_deck_owner_session(db, session)
 
-            if not session.slide_deck:
+            if not deck_owner.slide_deck:
                 return None
 
-            deck = session.slide_deck
+            deck = deck_owner.slide_deck
             
             # Load verification map (separate from deck_json)
             verification_map = {}
@@ -595,12 +839,38 @@ class SessionManager:
                 if deck.html_content:
                     deck_dict["html_content"] = deck.html_content
                 
-                # Merge verification into slides by content hash
+                # Backfill missing per-slide authorship from the deck owner
+                fallback_user = deck_owner.created_by
+                needs_persist = False
+                created_at_fallback = deck.created_at.isoformat() + "Z" if deck.created_at else None
+
+                # Merge verification and backfill metadata
                 for slide in deck_dict.get("slides", []):
                     if slide.get("html"):
                         content_hash = compute_slide_hash(slide["html"])
                         slide["verification"] = verification_map.get(content_hash)
                         slide["content_hash"] = content_hash
+
+                    if not slide.get("created_by") and fallback_user:
+                        slide["created_by"] = fallback_user
+                        slide["created_at"] = slide.get("created_at") or created_at_fallback
+                        slide["modified_by"] = slide.get("modified_by") or fallback_user
+                        slide["modified_at"] = slide.get("modified_at") or created_at_fallback
+                        needs_persist = True
+
+                # Persist backfilled metadata so this is a one-time migration
+                if needs_persist:
+                    try:
+                        deck.deck_json = json.dumps(deck_dict)
+                    except Exception:
+                        pass
+
+                # Deck-level authorship metadata
+                deck_dict["created_by"] = deck_owner.created_by
+                deck_dict["created_at"] = deck.created_at.isoformat() + "Z" if deck.created_at else None
+                deck_dict["modified_by"] = deck.modified_by or deck_owner.created_by
+                deck_dict["modified_at"] = deck.updated_at.isoformat() + "Z" if deck.updated_at else None
+                deck_dict["version"] = deck.version
                 
                 return deck_dict
             
@@ -610,8 +880,11 @@ class SessionManager:
                 "html_content": deck.html_content,
                 "scripts_content": deck.scripts_content,
                 "slide_count": deck.slide_count,
-                "created_at": deck.created_at.isoformat(),
-                "updated_at": deck.updated_at.isoformat(),
+                "created_by": deck_owner.created_by,
+                "created_at": deck.created_at.isoformat() + "Z" if deck.created_at else None,
+                "modified_by": deck.modified_by or deck_owner.created_by,
+                "modified_at": deck.updated_at.isoformat() + "Z" if deck.updated_at else None,
+                "version": deck.version,
             }
 
     def save_verification(
@@ -632,12 +905,13 @@ class SessionManager:
         """
         with get_db_session() as db:
             session = self._get_session_or_raise(db, session_id)
+            deck_owner = self._get_deck_owner_session(db, session)
 
-            if not session.slide_deck:
+            if not deck_owner.slide_deck:
                 logger.warning(f"No slide deck for session {session_id}, cannot save verification")
                 return
 
-            deck = session.slide_deck
+            deck = deck_owner.slide_deck
             
             # Load existing verification map
             verification_map = {}
@@ -673,12 +947,13 @@ class SessionManager:
         """
         with get_db_session() as db:
             session = self._get_session_or_raise(db, session_id)
+            deck_owner = self._get_deck_owner_session(db, session)
 
-            if not session.slide_deck or not session.slide_deck.verification_map:
+            if not deck_owner.slide_deck or not deck_owner.slide_deck.verification_map:
                 return {}
 
             try:
-                return json.loads(session.slide_deck.verification_map)
+                return json.loads(deck_owner.slide_deck.verification_map)
             except json.JSONDecodeError:
                 logger.warning(f"Invalid verification_map JSON for session {session_id}")
                 return {}
@@ -711,11 +986,12 @@ class SessionManager:
         """
         with get_db_session() as db:
             session = self._get_session_or_raise(db, session_id)
+            deck_owner = self._get_deck_owner_session(db, session)
 
             # Get the next version number
             max_version = (
                 db.query(SlideDeckVersion.version_number)
-                .filter(SlideDeckVersion.session_id == session.id)
+                .filter(SlideDeckVersion.session_id == deck_owner.id)
                 .order_by(SlideDeckVersion.version_number.desc())
                 .first()
             )
@@ -724,14 +1000,14 @@ class SessionManager:
             # Check version limit and delete oldest if needed
             version_count = (
                 db.query(SlideDeckVersion)
-                .filter(SlideDeckVersion.session_id == session.id)
+                .filter(SlideDeckVersion.session_id == deck_owner.id)
                 .count()
             )
             if version_count >= self.VERSION_LIMIT:
                 # Delete the oldest version
                 oldest = (
                     db.query(SlideDeckVersion)
-                    .filter(SlideDeckVersion.session_id == session.id)
+                    .filter(SlideDeckVersion.session_id == deck_owner.id)
                     .order_by(SlideDeckVersion.version_number.asc())
                     .first()
                 )
@@ -745,7 +1021,7 @@ class SessionManager:
                         },
                     )
 
-            # Capture chat history if not provided
+            # Capture chat history from the requesting session (private to them)
             if chat_history is None:
                 chat_history = [
                     {
@@ -758,9 +1034,9 @@ class SessionManager:
                     for m in session.messages
                 ]
 
-            # Create new version
+            # Create new version on the deck owner's session
             version = SlideDeckVersion(
-                session_id=session.id,
+                session_id=deck_owner.id,
                 version_number=next_version,
                 description=description,
                 deck_json=json.dumps(deck_dict),
@@ -813,11 +1089,12 @@ class SessionManager:
         """
         with get_db_session() as db:
             session = self._get_session_or_raise(db, session_id)
+            deck_owner = self._get_deck_owner_session(db, session)
 
             version = (
                 db.query(SlideDeckVersion)
                 .filter(
-                    SlideDeckVersion.session_id == session.id,
+                    SlideDeckVersion.session_id == deck_owner.id,
                     SlideDeckVersion.version_number == version_number,
                 )
                 .first()
@@ -845,7 +1122,9 @@ class SessionManager:
             }
 
     def list_versions(self, session_id: str) -> List[Dict[str, Any]]:
-        """List all save points for a session.
+        """List all save points for a session's slide deck.
+
+        For contributor sessions, returns the parent's versions.
 
         Args:
             session_id: Session to list versions for
@@ -855,10 +1134,11 @@ class SessionManager:
         """
         with get_db_session() as db:
             session = self._get_session_or_raise(db, session_id)
+            deck_owner = self._get_deck_owner_session(db, session)
 
             versions = (
                 db.query(SlideDeckVersion)
-                .filter(SlideDeckVersion.session_id == session.id)
+                .filter(SlideDeckVersion.session_id == deck_owner.id)
                 .order_by(SlideDeckVersion.version_number.desc())
                 .all()
             )
@@ -878,6 +1158,8 @@ class SessionManager:
     def get_version(self, session_id: str, version_number: int) -> Optional[Dict[str, Any]]:
         """Get a specific version for preview.
 
+        For contributor sessions, reads from the parent's versions.
+
         Args:
             session_id: Session to get version from
             version_number: Version number to retrieve
@@ -887,11 +1169,12 @@ class SessionManager:
         """
         with get_db_session() as db:
             session = self._get_session_or_raise(db, session_id)
+            deck_owner = self._get_deck_owner_session(db, session)
 
             version = (
                 db.query(SlideDeckVersion)
                 .filter(
-                    SlideDeckVersion.session_id == session.id,
+                    SlideDeckVersion.session_id == deck_owner.id,
                     SlideDeckVersion.version_number == version_number,
                 )
                 .first()
@@ -940,6 +1223,8 @@ class SessionManager:
     def restore_version(self, session_id: str, version_number: int) -> Dict[str, Any]:
         """Restore deck to a specific version and delete all newer versions.
 
+        For contributor sessions, operates on the parent's versions and deck.
+
         Args:
             session_id: Session to restore
             version_number: Version to restore to
@@ -952,12 +1237,13 @@ class SessionManager:
         """
         with get_db_session() as db:
             session = self._get_session_or_raise(db, session_id)
+            deck_owner = self._get_deck_owner_session(db, session)
 
             # Get the version to restore
             version = (
                 db.query(SlideDeckVersion)
                 .filter(
-                    SlideDeckVersion.session_id == session.id,
+                    SlideDeckVersion.session_id == deck_owner.id,
                     SlideDeckVersion.version_number == version_number,
                 )
                 .first()
@@ -970,7 +1256,7 @@ class SessionManager:
             deleted_count = (
                 db.query(SlideDeckVersion)
                 .filter(
-                    SlideDeckVersion.session_id == session.id,
+                    SlideDeckVersion.session_id == deck_owner.id,
                     SlideDeckVersion.version_number > version_number,
                 )
                 .delete()
@@ -1010,13 +1296,14 @@ class SessionManager:
                     .delete()
                 )
 
-            # Update the current slide deck in database
-            if session.slide_deck:
-                session.slide_deck.deck_json = version.deck_json
-                session.slide_deck.verification_map = version.verification_map_json
-                session.slide_deck.title = deck_dict.get("title")
-                session.slide_deck.slide_count = len(deck_dict.get("slides", []))
-                session.slide_deck.updated_at = datetime.utcnow()
+            # Update the current slide deck in database (use deck_owner for
+            # contributor sessions whose own slide_deck is None)
+            if deck_owner.slide_deck:
+                deck_owner.slide_deck.deck_json = version.deck_json
+                deck_owner.slide_deck.verification_map = version.verification_map_json
+                deck_owner.slide_deck.title = deck_dict.get("title")
+                deck_owner.slide_deck.slide_count = len(deck_dict.get("slides", []))
+                deck_owner.slide_deck.updated_at = datetime.utcnow()
 
             logger.info(
                 "Restored to save point",
@@ -1039,7 +1326,9 @@ class SessionManager:
             }
 
     def get_current_version_number(self, session_id: str) -> Optional[int]:
-        """Get the current (latest) version number for a session.
+        """Get the current (latest) version number for a session's slide deck.
+
+        For contributor sessions, returns the parent's latest version.
 
         Args:
             session_id: Session to check
@@ -1049,15 +1338,131 @@ class SessionManager:
         """
         with get_db_session() as db:
             session = self._get_session_or_raise(db, session_id)
+            deck_owner = self._get_deck_owner_session(db, session)
 
             max_version = (
                 db.query(SlideDeckVersion.version_number)
-                .filter(SlideDeckVersion.session_id == session.id)
+                .filter(SlideDeckVersion.session_id == deck_owner.id)
                 .order_by(SlideDeckVersion.version_number.desc())
                 .first()
             )
 
             return max_version[0] if max_version else None
+
+    # Deck-level locking for shared presentation editing
+    DECK_LOCK_TIMEOUT_SECONDS = 120
+
+    def acquire_deck_lock(self, session_id: str, user: str) -> bool:
+        """Acquire an editing lock on the slide deck.
+
+        For shared presentations, prevents two contributors from modifying
+        slides simultaneously via chat. Locks auto-expire after timeout.
+
+        Args:
+            session_id: Session (may be contributor or owner)
+            user: Username requesting the lock
+
+        Returns:
+            True if lock acquired, False if another user holds the lock
+        """
+        with get_db_session() as db:
+            session = self._get_session_or_raise(db, session_id)
+            deck_owner = self._get_deck_owner_session(db, session)
+
+            if not deck_owner.slide_deck:
+                return True  # No deck yet, allow proceeding
+
+            deck = deck_owner.slide_deck
+            now = datetime.utcnow()
+
+            if deck.locked_by and deck.locked_by != user:
+                if deck.locked_at:
+                    age = (now - deck.locked_at).total_seconds()
+                    if age < self.DECK_LOCK_TIMEOUT_SECONDS:
+                        logger.info(
+                            "Deck lock held by another user",
+                            extra={
+                                "session_id": session_id,
+                                "locked_by": deck.locked_by,
+                                "age_seconds": age,
+                            },
+                        )
+                        return False
+                # Stale lock — take it over
+
+            deck.locked_by = user
+            deck.locked_at = now
+            logger.info(
+                "Acquired deck lock",
+                extra={"session_id": session_id, "user": user},
+            )
+            return True
+
+    def release_deck_lock(self, session_id: str, user: str) -> None:
+        """Release the editing lock on the slide deck.
+
+        Only the lock holder (or anyone if the lock is stale) can release.
+
+        Args:
+            session_id: Session (may be contributor or owner)
+            user: Username releasing the lock
+        """
+        with get_db_session() as db:
+            session = (
+                db.query(UserSession)
+                .filter(UserSession.session_id == session_id)
+                .first()
+            )
+            if not session:
+                return
+
+            deck_owner = self._get_deck_owner_session(db, session)
+            if not deck_owner.slide_deck:
+                return
+
+            deck = deck_owner.slide_deck
+            if deck.locked_by == user or deck.locked_by is None:
+                deck.locked_by = None
+                deck.locked_at = None
+                logger.info(
+                    "Released deck lock",
+                    extra={"session_id": session_id, "user": user},
+                )
+
+    def get_deck_lock_holder(self, session_id: str) -> Optional[str]:
+        """Get the username that currently holds the deck lock, if any.
+
+        Returns None if unlocked or lock is expired.
+
+        Args:
+            session_id: Session (may be contributor or owner)
+
+        Returns:
+            Username of lock holder, or None
+        """
+        with get_db_session() as db:
+            session = (
+                db.query(UserSession)
+                .filter(UserSession.session_id == session_id)
+                .first()
+            )
+            if not session:
+                return None
+
+            deck_owner = self._get_deck_owner_session(db, session)
+            if not deck_owner.slide_deck:
+                return None
+
+            deck = deck_owner.slide_deck
+            if not deck.locked_by:
+                return None
+
+            if deck.locked_at:
+                age = (datetime.utcnow() - deck.locked_at).total_seconds()
+                if age >= self.DECK_LOCK_TIMEOUT_SECONDS:
+                    return None  # Expired
+
+            return deck.locked_by
 
     # Session locking for concurrent request handling
     def acquire_session_lock(self, session_id: str, timeout_seconds: int = 300) -> bool:
@@ -1487,6 +1892,157 @@ class SessionManager:
             raise SessionNotFoundError(f"Session not found: {session_id}")
 
         return session
+
+    # ================================================================
+    # Slide Comments
+    # ================================================================
+
+    def add_comment(
+        self,
+        session_id: str,
+        slide_id: str,
+        user_name: str,
+        content: str,
+        parent_comment_id: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """Add a comment on a slide.
+
+        Comments are stored against the *deck owner* session so all
+        contributors see them.
+        """
+        with get_db_session() as db:
+            session = self._get_session_or_raise(db, session_id)
+            deck_owner = self._get_deck_owner_session(db, session)
+
+            if parent_comment_id is not None:
+                parent = db.query(SlideComment).filter(
+                    SlideComment.id == parent_comment_id,
+                    SlideComment.session_id == deck_owner.id,
+                ).first()
+                if not parent:
+                    raise ValueError("Parent comment not found")
+
+            comment = SlideComment(
+                session_id=deck_owner.id,
+                slide_id=slide_id,
+                user_name=user_name,
+                content=content,
+                parent_comment_id=parent_comment_id,
+            )
+            db.add(comment)
+            db.flush()
+
+            logger.info(
+                "Added slide comment",
+                extra={
+                    "comment_id": comment.id,
+                    "session_id": session_id,
+                    "slide_id": slide_id,
+                    "user": user_name,
+                },
+            )
+            return self._comment_to_dict(comment)
+
+    def list_comments(
+        self,
+        session_id: str,
+        slide_id: Optional[str] = None,
+        include_resolved: bool = False,
+    ) -> List[Dict[str, Any]]:
+        """List comments for a presentation (optionally filtered by slide).
+
+        Only top-level comments are returned; replies are nested inside.
+        """
+        with get_db_session() as db:
+            session = self._get_session_or_raise(db, session_id)
+            deck_owner = self._get_deck_owner_session(db, session)
+
+            query = db.query(SlideComment).filter(
+                SlideComment.session_id == deck_owner.id,
+                SlideComment.parent_comment_id.is_(None),
+            )
+            if slide_id:
+                query = query.filter(SlideComment.slide_id == slide_id)
+            if not include_resolved:
+                query = query.filter(SlideComment.resolved.is_(False))
+
+            comments = query.order_by(SlideComment.created_at.asc()).all()
+            return [self._comment_to_dict(c, include_replies=True) for c in comments]
+
+    def update_comment(
+        self, comment_id: int, user_name: str, content: str
+    ) -> Dict[str, Any]:
+        """Edit a comment (only by the author)."""
+        with get_db_session() as db:
+            comment = db.query(SlideComment).filter(SlideComment.id == comment_id).first()
+            if not comment:
+                raise ValueError("Comment not found")
+            if comment.user_name != user_name:
+                raise PermissionError("Only the author can edit a comment")
+            comment.content = content
+            db.flush()
+            return self._comment_to_dict(comment)
+
+    def delete_comment(self, comment_id: int, user_name: str) -> bool:
+        """Delete a comment (only by the author)."""
+        with get_db_session() as db:
+            comment = db.query(SlideComment).filter(SlideComment.id == comment_id).first()
+            if not comment:
+                raise ValueError("Comment not found")
+            if comment.user_name != user_name:
+                raise PermissionError("Only the author can delete a comment")
+            db.delete(comment)
+            return True
+
+    def resolve_comment(
+        self, comment_id: int, resolved_by: str
+    ) -> Dict[str, Any]:
+        """Mark a comment (and its replies) as resolved."""
+        with get_db_session() as db:
+            comment = db.query(SlideComment).filter(SlideComment.id == comment_id).first()
+            if not comment:
+                raise ValueError("Comment not found")
+            comment.resolved = True
+            comment.resolved_by = resolved_by
+            comment.resolved_at = datetime.utcnow()
+            db.flush()
+            return self._comment_to_dict(comment)
+
+    def unresolve_comment(self, comment_id: int) -> Dict[str, Any]:
+        """Re-open a resolved comment."""
+        with get_db_session() as db:
+            comment = db.query(SlideComment).filter(SlideComment.id == comment_id).first()
+            if not comment:
+                raise ValueError("Comment not found")
+            comment.resolved = False
+            comment.resolved_by = None
+            comment.resolved_at = None
+            db.flush()
+            return self._comment_to_dict(comment)
+
+    @staticmethod
+    def _comment_to_dict(
+        comment: SlideComment, include_replies: bool = False
+    ) -> Dict[str, Any]:
+        result: Dict[str, Any] = {
+            "id": comment.id,
+            "slide_id": comment.slide_id,
+            "user_name": comment.user_name,
+            "content": comment.content,
+            "resolved": comment.resolved,
+            "resolved_by": comment.resolved_by,
+            "resolved_at": comment.resolved_at.isoformat() if comment.resolved_at else None,
+            "parent_comment_id": comment.parent_comment_id,
+            "created_at": comment.created_at.isoformat(),
+            "updated_at": comment.updated_at.isoformat(),
+        }
+        if include_replies and comment.replies:
+            result["replies"] = [
+                SessionManager._comment_to_dict(r) for r in comment.replies
+            ]
+        else:
+            result["replies"] = []
+        return result
 
 
 # Global session manager instance

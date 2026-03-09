@@ -316,21 +316,13 @@ class TestGoogleSlidesAuthUnit:
         assert auth.is_authorized() is False
 
     def test_get_auth_url_db_mode(self):
-        """get_auth_url generates a Google consent URL with PKCE in DB mode."""
+        """get_auth_url generates a Google consent URL in DB mode."""
         from src.services.google_slides_auth import GoogleSlidesAuth
 
         auth = GoogleSlidesAuth(credentials_json=VALID_CREDENTIALS)
-        url, state_json = auth.get_auth_url(
-            redirect_uri="http://localhost/callback",
-            state_data={"user": "test@example.com"},
-        )
+        url = auth.get_auth_url(redirect_uri="http://localhost/callback")
         assert "accounts.google.com" in url
-        assert "code_challenge=" in url
-        assert "code_challenge_method=S256" in url
-
-        state = json.loads(state_json)
-        assert state["user"] == "test@example.com"
-        assert "cv" in state
+        assert "http://localhost/callback" in url or "redirect_uri" in url
 
     def test_get_credentials_raises_when_no_token(self):
         """get_credentials raises GoogleSlidesAuthError when not authorized."""

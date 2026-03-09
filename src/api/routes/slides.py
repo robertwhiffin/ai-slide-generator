@@ -2,21 +2,120 @@
 
 All blocking operations are wrapped with asyncio.to_thread for multi-user concurrency.
 Mutation operations use session locking to prevent race conditions.
+
+Slide access is controlled by session permissions:
+- CAN_VIEW: Can view slides (via get_slides)
+- CAN_EDIT: Can modify slides (reorder, update, duplicate, delete)
+- CAN_MANAGE: Full control (same as owner)
 """
 
 import asyncio
 import logging
-from typing import List
+from typing import List, Optional, Tuple
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
+from sqlalchemy.orm import Session
 
 from src.api.services.chat_service import get_chat_service
-from src.api.services.session_manager import SessionNotFoundError, get_session_manager
+from src.api.services.session_manager import SessionNotFoundError, VersionConflictError, get_session_manager
+from src.core.database import get_db
+from src.core.permission_context import get_permission_context
+from src.core.user_context import get_current_user
+from src.database.models.profile_contributor import PermissionLevel
+from src.services.permission_service import PermissionService, PERMISSION_PRIORITY
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/slides", tags=["slides"])
+
+
+def _get_session_permission(
+    session_id: str,
+    db: Session,
+) -> Tuple[bool, Optional[PermissionLevel]]:
+    """Check if current user has access to a session's slides.
+
+    For contributor sessions, permission is derived from the profile — not
+    from session creation. For root (owner) sessions, the creator gets
+    CAN_MANAGE.
+    
+    Args:
+        session_id: Session identifier
+        db: Database session
+        
+    Returns:
+        Tuple of (has_access, permission_level)
+    """
+    session_manager = get_session_manager()
+    current_user = get_current_user()
+    ctx = get_permission_context()
+    
+    try:
+        session_info = session_manager.get_session(session_id)
+    except SessionNotFoundError:
+        return False, None
+    
+    is_contributor = session_info.get("is_contributor_session", False)
+
+    # For root sessions, creator gets full control
+    if not is_contributor and session_info.get("created_by") == current_user:
+        return True, PermissionLevel.CAN_MANAGE
+    
+    # For contributor sessions (or non-creator access), use profile permission
+    profile_id = session_info.get("profile_id")
+    if profile_id and ctx:
+        perm_service = PermissionService(db)
+        permission = perm_service.get_user_permission(
+            profile_id=profile_id,
+            user_id=ctx.user_id,
+            user_name=ctx.user_name,
+            group_ids=ctx.group_ids,
+        )
+        if permission:
+            return True, permission
+    
+    # Allow contributor session creator even without explicit profile permission
+    # (they were granted access when the contributor session was created)
+    if is_contributor and session_info.get("created_by") == current_user:
+        return True, PermissionLevel.CAN_VIEW
+    
+    return False, None
+
+
+def _require_slide_permission(
+    session_id: str,
+    db: Session,
+    min_permission: PermissionLevel = PermissionLevel.CAN_VIEW,
+) -> PermissionLevel:
+    """Require user has at least the specified permission level on slides.
+    
+    Args:
+        session_id: Session identifier
+        db: Database session
+        min_permission: Minimum required permission (default: CAN_VIEW)
+        
+    Returns:
+        The user's actual permission level
+        
+    Raises:
+        HTTPException 403: If user doesn't have required permission
+    """
+    has_access, permission = _get_session_permission(session_id, db)
+    
+    if not has_access or permission is None:
+        raise HTTPException(
+            status_code=403,
+            detail="You don't have permission to access these slides",
+        )
+    
+    if PERMISSION_PRIORITY[permission] < PERMISSION_PRIORITY[min_permission]:
+        raise HTTPException(
+            status_code=403,
+            detail=f"This action requires {min_permission.value} permission",
+        )
+    
+    return permission
 
 
 class ReorderRequest(BaseModel):
@@ -24,6 +123,7 @@ class ReorderRequest(BaseModel):
 
     session_id: str
     new_order: List[int]
+    expected_version: Optional[int] = None
 
 
 class UpdateSlideRequest(BaseModel):
@@ -31,12 +131,14 @@ class UpdateSlideRequest(BaseModel):
 
     session_id: str
     html: str
+    expected_version: Optional[int] = None
 
 
 class SlideActionRequest(BaseModel):
     """Request for slide actions (duplicate)."""
 
     session_id: str
+    expected_version: Optional[int] = None
 
 
 class UpdateVerificationRequest(BaseModel):
@@ -47,24 +149,35 @@ class UpdateVerificationRequest(BaseModel):
 
 
 @router.get("")
-async def get_slides(session_id: str = Query(..., description="Session ID")):
+async def get_slides(
+    session_id: str = Query(..., description="Session ID"),
+    db: Session = Depends(get_db),
+):
     """Get current slide deck.
+
+    Requires at least CAN_VIEW permission.
 
     Args:
         session_id: Session identifier
 
     Returns:
-        Slide deck dictionary
+        Slide deck dictionary with user's permission level
 
     Raises:
-        HTTPException: 404 if no slides available, 500 on error
+        HTTPException: 403 if no permission, 404 if no slides available, 500 on error
     """
     try:
+        # Check permission
+        permission = _require_slide_permission(session_id, db, PermissionLevel.CAN_VIEW)
+        
         chat_service = get_chat_service()
         result = await asyncio.to_thread(chat_service.get_slides, session_id)
 
         if not result:
             raise HTTPException(status_code=404, detail="No slides available")
+
+        # Add permission level to response
+        result["my_permission"] = permission.value
 
         logger.info(
             "Retrieved slides",
@@ -80,9 +193,10 @@ async def get_slides(session_id: str = Query(..., description="Session ID")):
 
 
 @router.put("/reorder")
-async def reorder_slides(request: ReorderRequest):
+async def reorder_slides(request: ReorderRequest, db: Session = Depends(get_db)):
     """Reorder slides.
 
+    Requires CAN_EDIT permission.
     Uses session locking to prevent concurrent modifications.
 
     Args:
@@ -92,8 +206,11 @@ async def reorder_slides(request: ReorderRequest):
         Updated slide deck
 
     Raises:
-        HTTPException: 400 for validation errors, 409 if session busy, 500 on error
+        HTTPException: 403 if no permission, 400 for validation errors, 409 if session busy, 500 on error
     """
+    # Check permission first
+    _require_slide_permission(request.session_id, db, PermissionLevel.CAN_EDIT)
+    
     session_manager = get_session_manager()
 
     locked = await asyncio.to_thread(
@@ -112,6 +229,7 @@ async def reorder_slides(request: ReorderRequest):
             chat_service.reorder_slides,
             request.session_id,
             request.new_order,
+            expected_version=request.expected_version,
         )
 
         logger.info(
@@ -120,6 +238,8 @@ async def reorder_slides(request: ReorderRequest):
         )
         return result
 
+    except VersionConflictError as e:
+        raise HTTPException(status_code=409, detail=str(e))
     except ValueError as e:
         logger.warning(f"Validation error in reorder_slides: {e}")
         raise HTTPException(status_code=400, detail=str(e))
@@ -134,9 +254,10 @@ async def reorder_slides(request: ReorderRequest):
 
 
 @router.patch("/{index}")
-async def update_slide(index: int, request: UpdateSlideRequest):
+async def update_slide(index: int, request: UpdateSlideRequest, db: Session = Depends(get_db)):
     """Update a single slide's HTML.
 
+    Requires CAN_EDIT permission.
     Uses session locking to prevent concurrent modifications.
 
     Args:
@@ -147,8 +268,10 @@ async def update_slide(index: int, request: UpdateSlideRequest):
         Updated slide information
 
     Raises:
-        HTTPException: 400 for validation errors, 409 if session busy, 500 on error
+        HTTPException: 403 if no permission, 400 for validation errors, 409 if session busy, 500 on error
     """
+    # Check permission first
+    _require_slide_permission(request.session_id, db, PermissionLevel.CAN_EDIT)
     session_manager = get_session_manager()
 
     locked = await asyncio.to_thread(
@@ -168,6 +291,7 @@ async def update_slide(index: int, request: UpdateSlideRequest):
             request.session_id,
             index,
             request.html,
+            expected_version=request.expected_version,
         )
 
         logger.info(
@@ -176,6 +300,8 @@ async def update_slide(index: int, request: UpdateSlideRequest):
         )
         return result
 
+    except VersionConflictError as e:
+        raise HTTPException(status_code=409, detail=str(e))
     except ValueError as e:
         logger.warning(f"Validation error in update_slide: {e}")
         raise HTTPException(status_code=400, detail=str(e))
@@ -190,9 +316,10 @@ async def update_slide(index: int, request: UpdateSlideRequest):
 
 
 @router.post("/{index}/duplicate")
-async def duplicate_slide(index: int, request: SlideActionRequest):
+async def duplicate_slide(index: int, request: SlideActionRequest, db: Session = Depends(get_db)):
     """Duplicate a slide.
 
+    Requires CAN_EDIT permission.
     Uses session locking to prevent concurrent modifications.
 
     Args:
@@ -203,8 +330,11 @@ async def duplicate_slide(index: int, request: SlideActionRequest):
         Updated slide deck
 
     Raises:
-        HTTPException: 400 for validation errors, 409 if session busy, 500 on error
+        HTTPException: 403 if no permission, 400 for validation errors, 409 if session busy, 500 on error
     """
+    # Check permission first
+    _require_slide_permission(request.session_id, db, PermissionLevel.CAN_EDIT)
+    
     session_manager = get_session_manager()
 
     locked = await asyncio.to_thread(
@@ -223,6 +353,7 @@ async def duplicate_slide(index: int, request: SlideActionRequest):
             chat_service.duplicate_slide,
             request.session_id,
             index,
+            expected_version=request.expected_version,
         )
 
         logger.info(
@@ -231,6 +362,8 @@ async def duplicate_slide(index: int, request: SlideActionRequest):
         )
         return result
 
+    except VersionConflictError as e:
+        raise HTTPException(status_code=409, detail=str(e))
     except ValueError as e:
         logger.warning(f"Validation error in duplicate_slide: {e}")
         raise HTTPException(status_code=400, detail=str(e))
@@ -245,21 +378,31 @@ async def duplicate_slide(index: int, request: SlideActionRequest):
 
 
 @router.delete("/{index}")
-async def delete_slide(index: int, session_id: str = Query(..., description="Session ID")):
+async def delete_slide(
+    index: int,
+    session_id: str = Query(..., description="Session ID"),
+    expected_version: Optional[int] = Query(None, description="Expected deck version for optimistic locking"),
+    db: Session = Depends(get_db),
+):
     """Delete a slide.
 
+    Requires CAN_EDIT permission.
     Uses session locking to prevent concurrent modifications.
 
     Args:
         index: Slide index to delete
         session_id: Session identifier
+        expected_version: If provided, reject when stale
 
     Returns:
         Updated slide deck
 
     Raises:
-        HTTPException: 400 for validation errors, 409 if session busy, 500 on error
+        HTTPException: 403 if no permission, 400 for validation errors, 409 if session busy or version conflict, 500 on error
     """
+    # Check permission first
+    _require_slide_permission(session_id, db, PermissionLevel.CAN_EDIT)
+    
     session_manager = get_session_manager()
 
     locked = await asyncio.to_thread(
@@ -278,6 +421,7 @@ async def delete_slide(index: int, session_id: str = Query(..., description="Ses
             chat_service.delete_slide,
             session_id,
             index,
+            expected_version=expected_version,
         )
 
         logger.info(
@@ -286,6 +430,8 @@ async def delete_slide(index: int, session_id: str = Query(..., description="Ses
         )
         return result
 
+    except VersionConflictError as e:
+        raise HTTPException(status_code=409, detail=str(e))
     except ValueError as e:
         logger.warning(f"Validation error in delete_slide: {e}")
         raise HTTPException(status_code=400, detail=str(e))

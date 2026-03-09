@@ -444,15 +444,16 @@ test.describe('ProfileCreationWizard', () => {
     await goToProfiles(page);
     await page.getByRole('button', { name: /Create Profile/i }).click();
 
-    // Navigate through wizard
+    // Navigate through wizard (6 steps: basic-info, genie-space, slide-style, deck-prompt, share, review)
     await page.getByPlaceholder(/Production Analytics/i).fill('Test Profile');
-    await page.getByRole('button', { name: /Next/i }).click(); // Step 1 -> 2
-    await page.getByRole('button', { name: /Next/i }).click(); // Step 2 -> 3
+    await page.getByRole('button', { name: /Next/i }).click(); // Step 1 -> 2 (genie-space)
+    await page.getByRole('button', { name: /Next/i }).click(); // Step 2 -> 3 (slide-style)
 
     // Select slide style - use label selector
     await page.locator('label').filter({ hasText: 'System Default' }).first().click();
-    await page.getByRole('button', { name: /Next/i }).click(); // Step 3 -> 4
-    await page.getByRole('button', { name: /Next/i }).click(); // Step 4 -> 5 (Review)
+    await page.getByRole('button', { name: /Next/i }).click(); // Step 3 -> 4 (deck-prompt)
+    await page.getByRole('button', { name: /Next/i }).click(); // Step 4 -> 5 (share)
+    await page.getByRole('button', { name: /Next/i }).click(); // Step 5 -> 6 (review)
 
     // Should show review with profile name
     await expect(page.getByText('Test Profile').first()).toBeVisible();
