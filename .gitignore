@@ -29,6 +29,10 @@ ENV/
 *.swo
 *~
 
+# Cursor IDE / Databricks AI Dev Kit
+.cursor/
+.ai-dev-kit/
+
 # Testing
 .pytest_cache/
 .coverage
