@@ -1922,11 +1922,16 @@ class SessionManager:
                 if not parent:
                     raise ValueError("Parent comment not found")
 
+            import re
+            mentioned = re.findall(r"@([\w.\-]+)", content)
+            mentioned = list(dict.fromkeys(mentioned))  # dedupe, preserve order
+
             comment = SlideComment(
                 session_id=deck_owner.id,
                 slide_id=slide_id,
                 user_name=user_name,
                 content=content,
+                mentions=mentioned or None,
                 parent_comment_id=parent_comment_id,
             )
             db.add(comment)
@@ -1973,6 +1978,8 @@ class SessionManager:
         self, comment_id: int, user_name: str, content: str
     ) -> Dict[str, Any]:
         """Edit a comment (only by the author)."""
+        import re
+
         with get_db_session() as db:
             comment = db.query(SlideComment).filter(SlideComment.id == comment_id).first()
             if not comment:
@@ -1980,6 +1987,8 @@ class SessionManager:
             if comment.user_name != user_name:
                 raise PermissionError("Only the author can edit a comment")
             comment.content = content
+            mentioned = re.findall(r"@([\w.\-]+)", content)
+            comment.mentions = list(dict.fromkeys(mentioned)) or None
             db.flush()
             return self._comment_to_dict(comment)
 
@@ -2029,6 +2038,7 @@ class SessionManager:
             "slide_id": comment.slide_id,
             "user_name": comment.user_name,
             "content": comment.content,
+            "mentions": comment.mentions or [],
             "resolved": comment.resolved,
             "resolved_by": comment.resolved_by,
             "resolved_at": comment.resolved_at.isoformat() if comment.resolved_at else None,
@@ -2043,6 +2053,83 @@ class SessionManager:
         else:
             result["replies"] = []
         return result
+
+    def list_mentions(self, user_name: str) -> List[Dict[str, Any]]:
+        """List comments that @mention a specific user, newest first.
+
+        Scans the JSON ``mentions`` array stored on each comment.
+        For SQLite the column is TEXT so we fall back to a LIKE query.
+        """
+        with get_db_session() as db:
+            try:
+                from sqlalchemy.dialects import sqlite as _sqlite_mod  # noqa: F401
+                is_sqlite = "sqlite" in str(db.bind.url)
+            except Exception:
+                is_sqlite = False
+
+            if is_sqlite:
+                from sqlalchemy import text as sa_text
+                comments = (
+                    db.query(SlideComment)
+                    .filter(SlideComment.mentions.isnot(None))
+                    .filter(SlideComment.content.contains(f"@{user_name}"))
+                    .order_by(SlideComment.created_at.desc())
+                    .limit(100)
+                    .all()
+                )
+            else:
+                from sqlalchemy import cast, String as SAString
+                comments = (
+                    db.query(SlideComment)
+                    .filter(SlideComment.mentions.isnot(None))
+                    .filter(cast(SlideComment.mentions, SAString).contains(f'"{user_name}"'))
+                    .order_by(SlideComment.created_at.desc())
+                    .limit(100)
+                    .all()
+                )
+
+            results = []
+            for c in comments:
+                mentions_list = c.mentions if isinstance(c.mentions, list) else []
+                if user_name in mentions_list:
+                    d = self._comment_to_dict(c)
+                    d["session_id_str"] = self._get_session_id_str(db, c.session_id)
+                    results.append(d)
+            return results
+
+    def get_mentionable_users(self, session_id: str) -> List[str]:
+        """Return usernames that can be @mentioned for a session.
+
+        Includes the session owner and all contributors of the profile
+        the session belongs to.
+        """
+        from src.database.models.profile_contributor import ConfigProfileContributor
+
+        with get_db_session() as db:
+            session = self._get_session_or_raise(db, session_id)
+            deck_owner = self._get_deck_owner_session(db, session)
+
+            users: set[str] = set()
+            if deck_owner.created_by:
+                users.add(deck_owner.created_by)
+
+            if deck_owner.profile_id:
+                contributors = (
+                    db.query(ConfigProfileContributor.identity_name)
+                    .filter(ConfigProfileContributor.profile_id == deck_owner.profile_id)
+                    .all()
+                )
+                for (name,) in contributors:
+                    if name:
+                        users.add(name)
+
+            return sorted(users)
+
+    def _get_session_id_str(self, db, internal_id: int) -> Optional[str]:
+        """Resolve internal DB id to the external session_id string."""
+        from src.database.models.session import UserSession
+        sess = db.query(UserSession.session_id).filter(UserSession.id == internal_id).first()
+        return sess[0] if sess else None
 
 
 # Global session manager instance

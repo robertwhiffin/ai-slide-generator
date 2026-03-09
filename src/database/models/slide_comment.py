@@ -16,6 +16,7 @@ from sqlalchemy import (
     Integer,
     String,
     Text,
+    JSON,
 )
 from sqlalchemy.orm import backref, relationship
 
@@ -40,6 +41,8 @@ class SlideComment(Base):
     slide_id = Column(String(64), nullable=False)
     user_name = Column(String(255), nullable=False)
     content = Column(Text, nullable=False)
+
+    mentions = Column(JSON, nullable=True)
 
     resolved = Column(Boolean, default=False, nullable=False)
     resolved_by = Column(String(255), nullable=True)

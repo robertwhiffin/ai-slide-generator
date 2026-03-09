@@ -11,6 +11,7 @@ import { DeckPromptList } from '../config/DeckPromptList';
 import { SlideStyleList } from '../config/SlideStyleList';
 import { SessionHistory } from '../History/SessionHistory';
 import { SaveAsDialog } from '../History/SaveAsDialog';
+import { NotificationsPanel } from '../Notifications/NotificationsPanel';
 import { HelpPage } from '../Help';
 import { ImageLibrary } from '../ImageLibrary/ImageLibrary';
 import { UpdateBanner } from '../UpdateBanner';
@@ -25,7 +26,7 @@ import { useVersionCheck } from '../../hooks/useVersionCheck';
 import { useSurveyTrigger } from '../../hooks/useSurveyTrigger';
 import { api } from '../../services/api';
 
-type ViewMode = 'main' | 'profiles' | 'deck_prompts' | 'slide_styles' | 'images' | 'history' | 'help';
+type ViewMode = 'main' | 'profiles' | 'deck_prompts' | 'slide_styles' | 'images' | 'history' | 'notifications' | 'help';
 
 interface AppLayoutProps {
   initialView?: ViewMode;
@@ -464,6 +465,20 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
                 My Sessions
               </button>
               <button
+                onClick={() => navigate('/notifications')}
+                disabled={isGenerating}
+                className={`px-3 py-1.5 rounded text-sm transition-colors ${
+                  initialView === 'notifications'
+                    ? 'bg-blue-700 text-white'
+                    : isGenerating
+                    ? 'bg-blue-400 text-blue-200 cursor-not-allowed opacity-50'
+                    : 'bg-blue-500 hover:bg-blue-700 text-blue-100'
+                }`}
+                title={isGenerating ? 'Navigation disabled during generation' : undefined}
+              >
+                Mentions
+              </button>
+              <button
                 onClick={() => navigate('/profiles')}
                 disabled={isGenerating}
                 className={`px-3 py-1.5 rounded text-sm transition-colors ${
@@ -644,6 +659,14 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
             <SessionHistory
               onSessionSelect={(id) => navigate(`/sessions/${id}/edit`)}
             />
+          </div>
+        </div>
+      )}
+
+      {initialView === 'notifications' && (
+        <div className="flex-1 overflow-auto bg-gray-50">
+          <div className="p-6">
+            <NotificationsPanel />
           </div>
         </div>
       )}

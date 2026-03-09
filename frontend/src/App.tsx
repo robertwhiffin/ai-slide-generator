@@ -23,6 +23,7 @@ function AppRoutes() {
       <Route path="/slide-styles" element={<AppLayout key="slide_styles" initialView="slide_styles" />} />
       <Route path="/images" element={<AppLayout key="images" initialView="images" />} />
       <Route path="/history" element={<AppLayout key="history" initialView="history" />} />
+      <Route path="/notifications" element={<AppLayout key="notifications" initialView="notifications" />} />
       <Route path="/admin" element={<AdminPage />} />
       <Route path="/feedback" element={<Navigate to="/admin" replace />} />
       <Route path="/sessions/:sessionId/edit" element={<AppLayout key={`edit-${location.pathname}`} initialView="main" />} />
