@@ -30,6 +30,17 @@ class SessionNotFoundError(Exception):
     pass
 
 
+class VersionConflictError(Exception):
+    """Raised when a write is rejected due to stale deck version."""
+
+    def __init__(self, current_version: int, expected_version: int):
+        self.current_version = current_version
+        self.expected_version = expected_version
+        super().__init__(
+            f"Version conflict: expected {expected_version}, current is {current_version}"
+        )
+
+
 class SessionManager:
     """Manager for database-backed session operations.
 
@@ -686,6 +697,7 @@ class SessionManager:
         slide_count: int = 0,
         deck_dict: Optional[Dict[str, Any]] = None,
         modified_by: Optional[str] = None,
+        expected_version: Optional[int] = None,
     ) -> Dict[str, Any]:
         """Save or update slide deck for a session.
 
@@ -703,9 +715,15 @@ class SessionManager:
             slide_count: Number of slides
             deck_dict: Full SlideDeck structure for restoration
             modified_by: Username to stamp on slides missing authorship
+            expected_version: If provided, reject write when the current
+                DB version doesn't match (optimistic locking). Raises
+                ``VersionConflictError`` on mismatch.
 
         Returns:
             Slide deck info dictionary
+
+        Raises:
+            VersionConflictError: If expected_version doesn't match current version
         """
         # Auto-stamp creation metadata on slides that have none yet
         if deck_dict and modified_by:
@@ -727,6 +745,14 @@ class SessionManager:
             if deck_owner.slide_deck:
                 # Update existing
                 deck = deck_owner.slide_deck
+
+                # Optimistic locking: reject stale writes
+                if expected_version is not None and deck.version != expected_version:
+                    raise VersionConflictError(
+                        current_version=deck.version,
+                        expected_version=expected_version,
+                    )
+
                 deck.title = title
                 deck.html_content = html_content
                 deck.scripts_content = scripts_content
@@ -844,6 +870,7 @@ class SessionManager:
                 deck_dict["created_at"] = deck.created_at.isoformat() + "Z" if deck.created_at else None
                 deck_dict["modified_by"] = deck.modified_by or deck_owner.created_by
                 deck_dict["modified_at"] = deck.updated_at.isoformat() + "Z" if deck.updated_at else None
+                deck_dict["version"] = deck.version
                 
                 return deck_dict
             
@@ -857,6 +884,7 @@ class SessionManager:
                 "created_at": deck.created_at.isoformat() + "Z" if deck.created_at else None,
                 "modified_by": deck.modified_by or deck_owner.created_by,
                 "modified_at": deck.updated_at.isoformat() + "Z" if deck.updated_at else None,
+                "version": deck.version,
             }
 
     def save_verification(

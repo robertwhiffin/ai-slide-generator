@@ -88,6 +88,15 @@ export const SlidePanel: React.FC<SlidePanelProps> = ({ slideDeck, rawHtml, onSl
     })
   );
 
+  const refreshDeck = async () => {
+    if (!sessionId || !onSlideChange) return;
+    const result = await api.getSlides(sessionId);
+    if (result.slide_deck) onSlideChange(result.slide_deck);
+  };
+
+  const isVersionConflict = (error: unknown): boolean =>
+    error instanceof Error && 'status' in error && (error as any).status === 409;
+
   const handleDragEnd = async (event: DragEndEvent) => {
     const { active, over } = event;
 
@@ -113,18 +122,18 @@ export const SlidePanel: React.FC<SlidePanelProps> = ({ slideDeck, rawHtml, onSl
         const newOrder = newSlides.map((_, idx) => 
           slideDeck.slides.findIndex(s => s.slide_id === newSlides[idx].slide_id)
         );
-        await api.reorderSlides(newOrder, sessionId);
-        // Fetch full deck to get verification merged from verification_map
-        const result = await api.getSlides(sessionId);
-        if (result.slide_deck) {
-          onSlideChange?.(result.slide_deck);
-        }
+        await api.reorderSlides(newOrder, sessionId, slideDeck.version);
+        await refreshDeck();
         clearSelection();
       } catch (error) {
         console.error('Failed to reorder:', error);
-        // Revert on error
-        onSlideChange(slideDeck);
-        alert('Failed to reorder slides');
+        if (isVersionConflict(error)) {
+          alert('This deck was modified by another user. Refreshing to latest version.');
+          await refreshDeck();
+        } else {
+          onSlideChange(slideDeck);
+          alert('Failed to reorder slides');
+        }
       } finally {
         setIsReordering(false);
       }
@@ -137,16 +146,17 @@ export const SlidePanel: React.FC<SlidePanelProps> = ({ slideDeck, rawHtml, onSl
     if (!confirm(`Delete slide ${index + 1}?`)) return;
 
     try {
-      await api.deleteSlide(index, sessionId);
-      // Fetch full deck to get verification merged from verification_map
-      const result = await api.getSlides(sessionId);
-      if (result.slide_deck) {
-        onSlideChange?.(result.slide_deck);
-      }
+      await api.deleteSlide(index, sessionId, slideDeck.version);
+      await refreshDeck();
       clearSelection();
     } catch (error) {
       console.error('Failed to delete:', error);
-      alert('Failed to delete slide');
+      if (isVersionConflict(error)) {
+        alert('This deck was modified by another user. Refreshing to latest version.');
+        await refreshDeck();
+      } else {
+        alert('Failed to delete slide');
+      }
     }
   };
 
@@ -154,16 +164,16 @@ export const SlidePanel: React.FC<SlidePanelProps> = ({ slideDeck, rawHtml, onSl
     if (!slideDeck || !sessionId || readOnly || !onSlideChange) return;
 
     try {
-      await api.updateSlide(index, html, sessionId);
-      // Fetch updated deck
-      const result = await api.getSlides(sessionId);
-      if (result.slide_deck) {
-        onSlideChange?.(result.slide_deck);
-      }
+      await api.updateSlide(index, html, sessionId, slideDeck.version);
+      await refreshDeck();
       clearSelection();
     } catch (error) {
       console.error('Failed to update:', error);
-      throw error; // Re-throw for editor to handle
+      if (isVersionConflict(error)) {
+        alert('This deck was modified by another user. Refreshing to latest version.');
+        await refreshDeck();
+      }
+      throw error;
     }
   };
 
@@ -748,31 +758,32 @@ export const SlidePanel: React.FC<SlidePanelProps> = ({ slideDeck, rawHtml, onSl
         )}
 
         {/* Deck Metadata */}
-        <div className="px-4 py-2 bg-gray-50 border-t text-xs text-gray-500 grid grid-cols-2 gap-x-6 gap-y-1">
-          <div className="flex items-center gap-1">
-            <FiUser size={11} className="text-gray-400 flex-shrink-0" />
-            <span className="text-gray-400">Created by:</span>
-            <span className="text-gray-700 font-medium truncate">{slideDeck.created_by || '—'}</span>
-          </div>
-          <div className="flex items-center gap-1">
-            <FiClock size={11} className="text-gray-400 flex-shrink-0" />
-            <span className="text-gray-400">Created at:</span>
+        <div className="px-4 py-1.5 bg-gray-50 border-t text-xs text-gray-500 flex flex-wrap items-center gap-x-4 gap-y-0.5">
+          <span className="inline-flex items-center gap-1 whitespace-nowrap">
+            <FiUser size={10} className="text-gray-400" />
+            <span className="text-gray-400">Created by</span>
+            <span className="text-gray-700 font-medium">{slideDeck.created_by || '—'}</span>
+          </span>
+          <span className="inline-flex items-center gap-1 whitespace-nowrap">
+            <FiClock size={10} className="text-gray-400" />
+            <span className="text-gray-400">Created</span>
             <span className="text-gray-700" title={slideDeck.created_at ? new Date(slideDeck.created_at).toLocaleString() : ''}>
               {slideDeck.created_at ? formatRelativeTime(slideDeck.created_at) : '—'}
             </span>
-          </div>
-          <div className="flex items-center gap-1">
-            <FiUser size={11} className="text-gray-400 flex-shrink-0" />
-            <span className="text-gray-400">Last modified by:</span>
-            <span className="text-gray-700 font-medium truncate">{slideDeck.modified_by || '—'}</span>
-          </div>
-          <div className="flex items-center gap-1">
-            <FiClock size={11} className="text-gray-400 flex-shrink-0" />
-            <span className="text-gray-400">Last modified at:</span>
+          </span>
+          <span className="text-gray-300">|</span>
+          <span className="inline-flex items-center gap-1 whitespace-nowrap">
+            <FiUser size={10} className="text-gray-400" />
+            <span className="text-gray-400">Last modified by</span>
+            <span className="text-gray-700 font-medium">{slideDeck.modified_by || '—'}</span>
+          </span>
+          <span className="inline-flex items-center gap-1 whitespace-nowrap">
+            <FiClock size={10} className="text-gray-400" />
+            <span className="text-gray-400">Modified</span>
             <span className="text-gray-700" title={slideDeck.modified_at ? new Date(slideDeck.modified_at).toLocaleString() : ''}>
               {slideDeck.modified_at ? formatRelativeTime(slideDeck.modified_at) : '—'}
             </span>
-          </div>
+          </span>
         </div>
 
         {/* Tab Navigation */}

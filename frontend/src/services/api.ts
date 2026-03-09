@@ -449,16 +449,17 @@ export const api = {
    */
   async reorderSlides(
     newOrder: number[],
-    sessionId: string
+    sessionId: string,
+    expectedVersion?: number
   ): Promise<SlideDeck> {
     const response = await fetch(`${API_BASE_URL}/api/slides/reorder`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ new_order: newOrder, session_id: sessionId }),
+      body: JSON.stringify({ new_order: newOrder, session_id: sessionId, expected_version: expectedVersion }),
     });
 
     if (!response.ok) {
-      throw new ApiError(response.status, 'Failed to reorder slides');
+      throw new ApiError(response.status, response.status === 409 ? 'Deck was modified by another user' : 'Failed to reorder slides');
     }
 
     return response.json();
@@ -470,16 +471,17 @@ export const api = {
   async updateSlide(
     index: number,
     html: string,
-    sessionId: string
+    sessionId: string,
+    expectedVersion?: number
   ): Promise<Slide> {
     const response = await fetch(`${API_BASE_URL}/api/slides/${index}`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ html, session_id: sessionId }),
+      body: JSON.stringify({ html, session_id: sessionId, expected_version: expectedVersion }),
     });
 
     if (!response.ok) {
-      throw new ApiError(response.status, 'Failed to update slide');
+      throw new ApiError(response.status, response.status === 409 ? 'Deck was modified by another user' : 'Failed to update slide');
     }
 
     return response.json();
@@ -490,16 +492,17 @@ export const api = {
    */
   async duplicateSlide(
     index: number,
-    sessionId: string
+    sessionId: string,
+    expectedVersion?: number
   ): Promise<SlideDeck> {
     const response = await fetch(`${API_BASE_URL}/api/slides/${index}/duplicate`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ session_id: sessionId }),
+      body: JSON.stringify({ session_id: sessionId, expected_version: expectedVersion }),
     });
 
     if (!response.ok) {
-      throw new ApiError(response.status, 'Failed to duplicate slide');
+      throw new ApiError(response.status, response.status === 409 ? 'Deck was modified by another user' : 'Failed to duplicate slide');
     }
 
     return response.json();
@@ -510,14 +513,17 @@ export const api = {
    */
   async deleteSlide(
     index: number,
-    sessionId: string
+    sessionId: string,
+    expectedVersion?: number
   ): Promise<SlideDeck> {
-    const response = await fetch(`${API_BASE_URL}/api/slides/${index}?session_id=${sessionId}`, {
+    const params = new URLSearchParams({ session_id: sessionId });
+    if (expectedVersion !== undefined) params.set('expected_version', String(expectedVersion));
+    const response = await fetch(`${API_BASE_URL}/api/slides/${index}?${params}`, {
       method: 'DELETE',
     });
 
     if (!response.ok) {
-      throw new ApiError(response.status, 'Failed to delete slide');
+      throw new ApiError(response.status, response.status === 409 ? 'Deck was modified by another user' : 'Failed to delete slide');
     }
 
     return response.json();

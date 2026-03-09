@@ -25,6 +25,7 @@ export interface SlideDeck {
   created_at?: string;
   modified_by?: string;
   modified_at?: string;
+  version?: number;
 }
 
 export interface SlideContext {

@@ -2375,7 +2375,7 @@ class ChatService:
         deck_dict, _ = self._substitute_images_for_response(deck_dict)
         return deck_dict
 
-    def reorder_slides(self, session_id: str, new_order: List[int]) -> Dict[str, Any]:
+    def reorder_slides(self, session_id: str, new_order: List[int], *, expected_version: Optional[int] = None) -> Dict[str, Any]:
         """Reorder slides based on new index order.
 
         Args:
@@ -2440,6 +2440,7 @@ class ChatService:
             scripts_content=current_deck.scripts,
             slide_count=len(current_deck.slides),
             deck_dict=deck_dict,
+            expected_version=expected_version,
         )
 
         # Create save point
@@ -2457,7 +2458,7 @@ class ChatService:
         deck_dict, _ = self._substitute_images_for_response(deck_dict)
         return deck_dict
 
-    def update_slide(self, session_id: str, index: int, html: str) -> Dict[str, Any]:
+    def update_slide(self, session_id: str, index: int, html: str, *, expected_version: Optional[int] = None) -> Dict[str, Any]:
         """Update a single slide's HTML.
 
         Args:
@@ -2512,6 +2513,7 @@ class ChatService:
             scripts_content=current_deck.scripts,
             slide_count=len(current_deck.slides),
             deck_dict=deck_dict,
+            expected_version=expected_version,
         )
 
         # Create save point immediately after persisting
@@ -2531,7 +2533,7 @@ class ChatService:
 
         return {"index": index, "slide_id": f"slide_{index}", "html": html}
 
-    def duplicate_slide(self, session_id: str, index: int) -> Dict[str, Any]:
+    def duplicate_slide(self, session_id: str, index: int, *, expected_version: Optional[int] = None) -> Dict[str, Any]:
         """Duplicate a slide.
 
         Args:
@@ -2578,6 +2580,7 @@ class ChatService:
             scripts_content=current_deck.scripts,
             slide_count=len(current_deck.slides),
             deck_dict=deck_dict,
+            expected_version=expected_version,
         )
 
         # Create save point
@@ -2599,7 +2602,7 @@ class ChatService:
         deck_dict, _ = self._substitute_images_for_response(deck_dict)
         return deck_dict
 
-    def delete_slide(self, session_id: str, index: int) -> Dict[str, Any]:
+    def delete_slide(self, session_id: str, index: int, *, expected_version: Optional[int] = None) -> Dict[str, Any]:
         """Delete a slide.
 
         Args:
@@ -2639,6 +2642,7 @@ class ChatService:
             scripts_content=current_deck.scripts,
             slide_count=len(current_deck.slides),
             deck_dict=deck_dict,
+            expected_version=expected_version,
         )
 
         # Create save point

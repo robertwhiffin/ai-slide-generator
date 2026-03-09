@@ -18,7 +18,7 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from src.api.services.chat_service import get_chat_service
-from src.api.services.session_manager import SessionNotFoundError, get_session_manager
+from src.api.services.session_manager import SessionNotFoundError, VersionConflictError, get_session_manager
 from src.core.database import get_db
 from src.core.permission_context import get_permission_context
 from src.core.user_context import get_current_user
@@ -123,6 +123,7 @@ class ReorderRequest(BaseModel):
 
     session_id: str
     new_order: List[int]
+    expected_version: Optional[int] = None
 
 
 class UpdateSlideRequest(BaseModel):
@@ -130,12 +131,14 @@ class UpdateSlideRequest(BaseModel):
 
     session_id: str
     html: str
+    expected_version: Optional[int] = None
 
 
 class SlideActionRequest(BaseModel):
     """Request for slide actions (duplicate)."""
 
     session_id: str
+    expected_version: Optional[int] = None
 
 
 class UpdateVerificationRequest(BaseModel):
@@ -226,6 +229,7 @@ async def reorder_slides(request: ReorderRequest, db: Session = Depends(get_db))
             chat_service.reorder_slides,
             request.session_id,
             request.new_order,
+            expected_version=request.expected_version,
         )
 
         logger.info(
@@ -234,6 +238,8 @@ async def reorder_slides(request: ReorderRequest, db: Session = Depends(get_db))
         )
         return result
 
+    except VersionConflictError as e:
+        raise HTTPException(status_code=409, detail=str(e))
     except ValueError as e:
         logger.warning(f"Validation error in reorder_slides: {e}")
         raise HTTPException(status_code=400, detail=str(e))
@@ -285,6 +291,7 @@ async def update_slide(index: int, request: UpdateSlideRequest, db: Session = De
             request.session_id,
             index,
             request.html,
+            expected_version=request.expected_version,
         )
 
         logger.info(
@@ -293,6 +300,8 @@ async def update_slide(index: int, request: UpdateSlideRequest, db: Session = De
         )
         return result
 
+    except VersionConflictError as e:
+        raise HTTPException(status_code=409, detail=str(e))
     except ValueError as e:
         logger.warning(f"Validation error in update_slide: {e}")
         raise HTTPException(status_code=400, detail=str(e))
@@ -344,6 +353,7 @@ async def duplicate_slide(index: int, request: SlideActionRequest, db: Session =
             chat_service.duplicate_slide,
             request.session_id,
             index,
+            expected_version=request.expected_version,
         )
 
         logger.info(
@@ -352,6 +362,8 @@ async def duplicate_slide(index: int, request: SlideActionRequest, db: Session =
         )
         return result
 
+    except VersionConflictError as e:
+        raise HTTPException(status_code=409, detail=str(e))
     except ValueError as e:
         logger.warning(f"Validation error in duplicate_slide: {e}")
         raise HTTPException(status_code=400, detail=str(e))
@@ -369,6 +381,7 @@ async def duplicate_slide(index: int, request: SlideActionRequest, db: Session =
 async def delete_slide(
     index: int,
     session_id: str = Query(..., description="Session ID"),
+    expected_version: Optional[int] = Query(None, description="Expected deck version for optimistic locking"),
     db: Session = Depends(get_db),
 ):
     """Delete a slide.
@@ -379,12 +392,13 @@ async def delete_slide(
     Args:
         index: Slide index to delete
         session_id: Session identifier
+        expected_version: If provided, reject when stale
 
     Returns:
         Updated slide deck
 
     Raises:
-        HTTPException: 403 if no permission, 400 for validation errors, 409 if session busy, 500 on error
+        HTTPException: 403 if no permission, 400 for validation errors, 409 if session busy or version conflict, 500 on error
     """
     # Check permission first
     _require_slide_permission(session_id, db, PermissionLevel.CAN_EDIT)
@@ -407,6 +421,7 @@ async def delete_slide(
             chat_service.delete_slide,
             session_id,
             index,
+            expected_version=expected_version,
         )
 
         logger.info(
@@ -415,6 +430,8 @@ async def delete_slide(
         )
         return result
 
+    except VersionConflictError as e:
+        raise HTTPException(status_code=409, detail=str(e))
     except ValueError as e:
         logger.warning(f"Validation error in delete_slide: {e}")
         raise HTTPException(status_code=400, detail=str(e))
