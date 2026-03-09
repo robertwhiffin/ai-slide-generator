@@ -14,7 +14,7 @@ import {
   sortableKeyboardCoordinates,
   verticalListSortingStrategy,
 } from '@dnd-kit/sortable';
-import { FiPlay, FiDownload, FiFile, FiFileText, FiCode } from 'react-icons/fi';
+import { FiPlay, FiDownload, FiFile, FiFileText, FiCode, FiUser, FiClock } from 'react-icons/fi';
 import type { Slide, SlideDeck } from '../../types/slide';
 import { SlideTile } from './SlideTile';
 import { PresentationMode } from '../PresentationMode';
@@ -46,6 +46,18 @@ interface SlidePanelProps {
 }
 
 type ViewMode = 'tiles' | 'rawhtml' | 'rawtext';
+
+function formatRelativeTime(iso: string): string {
+  const diff = Date.now() - new Date(iso).getTime();
+  const mins = Math.floor(diff / 60000);
+  if (mins < 1) return 'just now';
+  if (mins < 60) return `${mins}m ago`;
+  const hrs = Math.floor(mins / 60);
+  if (hrs < 24) return `${hrs}h ago`;
+  const days = Math.floor(hrs / 24);
+  if (days < 30) return `${days}d ago`;
+  return new Date(iso).toLocaleDateString();
+}
 
 export const SlidePanel: React.FC<SlidePanelProps> = ({ slideDeck, rawHtml, onSlideChange, scrollToSlide, onSendMessage, readOnly = false, onVerificationComplete, versionKey }) => {
   const [isReordering, setIsReordering] = useState(false);
@@ -619,8 +631,8 @@ export const SlidePanel: React.FC<SlidePanelProps> = ({ slideDeck, rawHtml, onSl
       {/* Header with Tabs */}
       <div className="bg-white border-b">
         <div className="p-4 flex items-center justify-between">
-          <div>
-            <h2 className="text-lg font-semibold">{slideDeck.title}</h2>
+          <div className="min-w-0 flex-1 mr-4">
+            <h2 className="text-lg font-semibold truncate">{slideDeck.title}</h2>
             <p className="text-sm text-gray-500">
               {slideDeck.slide_count} slide{slideDeck.slide_count !== 1 ? 's' : ''}
               {isReordering && ' • Reordering...'}
@@ -734,6 +746,34 @@ export const SlidePanel: React.FC<SlidePanelProps> = ({ slideDeck, rawHtml, onSl
             </button>
           </div>
         )}
+
+        {/* Deck Metadata */}
+        <div className="px-4 py-2 bg-gray-50 border-t text-xs text-gray-500 grid grid-cols-2 gap-x-6 gap-y-1">
+          <div className="flex items-center gap-1">
+            <FiUser size={11} className="text-gray-400 flex-shrink-0" />
+            <span className="text-gray-400">Created by:</span>
+            <span className="text-gray-700 font-medium truncate">{slideDeck.created_by || '—'}</span>
+          </div>
+          <div className="flex items-center gap-1">
+            <FiClock size={11} className="text-gray-400 flex-shrink-0" />
+            <span className="text-gray-400">Created at:</span>
+            <span className="text-gray-700" title={slideDeck.created_at ? new Date(slideDeck.created_at).toLocaleString() : ''}>
+              {slideDeck.created_at ? formatRelativeTime(slideDeck.created_at) : '—'}
+            </span>
+          </div>
+          <div className="flex items-center gap-1">
+            <FiUser size={11} className="text-gray-400 flex-shrink-0" />
+            <span className="text-gray-400">Last modified by:</span>
+            <span className="text-gray-700 font-medium truncate">{slideDeck.modified_by || '—'}</span>
+          </div>
+          <div className="flex items-center gap-1">
+            <FiClock size={11} className="text-gray-400 flex-shrink-0" />
+            <span className="text-gray-400">Last modified at:</span>
+            <span className="text-gray-700" title={slideDeck.modified_at ? new Date(slideDeck.modified_at).toLocaleString() : ''}>
+              {slideDeck.modified_at ? formatRelativeTime(slideDeck.modified_at) : '—'}
+            </span>
+          </div>
+        </div>
 
         {/* Tab Navigation */}
         <div className="flex border-t">

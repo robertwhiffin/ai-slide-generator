@@ -729,6 +729,8 @@ class SessionManager:
                 deck.slide_count = slide_count
                 deck.deck_json = deck_json
                 deck.version += 1
+                if modified_by:
+                    deck.modified_by = modified_by
             else:
                 # Create new
                 deck = SessionSlideDeck(
@@ -807,12 +809,37 @@ class SessionManager:
                 if deck.html_content:
                     deck_dict["html_content"] = deck.html_content
                 
-                # Merge verification into slides by content hash
+                # Backfill missing per-slide authorship from the deck owner
+                fallback_user = deck_owner.created_by
+                needs_persist = False
+                created_at_fallback = deck.created_at.isoformat() + "Z" if deck.created_at else None
+
+                # Merge verification and backfill metadata
                 for slide in deck_dict.get("slides", []):
                     if slide.get("html"):
                         content_hash = compute_slide_hash(slide["html"])
                         slide["verification"] = verification_map.get(content_hash)
                         slide["content_hash"] = content_hash
+
+                    if not slide.get("created_by") and fallback_user:
+                        slide["created_by"] = fallback_user
+                        slide["created_at"] = slide.get("created_at") or created_at_fallback
+                        slide["modified_by"] = slide.get("modified_by") or fallback_user
+                        slide["modified_at"] = slide.get("modified_at") or created_at_fallback
+                        needs_persist = True
+
+                # Persist backfilled metadata so this is a one-time migration
+                if needs_persist:
+                    try:
+                        deck.deck_json = json.dumps(deck_dict)
+                    except Exception:
+                        pass
+
+                # Deck-level authorship metadata
+                deck_dict["created_by"] = deck_owner.created_by
+                deck_dict["created_at"] = deck.created_at.isoformat() + "Z" if deck.created_at else None
+                deck_dict["modified_by"] = deck.modified_by or deck_owner.created_by
+                deck_dict["modified_at"] = deck.updated_at.isoformat() + "Z" if deck.updated_at else None
                 
                 return deck_dict
             
@@ -822,8 +849,10 @@ class SessionManager:
                 "html_content": deck.html_content,
                 "scripts_content": deck.scripts_content,
                 "slide_count": deck.slide_count,
-                "created_at": deck.created_at.isoformat(),
-                "updated_at": deck.updated_at.isoformat(),
+                "created_by": deck_owner.created_by,
+                "created_at": deck.created_at.isoformat() + "Z" if deck.created_at else None,
+                "modified_by": deck.modified_by or deck_owner.created_by,
+                "modified_at": deck.updated_at.isoformat() + "Z" if deck.updated_at else None,
             }
 
     def save_verification(

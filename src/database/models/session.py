@@ -255,6 +255,9 @@ class SessionSlideDeck(Base):
     # server can detect and reject stale writes (HTTP 409).
     version = Column(Integer, default=0, nullable=False)
 
+    # Authorship
+    modified_by = Column(String(255), nullable=True)
+
     # Timestamps
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)

@@ -434,8 +434,15 @@ class ChatService:
                             },
                         )
                         
+                        try:
+                            _add_user = get_current_username()
+                        except Exception:
+                            _add_user = None
+
                         for idx, slide in enumerate(new_deck.slides):
                             slide.slide_id = f"slide_{insert_position + idx}"
+                            if _add_user:
+                                slide.stamp_created(_add_user)
                             existing_deck.insert_slide(slide, insert_position + idx)
                         
                         # Update ALL slide IDs to reflect new positions (prevents duplicate keys)
@@ -1081,9 +1088,16 @@ class ChatService:
                                 "insert_at": insert_position,
                             },
                         )
+
+                        try:
+                            _rc9_user = get_current_username()
+                        except Exception:
+                            _rc9_user = None
                         
                         for idx, slide in enumerate(new_deck.slides):
                             slide.slide_id = f"slide_{insert_position + idx}"
+                            if _rc9_user:
+                                slide.stamp_created(_rc9_user)
                             existing_deck.insert_slide(slide, insert_position + idx)
                         
                         # Update ALL slide IDs to reflect new positions (prevents duplicate keys)
@@ -1128,9 +1142,16 @@ class ChatService:
                             "insert_position": insert_position,
                         },
                     )
+
+                    try:
+                        _stream_add_user = get_current_username()
+                    except Exception:
+                        _stream_add_user = None
                     
                     for idx, slide in enumerate(new_deck.slides):
                         slide.slide_id = f"slide_{insert_position + idx}"
+                        if _stream_add_user:
+                            slide.stamp_created(_stream_add_user)
                         existing_deck.insert_slide(slide, insert_position + idx)
                     
                     # Update ALL slide IDs to reflect new positions (prevents duplicate keys)
@@ -2048,6 +2069,12 @@ class ChatService:
         replacement_slides: List[Slide] = replacement_info["replacement_slides"]
         is_add_operation = replacement_info.get("is_add_operation", False)
 
+        # Resolve current user for authorship stamping
+        try:
+            _user = get_current_username()
+        except Exception:
+            _user = None
+
         # RC2: For add operations, insert at appropriate position
         if is_add_operation:
             # Get position intent from replacement_info
@@ -2128,6 +2155,8 @@ class ChatService:
             # Insert new slides at the calculated position
             for idx, slide in enumerate(replacement_slides):
                 slide.slide_id = f"slide_{insert_position + idx}"
+                if _user:
+                    slide.stamp_created(_user)
                 current_deck.insert_slide(slide, insert_position + idx)
                 logger.info(
                     "Inserted new slide (add operation)",
@@ -2164,6 +2193,15 @@ class ChatService:
         if start_idx + original_count > len(current_deck.slides):
             raise ValueError("Replacement range exceeds deck size")
 
+        # Capture original authorship before removal so replacements inherit it
+        original_authors = []
+        for i in range(original_count):
+            orig = current_deck.slides[start_idx + i]
+            original_authors.append({
+                "created_by": orig.created_by,
+                "created_at": orig.created_at,
+            })
+
         # Preserve scripts from original slides before removal
         # Map canvas IDs to their scripts for later re-attachment
         canvas_id_to_script: Dict[str, str] = {}
@@ -2195,6 +2233,15 @@ class ChatService:
         for idx, slide in enumerate(replacement_slides):
             # Update slide_id to reflect new position
             slide.slide_id = f"slide_{start_idx + idx}"
+
+            # Preserve original creator, stamp current user as modifier
+            if idx < len(original_authors):
+                slide.created_by = original_authors[idx]["created_by"]
+                slide.created_at = original_authors[idx]["created_at"]
+            if _user:
+                slide.stamp_modified(_user)
+                if not slide.created_by:
+                    slide.stamp_created(_user)
             
             # Extract canvas IDs from replacement slide HTML
             replacement_canvas_ids = extract_canvas_ids_from_html(slide.html)

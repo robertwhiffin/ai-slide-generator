@@ -20,7 +20,11 @@ export interface SlideDeck {
   external_scripts: string[];
   scripts: string;
   slides: Slide[];
-  html_content?: string; // Raw HTML for debug view (only present when restoring from history)
+  html_content?: string;
+  created_by?: string;
+  created_at?: string;
+  modified_by?: string;
+  modified_at?: string;
 }
 
 export interface SlideContext {

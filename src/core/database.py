@@ -464,6 +464,18 @@ def _run_migrations(engine, schema: str | None = None):
                 f"ALTER TABLE {qualified_table} ADD COLUMN deleted_at TIMESTAMP NULL"
             ))
 
+        # --- session_slide_decks: add modified_by ---
+        decks_table = "session_slide_decks"
+        try:
+            deck_cols = {c["name"] for c in inspector.get_columns(decks_table, schema=schema)}
+        except Exception:
+            deck_cols = set()
+        if deck_cols and "modified_by" not in deck_cols:
+            logger.info(f"Migration: adding modified_by column to {decks_table}")
+            conn.execute(text(
+                f"ALTER TABLE {_qual(decks_table)} ADD COLUMN modified_by VARCHAR(255) NULL"
+            ))
+
         # --- Migrate google_credentials_encrypted to google_global_credentials ---
         _migrate_google_credentials_to_global(conn, inspector, schema, _qual, is_sqlite)
 

@@ -375,34 +375,32 @@ export const SlideTile: React.FC<SlideTileProps> = ({
       </div>
 
       {/* Slide Metadata Footer */}
-      {(slide.created_by || slide.modified_by) && (
-        <div className="px-4 py-1.5 bg-gray-50 border-t text-xs text-gray-500 flex items-center justify-between">
-          {slide.created_by && (
-            <span className="flex items-center gap-1">
-              <FiUser size={12} />
-              {slide.created_by}
-              {slide.created_at && (
-                <Tooltip text={new Date(slide.created_at).toLocaleString()}>
-                  <span className="text-gray-400 cursor-default">
-                    &middot; created {formatRelativeTime(slide.created_at)}
-                  </span>
-                </Tooltip>
-              )}
-            </span>
-          )}
-          {slide.modified_by && slide.modified_at && slide.modified_at !== slide.created_at && (
-            <span className="flex items-center gap-1">
-              <FiClock size={12} />
-              edited by {slide.modified_by}
-              <Tooltip text={new Date(slide.modified_at).toLocaleString()}>
-                <span className="text-gray-400 cursor-default">
-                  {formatRelativeTime(slide.modified_at)}
-                </span>
-              </Tooltip>
-            </span>
-          )}
+      <div className="px-4 py-2 bg-gray-50 border-t text-xs text-gray-500 grid grid-cols-2 gap-x-6 gap-y-1">
+        <div className="flex items-center gap-1">
+          <FiUser size={11} className="text-gray-400 flex-shrink-0" />
+          <span className="text-gray-400">Created by:</span>
+          <span className="text-gray-700 font-medium truncate">{slide.created_by || '—'}</span>
         </div>
-      )}
+        <div className="flex items-center gap-1">
+          <FiClock size={11} className="text-gray-400 flex-shrink-0" />
+          <span className="text-gray-400">Created at:</span>
+          <span className="text-gray-700" title={slide.created_at ? new Date(slide.created_at).toLocaleString() : ''}>
+            {slide.created_at ? formatRelativeTime(slide.created_at) : '—'}
+          </span>
+        </div>
+        <div className="flex items-center gap-1">
+          <FiUser size={11} className="text-gray-400 flex-shrink-0" />
+          <span className="text-gray-400">Last modified by:</span>
+          <span className="text-gray-700 font-medium truncate">{slide.modified_by || '—'}</span>
+        </div>
+        <div className="flex items-center gap-1">
+          <FiClock size={11} className="text-gray-400 flex-shrink-0" />
+          <span className="text-gray-400">Last modified at:</span>
+          <span className="text-gray-700" title={slide.modified_at ? new Date(slide.modified_at).toLocaleString() : ''}>
+            {slide.modified_at ? formatRelativeTime(slide.modified_at) : '—'}
+          </span>
+        </div>
+      </div>
 
       {/* Comments Panel */}
       {showComments && (
