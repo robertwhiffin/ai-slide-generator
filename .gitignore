@@ -29,8 +29,7 @@ ENV/
 *.swo
 *~
 
-# Cursor IDE / Databricks AI Dev Kit
-.cursor/
+# Databricks AI Dev Kit
 .ai-dev-kit/
 
 # Testing

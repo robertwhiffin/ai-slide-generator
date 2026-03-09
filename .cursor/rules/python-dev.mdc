@@ -1,0 +1,26 @@
+---
+description: Python development guidance, combined from reviewing various examples and modifying to personal preferences
+globs: **/*.py, **/*.ipynb
+alwaysApply: false
+---
+# Python Development Rules
+
+## Code Quality
+- DRY principle, composition over inheritance, pure functions when possible
+- Simple solutions over clever ones, design for common use cases first
+- Type hints required, snake_case naming, Google-style docstrings
+- Keep functions small (single responsibility), preserve existing comments
+
+## Error Handling & Efficiency  
+- Specific exception types, validate inputs early, no bare except
+- f-strings, comprehensions, context managers
+
+## Testing (Critical)
+- **pytest only** (no unittest), all tests in `./tests/` with `__init__.py`
+- TDD approach: write/update tests for all new/modified code
+- All tests must pass before task completion
+
+## Environment
+- Dependency management via https://github.com/astral-sh/uv and virtual environments.
+- Code style consistency using Ruff.
+- **Virtual Environment or uv**: Always use either `uv` or a virtual environment (`venv`) when running Python scripts. Check for an existing `.venv` in the current or parent directories before creating a new one. Activate the `.venv` before installing packages or executing scripts.
