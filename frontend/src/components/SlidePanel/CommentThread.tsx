@@ -27,7 +27,7 @@ function timeAgo(iso: string): string {
 }
 
 function renderContentWithMentions(content: string): React.ReactNode {
-  const parts = content.split(/(@[\w.\-]+)/g);
+  const parts = content.split(/(@[\w.\-]+(?:@[\w.\-]+)?)/g);
   return parts.map((part, i) =>
     part.startsWith('@') ? (
       <span key={i} className="text-blue-600 font-medium">{part}</span>
@@ -69,7 +69,7 @@ const MentionInput: React.FC<MentionInputProps> = ({
     onChange(v);
     const pos = e.target.selectionStart ?? v.length;
     const before = v.slice(0, pos);
-    const atMatch = before.match(/@([\w.\-]*)$/);
+    const atMatch = before.match(/@([\w.\-]*(?:@[\w.\-]*)?)$/);
     if (atMatch) {
       setShowDropdown(true);
       setMentionQuery(atMatch[1]);
