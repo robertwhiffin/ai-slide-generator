@@ -77,6 +77,7 @@ async def send_message(request: ChatRequest) -> ChatResponse:
             request.message,
             request.slide_context.model_dump() if request.slide_context else None,
             request.image_ids,
+            request.profile_id,
         )
 
         return ChatResponse(**result)
@@ -163,6 +164,7 @@ async def send_message_streaming(request: ChatRequest) -> StreamingResponse:
                     if request.slide_context
                     else None,
                     image_ids=request.image_ids,
+                    profile_id=request.profile_id,
                 ):
                     event_queue.put(event)
             except Exception as e:
@@ -271,11 +273,20 @@ async def submit_chat_async(request: ChatRequest):
         )
 
     try:
-        # Get current profile info for session association
-        from src.core.settings_db import get_settings
-        settings = get_settings()
-        profile_id = getattr(settings, 'profile_id', None)
-        profile_name = getattr(settings, 'profile_name', None)
+        # Use profile_id from the request (sent by frontend) to avoid
+        # reading the process-global _active_profile_id which may be stale
+        # on a different worker.
+        profile_id = request.profile_id
+        profile_name = None
+        if profile_id is not None:
+            from src.core.settings_db import _get_profile_name
+            profile_name = _get_profile_name(profile_id)
+        else:
+            # Fallback for older clients that don't send profile_id
+            from src.core.settings_db import get_settings
+            settings = get_settings()
+            profile_id = getattr(settings, 'profile_id', None)
+            profile_name = getattr(settings, 'profile_name', None)
 
         # Create request record with profile info
         request_id = await asyncio.to_thread(
@@ -313,6 +324,7 @@ async def submit_chat_async(request: ChatRequest):
                 ),
                 "is_first_message": is_first_message,
                 "image_ids": request.image_ids,
+                "profile_id": request.profile_id,
             },
         )
 

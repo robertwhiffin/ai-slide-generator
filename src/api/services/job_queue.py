@@ -81,6 +81,7 @@ async def process_chat_request(request_id: str, payload: dict) -> None:
     slide_context = payload.get("slide_context")
     is_first_message = payload.get("is_first_message", False)
     image_ids = payload.get("image_ids")
+    profile_id = payload.get("profile_id")
 
     chat_service = get_chat_service()
     session_manager = get_session_manager()
@@ -108,6 +109,7 @@ async def process_chat_request(request_id: str, payload: dict) -> None:
                 request_id,
                 is_first_message,
                 image_ids,
+                profile_id,
             ):
                 if event.type == StreamEventType.COMPLETE:
                     result = {
@@ -129,6 +131,7 @@ async def process_chat_request(request_id: str, payload: dict) -> None:
                 request_id,
                 is_first_message,
                 image_ids,
+                profile_id,
             ):
                 if event.type == StreamEventType.COMPLETE:
                     result = {
@@ -167,6 +170,7 @@ def _run_streaming_generator(
     request_id: str,
     is_first_message: bool = False,
     image_ids: Optional[list] = None,
+    profile_id: Optional[int] = None,
 ) -> list:
     """Run the streaming generator and collect events.
 
@@ -180,6 +184,7 @@ def _run_streaming_generator(
         request_id: Request ID for message tagging
         is_first_message: Whether this is the first message in the session
         image_ids: Optional list of attached image IDs
+        profile_id: Optional profile ID from the request (avoids cross-worker race)
 
     Returns:
         List of all events from the generator
@@ -192,6 +197,7 @@ def _run_streaming_generator(
         request_id=request_id,
         is_first_message_override=is_first_message,
         image_ids=image_ids,
+        profile_id=profile_id,
     ):
         events.append(event)
     return events

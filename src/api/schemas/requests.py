@@ -71,6 +71,10 @@ class ChatRequest(BaseModel):
         default=None,
         description="IDs of images attached to this message (from upload or paste)",
     )
+    profile_id: Optional[int] = Field(
+        default=None,
+        description="Active profile ID from the frontend. Ensures correct profile is used regardless of which worker handles the request.",
+    )
 
     @field_validator("message")
     @classmethod

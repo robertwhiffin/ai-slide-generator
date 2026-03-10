@@ -312,7 +312,9 @@ class SessionManager:
     ) -> None:
         """Set the profile for a session.
 
-        Used to associate a session with a profile when it's first used.
+        Always updates to the given profile. Previous behaviour only wrote once
+        (one-way latch), which meant a session stamped with the wrong profile
+        by a stale worker could never be corrected.
 
         Args:
             session_id: Session to update
@@ -321,8 +323,7 @@ class SessionManager:
         """
         with get_db_session() as db:
             session = self._get_session_or_raise(db, session_id)
-            # Only set if not already set (preserve original profile)
-            if session.profile_id is None:
+            if session.profile_id is None or session.profile_id != profile_id:
                 session.profile_id = profile_id
                 session.profile_name = profile_name
 
