@@ -61,6 +61,7 @@ Comments are shared across all contributors — stored on the deck-owner session
 | Add comment / reply | ✅ | ✅ | ✅ | ✅ |
 | Edit own comment | ✅ | ✅ | ✅ | ✅ |
 | Delete own comment | ✅ | ✅ | ✅ | ✅ |
+| Delete any comment | ❌ | ❌ | ❌ | ✅ |
 | Resolve / unresolve comments | ✅ | ❌ | ✅ | ✅ |
 
 ### Conversation Privacy
@@ -134,16 +135,20 @@ Contributor Session (parent_session_id → owner)
 4. Contributor chats in their session → messages stored privately, slide changes applied to parent's deck
 5. Neither user sees the other's chat messages
 
-### Concurrent Editing
+### Exclusive Editing Lock
 
-When multiple users edit the same deck simultaneously:
+Only one contributor can edit a shared session at a time. The first person to open the session acquires an exclusive editing lock.
 
-| Conflict Type | Mechanism | User Experience |
-|---|---|---|
-| Two chat edits at once | Deck-level lock (`locked_by` on `session_slide_decks`) | "Slides are being updated by [user]. Please wait." |
-| Chat + direct edit | Lock blocks direct edits while agent is running | Same message |
-| Two direct edits at once | Version counter (optimistic lock) | Auto-refresh + re-apply |
-| Stale lock (crash) | 2-minute auto-expiry | Self-healing |
+| Aspect | Detail |
+|---|---|
+| **Acquire** | Automatically when a contributor opens the session |
+| **Heartbeat** | Client sends a heartbeat every 60 seconds to keep the lock alive |
+| **Timeout** | Lock auto-expires after 10 minutes without a heartbeat |
+| **Release** | Automatically when the editing user leaves / closes the session |
+| **Locked-out UX** | Other contributors see a banner: "[User] is editing the slides" and are restricted to view-only mode |
+| **Polling** | Locked-out contributors poll every 10 seconds; they acquire the lock once it is released |
+
+Per-request processing locks (`is_processing` on `session_slide_decks`) still prevent race conditions during individual slide operations (e.g. two concurrent chat edits).
 
 ---
 
@@ -190,8 +195,8 @@ class SessionSlideDeck(Base):
     __tablename__ = "session_slide_decks"
     
     # ... existing fields ...
-    locked_by: str | None            # Username holding the edit lock
-    locked_at: datetime | None       # When lock was acquired (auto-expires after 2 min)
+    locked_by: str | None            # Username holding the exclusive editing lock
+    locked_at: datetime | None       # When lock was acquired (auto-expires after 10 min)
     version: int                     # Optimistic lock counter for direct edits
 ```
 
@@ -335,6 +340,15 @@ GET    /api/sessions/{id}                      # Session detail — messages onl
 GET    /api/sessions/{id}/messages             # 403 unless you are the session creator
 ```
 
+### Editing Lock
+
+```
+POST   /api/sessions/{id}/lock                 # Acquire exclusive editing lock
+DELETE /api/sessions/{id}/lock                 # Release editing lock
+GET    /api/sessions/{id}/lock                 # Get current lock status
+PUT    /api/sessions/{id}/lock/heartbeat       # Renew lock (keep alive)
+```
+
 ---
 
 ## Group Resolution
@@ -357,8 +371,9 @@ When a user's permission is checked:
 
 1. **Creator Protection:** Profile creators get CAN_MANAGE automatically and cannot be removed
 2. **Default Profile:** Cannot be deleted (must set another as default first)
-3. **Token Storage:** Admin tokens should be set via environment variables, not hardcoded
+3. **App Identity:** User and group lookups use the app's service principal — no admin PATs stored or required
 4. **Group Cache:** 5-minute TTL balances API efficiency with permission propagation
+5. **Exclusive Lock:** Only one contributor can edit at a time; lock auto-expires after 10 minutes without heartbeat
 
 ---
 
@@ -366,5 +381,4 @@ When a user's permission is checked:
 
 - [User Guide: Profile Sharing](../user-guide/08-profile-sharing-permissions.md)
 - [Database Configuration](./database-configuration.md)
-- [Databricks Account SCIM API](https://docs.databricks.com/api/account/accountusers/list)
 - [Databricks Workspace SCIM API](https://docs.databricks.com/api/workspace/users/list)
