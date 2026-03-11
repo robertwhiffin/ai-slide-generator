@@ -77,99 +77,37 @@ Conversations (chat messages) are **always private** to the session creator.
 
 ---
 
-## Identity Provider Modes
+## Identity Provider
 
-The system needs to look up Databricks users and groups when adding contributors to a profile. Three modes are supported, selected automatically based on environment variables.
+The system needs to look up Databricks users and groups when adding contributors to a profile.
 
-### Mode 1: Account API
+### How It Works
 
-**When to use:** Organizations that want to share profiles across multiple workspaces.
-
-**Requires:** A Personal Access Token (PAT) from a **Databricks Account Admin**. This is a user with account-level administrative privileges, not just workspace access.
-
-**Configuration:**
-```yaml
-DATABRICKS_ACCOUNT_HOST: "https://accounts.cloud.databricks.com"
-DATABRICKS_ACCOUNT_ID: "your-account-id"
-DATABRICKS_ACCOUNT_ADMIN_TOKEN: "dapi..."  # Account admin PAT
-```
-
-**Capabilities:**
-- Lists all users and groups in the Databricks account
-- Works across all workspaces in the account
-
-**API Used:** [Account SCIM API](https://docs.databricks.com/api/account/accountusers/list)
-
----
-
-### Mode 2: Workspace API
-
-**When to use:** Single-workspace deployments where account-level access isn't available.
-
-**Requires:** A Personal Access Token (PAT) from a **Workspace Admin**. This is a user with administrative privileges on the specific workspace (member of the `admins` group).
-
-**Configuration:**
-```yaml
-DATABRICKS_WORKSPACE_ADMIN_TOKEN: "dapi..." 
-```
-
-**Capabilities:**
-- Lists all users and groups in the specific workspace
-- Only sees users/groups assigned to that workspace
+Users and groups are retrieved via the **Workspace SCIM API** using the app's **service principal** (system client). The service principal token is automatically provided by the Databricks Apps platform via `system.databricks_token` — no separate admin PATs are required.
 
 **API Used:** [Workspace SCIM API](https://docs.databricks.com/api/workspace/users/list)
 
----
-
-### Mode 3: Local Table
-
-**When to use:** When no admin tokens are available, or for simpler deployments.
-
-**Configuration:**
-```yaml
-# No tokens needed - this is the default fallback
-```
-
 **Capabilities:**
+- Lists all users and groups in the workspace
+- Supports filtered search by username, display name, or group name
+- Resolves group memberships for permission checks
+
+### Fallback: Local Table
+
+When the system client is unavailable (e.g. local development without Databricks), the identity provider falls back to the local `app_identities` table.
+
+**Limitations of local mode:**
 - Only lists users who have previously signed into the app
-- No groups available (group permissions won't work)
-- Populated automatically when users log in
-
-**How it works:**
-1. User signs into the app
-2. Middleware captures their identity from `x-forwarded-access-token`
-3. Identity is stored in `app_identities` table
-4. Future contributor searches can find this user
-
-**Limitations:**
-- Cannot search for users who haven't logged in yet
 - Group-based permissions don't work (no group membership data)
-
----
+- Populated automatically when users log in via middleware
 
 ### Mode Selection Logic
 
-The system checks environment variables in order and uses the first available mode:
-
 ```
-1. Account API    → If DATABRICKS_ACCOUNT_HOST + DATABRICKS_ACCOUNT_ID + DATABRICKS_ACCOUNT_ADMIN_TOKEN are all set
-       ↓ (not set)
-2. Workspace API  → If DATABRICKS_WORKSPACE_ADMIN_TOKEN is set
-       ↓ (not set)
-3. Local Table    → Default fallback (always available)
+1. System client available → Workspace SCIM API (via service principal)
+       ↓ (unavailable)
+2. Local Table             → Default fallback (dev/offline)
 ```
-
-### Comparison Table
-
-| Feature | Account API | Workspace API | Local Table |
-|---------|:-----------:|:-------------:|:-----------:|
-| Cross-workspace users | ✅ | ❌ | ❌ |
-| Single workspace users | ✅ | ✅ | ✅* |
-| Groups | ✅ | ✅ | ❌ |
-| Requires admin token | ✅ | ✅ | ❌ |
-| Setup complexity | High | Medium | None |
-
-*Only users who have logged into the app
 
 ---
 
@@ -352,17 +290,17 @@ class PermissionService:
 
 ### IdentityProvider
 
-Unified interface for all three modes:
+Unified interface backed by the app's service principal:
 
 ```python
 class IdentityProvider:
-    mode: IdentityProviderMode       # ACCOUNT, WORKSPACE, or LOCAL
+    mode: IdentityProviderMode       # WORKSPACE or LOCAL
     
     def list_users(filter_query, max_results) -> List[dict]
     def list_groups(filter_query, max_results) -> List[dict]
     def search_identities(query, include_users, include_groups) -> List[dict]
     def get_user_groups(user_id) -> List[str]
-    def record_user_login(user_id, user_name) -> None  # For local mode
+    def record_user_login(user_id, user_name) -> None  # Local cache
 ```
 
 ---
