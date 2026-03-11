@@ -465,20 +465,6 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
                 My Sessions
               </button>
               <button
-                onClick={() => navigate('/notifications')}
-                disabled={isGenerating}
-                className={`px-3 py-1.5 rounded text-sm transition-colors ${
-                  initialView === 'notifications'
-                    ? 'bg-blue-700 text-white'
-                    : isGenerating
-                    ? 'bg-blue-400 text-blue-200 cursor-not-allowed opacity-50'
-                    : 'bg-blue-500 hover:bg-blue-700 text-blue-100'
-                }`}
-                title={isGenerating ? 'Navigation disabled during generation' : undefined}
-              >
-                Mentions
-              </button>
-              <button
                 onClick={() => navigate('/profiles')}
                 disabled={isGenerating}
                 className={`px-3 py-1.5 rounded text-sm transition-colors ${
@@ -646,6 +632,7 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
               scrollToSlide={scrollTarget}
               onSendMessage={viewOnly || previewVersion || deletedProfileName || sessionPermission === 'CAN_VIEW' ? undefined : handleSendMessage}
               readOnly={viewOnly || !!previewVersion || !!deletedProfileName || sessionPermission === 'CAN_VIEW'}
+              canManage={sessionPermission === 'CAN_MANAGE'}
               onVerificationComplete={handleVerificationComplete}
               versionKey={versionKey}
             />

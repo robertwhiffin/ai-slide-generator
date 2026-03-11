@@ -1992,14 +1992,14 @@ class SessionManager:
             db.flush()
             return self._comment_to_dict(comment)
 
-    def delete_comment(self, comment_id: int, user_name: str) -> bool:
-        """Delete a comment (only by the author)."""
+    def delete_comment(self, comment_id: int, user_name: str, is_manager: bool = False) -> bool:
+        """Delete a comment. Authors can always delete their own; managers can delete any."""
         with get_db_session() as db:
             comment = db.query(SlideComment).filter(SlideComment.id == comment_id).first()
             if not comment:
                 raise ValueError("Comment not found")
-            if comment.user_name != user_name:
-                raise PermissionError("Only the author can delete a comment")
+            if comment.user_name != user_name and not is_manager:
+                raise PermissionError("Only the author or a manager can delete this comment")
             db.delete(comment)
             return True
 
@@ -2057,18 +2057,16 @@ class SessionManager:
     def list_mentions(self, user_name: str) -> List[Dict[str, Any]]:
         """List comments that @mention a specific user, newest first.
 
-        Scans the JSON ``mentions`` array stored on each comment.
-        For SQLite the column is TEXT so we fall back to a LIKE query.
+        Uses JSONB containment on PostgreSQL, LIKE fallback on SQLite.
+        Always double-checks in Python to avoid false positives.
         """
         with get_db_session() as db:
             try:
-                from sqlalchemy.dialects import sqlite as _sqlite_mod  # noqa: F401
                 is_sqlite = "sqlite" in str(db.bind.url)
             except Exception:
                 is_sqlite = False
 
             if is_sqlite:
-                from sqlalchemy import text as sa_text
                 comments = (
                     db.query(SlideComment)
                     .filter(SlideComment.mentions.isnot(None))
@@ -2078,11 +2076,13 @@ class SessionManager:
                     .all()
                 )
             else:
-                from sqlalchemy import cast, String as SAString
+                from sqlalchemy import text as sa_text
                 comments = (
                     db.query(SlideComment)
                     .filter(SlideComment.mentions.isnot(None))
-                    .filter(cast(SlideComment.mentions, SAString).contains(f'"{user_name}"'))
+                    .filter(sa_text(
+                        "mentions::jsonb @> :target"
+                    ).bindparams(target=f'["{user_name}"]'))
                     .order_by(SlideComment.created_at.desc())
                     .limit(100)
                     .all()

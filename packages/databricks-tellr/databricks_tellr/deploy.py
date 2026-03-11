@@ -1045,6 +1045,10 @@ def _write_app_yaml(
         LAKEBASE_PROJECT_ID=lakebase_project_id,
         LAKEBASE_ENDPOINT_NAME=lakebase_endpoint_name,
         PIP_INDEX_ARGS=pip_index_args,
+        DATABRICKS_ACCOUNT_HOST=os.getenv("DATABRICKS_ACCOUNT_HOST", ""),
+        DATABRICKS_ACCOUNT_ID=os.getenv("DATABRICKS_ACCOUNT_ID", ""),
+        DATABRICKS_ACCOUNT_ADMIN_TOKEN=os.getenv("DATABRICKS_ACCOUNT_ADMIN_TOKEN", ""),
+        DATABRICKS_WORKSPACE_ADMIN_TOKEN=os.getenv("DATABRICKS_WORKSPACE_ADMIN_TOKEN", ""),
     )
     (staging_dir / "app.yaml").write_text(content)
 
