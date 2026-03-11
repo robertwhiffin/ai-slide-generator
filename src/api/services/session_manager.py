@@ -1349,28 +1349,26 @@ class SessionManager:
 
             return max_version[0] if max_version else None
 
-    # Deck-level locking for shared presentation editing
-    DECK_LOCK_TIMEOUT_SECONDS = 120
+    # ------------------------------------------------------------------
+    # Session editing lock — first user to open a shared session gets
+    # exclusive editing rights. Others see a "locked by X" banner.
+    # The lock auto-expires if the holder stops sending heartbeats.
+    # ------------------------------------------------------------------
+    EDITING_LOCK_TIMEOUT_SECONDS = 600  # 10 minutes without heartbeat
 
-    def acquire_deck_lock(self, session_id: str, user: str) -> bool:
-        """Acquire an editing lock on the slide deck.
+    def acquire_editing_lock(self, session_id: str, user: str) -> dict:
+        """Try to acquire the editing lock when opening a session.
 
-        For shared presentations, prevents two contributors from modifying
-        slides simultaneously via chat. Locks auto-expire after timeout.
-
-        Args:
-            session_id: Session (may be contributor or owner)
-            user: Username requesting the lock
-
-        Returns:
-            True if lock acquired, False if another user holds the lock
+        Returns a dict with {"acquired": bool, "locked_by": str|None}.
+        If another user holds a non-expired lock, acquisition fails.
+        If the same user re-acquires, the lock is refreshed.
         """
         with get_db_session() as db:
             session = self._get_session_or_raise(db, session_id)
             deck_owner = self._get_deck_owner_session(db, session)
 
             if not deck_owner.slide_deck:
-                return True  # No deck yet, allow proceeding
+                return {"acquired": True, "locked_by": None}
 
             deck = deck_owner.slide_deck
             now = datetime.utcnow()
@@ -1378,35 +1376,17 @@ class SessionManager:
             if deck.locked_by and deck.locked_by != user:
                 if deck.locked_at:
                     age = (now - deck.locked_at).total_seconds()
-                    if age < self.DECK_LOCK_TIMEOUT_SECONDS:
-                        logger.info(
-                            "Deck lock held by another user",
-                            extra={
-                                "session_id": session_id,
-                                "locked_by": deck.locked_by,
-                                "age_seconds": age,
-                            },
-                        )
-                        return False
+                    if age < self.EDITING_LOCK_TIMEOUT_SECONDS:
+                        return {"acquired": False, "locked_by": deck.locked_by}
                 # Stale lock — take it over
 
             deck.locked_by = user
             deck.locked_at = now
-            logger.info(
-                "Acquired deck lock",
-                extra={"session_id": session_id, "user": user},
-            )
-            return True
+            logger.info("Editing lock acquired", extra={"session_id": session_id, "user": user})
+            return {"acquired": True, "locked_by": user}
 
-    def release_deck_lock(self, session_id: str, user: str) -> None:
-        """Release the editing lock on the slide deck.
-
-        Only the lock holder (or anyone if the lock is stale) can release.
-
-        Args:
-            session_id: Session (may be contributor or owner)
-            user: Username releasing the lock
-        """
+    def release_editing_lock(self, session_id: str, user: str) -> None:
+        """Release the editing lock (called on session close / navigation away)."""
         with get_db_session() as db:
             session = (
                 db.query(UserSession)
@@ -1424,21 +1404,34 @@ class SessionManager:
             if deck.locked_by == user or deck.locked_by is None:
                 deck.locked_by = None
                 deck.locked_at = None
-                logger.info(
-                    "Released deck lock",
-                    extra={"session_id": session_id, "user": user},
-                )
+                logger.info("Editing lock released", extra={"session_id": session_id, "user": user})
 
-    def get_deck_lock_holder(self, session_id: str) -> Optional[str]:
-        """Get the username that currently holds the deck lock, if any.
+    def heartbeat_editing_lock(self, session_id: str, user: str) -> bool:
+        """Renew the lock timestamp. Returns False if user no longer holds the lock."""
+        with get_db_session() as db:
+            session = (
+                db.query(UserSession)
+                .filter(UserSession.session_id == session_id)
+                .first()
+            )
+            if not session:
+                return False
 
-        Returns None if unlocked or lock is expired.
+            deck_owner = self._get_deck_owner_session(db, session)
+            if not deck_owner.slide_deck:
+                return False
 
-        Args:
-            session_id: Session (may be contributor or owner)
+            deck = deck_owner.slide_deck
+            if deck.locked_by != user:
+                return False
 
-        Returns:
-            Username of lock holder, or None
+            deck.locked_at = datetime.utcnow()
+            return True
+
+    def get_editing_lock_status(self, session_id: str) -> dict:
+        """Check who holds the editing lock.
+
+        Returns {"locked": bool, "locked_by": str|None}.
         """
         with get_db_session() as db:
             session = (
@@ -1447,22 +1440,25 @@ class SessionManager:
                 .first()
             )
             if not session:
-                return None
+                return {"locked": False, "locked_by": None}
 
             deck_owner = self._get_deck_owner_session(db, session)
             if not deck_owner.slide_deck:
-                return None
+                return {"locked": False, "locked_by": None}
 
             deck = deck_owner.slide_deck
             if not deck.locked_by:
-                return None
+                return {"locked": False, "locked_by": None}
 
             if deck.locked_at:
                 age = (datetime.utcnow() - deck.locked_at).total_seconds()
-                if age >= self.DECK_LOCK_TIMEOUT_SECONDS:
-                    return None  # Expired
+                if age >= self.EDITING_LOCK_TIMEOUT_SECONDS:
+                    # Expired — clear it
+                    deck.locked_by = None
+                    deck.locked_at = None
+                    return {"locked": False, "locked_by": None}
 
-            return deck.locked_by
+            return {"locked": True, "locked_by": deck.locked_by}
 
     # Session locking for concurrent request handling
     def acquire_session_lock(self, session_id: str, timeout_seconds: int = 300) -> bool:

@@ -745,3 +745,84 @@ async def export_session(session_id: str):
             detail=f"Export failed: {str(e)}",
         ) from e
 
+
+# =========================================================================
+# Editing lock endpoints — first user to open a shared session gets
+# exclusive edit access; others see a read-only banner.
+# =========================================================================
+
+@router.post("/{session_id}/lock")
+async def acquire_editing_lock(session_id: str):
+    """Acquire the editing lock when opening a session."""
+    current_user = get_current_user()
+    if not current_user:
+        raise HTTPException(status_code=401, detail="Authentication required")
+
+    session_manager = get_session_manager()
+    try:
+        result = await asyncio.to_thread(
+            session_manager.acquire_editing_lock,
+            session_id,
+            current_user,
+        )
+        return result
+    except SessionNotFoundError:
+        raise HTTPException(status_code=404, detail="Session not found")
+    except Exception as e:
+        logger.error(f"Failed to acquire editing lock: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.delete("/{session_id}/lock")
+async def release_editing_lock(session_id: str):
+    """Release the editing lock when leaving a session."""
+    current_user = get_current_user()
+    if not current_user:
+        raise HTTPException(status_code=401, detail="Authentication required")
+
+    session_manager = get_session_manager()
+    try:
+        await asyncio.to_thread(
+            session_manager.release_editing_lock,
+            session_id,
+            current_user,
+        )
+        return {"status": "released"}
+    except Exception as e:
+        logger.error(f"Failed to release editing lock: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/{session_id}/lock")
+async def get_editing_lock_status(session_id: str):
+    """Check who holds the editing lock."""
+    session_manager = get_session_manager()
+    try:
+        return await asyncio.to_thread(
+            session_manager.get_editing_lock_status,
+            session_id,
+        )
+    except Exception as e:
+        logger.error(f"Failed to check editing lock: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.put("/{session_id}/lock/heartbeat")
+async def heartbeat_editing_lock(session_id: str):
+    """Renew the editing lock timestamp (call every ~60s while session is open)."""
+    current_user = get_current_user()
+    if not current_user:
+        raise HTTPException(status_code=401, detail="Authentication required")
+
+    session_manager = get_session_manager()
+    try:
+        ok = await asyncio.to_thread(
+            session_manager.heartbeat_editing_lock,
+            session_id,
+            current_user,
+        )
+        return {"renewed": ok}
+    except Exception as e:
+        logger.error(f"Failed to heartbeat editing lock: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
