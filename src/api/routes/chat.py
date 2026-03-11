@@ -129,34 +129,13 @@ async def send_message(
     _check_chat_permission(request.session_id, db)
 
     session_manager = get_session_manager()
-    current_user = get_current_user()
 
-    # Acquire deck-level lock (prevents concurrent slide modifications
-    # across owner + contributor sessions sharing the same deck)
-    deck_locked = await asyncio.to_thread(
-        session_manager.acquire_deck_lock,
-        request.session_id,
-        current_user or "unknown",
-    )
-    if not deck_locked:
-        lock_holder = await asyncio.to_thread(
-            session_manager.get_deck_lock_holder,
-            request.session_id,
-        )
-        raise HTTPException(
-            status_code=409,
-            detail=f"Slides are being updated by {lock_holder or 'another user'}. Please wait.",
-        )
-
-    # Also acquire per-session lock
+    # Per-session lock prevents concurrent request processing
     locked = await asyncio.to_thread(
         session_manager.acquire_session_lock,
         request.session_id,
     )
     if not locked:
-        await asyncio.to_thread(
-            session_manager.release_deck_lock, request.session_id, current_user or "unknown",
-        )
         raise HTTPException(
             status_code=409,
             detail="Session is currently processing another request. Please wait.",
@@ -165,7 +144,6 @@ async def send_message(
     try:
         chat_service = get_chat_service()
 
-        # Run blocking LLM call in thread pool with user context preserved
         result = await run_in_thread_with_context(
             chat_service.send_message,
             request.session_id,
@@ -191,11 +169,6 @@ async def send_message(
         await asyncio.to_thread(
             session_manager.release_session_lock,
             request.session_id,
-        )
-        await asyncio.to_thread(
-            session_manager.release_deck_lock,
-            request.session_id,
-            current_user or "unknown",
         )
 
 
@@ -238,31 +211,12 @@ async def send_message_streaming(
     session_manager = get_session_manager()
     current_user = get_current_user()
 
-    # Acquire deck-level lock
-    deck_locked = await asyncio.to_thread(
-        session_manager.acquire_deck_lock,
-        request.session_id,
-        current_user or "unknown",
-    )
-    if not deck_locked:
-        lock_holder = await asyncio.to_thread(
-            session_manager.get_deck_lock_holder,
-            request.session_id,
-        )
-        raise HTTPException(
-            status_code=409,
-            detail=f"Slides are being updated by {lock_holder or 'another user'}. Please wait.",
-        )
-
-    # Also acquire per-session lock
+    # Per-session lock prevents concurrent request processing
     locked = await asyncio.to_thread(
         session_manager.acquire_session_lock,
         request.session_id,
     )
     if not locked:
-        await asyncio.to_thread(
-            session_manager.release_deck_lock, request.session_id, current_user or "unknown",
-        )
         raise HTTPException(
             status_code=409,
             detail="Session is currently processing another request. Please wait.",
@@ -330,11 +284,6 @@ async def send_message_streaming(
             await asyncio.to_thread(
                 session_manager.release_session_lock,
                 request.session_id,
-            )
-            await asyncio.to_thread(
-                session_manager.release_deck_lock,
-                request.session_id,
-                current_user or "unknown",
             )
 
     return StreamingResponse(

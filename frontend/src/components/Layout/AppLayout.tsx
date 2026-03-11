@@ -117,6 +117,94 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
   // Permission level for the current session (CAN_VIEW, CAN_EDIT, CAN_MANAGE)
   const [sessionPermission, setSessionPermission] = useState<'CAN_VIEW' | 'CAN_EDIT' | 'CAN_MANAGE'>('CAN_MANAGE');
 
+  // Editing lock state
+  const [editingLockHolder, setEditingLockHolder] = useState<string | null>(null);
+  const [isLockHolder, setIsLockHolder] = useState(true);
+  const lockSessionRef = useRef<string | null>(null);
+
+  // Acquire editing lock after session loads, heartbeat while holding, poll when locked out
+  useEffect(() => {
+    if (!sessionId || initialView !== 'main') return;
+    let cancelled = false;
+    let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
+    let pollTimer: ReturnType<typeof setInterval> | null = null;
+
+    const tryAcquire = async () => {
+      try {
+        const result = await api.acquireEditingLock(sessionId);
+        if (cancelled) return;
+
+        if (result.acquired) {
+          setIsLockHolder(true);
+          setEditingLockHolder(null);
+          lockSessionRef.current = sessionId;
+
+          // Heartbeat every 60s to keep the lock alive
+          heartbeatTimer = setInterval(() => {
+            api.heartbeatEditingLock(sessionId).catch(() => {});
+          }, 60_000);
+        } else {
+          setIsLockHolder(false);
+          setEditingLockHolder(result.locked_by);
+
+          // Poll every 10s to detect when lock is released
+          pollTimer = setInterval(async () => {
+            try {
+              const status = await api.getEditingLockStatus(sessionId);
+              if (cancelled) return;
+              if (!status.locked) {
+                // Lock was released — try to acquire
+                const retry = await api.acquireEditingLock(sessionId);
+                if (cancelled) return;
+                if (retry.acquired) {
+                  setIsLockHolder(true);
+                  setEditingLockHolder(null);
+                  lockSessionRef.current = sessionId;
+                  if (pollTimer) clearInterval(pollTimer);
+                  pollTimer = null;
+                  heartbeatTimer = setInterval(() => {
+                    api.heartbeatEditingLock(sessionId).catch(() => {});
+                  }, 60_000);
+                }
+              } else {
+                setEditingLockHolder(status.locked_by);
+              }
+            } catch { /* ignore */ }
+          }, 10_000);
+        }
+      } catch {
+        // If lock API fails, allow editing (backwards compat)
+        setIsLockHolder(true);
+        setEditingLockHolder(null);
+      }
+    };
+
+    tryAcquire();
+
+    return () => {
+      cancelled = true;
+      if (heartbeatTimer) clearInterval(heartbeatTimer);
+      if (pollTimer) clearInterval(pollTimer);
+      // Release lock when navigating away from the session
+      if (lockSessionRef.current === sessionId) {
+        api.releaseEditingLock(sessionId);
+        lockSessionRef.current = null;
+      }
+    };
+  }, [sessionId, initialView]);
+
+  // Release lock on page unload (tab close, refresh)
+  useEffect(() => {
+    const handleUnload = () => {
+      if (lockSessionRef.current) {
+        api.releaseEditingLock(lockSessionRef.current);
+        lockSessionRef.current = null;
+      }
+    };
+    window.addEventListener('beforeunload', handleUnload);
+    return () => window.removeEventListener('beforeunload', handleUnload);
+  }, []);
+
   // Load session from URL parameter when on a session route
   // Skip if URL session ID matches current context (newly created session)
   useEffect(() => {
@@ -614,9 +702,15 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
                   }).catch(() => {});
                 }
               }}
-              disabled={viewOnly || !!previewVersion || isLoadingSession || !!deletedProfileName || sessionPermission === 'CAN_VIEW'}
+              disabled={viewOnly || !!previewVersion || isLoadingSession || !!deletedProfileName || sessionPermission === 'CAN_VIEW' || !isLockHolder}
               previewMessages={previewMessages}
-              viewOnlyReason={sessionPermission === 'CAN_VIEW' ? 'You have view-only access to this session' : undefined}
+              viewOnlyReason={
+                !isLockHolder && editingLockHolder
+                  ? `${editingLockHolder} is currently editing this session`
+                  : sessionPermission === 'CAN_VIEW'
+                  ? 'You have view-only access to this session'
+                  : undefined
+              }
             />
           </div>
 
@@ -628,11 +722,12 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
             <SlidePanel
               slideDeck={displayDeck}
               rawHtml={rawHtml}
-              onSlideChange={viewOnly || previewVersion || deletedProfileName || sessionPermission === 'CAN_VIEW' ? undefined : setSlideDeck}
+              onSlideChange={viewOnly || previewVersion || deletedProfileName || sessionPermission === 'CAN_VIEW' || !isLockHolder ? undefined : setSlideDeck}
               scrollToSlide={scrollTarget}
-              onSendMessage={viewOnly || previewVersion || deletedProfileName || sessionPermission === 'CAN_VIEW' ? undefined : handleSendMessage}
-              readOnly={viewOnly || !!previewVersion || !!deletedProfileName || sessionPermission === 'CAN_VIEW'}
+              onSendMessage={viewOnly || previewVersion || deletedProfileName || sessionPermission === 'CAN_VIEW' || !isLockHolder ? undefined : handleSendMessage}
+              readOnly={viewOnly || !!previewVersion || !!deletedProfileName || sessionPermission === 'CAN_VIEW' || !isLockHolder}
               canManage={sessionPermission === 'CAN_MANAGE'}
+              lockedBy={!isLockHolder ? editingLockHolder : null}
               onVerificationComplete={handleVerificationComplete}
               versionKey={versionKey}
             />

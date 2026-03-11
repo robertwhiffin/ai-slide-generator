@@ -1506,4 +1506,36 @@ export const api = {
 
     return response.json();
   },
+
+  // ============ Editing Lock API ============
+
+  async acquireEditingLock(sessionId: string): Promise<{ acquired: boolean; locked_by: string | null }> {
+    const response = await fetch(`${API_BASE_URL}/api/sessions/${sessionId}/lock`, { method: 'POST' });
+    if (!response.ok) throw new ApiError(response.status, 'Failed to acquire editing lock');
+    return response.json();
+  },
+
+  releaseEditingLock(sessionId: string): void {
+    // Use keepalive so the request survives page unload
+    try {
+      fetch(`${API_BASE_URL}/api/sessions/${sessionId}/lock`, {
+        method: 'DELETE',
+        keepalive: true,
+      });
+    } catch {
+      // Best-effort — lock will expire via timeout if this fails
+    }
+  },
+
+  async getEditingLockStatus(sessionId: string): Promise<{ locked: boolean; locked_by: string | null }> {
+    const response = await fetch(`${API_BASE_URL}/api/sessions/${sessionId}/lock`);
+    if (!response.ok) throw new ApiError(response.status, 'Failed to check editing lock');
+    return response.json();
+  },
+
+  async heartbeatEditingLock(sessionId: string): Promise<{ renewed: boolean }> {
+    const response = await fetch(`${API_BASE_URL}/api/sessions/${sessionId}/lock/heartbeat`, { method: 'PUT' });
+    if (!response.ok) throw new ApiError(response.status, 'Failed to renew editing lock');
+    return response.json();
+  },
 };
