@@ -512,3 +512,188 @@ class TestLargerDeck:
             assert "data-marker" not in v_slides[idx]["html"], (
                 f"Slide {idx} should NOT have been edited"
             )
+
+
+class TestDeleteSlideRegressions:
+    """Targeted tests for the reported 'delete slide then things go messy' bug.
+
+    Scenarios:
+    - Delete a slide, then rapidly edit multiple remaining slides
+    - Delete middle slide, edit first and last, verify save points are cumulative
+    - Delete + edit + delete + edit chain
+    - Verify getSlides returns correct state between operations
+    """
+
+    @patch("src.api.services.chat_service.create_agent")
+    def test_delete_middle_then_edit_first_and_last(self, mock_agent, client, mock_user):
+        """Delete slide 3 (index 2) from 5-slide deck, then edit slides 1 and 4.
+        Each save point must reflect ALL prior changes cumulatively.
+        """
+        session_id = _create_session(client)
+        deck = _seed_deck(session_id, html=load_6_slide_deck())
+        original_count = len(deck.slides)
+        assert original_count == 6
+
+        # Delete slide 3 (index 2)
+        resp = client.delete("/api/slides/2", params={"session_id": session_id})
+        assert resp.status_code == 200, f"delete failed: {resp.text}"
+
+        # Verify deck state via getSlides
+        slides_after = _get_slides(client, session_id)
+        assert len(slides_after.get("slides", [])) == 5, "Should be 5 slides after delete"
+
+        # Edit slide 1 (index 0) -- now with 5 slides
+        edit_1 = _marker("post-delete-slide1")
+        _edit_slide(client, session_id, 0, edit_1)
+
+        # Verify intermediate state via getSlides
+        intermediate = _get_slides(client, session_id)
+        assert intermediate["slides"][0]["html"] == edit_1, "getSlides should show edit on slide 1"
+
+        # Edit last slide (index 4 in 5-slide deck)
+        edit_last = _marker("post-delete-last")
+        _edit_slide(client, session_id, 4, edit_last)
+
+        # Get the latest version from version list
+        versions = _list_versions(client, session_id)
+        latest_v = versions["versions"][0]["version_number"]
+        latest_data = _preview_version(client, session_id, latest_v)
+        latest_slides = _get_version_slides(latest_data)
+
+        assert len(latest_slides) == 5, "Latest save point should have 5 slides"
+        assert latest_slides[0]["html"] == edit_1, "Slide 1 edit MUST be in latest save point"
+        assert latest_slides[4]["html"] == edit_last, "Last slide edit MUST be in latest save point"
+
+    @patch("src.api.services.chat_service.create_agent")
+    def test_delete_edit_delete_edit_chain(self, mock_agent, client, mock_user):
+        """Delete-edit-delete-edit chain: each operation's save point must be correct."""
+        session_id = _create_session(client)
+        deck = _seed_deck(session_id, html=load_6_slide_deck())
+        assert len(deck.slides) == 6
+
+        # Step 1: Delete slide 2 (index 1) → 5 slides
+        resp = client.delete("/api/slides/1", params={"session_id": session_id})
+        assert resp.status_code == 200
+
+        # Step 2: Edit slide 1 (index 0)
+        edit_a = _marker("chain-edit-a")
+        _edit_slide(client, session_id, 0, edit_a)
+
+        # Step 3: Delete slide 3 (index 2 in 5-slide deck) → 4 slides
+        resp = client.delete("/api/slides/2", params={"session_id": session_id})
+        assert resp.status_code == 200
+
+        # Step 4: Edit slide 2 (index 1 in 4-slide deck)
+        edit_b = _marker("chain-edit-b")
+        _edit_slide(client, session_id, 1, edit_b)
+
+        # Verify final state
+        final = _get_slides(client, session_id)
+        final_slides = final.get("slides", [])
+        assert len(final_slides) == 4, f"Should be 4 slides, got {len(final_slides)}"
+        assert final_slides[0]["html"] == edit_a, "Slide 1 edit-a must persist through chain"
+        assert final_slides[1]["html"] == edit_b, "Slide 2 edit-b must be present"
+
+        # Verify the latest save point matches
+        versions = _list_versions(client, session_id)
+        latest_v = versions["versions"][0]["version_number"]
+        latest_data = _preview_version(client, session_id, latest_v)
+        latest_slides = _get_version_slides(latest_data)
+
+        assert len(latest_slides) == 4, "Save point should have 4 slides"
+        assert latest_slides[0]["html"] == edit_a, "Save point must have edit-a on slide 1"
+        assert latest_slides[1]["html"] == edit_b, "Save point must have edit-b on slide 2"
+
+    @patch("src.api.services.chat_service.create_agent")
+    def test_rapid_edits_after_delete_no_gaps(self, mock_agent, client, mock_user):
+        """Delete a slide then rapidly edit every remaining slide.
+        No save point should lose a prior edit.
+        """
+        session_id = _create_session(client)
+        deck = _seed_deck(session_id, html=load_6_slide_deck())
+        assert len(deck.slides) == 6
+
+        # Delete slide 4 (index 3) → 5 slides
+        resp = client.delete("/api/slides/3", params={"session_id": session_id})
+        assert resp.status_code == 200
+
+        # Rapidly edit all 5 remaining slides
+        edits = {}
+        for i in range(5):
+            tag = f"rapid-post-delete-{i}"
+            _edit_slide(client, session_id, i, _marker(tag))
+            edits[i] = tag
+
+        # Every edit should be in the latest save point
+        versions = _list_versions(client, session_id)
+        latest_v = versions["versions"][0]["version_number"]
+        latest_data = _preview_version(client, session_id, latest_v)
+        latest_slides = _get_version_slides(latest_data)
+
+        assert len(latest_slides) == 5, f"Expected 5 slides, got {len(latest_slides)}"
+        for idx, tag in edits.items():
+            assert tag in latest_slides[idx]["html"], (
+                f"Slide {idx} missing edit '{tag}' in latest save point. "
+                f"Got: {latest_slides[idx]['html'][:80]}"
+            )
+
+    @patch("src.api.services.chat_service.create_agent")
+    def test_getslides_consistent_between_operations(self, mock_agent, client, mock_user):
+        """After each operation, getSlides must return the cumulative state.
+        This catches the auto-verify race where getSlides could return stale data.
+        """
+        session_id = _create_session(client)
+        deck = _seed_deck(session_id)
+        assert len(deck.slides) == 3
+
+        # Edit slide 1
+        edit_1 = _marker("consistency-s1")
+        _edit_slide(client, session_id, 0, edit_1)
+        state_1 = _get_slides(client, session_id)
+        assert state_1["slides"][0]["html"] == edit_1, "getSlides after edit 1 must show edit"
+
+        # Edit slide 2
+        edit_2 = _marker("consistency-s2")
+        _edit_slide(client, session_id, 1, edit_2)
+        state_2 = _get_slides(client, session_id)
+        assert state_2["slides"][0]["html"] == edit_1, "getSlides after edit 2 must STILL show edit 1"
+        assert state_2["slides"][1]["html"] == edit_2, "getSlides after edit 2 must show edit 2"
+
+        # Delete slide 3
+        resp = client.delete("/api/slides/2", params={"session_id": session_id})
+        assert resp.status_code == 200
+        state_3 = _get_slides(client, session_id)
+        assert len(state_3["slides"]) == 2, "getSlides after delete must show 2 slides"
+        assert state_3["slides"][0]["html"] == edit_1, "Edit 1 must survive deletion of slide 3"
+        assert state_3["slides"][1]["html"] == edit_2, "Edit 2 must survive deletion of slide 3"
+
+        # Edit remaining slide 1 again
+        edit_1b = _marker("consistency-s1-v2")
+        _edit_slide(client, session_id, 0, edit_1b)
+        state_4 = _get_slides(client, session_id)
+        assert state_4["slides"][0]["html"] == edit_1b, "Re-edit of slide 1 must be reflected"
+        assert state_4["slides"][1]["html"] == edit_2, "Edit 2 must persist across re-edit of slide 1"
+
+    @patch("src.api.services.chat_service.create_agent")
+    def test_save_point_version_numbers_after_delete_chain(self, mock_agent, client, mock_user):
+        """Verify version numbers increment correctly through a delete+edit chain.
+        Backend auto-creates save points for each operation.
+        """
+        session_id = _create_session(client)
+        _seed_deck(session_id)
+
+        # Each operation auto-creates a save point on the backend
+        _edit_slide(client, session_id, 0, _marker("v-check-1"))
+        _edit_slide(client, session_id, 1, _marker("v-check-2"))
+        client.delete("/api/slides/2", params={"session_id": session_id})
+        _edit_slide(client, session_id, 0, _marker("v-check-3"))
+
+        versions = _list_versions(client, session_id)
+        v_numbers = [v["version_number"] for v in versions["versions"]]
+
+        # Should have at least 4 auto-created save points (one per operation)
+        assert len(v_numbers) >= 4, f"Expected >=4 versions, got {len(v_numbers)}: {v_numbers}"
+        # Version numbers should be strictly increasing (newest first in list)
+        assert v_numbers == sorted(v_numbers, reverse=True), (
+            f"Version numbers should be strictly decreasing in newest-first list: {v_numbers}"
+        )
