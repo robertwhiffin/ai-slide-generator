@@ -1,8 +1,8 @@
 """
-Workspace-level identity provider using Databricks Workspace SCIM API.
+Workspace-level identity provider using Databricks SDK.
 
-Uses the Workspace SCIM API to fetch users and groups from a specific workspace.
-Requires workspace admin credentials.
+Uses the Workspace SCIM API via the app's service principal (system client)
+to fetch users and groups. No separate admin PAT required.
 
 API Reference: https://docs.databricks.com/api/workspace/users/list
 """
@@ -10,7 +10,7 @@ API Reference: https://docs.databricks.com/api/workspace/users/list
 import logging
 from typing import List, Optional
 
-import requests
+from databricks.sdk import WorkspaceClient
 
 logger = logging.getLogger(__name__)
 
@@ -22,39 +22,16 @@ class WorkspaceIdentityError(Exception):
 
 class WorkspaceIdentityProvider:
     """
-    Fetch identities from Databricks Workspace SCIM API.
-    
-    This provider uses the Workspace-level SCIM API which allows listing
-    users and groups within a specific Databricks workspace.
-    
-    Environment Variables Required:
-    - DATABRICKS_HOST: Workspace URL (e.g., https://xxx.cloud.databricks.com)
-    - DATABRICKS_WORKSPACE_ADMIN_TOKEN: Workspace admin PAT
+    Fetch identities from Databricks Workspace SCIM API using the SDK.
+
+    Accepts a WorkspaceClient (typically the app's service principal)
+    instead of a raw PAT — no admin tokens required.
     """
-    
-    def __init__(self, host: str, token: str):
-        """
-        Initialize the workspace identity provider.
-        
-        Args:
-            host: Databricks workspace URL (with or without https://)
-            token: Workspace admin PAT
-        """
-        # Ensure host has https:// scheme
-        host = host.rstrip("/")
-        if not host.startswith("https://") and not host.startswith("http://"):
-            host = f"https://{host}"
-        self.host = host
-        self.token = token
-        logger.info(f"WorkspaceIdentityProvider initialized for {self.host}")
-    
-    def _get_headers(self) -> dict:
-        """Get headers for Workspace SCIM API requests."""
-        return {
-            "Authorization": f"Bearer {self.token}",
-            "Content-Type": "application/scim+json",
-        }
-    
+
+    def __init__(self, client: WorkspaceClient):
+        self._client = client
+        logger.info("WorkspaceIdentityProvider initialized (SDK / system client)")
+
     def list_users(
         self,
         filter_query: Optional[str] = None,
@@ -62,49 +39,39 @@ class WorkspaceIdentityProvider:
     ) -> List[dict]:
         """
         List workspace users via SCIM API.
-        
-        API: GET /api/2.0/preview/scim/v2/Users
-        
+
         Args:
-            filter_query: Optional SCIM filter (e.g., 'userName co "john"')
+            filter_query: Optional search string (matched against userName and displayName)
             max_results: Maximum number of results
-            
+
         Returns:
             List of user dictionaries with id, userName, displayName, type
         """
         try:
-            params = {
-                "attributes": "id,userName,displayName",
-                "count": max_results,
-            }
+            kwargs: dict = {"attributes": "id,userName,displayName"}
             if filter_query:
-                params["filter"] = filter_query
-            
-            response = requests.get(
-                f"{self.host}/api/2.0/preview/scim/v2/Users",
-                headers=self._get_headers(),
-                params=params,
-                timeout=30,
-            )
-            response.raise_for_status()
-            
-            data = response.json()
-            users = []
-            for resource in data.get("Resources", []):
+                kwargs["filter"] = (
+                    f'userName co "{filter_query}" or displayName co "{filter_query}"'
+                )
+
+            users: List[dict] = []
+            for u in self._client.users.list(**kwargs):
                 users.append({
-                    "id": resource.get("id"),
-                    "userName": resource.get("userName"),
-                    "displayName": resource.get("displayName", resource.get("userName")),
+                    "id": u.id,
+                    "userName": u.user_name,
+                    "displayName": u.display_name or u.user_name,
                     "type": "USER",
                 })
-            
+                if len(users) >= max_results:
+                    break
+
             logger.debug(f"Fetched {len(users)} users from Workspace SCIM API")
             return users
-            
-        except requests.exceptions.RequestException as e:
+
+        except Exception as e:
             logger.error(f"Failed to fetch users from Workspace SCIM API: {e}")
             raise WorkspaceIdentityError(f"Failed to fetch users: {e}") from e
-    
+
     def list_groups(
         self,
         filter_query: Optional[str] = None,
@@ -112,48 +79,36 @@ class WorkspaceIdentityProvider:
     ) -> List[dict]:
         """
         List workspace groups via SCIM API.
-        
-        API: GET /api/2.0/preview/scim/v2/Groups
-        
+
         Args:
-            filter_query: Optional SCIM filter (e.g., 'displayName co "admin"')
+            filter_query: Optional search string (matched against displayName)
             max_results: Maximum number of results
-            
+
         Returns:
             List of group dictionaries with id, displayName, type
         """
         try:
-            params = {
-                "attributes": "id,displayName",
-                "count": max_results,
-            }
+            kwargs: dict = {"attributes": "id,displayName"}
             if filter_query:
-                params["filter"] = filter_query
-            
-            response = requests.get(
-                f"{self.host}/api/2.0/preview/scim/v2/Groups",
-                headers=self._get_headers(),
-                params=params,
-                timeout=30,
-            )
-            response.raise_for_status()
-            
-            data = response.json()
-            groups = []
-            for resource in data.get("Resources", []):
+                kwargs["filter"] = f'displayName co "{filter_query}"'
+
+            groups: List[dict] = []
+            for g in self._client.groups.list(**kwargs):
                 groups.append({
-                    "id": resource.get("id"),
-                    "displayName": resource.get("displayName"),
+                    "id": g.id,
+                    "displayName": g.display_name,
                     "type": "GROUP",
                 })
-            
+                if len(groups) >= max_results:
+                    break
+
             logger.debug(f"Fetched {len(groups)} groups from Workspace SCIM API")
             return groups
-            
-        except requests.exceptions.RequestException as e:
+
+        except Exception as e:
             logger.error(f"Failed to fetch groups from Workspace SCIM API: {e}")
             raise WorkspaceIdentityError(f"Failed to fetch groups: {e}") from e
-    
+
     def search_identities(
         self,
         query: str,
@@ -163,135 +118,103 @@ class WorkspaceIdentityProvider:
     ) -> List[dict]:
         """
         Search for users and groups matching a query.
-        
+
         Args:
             query: Search string to match against names/emails
             include_users: Whether to include users
             include_groups: Whether to include groups
             max_results: Maximum total results
-            
+
         Returns:
             Combined list of matching users and groups
         """
-        results = []
-        
+        results: List[dict] = []
+
         if include_users:
-            user_filter = f'userName co "{query}" or displayName co "{query}"'
             try:
-                users = self.list_users(filter_query=user_filter, max_results=max_results)
+                users = self.list_users(filter_query=query, max_results=max_results)
                 results.extend(users)
             except WorkspaceIdentityError as e:
                 logger.warning(f"Failed to search users in Workspace SCIM API: {e}")
-        
+
         if include_groups:
-            group_filter = f'displayName co "{query}"'
             try:
-                groups = self.list_groups(filter_query=group_filter, max_results=max_results)
+                groups = self.list_groups(filter_query=query, max_results=max_results)
                 results.extend(groups)
             except WorkspaceIdentityError as e:
                 logger.warning(f"Failed to search groups in Workspace SCIM API: {e}")
-        
-        # Sort by display name and limit
+
         results.sort(key=lambda x: x.get("displayName") or x.get("userName", ""))
         return results[:max_results]
-    
+
     def get_user_by_id(self, user_id: str) -> Optional[dict]:
         """
         Get a specific user by ID.
-        
-        API: GET /api/2.0/preview/scim/v2/Users/{user_id}
-        
+
         Args:
             user_id: Databricks user ID
-            
+
         Returns:
             User dictionary or None if not found
         """
         try:
-            response = requests.get(
-                f"{self.host}/api/2.0/preview/scim/v2/Users/{user_id}",
-                headers=self._get_headers(),
-                timeout=30,
-            )
-            if response.status_code == 404:
-                return None
-            response.raise_for_status()
-            
-            data = response.json()
+            u = self._client.users.get(user_id)
             return {
-                "id": data.get("id"),
-                "userName": data.get("userName"),
-                "displayName": data.get("displayName", data.get("userName")),
+                "id": u.id,
+                "userName": u.user_name,
+                "displayName": u.display_name or u.user_name,
                 "type": "USER",
             }
-        except requests.exceptions.RequestException as e:
+        except Exception as e:
+            error_str = str(e).lower()
+            if "404" in error_str or "not found" in error_str:
+                return None
             logger.error(f"Failed to get user {user_id} from Workspace SCIM API: {e}")
             return None
-    
+
     def get_group_by_id(self, group_id: str) -> Optional[dict]:
         """
         Get a specific group by ID.
-        
-        API: GET /api/2.0/preview/scim/v2/Groups/{group_id}
-        
+
         Args:
             group_id: Databricks group ID
-            
+
         Returns:
             Group dictionary or None if not found
         """
         try:
-            response = requests.get(
-                f"{self.host}/api/2.0/preview/scim/v2/Groups/{group_id}",
-                headers=self._get_headers(),
-                timeout=30,
-            )
-            if response.status_code == 404:
-                return None
-            response.raise_for_status()
-            
-            data = response.json()
+            g = self._client.groups.get(group_id)
             return {
-                "id": data.get("id"),
-                "displayName": data.get("displayName"),
+                "id": g.id,
+                "displayName": g.display_name,
                 "type": "GROUP",
             }
-        except requests.exceptions.RequestException as e:
+        except Exception as e:
+            error_str = str(e).lower()
+            if "404" in error_str or "not found" in error_str:
+                return None
             logger.error(f"Failed to get group {group_id} from Workspace SCIM API: {e}")
             return None
-    
+
     def get_user_groups(self, user_id: str) -> List[str]:
         """
         Get list of group IDs that a user belongs to.
-        
-        API: GET /api/2.0/preview/scim/v2/Users/{user_id}
-        
+
         Args:
             user_id: Databricks user ID
-            
+
         Returns:
             List of group IDs
         """
         try:
-            response = requests.get(
-                f"{self.host}/api/2.0/preview/scim/v2/Users/{user_id}",
-                headers=self._get_headers(),
-                params={"attributes": "groups"},
-                timeout=30,
-            )
-            if response.status_code == 404:
+            u = self._client.users.get(user_id)
+            if u.groups:
+                return [g.value for g in u.groups if g.value]
+            return []
+        except Exception as e:
+            error_str = str(e).lower()
+            if "404" in error_str or "not found" in error_str:
                 logger.warning(f"User {user_id} not found in Workspace SCIM API")
                 return []
-            response.raise_for_status()
-            
-            data = response.json()
-            groups = data.get("groups", [])
-            group_ids = [g.get("value") for g in groups if g.get("value")]
-            
-            logger.debug(f"User {user_id} belongs to {len(group_ids)} groups (Workspace SCIM)")
-            return group_ids
-            
-        except requests.exceptions.RequestException as e:
-            logger.error(f"Failed to get groups for user {user_id} from Workspace SCIM API: {e}")
+            logger.error(f"Failed to get groups for user {user_id}: {e}")
             return []
-

@@ -34,28 +34,12 @@ env:
     value: "<set-by-deploy-script>"
   
   # ==========================================================================
-  # Identity Provider Configuration
+  # Identity Provider
   # ==========================================================================
-  # Controls how users/groups are listed for adding as profile contributors.
-  # Priority: Account API > Workspace API > Local table
+  # Users and groups are retrieved via the Workspace SCIM API using the
+  # app's service principal (DATABRICKS_TOKEN from system.databricks_token).
+  # No separate admin tokens are required.
   #
-  # To enable, set the appropriate token value in the TEMPLATE file:
-  #   packages/databricks-tellr/databricks_tellr/_templates/app.yaml.template
+  # Falls back to the local identity table when the system client is
+  # unavailable (local development without Databricks).
   # ==========================================================================
-  
-  # Option 1: Account Admin (cross-workspace)
-  # Required: All three must be set
-  - name: DATABRICKS_ACCOUNT_HOST
-    value: ""  # e.g., "https://accounts.cloud.databricks.com"
-  - name: DATABRICKS_ACCOUNT_ID
-    value: ""  # Your Databricks account ID
-  - name: DATABRICKS_ACCOUNT_ADMIN_TOKEN
-    value: ""  # Account admin PAT
-  
-  # Option 2: Workspace Admin (single workspace)
-  # Required: Just the token (uses DATABRICKS_HOST from above)
-  - name: DATABRICKS_WORKSPACE_ADMIN_TOKEN
-    value: ""  # Workspace admin PAT
-  
-  # Option 3: Local table (default)
-  # No configuration needed - only shows users who have signed into the app

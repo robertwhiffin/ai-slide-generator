@@ -1,9 +1,8 @@
 """API endpoints for Databricks identities (users and groups).
 
-Uses the multi-source identity provider which automatically selects:
-1. Account API (if DATABRICKS_ACCOUNT_ADMIN_TOKEN configured)
-2. Workspace API (if DATABRICKS_WORKSPACE_ADMIN_TOKEN configured)
-3. Local identity table (default fallback)
+Uses the app's service principal (system client) to query the
+Workspace SCIM API.  Falls back to the local identity table when
+the system client is unavailable (local dev).
 """
 
 import logging
@@ -57,8 +56,7 @@ def get_provider_info():
     provider = get_identity_provider()
     
     descriptions = {
-        IdentityProviderMode.ACCOUNT: "Using Databricks Account SCIM API (all account users/groups)",
-        IdentityProviderMode.WORKSPACE: "Using Databricks Workspace SCIM API (workspace users/groups)",
+        IdentityProviderMode.WORKSPACE: "Using Workspace SCIM API via app service principal",
         IdentityProviderMode.LOCAL: "Using local identity table (only users who have signed in)",
     }
     
