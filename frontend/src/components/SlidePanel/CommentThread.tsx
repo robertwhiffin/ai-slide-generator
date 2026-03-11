@@ -140,6 +140,8 @@ interface CommentBubbleProps {
   onRefresh: () => void;
   mentionableUsers: string[];
   depth?: number;
+  currentUser?: string;
+  canManage?: boolean;
 }
 
 const CommentBubble: React.FC<CommentBubbleProps> = ({
@@ -149,12 +151,15 @@ const CommentBubble: React.FC<CommentBubbleProps> = ({
   onRefresh,
   mentionableUsers,
   depth = 0,
+  currentUser = '',
+  canManage = false,
 }) => {
   const [isEditing, setIsEditing] = useState(false);
   const [editContent, setEditContent] = useState(comment.content);
   const [isReplying, setIsReplying] = useState(false);
   const [replyContent, setReplyContent] = useState('');
   const [busy, setBusy] = useState(false);
+  const isAuthor = currentUser !== '' && comment.user_name === currentUser;
 
   const handleEdit = async () => {
     if (!editContent.trim() || busy) return;
@@ -218,7 +223,7 @@ const CommentBubble: React.FC<CommentBubbleProps> = ({
   const maxDepth = 2;
 
   return (
-    <div className={`${depth > 0 ? 'ml-5 border-l-2 border-gray-200 pl-3' : ''}`}>
+    <div id={`comment-${comment.id}`} className={`${depth > 0 ? 'ml-5 border-l-2 border-gray-200 pl-3' : ''} transition-all duration-300`}>
       <div
         className={`rounded-lg p-2.5 text-sm ${
           comment.resolved ? 'bg-green-50 opacity-70' : 'bg-white border border-gray-200'
@@ -254,21 +259,25 @@ const CommentBubble: React.FC<CommentBubbleProps> = ({
                 {comment.resolved ? <FiRotateCcw size={13} /> : <FiCheck size={13} />}
               </button>
             )}
-            <button
-              onClick={() => { setIsEditing(true); setEditContent(comment.content); }}
-              className="p-1 rounded hover:bg-gray-100 text-gray-400 hover:text-blue-600"
-              title="Edit"
-            >
-              <FiEdit2 size={13} />
-            </button>
-            <button
-              onClick={handleDelete}
-              disabled={busy}
-              className="p-1 rounded hover:bg-gray-100 text-gray-400 hover:text-red-600"
-              title="Delete"
-            >
-              <FiTrash2 size={13} />
-            </button>
+            {isAuthor && (
+              <button
+                onClick={() => { setIsEditing(true); setEditContent(comment.content); }}
+                className="p-1 rounded hover:bg-gray-100 text-gray-400 hover:text-blue-600"
+                title="Edit"
+              >
+                <FiEdit2 size={13} />
+              </button>
+            )}
+            {(isAuthor || canManage) && (
+              <button
+                onClick={handleDelete}
+                disabled={busy}
+                className="p-1 rounded hover:bg-gray-100 text-gray-400 hover:text-red-600"
+                title="Delete"
+              >
+                <FiTrash2 size={13} />
+              </button>
+            )}
           </div>
         </div>
 
@@ -351,6 +360,8 @@ const CommentBubble: React.FC<CommentBubbleProps> = ({
               onRefresh={onRefresh}
               mentionableUsers={mentionableUsers}
               depth={depth + 1}
+              currentUser={currentUser}
+              canManage={canManage}
             />
           ))}
         </div>
@@ -366,26 +377,44 @@ const CommentBubble: React.FC<CommentBubbleProps> = ({
 interface CommentThreadProps {
   sessionId: string;
   slideId: string;
+  onCommentChange?: (commentCount: number, hasMentions: boolean) => void;
+  highlightCommentId?: number | null;
+  canManage?: boolean;
 }
 
-export const CommentThread: React.FC<CommentThreadProps> = ({ sessionId, slideId }) => {
+export const CommentThread: React.FC<CommentThreadProps> = ({ sessionId, slideId, onCommentChange, highlightCommentId, canManage = false }) => {
   const [comments, setComments] = useState<SlideComment[]>([]);
   const [loading, setLoading] = useState(true);
   const [newContent, setNewContent] = useState('');
   const [posting, setPosting] = useState(false);
   const [showResolved, setShowResolved] = useState(false);
   const [mentionableUsers, setMentionableUsers] = useState<string[]>([]);
+  const [currentUser, setCurrentUser] = useState<string>('');
+  const listRef = useRef<HTMLDivElement>(null);
 
   const fetchComments = useCallback(async () => {
     try {
-      const { comments: data } = await api.listComments(sessionId, slideId, showResolved);
-      setComments(data);
+      const resp = await api.listComments(sessionId, slideId, showResolved);
+      setComments(resp.comments);
+      if (resp.current_user) setCurrentUser(resp.current_user);
     } catch (err) {
       console.error('Failed to load comments:', err);
     } finally {
       setLoading(false);
     }
   }, [sessionId, slideId, showResolved]);
+
+  // Notify parent with current count
+  const notifyParent = useCallback((count: number, hasMentions: boolean) => {
+    onCommentChange?.(count, hasMentions);
+  }, [onCommentChange]);
+
+  const refreshAndNotify = useCallback(async () => {
+    const resp = await api.listComments(sessionId, slideId, showResolved);
+    setComments(resp.comments);
+    if (resp.current_user) setCurrentUser(resp.current_user);
+    notifyParent(resp.comments.length, true);
+  }, [sessionId, slideId, showResolved, notifyParent]);
 
   useEffect(() => {
     fetchComments();
@@ -395,15 +424,64 @@ export const CommentThread: React.FC<CommentThreadProps> = ({ sessionId, slideId
     api.getMentionableUsers(sessionId).then(setMentionableUsers).catch(() => {});
   }, [sessionId]);
 
+  // Scroll to highlighted comment when thread opens or highlightCommentId changes
+  useEffect(() => {
+    if (!highlightCommentId || loading) return;
+    const timer = setTimeout(() => {
+      const el = document.getElementById(`comment-${highlightCommentId}`);
+      if (el) {
+        el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        el.classList.add('ring-2', 'ring-blue-400', 'ring-offset-1');
+        setTimeout(() => el.classList.remove('ring-2', 'ring-blue-400', 'ring-offset-1'), 2500);
+      }
+    }, 100);
+    return () => clearTimeout(timer);
+  }, [highlightCommentId, loading]);
+
   const handleAdd = async () => {
     if (!newContent.trim() || posting) return;
+    const content = newContent.trim();
+    const mentionMatches = content.match(/@[\w.\-]+(?:@[\w.\-]+)?/g) || [];
+    const hasMentions = mentionMatches.length > 0;
+
+    // Optimistic: insert placeholder immediately
+    const optimisticId = -(Date.now());
+    const optimistic: SlideComment = {
+      id: optimisticId,
+      slide_id: slideId,
+      user_name: currentUser || 'You',
+      content,
+      mentions: mentionMatches.map(m => m.slice(1)),
+      resolved: false,
+      resolved_by: null,
+      resolved_at: null,
+      parent_comment_id: null,
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+      replies: [],
+    };
+    setComments(prev => {
+      const next = [...prev, optimistic];
+      // Notify parent immediately with new count
+      notifyParent(next.length, hasMentions);
+      return next;
+    });
+    setNewContent('');
+
+    setTimeout(() => listRef.current?.scrollTo({ top: listRef.current.scrollHeight, behavior: 'smooth' }), 50);
+
     setPosting(true);
     try {
-      await api.addComment(sessionId, slideId, newContent.trim());
-      setNewContent('');
-      await fetchComments();
+      const real = await api.addComment(sessionId, slideId, content);
+      // Swap optimistic entry with real server response
+      setComments(prev => prev.map(c => c.id === optimisticId ? { ...real, replies: real.replies || [] } : c));
     } catch (err) {
       console.error('Failed to add comment:', err);
+      setComments(prev => {
+        const next = prev.filter(c => c.id !== optimisticId);
+        notifyParent(next.length, false);
+        return next;
+      });
     } finally {
       setPosting(false);
     }
@@ -431,15 +509,17 @@ export const CommentThread: React.FC<CommentThreadProps> = ({ sessionId, slideId
       ) : comments.length === 0 ? (
         <p className="text-xs text-gray-400 py-2">No comments yet. Start a discussion below.</p>
       ) : (
-        <div className="space-y-2 mb-3 max-h-64 overflow-y-auto">
+        <div ref={listRef} className="space-y-2 mb-3 max-h-64 overflow-y-auto">
           {comments.map((c) => (
             <CommentBubble
               key={c.id}
               comment={c}
               sessionId={sessionId}
               slideId={slideId}
-              onRefresh={fetchComments}
+              onRefresh={refreshAndNotify}
               mentionableUsers={mentionableUsers}
+              currentUser={currentUser}
+              canManage={canManage}
             />
           ))}
         </div>

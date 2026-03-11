@@ -102,8 +102,9 @@ async def list_comments(
 ):
     """List comments for a presentation or a specific slide.
 
-    Returns top-level comments with nested replies.
+    Returns top-level comments with nested replies, plus the current user name.
     """
+    current_user = get_current_user()
     session_manager = get_session_manager()
     try:
         comments = await asyncio.to_thread(
@@ -112,7 +113,7 @@ async def list_comments(
             slide_id=slide_id,
             include_resolved=include_resolved,
         )
-        return {"comments": comments, "count": len(comments)}
+        return {"comments": comments, "count": len(comments), "current_user": current_user or ""}
     except SessionNotFoundError:
         raise HTTPException(status_code=404, detail="Session not found")
     except Exception as e:
@@ -174,17 +175,37 @@ async def update_comment(comment_id: int, request: UpdateCommentRequest):
 
 @router.delete("/{comment_id}")
 async def delete_comment(comment_id: int):
-    """Delete a comment (author only). Replies are cascaded."""
+    """Delete a comment. Author can delete own; CAN_MANAGE can delete any."""
     current_user = get_current_user()
     if not current_user:
         raise HTTPException(status_code=401, detail="Authentication required")
 
     session_manager = get_session_manager()
+
+    # Determine if user has CAN_MANAGE on this comment's profile
+    is_manager = False
+    try:
+        from src.database.models.slide_comment import SlideComment
+        from src.database.models.session import UserSession
+        from src.services.permission_service import PermissionService
+        from src.core.database import get_db_session
+
+        with get_db_session() as db:
+            comment = db.query(SlideComment).filter(SlideComment.id == comment_id).first()
+            if comment:
+                session = db.query(UserSession).filter(UserSession.id == comment.session_id).first()
+                if session and session.profile_id:
+                    perm_service = PermissionService()
+                    is_manager = perm_service.can_manage(session.profile_id)
+    except Exception as e:
+        logger.warning(f"Could not check manager permission for comment delete: {e}")
+
     try:
         await asyncio.to_thread(
             session_manager.delete_comment,
             comment_id=comment_id,
             user_name=current_user,
+            is_manager=is_manager,
         )
         return {"status": "deleted", "comment_id": comment_id}
     except ValueError as e:

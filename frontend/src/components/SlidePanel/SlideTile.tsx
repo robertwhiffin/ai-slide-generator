@@ -1,7 +1,7 @@
-import React, { useMemo, useRef, useState, useEffect } from 'react';
+import React, { useMemo, useRef, useState, useEffect, useCallback } from 'react';
 import { useSortable } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
-import { FiEdit, FiTrash2, FiMove, FiMessageSquare, FiMessageCircle, FiDatabase, FiMaximize2, FiUser, FiClock } from 'react-icons/fi';
+import { FiEdit, FiTrash2, FiMove, FiMessageSquare, FiMessageCircle, FiDatabase, FiMaximize2, FiUser, FiClock, FiBell } from 'react-icons/fi';
 import { Tooltip } from '../common/Tooltip';
 import type { Slide, SlideDeck } from '../../types/slide';
 import type { VerificationResult } from '../../types/verification';
@@ -36,7 +36,12 @@ interface SlideTileProps {
   isAutoVerifying?: boolean;  // True when auto-verification is running for this slide
   onOptimize?: () => void;
   isOptimizing?: boolean;
-  readOnly?: boolean;  // When true, hide edit/delete/reorder controls
+  readOnly?: boolean;
+  mentions?: Array<{ id: number; user_name: string; content: string; created_at: string }>;
+  readMentionIds?: Set<number>;
+  onMarkMentionRead?: (id: number) => void;
+  onMentionsRefresh?: () => void;
+  canManage?: boolean;
 }
 
 const SLIDE_WIDTH = 1280;
@@ -55,9 +60,17 @@ export const SlideTile: React.FC<SlideTileProps> = ({
   onOptimize,
   isOptimizing = false,
   readOnly = false,
+  mentions = [],
+  readMentionIds = new Set(),
+  onMarkMentionRead,
+  onMentionsRefresh,
+  canManage = false,
 }) => {
   const [isEditing, setIsEditing] = useState(false);
   const [showComments, setShowComments] = useState(false);
+  const [showMentions, setShowMentions] = useState(false);
+  const [scrollToCommentId, setScrollToCommentId] = useState<number | null>(null);
+  const mentionsRef = useRef<HTMLDivElement>(null);
   const [commentCount, setCommentCount] = useState<number | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const [scale, setScale] = useState(1);
@@ -94,6 +107,18 @@ export const SlideTile: React.FC<SlideTileProps> = ({
     }
   };
 
+  // Close mentions dropdown on outside click
+  useEffect(() => {
+    if (!showMentions) return;
+    function handleClickOutside(e: MouseEvent) {
+      if (mentionsRef.current && !mentionsRef.current.contains(e.target as Node)) {
+        setShowMentions(false);
+      }
+    }
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, [showMentions]);
+
   // Fetch comment count on mount and when comments panel closes
   useEffect(() => {
     if (!sessionId || !slide.slide_id) return;
@@ -103,6 +128,11 @@ export const SlideTile: React.FC<SlideTileProps> = ({
     }).catch(() => {});
     return () => { cancelled = true; };
   }, [sessionId, slide.slide_id, showComments]);
+
+  const handleCommentChange = useCallback((count: number, hasMentions: boolean) => {
+    setCommentCount(count);
+    if (hasMentions) onMentionsRefresh?.();
+  }, [onMentionsRefresh]);
 
   // Sync verification state when slide.verification changes (e.g., session restore)
   useEffect(() => {
@@ -271,6 +301,63 @@ export const SlideTile: React.FC<SlideTileProps> = ({
               </button>
             </Tooltip>
 
+            {/* Mentions notification bell */}
+            {mentions.length > 0 && (() => {
+              const unreadCount = mentions.filter(m => !readMentionIds.has(m.id)).length;
+              const hasUnread = unreadCount > 0;
+              return (
+                <div className="relative" ref={mentionsRef}>
+                  <Tooltip text={hasUnread ? `${unreadCount} new mention${unreadCount > 1 ? 's' : ''}` : 'Mentions'}>
+                    <button
+                      onClick={() => setShowMentions(v => !v)}
+                      className={`relative p-1 rounded ${showMentions ? 'text-red-700 bg-red-50' : hasUnread ? 'text-red-500 hover:bg-red-50' : 'text-gray-400 hover:bg-gray-100'}`}
+                    >
+                      <FiBell size={16} className={hasUnread ? 'animate-[bell-ring_1s_ease-in-out_infinite]' : ''} />
+                      {hasUnread && (
+                        <span className="absolute -top-1 -right-1 bg-red-500 text-white text-[10px] leading-none font-bold rounded-full min-w-[16px] h-4 flex items-center justify-center px-0.5">
+                          {unreadCount}
+                        </span>
+                      )}
+                    </button>
+                  </Tooltip>
+                  {showMentions && (
+                    <div className="absolute right-0 top-full mt-1 w-72 bg-white rounded-lg shadow-xl border border-gray-200 z-50 overflow-hidden">
+                      <div className="px-3 py-2 border-b border-gray-100 bg-gray-50">
+                        <span className="text-xs font-semibold text-gray-600">Mentions</span>
+                      </div>
+                      <div className="max-h-56 overflow-y-auto">
+                        {mentions.map(m => {
+                          const isRead = readMentionIds.has(m.id);
+                          return (
+                            <button
+                              key={m.id}
+                              onClick={() => {
+                                onMarkMentionRead?.(m.id);
+                                setScrollToCommentId(m.id);
+                                setShowMentions(false);
+                                setShowComments(true);
+                              }}
+                              className={`w-full text-left px-3 py-2.5 border-b border-gray-50 last:border-0 transition-colors ${
+                                isRead ? 'bg-white hover:bg-gray-50' : 'bg-blue-50 hover:bg-blue-100'
+                              }`}
+                            >
+                              <p className={`text-xs ${isRead ? 'text-gray-500' : 'text-gray-800'}`}>
+                                <span className={isRead ? 'font-medium' : 'font-semibold'}>{m.user_name}</span>
+                                {' mentioned you'}
+                                {!isRead && <span className="ml-1.5 inline-block w-2 h-2 rounded-full bg-blue-500" />}
+                              </p>
+                              <p className={`text-[11px] mt-0.5 line-clamp-1 ${isRead ? 'text-gray-400' : 'text-gray-600'}`}>{m.content}</p>
+                              <p className="text-[10px] text-gray-400 mt-0.5">{formatRelativeTime(m.created_at)}</p>
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              );
+            })()}
+
             {/* Comments toggle */}
             <Tooltip text={showComments ? 'Hide comments' : 'Comments'}>
               <button
@@ -405,7 +492,13 @@ export const SlideTile: React.FC<SlideTileProps> = ({
 
       {/* Comments Panel */}
       {showComments && (
-        <CommentThread sessionId={sessionId} slideId={slide.slide_id} />
+        <CommentThread
+          sessionId={sessionId}
+          slideId={slide.slide_id}
+          onCommentChange={handleCommentChange}
+          highlightCommentId={scrollToCommentId}
+          canManage={canManage}
+        />
       )}
     </div>
 

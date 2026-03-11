@@ -1328,7 +1328,7 @@ export const api = {
     sessionId: string,
     slideId?: string,
     includeResolved = false,
-  ): Promise<{ comments: SlideComment[]; count: number }> {
+  ): Promise<{ comments: SlideComment[]; count: number; current_user?: string }> {
     const params = new URLSearchParams({ session_id: sessionId });
     if (slideId) params.set('slide_id', slideId);
     if (includeResolved) params.set('include_resolved', 'true');

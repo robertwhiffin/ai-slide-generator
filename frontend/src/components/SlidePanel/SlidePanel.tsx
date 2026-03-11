@@ -41,8 +41,9 @@ interface SlidePanelProps {
   scrollToSlide?: { index: number; key: number } | null;
   onSendMessage?: (content: string, slideContext?: SlideContext) => void;
   readOnly?: boolean;
+  canManage?: boolean;
   onVerificationComplete?: () => void;
-  versionKey?: string;  // Used to force re-render when switching save point versions
+  versionKey?: string;
 }
 
 type ViewMode = 'tiles' | 'rawhtml' | 'rawtext';
@@ -59,7 +60,7 @@ function formatRelativeTime(iso: string): string {
   return new Date(iso).toLocaleDateString();
 }
 
-export const SlidePanel: React.FC<SlidePanelProps> = ({ slideDeck, rawHtml, onSlideChange, scrollToSlide, onSendMessage, readOnly = false, onVerificationComplete, versionKey }) => {
+export const SlidePanel: React.FC<SlidePanelProps> = ({ slideDeck, rawHtml, onSlideChange, scrollToSlide, onSendMessage, readOnly = false, canManage = false, onVerificationComplete, versionKey }) => {
   const [isReordering, setIsReordering] = useState(false);
   const [viewMode, setViewMode] = useState<ViewMode>('tiles');
   const [isExportingPDF, setIsExportingPDF] = useState(false);
@@ -76,6 +77,40 @@ export const SlidePanel: React.FC<SlidePanelProps> = ({ slideDeck, rawHtml, onSl
   const { openOAuthPopup } = useGoogleOAuthPopup();
   const slideRefs = useRef<Map<number, HTMLDivElement>>(new Map());
   
+  // Mentions per slide (for notification badges)
+  const [mentionsBySlide, setMentionsBySlide] = useState<Record<string, Array<{ id: number; user_name: string; content: string; created_at: string }>>>({});
+  const [dismissedMentionIds, setDismissedMentionIds] = useState<Set<number>>(() => {
+    const stored = localStorage.getItem('tellr_dismissed_mentions');
+    return stored ? new Set(JSON.parse(stored)) : new Set();
+  });
+
+  const fetchMentions = useCallback(() => {
+    if (!sessionId) return;
+    api.listMentions().then(({ mentions }) => {
+      const bySlide: Record<string, Array<{ id: number; user_name: string; content: string; created_at: string }>> = {};
+      for (const m of mentions) {
+        if (m.session_id_str === sessionId) {
+          if (!bySlide[m.slide_id]) bySlide[m.slide_id] = [];
+          bySlide[m.slide_id].push({ id: m.id, user_name: m.user_name, content: m.content, created_at: m.created_at });
+        }
+      }
+      setMentionsBySlide(bySlide);
+    }).catch(() => {});
+  }, [sessionId]);
+
+  useEffect(() => {
+    fetchMentions();
+  }, [fetchMentions, slideDeck]);
+
+  const handleDismissMention = useCallback((mentionId: number) => {
+    setDismissedMentionIds(prev => {
+      const next = new Set(prev);
+      next.add(mentionId);
+      localStorage.setItem('tellr_dismissed_mentions', JSON.stringify([...next]));
+      return next;
+    });
+  }, []);
+
   // Auto-verification state
   const [isAutoVerifying, setIsAutoVerifying] = useState(false);
   const [verifyingSlides, setVerifyingSlides] = useState<Set<number>>(new Set());
@@ -873,6 +908,11 @@ export const SlidePanel: React.FC<SlidePanelProps> = ({ slideDeck, rawHtml, onSl
               onOptimize={() => handleOptimizeLayout(index)}
               isOptimizing={optimizingSlideIndex === index}
               readOnly={readOnly}
+              mentions={mentionsBySlide[slide.slide_id] || []}
+              readMentionIds={dismissedMentionIds}
+              onMarkMentionRead={handleDismissMention}
+              onMentionsRefresh={fetchMentions}
+              canManage={canManage}
             />
           </div>
           );
