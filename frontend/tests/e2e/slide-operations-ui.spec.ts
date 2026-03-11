@@ -164,15 +164,15 @@ async function setupWithSlides(page: Page) {
     });
   });
 
-  // Mock slide operations (DELETE, PUT)
-  await page.route(/http:\/\/127.0.0.1:8000\/api\/slides\/\d+$/, (route, request) => {
+  // Mock slide operations (DELETE, PUT/PATCH)
+  await page.route(/http:\/\/127.0.0.1:8000\/api\/slides\/\d+(\?|$)/, (route, request) => {
     if (request.method() === 'DELETE') {
       route.fulfill({
         status: 200,
         contentType: 'application/json',
         body: JSON.stringify({ status: 'deleted' }),
       });
-    } else if (request.method() === 'PUT') {
+    } else if (request.method() === 'PATCH') {
       route.fulfill({
         status: 200,
         contentType: 'application/json',

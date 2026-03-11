@@ -129,10 +129,10 @@ async function setupSavePointMocks(
     route.fulfill({ status: 200, contentType: 'text/event-stream', body: createStreamingResponseWithDeck(mockSlideDeck) });
   });
 
-  await page.route(/http:\/\/127.0.0.1:8000\/api\/slides\/\d+$/, (route, request) => {
+  await page.route(/http:\/\/127.0.0.1:8000\/api\/slides\/\d+(\?|$)/, (route, request) => {
     if (request.method() === 'DELETE') {
       route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ status: 'deleted' }) });
-    } else if (request.method() === 'PUT') {
+    } else if (request.method() === 'PATCH') {
       route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(mockSlides[0]) });
     } else {
       route.continue();
