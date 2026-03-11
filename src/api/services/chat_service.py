@@ -2364,11 +2364,14 @@ class ChatService:
         )
 
         # Create save point
-        self.create_save_point(
-            session_id=session_id,
-            description=f"Reordered slides",
-            deck=current_deck,
-        )
+        try:
+            self.create_save_point(
+                session_id=session_id,
+                description=f"Reordered slides",
+                deck=current_deck,
+            )
+        except Exception as e:
+            logger.warning(f"Failed to create save point (reorder_slides): {e}")
 
         logger.info(
             "Reordered slides",
@@ -2485,11 +2488,14 @@ class ChatService:
         )
 
         # Create save point
-        self.create_save_point(
-            session_id=session_id,
-            description=f"Duplicated slide {index + 1}",
-            deck=current_deck,
-        )
+        try:
+            self.create_save_point(
+                session_id=session_id,
+                description=f"Duplicated slide {index + 1}",
+                deck=current_deck,
+            )
+        except Exception as e:
+            logger.warning(f"Failed to create save point (duplicate_slide): {e}")
 
         logger.info(
             "Duplicated slide",
@@ -2546,11 +2552,14 @@ class ChatService:
         )
 
         # Create save point
-        self.create_save_point(
-            session_id=session_id,
-            description=f"Deleted slide {index + 1}",
-            deck=current_deck,
-        )
+        try:
+            self.create_save_point(
+                session_id=session_id,
+                description=f"Deleted slide {index + 1}",
+                deck=current_deck,
+            )
+        except Exception as e:
+            logger.warning(f"Failed to create save point (delete_slide): {e}")
 
         logger.info(
             "Deleted slide",

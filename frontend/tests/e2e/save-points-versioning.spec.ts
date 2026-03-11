@@ -948,6 +948,242 @@ test.describe('User Journey - Genie: verification scores in save points', () => 
   });
 });
 
+// ============================================
+// Race Condition Prevention Tests
+//
+// Validates the deck-edit-counter fix: when auto-verify's getSlides response
+// arrives after a subsequent user edit, it must NOT overwrite the newer state.
+// ============================================
+
+/**
+ * Helper: set up ALL mocks manually with stateful getSlides/updateSlide/delete.
+ * Does NOT use setupSavePointMocks (Playwright routes are FIFO, first-registered
+ * fulfills first -- later overrides would be ignored).
+ */
+async function setupStatefulMocks(
+  page: Page,
+  state: {
+    currentDeck: typeof mockSlideDeck;
+    updateSlideCallCount: { value: number };
+    getSlidesCalls: { value: number };
+    verifyDelayMs?: number;
+  },
+) {
+  const { currentDeck, updateSlideCallCount, getSlidesCalls, verifyDelayMs = 3000 } = state;
+
+  // Profiles
+  await page.route('http://127.0.0.1:8000/api/settings/profiles', (route, request) => {
+    if (request.method() === 'GET') {
+      route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(mockProfiles) });
+    } else { route.continue(); }
+  });
+  await page.route(/http:\/\/127.0.0.1:8000\/api\/settings\/profiles\/\d+$/, (route, request) => {
+    if (request.method() === 'GET') {
+      const id = parseInt(request.url().split('/').pop() || '1');
+      const profile = mockProfiles.find(p => p.id === id) || mockProfiles[0];
+      route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(profile) });
+    } else { route.continue(); }
+  });
+  await page.route('http://127.0.0.1:8000/api/settings/deck-prompts', r =>
+    r.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(mockDeckPrompts) }));
+  await page.route('http://127.0.0.1:8000/api/settings/slide-styles', r =>
+    r.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(mockSlideStyles) }));
+  await page.route('**/api/version**', r =>
+    r.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ version: '0.1.21', latest: '0.1.21' }) }));
+  await page.route('http://127.0.0.1:8000/api/genie/spaces', r =>
+    r.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ spaces: [], total: 0 }) }));
+  await page.route(/http:\/\/127.0.0.1:8000\/api\/genie\/.*\/link/, r =>
+    r.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ url: 'https://example.com/genie', message: null }) }));
+  await page.route('http://127.0.0.1:8000/api/slides/reorder**', r =>
+    r.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ success: true }) }));
+
+  // Versions (static)
+  const v1 = makeVersionListItem(1, 'Generated 3 slide(s)');
+  await page.route('**/api/slides/versions?**', r =>
+    r.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ versions: [v1], current_version: 1 }) }));
+  await page.route('**/api/slides/versions/current?**', r =>
+    r.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ current_version: 1 }) }));
+  await page.route('**/api/slides/versions/create', r =>
+    r.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(v1) }));
+  await page.route('**/api/slides/versions/sync-verification', r =>
+    r.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ version_number: 1, verification_entries: 0 }) }));
+
+  // Chat
+  await page.route('http://127.0.0.1:8000/api/chat/stream', r =>
+    r.fulfill({ status: 200, contentType: 'text/event-stream', body: createStreamingResponseWithDeck(mockSlideDeck) }));
+
+  // --- STATEFUL: updateSlide (PATCH), deleteSlide (DELETE) ---
+  // Note: updateSlide sends PATCH with body {html, session_id}
+  //       deleteSlide sends DELETE with ?session_id= query param
+  await page.route(/http:\/\/127.0.0.1:8000\/api\/slides\/\d+(\?|$)/, async (route, request) => {
+    const urlPath = new URL(request.url()).pathname;
+    const slideIndex = parseInt(urlPath.split('/').pop() || '0');
+    if (request.method() === 'DELETE') {
+      state.currentDeck = {
+        ...state.currentDeck,
+        slide_count: state.currentDeck.slides.length - 1,
+        slides: state.currentDeck.slides.filter((_, i) => i !== slideIndex),
+      };
+      route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ status: 'deleted' }) });
+      return;
+    }
+    if (request.method() === 'PATCH') {
+      updateSlideCallCount.value++;
+      const body = request.postDataJSON();
+      if (body.html && slideIndex < state.currentDeck.slides.length) {
+        state.currentDeck = {
+          ...state.currentDeck,
+          slides: state.currentDeck.slides.map((s, i) =>
+            i === slideIndex ? { ...s, html: body.html, content_hash: `edit_${slideIndex}_${updateSlideCallCount.value}` } : s
+          ),
+        };
+      }
+      route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ index: slideIndex, slide_id: `slide-${slideIndex}`, html: body.html }) });
+      return;
+    }
+    route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({}) });
+  });
+
+  // --- STATEFUL: sessions (getSlides reads currentDeck) ---
+  await page.route('http://127.0.0.1:8000/api/sessions**', (route, request) => {
+    const url = request.url();
+    const method = request.method();
+    if (method === 'POST' || method === 'DELETE') {
+      route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ session_id: 'mock', title: 'New', user_id: null, created_at: '2026-01-01T00:00:00Z' }) });
+      return;
+    }
+    if (url.includes('limit=')) {
+      route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(mockSessions) });
+    } else if (url.includes('/slides')) {
+      getSlidesCalls.value++;
+      const snap = JSON.parse(JSON.stringify(state.currentDeck));
+      route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ session_id: 'test-session-id', slide_deck: snap }) });
+    } else {
+      route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ session_id: 'test-session-id', messages: [] }) });
+    }
+  });
+
+  // --- Verification: DELAYED to create race window ---
+  await page.route(/http:\/\/127.0.0.1:8000\/api\/slides\/\d+\/verification/, async (route) => {
+    await new Promise(resolve => setTimeout(resolve, verifyDelayMs));
+    route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ status: 'unable_to_verify', message: 'No Genie room linked' }) });
+  });
+  await page.route(/http:\/\/127.0.0.1:8000\/api\/verification/, r =>
+    r.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ score: 0, rating: 'grey', explanation: 'No Genie', issues: [], duration_ms: 50, error: false }) }));
+}
+
+/**
+ * Helper: open edit modal for slide at given 0-based index, change the first
+ * editable text to `newText`, and save.  Returns after the modal closes.
+ */
+async function editSlideText(page: Page, slideIndex: number, newText: string) {
+  const slideHeaders = page.locator('.bg-gray-100.border-b');
+  const editButton = slideHeaders.nth(slideIndex).locator('button.text-blue-600').first();
+  await editButton.click();
+  await expect(page.getByRole('heading', { name: 'Edit Slide' })).toBeVisible({ timeout: 5000 });
+
+  // Click the first editable text node (the span with cursor-pointer that shows quoted text)
+  const editableText = page.locator('span.truncate.cursor-pointer').first();
+  await editableText.click({ timeout: 3000 });
+
+  // The inline TextEditor should appear as an <input> or <textarea>
+  const textInput = page.getByRole('textbox').last();
+  await textInput.fill(newText);
+  await textInput.press('Enter');
+
+  // Save and wait for modal to close
+  await page.getByRole('button', { name: 'Save Changes' }).click();
+  await expect(page.getByRole('heading', { name: 'Edit Slide' })).not.toBeVisible({ timeout: 5000 });
+}
+
+test.describe('Race Condition Prevention - rapid sequential edits', () => {
+
+  test('edit slide 1 then edit slide 2 -- slide 1 edit must not revert (auto-verify race)', async ({ page }) => {
+    // Scenario from user report:
+    //   "you edit slide 1, then edit slide 2 - slide 1 reverts"
+    //
+    // Root cause: auto-verify starts after edit 1, its getSlides response
+    // (pre-edit-2) arrives and overwrites the frontend state.
+    // The deckEditCounterRef fix discards stale responses.
+
+    const state = {
+      currentDeck: JSON.parse(JSON.stringify(mockSlideDeck)),
+      updateSlideCallCount: { value: 0 },
+      getSlidesCalls: { value: 0 },
+    };
+
+    await setupStatefulMocks(page, state);
+
+    await goToGenerator(page);
+    await generateSlides(page);
+    await page.waitForTimeout(500);
+
+    // --- Edit slide 1 ---
+    await editSlideText(page, 0, 'EDITED_SLIDE_1_TEXT');
+
+    // Auto-verify triggers (3s delay on verifySlide).
+    // Quickly edit slide 2 BEFORE auto-verify completes.
+    await page.waitForTimeout(200);
+
+    // --- Edit slide 2 ---
+    await editSlideText(page, 1, 'EDITED_SLIDE_2_TEXT');
+
+    // Wait for auto-verify to complete (3s delay) and all getSlides to resolve
+    await page.waitForTimeout(5000);
+
+    // --- Assertions ---
+    expect(state.updateSlideCallCount.value).toBe(2);
+
+    // The stateful mock deck must have both edits applied
+    expect(state.currentDeck.slides[0].html).toContain('EDITED_SLIDE_1_TEXT');
+    expect(state.currentDeck.slides[1].html).toContain('EDITED_SLIDE_2_TEXT');
+
+    // The frontend should still show 3 slides (none lost)
+    await expect(page.locator('.bg-gray-100.border-b')).toHaveCount(3);
+  });
+
+  test('delete slide then rapid edit -- edit must persist through auto-verify race', async ({ page }) => {
+    // Scenario: "after deleting 1 slide it starts getting messy"
+
+    const state = {
+      currentDeck: JSON.parse(JSON.stringify(mockSlideDeck)),
+      updateSlideCallCount: { value: 0 },
+      getSlidesCalls: { value: 0 },
+    };
+
+    await setupStatefulMocks(page, state);
+
+    await goToGenerator(page);
+    await generateSlides(page);
+    await page.waitForTimeout(500);
+
+    await expect(page.locator('.bg-gray-100.border-b')).toHaveCount(3);
+
+    // Accept the confirm dialog for delete
+    page.on('dialog', dialog => dialog.accept());
+
+    // Delete slide 3 (index 2)
+    const deleteButton = page.locator('.bg-gray-100.border-b').nth(2).locator('button.text-red-600');
+    await deleteButton.click();
+
+    // Wait for delete + getSlides cycle
+    await page.waitForTimeout(1500);
+    await expect(page.locator('.bg-gray-100.border-b')).toHaveCount(2, { timeout: 5000 });
+
+    // Quickly edit slide 1 before auto-verify completes
+    await editSlideText(page, 0, 'POST_DELETE_EDIT');
+
+    // Wait for auto-verify to complete
+    await page.waitForTimeout(5000);
+
+    // Assertions
+    await expect(page.locator('.bg-gray-100.border-b')).toHaveCount(2);
+    expect(state.currentDeck.slides.length).toBe(2);
+    expect(state.currentDeck.slides[0].html).toContain('POST_DELETE_EDIT');
+    expect(state.updateSlideCallCount.value).toBe(1);
+  });
+});
+
 test.describe('User Journey - Edge Cases', () => {
 
   test('back-to-back preview switches between different versions correctly', async ({ page }) => {
