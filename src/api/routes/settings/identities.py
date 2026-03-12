@@ -22,13 +22,8 @@ router = APIRouter(prefix="/identities", tags=["identities"])
 
 
 def _readable_name(display_name: Optional[str], user_name: Optional[str]) -> str:
-    """Return a human-readable display name, deriving one from the email if needed."""
-    if display_name:
-        return display_name
-    if not user_name:
-        return "Unknown"
-    local = user_name.split("@")[0]
-    return " ".join(part.capitalize() for part in local.replace("_", ".").split("."))
+    """Return SCIM displayName if available, otherwise userName (email)."""
+    return display_name or user_name or "Unknown"
 
 
 # Response models

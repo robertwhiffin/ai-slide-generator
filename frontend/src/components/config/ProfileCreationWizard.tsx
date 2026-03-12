@@ -807,11 +807,9 @@ export const ProfileCreationWizard: React.FC<ProfileCreationWizardProps> = ({
                       )}
                       <div className="flex-1 min-w-0">
                         <p className="font-medium text-gray-900 truncate">{identity.display_name}</p>
-                        <p className="text-xs text-gray-500 truncate">
-                          {identity.user_name && identity.user_name !== identity.display_name
-                            ? identity.user_name
-                            : identity.type}
-                        </p>
+                        {identity.user_name && identity.user_name !== identity.display_name && (
+                          <p className="text-xs text-gray-500 truncate">{identity.user_name}</p>
+                        )}
                       </div>
                       <span className="text-xs text-gray-400">Click to add</span>
                     </button>

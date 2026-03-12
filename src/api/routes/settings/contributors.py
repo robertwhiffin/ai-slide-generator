@@ -94,14 +94,8 @@ def _validate_identity_type(type_str: str) -> str:
         raise ValueError(f"Invalid identity type. Must be one of: {valid}")
 
 
-def _readable_name_from_email(email: str) -> str:
-    """Derive a human-readable name from an email address."""
-    local = email.split("@")[0]
-    return " ".join(part.capitalize() for part in local.replace("_", ".").split("."))
-
-
 def _resolve_user_identities(contributors: list) -> dict[str, dict]:
-    """Batch-resolve display names and emails for USER contributors."""
+    """Batch-resolve emails for USER contributors."""
     result: dict[str, dict] = {}
     user_ids = [c.identity_id for c in contributors if c.identity_type == "USER"]
     if not user_ids:
@@ -118,7 +112,7 @@ def _resolve_user_identities(contributors: list) -> dict[str, dict]:
             info = provider.get_user_by_id(uid)
             if info:
                 email = info.get("userName", "")
-                display = info.get("displayName") or _readable_name_from_email(email) if email else ""
+                display = info.get("displayName") or email
                 result[uid] = {"display_name": display, "user_name": email}
         except Exception:
             pass

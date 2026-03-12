@@ -38,8 +38,8 @@ interface SlideTileProps {
   isOptimizing?: boolean;
   readOnly?: boolean;
   mentions?: Array<{ id: number; user_name: string; content: string; created_at: string }>;
-  readMentionIds?: Set<number>;
-  onMarkMentionRead?: (id: number) => void;
+  mentionsLastSeen?: string;
+  onMarkMentionsSeen?: () => void;
   onMentionsRefresh?: () => void;
   canManage?: boolean;
 }
@@ -61,8 +61,8 @@ export const SlideTile: React.FC<SlideTileProps> = ({
   isOptimizing = false,
   readOnly = false,
   mentions = [],
-  readMentionIds = new Set(),
-  onMarkMentionRead,
+  mentionsLastSeen = new Date(0).toISOString(),
+  onMarkMentionsSeen,
   onMentionsRefresh,
   canManage = false,
 }) => {
@@ -307,14 +307,21 @@ export const SlideTile: React.FC<SlideTileProps> = ({
 
             {/* Mentions notification bell — always visible */}
             {(() => {
-              const unreadCount = mentions.filter(m => !readMentionIds.has(m.id)).length;
+              const unreadCount = mentions.filter(m => m.created_at > mentionsLastSeen).length;
               const hasUnread = unreadCount > 0;
               const hasMentions = mentions.length > 0;
               return (
                 <div className="relative" ref={mentionsRef}>
                   <Tooltip text={hasUnread ? `${unreadCount} new mention${unreadCount > 1 ? 's' : ''}` : 'Mentions'}>
                     <button
-                      onClick={() => hasMentions && setShowMentions(v => !v)}
+                      onClick={() => {
+                        if (hasMentions) {
+                          setShowMentions(v => {
+                            if (!v && hasUnread) onMarkMentionsSeen?.();
+                            return !v;
+                          });
+                        }
+                      }}
                       className={`relative p-1 rounded ${
                         showMentions ? 'text-red-700 bg-red-50'
                         : hasUnread ? 'text-red-500 hover:bg-red-50'
@@ -337,26 +344,25 @@ export const SlideTile: React.FC<SlideTileProps> = ({
                       </div>
                       <div className="max-h-56 overflow-y-auto">
                         {mentions.map(m => {
-                          const isRead = readMentionIds.has(m.id);
+                          const isNew = m.created_at > mentionsLastSeen;
                           return (
                             <button
                               key={m.id}
                               onClick={() => {
-                                onMarkMentionRead?.(m.id);
                                 setScrollToCommentId(m.id);
                                 setShowMentions(false);
                                 setShowComments(true);
                               }}
                               className={`w-full text-left px-3 py-2.5 border-b border-gray-50 last:border-0 transition-colors ${
-                                isRead ? 'bg-white hover:bg-gray-50' : 'bg-blue-50 hover:bg-blue-100'
+                                isNew ? 'bg-blue-50 hover:bg-blue-100' : 'bg-white hover:bg-gray-50'
                               }`}
                             >
-                              <p className={`text-xs ${isRead ? 'text-gray-500' : 'text-gray-800'}`}>
-                                <span className={isRead ? 'font-medium' : 'font-semibold'}>{m.user_name}</span>
+                              <p className={`text-xs ${isNew ? 'text-gray-800' : 'text-gray-500'}`}>
+                                <span className={isNew ? 'font-semibold' : 'font-medium'}>{m.user_name}</span>
                                 {' mentioned you'}
-                                {!isRead && <span className="ml-1.5 inline-block w-2 h-2 rounded-full bg-blue-500" />}
+                                {isNew && <span className="ml-1.5 inline-block w-2 h-2 rounded-full bg-blue-500" />}
                               </p>
-                              <p className={`text-[11px] mt-0.5 line-clamp-1 ${isRead ? 'text-gray-400' : 'text-gray-600'}`}>{m.content}</p>
+                              <p className={`text-[11px] mt-0.5 line-clamp-1 ${isNew ? 'text-gray-600' : 'text-gray-400'}`}>{m.content}</p>
                               <p className="text-[10px] text-gray-400 mt-0.5">{formatRelativeTime(m.created_at)}</p>
                             </button>
                           );
