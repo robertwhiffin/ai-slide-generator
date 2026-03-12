@@ -41,12 +41,17 @@ function renderContentWithMentions(content: string): React.ReactNode {
 // Mention-aware text input
 // ---------------------------------------------------------------------------
 
+export interface MentionableUser {
+  username: string;
+  display_name: string;
+}
+
 interface MentionInputProps {
   value: string;
   onChange: (v: string) => void;
   onSubmit: () => void;
   placeholder?: string;
-  users: string[];
+  users: MentionableUser[];
   autoFocus?: boolean;
   className?: string;
 }
@@ -61,7 +66,10 @@ const MentionInput: React.FC<MentionInputProps> = ({
   const [selectedIdx, setSelectedIdx] = useState(0);
 
   const filtered = mentionQuery
-    ? users.filter(u => u.toLowerCase().includes(mentionQuery.toLowerCase())).slice(0, 8)
+    ? users.filter(u =>
+        u.display_name.toLowerCase().includes(mentionQuery.toLowerCase()) ||
+        u.username.toLowerCase().includes(mentionQuery.toLowerCase())
+      ).slice(0, 8)
     : users.slice(0, 8);
 
   const handleChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -80,10 +88,10 @@ const MentionInput: React.FC<MentionInputProps> = ({
     }
   };
 
-  const insertMention = (user: string) => {
+  const insertMention = (user: MentionableUser) => {
     const before = value.slice(0, mentionStart);
     const afterCursor = value.slice(mentionStart + 1 + mentionQuery.length);
-    onChange(`${before}@${user} ${afterCursor}`);
+    onChange(`${before}@${user.username} ${afterCursor}`);
     setShowDropdown(false);
     inputRef.current?.focus();
   };
@@ -113,14 +121,17 @@ const MentionInput: React.FC<MentionInputProps> = ({
         <div className="absolute bottom-full left-0 mb-1 w-full bg-white border border-gray-200 rounded-lg shadow-lg z-50 max-h-40 overflow-y-auto">
           {filtered.map((user, idx) => (
             <button
-              key={user}
+              key={user.username}
               onMouseDown={(e) => { e.preventDefault(); insertMention(user); }}
               className={`w-full text-left px-3 py-1.5 text-sm flex items-center gap-2 ${
                 idx === selectedIdx ? 'bg-blue-50 text-blue-700' : 'text-gray-700 hover:bg-gray-50'
               }`}
             >
               <FiAtSign size={12} className="text-gray-400" />
-              {user}
+              <span>{user.display_name}</span>
+              {user.display_name !== user.username && (
+                <span className="text-gray-400 text-xs ml-auto truncate">{user.username}</span>
+              )}
             </button>
           ))}
         </div>
@@ -138,7 +149,7 @@ interface CommentBubbleProps {
   sessionId: string;
   slideId: string;
   onRefresh: () => void;
-  mentionableUsers: string[];
+  mentionableUsers: MentionableUser[];
   depth?: number;
   currentUser?: string;
   canManage?: boolean;
@@ -388,7 +399,7 @@ export const CommentThread: React.FC<CommentThreadProps> = ({ sessionId, slideId
   const [newContent, setNewContent] = useState('');
   const [posting, setPosting] = useState(false);
   const [showResolved, setShowResolved] = useState(false);
-  const [mentionableUsers, setMentionableUsers] = useState<string[]>([]);
+  const [mentionableUsers, setMentionableUsers] = useState<MentionableUser[]>([]);
   const [currentUser, setCurrentUser] = useState<string>('');
   const listRef = useRef<HTMLDivElement>(null);
 

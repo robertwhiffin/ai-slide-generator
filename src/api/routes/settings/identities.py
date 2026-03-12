@@ -21,12 +21,23 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/identities", tags=["identities"])
 
 
+def _readable_name(display_name: Optional[str], user_name: Optional[str]) -> str:
+    """Return a human-readable display name, deriving one from the email if needed."""
+    if display_name:
+        return display_name
+    if not user_name:
+        return "Unknown"
+    local = user_name.split("@")[0]
+    return " ".join(part.capitalize() for part in local.replace("_", ".").split("."))
+
+
 # Response models
 class IdentityResponse(BaseModel):
     """Single identity (user or group)."""
 
     id: str = Field(..., description="Databricks identity ID")
-    display_name: str = Field(..., description="Display name (email for users, name for groups)")
+    display_name: str = Field(..., description="Human-readable display name")
+    user_name: Optional[str] = Field(None, description="Email / userName (USER type only)")
     type: str = Field(..., description="Identity type: USER or GROUP")
 
 
@@ -90,7 +101,8 @@ def list_users(
             identities=[
                 IdentityResponse(
                     id=u["id"],
-                    display_name=u.get("displayName") or u.get("userName", "Unknown"),
+                    display_name=_readable_name(u.get("displayName"), u.get("userName")),
+                    user_name=u.get("userName"),
                     type="USER",
                 )
                 for u in users
@@ -179,7 +191,12 @@ def search_identities(
             identities=[
                 IdentityResponse(
                     id=r["id"],
-                    display_name=r.get("displayName") or r.get("userName", "Unknown"),
+                    display_name=(
+                        _readable_name(r.get("displayName"), r.get("userName"))
+                        if r["type"] == "USER"
+                        else r.get("displayName", "Unknown")
+                    ),
+                    user_name=r.get("userName") if r["type"] == "USER" else None,
                     type=r["type"],
                 )
                 for r in results

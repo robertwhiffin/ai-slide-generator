@@ -53,6 +53,8 @@ class ContributorResponse(BaseModel):
     identity_id: str
     identity_type: str
     identity_name: str
+    display_name: Optional[str] = None
+    user_name: Optional[str] = None
     permission_level: str
     created_at: str
     created_by: Optional[str] = None
@@ -90,6 +92,38 @@ def _validate_identity_type(type_str: str) -> str:
     except ValueError:
         valid = [t.value for t in IdentityType]
         raise ValueError(f"Invalid identity type. Must be one of: {valid}")
+
+
+def _readable_name_from_email(email: str) -> str:
+    """Derive a human-readable name from an email address."""
+    local = email.split("@")[0]
+    return " ".join(part.capitalize() for part in local.replace("_", ".").split("."))
+
+
+def _resolve_user_identities(contributors: list) -> dict[str, dict]:
+    """Batch-resolve display names and emails for USER contributors."""
+    result: dict[str, dict] = {}
+    user_ids = [c.identity_id for c in contributors if c.identity_type == "USER"]
+    if not user_ids:
+        return result
+
+    try:
+        from src.services.identity_provider import get_identity_provider
+        provider = get_identity_provider()
+    except Exception:
+        return result
+
+    for uid in user_ids:
+        try:
+            info = provider.get_user_by_id(uid)
+            if info:
+                email = info.get("userName", "")
+                display = info.get("displayName") or _readable_name_from_email(email) if email else ""
+                result[uid] = {"display_name": display, "user_name": email}
+        except Exception:
+            pass
+
+    return result
 
 
 def _get_profile_or_404(db: Session, profile_id: int) -> ConfigProfile:
@@ -136,22 +170,25 @@ def list_contributors(
         .order_by(ConfigProfileContributor.identity_name)
         .all()
     )
-    
-    return ContributorListResponse(
-        contributors=[
-            ContributorResponse(
-                id=c.id,
-                identity_id=c.identity_id,
-                identity_type=c.identity_type,
-                identity_name=c.identity_name,
-                permission_level=c.permission_level,
-                created_at=c.created_at.isoformat(),
-                created_by=c.created_by,
-            )
-            for c in contributors
-        ],
-        total=len(contributors),
-    )
+
+    resolved = _resolve_user_identities(contributors)
+
+    items = []
+    for c in contributors:
+        info = resolved.get(c.identity_id, {})
+        items.append(ContributorResponse(
+            id=c.id,
+            identity_id=c.identity_id,
+            identity_type=c.identity_type,
+            identity_name=c.identity_name,
+            display_name=info.get("display_name") or c.identity_name,
+            user_name=info.get("user_name"),
+            permission_level=c.permission_level,
+            created_at=c.created_at.isoformat(),
+            created_by=c.created_by,
+        ))
+
+    return ContributorListResponse(contributors=items, total=len(items))
 
 
 @router.post("", response_model=ContributorResponse, status_code=status.HTTP_201_CREATED)

@@ -251,6 +251,7 @@ export type IdentityType = 'USER' | 'GROUP';
 export interface Identity {
   id: string;
   display_name: string;
+  user_name?: string;
   type: IdentityType;
 }
 
@@ -266,6 +267,8 @@ export interface Contributor {
   identity_id: string;
   identity_type: IdentityType;
   identity_name: string;
+  display_name?: string;
+  user_name?: string;
   permission_level: PermissionLevel;
   created_at: string;
   created_by: string | null;
@@ -275,6 +278,7 @@ export interface ContributorCreate {
   identity_id: string;
   identity_type: IdentityType;
   identity_name: string;
+  user_name?: string;
   permission_level: PermissionLevel;
 }
 

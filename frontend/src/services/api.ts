@@ -1311,7 +1311,7 @@ export const api = {
 
   // ============ Comments API ============
 
-  async getMentionableUsers(sessionId: string): Promise<string[]> {
+  async getMentionableUsers(sessionId: string): Promise<{ username: string; display_name: string }[]> {
     const response = await fetch(`${API_BASE_URL}/api/comments/mentionable-users?session_id=${sessionId}`);
     if (!response.ok) throw new ApiError(response.status, 'Failed to list mentionable users');
     const data = await response.json();
