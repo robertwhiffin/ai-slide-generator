@@ -80,9 +80,8 @@ export const SlidePanel: React.FC<SlidePanelProps> = ({ slideDeck, rawHtml, onSl
   
   // Mentions per slide (for notification badges)
   const [mentionsBySlide, setMentionsBySlide] = useState<Record<string, Array<{ id: number; user_name: string; content: string; created_at: string }>>>({});
-  const [dismissedMentionIds, setDismissedMentionIds] = useState<Set<number>>(() => {
-    const stored = localStorage.getItem('tellr_dismissed_mentions');
-    return stored ? new Set(JSON.parse(stored)) : new Set();
+  const [mentionsLastSeen, setMentionsLastSeen] = useState<string>(() => {
+    return localStorage.getItem('tellr_mentions_last_seen') || new Date(0).toISOString();
   });
 
   const fetchMentions = useCallback(() => {
@@ -106,13 +105,10 @@ export const SlidePanel: React.FC<SlidePanelProps> = ({ slideDeck, rawHtml, onSl
     return () => clearInterval(timer);
   }, [fetchMentions, slideDeck]);
 
-  const handleDismissMention = useCallback((mentionId: number) => {
-    setDismissedMentionIds(prev => {
-      const next = new Set(prev);
-      next.add(mentionId);
-      localStorage.setItem('tellr_dismissed_mentions', JSON.stringify([...next]));
-      return next;
-    });
+  const handleMarkMentionsSeen = useCallback(() => {
+    const now = new Date().toISOString();
+    setMentionsLastSeen(now);
+    localStorage.setItem('tellr_mentions_last_seen', now);
   }, []);
 
   // Auto-verification state
@@ -924,8 +920,8 @@ export const SlidePanel: React.FC<SlidePanelProps> = ({ slideDeck, rawHtml, onSl
               isOptimizing={optimizingSlideIndex === index}
               readOnly={readOnly}
               mentions={mentionsBySlide[slide.slide_id] || []}
-              readMentionIds={dismissedMentionIds}
-              onMarkMentionRead={handleDismissMention}
+              mentionsLastSeen={mentionsLastSeen}
+              onMarkMentionsSeen={handleMarkMentionsSeen}
               onMentionsRefresh={fetchMentions}
               canManage={canManage}
             />

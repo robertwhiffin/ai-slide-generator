@@ -11,9 +11,37 @@ is unavailable (e.g. local development without Databricks).
 
 import logging
 from enum import Enum
-from typing import List, Optional
+from functools import lru_cache
+from typing import Dict, List, Optional
 
 logger = logging.getLogger(__name__)
+
+
+def resolve_display_name(email: str) -> str:
+    """Return SCIM displayName for an email, falling back to the email itself.
+
+    No derivation or post-processing — only direct SCIM values are used.
+    """
+    if not email or "@" not in email:
+        return email or "Unknown"
+    return _resolve_cached(email)
+
+
+@lru_cache(maxsize=256)
+def _resolve_cached(email: str) -> str:
+    try:
+        provider = get_identity_provider()
+        users = provider.list_users(filter_query=f'userName eq "{email}"', max_results=1)
+        if users and users[0].get("displayName"):
+            return users[0]["displayName"]
+    except Exception:
+        pass
+    return email
+
+
+def resolve_display_names(emails: List[str]) -> Dict[str, str]:
+    """Batch-resolve emails to display names."""
+    return {e: resolve_display_name(e) for e in emails if e}
 
 
 class IdentityProviderMode(Enum):

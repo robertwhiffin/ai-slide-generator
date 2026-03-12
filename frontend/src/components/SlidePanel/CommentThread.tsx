@@ -26,25 +26,39 @@ function timeAgo(iso: string): string {
   return new Date(iso).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
 }
 
-function renderContentWithMentions(content: string): React.ReactNode {
+export interface MentionableUser {
+  username: string;
+  display_name: string;
+}
+
+function renderContentWithMentions(content: string, users: MentionableUser[] = []): React.ReactNode {
+  const emailToName = new Map(users.map(u => [u.username.toLowerCase(), u.display_name]));
   const parts = content.split(/(@[\w.\-]+(?:@[\w.\-]+)?)/g);
-  return parts.map((part, i) =>
-    part.startsWith('@') ? (
-      <span key={i} className="text-blue-600 font-medium">{part}</span>
-    ) : (
-      <span key={i}>{part}</span>
-    )
-  );
+  return parts.map((part, i) => {
+    if (part.startsWith('@')) {
+      const email = part.slice(1).toLowerCase();
+      const display = emailToName.get(email);
+      return <span key={i} className="text-blue-600 font-medium">@{display || part.slice(1)}</span>;
+    }
+    return <span key={i}>{part}</span>;
+  });
+}
+
+/**
+ * Replace @DisplayName with @email before sending to the backend.
+ */
+function resolveMentionsToEmails(content: string, users: MentionableUser[]): string {
+  let resolved = content;
+  const sorted = [...users].sort((a, b) => b.display_name.length - a.display_name.length);
+  for (const u of sorted) {
+    resolved = resolved.split(`@${u.display_name}`).join(`@${u.username}`);
+  }
+  return resolved;
 }
 
 // ---------------------------------------------------------------------------
 // Mention-aware text input
 // ---------------------------------------------------------------------------
-
-export interface MentionableUser {
-  username: string;
-  display_name: string;
-}
 
 interface MentionInputProps {
   value: string;
@@ -91,7 +105,7 @@ const MentionInput: React.FC<MentionInputProps> = ({
   const insertMention = (user: MentionableUser) => {
     const before = value.slice(0, mentionStart);
     const afterCursor = value.slice(mentionStart + 1 + mentionQuery.length);
-    onChange(`${before}@${user.username} ${afterCursor}`);
+    onChange(`${before}@${user.display_name} ${afterCursor}`);
     setShowDropdown(false);
     inputRef.current?.focus();
   };
@@ -176,7 +190,8 @@ const CommentBubble: React.FC<CommentBubbleProps> = ({
     if (!editContent.trim() || busy) return;
     setBusy(true);
     try {
-      await api.updateComment(comment.id, editContent.trim());
+      const resolved = resolveMentionsToEmails(editContent.trim(), mentionableUsers);
+      await api.updateComment(comment.id, resolved);
       setIsEditing(false);
       onRefresh();
     } catch (err) {
@@ -203,7 +218,8 @@ const CommentBubble: React.FC<CommentBubbleProps> = ({
     if (!replyContent.trim() || busy) return;
     setBusy(true);
     try {
-      await api.addComment(sessionId, slideId, replyContent.trim(), comment.id);
+      const resolved = resolveMentionsToEmails(replyContent.trim(), mentionableUsers);
+      await api.addComment(sessionId, slideId, resolved, comment.id);
       setReplyContent('');
       setIsReplying(false);
       onRefresh();
@@ -317,7 +333,7 @@ const CommentBubble: React.FC<CommentBubbleProps> = ({
             </button>
           </div>
         ) : (
-          <p className="text-gray-800 whitespace-pre-wrap break-words">{renderContentWithMentions(comment.content)}</p>
+          <p className="text-gray-800 whitespace-pre-wrap break-words">{renderContentWithMentions(comment.content, mentionableUsers)}</p>
         )}
 
         {/* Reply trigger */}
@@ -451,7 +467,7 @@ export const CommentThread: React.FC<CommentThreadProps> = ({ sessionId, slideId
 
   const handleAdd = async () => {
     if (!newContent.trim() || posting) return;
-    const content = newContent.trim();
+    const content = resolveMentionsToEmails(newContent.trim(), mentionableUsers);
     const mentionMatches = content.match(/@[\w.\-]+(?:@[\w.\-]+)?/g) || [];
     const hasMentions = mentionMatches.length > 0;
 
@@ -484,8 +500,9 @@ export const CommentThread: React.FC<CommentThreadProps> = ({ sessionId, slideId
     setPosting(true);
     try {
       const real = await api.addComment(sessionId, slideId, content);
-      // Swap optimistic entry with real server response
       setComments(prev => prev.map(c => c.id === optimisticId ? { ...real, replies: real.replies || [] } : c));
+      // Re-notify after the comment is persisted so fetchMentions finds it
+      if (hasMentions) notifyParent(comments.length + 1, true);
     } catch (err) {
       console.error('Failed to add comment:', err);
       setComments(prev => {

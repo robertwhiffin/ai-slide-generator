@@ -872,10 +872,11 @@ class SessionManager:
                 deck_dict["modified_at"] = deck.updated_at.isoformat() + "Z" if deck.updated_at else None
                 deck_dict["version"] = deck.version
                 
+                self._resolve_deck_display_names(deck_dict)
                 return deck_dict
             
             # Legacy: return basic info without slides array
-            return {
+            result = {
                 "title": deck.title,
                 "html_content": deck.html_content,
                 "scripts_content": deck.scripts_content,
@@ -886,6 +887,34 @@ class SessionManager:
                 "modified_at": deck.updated_at.isoformat() + "Z" if deck.updated_at else None,
                 "version": deck.version,
             }
+            self._resolve_deck_display_names(result)
+            return result
+
+    @staticmethod
+    def _resolve_deck_display_names(deck_dict: Dict[str, Any]) -> None:
+        """Replace email addresses in created_by/modified_by with SCIM display names."""
+        from src.services.identity_provider import resolve_display_names
+
+        emails: set[str] = set()
+        for key in ("created_by", "modified_by"):
+            if deck_dict.get(key):
+                emails.add(deck_dict[key])
+        for slide in deck_dict.get("slides", []):
+            for key in ("created_by", "modified_by"):
+                if slide.get(key):
+                    emails.add(slide[key])
+
+        if not emails:
+            return
+
+        name_map = resolve_display_names(list(emails))
+        for key in ("created_by", "modified_by"):
+            if deck_dict.get(key) and deck_dict[key] in name_map:
+                deck_dict[key] = name_map[deck_dict[key]]
+        for slide in deck_dict.get("slides", []):
+            for key in ("created_by", "modified_by"):
+                if slide.get(key) and slide[key] in name_map:
+                    slide[key] = name_map[slide[key]]
 
     def save_verification(
         self,
@@ -1377,13 +1406,15 @@ class SessionManager:
                 if deck.locked_at:
                     age = (now - deck.locked_at).total_seconds()
                     if age < self.EDITING_LOCK_TIMEOUT_SECONDS:
-                        return {"acquired": False, "locked_by": deck.locked_by}
+                        from src.services.identity_provider import resolve_display_name
+                        return {"acquired": False, "locked_by": resolve_display_name(deck.locked_by)}
                 # Stale lock — take it over
 
             deck.locked_by = user
             deck.locked_at = now
             logger.info("Editing lock acquired", extra={"session_id": session_id, "user": user})
-            return {"acquired": True, "locked_by": user}
+            from src.services.identity_provider import resolve_display_name
+            return {"acquired": True, "locked_by": resolve_display_name(user)}
 
     def release_editing_lock(self, session_id: str, user: str) -> None:
         """Release the editing lock (called on session close / navigation away)."""
@@ -1458,7 +1489,8 @@ class SessionManager:
                     deck.locked_at = None
                     return {"locked": False, "locked_by": None}
 
-            return {"locked": True, "locked_by": deck.locked_by}
+            from src.services.identity_provider import resolve_display_name
+            return {"locked": True, "locked_by": resolve_display_name(deck.locked_by)}
 
     # Session locking for concurrent request handling
     def acquire_session_lock(self, session_id: str, timeout_seconds: int = 300) -> bool:
@@ -2029,14 +2061,16 @@ class SessionManager:
     def _comment_to_dict(
         comment: SlideComment, include_replies: bool = False
     ) -> Dict[str, Any]:
+        from src.services.identity_provider import resolve_display_name
+
         result: Dict[str, Any] = {
             "id": comment.id,
             "slide_id": comment.slide_id,
-            "user_name": comment.user_name,
+            "user_name": resolve_display_name(comment.user_name),
             "content": comment.content,
             "mentions": comment.mentions or [],
             "resolved": comment.resolved,
-            "resolved_by": comment.resolved_by,
+            "resolved_by": resolve_display_name(comment.resolved_by) if comment.resolved_by else None,
             "resolved_at": comment.resolved_at.isoformat() if comment.resolved_at else None,
             "parent_comment_id": comment.parent_comment_id,
             "created_at": comment.created_at.isoformat(),
@@ -2096,17 +2130,17 @@ class SessionManager:
     def get_mentionable_users(self, session_id: str) -> List[Dict[str, str]]:
         """Return users that can be @mentioned for a session.
 
-        Each entry contains ``username`` (email) and ``display_name``.
-        The frontend shows display names in the dropdown but inserts the
-        email so that the stored mention matches ``current_user``.
+        Each entry has ``username`` (email) and ``display_name``
+        (SCIM displayName, falling back to the email if absent).
         """
         from src.database.models.profile_contributor import ConfigProfileContributor
+        from src.services.identity_provider import resolve_display_name
 
         with get_db_session() as db:
             session = self._get_session_or_raise(db, session_id)
             deck_owner = self._get_deck_owner_session(db, session)
 
-            seen_emails: set[str] = set()
+            seen: set[str] = set()
             result: List[Dict[str, str]] = []
 
             try:
@@ -2115,27 +2149,10 @@ class SessionManager:
             except Exception:
                 provider = None
 
-            def _name_from_email(email: str) -> str:
-                local = email.split("@")[0]
-                return " ".join(p.capitalize() for p in local.replace("_", ".").split("."))
-
             if deck_owner.created_by:
                 email = deck_owner.created_by
-                seen_emails.add(email)
-                display = _name_from_email(email)
-                if provider:
-                    try:
-                        from src.services.identity_providers.workspace_provider import WorkspaceIdentityProvider
-                        if isinstance(provider._provider, WorkspaceIdentityProvider):
-                            for u in provider._provider._client.users.list(
-                                filter=f'userName eq "{email}"', attributes="id,userName,displayName"
-                            ):
-                                if u.display_name:
-                                    display = u.display_name
-                                break
-                    except Exception:
-                        pass
-                result.append({"username": email, "display_name": display})
+                seen.add(email)
+                result.append({"username": email, "display_name": resolve_display_name(email)})
 
             if deck_owner.profile_id:
                 contributors = (
@@ -2152,25 +2169,18 @@ class SessionManager:
                     if identity_type != "USER":
                         continue
                     email = None
-                    display = identity_name or ""
                     if provider:
                         try:
                             user_info = provider.get_user_by_id(identity_id)
                             if user_info:
                                 email = user_info.get("userName")
-                                display = (
-                                    user_info.get("displayName")
-                                    or (_name_from_email(email) if email else display)
-                                )
                         except Exception:
                             pass
                     if not email:
                         email = identity_name
-                    if email and email not in seen_emails:
-                        seen_emails.add(email)
-                        if not display or display == email:
-                            display = _name_from_email(email)
-                        result.append({"username": email, "display_name": display})
+                    if email and email not in seen:
+                        seen.add(email)
+                        result.append({"username": email, "display_name": resolve_display_name(email)})
 
             result.sort(key=lambda u: u["display_name"])
             return result
