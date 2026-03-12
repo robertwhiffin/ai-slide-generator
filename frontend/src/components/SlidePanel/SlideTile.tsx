@@ -119,14 +119,18 @@ export const SlideTile: React.FC<SlideTileProps> = ({
     return () => document.removeEventListener('mousedown', handleClickOutside);
   }, [showMentions]);
 
-  // Fetch comment count on mount and when comments panel closes
+  // Fetch comment count on mount, when comments panel toggles, and poll every 10s
   useEffect(() => {
     if (!sessionId || !slide.slide_id) return;
     let cancelled = false;
-    api.listComments(sessionId, slide.slide_id).then(({ count }) => {
-      if (!cancelled) setCommentCount(count);
-    }).catch(() => {});
-    return () => { cancelled = true; };
+    const fetch = () => {
+      api.listComments(sessionId, slide.slide_id).then(({ count }) => {
+        if (!cancelled) setCommentCount(count);
+      }).catch(() => {});
+    };
+    fetch();
+    const timer = setInterval(fetch, 10_000);
+    return () => { cancelled = true; clearInterval(timer); };
   }, [sessionId, slide.slide_id, showComments]);
 
   const handleCommentChange = useCallback((count: number, hasMentions: boolean) => {
@@ -301,16 +305,22 @@ export const SlideTile: React.FC<SlideTileProps> = ({
               </button>
             </Tooltip>
 
-            {/* Mentions notification bell */}
-            {mentions.length > 0 && (() => {
+            {/* Mentions notification bell — always visible */}
+            {(() => {
               const unreadCount = mentions.filter(m => !readMentionIds.has(m.id)).length;
               const hasUnread = unreadCount > 0;
+              const hasMentions = mentions.length > 0;
               return (
                 <div className="relative" ref={mentionsRef}>
                   <Tooltip text={hasUnread ? `${unreadCount} new mention${unreadCount > 1 ? 's' : ''}` : 'Mentions'}>
                     <button
-                      onClick={() => setShowMentions(v => !v)}
-                      className={`relative p-1 rounded ${showMentions ? 'text-red-700 bg-red-50' : hasUnread ? 'text-red-500 hover:bg-red-50' : 'text-gray-400 hover:bg-gray-100'}`}
+                      onClick={() => hasMentions && setShowMentions(v => !v)}
+                      className={`relative p-1 rounded ${
+                        showMentions ? 'text-red-700 bg-red-50'
+                        : hasUnread ? 'text-red-500 hover:bg-red-50'
+                        : hasMentions ? 'text-gray-500 hover:bg-gray-100'
+                        : 'text-gray-300 cursor-default'
+                      }`}
                     >
                       <FiBell size={16} className={hasUnread ? 'animate-[bell-ring_1s_ease-in-out_infinite]' : ''} />
                       {hasUnread && (
@@ -320,7 +330,7 @@ export const SlideTile: React.FC<SlideTileProps> = ({
                       )}
                     </button>
                   </Tooltip>
-                  {showMentions && (
+                  {showMentions && hasMentions && (
                     <div className="absolute right-0 top-full mt-1 w-72 bg-white rounded-lg shadow-xl border border-gray-200 z-50 overflow-hidden">
                       <div className="px-3 py-2 border-b border-gray-100 bg-gray-50">
                         <span className="text-xs font-semibold text-gray-600">Mentions</span>

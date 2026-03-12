@@ -2093,11 +2093,12 @@ class SessionManager:
                     results.append(d)
             return results
 
-    def get_mentionable_users(self, session_id: str) -> List[str]:
-        """Return usernames that can be @mentioned for a session.
+    def get_mentionable_users(self, session_id: str) -> List[Dict[str, str]]:
+        """Return users that can be @mentioned for a session.
 
-        Includes the session owner and all contributors of the profile
-        the session belongs to.
+        Each entry contains ``username`` (email) and ``display_name``.
+        The frontend shows display names in the dropdown but inserts the
+        email so that the stored mention matches ``current_user``.
         """
         from src.database.models.profile_contributor import ConfigProfileContributor
 
@@ -2105,21 +2106,74 @@ class SessionManager:
             session = self._get_session_or_raise(db, session_id)
             deck_owner = self._get_deck_owner_session(db, session)
 
-            users: set[str] = set()
+            seen_emails: set[str] = set()
+            result: List[Dict[str, str]] = []
+
+            try:
+                from src.services.identity_provider import get_identity_provider
+                provider = get_identity_provider()
+            except Exception:
+                provider = None
+
+            def _name_from_email(email: str) -> str:
+                local = email.split("@")[0]
+                return " ".join(p.capitalize() for p in local.replace("_", ".").split("."))
+
             if deck_owner.created_by:
-                users.add(deck_owner.created_by)
+                email = deck_owner.created_by
+                seen_emails.add(email)
+                display = _name_from_email(email)
+                if provider:
+                    try:
+                        from src.services.identity_providers.workspace_provider import WorkspaceIdentityProvider
+                        if isinstance(provider._provider, WorkspaceIdentityProvider):
+                            for u in provider._provider._client.users.list(
+                                filter=f'userName eq "{email}"', attributes="id,userName,displayName"
+                            ):
+                                if u.display_name:
+                                    display = u.display_name
+                                break
+                    except Exception:
+                        pass
+                result.append({"username": email, "display_name": display})
 
             if deck_owner.profile_id:
                 contributors = (
-                    db.query(ConfigProfileContributor.identity_name)
+                    db.query(
+                        ConfigProfileContributor.identity_id,
+                        ConfigProfileContributor.identity_name,
+                        ConfigProfileContributor.identity_type,
+                    )
                     .filter(ConfigProfileContributor.profile_id == deck_owner.profile_id)
                     .all()
                 )
-                for (name,) in contributors:
-                    if name:
-                        users.add(name)
 
-            return sorted(users)
+                for identity_id, identity_name, identity_type in contributors:
+                    if identity_type != "USER":
+                        continue
+                    email = None
+                    display = identity_name or ""
+                    if provider:
+                        try:
+                            user_info = provider.get_user_by_id(identity_id)
+                            if user_info:
+                                email = user_info.get("userName")
+                                display = (
+                                    user_info.get("displayName")
+                                    or (_name_from_email(email) if email else display)
+                                )
+                        except Exception:
+                            pass
+                    if not email:
+                        email = identity_name
+                    if email and email not in seen_emails:
+                        seen_emails.add(email)
+                        if not display or display == email:
+                            display = _name_from_email(email)
+                        result.append({"username": email, "display_name": display})
+
+            result.sort(key=lambda u: u["display_name"])
+            return result
 
     def _get_session_id_str(self, db, internal_id: int) -> Optional[str]:
         """Resolve internal DB id to the external session_id string."""

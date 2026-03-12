@@ -147,11 +147,20 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
           setIsLockHolder(false);
           setEditingLockHolder(result.locked_by);
 
-          // Poll every 10s to detect when lock is released
+          // Poll every 10s: sync latest slides + detect when lock is released
           pollTimer = setInterval(async () => {
             try {
-              const status = await api.getEditingLockStatus(sessionId);
+              const [status, slideResult] = await Promise.all([
+                api.getEditingLockStatus(sessionId),
+                api.getSlides(sessionId),
+              ]);
               if (cancelled) return;
+
+              // Live-sync slides from the editing contributor
+              if (slideResult.slide_deck) {
+                setSlideDeck(slideResult.slide_deck as SlideDeck);
+              }
+
               if (!status.locked) {
                 // Lock was released — try to acquire
                 const retry = await api.acquireEditingLock(sessionId);

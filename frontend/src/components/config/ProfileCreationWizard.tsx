@@ -214,7 +214,8 @@ export const ProfileCreationWizard: React.FC<ProfileCreationWizardProps> = ({
     const newContributor: ContributorCreate = {
       identity_id: identity.id,
       identity_type: identity.type,
-      identity_name: identity.display_name,
+      identity_name: identity.display_name || identity.user_name || 'Unknown',
+      user_name: identity.user_name,
       permission_level: selectedPermission,
     };
     setFormData(prev => ({
@@ -806,7 +807,11 @@ export const ProfileCreationWizard: React.FC<ProfileCreationWizardProps> = ({
                       )}
                       <div className="flex-1 min-w-0">
                         <p className="font-medium text-gray-900 truncate">{identity.display_name}</p>
-                        <p className="text-xs text-gray-500">{identity.type}</p>
+                        <p className="text-xs text-gray-500 truncate">
+                          {identity.user_name && identity.user_name !== identity.display_name
+                            ? identity.user_name
+                            : identity.type}
+                        </p>
                       </div>
                       <span className="text-xs text-gray-400">Click to add</span>
                     </button>
@@ -840,7 +845,9 @@ export const ProfileCreationWizard: React.FC<ProfileCreationWizardProps> = ({
                         )}
                         <div className="flex-1 min-w-0">
                           <p className="font-medium text-gray-900 truncate">{contributor.identity_name}</p>
-                          <p className="text-xs text-gray-500">{contributor.identity_type}</p>
+                          <p className="text-xs text-gray-500 truncate">
+                            {contributor.user_name || contributor.identity_type}
+                          </p>
                         </div>
                         <select
                           value={contributor.permission_level}

@@ -99,8 +99,11 @@ export const SlidePanel: React.FC<SlidePanelProps> = ({ slideDeck, rawHtml, onSl
     }).catch(() => {});
   }, [sessionId]);
 
+  // Fetch mentions on mount, when slideDeck changes, and poll every 10s for live updates
   useEffect(() => {
     fetchMentions();
+    const timer = setInterval(fetchMentions, 10_000);
+    return () => clearInterval(timer);
   }, [fetchMentions, slideDeck]);
 
   const handleDismissMention = useCallback((mentionId: number) => {
