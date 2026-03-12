@@ -31,9 +31,15 @@ def resolve_display_name(email: str) -> str:
 def _resolve_cached(email: str) -> str:
     try:
         provider = get_identity_provider()
-        users = provider.list_users(filter_query=f'userName eq "{email}"', max_results=1)
-        if users and users[0].get("displayName"):
-            return users[0]["displayName"]
+        from src.services.identity_providers.workspace_provider import WorkspaceIdentityProvider
+        if isinstance(provider._provider, WorkspaceIdentityProvider):
+            for u in provider._provider._client.users.list(
+                filter=f'userName eq "{email}"',
+                attributes="id,userName,displayName",
+            ):
+                if u.display_name:
+                    return u.display_name
+                break
     except Exception:
         pass
     return email
