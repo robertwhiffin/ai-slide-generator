@@ -13,6 +13,7 @@ from datetime import datetime, timedelta
 from typing import Any, Dict, Optional
 
 from src.api.schemas.streaming import StreamEventType
+from src.services.cancellation import CancellationRegistry
 
 logger = logging.getLogger(__name__)
 
@@ -81,6 +82,7 @@ async def process_chat_request(request_id: str, payload: dict) -> None:
     slide_context = payload.get("slide_context")
     is_first_message = payload.get("is_first_message", False)
     image_ids = payload.get("image_ids")
+    pre_gen_version = payload.get("pre_gen_version")  # version to restore on cancel
 
     chat_service = get_chat_service()
     session_manager = get_session_manager()
@@ -153,8 +155,16 @@ async def process_chat_request(request_id: str, payload: dict) -> None:
         raise
 
     finally:
-        # Always release session lock
-        session_manager.release_session_lock(session_id)
+        if CancellationRegistry.is_cancelled(session_id):
+            # Revert slides only — preserve chat messages so history stays intact
+            try:
+                session_manager.revert_slides_on_cancel(session_id, pre_gen_version, request_id)
+            except Exception as e:
+                logger.warning(f"Failed to revert slides on cancel: {e}")
+            CancellationRegistry.reset(session_id)
+            # Lock was already released by the cancel endpoint
+        else:
+            session_manager.release_session_lock(session_id)
         # Clean up in-memory tracking
         jobs.pop(request_id, None)
 

@@ -12,6 +12,7 @@ from typing import Any, Dict, List, Optional
 from sqlalchemy.orm import Session, joinedload
 
 from src.core.database import get_db_session
+from src.services.cancellation import CancellationRegistry
 from src.database.models.session import (
     ChatRequest,
     SessionMessage,
@@ -957,6 +958,83 @@ class SessionManager:
                 "chat_history": chat_history,
             }
 
+    def revert_slides_on_cancel(
+        self, session_id: str, pre_gen_version: Optional[int], request_id: Optional[str] = None
+    ) -> None:
+        """Revert slide deck to pre-generation state after a cancel.
+
+        Unlike restore_version(), this does NOT delete messages — it only
+        restores the slide content. AI/tool messages from the cancelled request
+        are flagged with cancelled=true in their metadata so the frontend can
+        hide them, while the user's own message is preserved.
+
+        Args:
+            session_id: Session to revert
+            pre_gen_version: Version to restore slides from, or None to clear slides
+            request_id: The cancelled request's ID, used to flag its AI/tool messages
+        """
+        with get_db_session() as db:
+            session = (
+                db.query(UserSession)
+                .filter(UserSession.session_id == session_id)
+                .first()
+            )
+            if not session:
+                return
+
+            if pre_gen_version is not None:
+                version = (
+                    db.query(SlideDeckVersion)
+                    .filter(
+                        SlideDeckVersion.session_id == session.id,
+                        SlideDeckVersion.version_number == pre_gen_version,
+                    )
+                    .first()
+                )
+                if version and session.slide_deck:
+                    session.slide_deck.deck_json = version.deck_json
+                    session.slide_deck.verification_map = version.verification_map_json
+                    deck_dict = json.loads(version.deck_json) if version.deck_json else {}
+                    session.slide_deck.title = deck_dict.get("title")
+                    session.slide_deck.slide_count = len(deck_dict.get("slides", []))
+                    session.slide_deck.updated_at = datetime.utcnow()
+                # Delete save points created during the cancelled generation
+                db.query(SlideDeckVersion).filter(
+                    SlideDeckVersion.session_id == session.id,
+                    SlideDeckVersion.version_number > pre_gen_version,
+                ).delete()
+            else:
+                # No slides existed before — clear what the cancelled run created
+                if session.slide_deck:
+                    session.slide_deck.deck_json = None
+                    session.slide_deck.slide_count = 0
+                    session.slide_deck.title = None
+                db.query(SlideDeckVersion).filter(
+                    SlideDeckVersion.session_id == session.id
+                ).delete()
+
+            # Flag AI/tool messages from the cancelled request so the frontend
+            # can hide them, while preserving the user's own prompt
+            if request_id:
+                cancelled_messages = (
+                    db.query(SessionMessage)
+                    .filter(
+                        SessionMessage.session_id == session.id,
+                        SessionMessage.request_id == request_id,
+                        SessionMessage.role != "user",
+                    )
+                    .all()
+                )
+                for msg in cancelled_messages:
+                    existing = json.loads(msg.metadata_json) if msg.metadata_json else {}
+                    existing["cancelled"] = True
+                    msg.metadata_json = json.dumps(existing)
+
+            logger.info(
+                "Reverted slides on cancel",
+                extra={"session_id": session_id, "pre_gen_version": pre_gen_version},
+            )
+
     def restore_version(self, session_id: str, version_number: int) -> Dict[str, Any]:
         """Restore deck to a specific version and delete all newer versions.
 
@@ -1079,6 +1157,37 @@ class SessionManager:
 
             return max_version[0] if max_version else None
 
+    def clear_slide_deck(self, session_id: str) -> None:
+        """Clear the slide deck and any save points for a session.
+
+        Used when cancelling a generation that started with no slides,
+        to revert the session back to its empty state.
+
+        Args:
+            session_id: Session whose slides should be cleared
+        """
+        with get_db_session() as db:
+            session = (
+                db.query(UserSession)
+                .filter(UserSession.session_id == session_id)
+                .first()
+            )
+            if not session:
+                return
+
+            # Remove all save points
+            db.query(SlideDeckVersion).filter(
+                SlideDeckVersion.session_id == session.id
+            ).delete()
+
+            # Clear the live slide deck
+            if session.slide_deck:
+                session.slide_deck.deck_json = None
+                session.slide_deck.slide_count = 0
+                session.slide_deck.title = None
+
+            logger.info("Cleared slide deck on cancel", extra={"session_id": session_id})
+
     # Session locking for concurrent request handling
     def acquire_session_lock(self, session_id: str, timeout_seconds: int = 300) -> bool:
         """Try to acquire processing lock for a session.
@@ -1108,8 +1217,18 @@ class SessionManager:
                 return True
 
             if session.is_processing:
+                # Allow stealing the lock if the current generation was cancelled.
+                # The cancel endpoint may have already released the DB lock, but if
+                # it failed silently or the old worker hasn't finished yet, this
+                # guarantees the new request can always proceed after a cancel.
+                if CancellationRegistry.is_cancelled(session_id):
+                    logger.info(
+                        "Stealing lock from cancelled generation",
+                        extra={"session_id": session_id},
+                    )
+                    # fall through to acquire
                 # Check if lock is stale (held too long)
-                if session.processing_started_at:
+                elif session.processing_started_at:
                     age = (datetime.utcnow() - session.processing_started_at).total_seconds()
                     if age < timeout_seconds:
                         return False  # Legitimately locked
