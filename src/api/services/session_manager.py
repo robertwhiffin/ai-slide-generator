@@ -1268,6 +1268,19 @@ class SessionManager:
             session = self._get_session_or_raise(db, session_id)
             deck_owner = self._get_deck_owner_session(db, session)
 
+            # Reject if another user holds an active editing lock
+            if deck_owner.slide_deck:
+                deck = deck_owner.slide_deck
+                from src.core.user_context import get_current_user
+                current_user = get_current_user()
+                if deck.locked_by and deck.locked_by != current_user and deck.locked_at:
+                    age = (datetime.utcnow() - deck.locked_at).total_seconds()
+                    if age < self.EDITING_LOCK_TIMEOUT_SECONDS:
+                        from src.services.identity_provider import resolve_display_name
+                        raise PermissionError(
+                            f"Session is locked by {resolve_display_name(deck.locked_by)}"
+                        )
+
             # Get the version to restore
             version = (
                 db.query(SlideDeckVersion)
@@ -1383,10 +1396,10 @@ class SessionManager:
     # exclusive editing rights. Others see a "locked by X" banner.
     # The lock auto-expires if the holder stops sending heartbeats.
     # ------------------------------------------------------------------
-    EDITING_LOCK_TIMEOUT_SECONDS = 600  # 10 minutes without heartbeat
+    EDITING_LOCK_TIMEOUT_SECONDS = 45  # safety net for browser crashes when heartbeat stops
 
     def acquire_editing_lock(self, session_id: str, user: str) -> dict:
-        """Try to acquire the editing lock when opening a session.
+        """Try to acquire the editing lock before a mutation.
 
         Returns a dict with {"acquired": bool, "locked_by": str|None}.
         If another user holds a non-expired lock, acquisition fails.
@@ -1462,7 +1475,7 @@ class SessionManager:
     def get_editing_lock_status(self, session_id: str) -> dict:
         """Check who holds the editing lock.
 
-        Returns {"locked": bool, "locked_by": str|None}.
+        Returns {"locked": bool, "locked_by": str|None, "locked_by_email": str|None}.
         """
         with get_db_session() as db:
             session = (
@@ -1471,26 +1484,29 @@ class SessionManager:
                 .first()
             )
             if not session:
-                return {"locked": False, "locked_by": None}
+                return {"locked": False, "locked_by": None, "locked_by_email": None}
 
             deck_owner = self._get_deck_owner_session(db, session)
             if not deck_owner.slide_deck:
-                return {"locked": False, "locked_by": None}
+                return {"locked": False, "locked_by": None, "locked_by_email": None}
 
             deck = deck_owner.slide_deck
             if not deck.locked_by:
-                return {"locked": False, "locked_by": None}
+                return {"locked": False, "locked_by": None, "locked_by_email": None}
 
             if deck.locked_at:
                 age = (datetime.utcnow() - deck.locked_at).total_seconds()
                 if age >= self.EDITING_LOCK_TIMEOUT_SECONDS:
-                    # Expired — clear it
                     deck.locked_by = None
                     deck.locked_at = None
-                    return {"locked": False, "locked_by": None}
+                    return {"locked": False, "locked_by": None, "locked_by_email": None}
 
             from src.services.identity_provider import resolve_display_name
-            return {"locked": True, "locked_by": resolve_display_name(deck.locked_by)}
+            return {
+                "locked": True,
+                "locked_by": resolve_display_name(deck.locked_by),
+                "locked_by_email": deck.locked_by,
+            }
 
     # Session locking for concurrent request handling
     def acquire_session_lock(self, session_id: str, timeout_seconds: int = 300) -> bool:

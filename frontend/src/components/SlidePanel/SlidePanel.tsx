@@ -80,8 +80,11 @@ export const SlidePanel: React.FC<SlidePanelProps> = ({ slideDeck, rawHtml, onSl
   
   // Mentions per slide (for notification badges)
   const [mentionsBySlide, setMentionsBySlide] = useState<Record<string, Array<{ id: number; user_name: string; content: string; created_at: string }>>>({});
-  const [mentionsLastSeen, setMentionsLastSeen] = useState<string>(() => {
-    return localStorage.getItem('tellr_mentions_last_seen') || new Date(0).toISOString();
+  const [mentionsLastSeenMap, setMentionsLastSeenMap] = useState<Record<string, string>>(() => {
+    try {
+      const stored = localStorage.getItem('tellr_mentions_last_seen_map');
+      return stored ? JSON.parse(stored) : {};
+    } catch { return {}; }
   });
 
   const fetchMentions = useCallback(() => {
@@ -105,10 +108,13 @@ export const SlidePanel: React.FC<SlidePanelProps> = ({ slideDeck, rawHtml, onSl
     return () => clearInterval(timer);
   }, [fetchMentions, slideDeck]);
 
-  const handleMarkMentionsSeen = useCallback(() => {
+  const handleMarkMentionsSeen = useCallback((slideId: string) => {
     const now = new Date().toISOString();
-    setMentionsLastSeen(now);
-    localStorage.setItem('tellr_mentions_last_seen', now);
+    setMentionsLastSeenMap(prev => {
+      const next = { ...prev, [slideId]: now };
+      localStorage.setItem('tellr_mentions_last_seen_map', JSON.stringify(next));
+      return next;
+    });
   }, []);
 
   // Auto-verification state
@@ -177,7 +183,6 @@ export const SlidePanel: React.FC<SlidePanelProps> = ({ slideDeck, rawHtml, onSl
 
   const handleDeleteSlide = async (index: number) => {
     if (!slideDeck || !sessionId || readOnly || !onSlideChange) return;
-    
     if (!confirm(`Delete slide ${index + 1}?`)) return;
 
     try {
@@ -920,8 +925,8 @@ export const SlidePanel: React.FC<SlidePanelProps> = ({ slideDeck, rawHtml, onSl
               isOptimizing={optimizingSlideIndex === index}
               readOnly={readOnly}
               mentions={mentionsBySlide[slide.slide_id] || []}
-              mentionsLastSeen={mentionsLastSeen}
-              onMarkMentionsSeen={handleMarkMentionsSeen}
+              mentionsLastSeen={mentionsLastSeenMap[slide.slide_id] || new Date(0).toISOString()}
+              onMarkMentionsSeen={() => handleMarkMentionsSeen(slide.slide_id)}
               onMentionsRefresh={fetchMentions}
               canManage={canManage}
             />
