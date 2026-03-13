@@ -106,7 +106,7 @@ def mock_langchain_components():
     with patch("src.services.agent.ChatDatabricks") as mock_chat, patch(
         "src.services.agent.create_tool_calling_agent"
     ) as mock_create_agent, patch(
-        "src.services.agent.AgentExecutor"
+        "src.services.agent.CancellableAgentExecutor"
     ) as mock_executor_class:
         # Create a mock executor instance
         mock_executor_instance = Mock()
