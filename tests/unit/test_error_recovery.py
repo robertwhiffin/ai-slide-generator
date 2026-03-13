@@ -909,10 +909,10 @@ class TestGracefulDegradation:
             assert agent is not None
             assert agent.settings == mock_settings
 
-    def test_genie_failure_in_tool_propagates_error(
+    def test_genie_failure_in_tool_returns_placeholder_instructions(
         self, mock_settings, mock_client, mock_mlflow, mock_langchain_components
     ):
-        """Genie failure in tool propagates as GenieToolError."""
+        """Genie failure in tool returns placeholder instructions instead of raising."""
         with patch("src.services.agent.get_settings") as mock_get_settings, patch(
             "src.services.agent.get_databricks_client"
         ) as mock_get_client, patch(
@@ -946,13 +946,13 @@ class TestGracefulDegradation:
             tools = agent._create_tools_for_session(session_id)
             assert len(tools) == 2
 
-            # The tool wrapper propagates GenieToolError directly
-            # (not converted to ToolExecutionError)
+            # The tool wrapper catches GenieToolError and returns placeholder instructions
             genie_tool = next(t for t in tools if t.name == "query_genie_space")
-            with pytest.raises(GenieToolError) as exc_info:
-                genie_tool.func("test query")
+            result = genie_tool.func("test query")
 
-            assert "genie" in str(exc_info.value).lower() or "unavailable" in str(exc_info.value).lower()
+            assert "GENIE QUERY FAILED" in result
+            assert "test query" in result
+            assert "placeholder" in result.lower()
 
 
 # =============================================================================

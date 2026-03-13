@@ -33,7 +33,7 @@ from src.core.databricks_client import (
 from src.core.settings_db import fetch_prompt_content, get_settings
 from src.domain.slide import Slide
 from src.services.image_tools import SearchImagesInput, search_images
-from src.services.tools import initialize_genie_conversation, query_genie_space
+from src.services.tools import GenieToolError, initialize_genie_conversation, query_genie_space
 from src.utils.html_utils import extract_canvas_ids_from_script, split_script_by_canvas
 from src.utils.js_validator import validate_and_fix_javascript
 
@@ -367,7 +367,20 @@ class SlideGeneratorAgent:
                     raise ToolExecutionError(f"Failed to initialize Genie conversation: {e}") from e
 
             # Query Genie with automatic conversation_id
-            result = query_genie_space(query, conversation_id)
+            try:
+                result = query_genie_space(query, conversation_id)
+            except GenieToolError as e:
+                logger.warning(
+                    f"Genie query failed gracefully: {e}",
+                    extra={"session_id": session_id, "query": query[:100]},
+                )
+                return (
+                    f"GENIE QUERY FAILED: Could not retrieve data for query: \"{query}\"\n"
+                    f"Error: {e}\n\n"
+                    "INSTRUCTION: Do NOT retry this query. Instead, generate a placeholder slide for this data. "
+                    "Use a clear visual indicator (e.g. a muted/greyed-out box) showing that the data could not "
+                    "be loaded, and display the original query that was attempted so the user knows what is missing."
+                )
 
             # Format response for LLM (no conversation_id exposed)
             response_parts = []
@@ -379,7 +392,11 @@ class SlideGeneratorAgent:
                 response_parts.append(f"Data retrieved:\n\n{result['data']}")
 
             if not response_parts:
-                return "Query completed but no data or message was returned."
+                return (
+                    f"Genie query completed but returned no data for: \"{query}\"\n\n"
+                    "INSTRUCTION: Generate a placeholder slide noting that no data was available for this query. "
+                    "Use a clear visual indicator showing the data was unavailable and display the original query."
+                )
 
             return "\n\n".join(response_parts)
 

@@ -231,6 +231,57 @@ def test_query_genie_space_empty_data(mock_databricks_client, mock_settings):
     assert "col1" in lines[0]
 
 
+def test_query_genie_space_null_result_block(mock_databricks_client, mock_settings):
+    """Test Genie query where result is null but query 'succeeded'.
+
+    Reproduces real Genie behavior where statement_response has
+    status=SUCCEEDED and manifest with columns, but result is None.
+    This previously caused: KeyError: 'data_array'
+    """
+    conversation_response = Mock()
+    conversation_response.conversation_id = "conv-null"
+    conversation_response.message_id = "msg-null"
+
+    attachment = Mock()
+    attachment.attachment_id = "attach-null"
+    attachment.query = True
+    attachment.text = "No data was returned for this query"
+    conversation_response.attachments = [attachment]
+
+    mock_databricks_client.genie.start_conversation_and_wait.return_value = conversation_response
+
+    # Real Genie response: result is None despite status=SUCCEEDED
+    attachment_result = Mock()
+    attachment_result.as_dict.return_value = {
+        "statement_response": {
+            "manifest": {
+                "format": "JSON_ARRAY",
+                "schema": {
+                    "column_count": 3,
+                    "columns": [
+                        {"name": "media_partners", "position": 0, "type_name": "STRING"},
+                        {"name": "reach_1plus", "position": 1, "type_name": "FLOAT"},
+                        {"name": "mmr_rate", "position": 2, "type_name": "FLOAT"},
+                    ]
+                }
+            },
+            "result": None,
+            "statement_id": "test-stmt-id",
+            "status": {"state": "SUCCEEDED"},
+        }
+    }
+
+    mock_databricks_client.genie.get_message_attachment_query_result.return_value = attachment_result
+
+    # Should NOT raise - previously this caused KeyError: 'data_array'
+    response = query_genie_space(query="Show me reach metrics")
+
+    assert response["conversation_id"] == "conv-null"
+    assert response["message"] == "No data was returned for this query"
+    # data should be empty string (no data extracted)
+    assert response["data"] == ''
+
+
 def test_query_genie_space_error(mock_databricks_client, mock_settings):
     """Test Genie query with error."""
     # Setup mock to raise exception
