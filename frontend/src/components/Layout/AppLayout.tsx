@@ -117,90 +117,132 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
   // Permission level for the current session (CAN_VIEW, CAN_EDIT, CAN_MANAGE)
   const [sessionPermission, setSessionPermission] = useState<'CAN_VIEW' | 'CAN_EDIT' | 'CAN_MANAGE'>('CAN_MANAGE');
 
-  // Editing lock state
+  // Editing lock state — lock acquired on session open for editors/managers.
+  // Heartbeat every 10s keeps it alive. Released on 5-min idle, session leave,
+  // or tab close. Backend 45s timeout is a safety net for browser crashes.
   const [editingLockHolder, setEditingLockHolder] = useState<string | null>(null);
   const [isLockHolder, setIsLockHolder] = useState(true);
   const lockSessionRef = useRef<string | null>(null);
+  const currentUserEmailRef = useRef<string | null>(null);
+  const lastActivityRef = useRef<number>(Date.now());
+  const IDLE_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes
 
-  // Acquire editing lock after session loads, heartbeat while holding, poll when locked out
+  // Fetch current user email once for lock comparison
+  useEffect(() => {
+    fetch('/api/user/current').then(r => r.json()).then(data => {
+      currentUserEmailRef.current = data.username || null;
+    }).catch(() => {});
+  }, []);
+
+  // Track user activity (mouse, keyboard, scroll) to detect idle
+  useEffect(() => {
+    const markActive = () => { lastActivityRef.current = Date.now(); };
+    window.addEventListener('mousemove', markActive);
+    window.addEventListener('keydown', markActive);
+    window.addEventListener('scroll', markActive, true);
+    return () => {
+      window.removeEventListener('mousemove', markActive);
+      window.removeEventListener('keydown', markActive);
+      window.removeEventListener('scroll', markActive, true);
+    };
+  }, []);
+
+  // Main lock lifecycle: acquire on open, heartbeat, idle release, poll status
   useEffect(() => {
     if (!sessionId || initialView !== 'main') return;
+    const isViewer = sessionPermission === 'CAN_VIEW';
     let cancelled = false;
-    let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
-    let pollTimer: ReturnType<typeof setInterval> | null = null;
 
-    const tryAcquire = async () => {
-      try {
-        const result = await api.acquireEditingLock(sessionId);
-        if (cancelled) return;
+    const isSelf = (status: { locked_by_email?: string | null }) =>
+      lockSessionRef.current === sessionId ||
+      (currentUserEmailRef.current != null && status.locked_by_email === currentUserEmailRef.current);
 
-        if (result.acquired) {
-          setIsLockHolder(true);
-          setEditingLockHolder(null);
-          lockSessionRef.current = sessionId;
-
-          // Heartbeat every 60s to keep the lock alive
-          heartbeatTimer = setInterval(() => {
-            api.heartbeatEditingLock(sessionId).catch(() => {});
-          }, 60_000);
-        } else {
-          setIsLockHolder(false);
-          setEditingLockHolder(result.locked_by);
-
-          // Poll every 10s: sync latest slides + detect when lock is released
-          pollTimer = setInterval(async () => {
-            try {
-              const [status, slideResult] = await Promise.all([
-                api.getEditingLockStatus(sessionId),
-                api.getSlides(sessionId),
-              ]);
-              if (cancelled) return;
-
-              // Live-sync slides from the editing contributor
-              if (slideResult.slide_deck) {
-                setSlideDeck(slideResult.slide_deck as SlideDeck);
-              }
-
-              if (!status.locked) {
-                // Lock was released — try to acquire
-                const retry = await api.acquireEditingLock(sessionId);
-                if (cancelled) return;
-                if (retry.acquired) {
-                  setIsLockHolder(true);
-                  setEditingLockHolder(null);
-                  lockSessionRef.current = sessionId;
-                  if (pollTimer) clearInterval(pollTimer);
-                  pollTimer = null;
-                  heartbeatTimer = setInterval(() => {
-                    api.heartbeatEditingLock(sessionId).catch(() => {});
-                  }, 60_000);
-                }
-              } else {
-                setEditingLockHolder(status.locked_by);
-              }
-            } catch { /* ignore */ }
-          }, 10_000);
-        }
-      } catch {
-        // If lock API fails, allow editing (backwards compat)
+    const applyStatus = (status: { locked: boolean; locked_by: string | null; locked_by_email?: string | null }) => {
+      if (!status.locked) {
+        if (lockSessionRef.current === sessionId) lockSessionRef.current = null;
+        setIsLockHolder(!isViewer);
+        setEditingLockHolder(null);
+      } else if (isSelf(status)) {
+        lockSessionRef.current = sessionId;
         setIsLockHolder(true);
         setEditingLockHolder(null);
+      } else {
+        setIsLockHolder(false);
+        setEditingLockHolder(isViewer ? null : status.locked_by);
       }
     };
 
+    const tryAcquire = async () => {
+      if (isViewer) return;
+      try {
+        const result = await api.acquireEditingLock(sessionId);
+        if (!cancelled) {
+          if (result.acquired) {
+            lockSessionRef.current = sessionId;
+            setIsLockHolder(true);
+            setEditingLockHolder(null);
+          } else {
+            setIsLockHolder(false);
+            setEditingLockHolder(result.locked_by);
+          }
+        }
+      } catch { /* ignore */ }
+    };
+
+    // Acquire lock immediately on session open (non-viewers)
     tryAcquire();
+
+    const pollTimer = setInterval(async () => {
+      if (cancelled) return;
+
+      // Non-viewer with an active lock: check idle and send heartbeat
+      if (!isViewer && lockSessionRef.current === sessionId) {
+        const idleMs = Date.now() - lastActivityRef.current;
+        if (idleMs >= IDLE_TIMEOUT_MS) {
+          // Idle for 5 minutes — release lock immediately
+          try { await api.releaseEditingLock(sessionId); } catch { /* ignore */ }
+          lockSessionRef.current = null;
+          setIsLockHolder(true);
+          setEditingLockHolder(null);
+          return;
+        }
+        // Still active — send heartbeat to keep lock alive
+        try { await api.heartbeatEditingLock(sessionId); } catch { /* ignore */ }
+      }
+
+      // Poll lock status and live-sync slides
+      try {
+        const [status, slideResult] = await Promise.all([
+          api.getEditingLockStatus(sessionId),
+          api.getSlides(sessionId),
+        ]);
+        if (cancelled) return;
+
+        if (slideResult.slide_deck && !isSelf(status)) {
+          setSlideDeck(slideResult.slide_deck as SlideDeck);
+        }
+
+        applyStatus(status);
+
+        // If we lost the lock (expired server-side), try to re-acquire
+        if (!isViewer && !status.locked && lockSessionRef.current !== sessionId) {
+          const idleMs = Date.now() - lastActivityRef.current;
+          if (idleMs < IDLE_TIMEOUT_MS) {
+            await tryAcquire();
+          }
+        }
+      } catch { /* ignore */ }
+    }, 10_000);
 
     return () => {
       cancelled = true;
-      if (heartbeatTimer) clearInterval(heartbeatTimer);
-      if (pollTimer) clearInterval(pollTimer);
-      // Release lock when navigating away from the session
+      clearInterval(pollTimer);
       if (lockSessionRef.current === sessionId) {
         api.releaseEditingLock(sessionId);
         lockSessionRef.current = null;
       }
     };
-  }, [sessionId, initialView]);
+  }, [sessionId, initialView, sessionPermission]);
 
   // Release lock on page unload (tab close, refresh)
   useEffect(() => {
@@ -274,7 +316,6 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
     setScrollTarget(prev => ({ index, key: (prev?.key ?? 0) + 1 }));
   }, []);
 
-  // Send a message through the chat panel (used by SlidePanel for optimize layout)
   const handleSendMessage = useCallback((content: string, slideContext?: { indices: number[]; slide_htmls: string[] }) => {
     chatPanelRef.current?.sendMessage(content, slideContext);
   }, []);
@@ -392,7 +433,7 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
 
   // Confirm and execute revert
   const handleRevertConfirm = useCallback(async () => {
-    if (!sessionId || !revertTargetVersion) return;
+    if (!sessionId || !revertTargetVersion || !isLockHolder) return;
 
     try {
       const { deck } = await api.restoreVersion(sessionId, revertTargetVersion);
@@ -488,7 +529,7 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
                     previewVersion={previewVersion}
                     onPreview={handlePreviewVersion}
                     onRevert={handleRevertClick}
-                    disabled={isGenerating}
+                    disabled={isGenerating || !isLockHolder}
                   />
                 )}
                 <button
@@ -672,7 +713,7 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
         <PreviewBanner
           versionNumber={previewVersion}
           description={previewDescription}
-          onRevert={() => handleRevertClick()}
+          onRevert={isLockHolder ? () => handleRevertClick() : () => {}}
           onCancel={handleCancelPreview}
         />
       )}

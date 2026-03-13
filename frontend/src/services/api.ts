@@ -1527,7 +1527,7 @@ export const api = {
     }
   },
 
-  async getEditingLockStatus(sessionId: string): Promise<{ locked: boolean; locked_by: string | null }> {
+  async getEditingLockStatus(sessionId: string): Promise<{ locked: boolean; locked_by: string | null; locked_by_email?: string | null }> {
     const response = await fetch(`${API_BASE_URL}/api/sessions/${sessionId}/lock`);
     if (!response.ok) throw new ApiError(response.status, 'Failed to check editing lock');
     return response.json();

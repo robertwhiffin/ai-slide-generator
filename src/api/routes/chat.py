@@ -159,6 +159,8 @@ async def send_message(
             status_code=404,
             detail=f"Session not found: {request.session_id}. Create a session first via POST /api/sessions",
         )
+    except PermissionError as e:
+        raise HTTPException(status_code=423, detail=str(e))
     except Exception as e:
         logger.error(f"Chat request failed: {e}", exc_info=True)
         raise HTTPException(

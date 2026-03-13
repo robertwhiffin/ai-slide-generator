@@ -240,6 +240,8 @@ async def reorder_slides(request: ReorderRequest, db: Session = Depends(get_db))
 
     except VersionConflictError as e:
         raise HTTPException(status_code=409, detail=str(e))
+    except PermissionError as e:
+        raise HTTPException(status_code=423, detail=str(e))
     except ValueError as e:
         logger.warning(f"Validation error in reorder_slides: {e}")
         raise HTTPException(status_code=400, detail=str(e))
@@ -302,6 +304,8 @@ async def update_slide(index: int, request: UpdateSlideRequest, db: Session = De
 
     except VersionConflictError as e:
         raise HTTPException(status_code=409, detail=str(e))
+    except PermissionError as e:
+        raise HTTPException(status_code=423, detail=str(e))
     except ValueError as e:
         logger.warning(f"Validation error in update_slide: {e}")
         raise HTTPException(status_code=400, detail=str(e))
@@ -364,6 +368,8 @@ async def duplicate_slide(index: int, request: SlideActionRequest, db: Session =
 
     except VersionConflictError as e:
         raise HTTPException(status_code=409, detail=str(e))
+    except PermissionError as e:
+        raise HTTPException(status_code=423, detail=str(e))
     except ValueError as e:
         logger.warning(f"Validation error in duplicate_slide: {e}")
         raise HTTPException(status_code=400, detail=str(e))
@@ -432,6 +438,8 @@ async def delete_slide(
 
     except VersionConflictError as e:
         raise HTTPException(status_code=409, detail=str(e))
+    except PermissionError as e:
+        raise HTTPException(status_code=423, detail=str(e))
     except ValueError as e:
         logger.warning(f"Validation error in delete_slide: {e}")
         raise HTTPException(status_code=400, detail=str(e))
@@ -854,6 +862,8 @@ async def restore_version(version_number: int, request: RestoreVersionRequest):
         )
         return result
 
+    except PermissionError as e:
+        raise HTTPException(status_code=423, detail=str(e))
     except ValueError as e:
         logger.warning(f"Validation error in restore_version: {e}")
         raise HTTPException(status_code=400, detail=str(e))
