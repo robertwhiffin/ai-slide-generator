@@ -29,6 +29,7 @@ from src.core.databricks_client import (
 from src.domain.slide import Slide
 from src.domain.slide_deck import SlideDeck
 from src.services.agent import create_agent
+from src.services.cancellation import CancellationRegistry
 from src.services.streaming_callback import StreamingCallbackHandler
 from src.utils.html_utils import (
     extract_canvas_ids_from_html,
@@ -932,6 +933,22 @@ class ChatService:
         # Check for errors
         if "error" in error_container:
             raise error_container["error"]
+
+        # Check if generation was cancelled by the user
+        if CancellationRegistry.is_cancelled(session_id):
+            CancellationRegistry.reset(session_id)
+            logger.info("Generation cancelled, returning partial results", extra={"session_id": session_id})
+            # Return existing deck (partial results already streamed via events)
+            existing_deck = self._get_or_load_deck(session_id)
+            deck_dict = existing_deck.to_dict() if existing_deck else None
+            if deck_dict:
+                deck_dict, _ = self._substitute_images_for_response(deck_dict)
+            yield StreamEvent(
+                type=StreamEventType.CANCELLED,
+                slides=deck_dict,
+                content="Generation was cancelled.",
+            )
+            return
 
         # Process final result
         result = result_container.get("result")
