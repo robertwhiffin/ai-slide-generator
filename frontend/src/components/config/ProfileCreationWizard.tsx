@@ -214,7 +214,7 @@ export const ProfileCreationWizard: React.FC<ProfileCreationWizardProps> = ({
     const newContributor: ContributorCreate = {
       identity_id: identity.id,
       identity_type: identity.type,
-      identity_name: identity.display_name || identity.user_name || 'Unknown',
+      identity_name: identity.user_name || identity.display_name || 'Unknown',
       user_name: identity.user_name,
       permission_level: selectedPermission,
     };

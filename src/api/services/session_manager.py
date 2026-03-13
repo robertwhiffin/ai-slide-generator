@@ -2176,7 +2176,7 @@ class SessionManager:
                                 email = user_info.get("userName")
                         except Exception:
                             pass
-                    if not email:
+                    if not email and identity_name and "@" in identity_name:
                         email = identity_name
                     if email and email not in seen:
                         seen.add(email)
