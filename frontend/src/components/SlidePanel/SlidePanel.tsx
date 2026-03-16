@@ -21,6 +21,7 @@ import { api } from '../../services/api';
 import { useSelection } from '../../contexts/SelectionContext';
 import { exportSlideDeckToPDF } from '../../services/pdf_client';
 import { useSession } from '../../contexts/SessionContext';
+import { useToast } from '../../contexts/ToastContext';
 
 interface SlideContext {
   indices: number[];
@@ -60,6 +61,7 @@ function SlidePanelComponent(props: SlidePanelProps, ref: React.Ref<SlidePanelHa
   const [optimizingSlideIndex, setOptimizingSlideIndex] = useState<number | null>(null);
   const { selectedIndices, setSelection, clearSelection } = useSelection();
   const { sessionId } = useSession();
+  const { showToast } = useToast();
   const slideRefs = useRef<Map<number, HTMLDivElement>>(new Map());
   
   // Auto-verification state
@@ -283,6 +285,8 @@ function SlidePanelComponent(props: SlidePanelProps, ref: React.Ref<SlidePanelHa
       a.click();
       document.body.removeChild(a);
       window.URL.revokeObjectURL(url);
+      onExportStatusChange?.(null);
+      showToast('PPTX downloaded', 'success');
     } catch (error) {
       console.error('PPTX export failed:', error);
       const message = error instanceof Error 
