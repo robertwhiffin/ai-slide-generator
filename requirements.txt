@@ -60,6 +60,7 @@ playwright==1.48.0
 
 # Image processing
 Pillow>=10.0.0
+svgpathtools>=1.6.0
 
 # Note: Development dependencies are in pyproject.toml [project.optional-dependencies.dev]
 # Install with: uv sync --all-extras

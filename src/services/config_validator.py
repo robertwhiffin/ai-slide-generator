@@ -10,7 +10,7 @@ from typing import Any, Dict, List
 from databricks_langchain import ChatDatabricks
 from langchain_core.messages import HumanMessage
 
-from src.core.databricks_client import get_databricks_client
+from src.core.databricks_client import get_user_client
 from src.core.settings_db import load_settings_from_database
 
 logger = logging.getLogger(__name__)
@@ -152,7 +152,7 @@ class ConfigurationValidator:
 
         # Use the profile's space_id directly, not get_settings()
         space_id = self.settings.genie.space_id
-        client = get_databricks_client()
+        client = get_user_client()
         conversation_id = None
 
         try:
@@ -286,7 +286,7 @@ class ConfigurationValidator:
 
         try:
             # Check if space exists
-            client = get_databricks_client()
+            client = get_user_client()
             spaces = client.genie.list_spaces()
 
             space_exists = False

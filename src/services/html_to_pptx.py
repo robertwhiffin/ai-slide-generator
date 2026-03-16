@@ -306,16 +306,20 @@ class HtmlToPptxConverterV3:
             else:
                 logger.warning("No chart screenshots captured", extra={"slide_number": slide_number})
                 print(f"[PPTX_CONVERTER] WARNING: No chart screenshots captured for slide {slide_number}")
-        
+
         # 2b. Extract base64 content images before sending to LLM
+        has_base64_img = "data:image" in html_str
+        print(f"[PPTX_CONVERTER] Slide {slide_number}: base64 images in HTML: {has_base64_img}, HTML length: {len(html_str)}")
         html_str, content_images = self._extract_and_save_content_images(html_str, str(assets_dir))
-        chart_images.extend(content_images)
+        if content_images:
+            print(f"[PPTX_CONVERTER] Slide {slide_number}: extracted {len(content_images)} content images: {content_images}")
 
         # 3. Call LLM to generate code for adding this slide
         logger.debug("Calling LLM for slide", extra={"slide_number": slide_number})
         slide_code = await self._generate_slide_adder_code(
             html_str,
-            chart_images=chart_images
+            chart_images=chart_images,
+            content_images=content_images,
         )
         
         if not slide_code:
@@ -404,29 +408,34 @@ class HtmlToPptxConverterV3:
     async def _generate_slide_adder_code(
         self,
         html_str: str,
-        chart_images: list[str]
+        chart_images: list[str],
+        content_images: Optional[list[str]] = None,
     ) -> Optional[str]:
         """Call LLM to generate code for adding slide to existing presentation.
-        
+
         Args:
             html_str: HTML content to convert
             chart_images: List of chart image filenames (e.g., ['chart_0.png', 'chart_1.png'])
-        
+            content_images: List of content image filenames (e.g., ['content_image_0.png'])
+
         Returns:
             Generated Python code or None if generation fails
         """
+        content_images = content_images or []
         logger.debug(
             "Generating slide adder code",
             extra={
                 "original_html_length": len(html_str),
                 "chart_images": chart_images,
                 "chart_count": len(chart_images),
+                "content_images": content_images,
+                "content_image_count": len(content_images),
             }
         )
-        
+
         # Truncate HTML if too long
         html_content = self._truncate_html(html_str)
-        
+
         logger.debug(
             "HTML truncated for LLM (slide adder)",
             extra={
@@ -436,7 +445,7 @@ class HtmlToPptxConverterV3:
                 "truncated_preview": html_content[:500] + "..." if len(html_content) > 500 else html_content,
             }
         )
-        
+
         screenshot_note = ""
         if chart_images:
             chart_files_str = ", ".join(chart_images)
@@ -458,12 +467,24 @@ class HtmlToPptxConverterV3:
                 )
         else:
             screenshot_note = "No chart images. Extract Chart.js data from <script> tags. Only use data from HTML."
-        
+
+        if content_images:
+            content_files_str = ", ".join(content_images)
+            screenshot_note += (
+                f"\nContent images in assets_dir: {content_files_str}. "
+                f"These are logos/icons extracted from <img> tags in the HTML. "
+                f"CRITICAL: You MUST add each content image using slide.shapes.add_picture(os.path.join(assets_dir, filename), left, top, width, height). "
+                f"Match position and size to the original <img> tag's placement in the HTML (e.g. a logo in the top-right corner). "
+                f"Typical logo size: width=Inches(1.0), height=Inches(0.5). Place in the header area near the title."
+            )
+
+        print(f"[PPTX_CONVERTER] screenshot_note for LLM: {screenshot_note[:500]}")
+
         prompt = self.MULTI_SLIDE_USER_PROMPT.format(
             html_content=html_content,
             screenshot_note=screenshot_note
         )
-        
+
         return await self._call_llm(self.MULTI_SLIDE_SYSTEM_PROMPT, prompt)
     
     async def _call_llm(self, system_prompt: str, user_prompt: str) -> Optional[str]:
@@ -636,6 +657,74 @@ class HtmlToPptxConverterV3:
     # Map MIME sub-type to file extension
     _EXT_MAP = {"png": ".png", "jpeg": ".jpg", "jpg": ".jpg", "gif": ".gif", "svg+xml": ".svg"}
 
+    @staticmethod
+    def _svg_to_png(svg_bytes: bytes) -> bytes:
+        """Convert SVG bytes to PNG using svgpathtools + Pillow (pure Python).
+
+        Parses SVG ``<path>`` elements, samples bezier curves to polygons,
+        and rasterises them onto a Pillow RGBA canvas.
+
+        Args:
+            svg_bytes: Raw SVG file content.
+
+        Returns:
+            PNG image bytes.
+        """
+        import io
+        import xml.etree.ElementTree as ET
+
+        from PIL import Image, ImageDraw
+        from svgpathtools import parse_path
+
+        root = ET.fromstring(svg_bytes)
+        w = int(float(root.get("width", "100")))
+        h = int(float(root.get("height", "100")))
+
+        img = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(img)
+
+        paths = (
+            root.findall("{http://www.w3.org/2000/svg}path")
+            or root.findall("path")
+        )
+
+        for elem in paths:
+            d = elem.get("d", "")
+            fill = elem.get("fill", "none")
+            transform = elem.get("transform", "")
+
+            if fill == "none" or not d:
+                continue
+            if not (fill.startswith("#") and len(fill) >= 7):
+                continue
+
+            r_c = int(fill[1:3], 16)
+            g_c = int(fill[3:5], 16)
+            b_c = int(fill[5:7], 16)
+
+            tx, ty = 0.0, 0.0
+            tm = re.match(r"translate\(([^,]+),([^)]+)\)", transform)
+            if tm:
+                tx, ty = float(tm.group(1)), float(tm.group(2))
+
+            try:
+                path = parse_path(d)
+                length = path.length()
+                n = max(200, int(length))
+                n = min(n, 5000)
+                points = []
+                for i in range(n):
+                    pt = path.point(i / n)
+                    points.append((pt.real + tx, pt.imag + ty))
+                if len(points) >= 3:
+                    draw.polygon(points, fill=(r_c, g_c, b_c, 255))
+            except Exception:
+                continue
+
+        buf = io.BytesIO()
+        img.save(buf, format="PNG")
+        return buf.getvalue()
+
     def _extract_and_save_content_images(
         self, html_str: str, assets_dir: str
     ) -> tuple[str, list[str]]:
@@ -670,6 +759,13 @@ class HtmlToPptxConverterV3:
             # Decode and write
             try:
                 image_bytes = base64.b64decode(b64_data)
+
+                # python-pptx uses PIL which cannot handle SVG files.
+                # Convert SVG to PNG so add_picture() works.
+                if ext == ".svg":
+                    image_bytes = self._svg_to_png(image_bytes)
+                    filename = filename.rsplit(".", 1)[0] + ".png"
+
                 filepath = Path(assets_dir) / filename
                 filepath.write_bytes(image_bytes)
                 filenames.append(filename)
@@ -842,32 +938,51 @@ import os
         if "from pptx.util import" not in code:
             code = required_imports + "\n" + code
             logger.debug("Injected required imports into generated code")
+
         
         # Save code to temp file
         temp_module_path = Path(tempfile.mktemp(suffix=".py", prefix="slide_adder_"))
         temp_module_path.write_text(code, encoding='utf-8')
-        
+
+        # Also save to debug dir for inspection (use .txt to avoid triggering uvicorn reload)
+        debug_dir = Path("logs/pptx_debug")
+        debug_dir.mkdir(parents=True, exist_ok=True)
+        debug_file = debug_dir / f"slide_{len(prs.slides) + 1}_code.txt"
+        debug_file.write_text(code, encoding='utf-8')
+        print(f"[PPTX_CONVERTER] Generated code saved to: {debug_file}")
+
+        slides_before = len(prs.slides)
+
         try:
             # Load as module
             spec = importlib.util.spec_from_file_location("temp_slide_adder", str(temp_module_path))
             module = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(module)
-            
+
             # Execute add_slide_to_presentation function
             try:
                 module.add_slide_to_presentation(prs, html_str, assets_dir)
+                # Check if any picture shapes were added to the new slide
+                if len(prs.slides) > slides_before:
+                    new_slide = prs.slides[len(prs.slides) - 1]
+                    pic_shapes = [s for s in new_slide.shapes if s.shape_type == 13]  # 13 = PICTURE
+                    print(f"[PPTX_CONVERTER] Slide has {len(new_slide.shapes)} shapes, {len(pic_shapes)} are pictures")
+                    if not pic_shapes and "add_picture" in code:
+                        print(f"[PPTX_CONVERTER] WARNING: Code contains add_picture but no picture shapes found on slide!")
             except Exception as e:
                 logger.warning(
                     "Generated code error, creating fallback slide",
                     exc_info=True,
                     extra={"error": str(e)}
                 )
+                # Save failed code with error info
+                (debug_dir / f"slide_{slides_before + 1}_ERROR.txt").write_text(str(e), encoding='utf-8')
                 # Create a simple fallback slide with just a title
                 slide = prs.slides.add_slide(prs.slide_layouts[6])
                 from pptx.util import Inches, Pt
                 from pptx.enum.text import PP_ALIGN
                 from pptx.dml.color import RGBColor
-                
+
                 # Add a simple title
                 title_box = slide.shapes.add_textbox(Inches(1), Inches(3), Inches(8), Inches(1))
                 title_frame = title_box.text_frame
@@ -875,7 +990,7 @@ import os
                 title_frame.paragraphs[0].alignment = PP_ALIGN.CENTER
                 title_frame.paragraphs[0].font.size = Pt(32)
                 title_frame.paragraphs[0].font.color.rgb = RGBColor(16, 32, 37)
-            
+
         finally:
             # Cleanup temp module file
             if temp_module_path.exists():
