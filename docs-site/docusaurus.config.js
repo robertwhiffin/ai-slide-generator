@@ -93,7 +93,7 @@ const config = {
           },
           {
             // Replace 'your-username' with your actual GitHub username or organization name
-            href: 'https://github.com/your-username/tellr',
+            href: 'https://github.com/robertwhiffin/ai-slide-generator',
             label: 'GitHub',
             position: 'right',
             className: 'header-github-link',
@@ -147,7 +147,7 @@ const config = {
               {
                 // Replace 'your-username' with your actual GitHub username or organization name
                 label: 'GitHub',
-                href: 'https://github.com/your-username/tellr',
+                href: 'https://github.com/robertwhiffin/ai-slide-generator',
               },
             ],
           },

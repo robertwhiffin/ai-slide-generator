@@ -68,6 +68,14 @@ function SlidePanelComponent(props: SlidePanelProps, ref: React.Ref<SlidePanelHa
   const autoVerifyTriggeredRef = useRef<Set<string>>(new Set()); // Track which content hashes we've tried to verify
   const sessionIdRef = useRef(sessionId);
   sessionIdRef.current = sessionId;
+
+  // Deck edit counter: incremented on every user-initiated mutation (edit, delete,
+  // reorder).  Async callbacks (auto-verify, delayed getSlides) capture the counter
+  // at start and skip onSlideChange if it has since changed, preventing stale
+  // server responses from overwriting newer user edits.
+  const deckEditCounterRef = useRef(0);
+  const slideDeckRef = useRef(slideDeck);
+  slideDeckRef.current = slideDeck;
   
   const sensors = useSensors(
     useSensor(PointerSensor),
@@ -98,15 +106,15 @@ function SlidePanelComponent(props: SlidePanelProps, ref: React.Ref<SlidePanelHa
       }
 
       setIsReordering(true);
+      const editId = ++deckEditCounterRef.current;
       try {
         const newOrder = newSlides.map((_, idx) => 
           slideDeck.slides.findIndex(s => s.slide_id === newSlides[idx].slide_id)
         );
         await api.reorderSlides(newOrder, sessionId);
-        // Fetch full deck to get verification merged from verification_map
         const result = await api.getSlides(sessionId);
-        if (result.slide_deck) {
-          onSlideChange(result.slide_deck);
+        if (result.slide_deck && deckEditCounterRef.current === editId) {
+          onSlideChange?.(result.slide_deck);
         }
         clearSelection();
       } catch (error) {
@@ -125,12 +133,12 @@ function SlidePanelComponent(props: SlidePanelProps, ref: React.Ref<SlidePanelHa
     
     if (!confirm(`Delete slide ${index + 1}?`)) return;
 
+    const editId = ++deckEditCounterRef.current;
     try {
       await api.deleteSlide(index, sessionId);
-      // Fetch full deck to get verification merged from verification_map
       const result = await api.getSlides(sessionId);
-      if (result.slide_deck) {
-        onSlideChange(result.slide_deck);
+      if (result.slide_deck && deckEditCounterRef.current === editId) {
+        onSlideChange?.(result.slide_deck);
       }
       clearSelection();
     } catch (error) {
@@ -142,12 +150,12 @@ function SlidePanelComponent(props: SlidePanelProps, ref: React.Ref<SlidePanelHa
   const handleUpdateSlide = async (index: number, html: string) => {
     if (readOnly || !slideDeck || !sessionId) return;
 
+    const editId = ++deckEditCounterRef.current;
     try {
       await api.updateSlide(index, html, sessionId);
-      // Fetch updated deck
       const result = await api.getSlides(sessionId);
-      if (result.slide_deck) {
-        onSlideChange(result.slide_deck);
+      if (result.slide_deck && deckEditCounterRef.current === editId) {
+        onSlideChange?.(result.slide_deck);
       }
       clearSelection();
     } catch (error) {
@@ -160,17 +168,22 @@ function SlidePanelComponent(props: SlidePanelProps, ref: React.Ref<SlidePanelHa
     if (readOnly || !slideDeck || !sessionId) return;
 
     try {
-      // Save verification to backend but DON'T replace the whole deck
-      // This prevents overwriting other slide data (like charts)
       await api.updateSlideVerification(index, sessionId, verification);
-      
-      // Update only the verification field locally
-      const updatedSlides = [...slideDeck.slides];
-      updatedSlides[index] = { ...updatedSlides[index], verification: verification || undefined };
-      onSlideChange({ ...slideDeck, slides: updatedSlides });
+
+      // Only update the global deck state when SETTING verification (not clearing).
+      // When clearing (verification === null), this is typically called right after
+      // handleUpdateSlide's onSlideChange.  Because React hasn't re-rendered yet,
+      // slideDeck still holds the pre-edit value -- calling onSlideChange here would
+      // overwrite the edit with stale data.  SlideTile already handles the cleared
+      // badge locally via setVerificationResult(undefined).
+      if (verification !== null && onSlideChange) {
+        const currentDeck = slideDeckRef.current || slideDeck;
+        const updatedSlides = [...currentDeck.slides];
+        updatedSlides[index] = { ...updatedSlides[index], verification };
+        onSlideChange({ ...currentDeck, slides: updatedSlides });
+      }
     } catch (error) {
       console.error('Failed to update verification:', error);
-      // Don't throw - verification persistence is non-critical
     }
   };
 
@@ -337,6 +350,7 @@ function SlidePanelComponent(props: SlidePanelProps, ref: React.Ref<SlidePanelHa
     if (!sessionId || slidesToVerify.length === 0 || isAutoVerifying) return;
     const capturedSessionId = sessionId;
 
+    const editIdAtStart = deckEditCounterRef.current;
     setIsAutoVerifying(true);
     console.log(`[Auto-verify] Starting verification for ${slidesToVerify.length} slides`);
 
@@ -372,21 +386,37 @@ function SlidePanelComponent(props: SlidePanelProps, ref: React.Ref<SlidePanelHa
       return;
     }
 
-    // Refresh slides to get updated verification results (merged from verification_map)
+    // Merge only verification metadata into the CURRENT slideDeck (via ref to
+    // avoid stale closures).  We never replace the full deck here -- a stale
+    // getSlides response would overwrite user edits that landed while
+    // verification was running.
+    // Additionally, if the user mutated the deck (edit / delete / reorder)
+    // since we started, skip entirely -- the next auto-verify cycle will pick
+    // up the verification data after the user operation's own getSlides.
     try {
       const result = await api.getSlides(capturedSessionId);
-      if (result.slide_deck && sessionIdRef.current === capturedSessionId) {
-        onSlideChange(result.slide_deck);
+      const currentDeck = slideDeckRef.current;
+      if (result.slide_deck && currentDeck && deckEditCounterRef.current === editIdAtStart) {
+        const serverSlides = result.slide_deck.slides || [];
+        const mergedSlides = currentDeck.slides.map((localSlide) => {
+          const match = serverSlides.find(
+            (s: { content_hash?: string }) => s.content_hash && s.content_hash === localSlide.content_hash
+          );
+          if (match?.verification) {
+            return { ...localSlide, verification: match.verification };
+          }
+          return localSlide;
+        });
+        onSlideChange?.({ ...currentDeck, slides: mergedSlides });
       }
     } catch (error) {
-      console.error('[Auto-verify] Failed to refresh slides:', error);
+      console.error('[Auto-verify] Failed to refresh verification:', error);
     }
 
     setVerifyingSlides(new Set());
     setIsAutoVerifying(false);
     console.log('[Auto-verify] Completed');
 
-    // Notify parent that verification is complete (refresh version list)
     onVerificationComplete?.();
   }, [sessionId, isAutoVerifying, onSlideChange, onVerificationComplete]);
 

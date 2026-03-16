@@ -141,8 +141,8 @@ async def auth_url(
     try:
         auth = _get_auth(db)
         redirect_uri = _build_redirect_uri(request)
-        state = json.dumps({"user": _get_user_identity()})
-        url = auth.get_auth_url(redirect_uri=redirect_uri, state=state)
+        state_data = {"user": _get_user_identity()}
+        url, _ = auth.get_auth_url(redirect_uri=redirect_uri, state_data=state_data)
 
         return AuthUrlResponse(url=url)
     except GoogleSlidesAuthError as exc:
@@ -180,18 +180,29 @@ async def auth_callback(
 
         auth = _get_auth(db)
         redirect_uri = _build_redirect_uri(request)
-        auth.authorize(code=code, redirect_uri=redirect_uri)
+        code_verifier = state_data.get("cv")
+        logger.info(
+            "OAuth callback: exchanging code for tokens",
+            extra={"redirect_uri": redirect_uri, "user": user, "has_cv": bool(code_verifier)},
+        )
+        auth.authorize(code=code, redirect_uri=redirect_uri, code_verifier=code_verifier)
         logger.info(
             "Google Slides OAuth callback successful",
             extra={"user": _get_user_identity()},
         )
-    except (GoogleSlidesAuthError, ValueError, json.JSONDecodeError) as exc:
-        logger.error("OAuth callback failed", exc_info=True)
+    except Exception as exc:
+        logger.error(
+            "OAuth callback failed: %s: %s",
+            type(exc).__name__,
+            exc,
+            exc_info=True,
+        )
+        safe_msg = f"{type(exc).__name__}: {exc}"
         return HTMLResponse(
             content=f"""
             <html><body>
                 <h2>Authorization Failed</h2>
-                <p>{exc}</p>
+                <p>{safe_msg}</p>
                 <script>
                     if (window.opener) {{
                         window.opener.postMessage({{ type: 'google-slides-auth', success: false }}, '*');
@@ -272,6 +283,12 @@ async def start_google_slides_export(
 
     if not slide_deck or not slide_deck.get("slides"):
         raise HTTPException(status_code=404, detail="No slides available")
+
+    # Substitute {{image:ID}} placeholders with base64 data URIs
+    from src.utils.image_utils import substitute_deck_dict_images
+    from src.core.database import get_db_session
+    with get_db_session() as db:
+        substitute_deck_dict_images(slide_deck, db)
 
     slides_data = slide_deck.get("slides", [])
     total = len(slides_data)

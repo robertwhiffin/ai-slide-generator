@@ -11,7 +11,7 @@
 From a **Databricks notebook**:
 
 ```python
-%pip install --upgrade databricks-tellr databricks-sdk==0.73.0
+%pip install --upgrade databricks-tellr databricks-sdk==0.96.0
 dbutils.library.restartPython()
 ```
 

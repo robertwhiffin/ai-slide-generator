@@ -8,7 +8,7 @@ dynamic = ["version"]
 description = "AI-powered slide generation using Databricks"
 requires-python = ">=3.10"
 dependencies = [
-    "databricks-sdk>=0.85.0",
+    "databricks-sdk>=0.91.0",
     "fastapi>=0.104.0",
     "uvicorn[standard]>=0.24.0",
     "pydantic>=2.4.0",
@@ -38,6 +38,7 @@ dependencies = [
     "python-pptx>=0.6.0",
     "playwright>=1.40.0",
     "Pillow>=10.0.0",
+    "svgpathtools>=1.6.0",
     "google-api-python-client>=2.100.0",
     "google-auth-oauthlib>=1.2.0",
     "google-auth-httplib2>=0.2.0",
