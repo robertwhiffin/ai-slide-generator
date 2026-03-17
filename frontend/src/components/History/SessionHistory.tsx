@@ -3,10 +3,13 @@ import { api } from '../../services/api';
 import type { Session } from '../../services/api';
 interface SessionHistoryProps {
   onSessionSelect: (sessionId: string) => void;
+  onBack?: () => void;
+  refreshKey?: number;
 }
 
 export const SessionHistory: React.FC<SessionHistoryProps> = ({
   onSessionSelect,
+  refreshKey,
 }) => {
   const [sessions, setSessions] = useState<Session[]>([]);
   const [loading, setLoading] = useState(true);
@@ -30,7 +33,7 @@ export const SessionHistory: React.FC<SessionHistoryProps> = ({
 
   useEffect(() => {
     loadSessions();
-  }, []);
+  }, [refreshKey]); // Reload when refresh is triggered
 
   const handleRename = async (sessionId: string) => {
     if (!editTitle.trim()) return;
@@ -85,9 +88,9 @@ export const SessionHistory: React.FC<SessionHistoryProps> = ({
   return (
     <div className="max-w-6xl mx-auto">
       <div className="mb-6">
-        <h2 className="text-2xl font-bold text-gray-900">My Sessions</h2>
+        <h2 className="text-2xl font-bold text-gray-900">All Decks</h2>
         <p className="text-sm text-gray-500 mt-1">
-          {sessions.length} session{sessions.length !== 1 ? 's' : ''}
+          {sessions.length} session{sessions.length !== 1 ? 's' : ''} saved
         </p>
       </div>
 
@@ -209,14 +212,12 @@ export const SessionHistory: React.FC<SessionHistoryProps> = ({
                   </td>
                   <td className="px-3 py-3 text-center text-sm font-medium">
                     <div className="flex items-center justify-center gap-2">
-                      {session.has_slide_deck && (
-                        <button
-                          onClick={() => handleRestore(session.session_id)}
-                          className="text-blue-600 hover:text-blue-900 text-xs"
-                        >
-                          Restore
-                        </button>
-                      )}
+                      <button
+                        onClick={() => handleRestore(session.session_id)}
+                        className="text-blue-600 hover:text-blue-900 text-xs"
+                      >
+                        Open
+                      </button>
                       <button
                         onClick={() => {
                           setEditingId(session.session_id);

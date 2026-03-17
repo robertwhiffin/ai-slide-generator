@@ -59,6 +59,8 @@ export const ProfileSelector: React.FC<ProfileSelectorProps> = ({
     <div className="relative" ref={dropdownRef}>
       {/* Selector Button */}
       <button
+        type="button"
+        aria-label="Profile"
         onClick={() => setIsOpen(!isOpen)}
         className={`flex items-center gap-2 px-3 py-2 bg-white border border-gray-300 rounded transition-colors text-sm ${
           disabled ? 'opacity-50 cursor-not-allowed' : 'hover:bg-gray-50'
@@ -67,7 +69,7 @@ export const ProfileSelector: React.FC<ProfileSelectorProps> = ({
         title={disabled ? 'Profile switching disabled during generation' : undefined}
       >
         <span className="text-gray-700">
-          Profile: <strong>{currentProfile?.name || 'Loading...'}</strong>
+          <strong>{currentProfile?.name || 'Loading...'}</strong>
         </span>
         {currentProfile?.is_default && (
           <span className="px-2 py-0.5 bg-blue-100 text-blue-700 text-xs rounded">

@@ -18,14 +18,21 @@ import hashlib
 import logging
 import os
 import threading
+import time
 from contextvars import ContextVar
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Tuple
 
 import yaml
 from databricks.sdk import WorkspaceClient
 
 logger = logging.getLogger(__name__)
+
+# User client cache: avoid creating a new client on every request (e.g. poll every 2s)
+_USER_CLIENT_CACHE_TTL_SEC = 300  # 5 minutes
+_USER_CLIENT_CACHE_MAX_SIZE = 100
+_user_client_cache: dict[str, Tuple[WorkspaceClient, float]] = {}
+_user_client_cache_lock = threading.Lock()
 
 # =============================================================================
 # Product Tracking Constants
@@ -372,12 +379,12 @@ def create_user_client(token: str) -> WorkspaceClient:
     if not host:
         raise DatabricksClientError("DATABRICKS_HOST environment variable not set")
 
-    # Diagnostic logging: check if token looks like service principal ID
+    # Diagnostic logging (debug to avoid log spam on every request/poll)
     client_id_env = os.getenv("DATABRICKS_CLIENT_ID", "")
     token_prefix = token[:20] if len(token) > 20 else token
     is_sp_token = client_id_env and token.startswith(client_id_env)
 
-    logger.warning(
+    logger.debug(
         "create_user_client: creating client",
         extra={
             "token_prefix": token_prefix,
@@ -427,7 +434,7 @@ def create_user_client(token: str) -> WorkspaceClient:
             product_version=version,
         )
 
-        logger.warning(
+        logger.debug(
             "create_user_client: client created successfully",
             extra={"product": product_name, "product_version": version},
         )
@@ -436,6 +443,37 @@ def create_user_client(token: str) -> WorkspaceClient:
         raise DatabricksClientError(
             f"Failed to create user Databricks client: {e}"
         ) from e
+
+
+def _user_client_cache_key(token: str) -> str:
+    return hashlib.sha256(token.encode()).hexdigest()
+
+
+def get_or_create_user_client(token: str) -> WorkspaceClient:
+    """
+    Return a cached user-scoped WorkspaceClient when possible to avoid creating
+    a new client on every request (e.g. chat poll every 2s). Uses a short TTL
+    so token refresh is still respected.
+    """
+    now = time.monotonic()
+    key = _user_client_cache_key(token)
+    with _user_client_cache_lock:
+        if key in _user_client_cache:
+            client, expiry = _user_client_cache[key]
+            if now < expiry:
+                logger.debug("OBO auth: using cached user client")
+                return client
+            del _user_client_cache[key]
+        # Evict oldest entries if at capacity
+        while len(_user_client_cache) >= _USER_CLIENT_CACHE_MAX_SIZE:
+            oldest_key = min(
+                _user_client_cache.keys(),
+                key=lambda k: _user_client_cache[k][1],
+            )
+            del _user_client_cache[oldest_key]
+        client = create_user_client(token)
+        _user_client_cache[key] = (client, now + _USER_CLIENT_CACHE_TTL_SEC)
+        return client
 
 
 def set_user_client(client: Optional[WorkspaceClient]) -> None:

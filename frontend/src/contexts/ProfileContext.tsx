@@ -5,7 +5,7 @@
  * ensuring all components see the same profile state.
  */
 
-import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
+import React, { createContext, useContext, useState, useEffect, useCallback, useRef } from 'react';
 import type { 
   Profile, 
   ProfileCreate, 
@@ -47,6 +47,12 @@ export const ProfileProvider: React.FC<React.PropsWithChildren> = ({ children })
   // Track the last loaded profile ID (may differ from is_default)
   const [loadedProfileId, setLoadedProfileId] = useState<number | null>(readStoredProfileId);
 
+  // Ref-tracked loadedProfileId so loadProfiles can read the latest value without
+  // needing it in its dependency array (which would create a new identity on every
+  // profile load and re-fire the mount effect unnecessarily).
+  const loadedProfileIdRef = useRef(loadedProfileId);
+  loadedProfileIdRef.current = loadedProfileId;
+
   // Persist loadedProfileId to localStorage so it survives page reloads
   useEffect(() => {
     if (loadedProfileId !== null) {
@@ -63,13 +69,16 @@ export const ProfileProvider: React.FC<React.PropsWithChildren> = ({ children })
     try {
       setLoading(true);
       setError(null);
-      
+
       const data = await configApi.listProfiles();
       setProfiles(data);
-      
+
+      // Read via ref so this callback stays stable (no loadedProfileId in deps).
+      const currentLoadedId = loadedProfileIdRef.current;
+
       // Use loaded profile if we have one, otherwise fall back to default
-      if (loadedProfileId) {
-        const loadedProfile = data.find(p => p.id === loadedProfileId);
+      if (currentLoadedId) {
+        const loadedProfile = data.find(p => p.id === currentLoadedId);
         if (loadedProfile) {
           setCurrentProfile(loadedProfile);
         } else {
@@ -84,15 +93,15 @@ export const ProfileProvider: React.FC<React.PropsWithChildren> = ({ children })
         setCurrentProfile(defaultProfile || null);
       }
     } catch (err) {
-      const message = err instanceof ConfigApiError 
-        ? err.message 
+      const message = err instanceof ConfigApiError
+        ? err.message
         : 'Failed to load profiles';
       setError(message);
       console.error('Error loading profiles:', err);
     } finally {
       setLoading(false);
     }
-  }, [loadedProfileId]);
+  }, []);
 
   /**
    * Load profiles on mount
@@ -220,6 +229,13 @@ export const ProfileProvider: React.FC<React.PropsWithChildren> = ({ children })
         await loadProfiles();
       }
     } catch (err) {
+      // Profile was deleted: clear stored id, fall back to default, show friendly message
+      if (err instanceof ConfigApiError && err.status === 404 && err.message.includes('deleted')) {
+        setLoadedProfileId(null);
+        await loadProfiles();
+        setError('That profile was deleted. Switched to default profile.');
+        return;
+      }
       const message = err instanceof ConfigApiError 
         ? err.message 
         : 'Failed to load profile';

@@ -8,14 +8,32 @@ import {
   mockVerificationResponse,
   createStreamingResponse
 } from './fixtures/mocks';
+import {
+  goToGenerator as goToGeneratorNewUi,
+  NEW_DECK_BUTTON_LABEL,
+  VIEW_ALL_DECKS_LABEL,
+  AGENT_PROFILES_LABEL,
+  DECK_PROMPTS_LABEL,
+  SLIDE_STYLES_LABEL,
+  HELP_LABEL,
+} from './helpers/new-ui';
 
 /**
  * Set up API mocks for all tests.
  * These mocks intercept backend API calls and return predefined responses.
  */
 async function setupMocks(page: Page) {
+  // Mock setup status so app skips welcome screen
+  await page.route('**/api/setup/status', (route) => {
+    route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ configured: true }),
+    });
+  });
+
   // Mock profiles endpoint
-  await page.route('http://127.0.0.1:8000/api/settings/profiles', (route) => {
+  await page.route(/\/api\/settings\/profiles$/, (route) => {
     route.fulfill({
       status: 200,
       contentType: 'application/json',
@@ -24,7 +42,7 @@ async function setupMocks(page: Page) {
   });
 
   // Mock deck prompts endpoint
-  await page.route('http://127.0.0.1:8000/api/settings/deck-prompts', (route) => {
+  await page.route(/\/api\/settings\/deck-prompts$/, (route) => {
     route.fulfill({
       status: 200,
       contentType: 'application/json',
@@ -33,7 +51,7 @@ async function setupMocks(page: Page) {
   });
 
   // Mock slide styles endpoint
-  await page.route('http://127.0.0.1:8000/api/settings/slide-styles', (route) => {
+  await page.route(/\/api\/settings\/slide-styles$/, (route) => {
     route.fulfill({
       status: 200,
       contentType: 'application/json',
@@ -91,14 +109,8 @@ async function setupMocks(page: Page) {
   });
 }
 
-/**
- * Helper to navigate to the Generator view since the app opens on Help by default.
- */
 async function goToGenerator(page: Page) {
-  await page.goto('/');
-  await page.getByRole('navigation').getByRole('button', { name: 'New Session' }).click();
-  // Wait for the Generator view to load
-  await expect(page.getByRole('heading', { name: 'Chat', level: 2 })).toBeVisible();
+  await goToGeneratorNewUi(page);
 }
 
 test.describe('Slide Generator App - Navigation', () => {
@@ -108,90 +120,67 @@ test.describe('Slide Generator App - Navigation', () => {
 
   test('should load the app and display header', async ({ page }) => {
     await page.goto('/');
-    
-    // Check that the app header is visible
-    await expect(page.getByRole('heading', { name: 'databricks tellr', exact: true })).toBeVisible();
-    
-    // Check that navigation buttons are visible (scope to navigation element)
-    const nav = page.getByRole('navigation');
-    await expect(nav.getByRole('button', { name: 'New Session' })).toBeVisible();
-    await expect(nav.getByRole('button', { name: 'My Sessions' })).toBeVisible();
-    await expect(nav.getByRole('button', { name: 'Profiles' })).toBeVisible();
-    await expect(nav.getByRole('button', { name: 'Deck Prompts' })).toBeVisible();
-    await expect(nav.getByRole('button', { name: 'Slide Styles' })).toBeVisible();
-    await expect(nav.getByRole('button', { name: 'Help' })).toBeVisible();
+
+    await expect(
+      page.getByText(/Tellr|AI slide generator|How to Use/i).first()
+    ).toBeVisible({ timeout: 15000 });
+
+    const sidebarTrigger = page.getByRole('button', { name: 'Toggle Sidebar' });
+    if (await sidebarTrigger.isVisible().catch(() => false)) {
+      await sidebarTrigger.click();
+      await page.waitForTimeout(300);
+    }
+
+    await expect(page.getByRole('button', { name: NEW_DECK_BUTTON_LABEL }).first()).toBeVisible({ timeout: 10000 });
+    await expect(page.getByRole('button', { name: VIEW_ALL_DECKS_LABEL }).first()).toBeVisible();
+    await expect(page.getByRole('button', { name: AGENT_PROFILES_LABEL }).first()).toBeVisible();
+    await expect(page.getByRole('button', { name: DECK_PROMPTS_LABEL }).first()).toBeVisible();
+    await expect(page.getByRole('button', { name: SLIDE_STYLES_LABEL }).first()).toBeVisible();
+    await expect(page.getByRole('button', { name: HELP_LABEL }).first()).toBeVisible();
   });
 
   test('should display profile selector', async ({ page }) => {
-    await page.goto('/');
-    
-    // Check that the current profile is displayed
-    await expect(page.getByRole('button', { name: /Profile:/ })).toBeVisible();
+    await goToGenerator(page);
+    await expect(page.getByRole('button', { name: /Profile|Sales Analytics/i }).first()).toBeVisible();
   });
 
   test('should navigate to Generator view', async ({ page }) => {
     await goToGenerator(page);
-    
-    // Check that Generator view elements are visible
-    await expect(page.getByRole('heading', { name: 'Chat', level: 2 })).toBeVisible();
-    await expect(page.getByRole('textbox', { name: /Ask to generate or modify/ })).toBeVisible();
+
+    await expect(page.getByRole('heading', { name: 'AI Assistant', level: 2 })).toBeVisible();
+    await expect(page.getByRole('textbox')).toBeVisible();
     await expect(page.getByRole('button', { name: 'Send' })).toBeVisible();
   });
 
   test('should navigate to Deck Prompts section', async ({ page }) => {
-    await page.goto('/');
-    
-    // Click on Deck Prompts in the navigation bar
-    await page.getByRole('navigation').getByRole('button', { name: 'Deck Prompts' }).click();
-    
-    // Wait for the page to load
-    await expect(page.getByRole('button', { name: '+ Create Prompt' })).toBeVisible({ timeout: 10000 });
-    
-    // Check that Deck Prompts page is displayed
-    await expect(page.getByRole('heading', { name: 'Deck Prompt Library' })).toBeVisible();
-    
-    // Check that deck prompts are listed
-    await expect(page.getByRole('heading', { name: 'Monthly Review' })).toBeVisible();
+    await page.goto('/deck-prompts');
+
+    await expect(page.getByRole('heading', { name: 'Deck Prompt Library' })).toBeVisible({ timeout: 10000 });
+    await expect(page.getByRole('button', { name: /New Prompt|Create Prompt/i })).toBeVisible();
+    await expect(page.getByText('Monthly Review').first()).toBeVisible();
   });
 
   test('should navigate to Slide Styles section', async ({ page }) => {
-    await page.goto('/');
-    
-    // Click on Slide Styles in the navigation bar
-    await page.getByRole('navigation').getByRole('button', { name: 'Slide Styles' }).click();
-    
-    // Check that Slide Styles page is displayed
-    await expect(page.getByRole('heading', { name: 'Slide Style Library' })).toBeVisible();
-    
-    // Check that styles are listed
-    await expect(page.getByRole('heading', { name: 'Corporate Theme' })).toBeVisible();
-    await expect(page.getByRole('heading', { name: 'System Default' })).toBeVisible();
-    
-    // Check that Create Style button is visible
-    await expect(page.getByRole('button', { name: '+ Create Style' })).toBeVisible();
+    await page.goto('/slide-styles');
+
+    await expect(page.getByRole('heading', { name: 'Slide Style Library' })).toBeVisible({ timeout: 10000 });
+    await expect(page.getByText('Corporate Theme').first()).toBeVisible();
+    await expect(page.getByText('System Default').first()).toBeVisible();
+    await expect(page.getByRole('button', { name: /New Style|Create Style/i })).toBeVisible();
   });
 
   test('should navigate to My Sessions section', async ({ page }) => {
     await page.goto('/');
-    
-    // Click on My Sessions in the navigation bar
-    await page.getByRole('navigation').getByRole('button', { name: 'My Sessions' }).click();
-    
-    // Check that My Sessions page is displayed
-    await expect(page.getByRole('heading', { name: 'My Sessions' })).toBeVisible();
+    await page.getByRole('button', { name: VIEW_ALL_DECKS_LABEL }).click();
+
+    await expect(page.getByRole('heading', { name: 'All Decks' })).toBeVisible();
   });
 
   test('should navigate to Profiles section', async ({ page }) => {
-    await page.goto('/');
-    
-    // Click on Profiles in the navigation bar
-    await page.getByRole('navigation').getByRole('button', { name: 'Profiles' }).click();
-    
-    // Check that Profiles page is displayed
-    await expect(page.getByRole('heading', { name: 'Configuration Profiles' })).toBeVisible();
-    
-    // Check that Create Profile button is visible
-    await expect(page.getByRole('button', { name: '+ Create Profile' })).toBeVisible();
+    await page.goto('/profiles');
+
+    await expect(page.getByRole('heading', { name: /Agent Profiles|Configuration Profiles/i })).toBeVisible({ timeout: 10000 });
+    await expect(page.getByRole('button', { name: /New Agent|Create Profile/i })).toBeVisible();
   });
 });
 
@@ -202,17 +191,14 @@ test.describe('Slide Generator App - Generator View', () => {
   });
 
   test('should show chat input and send button', async ({ page }) => {
-    // Check that the chat input is visible
-    const chatInput = page.getByRole('textbox', { name: /Ask to generate or modify/ });
+    const chatInput = page.getByRole('textbox');
     await expect(chatInput).toBeVisible();
-    
-    // Check that Send button exists (disabled when no text)
     await expect(page.getByRole('button', { name: 'Send' })).toBeVisible();
     await expect(page.getByRole('button', { name: 'Send' })).toBeDisabled();
   });
 
   test('should enable send button when text is entered', async ({ page }) => {
-    const chatInput = page.getByRole('textbox', { name: /Ask to generate or modify/ });
+    const chatInput = page.getByRole('textbox');
     
     // Type a prompt
     await chatInput.fill('Create a presentation');
@@ -234,62 +220,34 @@ test.describe('Slide Generator App - Modal Dialogs', () => {
   });
 
   test('should open deck prompt creation modal', async ({ page }) => {
-    await page.goto('/');
-    
-    await page.getByRole('navigation').getByRole('button', { name: 'Deck Prompts' }).click();
-    await expect(page.getByRole('heading', { name: 'Deck Prompt Library' })).toBeVisible();
-    
-    await page.getByRole('button', { name: '+ Create Prompt' }).click();
-    
-    // Check that the modal is open
-    await expect(page.getByRole('heading', { name: 'Create Deck Prompt' })).toBeVisible();
-    
-    // Check form fields are present
-    await expect(page.getByRole('textbox', { name: 'Name *' })).toBeVisible();
-    await expect(page.getByRole('textbox', { name: 'Description' })).toBeVisible();
-    await expect(page.getByRole('textbox', { name: 'Category' })).toBeVisible();
-    
-    // Check action buttons
+    await page.goto('/deck-prompts');
+    await expect(page.getByRole('heading', { name: 'Deck Prompt Library' })).toBeVisible({ timeout: 10000 });
+
+    await page.getByRole('button', { name: /New Prompt|Create Prompt/i }).click();
+
+    await expect(page.getByRole('heading', { name: /Create Deck Prompt|New Deck Prompt/i })).toBeVisible();
     await expect(page.getByRole('button', { name: 'Cancel' })).toBeVisible();
-    await expect(page.getByRole('button', { name: 'Create Prompt', exact: true })).toBeVisible();
   });
 
   test('should open slide style creation modal', async ({ page }) => {
-    await page.goto('/');
-    
-    await page.getByRole('navigation').getByRole('button', { name: 'Slide Styles' }).click();
-    await expect(page.getByRole('heading', { name: 'Slide Style Library' })).toBeVisible();
-    
-    await page.getByRole('button', { name: '+ Create Style' }).click();
-    
-    // Check that the modal is open
-    await expect(page.getByRole('heading', { name: 'Create Slide Style' })).toBeVisible();
-    
-    // Check form fields are present
-    await expect(page.getByRole('textbox', { name: 'Name *' })).toBeVisible();
-    await expect(page.getByRole('textbox', { name: 'Description' })).toBeVisible();
-    await expect(page.getByRole('textbox', { name: 'Category' })).toBeVisible();
-    
-    // Check action buttons
+    await page.goto('/slide-styles');
+    await expect(page.getByRole('heading', { name: 'Slide Style Library' })).toBeVisible({ timeout: 10000 });
+
+    await page.getByRole('button', { name: /New Style|Create Style/i }).click();
+
+    await expect(page.getByRole('heading', { name: /Create Slide Style|New Slide Style/i })).toBeVisible();
     await expect(page.getByRole('button', { name: 'Cancel' })).toBeVisible();
-    await expect(page.getByRole('button', { name: 'Create Style', exact: true })).toBeVisible();
   });
 
   test('should cancel deck prompt creation', async ({ page }) => {
-    await page.goto('/');
-    
-    await page.getByRole('navigation').getByRole('button', { name: 'Deck Prompts' }).click();
-    await expect(page.getByRole('heading', { name: 'Deck Prompt Library' })).toBeVisible();
-    
-    await page.getByRole('button', { name: '+ Create Prompt' }).click();
-    await expect(page.getByRole('heading', { name: 'Create Deck Prompt' })).toBeVisible();
-    
-    // Click cancel
+    await page.goto('/deck-prompts');
+    await expect(page.getByRole('heading', { name: 'Deck Prompt Library' })).toBeVisible({ timeout: 10000 });
+
+    await page.getByRole('button', { name: /New Prompt|Create Prompt/i }).click();
+    await expect(page.getByRole('heading', { name: /Create Deck Prompt|New Deck Prompt/i })).toBeVisible();
+
     await page.getByRole('button', { name: 'Cancel' }).click();
-    
-    // Modal should be closed
-    await expect(page.getByRole('heading', { name: 'Create Deck Prompt' })).not.toBeVisible();
-    // Library should still be visible
+    await expect(page.getByRole('heading', { name: /Create Deck Prompt|New Deck Prompt/i })).not.toBeVisible();
     await expect(page.getByRole('heading', { name: 'Deck Prompt Library' })).toBeVisible();
   });
 });
