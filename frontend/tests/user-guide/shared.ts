@@ -221,47 +221,44 @@ export async function setupUserGuideMocks(page: Page): Promise<void> {
 }
 
 /**
- * Navigate to the Generator page.
+ * Navigate to the Generator page (new UI: New Deck → session edit URL).
  */
 export async function goToGenerator(page: Page): Promise<void> {
   await page.goto('/');
-  await page.getByRole('navigation').getByRole('button', { name: 'New Session' }).click();
-  await expect(page.getByRole('heading', { name: 'Chat', level: 2 })).toBeVisible();
+  await page.getByRole('button', { name: 'New Deck' }).click();
+  await page.waitForURL(/\/sessions\/[^/]+\/edit/);
+  await page.getByRole('textbox').waitFor({ state: 'visible', timeout: 10000 });
 }
 
 /**
- * Navigate to the Profiles page.
+ * Navigate to the Profiles page (new UI: Agent profiles or direct URL).
  */
 export async function goToProfiles(page: Page): Promise<void> {
-  await page.goto('/');
-  await page.getByRole('navigation').getByRole('button', { name: 'Profiles' }).click();
-  await expect(page.getByRole('heading', { name: 'Configuration Profiles' })).toBeVisible();
+  await page.goto('/profiles');
+  await expect(page.getByRole('heading', { name: /Agent Profiles|Configuration Profiles/i })).toBeVisible();
 }
 
 /**
- * Navigate to Deck Prompts page.
+ * Navigate to Deck Prompts page (new UI: direct URL).
  */
 export async function goToDeckPrompts(page: Page): Promise<void> {
-  await page.goto('/');
-  await page.getByRole('navigation').getByRole('button', { name: 'Deck Prompts' }).click();
+  await page.goto('/deck-prompts');
   await expect(page.getByRole('heading', { name: 'Deck Prompt Library' })).toBeVisible();
 }
 
 /**
- * Navigate to Slide Styles page.
+ * Navigate to Slide Styles page (new UI: direct URL).
  */
 export async function goToSlideStyles(page: Page): Promise<void> {
-  await page.goto('/');
-  await page.getByRole('navigation').getByRole('button', { name: 'Slide Styles' }).click();
+  await page.goto('/slide-styles');
   await expect(page.getByRole('heading', { name: 'Slide Style Library' })).toBeVisible();
 }
 
 /**
- * Navigate to the Image Library page.
+ * Navigate to the Image Library page (new UI: Images button or direct URL).
  */
 export async function goToImageLibrary(page: Page): Promise<void> {
-  await page.goto('/');
-  await page.getByRole('navigation').getByRole('button', { name: 'Images' }).click();
+  await page.goto('/images');
   await expect(page.getByRole('heading', { name: 'Image Library' })).toBeVisible();
 }
 

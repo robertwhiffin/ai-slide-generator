@@ -9,7 +9,7 @@ import secrets
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 
 from src.core.database import get_db_session
 from src.database.models.session import (
@@ -179,7 +179,8 @@ class SessionManager:
                 query = query.filter(UserSession.user_id == user_id)
 
             sessions = (
-                query.order_by(UserSession.last_activity.desc())
+                query.options(joinedload(UserSession.slide_deck))
+                .order_by(UserSession.last_activity.desc())
                 .limit(limit)
                 .all()
             )
@@ -200,6 +201,7 @@ class SessionManager:
                     "last_activity": s.last_activity.isoformat(),
                     "message_count": len(s.messages),
                     "has_slide_deck": s.slide_deck is not None,
+                    "slide_count": s.slide_deck.slide_count if s.slide_deck is not None else 0,
                     "profile_id": s.profile_id,
                     "profile_name": s.profile_name,
                     "profile_deleted": s.profile_id in deleted_profiles if s.profile_id else False,
@@ -246,11 +248,24 @@ class SessionManager:
             return True
 
     def rename_session(self, session_id: str, title: str) -> Dict[str, Any]:
-        """Rename a session.
+        """Rename a session (delegates to update_session)."""
+        return self.update_session(session_id, title=title)
+
+    def update_session(
+        self,
+        session_id: str,
+        title: Optional[str] = None,
+        slide_count: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """Update session metadata (title and/or deck slide count).
+
+        Persists title and slide_count so list_sessions shows correct name and count.
 
         Args:
-            session_id: Session to rename
-            title: New title for the session
+            session_id: Session to update
+            title: New session title (optional)
+            slide_count: New slide count for the session's deck (optional).
+                Only applied if the session has a slide_deck.
 
         Returns:
             Updated session info
@@ -260,12 +275,17 @@ class SessionManager:
         """
         with get_db_session() as db:
             session = self._get_session_or_raise(db, session_id)
-            session.title = title
+            if title is not None:
+                session.title = title
+                if session.slide_deck is not None:
+                    session.slide_deck.title = title
+            if slide_count is not None and session.slide_deck is not None:
+                session.slide_deck.slide_count = slide_count
             session.last_activity = datetime.utcnow()
 
             logger.info(
-                "Renamed session",
-                extra={"session_id": session_id, "new_title": title},
+                "Updated session",
+                extra={"session_id": session_id, "title": title, "slide_count": slide_count},
             )
 
             return {

@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { Routes, Route, Navigate, useLocation } from 'react-router-dom';
+import { Routes, Route, Navigate } from 'react-router-dom';
 import { AppLayout } from './components/Layout/AppLayout';
 import { AdminPage } from './components/Admin/AdminPage';
 import { WelcomeSetup } from './components/Setup';
@@ -11,22 +11,25 @@ import { GenerationProvider } from './contexts/GenerationContext';
 import { ToastProvider } from './contexts/ToastContext';
 
 function AppRoutes() {
-  // Use location key to force remount when route changes
-  const location = useLocation();
+  // Single stable key so AppLayout (and sidebar / Recent Decks) stays mounted when
+  // switching between help, profiles, deck-prompts, sessions/… — only the main
+  // content area updates via initialView sync. Avoids refetching Recent Decks on
+  // every nav and keeps partial rendering.
+  const layoutKey = "app-layout";
 
   return (
     <Routes>
-      <Route path="/" element={<AppLayout key="help" initialView="help" />} />
-      <Route path="/help" element={<AppLayout key="help" initialView="help" />} />
-      <Route path="/profiles" element={<AppLayout key="profiles" initialView="profiles" />} />
-      <Route path="/deck-prompts" element={<AppLayout key="deck_prompts" initialView="deck_prompts" />} />
-      <Route path="/slide-styles" element={<AppLayout key="slide_styles" initialView="slide_styles" />} />
-      <Route path="/images" element={<AppLayout key="images" initialView="images" />} />
-      <Route path="/history" element={<AppLayout key="history" initialView="history" />} />
+      <Route path="/" element={<AppLayout key={layoutKey} initialView="help" />} />
+      <Route path="/help" element={<AppLayout key={layoutKey} initialView="help" />} />
+      <Route path="/profiles" element={<AppLayout key={layoutKey} initialView="profiles" />} />
+      <Route path="/deck-prompts" element={<AppLayout key={layoutKey} initialView="deck_prompts" />} />
+      <Route path="/slide-styles" element={<AppLayout key={layoutKey} initialView="slide_styles" />} />
+      <Route path="/images" element={<AppLayout key={layoutKey} initialView="images" />} />
+      <Route path="/history" element={<AppLayout key={layoutKey} initialView="history" />} />
       <Route path="/admin" element={<AdminPage />} />
       <Route path="/feedback" element={<Navigate to="/admin" replace />} />
-      <Route path="/sessions/:sessionId/edit" element={<AppLayout key={`edit-${location.pathname}`} initialView="main" />} />
-      <Route path="/sessions/:sessionId/view" element={<AppLayout key={`view-${location.pathname}`} initialView="main" viewOnly={true} />} />
+      <Route path="/sessions/:sessionId/edit" element={<AppLayout key={layoutKey} initialView="main" />} />
+      <Route path="/sessions/:sessionId/view" element={<AppLayout key={layoutKey} initialView="main" viewOnly={true} />} />
       <Route path="*" element={<Navigate to="/help" replace />} />
     </Routes>
   );

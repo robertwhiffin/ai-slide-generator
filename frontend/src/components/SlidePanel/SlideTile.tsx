@@ -1,7 +1,8 @@
 import React, { useMemo, useRef, useState, useEffect } from 'react';
 import { useSortable } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
-import { FiEdit, FiTrash2, FiMove, FiMessageSquare, FiDatabase, FiMaximize2 } from 'react-icons/fi';
+import { GripVertical, Edit3, Trash2, MessageSquare, Database, Maximize2, Loader2 } from 'lucide-react';
+import { Button } from '@/ui/button';
 import { Tooltip } from '../common/Tooltip';
 import type { Slide, SlideDeck } from '../../types/slide';
 import type { VerificationResult } from '../../types/verification';
@@ -21,6 +22,7 @@ interface SlideTileProps {
   isAutoVerifying?: boolean;  // True when auto-verification is running for this slide
   onOptimize?: () => void;
   isOptimizing?: boolean;
+  readOnly?: boolean;
 }
 
 const SLIDE_WIDTH = 1280;
@@ -38,10 +40,14 @@ export const SlideTile: React.FC<SlideTileProps> = ({
   isAutoVerifying = false,
   onOptimize,
   isOptimizing = false,
+  readOnly = false,
 }) => {
   const [isEditing, setIsEditing] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
+  const iframeRef = useRef<HTMLIFrameElement>(null);
   const [scale, setScale] = useState(1);
+  /** Content height from iframe (px, unscaled); used so card height fits content and avoids inner scrollbar */
+  const [contentHeight, setContentHeight] = useState<number>(SLIDE_HEIGHT);
   const { selectedIndices, setSelection } = useSelection();
   
   // Verification state - initialize from persisted slide.verification
@@ -158,6 +164,7 @@ export const SlideTile: React.FC<SlideTileProps> = ({
   // Each slide is rendered in its own iframe, so no IIFE wrapping needed
   const slideHTML = useMemo(() => {
     const slideScripts = slide.scripts || '';
+    const slideId = slide.slide_id.replace(/'/g, "\\'");
     return `
 <!DOCTYPE html>
 <html lang="en">
@@ -172,13 +179,41 @@ export const SlideTile: React.FC<SlideTileProps> = ({
 <body>
   ${slide.html}
   ${slideScripts ? `<script>${slideScripts}</script>` : ''}
+  <script>
+(function() {
+  function sendHeight() {
+    var h = Math.max(document.documentElement.scrollHeight, document.documentElement.offsetHeight, document.body.scrollHeight, document.body.offsetHeight);
+    try { window.parent.postMessage({ type: 'slideHeight', slideId: '${slideId}', height: h }, '*'); } catch (e) {}
+  }
+  if (document.readyState === 'complete') sendHeight(); else window.addEventListener('load', sendHeight);
+  setTimeout(sendHeight, 100);
+  setTimeout(sendHeight, 500);
+})();
+</script>
 </body>
 </html>
     `.trim();
-  }, [slide.html, slide.scripts, slideDeck.css, slideDeck.external_scripts]);
+  }, [slide.html, slide.scripts, slide.slide_id, slideDeck.css, slideDeck.external_scripts]);
 
-  // Calculate scaled dimensions
-  const scaledHeight = SLIDE_HEIGHT * scale;
+  // Listen for height from iframe (postMessage) so card can adapt and avoid inner scrollbar
+  useEffect(() => {
+    const onMessage = (e: MessageEvent) => {
+      const d = e.data;
+      if (d?.type === 'slideHeight' && d?.slideId === slide.slide_id && typeof d?.height === 'number')
+        setContentHeight(Math.max(SLIDE_HEIGHT, d.height));
+    };
+    window.addEventListener('message', onMessage);
+    return () => window.removeEventListener('message', onMessage);
+  }, [slide.slide_id]);
+
+  // Reset content height when slide content changes so we re-measure on next load
+  useEffect(() => {
+    setContentHeight(SLIDE_HEIGHT);
+  }, [slide.html]);
+
+  // Calculate scaled dimensions; use measured content height so card fits content (no inner scrollbar)
+  const displayHeight = Math.max(SLIDE_HEIGHT, contentHeight);
+  const scaledHeight = displayHeight * scale;
 
   const style = {
     transform: CSS.Transform.toString(transform),
@@ -187,7 +222,7 @@ export const SlideTile: React.FC<SlideTileProps> = ({
   };
 
   const isSelected = selectedIndices.includes(index);
-  const containerClassName = `bg-white rounded-lg shadow-md overflow-hidden ${
+  const containerClassName = `bg-white rounded-lg overflow-hidden ${
     isSelected ? 'ring-2 ring-blue-500' : ''
   }`;
 
@@ -199,26 +234,28 @@ export const SlideTile: React.FC<SlideTileProps> = ({
         className={containerClassName}
       >
         {/* Slide Header with Actions */}
-      <div className="px-4 py-2 bg-gray-100 border-b flex items-center justify-between">
-          <div className="flex items-center space-x-2">
+      <div className="flex items-center gap-2 border-b border-border bg-card px-3 py-2" data-testid="slide-tile-header">
+          <div className="flex items-center gap-2 flex-1">
             {/* Drag Handle */}
-            <Tooltip text="Drag to reorder">
-              <button
-                {...attributes}
-                {...listeners}
-                className="cursor-grab active:cursor-grabbing text-gray-500 hover:text-gray-700"
-              >
-                <FiMove size={18} />
-              </button>
-            </Tooltip>
-            
-        <span className="text-sm font-medium text-gray-700">
-          Slide {index + 1}
-        </span>
+            {!readOnly && (
+              <Tooltip text="Drag to reorder">
+                <button
+                  {...attributes}
+                  {...listeners}
+                  className="cursor-grab active:cursor-grabbing text-muted-foreground hover:text-foreground"
+                >
+                  <GripVertical className="size-4" />
+                </button>
+              </Tooltip>
+            )}
+
+            <span className="text-sm font-medium text-foreground">
+              Slide {index + 1}
+            </span>
           </div>
 
           {/* Action Buttons */}
-          <div className="flex items-center space-x-1">
+          <div className="flex items-center gap-1">
             {/* Verification Badge/Button */}
             <VerificationBadge
               slideIndex={index}
@@ -228,84 +265,95 @@ export const SlideTile: React.FC<SlideTileProps> = ({
               onVerify={handleVerify}
               isStale={isStale}
             />
-            
+
             {/* Genie Source Data Link */}
             <Tooltip text="View source data">
-              <button
+              <Button
+                variant="ghost"
+                size="icon"
                 onClick={handleOpenGenieLink}
                 disabled={isLoadingGenieLink}
-                className="p-1 text-purple-600 hover:bg-purple-50 rounded disabled:opacity-50"
+                className="h-7 w-7"
               >
-                <FiDatabase size={16} />
-              </button>
+                <Database className="size-3.5" />
+              </Button>
             </Tooltip>
-            
+
             <Tooltip text={isSelected ? 'Selected for editing' : 'Add to chat context'}>
-              <button
+              <Button
+                variant={isSelected ? "secondary" : "ghost"}
+                size="icon"
                 onClick={() => setSelection([index], [slide])}
-                className={`p-1 rounded ${
-                  isSelected
-                    ? 'text-blue-700 bg-blue-50'
-                    : 'text-indigo-600 hover:bg-indigo-50'
-                }`}
+                className="h-7 w-7"
                 aria-pressed={isSelected}
               >
-                <FiMessageSquare size={16} />
-              </button>
+                <MessageSquare className="size-3.5" />
+              </Button>
             </Tooltip>
-            {onOptimize && (
+
+            {!readOnly && onOptimize && (
               <Tooltip text={isOptimizing ? 'Optimizing layout...' : 'Optimize layout'}>
-                <button
+                <Button
+                  variant="ghost"
+                  size="icon"
                   onClick={onOptimize}
                   disabled={isOptimizing}
-                  className={`p-1 rounded ${
-                    isOptimizing
-                      ? 'text-gray-400 cursor-not-allowed'
-                      : 'text-purple-600 hover:bg-purple-50'
-                  }`}
+                  className="h-7 w-7"
                 >
                   {isOptimizing ? (
-                    <div className="animate-spin rounded-full h-4 w-4 border-2 border-purple-600 border-t-transparent"></div>
+                    <Loader2 className="size-3.5 animate-spin" />
                   ) : (
-                    <FiMaximize2 size={16} />
+                    <Maximize2 className="size-3.5" />
                   )}
-                </button>
+                </Button>
               </Tooltip>
             )}
-            <Tooltip text="Edit slide HTML">
-              <button
-                onClick={() => setIsEditing(true)}
-                className="p-1 text-blue-600 hover:bg-blue-50 rounded"
-              >
-                <FiEdit size={16} />
-              </button>
-            </Tooltip>
-            
-            <Tooltip text="Delete slide" align="end">
-              <button
-                onClick={onDelete}
-                className="p-1 text-red-600 hover:bg-red-50 rounded"
-              >
-                <FiTrash2 size={16} />
-              </button>
-            </Tooltip>
+
+            {!readOnly && (
+              <>
+                <Tooltip text="Edit slide HTML">
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    onClick={() => setIsEditing(true)}
+                    className="h-7 w-7"
+                    aria-label="Edit"
+                  >
+                    <Edit3 className="size-3.5" />
+                  </Button>
+                </Tooltip>
+
+                <Tooltip text="Delete slide" align="end">
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    onClick={onDelete}
+                    className="h-7 w-7 text-destructive hover:text-destructive"
+                    aria-label="Delete"
+                  >
+                    <Trash2 className="size-3.5" />
+                  </Button>
+                </Tooltip>
+              </>
+            )}
           </div>
       </div>
 
-      {/* Slide Preview */}
-      <div 
+      {/* Slide Preview - height adapts to content to avoid inner scrollbar */}
+      <div
         ref={containerRef}
-        className="relative bg-gray-200 overflow-hidden"
-        style={{ height: `${scaledHeight}px` }}
+        className="relative bg-muted/20 overflow-hidden"
+        style={{ height: `${scaledHeight}px`, minHeight: `${SLIDE_HEIGHT * scale}px` }}
       >
         <iframe
+          ref={iframeRef}
           srcDoc={slideHTML}
           title={`Slide ${index + 1}`}
           className="absolute top-0 left-0 border-0"
           sandbox="allow-scripts"
           style={{
             width: `${SLIDE_WIDTH}px`,
-            height: `${SLIDE_HEIGHT}px`,
+            height: `${displayHeight}px`,
             transform: `scale(${scale})`,
             transformOrigin: 'top left',
           }}

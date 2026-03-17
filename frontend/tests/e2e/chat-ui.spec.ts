@@ -6,6 +6,7 @@ import {
   mockSessions,
   mockSlides,
 } from '../fixtures/mocks';
+import { goToGenerator, getSlideCountLocator } from '../helpers/new-ui';
 
 /**
  * Chat UI Tests
@@ -180,11 +181,7 @@ async function setupStreamMock(page: Page, slideDeck = mockSlideDeck) {
   });
 }
 
-async function goToGenerator(page: Page) {
-  await page.goto('/');
-  await page.getByRole('navigation').getByRole('button', { name: 'New Session' }).click();
-  await expect(page.getByRole('heading', { name: 'Chat', level: 2 })).toBeVisible();
-}
+// goToGenerator is imported from helpers/new-ui (uses "New Deck" and waits for session edit URL + chat input)
 
 // ============================================
 // ChatInput Tests
@@ -204,7 +201,7 @@ test.describe('ChatInput', () => {
   test('shows placeholder text in input', async ({ page }) => {
     await goToGenerator(page);
     const input = page.getByRole('textbox');
-    await expect(input).toHaveAttribute('placeholder', /Ask.*to.*generate|create slides/i);
+    await expect(input).toHaveAttribute('placeholder', /Ask.*(generate|create|modify).*slides/i);
   });
 
   test('Send button is disabled when input is empty', async ({ page }) => {
@@ -277,13 +274,13 @@ test.describe('MessageList', () => {
     await expect(page.getByText('Create slides about cloud computing')).toBeVisible({ timeout: 5000 });
   });
 
-  test('displays "You" label for user messages', async ({ page }) => {
+  test('displays user message content in chat', async ({ page }) => {
     await goToGenerator(page);
     await page.getByRole('textbox').fill('Create slides');
     await page.getByRole('button', { name: 'Send' }).click();
 
-    // Should see "You" label for user message (exact match to avoid tooltip matches)
-    await expect(page.getByText('You', { exact: true })).toBeVisible({ timeout: 5000 });
+    // User message content should be visible (new UI may not show "You" label for simple messages)
+    await expect(page.getByText('Create slides')).toBeVisible({ timeout: 5000 });
   });
 
   test('messages appear in chronological order', async ({ page }) => {
@@ -297,7 +294,7 @@ test.describe('MessageList', () => {
     await expect(page.getByText('First message')).toBeVisible({ timeout: 5000 });
 
     // Wait for slides to appear (indicates first generation complete)
-    await expect(page.locator('.text-gray-500').filter({ hasText: /3 slides?/ })).toBeVisible({ timeout: 15000 });
+    await expect(getSlideCountLocator(page, 3)).toBeVisible({ timeout: 15000 });
 
     // Send second message
     await page.getByRole('textbox').fill('Second message');
@@ -367,7 +364,7 @@ test.describe('LoadingStates', () => {
     await page.getByRole('button', { name: 'Send' }).click();
 
     // Wait for completion (slides appear)
-    await expect(page.locator('.text-gray-500').filter({ hasText: /3 slides?/ })).toBeVisible({ timeout: 15000 });
+    await expect(getSlideCountLocator(page, 3)).toBeVisible({ timeout: 15000 });
 
     // Loading indicator should be gone (MessageList loading spinner)
     await expect(page.getByText(/Generating slides/i)).not.toBeVisible();
@@ -418,16 +415,16 @@ test.describe('SlideGeneration', () => {
     await page.getByRole('button', { name: 'Send' }).click();
 
     // Wait for slides panel to show slide count in the panel header (gray text)
-    await expect(page.locator('.text-gray-500').filter({ hasText: /3 slides?/ })).toBeVisible({ timeout: 10000 });
+    await expect(getSlideCountLocator(page, 3)).toBeVisible({ timeout: 10000 });
   });
 
-  test('slide deck title appears in panel header', async ({ page }) => {
+  test('slide deck title appears in page header', async ({ page }) => {
     await goToGenerator(page);
     await page.getByRole('textbox').fill('Create slides');
     await page.getByRole('button', { name: 'Send' }).click();
 
-    // The deck title should appear in the slide panel header as an h2
-    await expect(page.getByRole('heading', { name: 'Benefits of Cloud Computing', level: 2 })).toBeVisible({ timeout: 10000 });
+    // Deck title appears in page header (button or heading)
+    await expect(page.getByRole('button', { name: /Benefits of Cloud Computing/i }).or(page.getByText('Benefits of Cloud Computing')).first()).toBeVisible({ timeout: 10000 });
   });
 });
 
@@ -462,7 +459,7 @@ test.describe('EmptyState', () => {
     await page.getByRole('button', { name: 'Send' }).click();
 
     // Wait for slides panel to show slide count (indicates slides loaded)
-    await expect(page.locator('.text-gray-500').filter({ hasText: /3 slides?/ })).toBeVisible({ timeout: 10000 });
+    await expect(getSlideCountLocator(page, 3)).toBeVisible({ timeout: 10000 });
 
     // Empty state should be gone
     await expect(page.getByText('No slides yet')).not.toBeVisible();
@@ -557,7 +554,7 @@ test.describe('ErrorHandling', () => {
     await page.getByRole('button', { name: 'Send' }).click();
 
     // Should see slides panel show slide count
-    await expect(page.locator('.text-gray-500').filter({ hasText: /3 slides?/ })).toBeVisible({ timeout: 10000 });
+    await expect(getSlideCountLocator(page, 3)).toBeVisible({ timeout: 10000 });
   });
 
   test('input is re-enabled after error', async ({ page }) => {
@@ -592,9 +589,9 @@ test.describe('ChatPanel Header', () => {
     await setupStreamMock(page);
   });
 
-  test('shows Chat heading', async ({ page }) => {
+  test('shows AI Assistant heading', async ({ page }) => {
     await goToGenerator(page);
-    await expect(page.getByRole('heading', { name: 'Chat', level: 2 })).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'AI Assistant', level: 2 })).toBeVisible();
   });
 
   test('shows input hint text', async ({ page }) => {

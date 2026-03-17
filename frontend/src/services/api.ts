@@ -9,8 +9,8 @@ const API_BASE_URL = import.meta.env.VITE_API_URL || (
   import.meta.env.MODE === 'production' ? '' : 'http://127.0.0.1:8000'
 );
 
-// Polling interval in milliseconds
-const POLL_INTERVAL_MS = 2000;
+// Polling interval in milliseconds (higher = fewer requests during generation; 3s is a balance)
+const POLL_INTERVAL_MS = 3000;
 
 export class ApiError extends Error {
   status: number;
@@ -94,6 +94,8 @@ export interface Session {
   last_activity?: string;
   message_count?: number;
   has_slide_deck?: boolean;
+  /** Slide count from list response; may also be on slide_deck when present */
+  slide_count?: number;
   messages?: SessionMessage[];
   slide_deck?: SlideDeck | null;
   profile_id?: number | null;
@@ -302,15 +304,44 @@ export const api = {
   },
 
   /**
-   * Rename a session
+   * Rename a session (optionally update slide count for sidebar/list).
    */
-  async renameSession(sessionId: string, title: string): Promise<Session> {
-    const response = await fetch(`${API_BASE_URL}/api/sessions/${sessionId}?title=${encodeURIComponent(title)}`, {
+  async renameSession(sessionId: string, title: string, slideCount?: number): Promise<Session> {
+    const body: { title: string; slide_count?: number } = { title };
+    if (slideCount !== undefined && slideCount !== null) body.slide_count = slideCount;
+    const response = await fetch(`${API_BASE_URL}/api/sessions/${sessionId}`, {
       method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
     });
 
     if (!response.ok) {
       throw new ApiError(response.status, 'Failed to rename session');
+    }
+
+    return response.json();
+  },
+
+  /**
+   * Update session metadata (title and/or slide_count). Used when only slide_count changes.
+   */
+  async updateSession(
+    sessionId: string,
+    updates: { title?: string; slide_count?: number },
+  ): Promise<Session> {
+    const body: { title?: string; slide_count?: number } = {};
+    if (updates.title !== undefined) body.title = updates.title;
+    if (updates.slide_count !== undefined && updates.slide_count !== null)
+      body.slide_count = updates.slide_count;
+    if (Object.keys(body).length === 0) return this.getSession(sessionId);
+    const response = await fetch(`${API_BASE_URL}/api/sessions/${sessionId}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+
+    if (!response.ok) {
+      throw new ApiError(response.status, 'Failed to update session');
     }
 
     return response.json();

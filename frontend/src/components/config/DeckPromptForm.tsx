@@ -1,12 +1,14 @@
 /**
  * Deck Prompt form modal.
- * 
+ *
  * Used for creating and editing deck prompts.
  */
 
 import React, { useState, useEffect } from 'react';
+import { AlertCircle } from 'lucide-react';
+import Editor from '@monaco-editor/react';
+import { Button } from '@/ui/button';
 import type { DeckPrompt, DeckPromptCreate, DeckPromptUpdate } from '../../api/config';
-import { ExpandableEditor } from './ExpandableEditor';
 
 interface DeckPromptFormProps {
   isOpen: boolean;
@@ -29,15 +31,6 @@ export const DeckPromptForm: React.FC<DeckPromptFormProps> = ({
   const [promptContent, setPromptContent] = useState('');
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
-
-  useEffect(() => {
-    if (!isOpen) return;
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Escape' && !saving) onCancel();
-    };
-    document.addEventListener('keydown', handleKeyDown);
-    return () => document.removeEventListener('keydown', handleKeyDown);
-  }, [isOpen, saving, onCancel]);
 
   // Reset form when opening
   useEffect(() => {
@@ -97,116 +90,126 @@ export const DeckPromptForm: React.FC<DeckPromptFormProps> = ({
   if (!isOpen) return null;
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-50">
-      <div className="bg-white rounded-lg shadow-xl w-full max-w-4xl max-h-[90vh] overflow-hidden flex flex-col">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm">
+      <div className="flex w-full max-w-4xl max-h-[90vh] flex-col overflow-hidden rounded-lg border border-border bg-card shadow-xl">
         {/* Header */}
-        <div className="px-6 py-4 border-b bg-gray-50">
-          <h2 className="text-xl font-semibold text-gray-900">
+        <div className="border-b border-border bg-muted/30 px-6 py-4">
+          <h2 className="text-lg font-semibold text-foreground">
             {mode === 'create' ? 'Create Deck Prompt' : 'Edit Deck Prompt'}
           </h2>
-          <p className="text-sm text-gray-600 mt-1">
+          <p className="mt-1 text-sm text-muted-foreground">
             Define a reusable prompt template for generating specific types of presentations.
           </p>
         </div>
 
         {/* Form */}
-        <form onSubmit={handleSubmit} className="flex-1 overflow-y-auto">
-          <div className="p-6 space-y-4">
-            {/* Error Message */}
-            {error && (
-              <div className="p-3 bg-red-50 border border-red-200 rounded text-red-700 text-sm">
-                {error}
+        <form onSubmit={handleSubmit} className="flex flex-1 flex-col overflow-hidden">
+          {/* Scrollable Content */}
+          <div className="flex-1 overflow-y-auto">
+            <div className="space-y-4 p-6">
+              {/* Error Message */}
+              {error && (
+                <div className="flex items-center gap-2 rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm text-destructive">
+                  <AlertCircle className="size-4 shrink-0" />
+                  <span>{error}</span>
+                </div>
+              )}
+
+              {/* Name */}
+              <div>
+                <label htmlFor="prompt-name" className="mb-1 block text-sm font-medium text-foreground">
+                  Name <span className="text-destructive">*</span>
+                </label>
+                <input
+                  id="prompt-name"
+                  type="text"
+                  value={name}
+                  onChange={(e) => setName(e.target.value)}
+                  placeholder="e.g., Quarterly Business Review"
+                  className="flex h-9 w-full rounded-md border border-input bg-background px-3 py-1 text-sm shadow-sm transition-colors file:border-0 file:bg-transparent file:text-sm file:font-medium placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
+                  maxLength={100}
+                  disabled={saving}
+                />
               </div>
-            )}
 
-            {/* Name */}
-            <div>
-              <label htmlFor="prompt-name" className="block text-sm font-medium text-gray-700 mb-1">
-                Name <span className="text-red-500">*</span>
-              </label>
-              <input
-                id="prompt-name"
-                type="text"
-                value={name}
-                onChange={(e) => setName(e.target.value)}
-                placeholder="e.g., Quarterly Business Review"
-                className="w-full px-3 py-2 border border-gray-300 rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
-                maxLength={100}
-                disabled={saving}
-              />
-            </div>
+              {/* Description */}
+              <div>
+                <label htmlFor="prompt-description" className="mb-1 block text-sm font-medium text-foreground">
+                  Description
+                </label>
+                <textarea
+                  id="prompt-description"
+                  value={description}
+                  onChange={(e) => setDescription(e.target.value)}
+                  placeholder="Brief description of what this prompt is for..."
+                  className="flex min-h-[60px] w-full rounded-md border border-input bg-background px-3 py-2 text-sm shadow-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
+                  rows={2}
+                  disabled={saving}
+                />
+              </div>
 
-            {/* Description */}
-            <div>
-              <label htmlFor="prompt-description" className="block text-sm font-medium text-gray-700 mb-1">
-                Description
-              </label>
-              <textarea
-                id="prompt-description"
-                value={description}
-                onChange={(e) => setDescription(e.target.value)}
-                placeholder="Brief description of what this prompt is for..."
-                className="w-full px-3 py-2 border border-gray-300 rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
-                rows={2}
-                disabled={saving}
-              />
-            </div>
+              {/* Category */}
+              <div>
+                <label htmlFor="prompt-category" className="mb-1 block text-sm font-medium text-foreground">
+                  Category
+                </label>
+                <input
+                  id="prompt-category"
+                  type="text"
+                  value={category}
+                  onChange={(e) => setCategory(e.target.value)}
+                  placeholder="e.g., Review, Report, Summary, Analysis"
+                  className="flex h-9 w-full rounded-md border border-input bg-background px-3 py-1 text-sm shadow-sm transition-colors file:border-0 file:bg-transparent file:text-sm file:font-medium placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
+                  maxLength={50}
+                  disabled={saving}
+                />
+                <p className="mt-1 text-xs text-muted-foreground">
+                  Optional category for organizing prompts.
+                </p>
+              </div>
 
-            {/* Category */}
-            <div>
-              <label htmlFor="prompt-category" className="block text-sm font-medium text-gray-700 mb-1">
-                Category
-              </label>
-              <input
-                id="prompt-category"
-                type="text"
-                value={category}
-                onChange={(e) => setCategory(e.target.value)}
-                placeholder="e.g., Review, Report, Summary, Analysis"
-                className="w-full px-3 py-2 border border-gray-300 rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
-                maxLength={50}
-                disabled={saving}
-              />
-              <p className="text-xs text-gray-500 mt-1">
-                Optional category for organizing prompts.
-              </p>
-            </div>
-
-            {/* Prompt Content */}
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">
-                Prompt Content <span className="text-red-500">*</span>
-              </label>
-              <ExpandableEditor
-                value={promptContent}
-                onChange={setPromptContent}
-                readOnly={saving}
-                modalTitle="Prompt Content"
-              />
-              <p className="text-xs text-gray-500 mt-1">
-                Instructions for the AI on how to create this type of presentation. 
-                Include sections, data to query, and formatting guidelines.
-              </p>
+              {/* Prompt Content */}
+              <div>
+                <label className="mb-1 block text-sm font-medium text-foreground">
+                  Prompt Content <span className="text-destructive">*</span>
+                </label>
+                <div className="overflow-hidden rounded-md border border-input">
+                  <Editor
+                    height="300px"
+                    defaultLanguage="markdown"
+                    value={promptContent}
+                    onChange={(value) => setPromptContent(value || '')}
+                    options={{
+                      minimap: { enabled: false },
+                      wordWrap: 'on',
+                      lineNumbers: 'on',
+                      scrollBeyondLastLine: false,
+                      fontSize: 13,
+                      readOnly: saving,
+                    }}
+                  />
+                </div>
+                <p className="mt-1 text-xs text-muted-foreground">
+                  Instructions for the AI on how to create this type of presentation.
+                  Include sections, data to query, and formatting guidelines.
+                </p>
+              </div>
             </div>
           </div>
 
-          {/* Footer */}
-          <div className="px-6 py-4 border-t bg-gray-50 flex justify-end gap-3">
-            <button
+          {/* Footer - Fixed at bottom */}
+          <div className="flex justify-end gap-2 border-t border-border bg-muted/30 px-6 py-4">
+            <Button
               type="button"
+              variant="outline"
               onClick={onCancel}
               disabled={saving}
-              className="px-4 py-2 bg-gray-200 hover:bg-gray-300 text-gray-800 rounded transition-colors disabled:bg-gray-100"
             >
               Cancel
-            </button>
-            <button
-              type="submit"
-              disabled={saving}
-              className="px-4 py-2 bg-blue-500 hover:bg-blue-600 text-white rounded transition-colors disabled:bg-blue-300"
-            >
+            </Button>
+            <Button type="submit" disabled={saving}>
               {saving ? 'Saving...' : mode === 'create' ? 'Create Prompt' : 'Save Changes'}
-            </button>
+            </Button>
           </div>
         </form>
       </div>
