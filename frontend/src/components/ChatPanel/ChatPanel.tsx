@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, forwardRef, useImperativeHandle } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { Bot } from 'lucide-react';
 import type { Message } from '../../types/message';
 import type { ReplacementInfo, SlideDeck } from '../../types/slide';
@@ -12,6 +13,7 @@ import { ErrorDisplay } from './ErrorDisplay';
 import { LoadingIndicator } from './LoadingIndicator';
 import { useSelection } from '../../contexts/SelectionContext';
 import { useSession } from '../../contexts/SessionContext';
+import { useAgentConfig } from '../../contexts/AgentConfigContext';
 import { useGeneration } from '../../contexts/GenerationContext';
 import { useKeyboardShortcuts } from '../../hooks/useKeyboardShortcuts';
 
@@ -49,6 +51,7 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(({
   const messageIndexRef = useRef(0);
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const cancelStreamRef = useRef<(() => void) | null>(null);
+  const navigate = useNavigate();
   const {
     selectedIndices,
     selectedSlides,
@@ -56,6 +59,7 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(({
     clearSelection,
   } = useSelection();
   const { sessionId, isInitializing, error: sessionError, setExperimentUrl, setSessionTitle } = useSession();
+  const { agentConfig, isPreSession } = useAgentConfig();
   const { setIsGenerating } = useGeneration();
 
   // Synchronously clear messages when sessionId changes (avoids old-message flash on session switch).
@@ -155,10 +159,8 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(({
       return;
     }
 
-    if (!sessionId) {
-      setError('Session not initialized. Please refresh the page.');
-      return;
-    }
+    // In pre-session mode, the backend creates the session on first message.
+    // sessionId may be empty — that's OK.
 
     setIsLoading(true);
     setIsGenerating(true);
@@ -248,6 +250,14 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(({
           }
           break;
 
+        case 'session_created':
+          // Backend created a session for us — navigate to the new session URL
+          if (event.session_id) {
+            api.setCurrentSessionId(event.session_id);
+            navigate(`/sessions/${event.session_id}/edit`, { replace: true });
+          }
+          break;
+
         case 'error':
           setError(event.error || 'An error occurred');
           stopLoadingMessages();
@@ -271,7 +281,9 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(({
             // Fetch slides from API to get content_hash for auto-verification
             // The API returns slides with content_hash computed and verification merged
             // Save point is now created by the backend during chat processing
-            api.getSlides(sessionId).then(result => {
+            // Use getCurrentSessionId() to pick up session_created updates during streaming
+            const activeSessionId = api.getCurrentSessionId() ?? sessionId ?? '';
+            api.getSlides(activeSessionId).then(result => {
               if (result.slide_deck) {
                 onSlidesGenerated(result.slide_deck, nextRawHtml);
               } else {
@@ -292,7 +304,7 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(({
 
     // Start streaming (automatically uses SSE or polling based on environment)
     cancelStreamRef.current = api.sendChatMessage(
-      sessionId,
+      sessionId ?? '',
       trimmedContent,
       slideContext,
       handleStreamEvent,
@@ -304,6 +316,7 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(({
         setIsGenerating(false);
       },
       imageIds,
+      isPreSession ? agentConfig : undefined,
     );
   };
 
