@@ -108,7 +108,6 @@ class TestSlideContextBase64Stripping:
 
     def _create_mock_service(self) -> ChatService:
         service = ChatService.__new__(ChatService)
-        service.agent = MagicMock()
         service._deck_cache = {}
         service._cache_lock = MagicMock()
         service._cache_lock.__enter__ = MagicMock(return_value=None)
@@ -141,10 +140,17 @@ class TestSlideContextBase64Stripping:
                 "replacement_info": None,
                 "parsed_output": {"html": '<div class="slide"><h1>Edited</h1></div>', "type": "full_deck"},
             }
-        service.agent.generate_slides = MagicMock(side_effect=fake_generate)
+        mock_agent = MagicMock()
+        mock_agent.generate_slides = MagicMock(side_effect=fake_generate)
+        mock_agent.sessions = {}
+
+        # Mock per-request agent builder
+        service._build_agent_for_session = MagicMock(
+            return_value=(mock_agent, {"session_id": session_id, "genie_conversation_id": None}, None)
+        )
+        service._persist_genie_conversation_ids = MagicMock()
 
         # Stub helpers used by send_message
-        service._ensure_agent_session = MagicMock(return_value=None)
         service._detect_edit_intent = MagicMock(return_value=True)
         service._detect_generation_intent = MagicMock(return_value=False)
         service._detect_add_intent = MagicMock(return_value=False)
@@ -154,7 +160,8 @@ class TestSlideContextBase64Stripping:
         mock_session_manager = MagicMock()
         mock_session_manager.get_session.return_value = {
             "id": session_id, "profile_id": None, "profile_name": None,
-            "genie_conversation_id": None,
+            "genie_conversation_id": None, "experiment_id": None,
+            "agent_config": None,
         }
         mock_session_manager.get_slide_deck.return_value = None
 
