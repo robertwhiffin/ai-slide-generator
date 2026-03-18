@@ -49,7 +49,7 @@ const navMainItems = [
 
 const navSecondaryItems = [
   {
-    title: "Agent profiles",
+    title: "Saved configs",
     viewId: "profiles",
     icon: User,
   },
