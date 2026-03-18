@@ -1,12 +1,12 @@
 """Chat endpoint for sending messages to the AI agent.
 
-Requires a valid session_id. Create sessions via POST /api/sessions.
-
 Supports:
 - POST /api/chat - Synchronous response
 - POST /api/chat/stream - Server-Sent Events for real-time updates
 - POST /api/chat/async - Submit for async processing (polling-based)
 - GET /api/chat/poll/{request_id} - Poll for async request status
+
+When session_id is omitted, a new session is created automatically.
 
 Chat access is controlled by session permissions:
 - CAN_EDIT or CAN_MANAGE required to send messages (creates/modifies slides)
@@ -102,6 +102,31 @@ def _check_chat_permission(session_id: str, db: DBSession) -> None:
     )
 
 
+def _maybe_create_session(request: ChatRequest, session_manager) -> bool:
+    """Create a session if request.session_id is missing.
+
+    Mutates request.session_id in place.
+    Returns True if a new session was created, False otherwise.
+    """
+    if request.session_id:
+        return False
+
+    from src.api.schemas.agent_config import AgentConfig
+
+    agent_config_data = None
+    if request.agent_config:
+        config = AgentConfig.model_validate(request.agent_config)
+        agent_config_data = config.model_dump()
+
+    current_user = get_current_user()
+    session = session_manager.create_session(
+        agent_config=agent_config_data,
+        created_by=current_user,
+    )
+    request.session_id = session["session_id"]
+    return True
+
+
 @router.post("/chat", response_model=ChatResponse)
 async def send_message(
     request: ChatRequest,
@@ -109,15 +134,15 @@ async def send_message(
 ) -> ChatResponse:
     """Send a message to the AI agent and receive response with slides.
 
-    Requires a valid session_id. Create sessions via POST /api/sessions first.
+    If session_id is not provided, a new session is created automatically.
     Requires CAN_EDIT or higher permission on the session.
     Uses asyncio.to_thread to avoid blocking the event loop during LLM calls.
 
     Args:
-        request: Chat request with session_id and message
+        request: Chat request with optional session_id and message
 
     Returns:
-        Chat response with messages, slide_deck, and metadata
+        Chat response with messages, slide_deck, metadata, and session_id
 
     Raises:
         HTTPException: 403 if no permission, 404 if session not found, 409 if session busy, 500 if agent fails
@@ -135,7 +160,11 @@ async def send_message(
 
     session_manager = get_session_manager()
 
-    # Per-session lock prevents concurrent request processing
+    # Create session on the fly if none provided
+    created = await asyncio.to_thread(_maybe_create_session, request, session_manager)
+    new_session_id = request.session_id if created else None
+
+    # Acquire session lock to prevent concurrent modifications
     locked = await asyncio.to_thread(
         session_manager.acquire_session_lock,
         request.session_id,
@@ -157,7 +186,11 @@ async def send_message(
             request.image_ids,
         )
 
-        return ChatResponse(**result)
+        response_data = {**result}
+        if new_session_id:
+            response_data["session_id"] = new_session_id
+
+        return ChatResponse(**response_data)
 
     except SessionNotFoundError:
         raise HTTPException(
@@ -186,7 +219,11 @@ async def send_message_streaming(
 ) -> StreamingResponse:
     """Send a message and receive real-time streaming updates via SSE.
 
+    If session_id is not provided, a new session is created and a
+    SESSION_CREATED event is emitted as the first SSE event.
+
     This endpoint yields Server-Sent Events as the agent executes:
+    - session_created: New session was created (includes session_id)
     - assistant: LLM text responses
     - tool_call: Tool invocation started
     - tool_result: Tool returned result
@@ -196,7 +233,7 @@ async def send_message_streaming(
     Requires CAN_EDIT or higher permission on the session.
 
     Args:
-        request: Chat request with session_id and message
+        request: Chat request with optional session_id and message
 
     Returns:
         StreamingResponse with SSE events
@@ -218,7 +255,11 @@ async def send_message_streaming(
     session_manager = get_session_manager()
     current_user = get_current_user()
 
-    # Per-session lock prevents concurrent request processing
+    # Create session on the fly if none provided
+    created = await asyncio.to_thread(_maybe_create_session, request, session_manager)
+    new_session_id = request.session_id if created else None
+
+    # Acquire session lock to prevent concurrent modifications
     locked = await asyncio.to_thread(
         session_manager.acquire_session_lock,
         request.session_id,
@@ -233,6 +274,14 @@ async def send_message_streaming(
         """Generate SSE events from the chat service."""
         import queue
         import threading
+
+        # Emit SESSION_CREATED event first if we just created a session
+        if new_session_id:
+            session_created_event = StreamEvent(
+                type=StreamEventType.SESSION_CREATED,
+                session_id=new_session_id,
+            )
+            yield session_created_event.to_sse()
 
         event_queue: queue.Queue = queue.Queue()
         error_holder: list = []
@@ -326,20 +375,22 @@ async def submit_chat_async(
 ):
     """Submit a chat request for async processing (polling-based).
 
+    If session_id is not provided, a new session is created automatically.
+
     Use this endpoint when SSE streaming is not available (e.g., Databricks Apps
     behind a reverse proxy with connection timeouts).
 
     Requires CAN_EDIT or higher permission on the session.
 
     Flow:
-    1. POST /api/chat/async -> returns request_id
+    1. POST /api/chat/async -> returns request_id (and session_id if created)
     2. Poll GET /api/chat/poll/{request_id} until status is completed/error
 
     Args:
-        request: Chat request with session_id and message
+        request: Chat request with optional session_id and message
 
     Returns:
-        Dictionary with request_id and initial status
+        Dictionary with request_id, status, and session_id (if created)
 
     Raises:
         HTTPException: 403 if no permission, 409 if session busy
@@ -357,6 +408,10 @@ async def submit_chat_async(
 
     session_manager = get_session_manager()
     current_user = get_current_user()
+
+    # Create session on the fly if none provided
+    created = await asyncio.to_thread(_maybe_create_session, request, session_manager)
+    new_session_id = request.session_id if created else None
 
     # Check session lock first
     locked = await asyncio.to_thread(
@@ -419,7 +474,10 @@ async def submit_chat_async(
             },
         )
 
-        return {"request_id": request_id, "status": "pending"}
+        result = {"request_id": request_id, "status": "pending"}
+        if new_session_id:
+            result["session_id"] = new_session_id
+        return result
 
     except Exception as e:
         # Release lock on failure

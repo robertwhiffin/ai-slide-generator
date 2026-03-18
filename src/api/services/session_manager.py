@@ -67,6 +67,7 @@ class SessionManager:
         profile_id: Optional[int] = None,
         profile_name: Optional[str] = None,
         created_by: Optional[str] = None,
+        agent_config: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """Create a new session.
 
@@ -77,6 +78,7 @@ class SessionManager:
             profile_id: Optional profile ID this session belongs to
             profile_name: Optional profile name (cached for display)
             created_by: Username of the authenticated user creating the session
+            agent_config: Optional agent configuration JSON (tools, style, prompts)
 
         Returns:
             Dictionary with session info including session_id
@@ -109,6 +111,7 @@ class SessionManager:
                 title=title or f"Session {datetime.utcnow().strftime('%Y-%m-%d %H:%M')}",
                 profile_id=profile_id,
                 profile_name=profile_name,
+                agent_config=agent_config,
             )
             db.add(session)
             db.flush()
@@ -168,6 +171,8 @@ class SessionManager:
                 "created_at": session.created_at.isoformat(),
                 "last_activity": session.last_activity.isoformat(),
                 "genie_conversation_id": session.genie_conversation_id,
+                "experiment_id": session.experiment_id,
+                "agent_config": session.agent_config,
                 "message_count": len(session.messages),
                 "has_slide_deck": deck_owner.slide_deck is not None,
                 "profile_id": session.profile_id,

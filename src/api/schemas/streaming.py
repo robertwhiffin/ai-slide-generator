@@ -19,6 +19,7 @@ class StreamEventType(str, Enum):
     ERROR = "error"  # Error occurred
     COMPLETE = "complete"  # Generation finished
     SESSION_TITLE = "session_title"  # Auto-generated session title
+    SESSION_CREATED = "session_created"  # New session created on first message
 
 
 class StreamEvent(BaseModel):
@@ -50,6 +51,7 @@ class StreamEvent(BaseModel):
     metadata: Optional[Dict[str, Any]] = Field(default=None, description="Execution metadata")
     experiment_url: Optional[str] = Field(default=None, description="MLflow experiment URL")
     session_title: Optional[str] = Field(default=None, description="Auto-generated session title")
+    session_id: Optional[str] = Field(default=None, description="Session ID (for session_created events)")
 
     def to_sse(self) -> str:
         """Format event as SSE data line.

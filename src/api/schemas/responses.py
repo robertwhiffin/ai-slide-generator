@@ -44,14 +44,19 @@ class MessageResponse(BaseModel):
 
 class ChatResponse(BaseModel):
     """Response from chat endpoint.
-    
+
     Attributes:
+        session_id: Session ID (included when session was created on the fly)
         messages: List of all messages in the conversation
         slide_deck: Parsed slide deck structure (if generated)
         raw_html: Raw HTML as returned by AI (for debugging)
         metadata: Execution metadata (latency, tool_calls, etc.)
     """
 
+    session_id: Optional[str] = Field(
+        default=None,
+        description="Session ID (present when session was auto-created)",
+    )
     messages: List[MessageResponse] = Field(
         ...,
         description="All messages from the conversation turn",
