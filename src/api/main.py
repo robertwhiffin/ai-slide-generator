@@ -16,15 +16,11 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from src.api.routes import admin, agent_config, chat, export, feedback, images, profiles, sessions, slides, verification, version, google_slides, setup, local_version
+from src.api.routes import admin, agent_config, chat, export, feedback, images, profiles, sessions, slides, tools, verification, version, google_slides, setup, local_version
 from src.core.databricks_client import get_or_create_user_client, set_user_client
 from src.core.user_context import get_current_user as get_ctx_user, set_current_user
 from src.api.routes.settings import (
-    ai_infra_router,
     deck_prompts_router,
-    genie_router,
-    profiles_router,
-    prompts_router,
     slide_styles_router,
 )
 from src.api.services.export_job_queue import start_export_worker
@@ -277,6 +273,7 @@ app.include_router(chat.router)
 app.include_router(feedback.router)
 app.include_router(images.router)
 app.include_router(slides.router)
+app.include_router(tools.router)
 app.include_router(export.router)
 app.include_router(sessions.router)
 app.include_router(verification.router)
@@ -287,12 +284,8 @@ app.include_router(local_version.router)
 app.include_router(profiles.router)
 app.include_router(profiles.load_router)
 
-# Configuration management routers
-app.include_router(profiles_router, prefix="/api/settings", tags=["settings"])
-app.include_router(ai_infra_router, prefix="/api/settings", tags=["settings"])
+# Configuration management routers (slide_styles and deck_prompts are global libraries, still needed)
 app.include_router(deck_prompts_router, prefix="/api/settings", tags=["settings"])
-app.include_router(genie_router, prefix="/api/settings", tags=["settings"])
-app.include_router(prompts_router, prefix="/api/settings", tags=["settings"])
 app.include_router(slide_styles_router, prefix="/api/settings", tags=["settings"])
 
 
