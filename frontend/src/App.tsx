@@ -5,7 +5,7 @@ import { AdminPage } from './components/Admin/AdminPage';
 import { WelcomeSetup } from './components/Setup';
 import './index.css';
 import { SelectionProvider } from './contexts/SelectionContext';
-import { ProfileProvider } from './contexts/ProfileContext';
+import { AgentConfigProvider } from './contexts/AgentConfigContext';
 import { SessionProvider } from './contexts/SessionContext';
 import { GenerationProvider } from './contexts/GenerationContext';
 import { ToastProvider } from './contexts/ToastContext';
@@ -19,7 +19,7 @@ function AppRoutes() {
 
   return (
     <Routes>
-      <Route path="/" element={<AppLayout key={layoutKey} initialView="help" />} />
+      <Route path="/" element={<AppLayout key={layoutKey} initialView="main" />} />
       <Route path="/help" element={<AppLayout key={layoutKey} initialView="help" />} />
       <Route path="/profiles" element={<AppLayout key={layoutKey} initialView="profiles" />} />
       <Route path="/deck-prompts" element={<AppLayout key={layoutKey} initialView="deck_prompts" />} />
@@ -30,7 +30,7 @@ function AppRoutes() {
       <Route path="/feedback" element={<Navigate to="/admin" replace />} />
       <Route path="/sessions/:sessionId/edit" element={<AppLayout key={layoutKey} initialView="main" />} />
       <Route path="/sessions/:sessionId/view" element={<AppLayout key={layoutKey} initialView="main" viewOnly={true} />} />
-      <Route path="*" element={<Navigate to="/help" replace />} />
+      <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>
   );
 }
@@ -90,17 +90,17 @@ function App() {
 
   // Show main app if configured
   return (
-    <ProfileProvider>
-      <SessionProvider>
-        <GenerationProvider>
-          <SelectionProvider>
-            <ToastProvider>
+    <SessionProvider>
+      <GenerationProvider>
+        <SelectionProvider>
+          <ToastProvider>
+            <AgentConfigProvider>
               <AppRoutes />
-            </ToastProvider>
-          </SelectionProvider>
-        </GenerationProvider>
-      </SessionProvider>
-    </ProfileProvider>
+            </AgentConfigProvider>
+          </ToastProvider>
+        </SelectionProvider>
+      </GenerationProvider>
+    </SessionProvider>
   );
 }
 

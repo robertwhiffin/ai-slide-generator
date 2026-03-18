@@ -4,7 +4,7 @@ import type { SlideDeck } from '../../types/slide';
 import { ChatPanel, type ChatPanelHandle } from '../ChatPanel/ChatPanel';
 import { SlidePanel, type SlidePanelHandle } from '../SlidePanel/SlidePanel';
 import { SelectionRibbon } from '../SlidePanel/SelectionRibbon';
-import { ProfileSelector } from '../config/ProfileSelector';
+import { AgentConfigBar } from '../AgentConfigBar/AgentConfigBar';
 import { ProfileList } from '../config/ProfileList';
 import { DeckPromptList } from '../config/DeckPromptList';
 import { SlideStyleList } from '../config/SlideStyleList';
@@ -20,7 +20,7 @@ import { SurveyModal } from '../Feedback/SurveyModal';
 import { useSurveyTrigger } from '../../hooks/useSurveyTrigger';
 import { useSession } from '../../contexts/SessionContext';
 import { useGeneration } from '../../contexts/GenerationContext';
-import { useProfiles } from '../../contexts/ProfileContext';
+import { ProfileProvider } from '../../contexts/ProfileContext';
 import { useVersionCheck } from '../../hooks/useVersionCheck';
 import { useToast } from '../../contexts/ToastContext';
 import { api } from '../../services/api';
@@ -64,15 +64,9 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
   slideDeckRef.current = slideDeck;
   const { sessionTitle, sessionId, createNewSession, switchSession, renameSession } = useSession();
   const { isGenerating } = useGeneration();
-  const { currentProfile, loadProfile } = useProfiles();
   /** Ref-tracked sessionId so the URL effect guard doesn't need sessionId as a dep (which would cause it to re-fire when switchSession internally calls setSessionId). */
   const sessionIdRef = useRef(sessionId);
   sessionIdRef.current = sessionId;
-  /** Refs for profile-related values so the URL effect can access them without adding them as deps. */
-  const currentProfileRef = useRef(currentProfile);
-  currentProfileRef.current = currentProfile;
-  const loadProfileRef = useRef(loadProfile);
-  loadProfileRef.current = loadProfile;
   const { updateAvailable, latestVersion, updateType, dismissed, dismiss } = useVersionCheck();
   const { showToast } = useToast();
   const { showSurvey, closeSurvey, onGenerationComplete, onGenerationStart } = useSurveyTrigger();
@@ -86,7 +80,6 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
   // sessionId is intentionally NOT in deps — we use sessionIdRef.current in the guard instead.
   // This prevents the effect from re-firing when switchSession internally calls setSessionId,
   // which would cancel the in-flight load and trigger another one, causing chat to reload 3×.
-  // currentProfile/loadProfile are also excluded — accessed via refs so they don't cause re-runs.
   useEffect(() => {
     if (!urlSessionId) return;
     // Skip if the URL already matches the current session AND we have a deck loaded.
@@ -98,19 +91,9 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
     let cancelled = false;
     (async () => {
       try {
-        // Fetch session info first so we can check the profile before loading the deck.
-        // Pass it to switchSession as existingSessionInfo to avoid a second getSession call.
+        // Fetch session info first so we can pass it to switchSession as existingSessionInfo
+        // to avoid a second getSession call.
         const sessionInfo = await api.getSession(urlSessionId);
-        if (cancelled) return;
-
-        // Auto-switch profile if the session was created with a different profile
-        if (sessionInfo.profile_id && currentProfileRef.current && sessionInfo.profile_id !== currentProfileRef.current.id) {
-          try {
-            await loadProfileRef.current(sessionInfo.profile_id);
-          } catch {
-            // Profile may have been deleted; continue with current profile
-          }
-        }
         if (cancelled) return;
 
         const { slideDeck: restoredDeck, rawHtml: restoredRawHtml } = await switchSession(
@@ -423,7 +406,6 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
         onSessionSelect={handleSessionRestore}
         onNewSession={handleNewSession}
         currentSessionId={sessionId}
-        profileName={currentProfile?.name}
         sessionsRefreshKey={sessionsRefreshKey}
       />
       <SidebarInset className="h-full overflow-hidden">
@@ -456,13 +438,6 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
                     />
                   ) : undefined
                 }
-                profileSelector={
-                  <ProfileSelector
-                    onManageClick={() => setViewMode('profiles')}
-                    onProfileChange={handleProfileChange}
-                    disabled={isGenerating}
-                  />
-                }
               />
 
               {previewVersion != null && (
@@ -485,7 +460,8 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
 
             <div className="relative flex-1 overflow-hidden">
               <div className="absolute inset-0 flex">
-                <div className="w-[32%] min-w-[260px] border-r border-border bg-card">
+                <div className="w-[32%] min-w-[260px] border-r border-border bg-card flex flex-col">
+                  <AgentConfigBar />
                   <ChatPanel
                     key="chat-panel"
                     ref={chatPanelRef}
@@ -557,7 +533,9 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
             </div>
             <div className="flex-1 overflow-y-auto">
               <div className="mx-auto w-full max-w-4xl px-4 py-8">
-                <ProfileList onProfileChange={handleProfileChange} />
+                <ProfileProvider>
+                  <ProfileList onProfileChange={handleProfileChange} />
+                </ProfileProvider>
               </div>
             </div>
           </div>
