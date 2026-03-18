@@ -1,7 +1,7 @@
 """Configuration profile model."""
 from datetime import datetime
 
-from sqlalchemy import Boolean, Column, DateTime, Integer, String, Text
+from sqlalchemy import Boolean, Column, DateTime, Integer, JSON, String, Text
 from sqlalchemy.orm import relationship
 
 from src.core.database import Base
@@ -22,6 +22,9 @@ class ConfigProfile(Base):
     created_by = Column(String(255))
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
     updated_by = Column(String(255))
+
+    # Agent configuration override (tools, style, prompts) — stored as JSON blob
+    agent_config = Column(JSON, nullable=True, default=None)
 
     # Relationships
     ai_infra = relationship("ConfigAIInfra", back_populates="profile", uselist=False, cascade="all, delete-orphan")
