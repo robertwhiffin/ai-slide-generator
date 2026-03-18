@@ -117,7 +117,29 @@ class SlideGeneratorAgent:
         self._pre_built_tools = pre_built_tools
         self._pre_built_prompts = pre_built_prompts
 
-        self.settings = get_settings()
+        # When using pre-built components (factory path), get_settings() may fail
+        # because the old profile tables are deprecated. Use defaults for the few
+        # settings still needed (e.g., llm.timeout).
+        if pre_built_prompts is not None:
+            try:
+                self.settings = get_settings()
+            except Exception:
+                from src.core.defaults import DEFAULT_CONFIG
+                from src.core.settings_db import LLMSettings, AppSettings
+                llm_defaults = DEFAULT_CONFIG["llm"]
+                self.settings = AppSettings(
+                    profile_id=0,
+                    profile_name="default",
+                    llm=LLMSettings(
+                        endpoint=llm_defaults["endpoint"],
+                        temperature=llm_defaults["temperature"],
+                        max_tokens=llm_defaults["max_tokens"],
+                    ),
+                    genie=None,
+                    prompts={},
+                )
+        else:
+            self.settings = get_settings()
         self.client = get_databricks_client()  # System client for non-user operations
 
         # Set up MLflow tracking (experiment created per-session)
