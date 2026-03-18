@@ -54,16 +54,7 @@ def initialize_genie_conversation(space_id: Optional[str] = None) -> str:
             raise GenieToolError("Genie space not configured for this profile")
         space_id = settings.genie.space_id
 
-    # Log with safe attribute access
-    extra_info = {
-        "space_id": space_id,
-    }
-    if hasattr(settings, 'profile_id'):
-        extra_info['profile_id'] = settings.profile_id
-    if hasattr(settings, 'profile_name'):
-        extra_info['profile_name'] = settings.profile_name
-
-    logger.info("Initializing Genie conversation", extra=extra_info)
+    logger.info("Initializing Genie conversation", extra={"space_id": space_id})
 
     conversation_start_message: str = """
     You are a data analyst agent for an AI slide generation system. 
