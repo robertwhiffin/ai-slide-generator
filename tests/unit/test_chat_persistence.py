@@ -86,6 +86,8 @@ class MockSessionManager:
                 "profile_id": None,
                 "profile_name": None,
                 "genie_conversation_id": None,
+                "experiment_id": None,
+                "agent_config": None,
             }
         return self.sessions[session_id]
 
@@ -98,6 +100,12 @@ class MockSessionManager:
         pass
 
     def add_message(self, session_id: str, role: str, content: str, message_type: str = "text"):
+        pass
+
+    def set_experiment_id(self, session_id: str, experiment_id: str):
+        pass
+
+    def set_genie_conversation_id(self, session_id: str, genie_conversation_id: str):
         pass
 
     def get_verification_map(self, session_id: str) -> Dict[str, Any]:
@@ -145,11 +153,17 @@ class TestSyncChatPersistence:
     def _create_mock_service(self) -> ChatService:
         """Create ChatService with mocked dependencies."""
         service = ChatService.__new__(ChatService)
-        service.agent = MagicMock()
         service._deck_cache = {}
         service._cache_lock = MagicMock()
         service._cache_lock.__enter__ = MagicMock(return_value=None)
         service._cache_lock.__exit__ = MagicMock(return_value=None)
+        # Mock per-request agent builder (agent is no longer singleton)
+        service._mock_agent = MagicMock()
+        service._mock_agent.sessions = {}
+        service._build_agent_for_session = MagicMock(
+            return_value=(service._mock_agent, {"session_id": "test", "genie_conversation_id": None}, None)
+        )
+        service._persist_genie_conversation_ids = MagicMock()
         return service
 
     def _setup_existing_deck(self, service: ChatService) -> SlideDeck:
@@ -165,7 +179,7 @@ class TestSyncChatPersistence:
 
         # Mock agent to return HTML
         new_deck_html = load_3_slide_deck()
-        service.agent.generate_slides = MagicMock(return_value={
+        service._mock_agent.generate_slides = MagicMock(return_value={
             "html": new_deck_html,
             "messages": [{"role": "assistant", "content": "Here are your slides"}],
             "metadata": {},
@@ -174,7 +188,6 @@ class TestSyncChatPersistence:
         })
 
         # Mock other dependencies
-        service._ensure_agent_session = MagicMock(return_value=None)
         service._detect_edit_intent = MagicMock(return_value=False)
         service._detect_generation_intent = MagicMock(return_value=True)
         service._detect_add_intent = MagicMock(return_value=False)
@@ -205,7 +218,7 @@ class TestSyncChatPersistence:
         replacement_html = '<div class="slide"><h1>Edited Slide</h1></div>'
         replacement_slide = Slide(html=replacement_html, slide_id="slide_0")
 
-        service.agent.generate_slides = MagicMock(return_value={
+        service._mock_agent.generate_slides = MagicMock(return_value={
             "html": replacement_html,
             "messages": [{"role": "assistant", "content": "Updated slide"}],
             "metadata": {},
@@ -225,7 +238,6 @@ class TestSyncChatPersistence:
             },
         })
 
-        service._ensure_agent_session = MagicMock(return_value=None)
         service._detect_edit_intent = MagicMock(return_value=True)
         service._detect_generation_intent = MagicMock(return_value=False)
         service._detect_add_intent = MagicMock(return_value=False)
@@ -268,11 +280,16 @@ class TestStreamingChatPersistence:
     def _create_mock_service(self) -> ChatService:
         """Create ChatService with mocked dependencies."""
         service = ChatService.__new__(ChatService)
-        service.agent = MagicMock()
         service._deck_cache = {}
         service._cache_lock = MagicMock()
         service._cache_lock.__enter__ = MagicMock(return_value=None)
         service._cache_lock.__exit__ = MagicMock(return_value=None)
+        service._mock_agent = MagicMock()
+        service._mock_agent.sessions = {}
+        service._build_agent_for_session = MagicMock(
+            return_value=(service._mock_agent, {"session_id": "test", "genie_conversation_id": None}, None)
+        )
+        service._persist_genie_conversation_ids = MagicMock()
         return service
 
     def _setup_existing_deck(self, service: ChatService) -> SlideDeck:
@@ -292,7 +309,7 @@ class TestStreamingChatPersistence:
         def mock_streaming_generator(*args, **kwargs):
             yield StreamEvent(type=StreamEventType.TOKEN, content="generating...")
 
-        service.agent.generate_slides_streaming = MagicMock(side_effect=mock_streaming_generator)
+        service._mock_agent.generate_slides_streaming = MagicMock(side_effect=mock_streaming_generator)
 
         # The streaming result (returned after events)
         mock_result = {
@@ -301,7 +318,6 @@ class TestStreamingChatPersistence:
             "replacement_info": None,
         }
 
-        service._ensure_agent_session = MagicMock(return_value=None)
         service._detect_edit_intent = MagicMock(return_value=False)
         service._detect_generation_intent = MagicMock(return_value=True)
         service._detect_add_intent = MagicMock(return_value=False)
@@ -397,7 +413,6 @@ class TestApplySlideReplacementsPersistence:
     def _create_mock_service(self) -> ChatService:
         """Create ChatService with mocked dependencies."""
         service = ChatService.__new__(ChatService)
-        service.agent = MagicMock()
         service._deck_cache = {}
         service._cache_lock = MagicMock()
         service._cache_lock.__enter__ = MagicMock(return_value=None)
@@ -476,7 +491,6 @@ class TestDeckDictCompleteness:
     def _create_mock_service(self) -> ChatService:
         """Create ChatService with mocked dependencies."""
         service = ChatService.__new__(ChatService)
-        service.agent = MagicMock()
         service._deck_cache = {}
         service._cache_lock = MagicMock()
         service._cache_lock.__enter__ = MagicMock(return_value=None)
