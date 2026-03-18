@@ -87,6 +87,9 @@ token.json
 # Git worktrees
 .worktrees/
 
+# Superpowers brainstorm artifacts
+.superpowers/
+
 # OpenSkills / PRPM
 .openskills/
 AGENTS.md
