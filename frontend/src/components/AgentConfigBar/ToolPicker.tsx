@@ -1,11 +1,12 @@
 /**
- * ToolPicker — popover that lists available tools for adding to the agent config.
+ * ToolPicker — dropdown with search for adding Genie spaces to the agent config.
  *
- * Fetches from api.getAvailableTools() on open, shows loading / error / list states.
+ * Fetches all available tools on open, then filters client-side as the user types.
+ * Positioned below the trigger button (not above) to avoid going off-screen.
  */
 
 import React, { useEffect, useState, useRef } from 'react';
-import { Loader2, RefreshCw, X } from 'lucide-react';
+import { Loader2, RefreshCw, Search, X } from 'lucide-react';
 import { api } from '../../services/api';
 import type { AvailableTool, ToolEntry } from '../../types/agentConfig';
 
@@ -13,11 +14,9 @@ interface ToolPickerProps {
   isOpen: boolean;
   onClose: () => void;
   onSelect: (tool: ToolEntry) => void;
-  /** Tools already in the config — used to grey-out duplicates. */
   existingTools: ToolEntry[];
 }
 
-/** Check whether a candidate tool is already present in the active list. */
 function isAlreadyAdded(candidate: AvailableTool, existing: ToolEntry[]): boolean {
   return existing.some(t => {
     if (t.type !== candidate.type) return false;
@@ -31,7 +30,6 @@ function isAlreadyAdded(candidate: AvailableTool, existing: ToolEntry[]): boolea
   });
 }
 
-/** Convert an AvailableTool into the ToolEntry shape expected by addTool(). */
 function toToolEntry(tool: AvailableTool): ToolEntry {
   if (tool.type === 'genie') {
     return {
@@ -55,28 +53,32 @@ export const ToolPicker: React.FC<ToolPickerProps> = ({
   onSelect,
   existingTools,
 }) => {
-  const [tools, setTools] = useState<AvailableTool[]>([]);
+  const [allTools, setAllTools] = useState<AvailableTool[]>([]);
+  const [query, setQuery] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const panelRef = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
 
   const fetchTools = async () => {
     setLoading(true);
     setError(null);
     try {
       const result = await api.getAvailableTools();
-      setTools(result);
+      setAllTools(result);
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to load tools');
+      setError(err instanceof Error ? err.message : 'Failed to load Genie spaces');
     } finally {
       setLoading(false);
     }
   };
 
-  // Fetch tools every time the picker opens
   useEffect(() => {
     if (isOpen) {
+      setQuery('');
       fetchTools();
+      // Focus the search input after a tick
+      setTimeout(() => inputRef.current?.focus(), 50);
     }
   }, [isOpen]);
 
@@ -99,30 +101,51 @@ export const ToolPicker: React.FC<ToolPickerProps> = ({
     return tool.server_name ?? tool.server_uri ?? 'MCP Server';
   };
 
+  // Client-side filter
+  const lowerQuery = query.toLowerCase();
+  const filtered = allTools.filter(tool => {
+    const name = displayName(tool).toLowerCase();
+    const desc = (tool.description ?? '').toLowerCase();
+    return name.includes(lowerQuery) || desc.includes(lowerQuery);
+  });
+
   return (
     <div
       ref={panelRef}
-      className="absolute bottom-full left-0 mb-2 w-72 bg-white border border-gray-200 rounded-lg shadow-lg z-20"
+      className="absolute top-full left-0 mt-1 w-80 bg-white border border-gray-200 rounded-lg shadow-lg z-20"
       data-testid="tool-picker"
     >
-      {/* Header */}
-      <div className="flex items-center justify-between px-3 py-2 border-b border-gray-100">
-        <span className="text-sm font-medium text-gray-700">Add Tool</span>
-        <button
-          onClick={onClose}
-          className="p-0.5 text-gray-400 hover:text-gray-600 rounded transition-colors"
-          aria-label="Close tool picker"
-        >
-          <X size={14} />
-        </button>
+      {/* Header with search */}
+      <div className="px-3 pt-3 pb-2">
+        <div className="flex items-center justify-between mb-2">
+          <span className="text-sm font-medium text-gray-700">Add Genie Space</span>
+          <button
+            onClick={onClose}
+            className="p-0.5 text-gray-400 hover:text-gray-600 rounded transition-colors"
+            aria-label="Close"
+          >
+            <X size={14} />
+          </button>
+        </div>
+        <div className="relative">
+          <Search size={14} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-gray-400" />
+          <input
+            ref={inputRef}
+            type="text"
+            placeholder="Search Genie spaces..."
+            value={query}
+            onChange={e => setQuery(e.target.value)}
+            className="w-full pl-8 pr-3 py-1.5 border border-gray-300 rounded text-sm focus:outline-none focus:ring-1 focus:ring-blue-500 bg-white"
+          />
+        </div>
       </div>
 
-      {/* Body */}
-      <div className="max-h-56 overflow-y-auto p-2">
+      {/* Results */}
+      <div className="max-h-48 overflow-y-auto px-2 pb-2">
         {loading && (
           <div className="flex items-center justify-center py-6 text-gray-500 text-sm gap-2">
             <Loader2 size={16} className="animate-spin" />
-            Loading tools...
+            Loading...
           </div>
         )}
 
@@ -139,21 +162,20 @@ export const ToolPicker: React.FC<ToolPickerProps> = ({
           </div>
         )}
 
-        {!loading && !error && tools.length === 0 && (
-          <p className="text-sm text-gray-500 py-4 text-center">No tools available.</p>
+        {!loading && !error && filtered.length === 0 && (
+          <p className="text-sm text-gray-500 py-4 text-center">
+            {query ? 'No matching Genie spaces.' : 'No Genie spaces available.'}
+          </p>
         )}
 
-        {!loading && !error && tools.map((tool, idx) => {
+        {!loading && !error && filtered.map((tool, idx) => {
           const added = isAlreadyAdded(tool, existingTools);
           return (
             <button
               key={`${tool.type}-${tool.space_id ?? tool.server_uri ?? idx}`}
               disabled={added}
               onClick={() => {
-                console.log('[ToolPicker] Tool clicked:', tool.type, tool.space_name || tool.server_name);
-                const entry = toToolEntry(tool);
-                console.log('[ToolPicker] Calling onSelect with:', JSON.stringify(entry));
-                onSelect(entry);
+                onSelect(toToolEntry(tool));
                 onClose();
               }}
               className={`w-full text-left px-3 py-2 rounded text-sm transition-colors ${
@@ -164,7 +186,6 @@ export const ToolPicker: React.FC<ToolPickerProps> = ({
             >
               <div className="flex items-center gap-2">
                 <span className="font-medium">{displayName(tool)}</span>
-                <span className="text-xs text-gray-400 uppercase">{tool.type}</span>
                 {added && <span className="text-xs text-gray-400 ml-auto">added</span>}
               </div>
               {tool.description && (
