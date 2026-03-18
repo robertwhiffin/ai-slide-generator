@@ -13,6 +13,7 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     Integer,
+    JSON,
     String,
     Text,
 )
@@ -126,6 +127,9 @@ class UserSession(Base):
     # Google Slides export tracking (reuse existing presentation on re-export)
     google_slides_presentation_id = Column(String(255), nullable=True)
     google_slides_url = Column(String(512), nullable=True)
+
+    # Agent configuration override (tools, style, prompts) — stored as JSON blob
+    agent_config = Column(JSON, nullable=True, default=None)
 
     # Processing lock for concurrent request handling
     is_processing = Column(Boolean, default=False, nullable=False)
