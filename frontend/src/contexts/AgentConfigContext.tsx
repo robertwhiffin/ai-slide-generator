@@ -36,6 +36,7 @@ interface AgentConfigContextValue {
   setDeckPrompt: (promptId: number | null) => Promise<void>;
   saveAsProfile: (name: string, description?: string) => Promise<void>;
   loadProfile: (profileId: number) => Promise<void>;
+  refreshConfig: () => Promise<void>;
   isPreSession: boolean;
 }
 
@@ -221,6 +222,16 @@ export const AgentConfigProvider: React.FC<{ children: React.ReactNode }> = ({ c
     }
   }, [isPreSession, urlSessionId, showToast]);
 
+  const refreshConfig = useCallback(async () => {
+    if (isPreSession || !urlSessionId) return;
+    try {
+      const config = await api.getAgentConfig(urlSessionId);
+      setAgentConfig(config);
+    } catch (err) {
+      console.error('[AgentConfigContext] Failed to refresh config:', err);
+    }
+  }, [isPreSession, urlSessionId]);
+
   const loadProfile = useCallback(async (profileId: number) => {
     if (!isPreSession && urlSessionId) {
       // Active session: call backend, then update local state
@@ -263,6 +274,7 @@ export const AgentConfigProvider: React.FC<{ children: React.ReactNode }> = ({ c
     setDeckPrompt,
     saveAsProfile,
     loadProfile,
+    refreshConfig,
     isPreSession,
   };
 
