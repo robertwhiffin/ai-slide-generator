@@ -11,7 +11,6 @@ from src.api.schemas.settings.requests import (
 )
 from src.api.schemas.settings.responses import (
     AIInfraConfig,
-    ConfigHistoryEntry,
     EndpointsList,
     ErrorResponse,
     GenieSpace,
@@ -37,7 +36,6 @@ __all__ = [
     "AIInfraConfig",
     "GenieSpace",
     "PromptsConfig",
-    "ConfigHistoryEntry",
     "EndpointsList",
     "ErrorResponse",
     "ValidationErrorResponse",
