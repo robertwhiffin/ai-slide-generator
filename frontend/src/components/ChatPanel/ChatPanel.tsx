@@ -316,7 +316,7 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(({
         setIsGenerating(false);
       },
       imageIds,
-      isPreSession ? agentConfig : undefined,
+      agentConfig,  // Always pass config — backend uses it for session creation and config sync
     );
   };
 
