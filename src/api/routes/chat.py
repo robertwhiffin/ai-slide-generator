@@ -116,7 +116,7 @@ def _maybe_create_session(request: ChatRequest, session_manager) -> bool:
         agent_config_data = config.model_dump()
 
     if request.session_id:
-        # Session exists — sync agent_config if provided in the request
+        # Session ID provided — sync agent_config if available
         if agent_config_data:
             try:
                 from src.core.database import get_db_session
@@ -132,6 +132,20 @@ def _maybe_create_session(request: ChatRequest, session_manager) -> bool:
                             "Synced agent_config from chat request",
                             extra={"session_id": request.session_id},
                         )
+                    else:
+                        # Session ID was generated client-side but never persisted.
+                        # Create it now with the agent_config.
+                        current_user = get_current_user()
+                        session_manager.create_session(
+                            session_id=request.session_id,
+                            agent_config=agent_config_data,
+                            created_by=current_user,
+                        )
+                        logger.info(
+                            "Created session from client-generated ID with agent_config",
+                            extra={"session_id": request.session_id},
+                        )
+                        return True
             except Exception as e:
                 logger.warning(f"Failed to sync agent_config: {e}")
         return False
