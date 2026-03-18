@@ -30,8 +30,6 @@ class ConfigProfile(Base):
     ai_infra = relationship("ConfigAIInfra", back_populates="profile", uselist=False, cascade="all, delete-orphan")
     genie_spaces = relationship("ConfigGenieSpace", back_populates="profile", cascade="all, delete-orphan")
     prompts = relationship("ConfigPrompts", back_populates="profile", uselist=False, cascade="all, delete-orphan")
-    history = relationship("ConfigHistory", back_populates="profile", cascade="all, delete-orphan")
-
     # Note: single_default_profile constraint handled in migration
 
     def __repr__(self):

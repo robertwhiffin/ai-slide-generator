@@ -3,7 +3,7 @@ from typing import Optional
 
 from sqlalchemy.orm import Session
 
-from src.database.models import ConfigGenieSpace, ConfigHistory
+from src.database.models import ConfigGenieSpace
 
 
 class GenieService:
@@ -64,19 +64,6 @@ class GenieService:
         )
         self.db.add(space)
 
-        # Log creation
-        history = ConfigHistory(
-            profile_id=profile_id,
-            domain="genie",
-            action="create",
-            changed_by=user or "system",
-            changes={
-                "space_id": {"old": None, "new": space_id},
-                "space_name": {"old": None, "new": space_name},
-            },
-        )
-        self.db.add(history)
-
         self.db.commit()
         self.db.refresh(space)
 
@@ -104,16 +91,6 @@ class GenieService:
             changes["description"] = {"old": space.description, "new": description}
             space.description = description
 
-        if changes:
-            history = ConfigHistory(
-                profile_id=space.profile_id,
-                domain="genie",
-                action="update",
-                changed_by=user or "system",
-                changes=changes,
-            )
-            self.db.add(history)
-
         self.db.commit()
         self.db.refresh(space)
 
@@ -133,17 +110,6 @@ class GenieService:
         space = self.db.query(ConfigGenieSpace).filter_by(id=space_id).first()
         if not space:
             raise ValueError(f"Genie space {space_id} not found")
-
-        # Log deletion
-        history = ConfigHistory(
-            profile_id=space.profile_id,
-            domain="genie",
-            action="delete",
-            changed_by=user,
-            changes={"space_name": {"old": space.space_name, "new": None}},
-        )
-        self.db.add(history)
-        self.db.flush()
 
         self.db.delete(space)
         self.db.commit()

@@ -8,7 +8,6 @@ from src.core.defaults import DEFAULT_CONFIG
 from src.database.models import (
     ConfigAIInfra,
     ConfigGenieSpace,
-    ConfigHistory,
     ConfigProfile,
     ConfigPrompts,
     SlideStyleLibrary,
@@ -138,16 +137,6 @@ class ProfileService:
         )
         self.db.add(prompts)
 
-        # Log creation
-        history = ConfigHistory(
-            profile_id=profile.id,
-            domain="profile",
-            action="create",
-            changed_by=user,
-            changes={"name": {"old": None, "new": name}},
-        )
-        self.db.add(history)
-
         self.db.commit()
         self.db.refresh(profile)
 
@@ -192,15 +181,6 @@ class ProfileService:
         if changes:
             profile.updated_by = user
 
-            history = ConfigHistory(
-                profile_id=profile.id,
-                domain="profile",
-                action="update",
-                changed_by=user,
-                changes=changes,
-            )
-            self.db.add(history)
-
         self.db.commit()
         self.db.refresh(profile)
 
@@ -233,15 +213,6 @@ class ProfileService:
         profile.is_default = False
         profile.updated_by = user
 
-        history = ConfigHistory(
-            profile_id=profile.id,
-            domain="profile",
-            action="delete",
-            changed_by=user,
-            changes={"name": {"old": profile.name, "new": None}, "is_deleted": True},
-        )
-        self.db.add(history)
-
         self.db.commit()
 
     def set_default_profile(self, profile_id: int, user: str) -> ConfigProfile:
@@ -273,15 +244,6 @@ class ProfileService:
         # Mark this as default
         profile.is_default = True
         profile.updated_by = user
-
-        history = ConfigHistory(
-            profile_id=profile.id,
-            domain="profile",
-            action="set_default",
-            changed_by=user,
-            changes={"is_default": {"old": False, "new": True}},
-        )
-        self.db.add(history)
 
         self.db.commit()
         self.db.refresh(profile)
@@ -375,20 +337,6 @@ class ProfileService:
         )
         self.db.add(prompts_record)
 
-        # Log creation
-        history = ConfigHistory(
-            profile_id=profile.id,
-            domain="profile",
-            action="create_with_config",
-            changed_by=user,
-            changes={
-                "name": {"old": None, "new": name}, 
-                "genie_space": genie_space["space_id"] if genie_space else None,
-                "prompt_only_mode": genie_space is None,
-            },
-        )
-        self.db.add(history)
-
         self.db.commit()
         self.db.refresh(profile)
 
@@ -478,16 +426,6 @@ class ProfileService:
             selected_slide_style_id=source_profile.prompts.selected_slide_style_id,
         )
         self.db.add(prompts)
-
-        # Log creation
-        history = ConfigHistory(
-            profile_id=profile.id,
-            domain="profile",
-            action="duplicate",
-            changed_by=user,
-            changes={"source_profile_id": profile_id, "name": new_name},
-        )
-        self.db.add(history)
 
         self.db.commit()
         self.db.refresh(profile)
