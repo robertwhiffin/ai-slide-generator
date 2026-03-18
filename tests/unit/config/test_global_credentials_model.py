@@ -27,36 +27,11 @@ def db_engine():
         poolclass=StaticPool,
     )
 
-    tables_to_create = [
-        t for t in Base.metadata.sorted_tables
-        if t.name != "config_history"
-    ]
-    for table in tables_to_create:
-        table.create(bind=engine, checkfirst=True)
-
-    with engine.connect() as conn:
-        conn.execute(text("""
-            CREATE TABLE IF NOT EXISTS config_history (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                profile_id INTEGER NOT NULL,
-                domain VARCHAR(50) NOT NULL,
-                action VARCHAR(50) NOT NULL,
-                changed_by VARCHAR(255) NOT NULL,
-                changes TEXT NOT NULL,
-                snapshot TEXT,
-                timestamp DATETIME NOT NULL,
-                FOREIGN KEY (profile_id) REFERENCES config_profiles (id) ON DELETE CASCADE
-            )
-        """))
-        conn.commit()
+    Base.metadata.create_all(bind=engine)
 
     yield engine
 
-    for table in reversed(tables_to_create):
-        table.drop(bind=engine, checkfirst=True)
-    with engine.connect() as conn:
-        conn.execute(text("DROP TABLE IF EXISTS config_history"))
-        conn.commit()
+    Base.metadata.drop_all(bind=engine)
     engine.dispose()
 
 
@@ -76,7 +51,6 @@ def db_session(session_factory, db_engine):
     with db_engine.connect() as conn:
         conn.execute(text("DELETE FROM google_oauth_tokens"))
         conn.execute(text("DELETE FROM google_global_credentials"))
-        conn.execute(text("DELETE FROM config_history"))
         conn.execute(text("DELETE FROM config_genie_spaces"))
         conn.execute(text("DELETE FROM config_prompts"))
         conn.execute(text("DELETE FROM config_ai_infra"))

@@ -9,7 +9,6 @@ from src.core.permission_context import get_permission_context
 from src.database.models import (
     ConfigAIInfra,
     ConfigGenieSpace,
-    ConfigHistory,
     ConfigProfile,
     ConfigProfileContributor,
     ConfigPrompts,
@@ -222,16 +221,6 @@ class ProfileService:
         )
         self.db.add(prompts)
 
-        # Log creation
-        history = ConfigHistory(
-            profile_id=profile.id,
-            domain="profile",
-            action="create",
-            changed_by=user,
-            changes={"name": {"old": None, "new": name}},
-        )
-        self.db.add(history)
-
         self.db.commit()
         self.db.refresh(profile)
 
@@ -276,15 +265,6 @@ class ProfileService:
         if changes:
             profile.updated_by = user
 
-            history = ConfigHistory(
-                profile_id=profile.id,
-                domain="profile",
-                action="update",
-                changed_by=user,
-                changes=changes,
-            )
-            self.db.add(history)
-
         self.db.commit()
         self.db.refresh(profile)
 
@@ -316,15 +296,6 @@ class ProfileService:
         profile.deleted_at = datetime.utcnow()
         profile.is_default = False
         profile.updated_by = user
-
-        history = ConfigHistory(
-            profile_id=profile.id,
-            domain="profile",
-            action="delete",
-            changed_by=user,
-            changes={"name": {"old": profile.name, "new": None}, "is_deleted": True},
-        )
-        self.db.add(history)
 
         self.db.commit()
 
@@ -361,15 +332,6 @@ class ProfileService:
                 default_profile_id=profile_id,
             )
             self.db.add(pref)
-
-        history = ConfigHistory(
-            profile_id=profile.id,
-            domain="profile",
-            action="set_user_default",
-            changed_by=user,
-            changes={"user_default_profile_id": {"old": None, "new": profile_id}},
-        )
-        self.db.add(history)
 
         self.db.commit()
         self.db.refresh(profile)
@@ -477,20 +439,6 @@ class ProfileService:
         )
         self.db.add(prompts_record)
 
-        # Log creation
-        history = ConfigHistory(
-            profile_id=profile.id,
-            domain="profile",
-            action="create_with_config",
-            changed_by=user,
-            changes={
-                "name": {"old": None, "new": name}, 
-                "genie_space": genie_space["space_id"] if genie_space else None,
-                "prompt_only_mode": genie_space is None,
-            },
-        )
-        self.db.add(history)
-
         self.db.commit()
         self.db.refresh(profile)
 
@@ -580,16 +528,6 @@ class ProfileService:
             selected_slide_style_id=source_profile.prompts.selected_slide_style_id,
         )
         self.db.add(prompts)
-
-        # Log creation
-        history = ConfigHistory(
-            profile_id=profile.id,
-            domain="profile",
-            action="duplicate",
-            changed_by=user,
-            changes={"source_profile_id": profile_id, "name": new_name},
-        )
-        self.db.add(history)
 
         self.db.commit()
         self.db.refresh(profile)
