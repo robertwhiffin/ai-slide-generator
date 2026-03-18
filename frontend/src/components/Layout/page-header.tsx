@@ -23,7 +23,6 @@ interface PageHeaderProps {
   onPresent?: () => void
   onTitleChange?: (newTitle: string) => void
   savePointDropdown?: React.ReactNode
-  profileSelector?: React.ReactNode
   /** Shown next to Export button (e.g. "Capturing charts...", "Exporting to Google Slides…") */
   exportStatus?: string | null
   isGenerating?: boolean
@@ -43,7 +42,6 @@ export function PageHeader({
   onPresent,
   onTitleChange,
   savePointDropdown,
-  profileSelector,
   exportStatus,
   isGenerating = false,
   viewOnly = false,
@@ -217,12 +215,6 @@ export function PageHeader({
           </Button>
         )}
 
-        {profileSelector && (
-          <>
-            <div className="mx-2 h-5 w-px bg-border" />
-            {profileSelector}
-          </>
-        )}
       </div>
     </header>
   )

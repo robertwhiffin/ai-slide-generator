@@ -12,7 +12,6 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { Plus, X, Save, FolderOpen, Loader2, ChevronDown, ChevronUp } from 'lucide-react';
 import { useAgentConfig } from '../../contexts/AgentConfigContext';
-import { useToast } from '../../contexts/ToastContext';
 import { configApi } from '../../api/config';
 import type { SlideStyle, DeckPrompt } from '../../api/config';
 import type { ProfileSummary, ToolEntry } from '../../types/agentConfig';
@@ -189,8 +188,6 @@ export const AgentConfigBar: React.FC = () => {
     loadProfile,
     isPreSession,
   } = useAgentConfig();
-
-  const { showToast } = useToast();
 
   // Expanded / collapsed state
   const [expanded, setExpanded] = useState(false);
