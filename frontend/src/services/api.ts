@@ -105,6 +105,7 @@ export interface Session {
   profile_name?: string | null;
   google_slides_url?: string | null;
   google_slides_presentation_id?: string | null;
+  experiment_url?: string | null;
   profile_deleted?: boolean;
   /** User's permission level on this session (CAN_VIEW, CAN_EDIT, CAN_MANAGE) */
   my_permission?: 'CAN_VIEW' | 'CAN_EDIT' | 'CAN_MANAGE';

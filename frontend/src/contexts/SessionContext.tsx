@@ -15,6 +15,7 @@ interface SessionRestoreResult {
 export interface OptionalSessionInfo {
   title: string | null;
   has_slide_deck?: boolean;
+  experiment_url?: string | null;
 }
 
 interface SessionContextType {
@@ -74,15 +75,16 @@ export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ child
       setIsInitializing(true);
       setError(null);
       try {
-        let sessionInfo: { title: string | null; has_slide_deck?: boolean };
+        let sessionInfo: { title: string | null; has_slide_deck?: boolean; experiment_url?: string | null };
         if (existingSessionInfo != null) {
           sessionInfo = {
             title: existingSessionInfo.title ?? null,
             has_slide_deck: existingSessionInfo.has_slide_deck,
+            experiment_url: existingSessionInfo.experiment_url,
           };
         } else {
           const full = await api.getSession(newSessionId);
-          sessionInfo = { title: full.title, has_slide_deck: full.has_slide_deck };
+          sessionInfo = { title: full.title, has_slide_deck: full.has_slide_deck, experiment_url: full.experiment_url };
         }
 
         // Get slide deck if it has one
@@ -106,6 +108,7 @@ export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ child
           setSessionTitle(sessionInfo.title);
           setSessionId(newSessionId);
           api.setCurrentSessionId(newSessionId);
+          setExperimentUrl(sessionInfo.experiment_url ?? null);
         }
 
         return { slideDeck, rawHtml };

@@ -5,6 +5,7 @@ supporting both local PostgreSQL and Databricks Lakebase deployments.
 """
 import json
 import logging
+import os
 import secrets
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
@@ -172,6 +173,7 @@ class SessionManager:
                 "last_activity": session.last_activity.isoformat(),
                 "genie_conversation_id": session.genie_conversation_id,
                 "experiment_id": session.experiment_id,
+                "experiment_url": self._build_experiment_url(session.experiment_id),
                 "agent_config": session.agent_config,
                 "message_count": len(session.messages),
                 "has_slide_deck": deck_owner.slide_deck is not None,
@@ -631,6 +633,18 @@ class SessionManager:
         with get_db_session() as db:
             session = self._get_session_or_raise(db, session_id)
             return session.experiment_id
+
+    @staticmethod
+    def _build_experiment_url(experiment_id: Optional[str]) -> Optional[str]:
+        """Build the full MLflow experiment URL from an experiment ID."""
+        if not experiment_id:
+            return None
+        host = os.getenv("DATABRICKS_HOST", "").rstrip("/")
+        if not host:
+            return None
+        if not host.startswith("http"):
+            host = f"https://{host}"
+        return f"{host}/ml/experiments/{experiment_id}"
 
     # Message operations
     def add_message(
