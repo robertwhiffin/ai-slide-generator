@@ -1,24 +1,20 @@
 /**
- * Profile management component.
- * 
+ * Saved Configurations management component.
+ *
  * Displays all profiles in a list with actions:
- * - View and edit profile configuration
+ * - Rename profile
  * - Delete profile
- * - Duplicate profile
  * - Set as default
  * - Load profile (hot-reload)
  */
 
-import React, { useState, useEffect } from 'react';
-import { User, ChevronDown, Trash2, Plus, Copy, Play, Star } from 'lucide-react';
+import React, { useState } from 'react';
+import { User, ChevronDown, Trash2, Play, Star, Pencil } from 'lucide-react';
 import { Button } from '@/ui/button';
 import { Badge } from '@/ui/badge';
-import type { Profile, ProfileCreate, ProfileUpdate } from '../../api/config';
+import type { Profile } from '../../api/config';
 import { useProfiles } from '../../hooks/useProfiles';
-import { ProfileForm } from './ProfileForm';
-import { ProfileCreationWizard } from './ProfileCreationWizard';
 import { ConfirmDialog } from './ConfirmDialog';
-import { ProfileDetailView } from './ProfileDetail';
 
 interface ProfileListProps {
   onProfileChange?: () => void;
@@ -31,15 +27,11 @@ export const ProfileList: React.FC<ProfileListProps> = ({ onProfileChange }) => 
     loading,
     error,
     deleteProfile,
-    duplicateProfile,
     setDefaultProfile,
     loadProfile,
+    updateProfile,
   } = useProfiles();
 
-  const [formMode, setFormMode] = useState<'create' | 'edit' | null>(null);
-  const [editingProfile, setEditingProfile] = useState<Profile | null>(null);
-  const [showCreationWizard, setShowCreationWizard] = useState(false);
-  const [currentUsername, setCurrentUsername] = useState('user');
   const [confirmDialog, setConfirmDialog] = useState<{
     isOpen: boolean;
     title: string;
@@ -56,57 +48,13 @@ export const ProfileList: React.FC<ProfileListProps> = ({ onProfileChange }) => 
     onConfirm: () => {},
   });
   const [actionLoading, setActionLoading] = useState<number | null>(null);
-  const [duplicateName, setDuplicateName] = useState('');
-  const [showDuplicateInput, setShowDuplicateInput] = useState<number | null>(null);
-  const [duplicateError, setDuplicateError] = useState<string | null>(null);
-  const [viewingProfileId, setViewingProfileId] = useState<number | null>(null);
-  const [viewingProfileMode, setViewingProfileMode] = useState<'view' | 'edit'>('view');
+  const [expandedId, setExpandedId] = useState<number | null>(null);
+  const [renamingId, setRenamingId] = useState<number | null>(null);
+  const [renameValue, setRenameValue] = useState('');
+  const [renameError, setRenameError] = useState<string | null>(null);
 
-  // Fetch current username from Databricks on mount
-  useEffect(() => {
-    const fetchUsername = async () => {
-      try {
-        // Use environment-aware URL
-        const apiBase = import.meta.env.VITE_API_URL || (
-          import.meta.env.MODE === 'production' ? '' : 'http://localhost:8000'
-        );
-        const response = await fetch(`${apiBase}/api/user/current`);
-        if (response.ok) {
-          const data = await response.json();
-          setCurrentUsername(data.username || 'user');
-        }
-      } catch {
-        // Use default if fetch fails
-        setCurrentUsername('user');
-      }
-    };
-    fetchUsername();
-  }, []);
-
-  // Handle create profile - show wizard
-  const handleCreate = () => {
-    setShowCreationWizard(true);
-  };
-
-  // Handle wizard success
-  const handleWizardSuccess = async (profileId: number) => {
-    setShowCreationWizard(false);
-    // Load the new profile (default is only set automatically for the first profile by the backend)
-    try {
-      await loadProfile(profileId);
-      if (onProfileChange) {
-        onProfileChange();
-      }
-    } catch (err) {
-      console.error('Failed to load new profile:', err);
-    }
-  };
-
-  // Handle form submit (edit mode only - create uses wizard)
-  const handleFormSubmit = async (_data: ProfileCreate | ProfileUpdate) => {
-    // This is only used for editing, which is now handled in ProfileDetailView
-    setFormMode(null);
-    setEditingProfile(null);
+  const toggleExpand = (id: number) => {
+    setExpandedId(expandedId === id ? null : id);
   };
 
   // Handle delete with confirmation
@@ -170,7 +118,6 @@ export const ProfileList: React.FC<ProfileListProps> = ({ onProfileChange }) => 
         setActionLoading(profile.id);
         try {
           await loadProfile(profile.id);
-          // Notify parent to reset chat state
           if (onProfileChange) {
             onProfileChange();
           }
@@ -185,49 +132,43 @@ export const ProfileList: React.FC<ProfileListProps> = ({ onProfileChange }) => 
     });
   };
 
-  // Handle duplicate
-  const handleDuplicateClick = (profile: Profile) => {
-    setDuplicateName(`${profile.name} (Copy)`);
-    setShowDuplicateInput(profile.id);
-    setDuplicateError(null);
+  // Handle rename
+  const handleRenameClick = (profile: Profile) => {
+    setRenamingId(profile.id);
+    setRenameValue(profile.name);
+    setRenameError(null);
   };
 
-  const handleDuplicateCancel = () => {
-    setShowDuplicateInput(null);
-    setDuplicateName('');
-    setDuplicateError(null);
+  const handleRenameCancel = () => {
+    setRenamingId(null);
+    setRenameValue('');
+    setRenameError(null);
   };
 
-  const handleDuplicateSubmit = async (profileId: number) => {
-    const trimmedName = duplicateName.trim();
+  const handleRenameSubmit = async (profileId: number) => {
+    const trimmedName = renameValue.trim();
     if (!trimmedName) return;
-    
-    // Client-side check for duplicate name
-    const nameExists = profiles.some(p => p.name.toLowerCase() === trimmedName.toLowerCase());
+
+    const nameExists = profiles.some(
+      p => p.id !== profileId && p.name.toLowerCase() === trimmedName.toLowerCase()
+    );
     if (nameExists) {
-      setDuplicateError(`A profile named "${trimmedName}" already exists. Please choose a different name.`);
+      setRenameError(`A profile named "${trimmedName}" already exists.`);
       return;
     }
-    
-    setDuplicateError(null);
+
+    setRenameError(null);
     setActionLoading(profileId);
     try {
-      await duplicateProfile(profileId, trimmedName);
-      setShowDuplicateInput(null);
-      setDuplicateName('');
+      await updateProfile(profileId, { name: trimmedName });
+      setRenamingId(null);
+      setRenameValue('');
     } catch (err) {
-      // Show error inline instead of letting it propagate
-      const message = err instanceof Error ? err.message : 'Failed to duplicate profile';
-      setDuplicateError(message);
+      const message = err instanceof Error ? err.message : 'Failed to rename profile';
+      setRenameError(message);
     } finally {
       setActionLoading(null);
     }
-  };
-
-  const [expandedId, setExpandedId] = useState<number | null>(null);
-
-  const toggleExpand = (id: number) => {
-    setExpandedId(expandedId === id ? null : id);
   };
 
   if (loading) {
@@ -251,15 +192,14 @@ export const ProfileList: React.FC<ProfileListProps> = ({ onProfileChange }) => 
       {/* Header */}
       <div className="flex items-start justify-between">
         <div>
-          <h1 className="text-xl font-bold text-foreground">Agent Profiles</h1>
+          <h1 className="text-xl font-bold text-foreground">Saved Configurations</h1>
           <p className="mt-1 text-sm text-muted-foreground">
-            Manage your configuration profiles. Load different profiles to switch settings without restarting.
+            Manage your saved configuration profiles. Load different profiles to switch settings without restarting.
+          </p>
+          <p className="mt-1 text-xs text-muted-foreground">
+            To create a new profile, use "Save as Profile" from the generator.
           </p>
         </div>
-        <Button size="sm" onClick={handleCreate} className="gap-1.5">
-          <Plus className="size-3.5" />
-          New Agent
-        </Button>
       </div>
 
       {/* Current Profile Badge */}
@@ -277,7 +217,7 @@ export const ProfileList: React.FC<ProfileListProps> = ({ onProfileChange }) => 
         <div className="flex flex-col items-center justify-center rounded-lg border border-dashed border-border bg-muted/20 p-12 text-center">
           <User className="mb-3 size-12 text-muted-foreground/50" />
           <p className="text-sm text-muted-foreground">
-            No profiles found. Create your first profile to get started.
+            No saved configurations found. Use "Save as Profile" from the generator to create one.
           </p>
         </div>
       ) : (
@@ -352,67 +292,66 @@ export const ProfileList: React.FC<ProfileListProps> = ({ onProfileChange }) => 
                   {/* Expanded Details */}
                   {expandedId === profile.id && (
                     <div className="mt-3 space-y-3">
-                      {/* Duplicate Input (when active) */}
-                      {showDuplicateInput === profile.id && (
+                      {/* Rename Input (when active) */}
+                      {renamingId === profile.id && (
                         <div className="rounded-md border border-border bg-muted/30 p-3 space-y-2">
                           <div className="flex items-center gap-2">
                             <input
                               type="text"
-                              value={duplicateName}
+                              value={renameValue}
                               onChange={(e) => {
-                                setDuplicateName(e.target.value);
-                                setDuplicateError(null);
+                                setRenameValue(e.target.value);
+                                setRenameError(null);
                               }}
                               onKeyDown={(e) => {
-                                if (e.key === 'Enter' && duplicateName.trim()) {
-                                  handleDuplicateSubmit(profile.id);
+                                if (e.key === 'Enter' && renameValue.trim()) {
+                                  handleRenameSubmit(profile.id);
                                 } else if (e.key === 'Escape') {
-                                  handleDuplicateCancel();
+                                  handleRenameCancel();
                                 }
                               }}
                               className={`flex-1 rounded-md border px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-primary ${
-                                duplicateError ? 'border-destructive bg-destructive/5' : 'border-input bg-background'
+                                renameError ? 'border-destructive bg-destructive/5' : 'border-input bg-background'
                               }`}
-                              placeholder="Enter new profile name"
+                              placeholder="Enter new name"
                               maxLength={100}
                               autoFocus
                             />
                             <Button
                               size="sm"
-                              onClick={() => handleDuplicateSubmit(profile.id)}
-                              disabled={!duplicateName.trim() || actionLoading === profile.id}
+                              onClick={() => handleRenameSubmit(profile.id)}
+                              disabled={!renameValue.trim() || actionLoading === profile.id}
                             >
-                              {actionLoading === profile.id ? 'Creating...' : 'Create'}
+                              {actionLoading === profile.id ? 'Saving...' : 'Save'}
                             </Button>
                             <Button
                               variant="outline"
                               size="sm"
-                              onClick={handleDuplicateCancel}
+                              onClick={handleRenameCancel}
                             >
                               Cancel
                             </Button>
                           </div>
-                          {duplicateError && (
+                          {renameError && (
                             <div className="flex items-center gap-2 rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm text-destructive">
-                              <span>{duplicateError}</span>
+                              <span>{renameError}</span>
                             </div>
                           )}
                         </div>
                       )}
 
                       {/* Action Buttons */}
-                      {showDuplicateInput !== profile.id && (
+                      {renamingId !== profile.id && (
                         <div className="flex flex-wrap gap-2">
                           <Button
                             variant="outline"
                             size="sm"
-                            onClick={() => {
-                              setViewingProfileId(profile.id);
-                              setViewingProfileMode('view');
-                            }}
+                            onClick={() => handleRenameClick(profile)}
                             disabled={actionLoading === profile.id}
+                            className="gap-1.5"
                           >
-                            View and Edit
+                            <Pencil className="size-3.5" />
+                            Rename
                           </Button>
 
                           {currentProfile?.id !== profile.id && (
@@ -440,17 +379,6 @@ export const ProfileList: React.FC<ProfileListProps> = ({ onProfileChange }) => 
                               Set as Default
                             </Button>
                           )}
-
-                          <Button
-                            variant="outline"
-                            size="sm"
-                            onClick={() => handleDuplicateClick(profile)}
-                            disabled={actionLoading === profile.id}
-                            className="gap-1.5"
-                          >
-                            <Copy className="size-3.5" />
-                            Duplicate
-                          </Button>
                         </div>
                       )}
                     </div>
@@ -462,26 +390,6 @@ export const ProfileList: React.FC<ProfileListProps> = ({ onProfileChange }) => 
         </div>
       )}
 
-      {/* Profile Creation Wizard */}
-      <ProfileCreationWizard
-        isOpen={showCreationWizard}
-        onClose={() => setShowCreationWizard(false)}
-        onSuccess={handleWizardSuccess}
-        currentUsername={currentUsername}
-      />
-
-      {/* Profile Form Modal (for editing only) */}
-      <ProfileForm
-        isOpen={formMode === 'edit'}
-        mode="edit"
-        profile={editingProfile || undefined}
-        onSubmit={handleFormSubmit}
-        onCancel={() => {
-          setFormMode(null);
-          setEditingProfile(null);
-        }}
-      />
-
       {/* Confirmation Dialog */}
       <ConfirmDialog
         isOpen={confirmDialog.isOpen}
@@ -492,19 +400,6 @@ export const ProfileList: React.FC<ProfileListProps> = ({ onProfileChange }) => 
         onConfirm={confirmDialog.onConfirm}
         onCancel={() => setConfirmDialog({ ...confirmDialog, isOpen: false, error: null })}
       />
-
-      {/* Profile Detail View */}
-      {viewingProfileId !== null && (
-        <ProfileDetailView
-          profileId={viewingProfileId}
-          onClose={() => {
-            setViewingProfileId(null);
-            setViewingProfileMode('view');
-          }}
-          initialMode={viewingProfileMode}
-        />
-      )}
     </div>
   );
 };
-
