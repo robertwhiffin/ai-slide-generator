@@ -56,7 +56,7 @@ All successful responses return JSON. Error responses follow standard HTTP statu
 
 ### Session-Based Operations
 
-Most operations require a `session_id` to identify the conversation context. Sessions are created automatically on the first message or can be created explicitly via the sessions endpoint.
+Most operations require a `session_id` to identify the conversation context. Sessions are created on the fly when no `session_id` is provided on a chat request, or can be created explicitly via the sessions endpoint. Each session carries its own `agent_config` JSON column that controls tools, slide style, deck prompt, and prompt overrides.
 
 ### Slide Context
 
@@ -79,12 +79,12 @@ Currently, rate limiting is handled via session locking. Only one request per se
 
 ## API Categories
 
-- **[Sessions](./sessions.md)** - Session management and lifecycle
+- **[Sessions](./sessions.md)** - Session management, agent configuration, and lifecycle
 - **[Chat](./chat.md)** - Slide generation and conversation
 - **[Slides](./slides.md)** - Slide CRUD operations
 - **[Export](./export.md)** - PowerPoint and PDF export
 - **[Verification](./verification.md)** - LLM-based slide verification
-- **[Settings](./settings.md)** - Configuration management (profiles, prompts, styles)
+- **[Settings](./settings.md)** - Agent configuration, profiles, deck prompts, slide styles, and tool discovery
 
 ## OpenAPI Schema
 

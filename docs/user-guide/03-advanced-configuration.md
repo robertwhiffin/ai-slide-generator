@@ -165,4 +165,4 @@ All configuration pages are accessible from the main navigation.
 ## Related Guides
 
 - [Generating Slides](./01-generating-slides.md) - Use your custom configuration
-- [Creating Profiles](./02-creating-profiles.md) - Link prompts and styles to profiles
+- [Saving and Loading Configurations](./02-creating-profiles.md) - Save and reuse configuration snapshots

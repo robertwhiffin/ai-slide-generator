@@ -17,22 +17,23 @@ This guide explains how the FastAPI/LangChain backend works, how it serves the f
 
 ```
                                       ┌────────────────────────┐
-Frontend fetch -> FastAPI router ->   │ ChatService (singleton)│
-                                      │  - SlideGeneratorAgent │
+Frontend fetch -> FastAPI router ->   │ ChatService            │
+                                      │  - build_agent_for_request()
                                       │  - SlideDeck cache     │
                                       └──────────┬─────────────┘
                                                  │
-                                    LangChain AgentExecutor
+                                    LangChain AgentExecutor (per-request)
                                                  │
                           ┌───────────────────────┴──────────────────────┐
                           │ Databricks LLM endpoint + Genie tool APIs    │
+                          │ (multiple Genie spaces per session)          │
                           └──────────────────────────────────────────────┘
 ```
 
 - **Routers** (`src/api/routes/*.py`) validate HTTP payloads and map 1:1 to frontend calls. All endpoints use `asyncio.to_thread()` for blocking operations.
-- **`ChatService`** (`src/api/services/chat_service.py`) is a process-wide singleton that owns the `SlideGeneratorAgent` and a session-scoped deck cache. Thread-safe via `_cache_lock`.
-- **`SessionManager`** (`src/api/services/session_manager.py`) handles database-backed sessions with locking for concurrent request handling. Stores slide deck in `deck_json` and verification results separately in `verification_map` (keyed by content hash) for persistence across deck regeneration.
-- **`SlideGeneratorAgent`** (`src/services/agent.py`) wraps LangChain's tool-calling agent. Tools are created per-request with session ID bound via closure to eliminate race conditions.
+- **`ChatService`** (`src/api/services/chat_service.py`) is a process-wide singleton that manages a session-scoped deck cache (thread-safe via `_cache_lock`). It no longer holds a persistent agent instance; instead it calls `build_agent_for_request()` from `src/services/agent_factory.py` to construct a fresh agent for each request using the session's `agent_config`.
+- **`SessionManager`** (`src/api/services/session_manager.py`) handles database-backed sessions with locking for concurrent request handling. Stores slide deck in `deck_json`, verification results separately in `verification_map` (keyed by content hash), and the session's `agent_config` JSON column.
+- **`SlideGeneratorAgent`** (`src/services/agent.py`) wraps LangChain's tool-calling agent. Built per-request by `agent_factory.py` with tools derived from the session's `agent_config`.
 - **`SlideDeck` / `Slide` models** (`src/models/...`) parse, manipulate, and serialize slides so both chat and CRUD endpoints share the same representation.
 
 ---
@@ -88,17 +89,24 @@ Frontend fetch -> FastAPI router ->   │ ChatService (singleton)│
 
 Save points are created on the backend immediately after deck persistence (in `ChatService.send_message`, `send_message_streaming`, and `update_slide`). Verification scores are backfilled via `sync-verification` after auto-verification completes. Maximum 40 per session; oldest deleted on overflow. See [Save Points / Versioning](save-points-versioning.md).
 
-### Settings & Configuration Endpoints
+### Agent Configuration & Profile Endpoints
 
 | Method | Path | Purpose | Backend handler |
 | --- | --- | --- | --- |
-| `GET` | `/api/settings/profiles` | List all profiles | `routes/settings/profiles.list_profiles` |
-| `POST` | `/api/settings/profiles` | Create profile (basic, requires subsequent config) | `routes/settings/profiles.create_profile` |
-| `POST` | `/api/settings/profiles/with-config` | Create profile with all config in one request (wizard) | `routes/settings/profiles.create_profile_with_config` |
-| `GET` | `/api/settings/profiles/{id}` | Get profile details | `routes/settings/profiles.get_profile` |
-| `PUT` | `/api/settings/profiles/{id}` | Update profile | `routes/settings/profiles.update_profile` |
-| `DELETE` | `/api/settings/profiles/{id}` | Delete profile | `routes/settings/profiles.delete_profile` |
-| `POST` | `/api/settings/profiles/{id}/load` | Hot-reload profile | `routes/settings/profiles.load_profile` |
+| `GET` | `/api/sessions/{id}/agent-config` | Get session agent config | `routes/sessions.get_agent_config` |
+| `PUT` | `/api/sessions/{id}/agent-config` | Update session agent config | `routes/sessions.update_agent_config` |
+| `PATCH` | `/api/sessions/{id}/agent-config/tools` | Add/remove tools | `routes/sessions.update_agent_config_tools` |
+| `GET` | `/api/profiles` | List saved profiles | `routes/profiles.list_profiles` |
+| `POST` | `/api/profiles/save-from-session/{session_id}` | Snapshot session config as profile | `routes/profiles.save_from_session` |
+| `POST` | `/api/sessions/{id}/load-profile/{profile_id}` | Load profile into session | `routes/sessions.load_profile` |
+| `PUT` | `/api/profiles/{id}` | Update profile | `routes/profiles.update_profile` |
+| `DELETE` | `/api/profiles/{id}` | Delete profile | `routes/profiles.delete_profile` |
+| `GET` | `/api/tools/available` | Discover Genie spaces and MCP servers | `routes/tools.list_available` |
+
+### Settings Endpoints (Deck Prompts & Slide Styles)
+
+| Method | Path | Purpose | Backend handler |
+| --- | --- | --- | --- |
 | `GET` | `/api/settings/deck-prompts` | List deck prompts | `routes/settings/deck_prompts.list_deck_prompts` |
 | `POST` | `/api/settings/deck-prompts` | Create deck prompt | `routes/settings/deck_prompts.create_deck_prompt` |
 | `GET` | `/api/settings/deck-prompts/{id}` | Get deck prompt | `routes/settings/deck_prompts.get_deck_prompt` |
@@ -109,10 +117,6 @@ Save points are created on the backend immediately after deck persistence (in `C
 | `GET` | `/api/settings/slide-styles/{id}` | Get slide style | `routes/settings/slide_styles.get_slide_style` |
 | `PUT` | `/api/settings/slide-styles/{id}` | Update slide style | `routes/settings/slide_styles.update_slide_style` |
 | `DELETE` | `/api/settings/slide-styles/{id}` | Delete slide style | `routes/settings/slide_styles.delete_slide_style` |
-| `PUT` | `/api/settings/prompts/{profile_id}` | Update prompts config (deck prompt, slide style selection) | `routes/settings/prompts.update_prompts_config` |
-| `POST` | `/api/settings/profiles/{id}/google-credentials` | Upload Google OAuth credentials.json | `routes/settings/google_credentials.upload` |
-| `GET` | `/api/settings/profiles/{id}/google-credentials/status` | Check if Google credentials configured | `routes/settings/google_credentials.status` |
-| `DELETE` | `/api/settings/profiles/{id}/google-credentials` | Remove stored Google credentials | `routes/settings/google_credentials.delete` |
 
 ### Google Slides Export & Auth Endpoints
 
@@ -125,17 +129,15 @@ Save points are created on the backend immediately after deck persistence (in `C
 
 See [Google Slides Integration](google-slides-integration.md) for full details on the OAuth2 flow, encryption, and converter.
 
-**Deck Prompts** are global presentation templates stored in `slide_deck_prompt_library`. Profiles reference a selected prompt via `config_prompts.selected_deck_prompt_id`. When generating slides, the agent prepends the deck prompt content (WHAT to create).
+**Deck Prompts** are global presentation templates stored in `slide_deck_prompt_library`. Sessions reference a selected prompt via `agent_config.deck_prompt_id`. When generating slides, the agent prepends the deck prompt content (WHAT to create).
 
-**Slide Styles** are global visual style configurations stored in `slide_style_library`. Profiles reference a selected style via `config_prompts.selected_slide_style_id`. When generating slides, the agent includes the style content (HOW slides should look).
+**Slide Styles** are global visual style configurations stored in `slide_style_library`. Sessions reference a selected style via `agent_config.slide_style_id`. When generating slides, the agent includes the style content (HOW slides should look).
 
 **Prompt Assembly Order** (in `src/services/agent.py`):
 1. Deck Prompt (optional) - defines presentation type/content
 2. Slide Style (from library) - defines visual appearance
 3. System Prompt (technical) - defines HTML/chart generation rules
 4. Slide Editing Instructions - defines editing behavior
-
-The **Advanced** tab in profile settings (system prompt, editing instructions) is hidden from regular users and only visible in debug mode (`?debug=true`).
 
 All responses conform to the Pydantic models in `src/api/models/responses.py`. Structure mirrors what the frontend expects (`messages`, `slide_deck`, `raw_html`, `metadata`, optional `replacement_info`).
 
@@ -155,16 +157,18 @@ Mutation endpoints return **409 Conflict** if the session is already processing 
    - Returns 409 if another request is already processing the session.
    - Lock released in `finally` block via `release_session_lock()`.
 
-3. **ChatService orchestration**  
+3. **ChatService orchestration**
    - Singleton created lazily via `get_chat_service()`.
    - Maintains a thread-safe deck cache keyed by `session_id`.
+   - Calls `build_agent_for_request()` to construct a fresh agent from the session's `agent_config` for each request.
    - Operations wrapped in `asyncio.to_thread()` to avoid blocking the event loop.
+   - Sessions are created on the fly when no `session_id` is provided on a chat request.
 
-4. **Agent execution**  
-   - `SlideGeneratorAgent.generate_slides()` creates tools per-request with session ID bound via closure.
-   - Stitches user prompt, optional `<slide-context>...</slide-context>` block, chat history, and passes to LangChain's `AgentExecutor`.  
-   - **Prompt-only mode:** When no Genie space is configured, the agent runs with an empty tools list. LangChain handles this gracefully - the LLM generates slides purely from conversation without data queries.
-   - **With Genie:** Genie tool calls automatically reuse the session's `conversation_id`, so the LLM never fabricates IDs.
+4. **Agent execution**
+   - `build_agent_for_request()` reads the session's `agent_config` and constructs a `SlideGeneratorAgent` with the configured tools, slide style, and deck prompt.
+   - Stitches user prompt, optional `<slide-context>...</slide-context>` block, chat history, and passes to LangChain's `AgentExecutor`.
+   - **Prompt-only mode:** When no Genie tools are in the agent config, the agent runs with an empty tools list. LangChain handles this gracefully - the LLM generates slides purely from conversation without data queries.
+   - **With Genie:** Each Genie space gets a uniquely-named tool. Genie tool calls automatically reuse the per-space `conversation_id` stored in the agent config, so the LLM never fabricates IDs.
 
 5. **Post-processing**  
    - **New deck:** Raw HTML is parsed into a `SlideDeck` (`SlideDeck.from_html_string`). Canvas/script integrity is checked before caching.  
@@ -185,13 +189,14 @@ Mutation endpoints return **409 Conflict** if the session is already processing 
 | `src/api/services/job_queue.py` | Async chat processing | In-memory job queue with background worker for polling mode. |
 | `src/api/routes/sessions.py` | Session CRUD endpoints | Create, list, get (with messages), rename, delete. |
 | `src/api/routes/slides.py` | Slide CRUD endpoints | Session-scoped operations with locking. |
+| `src/services/agent_factory.py` | Per-request agent builder | Reads session `agent_config`, constructs `SlideGeneratorAgent`. |
 | `src/api/services/chat_service.py` | Stateful orchestration | Deck cache, streaming generator, history hydration. |
 | `src/api/services/session_manager.py` | Session persistence | Database CRUD, message storage, session locking. |
 | `src/services/agent.py` | LangChain agent | Per-request tools, streaming callbacks, MLflow spans. |
 | `src/services/streaming_callback.py` | SSE event emission | Emits events to queue AND persists to database. |
 | `src/services/tools.py` | Genie wrappers | Starts conversations, retries, converts tabular responses. |
 | `src/models/slide*.py` | Deck primitives | Parsing, reordering, cloning, script bookkeeping, serialization. |
-| `src/core/settings_db.py` | Settings from database | Profile-based configuration with hot-reload. |
+| `src/core/settings_db.py` | Settings from database | Application-level defaults (LLM, etc.). |
 | `src/core/databricks_client.py` | Databricks connection | Thread-safe singleton `WorkspaceClient`. |
 | `src/utils/html_utils.py` | Canvas/script analysis | Extracts `canvas` ids from HTML and JS for validation. |
 | `src/utils/css_utils.py` | CSS parsing & merging | Selector-level merge for edit responses using `tinycss2`. |
@@ -221,11 +226,12 @@ Breaking these invariants (e.g., submitting non-contiguous indices, missing `.sl
 
 ## Agent Details
 
-- **Model:** `ChatDatabricks` configured via database profiles and exposed through `get_settings().llm`.
-- **Prompting:** System prompt + slide-editing addendum loaded from database and injected via `ChatPromptTemplate`. Chat history pulled from `ChatMessageHistory`.
-- **Tools:** Created per-request via `_create_tools_for_session(session_id)`. The Genie wrapper captures the session dict via closure, eliminating race conditions from shared state. Automatically reuses the session's `conversation_id`.
-- **Sessions:** `SlideGeneratorAgent.sessions` holds `chat_history`, `genie_conversation_id`, `experiment_id`, `experiment_url`, `username`, and `metadata`. Each user operates on their own session with isolated state.
-- **Concurrency:** Tools and `AgentExecutor` are created fresh for each request. No shared mutable state between concurrent requests.
+- **Model:** `ChatDatabricks` using a fixed backend default LLM (not user-configurable).
+- **Agent lifecycle:** No singleton agent. Each request calls `build_agent_for_request()` in `src/services/agent_factory.py`, which reads the session's `agent_config` JSON column and constructs a fresh `SlideGeneratorAgent` with the appropriate tools, slide style, and deck prompt.
+- **Prompting:** System prompt + slide-editing addendum loaded from the session's `agent_config` (or defaults) and injected via `ChatPromptTemplate`. Chat history pulled from `ChatMessageHistory`.
+- **Tools:** Derived from the session's `agent_config.tools` list. Each Genie space gets a uniquely-named tool with its own `conversation_id` tracked per-space. Multiple Genie spaces are supported per session.
+- **Sessions:** Session state (tools, conversation IDs, style, prompt) lives in the `agent_config` JSON column on `user_sessions`. Each user operates on their own session with isolated state.
+- **Concurrency:** The entire agent (tools + `AgentExecutor`) is created fresh for each request. No shared mutable state between concurrent requests.
 - **Observability:** MLflow spans wrap each generation. Attributes include mode (`generate` vs `edit`), latency, tool call counts, Genie conversation ID, and replacement stats.
 - **Robustness:** Multiple safeguards prevent slide data loss during edits (see [Slide Editing Robustness](slide-editing-robustness-fixes.md)):
   - Response validation with automatic retry if LLM returns text instead of HTML
@@ -250,12 +256,12 @@ Each session creates its own MLflow experiment for isolated tracing:
 
 1. **Experiment Path** (production with service principal):
    ```
-   /Workspace/Users/{DATABRICKS_CLIENT_ID}/{username}/{profile_name}/{timestamp}
+   /Workspace/Users/{DATABRICKS_CLIENT_ID}/{username}/{session_id}/{timestamp}
    ```
-   
+
 2. **Experiment Path** (local development):
    ```
-   /Workspace/Users/{username}/{profile_name}/{timestamp}
+   /Workspace/Users/{username}/{session_id}/{timestamp}
    ```
 
 3. **Permission Granting:** When running as a Databricks App, the system client (service principal) creates the experiment in its folder and grants `CAN_MANAGE` permission to the user via `client.experiments.set_permissions()`.
@@ -288,16 +294,16 @@ If the agent's HTML has empty slides, out-of-range indices, or references canvas
 
 ## Configuration, Secrets & Clients
 
-- **Settings loading** (`src/core/settings_db.py`):
-  - Configuration stored in database (profiles with LLM, Genie, MLflow, prompts settings).
+- **Agent configuration** (session-bound):
+  - Each session stores an `agent_config` JSON column on `user_sessions` containing tools, slide style ID, deck prompt ID, and optional prompt overrides.
+  - `build_agent_for_request()` reads this config to construct the agent per-request.
+  - The LLM is a fixed backend default (not user-configurable).
   - Environment variables for secrets (`DATABRICKS_HOST`, `DATABRICKS_TOKEN`, `DATABASE_URL`).
-  - `get_settings()` caches the merged `AppSettings`. Use `reload_settings()` to refresh from database.
-  - **Deck Prompts:** If a profile has `selected_deck_prompt_id` set, the prompt content is loaded and included in `settings.prompts["deck_prompt"]`.
 - **Deck Prompt Injection** (`src/services/agent.py`):
-  - When creating the system prompt, if `deck_prompt` is present, it's prepended to provide presentation structure guidance.
+  - When creating the system prompt, if `deck_prompt_id` is set in the agent config, the prompt content is loaded and prepended to provide presentation structure guidance.
   - This allows standardized decks (QBR, consumption review, etc.) without users retyping instructions.
 - **Databricks client** (`src/core/databricks_client.py`):
-  - Thread-safe singleton `WorkspaceClient` that prefers configured profile → explicit host/token → environment fallback.
+  - Thread-safe singleton `WorkspaceClient` that prefers explicit host/token → environment fallback.
   - `initialize_genie_conversation()` and `query_genie_space()` both consume this singleton to avoid reconnecting per request.
 
 ---
