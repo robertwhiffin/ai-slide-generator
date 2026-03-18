@@ -107,11 +107,25 @@ def mock_session_manager():
 class TestChatEndpoints:
     """Tests for /api/chat endpoints."""
 
-    def test_chat_requires_session_id(self, client):
-        """POST /api/chat returns 422 without session_id."""
+    def test_chat_without_session_id_creates_session(self, client, mock_chat_service, mock_session_manager):
+        """POST /api/chat without session_id creates a session on the fly."""
+        mock_session_manager.create_session.return_value = {
+            "session_id": "auto-created-session",
+            "user_id": None,
+            "created_by": "test-user",
+            "title": "Session 2026-03-18 12:00",
+            "created_at": "2026-03-18T12:00:00",
+            "profile_id": None,
+            "profile_name": None,
+        }
+        mock_chat_service.send_message.return_value = {
+            "messages": [],
+            "slide_deck": None,
+            "metadata": {},
+        }
         response = client.post("/api/chat", json={"message": "Hello"})
-        assert response.status_code == 422
-        assert "detail" in response.json()
+        assert response.status_code == 200
+        mock_session_manager.create_session.assert_called_once()
 
     def test_chat_requires_message(self, client):
         """POST /api/chat returns 422 without message."""
@@ -127,13 +141,28 @@ class TestChatEndpoints:
         })
         assert response.status_code == 422
 
-    def test_chat_empty_session_id_rejected(self, client):
-        """POST /api/chat returns 422 with empty session_id."""
+    def test_chat_empty_session_id_creates_session(self, client, mock_chat_service, mock_session_manager):
+        """POST /api/chat with empty session_id creates a session on the fly."""
+        mock_session_manager.create_session.return_value = {
+            "session_id": "auto-created-session",
+            "user_id": None,
+            "created_by": "test-user",
+            "title": "Session 2026-03-18 12:00",
+            "created_at": "2026-03-18T12:00:00",
+            "profile_id": None,
+            "profile_name": None,
+        }
+        mock_chat_service.send_message.return_value = {
+            "messages": [],
+            "slide_deck": None,
+            "metadata": {},
+        }
         response = client.post("/api/chat", json={
             "session_id": "",
             "message": "Hello"
         })
-        assert response.status_code == 422
+        assert response.status_code == 200
+        mock_session_manager.create_session.assert_called_once()
 
     def test_chat_session_not_found(self, client, mock_chat_service, mock_session_manager):
         """POST /api/chat returns 404 for nonexistent session."""

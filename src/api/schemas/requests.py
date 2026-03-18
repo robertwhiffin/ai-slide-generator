@@ -48,15 +48,15 @@ class ChatRequest(BaseModel):
     """Request model for chat endpoint.
 
     Attributes:
-        session_id: Session ID (required, create via POST /api/sessions)
+        session_id: Optional session ID. If not provided, a new session is created.
         message: User's natural language message
         slide_context: Optional context for slide editing
+        agent_config: Optional agent configuration for session creation
     """
 
-    session_id: str = Field(
-        ...,
-        description="Session ID (required, create via POST /api/sessions first)",
-        min_length=1,
+    session_id: Optional[str] = Field(
+        default=None,
+        description="Session ID. If not provided, a new session is created on the fly.",
     )
     message: str = Field(
         ...,
@@ -71,6 +71,18 @@ class ChatRequest(BaseModel):
         default=None,
         description="IDs of images attached to this message (from upload or paste)",
     )
+    agent_config: Optional[dict] = Field(
+        default=None,
+        description="Agent configuration for session creation (tools, style, prompts)",
+    )
+
+    @field_validator("session_id", mode="before")
+    @classmethod
+    def empty_session_id_to_none(cls, value):
+        """Treat empty string session_id as None (missing)."""
+        if isinstance(value, str) and value.strip() == "":
+            return None
+        return value
 
     @field_validator("message")
     @classmethod
