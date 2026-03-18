@@ -475,10 +475,10 @@ class SlideGeneratorAgent:
         The system prompt is tool-agnostic - the LLM discovers available tools
         through the tool binding mechanism, not the prompt.
         """
-        deck_prompt = self.settings.prompts.get("deck_prompt", "")
-        slide_style = self.settings.prompts.get("slide_style", "")
-        system_prompt = self.settings.prompts.get("system_prompt", "")
-        editing_prompt = self.settings.prompts.get("slide_editing_instructions", "")
+        deck_prompt = prompts.get("deck_prompt") or ""
+        slide_style = prompts.get("slide_style") or ""
+        system_prompt = prompts.get("system_prompt") or ""
+        editing_prompt = prompts.get("slide_editing_instructions") or ""
 
         if not system_prompt:
             raise AgentError("System prompt not found in configuration")
@@ -503,8 +503,7 @@ class SlideGeneratorAgent:
         if editing_prompt:
             prompt_parts.append(editing_prompt.strip())
 
-        # Image tool instructions (conditional on image_guidelines)
-        image_guidelines = self.settings.prompts.get("image_guidelines", "")
+        image_guidelines = prompts.get("image_guidelines") or ""
 
         image_section = (
             "IMAGE SUPPORT:\n"
