@@ -675,7 +675,7 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
         {viewMode === 'profiles' && (
           <div className="flex h-full flex-col">
             <div className="shrink-0">
-              <SimplePageHeader title="Agent Profiles" />
+              <SimplePageHeader title="Saved Configurations" />
             </div>
             <div className="flex-1 overflow-y-auto">
               <div className="mx-auto w-full max-w-4xl px-4 py-8">
