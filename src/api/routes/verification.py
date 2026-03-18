@@ -331,21 +331,26 @@ async def submit_feedback(slide_index: int, request: FeedbackRequest):
 @router.get("/genie-link")
 async def get_genie_link(
     session_id: str = Query(..., description="Session ID"),
+    space_id: Optional[str] = Query(None, description="Genie space ID for per-space link"),
 ):
     """Get the Genie conversation deep-link for a session.
 
-    Returns the URL to view the full Genie conversation with all queries
-    and results that contributed to slide generation.
+    When space_id is provided, looks up the conversation_id from the matching
+    GenieTool in the session's agent_config. When omitted, falls back to the
+    legacy genie_conversation_id on the session.
 
     URL format: {host}/genie/rooms/{space_id}/chats/{conversation_id}?o={workspace_id}
 
     Args:
         session_id: Session identifier
+        space_id: Optional Genie space ID for per-space deep-link
 
     Returns:
         Genie conversation URL and metadata
     """
     import re
+
+    from src.api.schemas.agent_config import GenieTool, resolve_agent_config
 
     session_manager = get_session_manager()
 
@@ -354,51 +359,71 @@ async def get_genie_link(
             session_manager.get_session, session_id
         )
 
-        genie_conversation_id = session.get("genie_conversation_id")
+        # Per-space path: look up conversation_id from agent_config
+        if space_id:
+            agent_config = resolve_agent_config(session.get("agent_config"))
+            genie_conversation_id = None
+            for tool in agent_config.tools:
+                if isinstance(tool, GenieTool) and tool.space_id == space_id:
+                    genie_conversation_id = tool.conversation_id
+                    break
 
-        if not genie_conversation_id:
-            return {
-                "has_genie_conversation": False,
-                "message": "No Genie queries were made in this session",
-            }
+            if not genie_conversation_id:
+                return {
+                    "has_genie_conversation": False,
+                    "message": f"No Genie conversation found for space {space_id}",
+                }
 
-        from src.core.settings_db import get_settings
+            resolved_space_id = space_id
+        else:
+            # Legacy path: use session-level genie_conversation_id
+            genie_conversation_id = session.get("genie_conversation_id")
 
-        settings = get_settings()
-        
-        # Handle prompt-only mode (no Genie configured)
-        if not settings.genie:
-            return {
-                "has_genie_conversation": False,
-                "message": "Profile is in prompt-only mode (no Genie space configured)",
-            }
-        
+            if not genie_conversation_id:
+                return {
+                    "has_genie_conversation": False,
+                    "message": "No Genie queries were made in this session",
+                }
+
+            from src.core.settings_db import get_settings
+
+            settings = get_settings()
+
+            # Handle prompt-only mode (no Genie configured)
+            if not settings.genie:
+                return {
+                    "has_genie_conversation": False,
+                    "message": "Profile is in prompt-only mode (no Genie space configured)",
+                }
+
+            resolved_space_id = settings.genie.space_id
+
+        from src.core.settings_db import get_settings as _get_settings
+
+        settings = _get_settings()
         workspace_url = settings.databricks_host.rstrip("/")
-        space_id = settings.genie.space_id
 
         # Extract workspace_id from databricks host URL
         # Format: https://adb-{workspace_id}.{region}.azuredatabricks.net
-        # or: https://{workspace}.cloud.databricks.com (workspace_id in different location)
         workspace_id = None
         match = re.search(r"adb-(\d+)", workspace_url)
         if match:
             workspace_id = match.group(1)
 
         # Build deep-link URL to specific conversation
-        # Format: {host}/genie/rooms/{space_id}/chats/{conversation_id}?o={workspace_id}
         if workspace_id:
             genie_url = (
-                f"{workspace_url}/genie/rooms/{space_id}/chats/{genie_conversation_id}"
+                f"{workspace_url}/genie/rooms/{resolved_space_id}/chats/{genie_conversation_id}"
                 f"?o={workspace_id}"
             )
         else:
-            # Fallback: try without workspace_id parameter
-            genie_url = f"{workspace_url}/genie/rooms/{space_id}/chats/{genie_conversation_id}"
+            genie_url = f"{workspace_url}/genie/rooms/{resolved_space_id}/chats/{genie_conversation_id}"
 
         logger.info(
             "Generated Genie deep-link",
             extra={
                 "session_id": session_id,
+                "space_id": resolved_space_id,
                 "conversation_id": genie_conversation_id,
                 "workspace_id": workspace_id,
                 "url": genie_url,
