@@ -12,6 +12,7 @@ class GenieTool(BaseModel):
     space_id: str = Field(..., min_length=1)
     space_name: str = Field(..., min_length=1)
     description: Optional[str] = None
+    conversation_id: Optional[str] = None
 
 
 class MCPTool(BaseModel):

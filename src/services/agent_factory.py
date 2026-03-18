@@ -177,8 +177,11 @@ def _build_genie_tool(
     # Per-space conversation ID key
     conv_key = f"genie_conversation_id:{genie_config.space_id}"
 
-    # Seed from the legacy single key if this is the first/only Genie space
-    if conv_key not in session_data and index == 1:
+    # Seed from the persisted conversation_id on the GenieTool config first
+    if genie_config.conversation_id:
+        session_data[conv_key] = genie_config.conversation_id
+    # Fall back to the legacy single key if this is the first/only Genie space
+    elif conv_key not in session_data and index == 1:
         legacy_id = session_data.get("genie_conversation_id")
         if legacy_id:
             session_data[conv_key] = legacy_id
