@@ -3,6 +3,7 @@ export interface GenieTool {
   space_id: string;
   space_name: string;
   description?: string;
+  conversation_id?: string;
 }
 
 export interface MCPTool {

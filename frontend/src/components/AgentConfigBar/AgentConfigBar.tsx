@@ -10,8 +10,9 @@
  */
 
 import React, { useState, useEffect, useCallback } from 'react';
-import { Plus, X, Save, FolderOpen, Loader2, ChevronDown, ChevronUp } from 'lucide-react';
+import { Plus, X, Save, FolderOpen, Loader2, ChevronDown, ChevronUp, ExternalLink } from 'lucide-react';
 import { useAgentConfig } from '../../contexts/AgentConfigContext';
+import { useSession } from '../../contexts/SessionContext';
 import { configApi } from '../../api/config';
 import type { SlideStyle, DeckPrompt } from '../../api/config';
 import type { ProfileSummary, ToolEntry } from '../../types/agentConfig';
@@ -22,16 +23,46 @@ import { ToolPicker } from './ToolPicker';
 // Sub-components
 // ---------------------------------------------------------------------------
 
-/** Removable chip for an active tool. */
-const ToolChip: React.FC<{ tool: ToolEntry; onRemove: () => void }> = ({ tool, onRemove }) => {
+/** Removable chip for an active tool, with optional Genie deep-link. */
+const ToolChip: React.FC<{
+  tool: ToolEntry;
+  onRemove: () => void;
+  sessionId?: string | null;
+}> = ({ tool, onRemove, sessionId }) => {
   const label = tool.type === 'genie'
     ? tool.space_name
     : tool.server_name;
+
+  const conversationId = tool.type === 'genie' ? tool.conversation_id : undefined;
+  const spaceId = tool.type === 'genie' ? tool.space_id : undefined;
+
+  const handleOpenGenieLink = async (e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (!sessionId || !spaceId) return;
+    try {
+      const link = await api.getGenieLink(sessionId, spaceId);
+      if (link.url) {
+        window.open(link.url, '_blank');
+      }
+    } catch (error) {
+      console.error('Failed to get Genie link:', error);
+    }
+  };
 
   return (
     <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-blue-100 text-blue-800">
       <span className="uppercase text-[10px] opacity-60 mr-0.5">{tool.type}</span>
       {label}
+      {conversationId && (
+        <button
+          onClick={handleOpenGenieLink}
+          className="p-0.5 rounded-full hover:bg-blue-200 transition-colors"
+          aria-label={`View source data for ${label}`}
+          title="View source data in Genie"
+        >
+          <ExternalLink size={10} />
+        </button>
+      )}
       <button
         onClick={onRemove}
         className="ml-0.5 p-0.5 rounded-full hover:bg-blue-200 transition-colors"
@@ -188,6 +219,7 @@ export const AgentConfigBar: React.FC = () => {
     loadProfile,
     isPreSession,
   } = useAgentConfig();
+  const { sessionId } = useSession();
 
   // Expanded / collapsed state
   const [expanded, setExpanded] = useState(false);
@@ -295,6 +327,7 @@ export const AgentConfigBar: React.FC = () => {
                   key={`${tool.type}-${tool.type === 'genie' ? tool.space_id : tool.server_uri}-${idx}`}
                   tool={tool}
                   onRemove={() => removeTool(tool)}
+                  sessionId={sessionId}
                 />
               ))}
               <button
