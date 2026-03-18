@@ -1,6 +1,6 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { FaGavel } from 'react-icons/fa';
-import { FiThumbsUp, FiThumbsDown, FiX, FiExternalLink } from 'react-icons/fi';
+import { FiThumbsUp, FiThumbsDown, FiX } from 'react-icons/fi';
 import type { VerificationResult } from '../../types/verification';
 import { getRatingColor, getRatingText, getRatingIcon, getRatingLabel } from '../../types/verification';
 import { api } from '../../services/api';
@@ -250,26 +250,6 @@ export const VerificationBadge: React.FC<VerificationBadgeProps> = ({
                 </div>
                 <code className="text-xs text-gray-700 break-all">{verificationResult.trace_id}</code>
               </div>
-            )}
-
-            {/* Genie Link */}
-            {verificationResult.genie_conversation_id && (
-              <button
-                onClick={async () => {
-                  try {
-                    const link = await api.getGenieLink(sessionId);
-                    if (link.url) {
-                      window.open(link.url, '_blank');
-                    }
-                  } catch (error) {
-                    console.error('Failed to get Genie link:', error);
-                  }
-                }}
-                className="flex items-center space-x-1 text-xs text-blue-600 hover:text-blue-800 mb-3"
-              >
-                <FiExternalLink size={12} />
-                <span>View Source Data in Genie</span>
-              </button>
             )}
 
             {/* Feedback - only show if not already submitted */}

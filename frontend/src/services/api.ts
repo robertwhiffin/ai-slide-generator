@@ -915,15 +915,17 @@ export const api = {
   /**
    * Get the Genie conversation link for viewing source data
    */
-  async getGenieLink(sessionId: string): Promise<{
+  async getGenieLink(sessionId: string, spaceId?: string): Promise<{
     has_genie_conversation: boolean;
     conversation_id?: string;
     url?: string;
     message: string;
   }> {
-    const response = await fetch(
-      `${API_BASE_URL}/api/verification/genie-link?session_id=${encodeURIComponent(sessionId)}`
-    );
+    let url = `${API_BASE_URL}/api/verification/genie-link?session_id=${encodeURIComponent(sessionId)}`;
+    if (spaceId) {
+      url += `&space_id=${encodeURIComponent(spaceId)}`;
+    }
+    const response = await fetch(url);
 
     if (!response.ok) {
       const error = await response.json().catch(() => ({}));

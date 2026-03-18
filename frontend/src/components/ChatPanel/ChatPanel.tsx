@@ -59,7 +59,7 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(({
     clearSelection,
   } = useSelection();
   const { sessionId, isInitializing, error: sessionError, setExperimentUrl, setSessionTitle } = useSession();
-  const { agentConfig, isPreSession } = useAgentConfig();
+  const { agentConfig, isPreSession, refreshConfig } = useAgentConfig();
   const { setIsGenerating } = useGeneration();
 
   // Synchronously clear messages when sessionId changes (avoids old-message flash on session switch).
@@ -298,6 +298,9 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(({
           if (event.replacement_info && slideContext) {
             setLastReplacement(event.replacement_info);
           }
+
+          // Refresh agent config to pick up updated conversation_ids from Genie tools
+          refreshConfig();
           break;
       }
     };
