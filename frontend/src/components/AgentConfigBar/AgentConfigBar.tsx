@@ -303,7 +303,7 @@ export const AgentConfigBar: React.FC = () => {
                 data-testid="add-tool-button"
               >
                 <Plus size={12} />
-                Add Tool
+                Add Genie
               </button>
               <ToolPicker
                 isOpen={toolPickerOpen}
