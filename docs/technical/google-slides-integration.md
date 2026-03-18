@@ -10,7 +10,7 @@ The Google Slides integration allows users to export their AI-generated slide de
 
 Key design decisions:
 - **Global credentials** — A single `credentials.json` is stored app-wide in the `google_global_credentials` table, encrypted at rest. Admins upload via the `/admin` page.
-- **Per-user tokens** — OAuth tokens are scoped to `user_identity` only (no profile). Each user authorizes once; tokens are stored in `google_oauth_tokens`.
+- **Per-user tokens** — OAuth tokens are scoped to `user_identity` only. Each user authorizes once; tokens are stored in `google_oauth_tokens`.
 - **DB-backed storage** — No files on disk; all secrets live in PostgreSQL/Lakebase, encrypted with Fernet symmetric encryption.
 - **LLM code-gen approach** — Same architecture as PPTX export: an LLM generates Python code that calls the Google Slides API, which is then executed server-side.
 
@@ -124,9 +124,9 @@ python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().d
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `GET` | `/auth/status` | Returns `{"authorized": bool}`. Gracefully returns `false` on any error. No `profile_id` required. |
-| `GET` | `/auth/url` | Generates and returns the Google OAuth consent URL. No `profile_id` required. |
-| `GET` | `/auth/callback?code=...` | Exchanges auth code for tokens, encrypts, stores. Returns HTML that notifies the opener window. No `profile_id` required. |
+| `GET` | `/auth/status` | Returns `{"authorized": bool}`. Gracefully returns `false` on any error. |
+| `GET` | `/auth/url` | Generates and returns the Google OAuth consent URL. |
+| `GET` | `/auth/callback?code=...` | Exchanges auth code for tokens, encrypts, stores. Returns HTML that notifies the opener window. |
 
 ### Export (`/api/export/google-slides`)
 
@@ -142,7 +142,7 @@ python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().d
 }
 ```
 
-No `profile_id` in the body; auth uses global credentials and user-scoped token.
+Auth uses global credentials and user-scoped token.
 
 ---
 
@@ -190,7 +190,7 @@ Shared rules cover:
 
 ### GoogleSlidesAuthForm (`frontend/src/components/config/GoogleSlidesAuthForm.tsx`)
 
-Rendered on the `/admin` page (not in profile ConfigTabs). Does **not** take `profileId`. Provides:
+Rendered on the `/admin` page. Provides:
 - Drag-and-drop file upload for `credentials.json`
 - Status indicators (uploaded / not configured)
 - Upload / replace / remove actions
@@ -198,22 +198,14 @@ Rendered on the `/admin` page (not in profile ConfigTabs). Does **not** take `pr
 - Authorization status (authorized / not authorized)
 - Help text with instructions for obtaining credentials from Google Cloud Console
 
-### ConfigTabs (`frontend/src/components/config/ConfigTabs.tsx`)
-
-No Google Slides tab. Google Slides configuration is on the admin page only.
-
-### ProfileDetail (`frontend/src/components/config/ProfileDetail.tsx`)
-
-Does **not** display Google Slides status. That is shown on the admin page.
-
 ### SlidePanel (`frontend/src/components/SlidePanel/SlidePanel.tsx`)
 
-`handleExportGoogleSlides` exports without `profileId`. Calls `exportToGoogleSlides(sessionId, chartImages)` — no profile parameter.
+`handleExportGoogleSlides` calls `exportToGoogleSlides(sessionId, chartImages)` to export the current session's deck.
 
 ### API Services
 
 - `frontend/src/api/config.ts` — `uploadGoogleCredentials()`, `getGoogleCredentialsStatus()`, `deleteGoogleCredentials()` (admin endpoints)
-- `frontend/src/services/api.ts` — `checkGoogleSlidesAuth()`, `getGoogleSlidesAuthUrl()`, `exportToGoogleSlides(sessionId, chartImages)` — no profileId
+- `frontend/src/services/api.ts` — `checkGoogleSlidesAuth()`, `getGoogleSlidesAuthUrl()`, `exportToGoogleSlides(sessionId, chartImages)`
 
 ---
 
