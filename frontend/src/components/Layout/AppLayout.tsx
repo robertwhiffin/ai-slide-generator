@@ -62,7 +62,7 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
   /** Ref-tracked slideDeck so the URL restoration effect doesn't re-fire on setSlideDeck(null) during new-session creation. */
   const slideDeckRef = useRef(slideDeck);
   slideDeckRef.current = slideDeck;
-  const { sessionTitle, sessionId, createNewSession, switchSession, renameSession } = useSession();
+  const { sessionTitle, sessionId, experimentUrl, createNewSession, switchSession, renameSession } = useSession();
   const { isGenerating } = useGeneration();
   /** Ref-tracked sessionId so the URL effect guard doesn't need sessionId as a dep (which would cause it to re-fire when switchSession internally calls setSessionId). */
   const sessionIdRef = useRef(sessionId);
@@ -98,7 +98,7 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
 
         const { slideDeck: restoredDeck, rawHtml: restoredRawHtml } = await switchSession(
           urlSessionId,
-          { title: sessionInfo.title, has_slide_deck: sessionInfo.has_slide_deck },
+          { title: sessionInfo.title, has_slide_deck: sessionInfo.has_slide_deck, experiment_url: sessionInfo.experiment_url },
           () => cancelled,
         );
         if (!cancelled) {
@@ -332,19 +332,26 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
   };
 
   // Generate subtitle for page header with status
-  const getSubtitle = () => {
+  const getSubtitle = (): React.ReactNode | undefined => {
     if (!slideDeck) return undefined;
-    const parts = [`${slideDeck.slide_count} slide${slideDeck.slide_count !== 1 ? 's' : ''}`];
+    const slideCount = `${slideDeck.slide_count} slide${slideDeck.slide_count !== 1 ? 's' : ''}`;
+    const saved = lastSavedTime ? `Saved ${getTimeAgo(lastSavedTime)}` : null;
 
-    // Add last saved time
-    if (lastSavedTime) {
-      parts.push(`Saved ${getTimeAgo(lastSavedTime)}`);
-    }
-
-    // Add status indicators (export status shown next to Export button in header)
-    if (isGenerating) parts.push('Generating...');
-
-    return parts.join(' • ');
+    return (
+      <>
+        {slideCount}
+        {experimentUrl && (
+          <>
+            {' \u2022 '}
+            <a href={experimentUrl} target="_blank" rel="noopener noreferrer" className="hover:underline text-primary">
+              Agent Trace
+            </a>
+          </>
+        )}
+        {saved && ` \u2022 ${saved}`}
+        {isGenerating && ' \u2022 Generating...'}
+      </>
+    );
   };
 
   // Deck to show: preview snapshot or live (use preview only when we have the deck)

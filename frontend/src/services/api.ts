@@ -104,6 +104,7 @@ export interface Session {
   profile_name?: string | null;
   google_slides_url?: string | null;
   google_slides_presentation_id?: string | null;
+  experiment_url?: string | null;
   profile_deleted?: boolean;
 }
 
