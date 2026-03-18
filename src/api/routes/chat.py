@@ -103,20 +103,38 @@ def _check_chat_permission(session_id: str, db: DBSession) -> None:
 
 
 def _maybe_create_session(request: ChatRequest, session_manager) -> bool:
-    """Create a session if request.session_id is missing.
+    """Create a session if request.session_id is missing, or sync agent_config if provided.
 
     Mutates request.session_id in place.
     Returns True if a new session was created, False otherwise.
     """
-    if request.session_id:
-        return False
-
     from src.api.schemas.agent_config import AgentConfig
 
     agent_config_data = None
     if request.agent_config:
         config = AgentConfig.model_validate(request.agent_config)
         agent_config_data = config.model_dump()
+
+    if request.session_id:
+        # Session exists — sync agent_config if provided in the request
+        if agent_config_data:
+            try:
+                from src.core.database import get_db_session
+                from src.database.models import UserSession
+
+                with get_db_session() as db:
+                    session = db.query(UserSession).filter(
+                        UserSession.session_id == request.session_id
+                    ).first()
+                    if session:
+                        session.agent_config = agent_config_data
+                        logger.info(
+                            "Synced agent_config from chat request",
+                            extra={"session_id": request.session_id},
+                        )
+            except Exception as e:
+                logger.warning(f"Failed to sync agent_config: {e}")
+        return False
 
     current_user = get_current_user()
     session = session_manager.create_session(
