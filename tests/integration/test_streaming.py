@@ -514,13 +514,14 @@ class TestRequestValidation:
         )
         assert response.status_code == 422
 
-    def test_missing_session_id_validation(self, client):
-        """Missing session_id is rejected with 422."""
+    def test_missing_session_id_creates_session(self, client):
+        """Missing session_id triggers auto-session creation (no longer 422)."""
         response = client.post(
             "/api/chat/stream",
             json={"message": "Hello"},
         )
-        assert response.status_code == 422
+        # Should not be 422 — session is created on the fly
+        assert response.status_code != 422
 
     def test_missing_message_validation(self, client):
         """Missing message is rejected with 422."""
