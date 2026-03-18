@@ -158,23 +158,34 @@ def _get_prompt_content(
 def _build_genie_tool(
     genie_config: GenieTool,
     session_data: dict[str, Any],
+    index: int = 1,
 ) -> StructuredTool:
     """Build a LangChain StructuredTool for a Genie space.
 
     The tool wraps query_genie_space with automatic conversation_id
-    management via closure over session_data.
+    management via closure over session_data. Each Genie space gets
+    its own conversation_id tracked under a per-space key.
 
     Args:
         genie_config: GenieTool config with space_id and space_name
-        session_data: Mutable session dict (conversation_id updated in place)
+        session_data: Mutable session dict (conversation_ids updated in place)
+        index: 1-based index for unique tool naming when multiple Genie spaces
 
     Returns:
         StructuredTool for querying Genie
     """
+    # Per-space conversation ID key
+    conv_key = f"genie_conversation_id:{genie_config.space_id}"
+
+    # Seed from the legacy single key if this is the first/only Genie space
+    if conv_key not in session_data and index == 1:
+        legacy_id = session_data.get("genie_conversation_id")
+        if legacy_id:
+            session_data[conv_key] = legacy_id
 
     def _query_genie_wrapper(query: str) -> str:
         """Query Genie with auto-injected conversation_id from session."""
-        conversation_id = session_data.get("genie_conversation_id")
+        conversation_id = session_data.get(conv_key)
 
         if conversation_id is None:
             logger.info(
@@ -183,6 +194,8 @@ def _build_genie_tool(
             )
             try:
                 new_conv_id = initialize_genie_conversation()
+                session_data[conv_key] = new_conv_id
+                # Also update the legacy key for backward compat
                 session_data["genie_conversation_id"] = new_conv_id
                 conversation_id = new_conv_id
             except Exception as e:
@@ -218,9 +231,11 @@ def _build_genie_tool(
     else:
         description += f"DATA AVAILABLE:\nGenie space '{genie_config.space_name}'"
 
+    tool_name = "query_genie_space" if index == 1 else f"query_genie_space_{index}"
+
     return StructuredTool.from_function(
         func=_query_genie_wrapper,
-        name="query_genie_space",
+        name=tool_name,
         description=description,
         args_schema=GenieQueryInput,
     )
@@ -258,15 +273,18 @@ def _build_tools(
     )
     tools.append(image_search_tool)
 
+    genie_index = 0
     for tool_entry in config.tools:
         if isinstance(tool_entry, GenieTool):
-            genie_tool = _build_genie_tool(tool_entry, session_data)
+            genie_index += 1
+            genie_tool = _build_genie_tool(tool_entry, session_data, genie_index)
             tools.append(genie_tool)
             logger.info(
                 "Added Genie tool",
                 extra={
                     "space_id": tool_entry.space_id,
                     "space_name": tool_entry.space_name,
+                    "tool_name": genie_tool.name,
                 },
             )
         elif isinstance(tool_entry, MCPTool):

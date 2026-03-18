@@ -251,8 +251,11 @@ def test_multiple_genie_tools(default_prompts):
 
     # search_images + 2 genie tools
     assert len(tools) == 3
-    genie_tools = [t for t in tools if t.name == "query_genie_space"]
+    genie_tools = [t for t in tools if "query_genie_space" in t.name]
     assert len(genie_tools) == 2
+    # Unique names
+    assert genie_tools[0].name == "query_genie_space"
+    assert genie_tools[1].name == "query_genie_space_2"
 
 
 def test_backward_compatible_init():
