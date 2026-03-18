@@ -230,8 +230,7 @@ def _version_slide_html(version_data: dict, index: int) -> str:
 class TestSequentialEditsE2E:
     """The core bug reproduction: sequential panel edits losing earlier changes."""
 
-    @patch("src.api.services.chat_service.create_agent")
-    def test_three_sequential_edits_all_preserved(self, mock_agent, client, mock_user):
+    def test_three_sequential_edits_all_preserved(self, client, mock_user):
         """Edit slide 2, then slide 1, then slide 3. Each save point must
         contain ALL prior edits cumulatively.
 
@@ -286,8 +285,7 @@ class TestSequentialEditsE2E:
         assert v3_slides[1]["html"] == html_edit_1, "V3: slide 2 MUST still have red-background"
         assert v3_slides[2]["html"] == html_edit_3, "V3: slide 3 should have bullet-points"
 
-    @patch("src.api.services.chat_service.create_agent")
-    def test_rapid_sequential_edits(self, mock_agent, client, mock_user):
+    def test_rapid_sequential_edits(self, client, mock_user):
         """Rapid edits with minimal delay -- simulates fast user typing in no-Genie mode."""
         session_id = _create_session(client)
         _seed_deck(session_id)
@@ -323,8 +321,7 @@ class TestSequentialEditsE2E:
 class TestMixedOperationsE2E:
     """Verify save point integrity across different operation types."""
 
-    @patch("src.api.services.chat_service.create_agent")
-    def test_reorder_then_edit(self, mock_agent, client, mock_user):
+    def test_reorder_then_edit(self, client, mock_user):
         """Reorder slides then edit one. Save point after edit must keep the reorder."""
         session_id = _create_session(client)
         deck = _seed_deck(session_id)
@@ -348,8 +345,7 @@ class TestMixedOperationsE2E:
         assert len(v2_slides) == original_count
         assert v2_slides[0]["html"] == html_edit, "Position 0 should have the edit"
 
-    @patch("src.api.services.chat_service.create_agent")
-    def test_duplicate_then_edit(self, mock_agent, client, mock_user):
+    def test_duplicate_then_edit(self, client, mock_user):
         """Duplicate a slide, edit the duplicate, verify save point has both."""
         session_id = _create_session(client)
         _seed_deck(session_id)
@@ -376,8 +372,7 @@ class TestMixedOperationsE2E:
         assert v2_slides[2]["html"] == html_edit, "Duplicate at index 2 should have edit"
         assert v2_slides[1]["html"] != html_edit, "Original at index 1 should NOT have edit"
 
-    @patch("src.api.services.chat_service.create_agent")
-    def test_delete_then_edit(self, mock_agent, client, mock_user):
+    def test_delete_then_edit(self, client, mock_user):
         """Delete a slide, edit another, verify save point reflects both."""
         session_id = _create_session(client)
         _seed_deck(session_id)
@@ -400,8 +395,7 @@ class TestMixedOperationsE2E:
 class TestVersionPreviewAndRestore:
     """Verify that previewing and restoring versions returns correct state."""
 
-    @patch("src.api.services.chat_service.create_agent")
-    def test_preview_earlier_version_shows_original(self, mock_agent, client, mock_user):
+    def test_preview_earlier_version_shows_original(self, client, mock_user):
         """Previewing V1 after additional edits should show V1's state."""
         session_id = _create_session(client)
         deck = _seed_deck(session_id)
@@ -425,8 +419,7 @@ class TestVersionPreviewAndRestore:
         assert "edit-1" in v2_slides[0]["html"], "V2 should have edit-1"
         assert "edit-2" in v2_slides[1]["html"], "V2 should have edit-2"
 
-    @patch("src.api.services.chat_service.create_agent")
-    def test_restore_then_edit_creates_correct_savepoint(self, mock_agent, client, mock_user):
+    def test_restore_then_edit_creates_correct_savepoint(self, client, mock_user):
         """Restore to V1, then edit -> new V2 should have V1 state + edit."""
         session_id = _create_session(client)
         deck = _seed_deck(session_id)
@@ -458,8 +451,7 @@ class TestVersionPreviewAndRestore:
 class TestLargerDeck:
     """Verify save point correctness with a 6-slide deck."""
 
-    @patch("src.api.services.chat_service.create_agent")
-    def test_six_slide_sequential_edits(self, mock_agent, client, mock_user):
+    def test_six_slide_sequential_edits(self, client, mock_user):
         """Edit every other slide in a 6-slide deck. Final save point must have all."""
         session_id = _create_session(client)
         deck = _seed_deck(session_id, html=load_6_slide_deck())
@@ -501,8 +493,7 @@ class TestDeleteSlideRegressions:
     - Verify getSlides returns correct state between operations
     """
 
-    @patch("src.api.services.chat_service.create_agent")
-    def test_delete_middle_then_edit_first_and_last(self, mock_agent, client, mock_user):
+    def test_delete_middle_then_edit_first_and_last(self, client, mock_user):
         """Delete slide 3 (index 2) from 5-slide deck, then edit slides 1 and 4.
         Each save point must reflect ALL prior changes cumulatively.
         """
@@ -541,8 +532,7 @@ class TestDeleteSlideRegressions:
         assert latest_slides[0]["html"] == edit_1, "Slide 1 edit MUST be in latest save point"
         assert latest_slides[4]["html"] == edit_last, "Last slide edit MUST be in latest save point"
 
-    @patch("src.api.services.chat_service.create_agent")
-    def test_delete_edit_delete_edit_chain(self, mock_agent, client, mock_user):
+    def test_delete_edit_delete_edit_chain(self, client, mock_user):
         """Delete-edit-delete-edit chain: each operation's save point must be correct."""
         session_id = _create_session(client)
         deck = _seed_deck(session_id, html=load_6_slide_deck())
@@ -581,8 +571,7 @@ class TestDeleteSlideRegressions:
         assert latest_slides[0]["html"] == edit_a, "Save point must have edit-a on slide 1"
         assert latest_slides[1]["html"] == edit_b, "Save point must have edit-b on slide 2"
 
-    @patch("src.api.services.chat_service.create_agent")
-    def test_rapid_edits_after_delete_no_gaps(self, mock_agent, client, mock_user):
+    def test_rapid_edits_after_delete_no_gaps(self, client, mock_user):
         """Delete a slide then rapidly edit every remaining slide.
         No save point should lose a prior edit.
         """
@@ -614,8 +603,7 @@ class TestDeleteSlideRegressions:
                 f"Got: {latest_slides[idx]['html'][:80]}"
             )
 
-    @patch("src.api.services.chat_service.create_agent")
-    def test_getslides_consistent_between_operations(self, mock_agent, client, mock_user):
+    def test_getslides_consistent_between_operations(self, client, mock_user):
         """After each operation, getSlides must return the cumulative state.
         This catches the auto-verify race where getSlides could return stale data.
         """
@@ -651,8 +639,7 @@ class TestDeleteSlideRegressions:
         assert state_4["slides"][0]["html"] == edit_1b, "Re-edit of slide 1 must be reflected"
         assert state_4["slides"][1]["html"] == edit_2, "Edit 2 must persist across re-edit of slide 1"
 
-    @patch("src.api.services.chat_service.create_agent")
-    def test_save_point_version_numbers_after_delete_chain(self, mock_agent, client, mock_user):
+    def test_save_point_version_numbers_after_delete_chain(self, client, mock_user):
         """Verify version numbers increment correctly through a delete+edit chain.
         Backend auto-creates save points for each operation.
         """
