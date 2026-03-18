@@ -3,6 +3,7 @@ import type { ImageAsset, ImageListResponse, ImageDataResponse } from '../types/
 import type { SlideDeck, Slide, SlideContext, ReplacementInfo } from '../types/slide';
 import type { VerificationResult } from '../types/verification';
 import type { SlideComment } from '../types/comment';
+import type { AgentConfig, ToolEntry, AvailableTool, ProfileSummary } from '../types/agentConfig';
 
 // Use relative URLs in production, explicit IPv4 in development
 // Note: Using 127.0.0.1 instead of localhost to avoid IPv6 resolution issues in CI
@@ -1590,5 +1591,160 @@ export const api = {
     const response = await fetch(`${API_BASE_URL}/api/sessions/${sessionId}/lock/heartbeat`, { method: 'PUT' });
     if (!response.ok) throw new ApiError(response.status, 'Failed to renew editing lock');
     return response.json();
+  },
+
+  // =========================================================================
+  // Agent Config API
+  // =========================================================================
+
+  /**
+   * Get the agent config for a session.
+   */
+  async getAgentConfig(sessionId: string): Promise<AgentConfig> {
+    const response = await fetch(
+      `${API_BASE_URL}/api/sessions/${sessionId}/agent-config`
+    );
+
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({}));
+      throw new ApiError(response.status, error.detail || 'Failed to fetch agent config');
+    }
+
+    return response.json();
+  },
+
+  /**
+   * Replace the full agent config for a session.
+   */
+  async updateAgentConfig(sessionId: string, config: AgentConfig): Promise<AgentConfig> {
+    const response = await fetch(
+      `${API_BASE_URL}/api/sessions/${sessionId}/agent-config`,
+      {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(config),
+      }
+    );
+
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({}));
+      throw new ApiError(response.status, error.detail || 'Failed to update agent config');
+    }
+
+    return response.json();
+  },
+
+  /**
+   * Add or remove a single tool from the session's agent config.
+   */
+  async patchTools(sessionId: string, action: 'add' | 'remove', tool: ToolEntry): Promise<AgentConfig> {
+    const response = await fetch(
+      `${API_BASE_URL}/api/sessions/${sessionId}/agent-config/tools`,
+      {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action, tool }),
+      }
+    );
+
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({}));
+      throw new ApiError(response.status, error.detail || 'Failed to update tools');
+    }
+
+    return response.json();
+  },
+
+  // =========================================================================
+  // Tools Discovery API
+  // =========================================================================
+
+  /**
+   * List all available tools (Genie spaces, MCP servers, etc.).
+   */
+  async getAvailableTools(): Promise<AvailableTool[]> {
+    const response = await fetch(`${API_BASE_URL}/api/tools/available`);
+
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({}));
+      throw new ApiError(response.status, error.detail || 'Failed to fetch available tools');
+    }
+
+    return response.json();
+  },
+
+  // =========================================================================
+  // Profiles API (simplified)
+  // =========================================================================
+
+  /**
+   * List all profiles.
+   */
+  async listProfiles(): Promise<ProfileSummary[]> {
+    const response = await fetch(`${API_BASE_URL}/api/profiles`);
+
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({}));
+      throw new ApiError(response.status, error.detail || 'Failed to fetch profiles');
+    }
+
+    return response.json();
+  },
+
+  /**
+   * Save the current session's agent config as a named profile.
+   */
+  async saveAsProfile(sessionId: string, name: string, description?: string): Promise<ProfileSummary> {
+    const response = await fetch(
+      `${API_BASE_URL}/api/profiles/save-from-session/${sessionId}`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name, description }),
+      }
+    );
+
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({}));
+      throw new ApiError(response.status, error.detail || 'Failed to save profile');
+    }
+
+    return response.json();
+  },
+
+  /**
+   * Load a profile's agent config into a session.
+   */
+  async loadProfile(sessionId: string, profileId: number): Promise<{ status: string; agent_config: AgentConfig }> {
+    const response = await fetch(
+      `${API_BASE_URL}/api/sessions/${sessionId}/load-profile/${profileId}`,
+      {
+        method: 'POST',
+      }
+    );
+
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({}));
+      throw new ApiError(response.status, error.detail || 'Failed to load profile');
+    }
+
+    return response.json();
+  },
+
+  /**
+   * Delete a profile.
+   */
+  async deleteProfile(profileId: number): Promise<void> {
+    const response = await fetch(
+      `${API_BASE_URL}/api/profiles/${profileId}`,
+      {
+        method: 'DELETE',
+      }
+    );
+
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({}));
+      throw new ApiError(response.status, error.detail || 'Failed to delete profile');
+    }
   },
 };
