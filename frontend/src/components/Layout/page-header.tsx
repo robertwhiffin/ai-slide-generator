@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect } from "react"
+import { useState, useRef, useEffect, type ReactNode } from "react"
 import { Save, Download, Play, Share2, ChevronDown, FileDown, FileText, Presentation } from "lucide-react"
 import { Button } from "@/ui/button"
 import { SidebarTrigger } from "@/ui/sidebar"
@@ -12,7 +12,7 @@ import {
 
 interface PageHeaderProps {
   title: string
-  subtitle?: string
+  subtitle?: ReactNode
   onSave?: () => void
   onShare?: () => void
   /** Single export action (legacy); ignored if export menu items are provided */
