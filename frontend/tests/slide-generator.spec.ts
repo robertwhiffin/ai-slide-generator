@@ -1,6 +1,9 @@
 import { test, expect, Page } from '@playwright/test';
 import {
   mockProfiles,
+  mockProfileSummaries,
+  mockDefaultAgentConfig,
+  mockAvailableTools,
   mockDeckPrompts,
   mockSlideStyles,
   mockSessions,
@@ -32,13 +35,19 @@ async function setupMocks(page: Page) {
     });
   });
 
-  // Mock profiles endpoint
+  // New profiles API (GET /api/profiles)
+  await page.route(/\/api\/profiles$/, (route) => {
+    route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(mockProfileSummaries) });
+  });
+
+  // Legacy profiles endpoint
   await page.route(/\/api\/settings\/profiles$/, (route) => {
-    route.fulfill({
-      status: 200,
-      contentType: 'application/json',
-      body: JSON.stringify(mockProfiles)
-    });
+    route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(mockProfiles) });
+  });
+
+  // Available tools
+  await page.route('**/api/tools/available', (route) => {
+    route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(mockAvailableTools) });
   });
 
   // Mock deck prompts endpoint
@@ -67,6 +76,12 @@ async function setupMocks(page: Page) {
     // Handle session creation/deletion
     if (method === 'POST' || method === 'DELETE') {
       route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ session_id: 'mock', title: 'New', user_id: null, created_at: '2026-01-01T00:00:00Z' }) });
+      return;
+    }
+
+    // Handle agent-config endpoint
+    if (url.includes('/agent-config')) {
+      route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(mockDefaultAgentConfig) });
       return;
     }
 
@@ -139,9 +154,10 @@ test.describe('Slide Generator App - Navigation', () => {
     await expect(page.getByRole('button', { name: HELP_LABEL }).first()).toBeVisible();
   });
 
-  test('should display profile selector', async ({ page }) => {
+  test('should display agent config bar', async ({ page }) => {
     await goToGenerator(page);
-    await expect(page.getByRole('button', { name: /Profile|Sales Analytics/i }).first()).toBeVisible();
+    // AgentConfigBar should be visible in the generator view
+    await expect(page.getByRole('textbox')).toBeVisible();
   });
 
   test('should navigate to Generator view', async ({ page }) => {

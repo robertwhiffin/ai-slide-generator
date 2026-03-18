@@ -1,6 +1,9 @@
 import { test, expect, Page } from '@playwright/test';
 import {
   mockProfiles,
+  mockProfileSummaries,
+  mockDefaultAgentConfig,
+  mockAvailableTools,
   mockDeckPrompts,
   mockSlideStyles,
   mockSessions,
@@ -9,7 +12,6 @@ import {
   mockDuplicateNameError,
   mockGenieSpaces,
 } from '../fixtures/mocks';
-import { goToGenerator } from '../helpers/new-ui';
 
 /**
  * Profile UI Tests (Mocked)
@@ -18,9 +20,11 @@ import { goToGenerator } from '../helpers/new-ui';
  * using mocked API responses. They run fast and don't require a backend.
  *
  * Covers:
- * - ProfileSelector dropdown behavior
  * - ProfileList rendering and interactions
  * - ProfileCreationWizard step navigation and validation
+ *
+ * NOTE: ProfileSelector tests removed — the header profile dropdown was replaced
+ * by the AgentConfigBar. Profile management is now on the /profiles page.
  */
 
 // ============================================
@@ -31,6 +35,18 @@ async function setupProfileMocks(page: Page) {
   await page.route('**/api/setup/status', (route) => {
     route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ configured: true }) });
   });
+
+  // New profiles API (GET /api/profiles) — used by AgentConfigContext
+  await page.route(/\/api\/profiles$/, (route) => {
+    route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(mockProfileSummaries) });
+  });
+
+  // Available tools
+  await page.route('**/api/tools/available', (route) => {
+    route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(mockAvailableTools) });
+  });
+
+  // Legacy profiles endpoint (used by ProfileList on /profiles page)
   await page.route(/\/api\/settings\/profiles$/, (route, request) => {
     if (request.method() === 'GET') {
       route.fulfill({
@@ -138,7 +154,22 @@ async function setupProfileMocks(page: Page) {
         contentType: 'application/json',
         body: JSON.stringify({ presentations: [], count: 0 }),
       });
-    } else if (url.includes('limit=')) {
+      return;
+    }
+
+    // Handle agent-config endpoint
+    if (url.includes('/agent-config')) {
+      route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(mockDefaultAgentConfig) });
+      return;
+    }
+
+    // Handle load-profile endpoint
+    if (url.includes('/load-profile/')) {
+      route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ status: 'loaded', agent_config: mockDefaultAgentConfig }) });
+      return;
+    }
+
+    if (url.includes('limit=')) {
       route.fulfill({
         status: 200,
         contentType: 'application/json',
@@ -204,78 +235,9 @@ async function goToProfiles(page: Page) {
   await expect(page.getByRole('heading', { name: /Agent Profiles|Configuration Profiles/i })).toBeVisible({ timeout: 10000 });
 }
 
-/** Profile selector button in the page header (not sidebar). */
-function getHeaderProfileButton(page: Page) {
-  return page.locator('header button[aria-label="Profile"]');
-}
-
-// ============================================
-// ProfileSelector Tests
-// ============================================
-
-test.describe('ProfileSelector', () => {
-  test.beforeEach(async ({ page }) => {
-    await setupProfileMocks(page);
-  });
-
-  test('displays current profile name in button', async ({ page }) => {
-    await goToGenerator(page);
-
-    const profileButton = getHeaderProfileButton(page);
-    await expect(profileButton).toBeVisible();
-    await expect(page.getByText('Sales Analytics').first()).toBeVisible();
-  });
-
-  test('shows "Default" badge when current profile is default', async ({ page }) => {
-    await goToGenerator(page);
-
-    const profileButton = getHeaderProfileButton(page);
-    await profileButton.click();
-
-    await expect(page.getByText('Default').first()).toBeVisible();
-  });
-
-  test('opens dropdown on click', async ({ page }) => {
-    await goToGenerator(page);
-
-    const profileButton = getHeaderProfileButton(page);
-    await profileButton.click();
-
-    await expect(page.getByText('Marketing Reports')).toBeVisible();
-  });
-
-  test('closes dropdown when clicking outside', async ({ page }) => {
-    await goToGenerator(page);
-
-    const profileButton = getHeaderProfileButton(page);
-    await profileButton.click();
-
-    await expect(page.getByText('Switch Profile')).toBeVisible();
-
-    await page.locator('header').click({ position: { x: 10, y: 10 } });
-
-    await expect(page.getByText('Switch Profile')).not.toBeVisible();
-  });
-
-  test('shows checkmark on currently loaded profile', async ({ page }) => {
-    await goToGenerator(page);
-
-    const profileButton = getHeaderProfileButton(page);
-    await profileButton.click();
-
-    const salesRow = page.locator('text=Sales Analytics').first();
-    await expect(salesRow).toBeVisible();
-  });
-
-  test('shows "Manage Profiles" link', async ({ page }) => {
-    await goToGenerator(page);
-
-    const profileButton = getHeaderProfileButton(page);
-    await profileButton.click();
-
-    await expect(page.getByText(/Manage Profiles/)).toBeVisible();
-  });
-});
+// NOTE: ProfileSelector tests removed — the header profile dropdown was replaced
+// by the AgentConfigBar in the generator view. Profile management is now done
+// via the /profiles page (ProfileList) and the AgentConfigBar inline controls.
 
 // ============================================
 // ProfileList Tests
