@@ -1,76 +1,83 @@
 # Settings API
 
-Endpoints for managing configuration profiles, deck prompts, slide styles, AI infrastructure, and Genie spaces.
+Endpoints for managing session agent configuration, profiles, deck prompts, slide styles, and tool discovery.
+
+## Agent Configuration
+
+Session-bound agent configuration. Each session carries its own `agent_config` JSON that controls tools, slide style, deck prompt, and prompt overrides.
+
+### Get Agent Config
+
+**GET** `/api/sessions/{session_id}/agent-config`
+
+Returns the agent configuration for a session.
+
+**Response:**
+```json
+{
+  "tools": [
+    {"type": "genie", "space_id": "...", "space_name": "...", "description": "...", "conversation_id": "..."}
+  ],
+  "slide_style_id": 3,
+  "deck_prompt_id": 7,
+  "system_prompt": null,
+  "slide_editing_instructions": null
+}
+```
+
+### Update Agent Config
+
+**PUT** `/api/sessions/{session_id}/agent-config`
+
+Replace the full agent configuration for a session.
+
+### Update Tools
+
+**PATCH** `/api/sessions/{session_id}/agent-config/tools`
+
+Add or remove tools from the session's agent configuration.
+
+## Tool Discovery
+
+### List Available Tools
+
+**GET** `/api/tools/available`
+
+Discover available Genie spaces and MCP servers that can be added to a session's tool list.
 
 ## Profiles
 
-Configuration profiles bundle together Genie spaces, slide styles, deck prompts, and LLM settings.
+Profiles are named snapshots of agent configuration. Save a session's config as a profile, or load a profile into a session.
 
 ### List Profiles
 
-**GET** `/api/settings/profiles`
+**GET** `/api/profiles`
 
-Returns a list of all profiles.
+Returns a list of all saved profiles.
 
-### Get Default Profile
+### Save Profile from Session
 
-**GET** `/api/settings/profiles/default`
+**POST** `/api/profiles/save-from-session/{session_id}`
 
-Returns the default profile configuration.
+Snapshot the current session's agent configuration as a named profile.
 
-### Get Profile
+### Load Profile into Session
 
-**GET** `/api/settings/profiles/{profile_id}`
+**POST** `/api/sessions/{session_id}/load-profile/{profile_id}`
 
-Get detailed configuration for a specific profile.
-
-### Create Profile
-
-**POST** `/api/settings/profiles`
-
-Create a new profile with basic information.
-
-### Create Profile with Config
-
-**POST** `/api/settings/profiles/with-config`
-
-Create a profile with all configuration in one request (wizard mode).
+Load a saved profile's agent configuration into a session, replacing the session's current config.
 
 ### Update Profile
 
-**PUT** `/api/settings/profiles/{profile_id}`
+**PUT** `/api/profiles/{profile_id}`
 
 Update an existing profile.
 
 ### Delete Profile
 
-**DELETE** `/api/settings/profiles/{profile_id}`
+**DELETE** `/api/profiles/{profile_id}`
 
 Delete a profile.
-
-### Set Default Profile
-
-**POST** `/api/settings/profiles/{profile_id}/set-default`
-
-Set a profile as the default.
-
-### Duplicate Profile
-
-**POST** `/api/settings/profiles/{profile_id}/duplicate`
-
-Create a copy of an existing profile.
-
-### Load Profile
-
-**POST** `/api/settings/profiles/{profile_id}/load`
-
-Hot-reload a profile configuration.
-
-### Reload All Profiles
-
-**POST** `/api/settings/profiles/reload`
-
-Reload all profiles from the database.
 
 ## Deck Prompts
 
@@ -140,105 +147,15 @@ Update an existing slide style.
 
 Delete a slide style.
 
-## Prompts Configuration
-
-Manage prompt configuration for profiles.
-
-### Get Prompts Config
-
-**GET** `/api/settings/prompts/{profile_id}`
-
-Get prompt configuration for a profile.
-
-### Update Prompts Config
-
-**PUT** `/api/settings/prompts/{profile_id}`
-
-Update prompt configuration (deck prompt and slide style selection).
-
-## AI Infrastructure
-
-Manage LLM endpoint and MLflow settings.
-
-### Get AI Infrastructure Config
-
-**GET** `/api/settings/ai-infra/{profile_id}`
-
-Get AI infrastructure configuration for a profile.
-
-### Update AI Infrastructure Config
-
-**PUT** `/api/settings/ai-infra/{profile_id}`
-
-Update AI infrastructure configuration.
-
-### Validate AI Infrastructure
-
-**POST** `/api/settings/ai-infra/validate`
-
-Validate AI infrastructure settings.
-
-### List Available Endpoints
-
-**GET** `/api/settings/ai-infra/endpoints/available`
-
-List available LLM endpoints in the workspace.
-
-## Genie Spaces
-
-Manage Genie space connections.
-
-### List Available Genie Spaces
-
-**GET** `/api/settings/genie/available`
-
-List all available Genie spaces in the workspace.
-
-### Get Genie Space
-
-**GET** `/api/settings/genie/{profile_id}`
-
-Get Genie space configuration for a profile.
-
-### Create/Update Genie Space
-
-**POST** `/api/settings/genie/{profile_id}`
-
-Set Genie space for a profile.
-
-### Update Genie Space
-
-**PUT** `/api/settings/genie/space/{space_id}`
-
-Update a Genie space configuration.
-
-### Delete Genie Space
-
-**DELETE** `/api/settings/genie/space/{space_id}`
-
-Delete a Genie space configuration.
-
-### Lookup Genie Space
-
-**GET** `/api/settings/genie/lookup/{space_id}`
-
-Get details about a specific Genie space.
-
-### Validate Genie Space
-
-**POST** `/api/settings/genie/validate`
-
-Validate Genie space configuration.
-
 ## Google Credentials
 
-Manage Google OAuth client credentials for Google Slides export. Credentials are stored encrypted per profile.
+Manage Google OAuth client credentials for Google Slides export. Credentials are stored encrypted app-wide.
 
 ### Upload Google Credentials
 
-**POST** `/api/settings/profiles/{profile_id}/google-credentials`
+**POST** `/api/admin/google-credentials`
 
-Upload a `credentials.json` file obtained from Google Cloud Console. The file is validated, encrypted, and stored with the profile.
+Upload a `credentials.json` file obtained from Google Cloud Console. The file is validated, encrypted, and stored globally.
 
 **Request:** `multipart/form-data` with `file` field containing `credentials.json`.
 
@@ -252,9 +169,9 @@ Upload a `credentials.json` file obtained from Google Cloud Console. The file is
 
 ### Get Google Credentials Status
 
-**GET** `/api/settings/profiles/{profile_id}/google-credentials/status`
+**GET** `/api/admin/google-credentials/status`
 
-Check whether credentials are configured for the profile.
+Check whether credentials are configured.
 
 **Response:**
 ```json
@@ -265,9 +182,9 @@ Check whether credentials are configured for the profile.
 
 ### Delete Google Credentials
 
-**DELETE** `/api/settings/profiles/{profile_id}/google-credentials`
+**DELETE** `/api/admin/google-credentials`
 
-Remove stored credentials from the profile. Returns 204 on success.
+Remove stored credentials. Returns 204 on success.
 
 ## Common Response Patterns
 
@@ -279,4 +196,3 @@ Most settings endpoints return detailed configuration objects. Error responses f
 - `404 Not Found` - Resource not found
 - `400 Bad Request` - Invalid configuration
 - `500 Internal Server Error` - Server error
-

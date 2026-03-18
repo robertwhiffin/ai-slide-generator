@@ -7,11 +7,10 @@
 
 The AI Slide Generator uses a PostgreSQL database to manage configuration profiles. This replaces the previous YAML-based configuration system and enables:
 
-- Multiple configuration profiles
-- Hot-reload without application restart
-- Configuration history and audit trail
-- Dynamic profile switching
-- Centralized configuration management
+- Session-bound agent configuration via `agent_config` JSON column
+- Named profile snapshots for reusable configurations
+- Deck prompt and slide style libraries
+- Dynamic configuration per session
 
 ## Architecture
 
@@ -20,16 +19,11 @@ The AI Slide Generator uses a PostgreSQL database to manage configuration profil
 The database consists of configuration and session tables:
 
 **Configuration Tables:**
-1. **`config_profiles`** - Configuration profiles (e.g., "production", "development")
-2. **`config_ai_infra`** - AI/LLM settings (endpoint, temperature, max tokens)
-3. **`config_genie_spaces`** - Databricks Genie space configurations
-4. **`config_mlflow`** - MLflow experiment settings
-5. **`config_prompts`** - System prompts and deck prompt selection
-6. **`config_history`** - Audit trail of all configuration changes
-7. **`slide_deck_prompt_library`** - Global deck prompt templates (shared across profiles)
-8. **`slide_style_library`** - Global slide style library (CSS styles, image guidelines)
-9. **`google_global_credentials`** - App-wide encrypted Google OAuth credentials.json (single row)
-10. **`google_oauth_tokens`** - Per-user encrypted Google OAuth tokens (unique on `user_identity` only)
+1. **`config_profiles`** - Named configuration snapshots with `agent_config` JSON
+2. **`slide_deck_prompt_library`** - Global deck prompt templates
+3. **`slide_style_library`** - Global slide style library (CSS styles, image guidelines)
+4. **`google_global_credentials`** - App-wide encrypted Google OAuth credentials.json (single row)
+5. **`google_oauth_tokens`** - Per-user encrypted Google OAuth tokens (unique on `user_identity` only)
 
 **Session Tables:**
 8. **`user_sessions`** - User conversation sessions with processing locks
@@ -46,18 +40,13 @@ The database consists of configuration and session tables:
 
 **Configuration Tables:**
 ```
-config_profiles (1) ──┬── (1) config_ai_infra
-                      ├── (1) config_genie_spaces
-                      ├── (1) config_mlflow
-                      ├── (1) config_prompts ──┬── (0..1) slide_deck_prompt_library
-                      │                        └── (0..1) slide_style_library
-                      └── (n) config_history
+config_profiles (standalone, each has agent_config JSON)
 
 google_global_credentials (standalone, single row)
 google_oauth_tokens (standalone, per user_identity, no profile FK)
 
-slide_deck_prompt_library (global) ──── (n) config_prompts (via selected_deck_prompt_id FK)
-slide_style_library (global) ──── (n) config_prompts (via selected_slide_style_id FK)
+slide_deck_prompt_library (global, referenced by agent_config.deck_prompt_id)
+slide_style_library (global, referenced by agent_config.slide_style_id)
 ```
 
 **Session Tables:**
@@ -75,20 +64,14 @@ export_jobs (standalone, references session_id as string)
 image_assets (standalone, no foreign keys)
 ```
 
-- One profile has exactly one AI infrastructure config
-- One profile has exactly one Genie space
-- One profile has exactly one MLflow config
-- One profile has exactly one prompts config
-- All changes are tracked in history
+- Each session carries its own `agent_config` JSON column with tools, style, prompt, and overrides
+- Profiles are simplified named snapshots containing `agent_config` JSON
+- Deck prompt and slide style libraries are global (referenced by ID from `agent_config`)
 
 ### Key Constraints
 
 1. **Unique Profile Names**: Each profile must have a unique name
-2. **Single Default Profile**: Only one profile can be marked as default (enforced by trigger)
-3. **One Genie Space Per Profile**: Each profile can have only one Genie space (enforced by unique constraint)
-4. **Cascade Delete**: Deleting a profile cascades to all related configurations
-5. **Temperature Range**: LLM temperature must be between 0 and 1
-6. **Positive Max Tokens**: LLM max_tokens must be greater than 0
+2. **Agent Config Validation**: Pydantic validates `agent_config` JSON on every write
 
 ## Database Connection
 
@@ -145,83 +128,29 @@ with get_db_session() as db:
 
 ### ConfigProfile
 
-Main profile entity containing metadata about a configuration set.
+Named configuration snapshot containing an `agent_config` JSON blob.
 
 ```python
 class ConfigProfile(Base):
     id: int
     name: str                    # Unique profile name
     description: str | None
-    is_default: bool             # Only one can be True
+    agent_config: dict           # JSON: tools, slide_style_id, deck_prompt_id, system_prompt, etc.
     created_at: datetime
     created_by: str | None
     updated_at: datetime
     updated_by: str | None
-    
-    # Relationships
-    ai_infra: ConfigAIInfra
-    genie_spaces: list[ConfigGenieSpace]
-    mlflow: ConfigMLflow
-    prompts: ConfigPrompts
-    history: list[ConfigHistory]
 ```
 
-### ConfigAIInfra
-
-LLM and AI infrastructure settings.
-
-```python
-class ConfigAIInfra(Base):
-    id: int
-    profile_id: int              # Foreign key to config_profiles
-    llm_endpoint: str            # e.g., "databricks-claude-sonnet-4-5"
-    llm_temperature: Decimal     # 0.0 to 1.0
-    llm_max_tokens: int          # Must be positive
-    created_at: datetime
-    updated_at: datetime
-```
-
-### ConfigGenieSpace
-
-Databricks Genie space configuration. Each profile has exactly one Genie space.
-
-```python
-class ConfigGenieSpace(Base):
-    id: int
-    profile_id: int              # Foreign key to config_profiles (unique)
-    space_id: str                # Genie space ID
-    space_name: str              # Display name
-    description: str | None
-    created_at: datetime
-    updated_at: datetime
-```
-
-### ConfigMLflow
-
-MLflow experiment tracking settings.
-
-```python
-class ConfigMLflow(Base):
-    id: int
-    profile_id: int              # Foreign key to config_profiles
-    experiment_name: str         # MLflow experiment path
-    created_at: datetime
-    updated_at: datetime
-```
-
-### ConfigPrompts
-
-System prompts and deck prompt selection for the LLM.
-
-```python
-class ConfigPrompts(Base):
-    id: int
-    profile_id: int                      # Foreign key to config_profiles
-    selected_deck_prompt_id: int | None  # FK to slide_deck_prompt_library (optional)
-    system_prompt: str                   # Main system prompt (advanced)
-    slide_editing_instructions: str      # Editing mode instructions (advanced)
-    created_at: datetime
-    updated_at: datetime
+**Agent config schema:**
+```json
+{
+  "tools": [{"type": "genie", "space_id": "...", "space_name": "...", "description": "...", "conversation_id": "..."}],
+  "slide_style_id": 3,
+  "deck_prompt_id": 7,
+  "system_prompt": null,
+  "slide_editing_instructions": null
+}
 ```
 
 ### SlideDeckPromptLibrary
@@ -243,8 +172,8 @@ class SlideDeckPromptLibrary(Base):
 ```
 
 **How deck prompts work:**
-1. Deck prompts are created globally (not per-profile)
-2. Each profile can select one deck prompt via `config_prompts.selected_deck_prompt_id`
+1. Deck prompts are created globally
+2. Each session can select one deck prompt via `agent_config.deck_prompt_id`
 3. When generating slides, the deck prompt content is prepended to the system prompt
 4. This enables standardized presentations without users retyping instructions each time
 
@@ -269,26 +198,10 @@ class SlideStyleLibrary(Base):
 ```
 
 **How slide styles work:**
-1. Styles are created globally (not per-profile)
-2. Each profile can select one style via `config_prompts.selected_slide_style_id`
+1. Styles are created globally
+2. Each session can select one style via `agent_config.slide_style_id`
 3. When generating slides, the style content is included in the system prompt
 4. `is_system=True` styles (e.g., "System Default") are protected from user modification
-
-### ConfigHistory
-
-Audit trail of all configuration changes.
-
-```python
-class ConfigHistory(Base):
-    id: int
-    profile_id: int              # Foreign key to config_profiles
-    domain: str                  # 'ai_infra', 'genie', 'mlflow', 'prompts', 'profile'
-    action: str                  # 'create', 'update', 'delete', 'activate'
-    changed_by: str              # User who made the change
-    changes: dict                # {"field": {"old": "...", "new": "..."}}
-    snapshot: dict | None        # Full settings snapshot at time of change
-    timestamp: datetime
-```
 
 ### GoogleGlobalCredentials
 
@@ -321,7 +234,7 @@ class GoogleOAuthToken(Base):
 
 ### UserSession
 
-User conversation sessions with processing lock support and profile association.
+User conversation sessions with processing lock support and session-bound agent configuration.
 
 ```python
 class UserSession(Base):
@@ -332,14 +245,12 @@ class UserSession(Base):
     title: str                   # Session title
     created_at: datetime
     last_activity: datetime
-    profile_id: int | None       # Profile this session belongs to (for Genie space association)
-    profile_name: str | None     # Cached profile name for display in session history
-    genie_conversation_id: str | None  # Genie conversation ID (persists across profile switches)
+    agent_config: dict | None    # JSON: tools, slide_style_id, deck_prompt_id, prompts
     is_processing: bool          # Lock flag for concurrent requests
     processing_started_at: datetime | None
 ```
 
-**Note:** Sessions track their `profile_id` to preserve Genie conversation IDs across profile switches. When restoring a session, the frontend auto-switches to the session's profile.
+**`agent_config` column:** Stores the session's complete agent configuration as JSON. The agent is built per-request from this config via `build_agent_for_request()`. Each Genie space tool tracks its own `conversation_id` within the config. See [Agent Config Flow](profile-switch-genie-flow.md) for details.
 
 ### SessionMessage
 
@@ -543,63 +454,29 @@ Called from the Databricks App startup command in `app.yaml` after `init_databas
 
 ## Database Initialization
 
-### Default Profile
+### Database Initialization
 
-On first run, initialize the database with a default profile:
+On first run, initialize the database:
 
 ```bash
 python scripts/init_database.py
 ```
 
 This creates:
-- A "default" profile marked as the default
-- Default AI infrastructure settings (LLM endpoint: `databricks-claude-sonnet-4-5`)
-- Default Genie space configuration (one per profile)
-- Default MLflow experiment name
-- Default system prompts
 - Seed deck prompts (Consumption Review, QBR, Executive Summary, Use Case Analysis)
+- Default slide styles
 
 ### Profile Creation
 
-Profiles are created via a 5-step wizard that collects essential configuration. LLM and MLflow settings use backend defaults:
+Profiles are created by saving a session's agent configuration as a named snapshot via `POST /api/profiles/save-from-session/{session_id}`. The profile stores the session's `agent_config` JSON (tools, slide style, deck prompt, prompt overrides).
 
-1. **Basic Info** - Name and description
-2. **Genie Space** - Optional data source with AI description (enables data queries)
-3. **Slide Style** - Required visual appearance selection
-4. **Deck Prompt** - Optional template selection
-5. **Review** - Confirmation before creation
+Profiles can also be loaded into any session via `POST /api/sessions/{id}/load-profile/{profile_id}`.
 
-**Genie Space is Optional:**
-- Profiles without a Genie space run in **prompt-only mode**
-- The agent generates slides purely from conversation without data queries
-- A Genie space can be added later from the profile settings
-
-**Backend Defaults Applied:**
-- **LLM**: `databricks-claude-sonnet-4-5`, temperature 0.7, max tokens 60000
-- **MLflow**: `/Workspace/Users/{username}/ai-slide-generator`
-
-The wizard creates the profile and all configurations in a single transaction via `ProfileService.create_profile_with_config()`. LLM, MLflow, and Genie settings can be customized after profile creation in the profile settings.
+**LLM is a fixed backend default** (not user-configurable). Sessions without Genie tools run in **prompt-only mode**.
 
 ### Default Values
 
-Defined in `src/core/defaults.py`:
-
-```python
-DEFAULT_CONFIG = {
-    "llm": {
-        "endpoint": "databricks-claude-sonnet-4-5",
-        "temperature": 0.7,
-        "max_tokens": 60000,
-    },
-    # No default Genie space - must be explicitly configured per profile
-    "prompts": {
-        "system_prompt": "...",
-        "slide_editing_instructions": "...",
-    },
-}
-```
-
-**Note:** Genie space is optional - profiles without Genie run in prompt-only mode. MLflow experiment name is auto-set based on the profile creator's username.
+The LLM endpoint and model parameters are fixed backend defaults (not stored in agent config or profiles). Sessions start with an empty `agent_config` (no tools, default style and prompt) and can be configured via the AgentConfigBar or by loading a profile.
 
 ### Default Deck Prompts
 
