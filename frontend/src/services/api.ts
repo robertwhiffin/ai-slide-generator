@@ -60,7 +60,7 @@ const isPollingMode = (): boolean => {
 };
 
 // Streaming event types matching backend StreamEventType
-export type StreamEventType = 'assistant' | 'tool_call' | 'tool_result' | 'error' | 'complete' | 'session_title';
+export type StreamEventType = 'assistant' | 'tool_call' | 'tool_result' | 'error' | 'complete' | 'session_title' | 'session_created';
 
 export interface StreamEvent {
   type: StreamEventType;
@@ -76,6 +76,7 @@ export interface StreamEvent {
   metadata?: Record<string, any>;
   experiment_url?: string;
   session_title?: string;
+  session_id?: string;
 }
 
 export interface SessionMessage {
@@ -608,8 +609,7 @@ export const api = {
     onEvent: (event: StreamEvent) => void,
     onError: (error: Error) => void,
     imageIds?: number[],
-    profileId?: number,
-    profileName?: string,
+    agentConfig?: AgentConfig,
   ): () => void {
     const controller = new AbortController();
 
@@ -621,12 +621,11 @@ export const api = {
             'Content-Type': 'application/json',
           },
           body: JSON.stringify({
-            session_id: sessionId,
+            session_id: sessionId || undefined,
             message,
             slide_context: slideContext,
             image_ids: imageIds,
-            profile_id: profileId,
-            profile_name: profileName,
+            agent_config: agentConfig,
           }),
           signal: controller.signal,
         });
@@ -702,19 +701,17 @@ export const api = {
     message: string,
     slideContext?: SlideContext,
     imageIds?: number[],
-    profileId?: number,
-    profileName?: string,
+    agentConfig?: AgentConfig,
   ): Promise<{ request_id: string }> {
     const response = await fetch(`${API_BASE_URL}/api/chat/async`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        session_id: sessionId,
+        session_id: sessionId || undefined,
         message,
         slide_context: slideContext,
         image_ids: imageIds,
-        profile_id: profileId,
-        profile_name: profileName,
+        agent_config: agentConfig,
       }),
     });
 
@@ -763,15 +760,14 @@ export const api = {
     onEvent: (event: StreamEvent) => void,
     onError: (error: Error) => void,
     imageIds?: number[],
-    profileId?: number,
-    profileName?: string,
+    agentConfig?: AgentConfig,
   ): () => void {
     let cancelled = false;
     let pollInterval: ReturnType<typeof setInterval> | null = null;
 
     (async () => {
       try {
-        const { request_id } = await this.submitChatAsync(sessionId, message, slideContext, imageIds, profileId, profileName);
+        const { request_id } = await this.submitChatAsync(sessionId, message, slideContext, imageIds, agentConfig);
 
         let lastMessageId = 0;
 
@@ -853,13 +849,12 @@ export const api = {
     onEvent: (event: StreamEvent) => void,
     onError: (error: Error) => void,
     imageIds?: number[],
-    profileId?: number,
-    profileName?: string,
+    agentConfig?: AgentConfig,
   ): () => void {
     if (isPollingMode()) {
-      return this.startPolling(sessionId, message, slideContext, onEvent, onError, imageIds, profileId, profileName);
+      return this.startPolling(sessionId, message, slideContext, onEvent, onError, imageIds, agentConfig);
     } else {
-      return this.streamChat(sessionId, message, slideContext, onEvent, onError, imageIds, profileId, profileName);
+      return this.streamChat(sessionId, message, slideContext, onEvent, onError, imageIds, agentConfig);
     }
   },
 
