@@ -196,7 +196,7 @@ def _build_genie_tool(
                 extra={"space_id": genie_config.space_id},
             )
             try:
-                new_conv_id = initialize_genie_conversation()
+                new_conv_id = initialize_genie_conversation(space_id=genie_config.space_id)
                 session_data[conv_key] = new_conv_id
                 # Also update the legacy key for backward compat
                 session_data["genie_conversation_id"] = new_conv_id
@@ -205,7 +205,7 @@ def _build_genie_tool(
                 logger.error(f"Failed to initialize Genie conversation: {e}")
                 raise
 
-        result = query_genie_space(query, conversation_id)
+        result = query_genie_space(query, conversation_id, space_id=genie_config.space_id)
 
         response_parts = []
         if result.get("message"):
