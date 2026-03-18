@@ -476,10 +476,10 @@ class SlideGeneratorAgent:
         3. System prompt - defines technical generation rules (HOW to generate valid HTML/charts)
         4. Slide editing instructions - defines editing behavior
         """
-        deck_prompt = prompts.get("deck_prompt", "")
-        slide_style = prompts.get("slide_style", "")
-        system_prompt = prompts.get("system_prompt", "")
-        editing_prompt = prompts.get("slide_editing_instructions", "")
+        deck_prompt = prompts.get("deck_prompt") or ""
+        slide_style = prompts.get("slide_style") or ""
+        system_prompt = prompts.get("system_prompt") or ""
+        editing_prompt = prompts.get("slide_editing_instructions") or ""
 
         if not system_prompt:
             raise AgentError("System prompt not found in configuration")
@@ -504,7 +504,7 @@ class SlideGeneratorAgent:
         if editing_prompt:
             prompt_parts.append(editing_prompt.strip())
 
-        image_guidelines = prompts.get("image_guidelines", "")
+        image_guidelines = prompts.get("image_guidelines") or ""
 
         image_section = (
             "IMAGE SUPPORT:\n"
