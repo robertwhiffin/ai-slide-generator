@@ -635,21 +635,20 @@ class TestCacheRestoration:
         from unittest.mock import patch, MagicMock
         import threading
 
-        with patch("src.api.services.chat_service.create_agent"):
-            service = ChatService.__new__(ChatService)
-            service._deck_cache = {}
-            service._cache_lock = threading.RLock()
+        service = ChatService.__new__(ChatService)
+        service._deck_cache = {}
+        service._cache_lock = threading.RLock()
 
-            # Add deck to cache
-            mock_deck = SlideDeck(
-                title="Cached Deck",
-                slides=[Slide(html='<div class="slide">Test</div>', slide_id="slide_0")],
-            )
-            service._deck_cache["session-123"] = mock_deck
+        # Add deck to cache
+        mock_deck = SlideDeck(
+            title="Cached Deck",
+            slides=[Slide(html='<div class="slide">Test</div>', slide_id="slide_0")],
+        )
+        service._deck_cache["session-123"] = mock_deck
 
-            # Should return cached deck
-            result = service._get_or_load_deck("session-123")
-            assert result is mock_deck
+        # Should return cached deck
+        result = service._get_or_load_deck("session-123")
+        assert result is mock_deck
 
     def test_rc6_get_or_load_deck_from_database(self):
         """Test that _get_or_load_deck loads from database when cache is empty."""
@@ -657,27 +656,26 @@ class TestCacheRestoration:
         from unittest.mock import patch, MagicMock
         import threading
 
-        with patch("src.api.services.chat_service.create_agent"):
-            with patch("src.api.services.chat_service.get_session_manager") as mock_get_sm:
-                service = ChatService.__new__(ChatService)
-                service._deck_cache = {}
-                service._cache_lock = threading.RLock()
+        with patch("src.api.services.chat_service.get_session_manager") as mock_get_sm:
+            service = ChatService.__new__(ChatService)
+            service._deck_cache = {}
+            service._cache_lock = threading.RLock()
 
-                # Mock database returning deck data
-                mock_sm = MagicMock()
-                mock_sm.get_slide_deck.return_value = {
-                    "html_content": '<!DOCTYPE html><html><body><div class="slide"><h1>DB Deck</h1></div></body></html>'
-                }
-                mock_get_sm.return_value = mock_sm
+            # Mock database returning deck data
+            mock_sm = MagicMock()
+            mock_sm.get_slide_deck.return_value = {
+                "html_content": '<!DOCTYPE html><html><body><div class="slide"><h1>DB Deck</h1></div></body></html>'
+            }
+            mock_get_sm.return_value = mock_sm
 
-                # Should load from database
-                result = service._get_or_load_deck("session-456")
-                assert result is not None
-                assert len(result.slides) == 1
-                assert "DB Deck" in result.slides[0].html
+            # Should load from database
+            result = service._get_or_load_deck("session-456")
+            assert result is not None
+            assert len(result.slides) == 1
+            assert "DB Deck" in result.slides[0].html
 
-                # Should also cache it
-                assert "session-456" in service._deck_cache
+            # Should also cache it
+            assert "session-456" in service._deck_cache
 
     def test_rc6_get_or_load_deck_empty_database(self):
         """Test that _get_or_load_deck returns None when nothing in cache or database."""
@@ -685,20 +683,19 @@ class TestCacheRestoration:
         from unittest.mock import patch, MagicMock
         import threading
 
-        with patch("src.api.services.chat_service.create_agent"):
-            with patch("src.api.services.chat_service.get_session_manager") as mock_get_sm:
-                service = ChatService.__new__(ChatService)
-                service._deck_cache = {}
-                service._cache_lock = threading.RLock()
+        with patch("src.api.services.chat_service.get_session_manager") as mock_get_sm:
+            service = ChatService.__new__(ChatService)
+            service._deck_cache = {}
+            service._cache_lock = threading.RLock()
 
-                # Mock database returning nothing
-                mock_sm = MagicMock()
-                mock_sm.get_slide_deck.return_value = None
-                mock_get_sm.return_value = mock_sm
+            # Mock database returning nothing
+            mock_sm = MagicMock()
+            mock_sm.get_slide_deck.return_value = None
+            mock_get_sm.return_value = mock_sm
 
-                # Should return None gracefully
-                result = service._get_or_load_deck("session-789")
-                assert result is None
+            # Should return None gracefully
+            result = service._get_or_load_deck("session-789")
+            assert result is None
 
 
 class TestEdgeCases:
