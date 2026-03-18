@@ -343,7 +343,7 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(({
   }, [setIsGenerating]);
 
   return (
-    <div className="flex flex-col h-full bg-background" data-testid="chat-panel">
+    <div className="flex flex-col flex-1 min-h-0 bg-background" data-testid="chat-panel">
       <div className="flex items-center gap-3 border-b border-border bg-card px-4 py-3">
         <div className="flex size-8 items-center justify-center rounded-lg bg-primary/10">
           <Bot className="size-4 text-primary" />
