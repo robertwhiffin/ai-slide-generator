@@ -16,8 +16,8 @@ import React, {
   useCallback,
   useRef,
 } from 'react';
-import { useParams } from 'react-router-dom';
 import { api } from '../services/api';
+import { useSession } from './SessionContext';
 import { useToast } from './ToastContext';
 import type { AgentConfig, ToolEntry, ProfileSummary } from '../types/agentConfig';
 import { DEFAULT_AGENT_CONFIG } from '../types/agentConfig';
@@ -61,7 +61,7 @@ function readStoredConfig(): AgentConfig | null {
 // ---------------------------------------------------------------------------
 
 export const AgentConfigProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  const { sessionId: urlSessionId } = useParams<{ sessionId?: string }>();
+  const { sessionId: urlSessionId } = useSession();
   const { showToast } = useToast();
 
   const isPreSession = !urlSessionId;
@@ -141,14 +141,18 @@ export const AgentConfigProvider: React.FC<{ children: React.ReactNode }> = ({ c
     setAgentConfig(config);
 
     if (!isPreSession && urlSessionId) {
+      console.log('[AgentConfigContext] Syncing to backend, session:', urlSessionId, 'tools:', config.tools.length);
       try {
         const confirmed = await api.updateAgentConfig(urlSessionId, config);
+        console.log('[AgentConfigContext] Backend confirmed:', JSON.stringify(confirmed));
         setAgentConfig(confirmed);
       } catch (err) {
-        console.error('Failed to update agent config:', err);
+        console.error('[AgentConfigContext] Failed to update agent config:', err);
         setAgentConfig(previous);
         showToast('Failed to update configuration', 'error');
       }
+    } else {
+      console.log('[AgentConfigContext] Pre-session mode, config saved locally only. isPreSession:', isPreSession, 'urlSessionId:', urlSessionId);
     }
   }, [agentConfig, isPreSession, urlSessionId, showToast]);
 
@@ -157,10 +161,12 @@ export const AgentConfigProvider: React.FC<{ children: React.ReactNode }> = ({ c
   // ------------------------------------------------------------------
 
   const addTool = useCallback(async (tool: ToolEntry) => {
+    console.log('[AgentConfigContext] addTool called:', JSON.stringify(tool));
     const updated: AgentConfig = {
       ...agentConfig,
       tools: [...agentConfig.tools, tool],
     };
+    console.log('[AgentConfigContext] calling updateConfig with tools:', updated.tools.length);
     await updateConfig(updated);
   }, [agentConfig, updateConfig]);
 

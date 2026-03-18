@@ -150,7 +150,10 @@ export const ToolPicker: React.FC<ToolPickerProps> = ({
               key={`${tool.type}-${tool.space_id ?? tool.server_uri ?? idx}`}
               disabled={added}
               onClick={() => {
-                onSelect(toToolEntry(tool));
+                console.log('[ToolPicker] Tool clicked:', tool.type, tool.space_name || tool.server_name);
+                const entry = toToolEntry(tool);
+                console.log('[ToolPicker] Calling onSelect with:', JSON.stringify(entry));
+                onSelect(entry);
                 onClose();
               }}
               className={`w-full text-left px-3 py-2 rounded text-sm transition-colors ${
