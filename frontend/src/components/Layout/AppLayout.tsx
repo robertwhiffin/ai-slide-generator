@@ -603,7 +603,9 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
             <div className="relative flex-1 overflow-hidden">
               <div className="absolute inset-0 flex">
                 <div className="w-[32%] min-w-[260px] border-r border-border bg-card flex flex-col">
-                  <AgentConfigBar />
+                  <div className="shrink-0 relative z-10 overflow-visible">
+                    <AgentConfigBar />
+                  </div>
                   <ChatPanel
                     key="chat-panel"
                     ref={chatPanelRef}
