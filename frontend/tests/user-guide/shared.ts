@@ -163,19 +163,40 @@ export class UserGuideCapture {
  */
 export async function setupUserGuideMocks(page: Page): Promise<void> {
   // Import mocks from the fixtures
-  const { 
-    mockProfiles, 
-    mockDeckPrompts, 
-    mockSlideStyles, 
-    mockSessions 
+  const {
+    mockProfiles,
+    mockProfileSummaries,
+    mockDefaultAgentConfig,
+    mockAvailableTools,
+    mockDeckPrompts,
+    mockSlideStyles,
+    mockSessions
   } = await import('../fixtures/mocks');
 
-  // Mock profiles
+  // New profiles API (GET /api/profiles) — used by AgentConfigContext
+  await page.route(/\/api\/profiles$/, (route) => {
+    route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify(mockProfileSummaries)
+    });
+  });
+
+  // Legacy profiles
   await page.route('http://127.0.0.1:8000/api/settings/profiles', (route) => {
     route.fulfill({
       status: 200,
       contentType: 'application/json',
       body: JSON.stringify(mockProfiles)
+    });
+  });
+
+  // Available tools
+  await page.route('**/api/tools/available', (route) => {
+    route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify(mockAvailableTools)
     });
   });
 
@@ -205,6 +226,12 @@ export async function setupUserGuideMocks(page: Page): Promise<void> {
     // Handle session creation/deletion
     if (method === 'POST' || method === 'DELETE') {
       route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ session_id: 'mock', title: 'New', user_id: null, created_at: '2026-01-01T00:00:00Z' }) });
+      return;
+    }
+
+    // Handle agent-config endpoint
+    if (url.includes('/agent-config')) {
+      route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(mockDefaultAgentConfig) });
       return;
     }
 
