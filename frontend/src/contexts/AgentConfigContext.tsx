@@ -16,6 +16,7 @@ import React, {
   useCallback,
   useRef,
 } from 'react';
+import { useLocation } from 'react-router-dom';
 import { api } from '../services/api';
 import { useSession } from './SessionContext';
 import { useToast } from './ToastContext';
@@ -61,9 +62,15 @@ function readStoredConfig(): AgentConfig | null {
 // ---------------------------------------------------------------------------
 
 export const AgentConfigProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  const { sessionId: urlSessionId } = useSession();
+  const { sessionId: ctxSessionId } = useSession();
+  const location = useLocation();
   const { showToast } = useToast();
 
+  // Determine session ID from the URL path (reliable — not the local-only ID from SessionContext).
+  // SessionContext always generates a local ID on mount, even before backend persistence,
+  // so we can't rely on it to know if a real session exists.
+  const urlMatch = location.pathname.match(/\/sessions\/([^/]+)\//);
+  const urlSessionId = urlMatch ? urlMatch[1] : null;
   const isPreSession = !urlSessionId;
 
   const [agentConfig, setAgentConfig] = useState<AgentConfig>(
