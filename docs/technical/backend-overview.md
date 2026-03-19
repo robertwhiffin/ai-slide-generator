@@ -40,6 +40,8 @@ Frontend fetch -> FastAPI router ->   │ ChatService            │
 
 ## API Surface (Contracts Shared with Frontend)
 
+> **Interactive API docs:** For full endpoint details, request/response schemas, and interactive testing, see the Swagger UI at `/docs` on any running instance.
+
 ### Session Endpoints
 
 | Method | Path | Purpose | Backend handler |
