@@ -7,7 +7,7 @@ How the React/Vite frontend is structured, how it communicates with backend APIs
 ## Stack & Entry Points
 
 - **Tooling:** Vite + React + TypeScript, Tailwind utility classes, `@dnd-kit` for drag/drop, `@monaco-editor/react` for HTML editing, standard Fetch for API calls.
-- **Entrypoint:** `src/main.tsx` wraps `<App />` in `<BrowserRouter>` and injects into `#root`. `src/App.tsx` wraps the tree in `AgentConfigProvider`, `SessionProvider`, `GenerationProvider`, `SelectionProvider`, `ToastProvider` and defines routes via React Router v7 — each route renders `AppLayout` with `initialView` and optional `viewOnly` props.
+- **Entrypoint:** `src/main.tsx` wraps `<App />` in `<BrowserRouter>` and injects into `#root`. `src/App.tsx` wraps the tree in `AgentConfigProvider`, `SessionProvider`, `GenerationProvider`, `SelectionProvider`, `ToastProvider` and defines routes via React Router v7 — each route renders `AppLayout` (which adds `ProfileProvider`) with `initialView` and optional `viewOnly` props.
 - **Env configuration:** `src/services/api.ts` reads `import.meta.env.VITE_API_URL` (defaults to `http://localhost:8000` in dev, relative URLs in production).
 
 ---
@@ -105,6 +105,44 @@ Slides are HTML snippets embedded in iframes for preview. The optional `verifica
 - Tracks `isGenerating` boolean for navigation locking
 - Set by `ChatPanel` during streaming, consumed by `AppLayout`
 - Disables navigation buttons, AgentConfigBar, and session actions during generation
+
+### 4b. Agent Config Context (`src/contexts/AgentConfigContext.tsx`)
+
+Manages the active agent configuration (tools, slide style, deck prompt). Operates in two modes:
+
+- **Pre-session mode** (no `/sessions/:id/` in URL): Config stored in React state + localStorage. Persists across navigation until a session is created.
+- **Active session mode**: Config loaded from backend on session change. Updates synced via `PUT /api/sessions/{id}/agent-config` with optimistic updates (reverts on failure).
+
+```typescript
+// Key operations
+updateConfig(config)       // Replace full agent config
+addTool(tool)              // Add a Genie space or MCP server
+removeTool(tool)           // Remove a tool
+setStyle(styleId)          // Set slide style
+setDeckPrompt(promptId)    // Set deck prompt
+saveAsProfile(name, desc)  // Save current config as a named profile (active session only)
+loadProfile(profileId)     // Load a profile's config into current session
+```
+
+Used by: `AgentConfigBar`, `ChatPanel`.
+
+### 4c. Profile Context (`src/contexts/ProfileContext.tsx`)
+
+Manages profile CRUD operations and the profile list. Wraps inside `AppLayout` (not app-level) because it's only needed by the profile management page.
+
+```typescript
+// Key operations
+reload()                   // Refresh profile list from backend
+createProfile(data)        // Create new profile
+updateProfile(id, data)    // Update profile metadata (name, description)
+deleteProfile(id)          // Delete a profile
+setDefaultProfile(id)      // Mark profile as default
+loadProfile(id)            // Load profile and trigger hot-reload
+```
+
+Used by: `ProfileList` on the `/profiles` page.
+
+**How they interact:** `AgentConfigContext` handles the active session's tool/style/prompt configuration. `ProfileContext` handles profile metadata (names, defaults, CRUD). Users save configs as profiles via `AgentConfigContext.saveAsProfile()` and browse/manage profiles via `ProfileContext`.
 
 ### 5. Version Check (`src/hooks/useVersionCheck.ts`)
 
