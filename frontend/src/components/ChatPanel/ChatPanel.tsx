@@ -62,7 +62,7 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(({
     clearSelection,
   } = useSelection();
   const { sessionId, isInitializing, error: sessionError, setExperimentUrl, setSessionTitle } = useSession();
-  const { agentConfig, isPreSession, refreshConfig } = useAgentConfig();
+  const { agentConfig, refreshConfig } = useAgentConfig();
   const { setIsGenerating } = useGeneration();
   const { currentProfile } = useProfiles();
 

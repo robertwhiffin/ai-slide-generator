@@ -18,7 +18,6 @@ import React, {
 } from 'react';
 import { useLocation } from 'react-router-dom';
 import { api } from '../services/api';
-import { useSession } from './SessionContext';
 import { useToast } from './ToastContext';
 import type { AgentConfig, ToolEntry, ProfileSummary } from '../types/agentConfig';
 import { DEFAULT_AGENT_CONFIG } from '../types/agentConfig';
@@ -63,7 +62,6 @@ function readStoredConfig(): AgentConfig | null {
 // ---------------------------------------------------------------------------
 
 export const AgentConfigProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  const { sessionId: ctxSessionId } = useSession();
   const location = useLocation();
   const { showToast } = useToast();
 
