@@ -42,16 +42,23 @@ test.describe('User Guide: Creating Profiles', () => {
       description: 'In an active session, the config bar syncs changes to the backend',
     });
 
+    // Expand the AgentConfigBar to reveal profile actions
+    const configToggle = page.getByTestId('agent-config-toggle');
+    if (await configToggle.isVisible({ timeout: 3000 })) {
+      await configToggle.click();
+      await page.waitForTimeout(300);
+    }
+
     // Step 03: Highlight Save as Profile button (enabled in session mode)
     await capture.capture({
       step: '03',
       name: 'save-as-profile-button',
       description: 'Click "Save as Profile" to save your current configuration as a reusable profile',
-      highlightSelector: 'button:has-text("Save as Profile")',
+      highlightSelector: '[data-testid="save-profile-button"]',
     });
 
     // Step 04: Click Save as Profile to open dialog
-    await page.getByRole('button', { name: 'Save as Profile' }).click();
+    await page.getByTestId('save-profile-button').click();
     await page.waitForTimeout(500);
     await capture.capture({
       step: '04',
@@ -88,6 +95,13 @@ test.describe('User Guide: Creating Profiles', () => {
     const capture = new UserGuideCapture(page, '02-creating-profiles');
 
     await goToGenerator(page);
+
+    // Expand the AgentConfigBar to reveal profile actions
+    const configToggle = page.getByTestId('agent-config-toggle');
+    if (await configToggle.isVisible({ timeout: 3000 })) {
+      await configToggle.click();
+      await page.waitForTimeout(300);
+    }
 
     // Step 06: Highlight Load Profile button
     await capture.capture({

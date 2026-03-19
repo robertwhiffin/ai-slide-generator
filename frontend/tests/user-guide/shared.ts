@@ -164,6 +164,7 @@ export class UserGuideCapture {
 export async function setupUserGuideMocks(page: Page): Promise<void> {
   // Import mocks from the fixtures
   const {
+    mockProfiles,
     mockProfileSummaries,
     mockDefaultAgentConfig,
     mockAvailableTools,
@@ -181,6 +182,15 @@ export async function setupUserGuideMocks(page: Page): Promise<void> {
     });
   });
 
+  // Legacy profiles API (GET /api/settings/profiles) — used by ProfileContext/ProfileList
+  await page.route('**/api/settings/profiles', (route) => {
+    route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify(mockProfiles)
+    });
+  });
+
   // Available tools
   await page.route('**/api/tools/available', (route) => {
     route.fulfill({
@@ -191,7 +201,7 @@ export async function setupUserGuideMocks(page: Page): Promise<void> {
   });
 
   // Mock deck prompts
-  await page.route('http://127.0.0.1:8000/api/settings/deck-prompts', (route) => {
+  await page.route('**/api/settings/deck-prompts', (route) => {
     route.fulfill({
       status: 200,
       contentType: 'application/json',
@@ -200,7 +210,7 @@ export async function setupUserGuideMocks(page: Page): Promise<void> {
   });
 
   // Mock slide styles
-  await page.route('http://127.0.0.1:8000/api/settings/slide-styles', (route) => {
+  await page.route('**/api/settings/slide-styles', (route) => {
     route.fulfill({
       status: 200,
       contentType: 'application/json',
@@ -209,7 +219,7 @@ export async function setupUserGuideMocks(page: Page): Promise<void> {
   });
 
   // Mock sessions
-  await page.route('http://127.0.0.1:8000/api/sessions**', (route, request) => {
+  await page.route('**/api/sessions**', (route, request) => {
     const url = request.url();
     const method = request.method();
 
@@ -231,8 +241,27 @@ export async function setupUserGuideMocks(page: Page): Promise<void> {
         contentType: 'application/json',
         body: JSON.stringify(mockSessions)
       });
+    } else if (url.match(/\/api\/sessions\/[^/]+$/)) {
+      // Individual session GET — return a mock session object
+      const idMatch = url.match(/\/api\/sessions\/([^/]+)$/);
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          session_id: idMatch ? idMatch[1] : 'mock',
+          title: 'New Deck',
+          user_id: null,
+          created_by: 'dev@local.dev',
+          created_at: '2026-01-01T00:00:00Z',
+          last_activity: '2026-01-01T00:00:00Z',
+          message_count: 0,
+          has_slide_deck: false,
+          agent_config: mockDefaultAgentConfig
+        })
+      });
     } else {
-      route.fulfill({ status: 404 });
+      // Pass through anything else
+      route.fulfill({ status: 200, contentType: 'application/json', body: '{}' });
     }
   });
 }
