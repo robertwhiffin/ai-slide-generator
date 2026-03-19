@@ -45,6 +45,7 @@ const config = {
           sidebarPath: './sidebars.js',
           // Remove this to remove the "edit this page" links.
           editUrl: undefined,
+          exclude: ['superpowers/**'],
         },
         blog: false, // Disable blog
         theme: {
