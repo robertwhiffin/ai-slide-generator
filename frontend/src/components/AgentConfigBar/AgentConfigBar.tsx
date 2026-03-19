@@ -15,9 +15,10 @@ import { useAgentConfig } from '../../contexts/AgentConfigContext';
 import { useSession } from '../../contexts/SessionContext';
 import { configApi } from '../../api/config';
 import type { SlideStyle, DeckPrompt } from '../../api/config';
-import type { ProfileSummary, ToolEntry } from '../../types/agentConfig';
+import type { AvailableTool, GenieTool, ProfileSummary, ToolEntry } from '../../types/agentConfig';
 import { api } from '../../services/api';
 import { ToolPicker } from './ToolPicker';
+import GenieDetailPanel from './GenieDetailPanel';
 
 // ---------------------------------------------------------------------------
 // Sub-components
@@ -27,8 +28,9 @@ import { ToolPicker } from './ToolPicker';
 const ToolChip: React.FC<{
   tool: ToolEntry;
   onRemove: () => void;
+  onEdit?: () => void;
   sessionId?: string | null;
-}> = ({ tool, onRemove, sessionId }) => {
+}> = ({ tool, onRemove, onEdit, sessionId }) => {
   const label = tool.type === 'genie'
     ? tool.space_name
     : tool.server_name;
@@ -52,7 +54,17 @@ const ToolChip: React.FC<{
   return (
     <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-blue-100 text-blue-800">
       <span className="uppercase text-[10px] opacity-60 mr-0.5">{tool.type}</span>
-      {label}
+      {onEdit ? (
+        <button
+          onClick={onEdit}
+          className="hover:underline cursor-pointer"
+          data-testid="tool-chip-label"
+        >
+          {label}
+        </button>
+      ) : (
+        <span>{label}</span>
+      )}
       {conversationId && (
         <button
           onClick={handleOpenGenieLink}
@@ -64,7 +76,7 @@ const ToolChip: React.FC<{
         </button>
       )}
       <button
-        onClick={onRemove}
+        onClick={(e) => { e.stopPropagation(); onRemove(); }}
         className="ml-0.5 p-0.5 rounded-full hover:bg-blue-200 transition-colors"
         aria-label={`Remove ${label}`}
       >
@@ -213,6 +225,7 @@ export const AgentConfigBar: React.FC = () => {
     agentConfig,
     addTool,
     removeTool,
+    updateTool,
     setStyle,
     setDeckPrompt,
     saveAsProfile,
@@ -226,6 +239,10 @@ export const AgentConfigBar: React.FC = () => {
 
   // ToolPicker visibility
   const [toolPickerOpen, setToolPickerOpen] = useState(false);
+
+  // Detail panel state
+  const [detailTool, setDetailTool] = useState<GenieTool | AvailableTool | null>(null);
+  const [detailMode, setDetailMode] = useState<'add' | 'edit'>('add');
 
   // Save / Load dialogs
   const [saveDialogOpen, setSaveDialogOpen] = useState(false);
@@ -286,6 +303,36 @@ export const AgentConfigBar: React.FC = () => {
     await setDeckPrompt(value === '' ? null : Number(value));
   }, [setDeckPrompt]);
 
+  // Detail panel handlers
+  const handlePreview = useCallback((tool: AvailableTool) => {
+    setDetailTool(tool);
+    setDetailMode('add');
+  }, []);
+
+  const handleEditChip = useCallback((tool: ToolEntry) => {
+    if (tool.type === 'genie') {
+      setDetailTool(tool);
+      setDetailMode('edit');
+    }
+  }, []);
+
+  const handleDetailSave = useCallback(async (tool: GenieTool) => {
+    try {
+      if (detailMode === 'add') {
+        await addTool(tool);
+      } else {
+        await updateTool(tool.space_id, { description: tool.description });
+      }
+      setDetailTool(null);
+    } catch {
+      // Panel stays open on failure; toast shown by context
+    }
+  }, [detailMode, addTool, updateTool]);
+
+  const handleDetailCancel = useCallback(() => {
+    setDetailTool(null);
+  }, []);
+
   // Summary line for collapsed state
   const toolCount = agentConfig.tools.length;
   const selectedStyleName = slideStyles.find(s => s.id === agentConfig.slide_style_id)?.name;
@@ -318,6 +365,16 @@ export const AgentConfigBar: React.FC = () => {
       {/* Expanded content */}
       {expanded && (
         <div className="px-3 pb-3 space-y-3 border-t border-gray-200 pt-3">
+          {/* Detail panel (shown above tools row when active) */}
+          {detailTool && (
+            <GenieDetailPanel
+              tool={detailTool}
+              mode={detailMode}
+              onSave={handleDetailSave}
+              onCancel={handleDetailCancel}
+            />
+          )}
+
           {/* Tools row */}
           <div>
             <label className="block text-xs font-medium text-gray-500 mb-1">Tools</label>
@@ -327,6 +384,7 @@ export const AgentConfigBar: React.FC = () => {
                   key={`${tool.type}-${tool.type === 'genie' ? tool.space_id : tool.server_uri}-${idx}`}
                   tool={tool}
                   onRemove={() => removeTool(tool)}
+                  onEdit={tool.type === 'genie' ? () => handleEditChip(tool) : undefined}
                   sessionId={sessionId}
                 />
               ))}
@@ -342,6 +400,7 @@ export const AgentConfigBar: React.FC = () => {
                 isOpen={toolPickerOpen}
                 onClose={() => setToolPickerOpen(false)}
                 onSelect={addTool}
+                onPreview={handlePreview}
                 existingTools={agentConfig.tools}
               />
             </div>

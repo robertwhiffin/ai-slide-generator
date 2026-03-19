@@ -9,11 +9,13 @@ import React, { useEffect, useState, useRef } from 'react';
 import { Loader2, RefreshCw, Search, X } from 'lucide-react';
 import { api } from '../../services/api';
 import type { AvailableTool, ToolEntry } from '../../types/agentConfig';
+import { toToolEntry } from './toolUtils';
 
 interface ToolPickerProps {
   isOpen: boolean;
   onClose: () => void;
   onSelect: (tool: ToolEntry) => void;
+  onPreview: (tool: AvailableTool) => void;
   existingTools: ToolEntry[];
 }
 
@@ -30,27 +32,12 @@ function isAlreadyAdded(candidate: AvailableTool, existing: ToolEntry[]): boolea
   });
 }
 
-function toToolEntry(tool: AvailableTool): ToolEntry {
-  if (tool.type === 'genie') {
-    return {
-      type: 'genie',
-      space_id: tool.space_id!,
-      space_name: tool.space_name ?? tool.space_id!,
-      description: tool.description,
-    };
-  }
-  return {
-    type: 'mcp',
-    server_uri: tool.server_uri!,
-    server_name: tool.server_name ?? tool.server_uri!,
-    config: undefined,
-  };
-}
 
 export const ToolPicker: React.FC<ToolPickerProps> = ({
   isOpen,
   onClose,
   onSelect,
+  onPreview,
   existingTools,
 }) => {
   const [allTools, setAllTools] = useState<AvailableTool[]>([]);
@@ -175,7 +162,11 @@ export const ToolPicker: React.FC<ToolPickerProps> = ({
               key={`${tool.type}-${tool.space_id ?? tool.server_uri ?? idx}`}
               disabled={added}
               onClick={() => {
-                onSelect(toToolEntry(tool));
+                if (tool.type === 'genie') {
+                  onPreview(tool);
+                } else {
+                  onSelect(toToolEntry(tool));
+                }
                 onClose();
               }}
               className={`w-full text-left px-3 py-2 rounded text-sm transition-colors ${
