@@ -33,7 +33,7 @@ The AgentConfigBar at the top shows your current tools (Genie spaces, etc.). You
 
 Click in the chat input area at the bottom of the screen.
 
-![Chat input](images/01-generating-slides/05-chat-input-empty.png)
+![Chat input](images/01-generating-slides/03-chat-input-empty.png)
 
 ### Step 04: Describe Your Presentation
 
@@ -43,13 +43,13 @@ Type a clear, specific prompt describing what you want:
 - Data to include (if using Genie)
 - Any specific requirements
 
-![Prompt entered](images/01-generating-slides/06-chat-input-with-prompt.png)
+![Prompt entered](images/01-generating-slides/04-chat-input-with-prompt.png)
 
 ### Step 05: Send Your Request
 
 Click the **Send** button or press Enter to start generation. A session is created automatically on your first message.
 
-![Send button](images/01-generating-slides/07-send-button-enabled.png)
+![Send button](images/01-generating-slides/05-send-button-enabled.png)
 
 ## Iterating on Your Slides
 
