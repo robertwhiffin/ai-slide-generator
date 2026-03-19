@@ -87,12 +87,6 @@ const config = {
             label: 'Technical',
           },
           {
-            type: 'docSidebar',
-            sidebarId: 'api',
-            position: 'left',
-            label: 'API Reference',
-          },
-          {
             // Replace 'your-username' with your actual GitHub username or organization name
             href: 'https://github.com/robertwhiffin/ai-slide-generator',
             label: 'GitHub',
@@ -114,10 +108,6 @@ const config = {
               {
                 label: 'User Guide',
                 to: '/docs/user-guide/generating-slides',
-              },
-              {
-                label: 'API Reference',
-                to: '/docs/api/overview',
               },
               {
                 label: 'Technical Docs',
