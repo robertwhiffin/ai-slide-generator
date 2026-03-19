@@ -7,7 +7,7 @@ Welcome to the Databricks Tellr user guide. This documentation covers the main w
 | Guide | Description |
 |-------|-------------|
 | [Generating Slides](./01-generating-slides.md) | Learn how to create presentations using AI-powered slide generation |
-| [Creating Profiles](./02-creating-profiles.md) | Set up configuration profiles linking Genie rooms, styles, and prompts |
+| [Creating Profiles](./02-creating-profiles.md) | Save and load session configurations as reusable profiles |
 | [Advanced Configuration](./03-advanced-configuration.md) | Manage deck prompts and slide styles for customized output |
 | [Creating Custom Styles](./05-creating-custom-styles.md) | CSS reference, constraints, and converting existing templates into styles |
 | [Uploading Images](./06-uploading-images.md) | Upload, organise, and embed images in AI-generated slides |
@@ -17,11 +17,11 @@ Welcome to the Databricks Tellr user guide. This documentation covers the main w
 
 ## Quick Start
 
-1. **Open the app** - Navigate to the application URL
-2. **Start a session** - Click "New Session" in the navigation bar
-3. **Check your profile** - The active profile is shown top-right; switch if needed
-4. **Enter a prompt** - Describe the presentation you want to create
-5. **Send** - Click Send and watch your slides generate
+1. **Open the app** — you land directly on the generator
+2. **Add tools** (optional) — click "Add Tool" in the config bar to connect Genie spaces or other data sources
+3. **Enter a prompt** — describe the presentation you want to create
+4. **Click Send** — a session is created automatically and slides begin generating
+5. **Refine** — send follow-up messages to edit, add, or restyle slides
 
 ## Regenerating Screenshots
 
