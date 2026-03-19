@@ -192,7 +192,7 @@ export const ProfileList: React.FC<ProfileListProps> = ({ onProfileChange }) => 
       {/* Header */}
       <div className="flex items-start justify-between">
         <div>
-          <h1 className="text-xl font-bold text-foreground">Saved Configurations</h1>
+          <h1 className="text-xl font-bold text-foreground">Agent Profiles</h1>
           <p className="mt-1 text-sm text-muted-foreground">
             Manage your saved configuration profiles. Load different profiles to switch settings without restarting.
           </p>
