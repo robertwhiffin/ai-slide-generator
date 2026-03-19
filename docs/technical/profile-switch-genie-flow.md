@@ -120,7 +120,7 @@ Profiles are simplified to named snapshots of `agent_config` JSON.
 **Load:** `POST /api/sessions/{id}/load-profile/{profile_id}`
 - Reads the profile's `agent_config`
 - Writes it to the session's `agent_config` column
-- Conversation IDs are reset (new Genie conversations will be initialized)
+- conversation_id fields are cleared; fresh conversations initialize on first Genie query
 
 ---
 
