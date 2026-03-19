@@ -59,7 +59,7 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(({
     clearSelection,
   } = useSelection();
   const { sessionId, isInitializing, error: sessionError, setExperimentUrl, setSessionTitle } = useSession();
-  const { agentConfig, isPreSession, refreshConfig } = useAgentConfig();
+  const { agentConfig, refreshConfig } = useAgentConfig();
   const { setIsGenerating } = useGeneration();
 
   // Synchronously clear messages when sessionId changes (avoids old-message flash on session switch).
