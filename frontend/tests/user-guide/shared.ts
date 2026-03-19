@@ -164,7 +164,6 @@ export class UserGuideCapture {
 export async function setupUserGuideMocks(page: Page): Promise<void> {
   // Import mocks from the fixtures
   const {
-    mockProfiles,
     mockProfileSummaries,
     mockDefaultAgentConfig,
     mockAvailableTools,
@@ -179,15 +178,6 @@ export async function setupUserGuideMocks(page: Page): Promise<void> {
       status: 200,
       contentType: 'application/json',
       body: JSON.stringify(mockProfileSummaries)
-    });
-  });
-
-  // Legacy profiles
-  await page.route('http://127.0.0.1:8000/api/settings/profiles', (route) => {
-    route.fulfill({
-      status: 200,
-      contentType: 'application/json',
-      body: JSON.stringify(mockProfiles)
     });
   });
 
@@ -254,6 +244,15 @@ export async function goToGenerator(page: Page): Promise<void> {
   await page.goto('/');
   await page.getByRole('button', { name: 'New Deck' }).click();
   await page.waitForURL(/\/sessions\/[^/]+\/edit/);
+  await page.getByRole('textbox').waitFor({ state: 'visible', timeout: 10000 });
+}
+
+/**
+ * Navigate to the pre-session generator (landing page, no session created).
+ * Use this when you want to capture the config bar before a session exists.
+ */
+export async function goToPreSessionGenerator(page: Page): Promise<void> {
+  await page.goto('/');
   await page.getByRole('textbox').waitFor({ state: 'visible', timeout: 10000 });
 }
 
