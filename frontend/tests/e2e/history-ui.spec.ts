@@ -28,6 +28,26 @@ async function setupMocks(page: Page) {
   await page.route('**/api/setup/status', (route) => {
     route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ configured: true }) });
   });
+
+  // Permission / lock / mention mocks
+  await page.route('**/api/user/current', (route) => {
+    route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ username: 'test@test.com', display_name: 'Test User' }) });
+  });
+  await page.route(/\/api\/sessions\/[^/]+\/lock$/, (route) => {
+    route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ locked_by: 'test@test.com', locked_at: new Date().toISOString() }) });
+  });
+  await page.route('**/api/comments/mentions**', (route) => {
+    route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ mentions: [], count: 0 }) });
+  });
+  await page.route('**/api/comments/mentionable-users**', (route) => {
+    route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ users: [], is_global: false }) });
+  });
+
+  // Shared presentations (must be before the generic sessions catch-all)
+  await page.route('**/api/sessions/shared**', (route) => {
+    route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ presentations: [], count: 0 }) });
+  });
+
   await page.route('http://127.0.0.1:8000/api/sessions**', (route, request) => {
     const url = request.url();
     const method = request.method();
@@ -125,6 +145,11 @@ async function setupMocks(page: Page) {
 }
 
 async function setupEmptySessionsMock(page: Page) {
+  // Override shared presentations to return empty list
+  await page.route('**/api/sessions/shared**', (route) => {
+    route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ presentations: [], count: 0 }) });
+  });
+
   // Override sessions to return empty list
   await page.route('http://127.0.0.1:8000/api/sessions**', (route, request) => {
     const method = request.method();
