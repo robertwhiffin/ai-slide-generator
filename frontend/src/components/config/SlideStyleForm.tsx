@@ -4,11 +4,14 @@
  * Used for creating and editing slide styles.
  */
 
-import React, { useState, useEffect } from 'react';
-import { AlertCircle } from 'lucide-react';
+import React, { useState, useEffect, useRef } from 'react';
+import { AlertCircle, ExternalLink, ImageIcon } from 'lucide-react';
 import Editor from '@monaco-editor/react';
 import { Button } from '@/ui/button';
 import type { SlideStyle, SlideStyleCreate, SlideStyleUpdate } from '../../api/config';
+import { ImagePicker } from '../ImageLibrary/ImagePicker';
+import { ExpandableEditor } from './ExpandableEditor';
+import { DOCS_URLS } from '../../constants/docs';
 
 interface SlideStyleFormProps {
   isOpen: boolean;
@@ -29,8 +32,21 @@ export const SlideStyleForm: React.FC<SlideStyleFormProps> = ({
   const [description, setDescription] = useState('');
   const [category, setCategory] = useState('');
   const [styleContent, setStyleContent] = useState('');
+  const [imageGuidelines, setImageGuidelines] = useState('');
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [showImagePicker, setShowImagePicker] = useState(false);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const imageGuidelinesEditorRef = useRef<any>(null);
+
+  useEffect(() => {
+    if (!isOpen) return;
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' && !saving && !showImagePicker) onCancel();
+    };
+    document.addEventListener('keydown', handleKeyDown);
+    return () => document.removeEventListener('keydown', handleKeyDown);
+  }, [isOpen, saving, showImagePicker, onCancel]);
 
   // Reset form when opening
   useEffect(() => {
@@ -40,11 +56,13 @@ export const SlideStyleForm: React.FC<SlideStyleFormProps> = ({
         setDescription(style.description || '');
         setCategory(style.category || '');
         setStyleContent(style.style_content);
+        setImageGuidelines(style.image_guidelines || '');
       } else {
         setName('');
         setDescription('');
         setCategory('');
         setStyleContent('');
+        setImageGuidelines('');
       }
       setError(null);
     }
@@ -78,6 +96,7 @@ export const SlideStyleForm: React.FC<SlideStyleFormProps> = ({
         description: description.trim() || null,
         category: category.trim() || null,
         style_content: styleContent,
+        image_guidelines: imageGuidelines.trim() || null,
       };
       await onSubmit(data);
     } catch (err) {
@@ -85,6 +104,30 @@ export const SlideStyleForm: React.FC<SlideStyleFormProps> = ({
     } finally {
       setSaving(false);
     }
+  };
+
+  const handleInsertImageRef = (image: { id: number; original_filename: string }) => {
+    const textToInsert = `{{image:${image.id}}}  /* ${image.original_filename} */`;
+
+    const editor = imageGuidelinesEditorRef.current;
+    if (editor) {
+      const position = editor.getPosition();
+      if (position) {
+        editor.executeEdits('insert-image-ref', [{
+          range: {
+            startLineNumber: position.lineNumber,
+            startColumn: position.column,
+            endLineNumber: position.lineNumber,
+            endColumn: position.column,
+          },
+          text: textToInsert,
+        }]);
+        editor.focus();
+        return;
+      }
+    }
+
+    setImageGuidelines(prev => prev + (prev ? '\n' : '') + textToInsert);
   };
 
   if (!isOpen) return null;
@@ -173,12 +216,52 @@ export const SlideStyleForm: React.FC<SlideStyleFormProps> = ({
                 <label className="mb-1 block text-sm font-medium text-foreground">
                   Style Content <span className="text-destructive">*</span>
                 </label>
+                <ExpandableEditor
+                  value={styleContent}
+                  onChange={setStyleContent}
+                  readOnly={saving}
+                  modalTitle="Style Content"
+                />
+                <p className="mt-1 text-xs text-muted-foreground">
+                  Define typography, colors, layout rules, and visual guidelines.
+                  Include font sizes, color codes, spacing, and chart color palettes.
+                  {' '}
+                  <a
+                    href={DOCS_URLS.customStylesCSS}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="inline-flex items-center gap-1 text-primary hover:underline"
+                  >
+                    CSS reference <ExternalLink className="size-2.5" />
+                  </a>
+                </p>
+              </div>
+
+              {/* Image Guidelines */}
+              <div>
+                <div className="mb-1 flex items-center justify-between">
+                  <label className="block text-sm font-medium text-foreground">
+                    Image Guidelines
+                  </label>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    onClick={() => setShowImagePicker(true)}
+                    disabled={saving}
+                    className="h-7 gap-1 text-xs"
+                  >
+                    <ImageIcon className="size-3" />
+                    Insert Image Ref
+                  </Button>
+                </div>
                 <div className="overflow-hidden rounded-md border border-input">
                   <Editor
-                    height="300px"
+                    height="150px"
                     defaultLanguage="markdown"
-                    value={styleContent}
-                    onChange={(value) => setStyleContent(value || '')}
+                    value={imageGuidelines}
+                    onChange={(value) => setImageGuidelines(value || '')}
+                    onMount={(editor) => { imageGuidelinesEditorRef.current = editor; }}
                     options={{
                       minimap: { enabled: false },
                       wordWrap: 'on',
@@ -190,8 +273,18 @@ export const SlideStyleForm: React.FC<SlideStyleFormProps> = ({
                   />
                 </div>
                 <p className="mt-1 text-xs text-muted-foreground">
-                  Define typography, colors, layout rules, and visual guidelines.
-                  Include font sizes, color codes, spacing, and chart color palettes.
+                  Specify which images to include on slides (e.g. logos, backgrounds).
+                  Use &quot;Insert Image Ref&quot; to add image IDs. When set, the agent uses these images
+                  automatically without searching. Leave blank to skip image injection.
+                  {' '}
+                  <a
+                    href={DOCS_URLS.imageGuidelines}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="inline-flex items-center gap-1 text-primary hover:underline"
+                  >
+                    Image guidelines guide <ExternalLink className="size-2.5" />
+                  </a>
                 </p>
               </div>
             </div>
@@ -213,6 +306,16 @@ export const SlideStyleForm: React.FC<SlideStyleFormProps> = ({
           </div>
         </form>
       </div>
+
+      {/* Image Picker for inserting image references */}
+      <ImagePicker
+        isOpen={showImagePicker}
+        onClose={() => setShowImagePicker(false)}
+        onSelect={(image) => {
+          handleInsertImageRef(image);
+          setShowImagePicker(false);
+        }}
+      />
     </div>
   );
 };
