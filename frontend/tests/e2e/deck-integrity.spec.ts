@@ -136,10 +136,36 @@ async function setupMocks(page: Page) {
         body: JSON.stringify(mockSlides)
       });
     } else {
-      // Individual session GET — return a valid empty session so the URL effect
-      // doesn't 404 and navigate away when a new session is loaded.
-      route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ session_id: 'test-session-id', title: null, has_slide_deck: false, messages: [] }) });
+      // Individual session GET — return a valid empty session with permission
+      route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ session_id: 'test-session-id', title: null, has_slide_deck: false, messages: [], my_permission: 'CAN_MANAGE' }) });
     }
+  });
+
+  // Mock current user (for editing lock)
+  await page.route('**/api/user/current', (route) => {
+    route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ username: 'test@example.com', display_name: 'Test User' }) });
+  });
+
+  // Mock editing lock endpoints
+  await page.route(/\/api\/sessions\/[^/]+\/lock$/, (route, request) => {
+    const method = request.method();
+    if (method === 'POST') {
+      route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ acquired: true, locked_by: null }) });
+    } else if (method === 'DELETE') {
+      route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ released: true }) });
+    } else {
+      route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ locked: false, locked_by: null }) });
+    }
+  });
+
+  // Mock mentions endpoint (notification bell)
+  await page.route('**/api/comments/mentions**', (route) => {
+    route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ mentions: [], count: 0 }) });
+  });
+
+  // Mock mentionable users
+  await page.route('**/api/comments/mentionable-users**', (route) => {
+    route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ users: [] }) });
   });
 
   // Mock verification endpoint
