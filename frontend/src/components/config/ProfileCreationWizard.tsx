@@ -50,7 +50,7 @@ interface WizardFormData {
   // Deck prompt
   selectedDeckPromptId: number | null;
   // Sharing
-  isGlobal: boolean;
+  globalPermission: PermissionLevel | null;
   contributors: ContributorCreate[];
 }
 
@@ -78,7 +78,7 @@ export const ProfileCreationWizard: React.FC<ProfileCreationWizardProps> = ({
     genieDescription: '',
     selectedSlideStyleId: null,
     selectedDeckPromptId: null,
-    isGlobal: false,
+    globalPermission: null,
     contributors: [],
   });
   
@@ -129,7 +129,7 @@ export const ProfileCreationWizard: React.FC<ProfileCreationWizardProps> = ({
         genieDescription: '',
         selectedSlideStyleId: null,
         selectedDeckPromptId: null,
-        isGlobal: false,
+        globalPermission: null,
         contributors: [],
       });
       setError(null);
@@ -362,9 +362,8 @@ export const ProfileCreationWizard: React.FC<ProfileCreationWizardProps> = ({
         prompts: promptsConfig,
       });
       
-      // Set global visibility if toggled on
-      if (formData.isGlobal) {
-        await configApi.setProfileGlobal(response.id, true);
+      if (formData.globalPermission) {
+        await configApi.setProfileGlobal(response.id, formData.globalPermission);
       }
 
       // Add contributors if any were selected
@@ -764,36 +763,6 @@ export const ProfileCreationWizard: React.FC<ProfileCreationWizardProps> = ({
                 </p>
               </div>
 
-              {/* Share with everyone toggle */}
-              <div className="flex items-center justify-between p-4 bg-blue-50 border border-blue-200 rounded-lg">
-                <div className="flex items-center gap-3">
-                  <FiGlobe className={`text-lg ${formData.isGlobal ? 'text-blue-600' : 'text-gray-400'}`} />
-                  <div>
-                    <p className="font-medium text-gray-900">Share with everyone</p>
-                    <p className="text-sm text-gray-500">
-                      {formData.isGlobal
-                        ? 'All workspace users can view and use this profile'
-                        : 'Only you and contributors below can access this profile'}
-                    </p>
-                  </div>
-                </div>
-                <button
-                  type="button"
-                  role="switch"
-                  aria-checked={formData.isGlobal}
-                  onClick={() => setFormData(prev => ({ ...prev, isGlobal: !prev.isGlobal }))}
-                  className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none focus:ring-2 focus:ring-purple-500 focus:ring-offset-2 ${
-                    formData.isGlobal ? 'bg-blue-600' : 'bg-gray-200'
-                  }`}
-                >
-                  <span
-                    className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out ${
-                      formData.isGlobal ? 'translate-x-5' : 'translate-x-0'
-                    }`}
-                  />
-                </button>
-              </div>
-
               {/* Search and permission selector */}
               <div className="flex gap-3">
                 <div className="flex-1 relative">
@@ -804,7 +773,7 @@ export const ProfileCreationWizard: React.FC<ProfileCreationWizardProps> = ({
                     type="text"
                     value={identitySearch}
                     onChange={(e) => setIdentitySearch(e.target.value)}
-                    placeholder="Search users or groups..."
+                    placeholder="Search users, groups, or &quot;All workspace users&quot;..."
                     className="w-full pl-10 pr-3 py-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-purple-500 focus:border-purple-500"
                   />
                   {searchingIdentities && (
@@ -825,8 +794,25 @@ export const ProfileCreationWizard: React.FC<ProfileCreationWizardProps> = ({
               </div>
 
               {/* Search results dropdown */}
-              {searchResults.length > 0 && (
+              {(searchResults.length > 0 || (identitySearch.length >= 1 && !formData.globalPermission)) && (
                 <div className="border border-gray-200 rounded-md shadow-sm max-h-48 overflow-y-auto">
+                  {/* "All workspace users" suggestion */}
+                  {!formData.globalPermission && 'all workspace'.includes(identitySearch.toLowerCase()) && (
+                    <button
+                      onClick={() => {
+                        setFormData(prev => ({ ...prev, globalPermission: selectedPermission }));
+                        setIdentitySearch('');
+                      }}
+                      className="w-full px-4 py-3 flex items-center gap-3 hover:bg-blue-50 border-b last:border-b-0 text-left"
+                    >
+                      <FiGlobe className="text-green-600 flex-shrink-0" />
+                      <div className="flex-1 min-w-0">
+                        <p className="font-medium text-gray-900">All workspace users</p>
+                        <p className="text-xs text-gray-500">Share with everyone in the workspace</p>
+                      </div>
+                      <span className="text-xs text-blue-600 font-medium">+ Add</span>
+                    </button>
+                  )}
                   {searchResults.map(identity => (
                     <button
                       key={identity.id}
@@ -844,7 +830,7 @@ export const ProfileCreationWizard: React.FC<ProfileCreationWizardProps> = ({
                           <p className="text-xs text-gray-500 truncate">{identity.user_name}</p>
                         )}
                       </div>
-                      <span className="text-xs text-gray-400">Click to add</span>
+                      <span className="text-xs text-blue-600 font-medium">+ Add</span>
                     </button>
                   ))}
                 </div>
@@ -857,22 +843,62 @@ export const ProfileCreationWizard: React.FC<ProfileCreationWizardProps> = ({
                 </p>
               )}
 
-              {/* Added contributors list */}
-              {formData.contributors.length > 0 && (
-                <div className="mt-6">
-                  <h4 className="text-sm font-medium text-gray-700 mb-3">
-                    Contributors ({formData.contributors.length})
-                  </h4>
+              {/* Current access list */}
+              <div className="mt-4">
+                <h4 className="text-sm font-medium text-gray-700 mb-3">
+                  Current Access ({formData.contributors.length + (formData.globalPermission ? 1 : 0)})
+                </h4>
+
+                {formData.contributors.length === 0 && !formData.globalPermission ? (
+                  <div className="bg-blue-50 border border-blue-200 rounded-md p-4">
+                    <h4 className="font-medium text-blue-900">No contributors added</h4>
+                    <p className="text-sm text-blue-700 mt-1">
+                      This profile will be private to you. Search above to add users, groups, or "All workspace users".
+                    </p>
+                  </div>
+                ) : (
                   <div className="space-y-2">
+                    {/* All workspace users row */}
+                    {formData.globalPermission && (
+                      <div className="flex items-center gap-3 p-3 bg-green-50 rounded-md border border-green-200">
+                        <div className="w-10 h-10 rounded-full bg-green-100 flex items-center justify-center">
+                          <FiGlobe className="text-green-600" />
+                        </div>
+                        <div className="flex-1 min-w-0">
+                          <p className="font-medium text-gray-900">All workspace users</p>
+                          <p className="text-xs text-gray-500">Everyone in the workspace</p>
+                        </div>
+                        <select
+                          value={formData.globalPermission}
+                          onChange={(e) => setFormData(prev => ({ ...prev, globalPermission: e.target.value as PermissionLevel }))}
+                          className="text-sm px-2 py-1 border border-gray-300 rounded focus:ring-2 focus:ring-purple-500"
+                        >
+                          {PERMISSION_OPTIONS.map(opt => (
+                            <option key={opt.value} value={opt.value}>{opt.label}</option>
+                          ))}
+                        </select>
+                        <button
+                          onClick={() => setFormData(prev => ({ ...prev, globalPermission: null }))}
+                          className="p-1 text-gray-400 hover:text-red-500 transition-colors"
+                          title="Remove global access"
+                        >
+                          <FiTrash2 />
+                        </button>
+                      </div>
+                    )}
                     {formData.contributors.map(contributor => (
                       <div
                         key={contributor.identity_id}
                         className="flex items-center gap-3 p-3 bg-gray-50 rounded-md border border-gray-200"
                       >
                         {contributor.identity_type === 'USER' ? (
-                          <FiUser className="text-blue-500 flex-shrink-0" />
+                          <div className="w-10 h-10 rounded-full bg-blue-100 flex items-center justify-center">
+                            <FiUser className="text-blue-500" />
+                          </div>
                         ) : (
-                          <FiUsers className="text-purple-500 flex-shrink-0" />
+                          <div className="w-10 h-10 rounded-full bg-purple-100 flex items-center justify-center">
+                            <FiUsers className="text-purple-500" />
+                          </div>
                         )}
                         <div className="flex-1 min-w-0">
                           <p className="font-medium text-gray-900 truncate">{contributor.identity_name}</p>
@@ -899,18 +925,8 @@ export const ProfileCreationWizard: React.FC<ProfileCreationWizardProps> = ({
                       </div>
                     ))}
                   </div>
-                </div>
-              )}
-
-              {/* Empty state */}
-              {formData.contributors.length === 0 && (
-                <div className="bg-blue-50 border border-blue-200 rounded-md p-4 mt-4">
-                  <h4 className="font-medium text-blue-900">No contributors added</h4>
-                  <p className="text-sm text-blue-700 mt-1">
-                    This profile will be private to you. You can add contributors now or later from the profile settings.
-                  </p>
-                </div>
-              )}
+                )}
+              </div>
             </div>
           )}
 
@@ -983,10 +999,13 @@ export const ProfileCreationWizard: React.FC<ProfileCreationWizardProps> = ({
                   <h4 className="text-sm font-medium text-indigo-700 mb-2">
                     Sharing
                   </h4>
-                  {formData.isGlobal && (
+                  {formData.globalPermission && (
                     <div className="flex items-center gap-2 text-sm mb-2">
-                      <FiGlobe className="text-blue-600" size={14} />
-                      <span className="font-medium text-indigo-900">Visible to all workspace users</span>
+                      <FiGlobe className="text-green-600" size={14} />
+                      <span className="font-medium text-indigo-900">All workspace users</span>
+                      <span className="text-indigo-500">
+                        ({PERMISSION_OPTIONS.find(p => p.value === formData.globalPermission)?.label})
+                      </span>
                     </div>
                   )}
                   {formData.contributors.length > 0 ? (
@@ -1005,7 +1024,7 @@ export const ProfileCreationWizard: React.FC<ProfileCreationWizardProps> = ({
                         </li>
                       ))}
                     </ul>
-                  ) : !formData.isGlobal ? (
+                  ) : !formData.globalPermission ? (
                     <p className="text-sm text-indigo-600">
                       Private profile - no contributors added.
                     </p>

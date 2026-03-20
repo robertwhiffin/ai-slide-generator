@@ -119,9 +119,8 @@ class PermissionService:
                 permissions_found.append(PermissionLevel(match.permission_level))
         
         if not permissions_found:
-            # Global profiles grant CAN_VIEW to everyone
-            if profile.is_global:
-                return PermissionLevel.CAN_VIEW
+            if profile.global_permission:
+                return PermissionLevel(profile.global_permission)
             return None
         
         # Return highest permission found
@@ -216,7 +215,7 @@ class PermissionService:
         # Global profiles (visible to everyone)
         global_profiles = self.db.query(ConfigProfile.id).filter(
             ConfigProfile.is_deleted == False,
-            ConfigProfile.is_global == True,
+            ConfigProfile.global_permission.isnot(None),
         ).all()
         accessible_ids.update(p.id for p in global_profiles)
         

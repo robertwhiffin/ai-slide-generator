@@ -44,12 +44,12 @@ const allTabs: Tab[] = [
 interface ConfigTabsProps {
   profileId: number;
   profileName: string;
-  isGlobal?: boolean;
+  globalPermission?: import('../../api/config').PermissionLevel | null;
   canManage?: boolean;
-  onGlobalChange?: (isGlobal: boolean) => void;
+  onGlobalPermissionChange?: (permission: import('../../api/config').PermissionLevel | null) => void;
 }
 
-export const ConfigTabs: React.FC<ConfigTabsProps> = ({ profileId, profileName, isGlobal, canManage, onGlobalChange }) => {
+export const ConfigTabs: React.FC<ConfigTabsProps> = ({ profileId, profileName, globalPermission, canManage, onGlobalPermissionChange }) => {
   const [activeTab, setActiveTab] = useState<TabId>('genie');
   
   const {
@@ -153,9 +153,9 @@ export const ConfigTabs: React.FC<ConfigTabsProps> = ({ profileId, profileName, 
         {activeTab === 'sharing' && (
           <ContributorsManager
             profileId={profileId}
-            isGlobal={isGlobal}
+            globalPermission={globalPermission}
             canManage={canManage}
-            onGlobalChange={onGlobalChange}
+            onGlobalPermissionChange={onGlobalPermissionChange}
           />
         )}
 

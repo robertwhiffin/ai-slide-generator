@@ -88,7 +88,7 @@ def list_profiles(service: ProfileService = Depends(get_profile_service)):
                 name=profile.name,
                 description=profile.description,
                 is_default=profile.is_default,
-                is_global=profile.is_global,
+                global_permission=profile.global_permission,
                 created_at=profile.created_at,
                 created_by=profile.created_by,
                 updated_at=profile.updated_at,
@@ -176,7 +176,7 @@ def get_profile(
             name=profile.name,
             description=profile.description,
             is_default=profile.is_default,
-            is_global=profile.is_global,
+            global_permission=profile.global_permission,
             created_at=profile.created_at,
             created_by=profile.created_by,
             updated_at=profile.updated_at,
@@ -451,17 +451,23 @@ def set_default_profile(
 @router.patch("/{profile_id}/global")
 def set_profile_global(
     profile_id: int,
-    is_global: bool,
+    permission: Optional[str] = None,
     db: Session = Depends(get_db),
     perm_service: PermissionService = Depends(get_permission_service),
 ):
     """
-    Toggle global visibility for a profile.
+    Set global permission level for a profile.
 
-    When enabled, the profile becomes visible (CAN_VIEW) to all workspace users.
+    Pass a permission level (CAN_VIEW, CAN_EDIT, CAN_MANAGE) to share with
+    all workspace users at that level, or null/empty to make private.
     Requires CAN_MANAGE permission.
     """
+    from src.database.models.profile_contributor import PermissionLevel as PL
+
     perm_service.require_manage(profile_id)
+
+    if permission and permission not in [p.value for p in PL]:
+        raise HTTPException(status_code=400, detail=f"Invalid permission: {permission}")
 
     profile = db.query(ConfigProfile).filter(
         ConfigProfile.id == profile_id,
@@ -470,9 +476,9 @@ def set_profile_global(
     if not profile:
         raise HTTPException(status_code=404, detail="Profile not found")
 
-    profile.is_global = is_global
+    profile.global_permission = permission or None
     db.commit()
-    return {"id": profile_id, "is_global": is_global}
+    return {"id": profile_id, "global_permission": profile.global_permission}
 
 
 @router.post("/{profile_id}/duplicate", response_model=ProfileDetail, status_code=status.HTTP_201_CREATED)

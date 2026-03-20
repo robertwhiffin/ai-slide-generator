@@ -475,11 +475,17 @@ def _run_migrations(engine, schema: str | None = None):
                 f"ALTER TABLE {_qual(comments_table)} ADD COLUMN mentions {col_type} NULL"
             ))
 
-        # --- config_profiles: add is_global ---
-        if "is_global" not in columns:
-            logger.info(f"Migration: adding is_global column to {table_name}")
+        # --- config_profiles: add global_permission ---
+        if "global_permission" not in columns:
+            logger.info(f"Migration: adding global_permission column to {table_name}")
             conn.execute(text(
-                f"ALTER TABLE {qualified_table} ADD COLUMN is_global BOOLEAN DEFAULT FALSE NOT NULL"
+                f"ALTER TABLE {qualified_table} ADD COLUMN global_permission VARCHAR(20) NULL"
+            ))
+        # --- config_profiles: migrate is_global bool to global_permission ---
+        if "is_global" in columns:
+            logger.info(f"Migration: migrating is_global to global_permission")
+            conn.execute(text(
+                f"UPDATE {qualified_table} SET global_permission = 'CAN_VIEW' WHERE is_global = TRUE AND global_permission IS NULL"
             ))
 
         # --- Migrate google_credentials_encrypted to google_global_credentials ---

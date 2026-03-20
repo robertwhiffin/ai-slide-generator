@@ -16,7 +16,7 @@ class ConfigProfile(Base):
     name = Column(String(100), nullable=False, unique=True, index=True)
     description = Column(Text)
     is_default = Column(Boolean, default=False, nullable=False)
-    is_global = Column(Boolean, default=False, nullable=False, server_default="false")
+    global_permission = Column(String(20), nullable=True)
     is_deleted = Column(Boolean, default=False, nullable=False, index=True)
     deleted_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)

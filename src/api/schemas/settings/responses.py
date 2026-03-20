@@ -14,7 +14,7 @@ class ProfileSummary(BaseModel):
     name: str
     description: Optional[str]
     is_default: bool
-    is_global: bool = False
+    global_permission: Optional[str] = None
     created_at: datetime
     created_by: Optional[str]
     updated_at: datetime
@@ -79,7 +79,7 @@ class ProfileDetail(BaseModel):
     name: str
     description: Optional[str]
     is_default: bool
-    is_global: bool = False
+    global_permission: Optional[str] = None
     created_at: datetime
     created_by: Optional[str]
     updated_at: datetime

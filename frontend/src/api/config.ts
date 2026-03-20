@@ -21,7 +21,7 @@ export interface Profile {
   name: string;
   description: string | null;
   is_default: boolean;
-  is_global: boolean;
+  global_permission: PermissionLevel | null;
   created_at: string;
   created_by: string | null;
   updated_at: string;
@@ -376,8 +376,8 @@ export const configApi = {
       method: 'POST',
     }),
   
-  setProfileGlobal: (id: number, isGlobal: boolean): Promise<{ id: number; is_global: boolean }> =>
-    fetchJson(`${API_BASE}/profiles/${id}/global?is_global=${isGlobal}`, {
+  setProfileGlobal: (id: number, permission: PermissionLevel | null): Promise<{ id: number; global_permission: PermissionLevel | null }> =>
+    fetchJson(`${API_BASE}/profiles/${id}/global${permission ? `?permission=${permission}` : ''}`, {
       method: 'PATCH',
     }),
 
