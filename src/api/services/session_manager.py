@@ -2182,16 +2182,15 @@ class SessionManager:
         self,
         session_id: str,
         query: Optional[str] = None,
-    ) -> List[Dict[str, str]]:
+    ) -> Dict[str, Any]:
         """Return users that can be @mentioned for a session.
 
         Each entry has ``username`` (email) and ``display_name``
         (SCIM displayName, falling back to the email if absent).
 
-        When the profile has ``global_permission`` set and a *query* is
-        provided, workspace users matching the query are included via
-        server-side SCIM filtering.  Without a query the initial load
-        returns only the owner + explicit contributors (fast).
+        When *query* is provided and the profile is globally shared,
+        only the SCIM search results are returned (fast path — skips
+        contributor resolution since the frontend already has them).
         """
         from src.database.models.profile import ConfigProfile
         from src.database.models.profile_contributor import ConfigProfileContributor
@@ -2201,38 +2200,40 @@ class SessionManager:
             session = self._get_session_or_raise(db, session_id)
             deck_owner = self._get_deck_owner_session(db, session)
 
-            seen: set[str] = set()
-            result: List[Dict[str, str]] = []
-
             try:
                 from src.services.identity_provider import get_identity_provider
                 provider = get_identity_provider()
             except Exception:
                 provider = None
 
-            if deck_owner.created_by:
-                email = deck_owner.created_by
-                seen.add(email)
-                result.append({"username": email, "display_name": resolve_display_name(email)})
-
             is_global = False
             if deck_owner.profile_id:
                 profile = db.query(ConfigProfile).filter(ConfigProfile.id == deck_owner.profile_id).first()
                 is_global = bool(profile and profile.global_permission)
 
-                # For global profiles with a search query, use SCIM server-side filtering
-                if is_global and query and provider:
-                    try:
-                        workspace_users = provider.list_users(filter_query=query, max_results=20)
-                        for wu in workspace_users:
-                            email = wu.get("userName")
-                            if email and email not in seen:
-                                seen.add(email)
-                                display = wu.get("displayName") or email
-                                result.append({"username": email, "display_name": display})
-                    except Exception:
-                        logger.warning("Failed to search workspace users for global profile mentions", exc_info=True)
+            # Fast path: search query on a global profile → SCIM only
+            if query and is_global and provider:
+                results: List[Dict[str, str]] = []
+                try:
+                    workspace_users = provider.list_users(filter_query=query, max_results=15)
+                    for wu in workspace_users:
+                        email = wu.get("userName")
+                        if email:
+                            results.append({"username": email, "display_name": wu.get("displayName") or email})
+                except Exception:
+                    logger.warning("Failed to search workspace users for mentions", exc_info=True)
+                return {"users": results, "is_global": True}
 
+            # Initial load: owner + explicit contributors
+            seen: set[str] = set()
+            result: List[Dict[str, str]] = []
+
+            if deck_owner.created_by:
+                email = deck_owner.created_by
+                seen.add(email)
+                result.append({"username": email, "display_name": resolve_display_name(email)})
+
+            if deck_owner.profile_id:
                 contributors = (
                     db.query(
                         ConfigProfileContributor.identity_id,
