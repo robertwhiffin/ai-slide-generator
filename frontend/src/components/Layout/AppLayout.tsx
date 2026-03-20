@@ -317,26 +317,7 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
     [navigate],
   );
 
-  const autoSaveSession = useCallback(async (deck: SlideDeck) => {
-    if (!sessionId) return;
-
-    try {
-      const title = deck.title?.trim();
-      const count = deck.slide_count ?? deck.slides?.length;
-      if (title) {
-        await renameSession(title, count);
-      } else if (count != null) {
-        await api.updateSession(sessionId, { slide_count: count });
-      } else {
-        return;
-      }
-      setLastSavedTime(new Date());
-      setSessionsRefreshKey((prev) => prev + 1);
-    } catch (err) {
-      console.error('Failed to save session after generation:', err);
-    }
-  }, [sessionId, renameSession]);
-
+  // Handle title change from header
   const handleTitleChange = useCallback(async (newTitle: string) => {
     try {
       await renameSession(newTitle);
@@ -633,7 +614,8 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
                       onGenerationComplete();
                       setSlideDeck(deck);
                       setRawHtml(raw);
-                      autoSaveSession(deck);
+                      setLastSavedTime(new Date());
+                      setSessionsRefreshKey((prev) => prev + 1);
                       if (sessionId) {
                         try {
                           await loadVersions();
