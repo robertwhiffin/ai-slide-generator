@@ -44,9 +44,12 @@ const allTabs: Tab[] = [
 interface ConfigTabsProps {
   profileId: number;
   profileName: string;
+  isGlobal?: boolean;
+  canManage?: boolean;
+  onGlobalChange?: (isGlobal: boolean) => void;
 }
 
-export const ConfigTabs: React.FC<ConfigTabsProps> = ({ profileId, profileName }) => {
+export const ConfigTabs: React.FC<ConfigTabsProps> = ({ profileId, profileName, isGlobal, canManage, onGlobalChange }) => {
   const [activeTab, setActiveTab] = useState<TabId>('genie');
   
   const {
@@ -148,7 +151,12 @@ export const ConfigTabs: React.FC<ConfigTabsProps> = ({ profileId, profileName }
         )}
 
         {activeTab === 'sharing' && (
-          <ContributorsManager profileId={profileId} />
+          <ContributorsManager
+            profileId={profileId}
+            isGlobal={isGlobal}
+            canManage={canManage}
+            onGlobalChange={onGlobalChange}
+          />
         )}
 
         {activeTab === 'advanced' && config.prompts && (

@@ -21,7 +21,7 @@ import {
   SidebarGroupLabel,
 } from "@/ui/sidebar"
 
-type ViewMode = 'main' | 'profiles' | 'deck_prompts' | 'slide_styles' | 'images' | 'history' | 'help'
+type ViewMode = 'main' | 'profiles' | 'deck_prompts' | 'slide_styles' | 'images' | 'history' | 'notifications' | 'help'
 
 interface AppSidebarProps extends React.ComponentProps<typeof Sidebar> {
   currentView: ViewMode

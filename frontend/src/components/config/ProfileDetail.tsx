@@ -240,7 +240,13 @@ export const ProfileDetailView: React.FC<ProfileDetailProps> = ({
         <div className="px-6 py-4 max-h-[70vh] overflow-y-auto">
           {mode === 'edit' ? (
             /* Edit Mode - Show ConfigTabs */
-            <ConfigTabs profileId={profile.id} profileName={profile.name} />
+            <ConfigTabs
+              profileId={profile.id}
+              profileName={profile.name}
+              isGlobal={profile.is_global}
+              canManage={!profile.my_permission || profile.my_permission === 'CAN_MANAGE'}
+              onGlobalChange={(val) => setProfile(prev => prev ? { ...prev, is_global: val } : prev)}
+            />
           ) : (
             /* View Mode - Show Read-Only Details */
             <div>
