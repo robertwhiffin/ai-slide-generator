@@ -46,6 +46,7 @@ def _profile_to_dict(profile: ConfigProfile) -> dict:
         "agent_config": profile.agent_config,
         "created_at": profile.created_at.isoformat() if profile.created_at else None,
         "created_by": profile.created_by,
+        "updated_at": profile.updated_at.isoformat() if profile.updated_at else None,
     }
 
 
