@@ -25,14 +25,12 @@ import {
 
 interface DeckHistoryProps {
   onSessionSelect: (sessionId: string) => void
-  onViewAll: () => void
   currentSessionId?: string | null
   refreshKey?: number
 }
 
 export function DeckHistory({
   onSessionSelect,
-  onViewAll,
   currentSessionId,
   refreshKey,
 }: DeckHistoryProps) {
@@ -71,6 +69,10 @@ export function DeckHistory({
     if (hours < 24) return `${hours}h ago`
     const days = Math.floor(hours / 24)
     return `${days}d ago`
+  }
+
+  if (sessions.length === 0) {
+    return null
   }
 
   return (
@@ -120,15 +122,6 @@ export function DeckHistory({
             </DropdownMenu>
           </SidebarMenuItem>
         ))}
-        <SidebarMenuItem>
-          <SidebarMenuButton
-            className="text-sidebar-foreground/70"
-            onClick={onViewAll}
-          >
-            <MoreHorizontal />
-            <span>View All Decks</span>
-          </SidebarMenuButton>
-        </SidebarMenuItem>
       </SidebarMenu>
     </SidebarGroup>
   )

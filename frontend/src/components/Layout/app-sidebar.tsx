@@ -6,6 +6,7 @@ import {
   FileText,
   Palette,
   Image,
+  Layers,
 } from "lucide-react"
 import { NavMain } from "@/components/Layout/nav-main"
 import { NavSecondary } from "@/components/Layout/nav-secondary"
@@ -38,6 +39,11 @@ const navMainItems = [
     title: "New Deck",
     viewId: "main",
     icon: Plus,
+  },
+  {
+    title: "View All Decks",
+    viewId: "history",
+    icon: Layers,
   },
 ]
 
@@ -98,7 +104,6 @@ export function AppSidebar({
       <SidebarContent>
         <DeckHistory
           onSessionSelect={onSessionSelect}
-          onViewAll={() => onViewChange('history')}
           currentSessionId={currentSessionId}
           refreshKey={sessionsRefreshKey}
         />
