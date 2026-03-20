@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { api } from '../../services/api';
 import type { Session, SharedPresentation } from '../../services/api';
 
@@ -25,9 +25,11 @@ export const SessionHistory: React.FC<SessionHistoryProps> = ({
   const [activeTab, setActiveTab] = useState<TabType>('my');
   const [contributorLoading, setContributorLoading] = useState<string | null>(null);
 
+  const isFirstLoad = useRef(true);
+
   const loadSessions = async () => {
     try {
-      setLoading(true);
+      if (isFirstLoad.current) setLoading(true);
       const [myResult, sharedResult] = await Promise.all([
         api.listSessions(100),
         api.listSharedPresentations(100, activeProfileId),
@@ -36,15 +38,18 @@ export const SessionHistory: React.FC<SessionHistoryProps> = ({
       setSharedPresentations(sharedResult.presentations);
       setError(null);
     } catch (err) {
-      setError('Failed to load sessions');
+      if (isFirstLoad.current) setError('Failed to load sessions');
       console.error(err);
     } finally {
       setLoading(false);
+      isFirstLoad.current = false;
     }
   };
 
   useEffect(() => {
     loadSessions();
+    const timer = setInterval(loadSessions, 15_000);
+    return () => clearInterval(timer);
   }, [refreshKey, activeProfileId]);
 
   const sessions = mySessions;
