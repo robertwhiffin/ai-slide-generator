@@ -1,6 +1,5 @@
 import { test, expect, Page } from '@playwright/test';
 import {
-  mockProfiles,
   mockProfileSummaries,
   mockDefaultAgentConfig,
   mockAvailableTools,
@@ -91,11 +90,6 @@ async function setupMocks(page: Page) {
   // New profiles API (GET /api/profiles)
   await page.route(/\/api\/profiles$/, (route) => {
     route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(mockProfileSummaries) });
-  });
-
-  // Legacy profiles endpoint
-  await page.route('http://127.0.0.1:8000/api/settings/profiles', (route) => {
-    route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(mockProfiles) });
   });
 
   // Available tools
@@ -569,34 +563,6 @@ test.describe('Form Validation', () => {
 test.describe('Empty State', () => {
   test('shows empty message when no styles exist', async ({ page }) => {
     // Setup other mocks first (except slide-styles)
-    await page.route('http://127.0.0.1:8000/api/settings/profiles', (route) => {
-      route.fulfill({
-        status: 200,
-        contentType: 'application/json',
-        body: JSON.stringify(mockProfiles),
-      });
-    });
-
-    await page.route(/http:\/\/127.0.0.1:8000\/api\/settings\/profiles\/\d+$/, (route, request) => {
-      if (request.method() === 'GET') {
-        route.fulfill({
-          status: 200,
-          contentType: 'application/json',
-          body: JSON.stringify(mockProfiles[0]),
-        });
-      } else {
-        route.continue();
-      }
-    });
-
-    await page.route(/http:\/\/127.0.0.1:8000\/api\/settings\/profiles\/\d+\/load/, (route) => {
-      route.fulfill({
-        status: 200,
-        contentType: 'application/json',
-        body: JSON.stringify({ status: 'reloaded', profile_id: 1 }),
-      });
-    });
-
     await page.route('http://127.0.0.1:8000/api/settings/deck-prompts', (route) => {
       route.fulfill({
         status: 200,

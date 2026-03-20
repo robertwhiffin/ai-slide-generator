@@ -1,6 +1,5 @@
 import { test, expect, Page } from '@playwright/test';
 import {
-  mockProfiles,
   mockProfileSummaries,
   mockDefaultAgentConfig,
   mockAvailableTools,
@@ -69,15 +68,6 @@ async function setupMocks(page: Page) {
       status: 200,
       contentType: 'application/json',
       body: JSON.stringify(mockProfileSummaries),
-    });
-  });
-
-  // Mock legacy profiles endpoint (GET /api/settings/profiles) — used by ProfileList page
-  await page.route(/\/api\/settings\/profiles$/, (route) => {
-    route.fulfill({
-      status: 200,
-      contentType: 'application/json',
-      body: JSON.stringify(mockProfiles),
     });
   });
 
