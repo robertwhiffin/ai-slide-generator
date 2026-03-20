@@ -6,7 +6,6 @@ import {
   FileText,
   Palette,
   Image,
-  Bell,
 } from "lucide-react"
 import { NavMain } from "@/components/Layout/nav-main"
 import { NavSecondary } from "@/components/Layout/nav-secondary"
@@ -62,11 +61,6 @@ const navSecondaryItems = [
     title: "Images",
     viewId: "images",
     icon: Image,
-  },
-  {
-    title: "Notifications",
-    viewId: "notifications",
-    icon: Bell,
   },
   {
     title: "Help",
