@@ -314,10 +314,8 @@ export const api = {
    * List presentations shared with the user via profile access (Shared with Me).
    * Returns slide deck metadata only — conversations are never exposed.
    */
-  async listSharedPresentations(limit = 50, profileId?: number): Promise<{ presentations: SharedPresentation[]; count: number }> {
-    let url = `${API_BASE_URL}/api/sessions/shared?limit=${limit}`;
-    if (profileId != null) url += `&profile_id=${profileId}`;
-    const response = await fetch(url);
+  async listSharedPresentations(limit = 50): Promise<{ presentations: SharedPresentation[]; count: number }> {
+    const response = await fetch(`${API_BASE_URL}/api/sessions/shared?limit=${limit}`);
 
     if (!response.ok) {
       throw new ApiError(response.status, 'Failed to list shared presentations');

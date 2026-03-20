@@ -149,6 +149,17 @@ async def create_session(request: CreateSessionRequest = None):
     request = request or CreateSessionRequest()
     current_user = get_current_user()
 
+    # Attach the currently loaded profile so the session is associated from the start
+    profile_id = None
+    profile_name = None
+    try:
+        from src.core.settings_db import get_settings
+        settings = get_settings()
+        profile_id = getattr(settings, 'profile_id', None)
+        profile_name = getattr(settings, 'profile_name', None)
+    except Exception:
+        pass
+
     try:
         session_manager = get_session_manager()
         result = await asyncio.to_thread(
@@ -156,6 +167,8 @@ async def create_session(request: CreateSessionRequest = None):
             session_id=request.session_id,
             title=request.title,
             created_by=current_user,
+            profile_id=profile_id,
+            profile_name=profile_name,
         )
 
         logger.info(
@@ -215,7 +228,6 @@ async def list_sessions(
 @router.get("/shared")
 async def list_shared_presentations(
     limit: int = Query(50, ge=1, le=100, description="Maximum presentations to return"),
-    profile_id: Optional[int] = Query(None, description="Filter to a single profile"),
     db: Session = Depends(get_db),
 ):
     """List presentations (slide decks) shared with the current user via profile access.
@@ -224,12 +236,8 @@ async def list_shared_presentations(
     or CAN_MANAGE permission. Conversations (chat messages) are never exposed —
     contributors only see the slide decks.
 
-    When ``profile_id`` is provided, only presentations under that specific profile
-    are returned (the user must still have access to the profile).
-
     Args:
         limit: Maximum number of presentations to return
-        profile_id: Optional profile ID to scope results
 
     Returns:
         List of presentation summaries with my_permission and slide metadata
@@ -250,12 +258,6 @@ async def list_shared_presentations(
 
         if not accessible_profile_ids:
             return {"presentations": [], "count": 0}
-
-        # Scope to a single profile when requested
-        if profile_id is not None:
-            if profile_id not in accessible_profile_ids:
-                return {"presentations": [], "count": 0}
-            accessible_profile_ids = {profile_id}
 
         session_manager = get_session_manager()
         sessions = await asyncio.to_thread(

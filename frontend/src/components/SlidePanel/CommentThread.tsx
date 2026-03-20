@@ -116,7 +116,8 @@ const MentionInput: React.FC<MentionInputProps> = ({
     if (e.key === 'Enter' && !showDropdown) onSubmit();
   };
 
-  const showPanel = showDropdown && (filtered.length > 0 || (searching && mentionQuery.length >= 2));
+  const awaitingResults = !!onSearch && mentionQuery.length >= 2 && filtered.length === 0;
+  const showPanel = showDropdown && (filtered.length > 0 || searching || awaitingResults);
 
   return (
     <div className="relative flex-1">
@@ -146,7 +147,7 @@ const MentionInput: React.FC<MentionInputProps> = ({
               )}
             </button>
           ))}
-          {searching && (
+          {(searching || awaitingResults) && (
             <div className="px-3 py-1.5 text-xs text-gray-400 flex items-center gap-2">
               <svg className="animate-spin h-3 w-3" viewBox="0 0 24 24">
                 <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />

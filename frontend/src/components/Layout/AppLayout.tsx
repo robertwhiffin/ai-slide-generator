@@ -680,7 +680,6 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
                   onSessionSelect={handleSessionRestore}
                   onBack={() => setViewMode('main')}
                   refreshKey={sessionsRefreshKey}
-                  activeProfileId={currentProfile?.id}
                 />
               </div>
             </div>
