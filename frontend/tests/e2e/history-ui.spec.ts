@@ -43,14 +43,15 @@ async function setupMocks(page: Page) {
     route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ users: [], is_global: false }) });
   });
 
-  // Shared presentations (must be before the generic sessions catch-all)
-  await page.route('**/api/sessions/shared**', (route) => {
-    route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ presentations: [], count: 0 }) });
-  });
-
   await page.route('http://127.0.0.1:8000/api/sessions**', (route, request) => {
     const url = request.url();
     const method = request.method();
+
+    // Shared presentations endpoint
+    if (url.includes('/sessions/shared')) {
+      route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ presentations: [], count: 0 }) });
+      return;
+    }
 
     // Handle session creation
     if (method === 'POST') {
@@ -145,22 +146,22 @@ async function setupMocks(page: Page) {
 }
 
 async function setupEmptySessionsMock(page: Page) {
-  // Override shared presentations to return empty list
-  await page.route('**/api/sessions/shared**', (route) => {
-    route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ presentations: [], count: 0 }) });
-  });
-
-  // Override sessions to return empty list
+  // Override sessions to return empty list (handles shared too)
   await page.route('http://127.0.0.1:8000/api/sessions**', (route, request) => {
+    const url = request.url();
     const method = request.method();
 
-    // Handle session creation/deletion
+    if (url.includes('/sessions/shared')) {
+      route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ presentations: [], count: 0 }) });
+      return;
+    }
+
     if (method === 'POST' || method === 'DELETE') {
       route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ session_id: 'mock', title: 'New', user_id: null, created_at: '2026-01-01T00:00:00Z' }) });
       return;
     }
 
-    if (request.url().includes('limit=')) {
+    if (url.includes('limit=')) {
       route.fulfill({
         status: 200,
         contentType: 'application/json',
