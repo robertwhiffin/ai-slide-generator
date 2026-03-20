@@ -65,15 +65,14 @@ test.describe('User Guide: Uploading Images', () => {
       await setupImageMocks(page);
       const capture = new UserGuideCapture(page, '06-uploading-images');
 
-      // Step 01: Navigate to Image Library
-      await page.goto('/');
-      await page.getByRole('navigation').getByRole('button', { name: 'Images' }).click();
+      // Step 01: Navigate to Image Library (shared goToImageLibrary uses /images)
+      await goToImageLibrary(page);
       await page.waitForTimeout(500);
       await capture.capture({
         step: '01',
         name: 'image-library-page',
-        description: 'Open the Image Library from the navigation bar',
-        highlightSelector: 'nav button:has-text("Images")',
+        description: 'Open the Image Library from the sidebar or URL',
+        highlightSelector: 'button:has-text("Images")',
       });
 
       // Step 02: Upload area
@@ -121,7 +120,7 @@ test.describe('User Guide: Uploading Images', () => {
 
       // Step 05: Simulate a pasted image by uploading via the mock
       // Trigger the paste handler by evaluating clipboard paste with an image
-      const chatInput = page.getByRole('textbox', { name: /Ask to generate or modify/ });
+      const chatInput = page.getByRole('textbox');
       await chatInput.click();
 
       // Simulate paste event with an image blob
@@ -181,7 +180,7 @@ test.describe('User Guide: Uploading Images', () => {
       await goToSlideStyles(page);
 
       // Open the Create Style modal to access Image Guidelines
-      await page.getByRole('button', { name: '+ Create Style' }).click();
+      await page.getByRole('button', { name: 'New Style' }).click();
       await expect(page.getByRole('heading', { name: 'Create Slide Style' })).toBeVisible();
       await page.waitForTimeout(300);
 

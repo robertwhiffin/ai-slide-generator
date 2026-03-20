@@ -25,7 +25,9 @@ import {
 // ============================================
 
 async function setupMocks(page: Page) {
-  // Mock sessions endpoint
+  await page.route('**/api/setup/status', (route) => {
+    route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ configured: true }) });
+  });
   await page.route('http://127.0.0.1:8000/api/sessions**', (route, request) => {
     const url = request.url();
     const method = request.method();
@@ -146,9 +148,8 @@ async function setupEmptySessionsMock(page: Page) {
 }
 
 async function goToHistory(page: Page) {
-  await page.goto('/');
-  await page.getByRole('navigation').getByRole('button', { name: 'My Sessions' }).click();
-  await expect(page.getByRole('heading', { name: 'Sessions', exact: true })).toBeVisible();
+  await page.goto('/history');
+  await expect(page.getByRole('heading', { name: 'Sessions', exact: true })).toBeVisible({ timeout: 10000 });
 }
 
 // ============================================
@@ -164,7 +165,6 @@ test.describe('SessionHistoryList', () => {
     await goToHistory(page);
 
     await expect(page.getByRole('heading', { name: 'Sessions', exact: true })).toBeVisible();
-    // Check for "My Sessions" tab (using exact match to avoid nav button)
     await expect(page.getByRole('button', { name: 'My Sessions', exact: true }).first()).toBeVisible();
   });
 
@@ -174,9 +174,8 @@ test.describe('SessionHistoryList', () => {
     const table = page.getByRole('table');
     await expect(table).toBeVisible();
 
-    // Verify mock sessions are displayed
-    await expect(page.getByText('Session 2026-01-08 20:38')).toBeVisible();
-    await expect(page.getByText('Session 2026-01-08 20:20')).toBeVisible();
+    await expect(page.getByText('Session 2026-01-08 20:38').first()).toBeVisible();
+    await expect(page.getByText('Session 2026-01-08 20:20').first()).toBeVisible();
   });
 
   test('shows correct table columns', async ({ page }) => {

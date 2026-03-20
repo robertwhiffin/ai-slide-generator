@@ -98,6 +98,24 @@ const OverviewTab: React.FC<{
     </section>
 
     <section>
+      <h2 className="text-lg font-semibold text-gray-800 mb-3">Header actions</h2>
+      <p className="text-gray-600 mb-2">
+        From the session header you can:
+      </p>
+      <ul className="list-disc list-inside text-gray-600 space-y-1">
+        <li><strong>Save</strong> — Rename the session (Save As)</li>
+        <li><strong>Share</strong> — Copy a view-only link to share the deck</li>
+        <li><strong>Save Points</strong> — View and revert to previous versions; create save points after generating slides</li>
+        <li><strong>Export</strong> — Download as PPTX or PDF, or export to Google Slides</li>
+        <li><strong>Present</strong> — Open presentation mode</li>
+      </ul>
+      <p className="text-gray-600 mt-2">
+        Use the <strong>Image library</strong> (sidebar) to upload and manage images; you can also paste or attach images in chat.
+        The <strong>Feedback</strong> button (bottom-right) lets you send comments; a short survey may appear after generation.
+      </p>
+    </section>
+
+    <section>
       <h2 className="text-lg font-semibold text-gray-800 mb-3">Navigation Quick Links</h2>
       <div className="flex gap-2 flex-wrap">
         <QuickLinkButton tab="generator" label="Learn about Generator →" />

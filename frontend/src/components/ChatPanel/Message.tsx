@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import { ChevronRight, ChevronDown } from 'lucide-react';
 import type { Message as MessageType } from '../../types/message';
 
 interface MessageProps {
@@ -7,19 +8,6 @@ interface MessageProps {
 
 export const Message: React.FC<MessageProps> = ({ message }) => {
   const [isExpanded, setIsExpanded] = useState(false);
-
-  const getMessageStyle = () => {
-    switch (message.role) {
-      case 'user':
-        return 'bg-blue-100 ml-auto';
-      case 'assistant':
-        return 'bg-white';
-      case 'tool':
-        return 'bg-gray-100';
-      default:
-        return 'bg-gray-50';
-    }
-  };
 
   const getMessageLabel = () => {
     switch (message.role) {
@@ -39,22 +27,34 @@ export const Message: React.FC<MessageProps> = ({ message }) => {
     preview: string,
     content: React.ReactNode,
   ) => (
-    <div className={`max-w-3xl rounded-lg p-3 ${getMessageStyle()}`}>
-      <button
-        onClick={() => setIsExpanded(prev => !prev)}
-        className="flex items-center space-x-2 text-sm font-medium text-gray-600 hover:text-gray-800"
-        type="button"
-      >
-        <span>{isExpanded ? '▼' : '▶'}</span>
-        <span>{label}</span>
-        <span className="text-xs text-gray-500">{preview}</span>
-      </button>
+    <div className="flex justify-start">
+      <div className="max-w-[85%] rounded-xl bg-muted/50 px-3.5 py-2.5">
+        <button
+          onClick={() => setIsExpanded(prev => !prev)}
+          className="group flex w-full items-center justify-between gap-2 text-left text-sm font-medium text-foreground hover:text-foreground/70 transition-colors"
+          type="button"
+        >
+          <span className="flex-1">
+            <span className="block">{label}</span>
+            {preview && (
+              <span className="block text-xs font-normal text-muted-foreground mt-0.5">
+                {preview}
+              </span>
+            )}
+          </span>
+          {isExpanded ? (
+            <ChevronDown className="size-4 shrink-0 text-muted-foreground opacity-40 group-hover:opacity-100 transition-opacity" />
+          ) : (
+            <ChevronRight className="size-4 shrink-0 text-muted-foreground opacity-40 group-hover:opacity-100 transition-opacity" />
+          )}
+        </button>
 
-      {isExpanded && (
-        <div className="mt-2 text-sm text-gray-700 font-mono bg-gray-50 border border-gray-200 rounded p-3 overflow-auto max-h-96">
-          {content}
-        </div>
-      )}
+        {isExpanded && (
+          <div className="mt-2 text-[13px] leading-relaxed text-muted-foreground font-mono bg-background border border-border rounded p-3 overflow-auto max-h-96">
+            {content}
+          </div>
+        )}
+      </div>
     </div>
   );
 
@@ -94,19 +94,19 @@ export const Message: React.FC<MessageProps> = ({ message }) => {
       // Try to find a query-like field
       queryText = toolArgs.query || toolArgs.input || JSON.stringify(toolArgs);
     }
-    
-    const argsPreview = queryText 
+
+    const argsPreview = queryText
       ? `"${queryText.slice(0, 60)}${queryText.length > 60 ? '...' : ''}"`
       : '';
-    
+
     return renderCollapsibleContent(
       `Tool call: ${message.tool_call.name}`,
       argsPreview,
       <div className="text-xs">
         {queryText ? (
           <div>
-            <span className="text-gray-500">Query: </span>
-            <span className="text-gray-800">{queryText}</span>
+            <span className="text-muted-foreground">Query: </span>
+            <span className="text-foreground">{queryText}</span>
           </div>
         ) : (
           <pre className="whitespace-pre-wrap">
@@ -117,13 +117,21 @@ export const Message: React.FC<MessageProps> = ({ message }) => {
     );
   }
 
+  // Regular user/assistant messages with v0 styling
+  const isUser = message.role === 'user';
+
   return (
-    <div className={`max-w-3xl rounded-lg p-4 ${getMessageStyle()}`}>
-      <div className="text-xs font-semibold text-gray-500 mb-1">
-        {getMessageLabel()}
-      </div>
-      <div className="text-sm text-gray-800 whitespace-pre-wrap">
-        {message.content}
+    <div className={`flex ${isUser ? 'justify-end' : 'justify-start'}`}>
+      <div
+        className={`max-w-[85%] rounded-xl px-3.5 py-2.5 text-[13px] leading-relaxed ${
+          message.role === 'assistant'
+            ? 'bg-muted/50 text-foreground'
+            : 'bg-primary text-primary-foreground'
+        }`}
+      >
+        <div className="whitespace-pre-wrap">
+          {message.content}
+        </div>
       </div>
     </div>
   );
