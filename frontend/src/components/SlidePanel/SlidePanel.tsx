@@ -91,7 +91,7 @@ function SlidePanelComponent(props: SlidePanelProps, ref: React.Ref<SlidePanelHa
 
   useEffect(() => {
     fetchMentions();
-    const timer = setInterval(fetchMentions, 10_000);
+    const timer = setInterval(fetchMentions, 3_000);
     return () => clearInterval(timer);
   }, [fetchMentions, slideDeck]);
 
