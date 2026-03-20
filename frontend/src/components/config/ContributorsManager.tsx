@@ -2,11 +2,11 @@
  * Contributors management component for sharing profiles.
  * 
  * Allows adding, updating, and removing contributors (users/groups)
- * with different permission levels.
+ * with different permission levels, and toggling global visibility.
  */
 
 import React, { useState, useEffect, useCallback } from 'react';
-import { FiSearch, FiUser, FiUsers, FiTrash2, FiUserPlus } from 'react-icons/fi';
+import { FiSearch, FiUser, FiUsers, FiTrash2, FiUserPlus, FiGlobe } from 'react-icons/fi';
 import {
   configApi,
   type Contributor,
@@ -24,13 +24,42 @@ const PERMISSION_OPTIONS: { value: PermissionLevel; label: string; description: 
 
 interface ContributorsManagerProps {
   profileId: number;
+  isGlobal?: boolean;
+  canManage?: boolean;
+  onGlobalChange?: (isGlobal: boolean) => void;
 }
 
-export const ContributorsManager: React.FC<ContributorsManagerProps> = ({ profileId }) => {
+export const ContributorsManager: React.FC<ContributorsManagerProps> = ({
+  profileId,
+  isGlobal: initialIsGlobal,
+  canManage = true,
+  onGlobalChange,
+}) => {
   // Contributors list
   const [contributors, setContributors] = useState<Contributor[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+
+  // Global visibility
+  const [isGlobal, setIsGlobal] = useState(initialIsGlobal ?? false);
+  const [togglingGlobal, setTogglingGlobal] = useState(false);
+
+  useEffect(() => {
+    if (initialIsGlobal !== undefined) setIsGlobal(initialIsGlobal);
+  }, [initialIsGlobal]);
+
+  const handleToggleGlobal = async () => {
+    setTogglingGlobal(true);
+    try {
+      const result = await configApi.setProfileGlobal(profileId, !isGlobal);
+      setIsGlobal(result.is_global);
+      onGlobalChange?.(result.is_global);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to update visibility');
+    } finally {
+      setTogglingGlobal(false);
+    }
+  };
 
   // Search state
   const [searchQuery, setSearchQuery] = useState('');
@@ -161,6 +190,39 @@ export const ContributorsManager: React.FC<ContributorsManagerProps> = ({ profil
           Add users or groups from your Databricks workspace who can access this profile.
         </p>
       </div>
+
+      {/* Share with Everyone toggle */}
+      {canManage && (
+        <div className="flex items-center justify-between p-4 bg-blue-50 border border-blue-200 rounded-lg">
+          <div className="flex items-center gap-3">
+            <FiGlobe className={`text-lg ${isGlobal ? 'text-blue-600' : 'text-gray-400'}`} />
+            <div>
+              <p className="font-medium text-gray-900">Share with everyone</p>
+              <p className="text-sm text-gray-500">
+                {isGlobal
+                  ? 'All workspace users can view and use this profile'
+                  : 'Only you and contributors below can access this profile'}
+              </p>
+            </div>
+          </div>
+          <button
+            type="button"
+            role="switch"
+            aria-checked={isGlobal}
+            onClick={handleToggleGlobal}
+            disabled={togglingGlobal}
+            className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 disabled:opacity-50 ${
+              isGlobal ? 'bg-blue-600' : 'bg-gray-200'
+            }`}
+          >
+            <span
+              className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out ${
+                isGlobal ? 'translate-x-5' : 'translate-x-0'
+              }`}
+            />
+          </button>
+        </div>
+      )}
 
       {/* Error display */}
       {error && (

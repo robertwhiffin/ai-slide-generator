@@ -475,6 +475,13 @@ def _run_migrations(engine, schema: str | None = None):
                 f"ALTER TABLE {_qual(comments_table)} ADD COLUMN mentions {col_type} NULL"
             ))
 
+        # --- config_profiles: add is_global ---
+        if "is_global" not in columns:
+            logger.info(f"Migration: adding is_global column to {table_name}")
+            conn.execute(text(
+                f"ALTER TABLE {qualified_table} ADD COLUMN is_global BOOLEAN DEFAULT FALSE NOT NULL"
+            ))
+
         # --- Migrate google_credentials_encrypted to google_global_credentials ---
         _migrate_google_credentials_to_global(conn, inspector, schema, _qual, is_sqlite)
 

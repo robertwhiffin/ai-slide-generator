@@ -17,6 +17,7 @@ from src.api.schemas.settings import (
 from src.api.services.chat_service import ChatService, get_chat_service
 from src.core.database import get_db
 from src.core.permission_context import get_permission_context
+from src.database.models import ConfigProfile
 from src.services import ProfileService
 from src.services.permission_service import PermissionService
 
@@ -87,6 +88,7 @@ def list_profiles(service: ProfileService = Depends(get_profile_service)):
                 name=profile.name,
                 description=profile.description,
                 is_default=profile.is_default,
+                is_global=profile.is_global,
                 created_at=profile.created_at,
                 created_by=profile.created_by,
                 updated_at=profile.updated_at,
@@ -443,6 +445,33 @@ def set_default_profile(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to set default profile",
         )
+
+
+@router.patch("/{profile_id}/global")
+def set_profile_global(
+    profile_id: int,
+    is_global: bool,
+    db: Session = Depends(get_db),
+    perm_service: PermissionService = Depends(get_permission_service),
+):
+    """
+    Toggle global visibility for a profile.
+
+    When enabled, the profile becomes visible (CAN_VIEW) to all workspace users.
+    Requires CAN_MANAGE permission.
+    """
+    perm_service.require_manage(profile_id)
+
+    profile = db.query(ConfigProfile).filter(
+        ConfigProfile.id == profile_id,
+        ConfigProfile.is_deleted == False,
+    ).first()
+    if not profile:
+        raise HTTPException(status_code=404, detail="Profile not found")
+
+    profile.is_global = is_global
+    db.commit()
+    return {"id": profile_id, "is_global": is_global}
 
 
 @router.post("/{profile_id}/duplicate", response_model=ProfileDetail, status_code=status.HTTP_201_CREATED)
