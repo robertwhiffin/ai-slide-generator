@@ -7,7 +7,6 @@ import {
   mockDeckPrompts,
   mockSlideStyles,
   mockSessions,
-  mockProfileLoadResponse,
 } from '../fixtures/mocks';
 
 /**
@@ -17,7 +16,7 @@ import {
  * using mocked API responses. They run fast and don't require a backend.
  *
  * Covers:
- * - ProfileList rendering and interactions (rename, delete, load, set default)
+ * - ProfileList rendering and interactions (rename, delete)
  */
 
 // ============================================
@@ -29,7 +28,7 @@ async function setupProfileMocks(page: Page) {
     route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ configured: true }) });
   });
 
-  // New profiles API (GET /api/profiles) — used by AgentConfigContext
+  // Profiles API (GET /api/profiles) — used by both AgentConfigContext and ProfileContext
   await page.route(/\/api\/profiles$/, (route) => {
     route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(mockProfileSummaries) });
   });
@@ -39,58 +38,23 @@ async function setupProfileMocks(page: Page) {
     route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(mockAvailableTools) });
   });
 
-  // Legacy profiles endpoint (used by ProfileList on /profiles page)
-  await page.route(/\/api\/settings\/profiles$/, (route, request) => {
-    if (request.method() === 'GET') {
-      route.fulfill({
-        status: 200,
-        contentType: 'application/json',
-        body: JSON.stringify(mockProfiles),
-      });
-    } else {
-      route.continue();
-    }
-  });
-
-  // Mock individual profile endpoints
-  await page.route(/http:\/\/127.0.0.1:8000\/api\/settings\/profiles\/\d+$/, (route, request) => {
-    if (request.method() === 'GET') {
-      const id = parseInt(request.url().split('/').pop() || '1');
-      const profile = mockProfiles.find((p) => p.id === id) || mockProfiles[0];
-      route.fulfill({
-        status: 200,
-        contentType: 'application/json',
-        body: JSON.stringify(profile),
-      });
-    } else if (request.method() === 'PUT') {
+  // Mock individual profile endpoints (PUT for rename, DELETE for delete)
+  await page.route(/http:\/\/127.0.0.1:8000\/api\/profiles\/\d+$/, (route, request) => {
+    if (request.method() === 'PUT') {
       route.fulfill({
         status: 200,
         contentType: 'application/json',
         body: JSON.stringify({ ...mockProfiles[0], name: 'Updated Profile' }),
       });
     } else if (request.method() === 'DELETE') {
-      route.fulfill({ status: 204 });
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ status: 'deleted', id: 1 }),
+      });
     } else {
       route.continue();
     }
-  });
-
-  // Mock profile load endpoint
-  await page.route(/http:\/\/127.0.0.1:8000\/api\/settings\/profiles\/\d+\/load/, (route) => {
-    route.fulfill({
-      status: 200,
-      contentType: 'application/json',
-      body: JSON.stringify(mockProfileLoadResponse),
-    });
-  });
-
-  // Mock profile set-default endpoint
-  await page.route(/http:\/\/127.0.0.1:8000\/api\/settings\/profiles\/\d+\/set-default/, (route) => {
-    route.fulfill({
-      status: 200,
-      contentType: 'application/json',
-      body: JSON.stringify({ ...mockProfiles[1], is_default: true }),
-    });
   });
 
   // Mock deck prompts
@@ -159,7 +123,7 @@ async function setupProfileMocks(page: Page) {
 
 async function goToProfiles(page: Page) {
   await page.goto('/profiles');
-  await expect(page.getByRole('heading', { name: /Saved Configurations/i })).toBeVisible({ timeout: 10000 });
+  await expect(page.getByRole('heading', { name: /Agent Profiles/i })).toBeVisible({ timeout: 10000 });
 }
 
 // ============================================
@@ -197,30 +161,6 @@ test.describe('ProfileList', () => {
     await expect(salesCard.getByRole('button', { name: /Rename/i })).toBeVisible();
   });
 
-  test('hides "Set Default" for default profile', async ({ page }) => {
-    await goToProfiles(page);
-
-    const salesCard = profileCard(page, 'Sales Analytics');
-    await salesCard.getByRole('button', { name: 'Expand' }).click();
-    await expect(salesCard.getByRole('button', { name: /Set as Default/i })).not.toBeVisible();
-
-    const marketingCard = profileCard(page, 'Marketing Reports');
-    await marketingCard.getByRole('button', { name: 'Expand' }).click();
-    await expect(marketingCard.getByRole('button', { name: /Set as Default/i })).toBeVisible();
-  });
-
-  test('hides "Load" for currently loaded profile', async ({ page }) => {
-    await goToProfiles(page);
-
-    const salesCard = profileCard(page, 'Sales Analytics');
-    await salesCard.getByRole('button', { name: 'Expand' }).click();
-    await expect(salesCard.getByRole('button', { name: 'Load' })).not.toBeVisible();
-
-    const marketingCard = profileCard(page, 'Marketing Reports');
-    await marketingCard.getByRole('button', { name: 'Expand' }).click();
-    await expect(marketingCard.getByRole('button', { name: 'Load' })).toBeVisible();
-  });
-
   test('opens confirm dialog on Delete click', async ({ page }) => {
     await goToProfiles(page);
 
@@ -230,16 +170,6 @@ test.describe('ProfileList', () => {
     await expect(page.getByRole('heading', { name: /Delete Profile/i })).toBeVisible();
     const dialog = page.locator('[role="dialog"], .fixed.inset-0').last();
     await expect(dialog.getByRole('button', { name: /Cancel/i })).toBeVisible();
-  });
-
-  test('opens confirm dialog on Set Default click', async ({ page }) => {
-    await goToProfiles(page);
-
-    const marketingCard = profileCard(page, 'Marketing Reports');
-    await marketingCard.getByRole('button', { name: 'Expand' }).click();
-    await marketingCard.getByRole('button', { name: /Set as Default/i }).click();
-
-    await expect(page.getByRole('heading', { name: /Set Default Profile/i })).toBeVisible();
   });
 
   test('shows inline rename form on Rename click', async ({ page }) => {
