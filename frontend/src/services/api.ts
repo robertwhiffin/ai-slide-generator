@@ -2,6 +2,7 @@ import type { ChatResponse } from '../types/message';
 import type { ImageAsset, ImageListResponse, ImageDataResponse } from '../types/image';
 import type { SlideDeck, Slide, SlideContext, ReplacementInfo } from '../types/slide';
 import type { VerificationResult } from '../types/verification';
+import type { SlideComment } from '../types/comment';
 
 // Use relative URLs in production, explicit IPv4 in development
 // Note: Using 127.0.0.1 instead of localhost to avoid IPv6 resolution issues in CI
@@ -103,6 +104,25 @@ export interface Session {
   google_slides_url?: string | null;
   google_slides_presentation_id?: string | null;
   profile_deleted?: boolean;
+  /** User's permission level on this session (CAN_VIEW, CAN_EDIT, CAN_MANAGE) */
+  my_permission?: 'CAN_VIEW' | 'CAN_EDIT' | 'CAN_MANAGE';
+  /** True if this is a contributor session (shares parent's slide deck) */
+  is_contributor_session?: boolean;
+  /** Parent session ID for contributor sessions */
+  parent_session_id?: string | null;
+}
+
+export interface SharedPresentation {
+  session_id: string;
+  title: string | null;
+  created_by: string | null;
+  created_at: string | null;
+  last_activity: string | null;
+  modified_by: string | null;
+  modified_at: string | null;
+  profile_id: number | null;
+  profile_name: string | null;
+  my_permission: 'CAN_VIEW' | 'CAN_EDIT' | 'CAN_MANAGE';
 }
 
 interface SendMessageParams {
@@ -227,7 +247,7 @@ export const api = {
   /**
    * Create a new session
    */
-  async createSession(options?: { sessionId?: string; title?: string }): Promise<Session> {
+  async createSession(options?: { sessionId?: string; title?: string; profileId?: number; profileName?: string }): Promise<Session> {
     const response = await fetch(`${API_BASE_URL}/api/sessions`, {
       method: 'POST',
       headers: {
@@ -236,6 +256,8 @@ export const api = {
       body: JSON.stringify({
         session_id: options?.sessionId,
         title: options?.title,
+        profile_id: options?.profileId,
+        profile_name: options?.profileName,
       }),
     });
 
@@ -278,13 +300,50 @@ export const api = {
   },
 
   /**
-   * List all sessions
+   * List user's own sessions (My Sessions)
    */
   async listSessions(limit = 50): Promise<{ sessions: Session[]; count: number }> {
     const response = await fetch(`${API_BASE_URL}/api/sessions?limit=${limit}`);
 
     if (!response.ok) {
       throw new ApiError(response.status, 'Failed to list sessions');
+    }
+
+    return response.json();
+  },
+
+  /**
+   * List presentations shared with the user via profile access (Shared with Me).
+   * Returns slide deck metadata only — conversations are never exposed.
+   */
+  async listSharedPresentations(limit = 50): Promise<{ presentations: SharedPresentation[]; count: number }> {
+    const response = await fetch(`${API_BASE_URL}/api/sessions/shared?limit=${limit}`);
+
+    if (!response.ok) {
+      throw new ApiError(response.status, 'Failed to list shared presentations');
+    }
+
+    return response.json();
+  },
+
+  /**
+   * Get or create a contributor session for a shared presentation.
+   * The contributor session shares the parent's slide deck but has its own private chat.
+   */
+  async getOrCreateContributorSession(parentSessionId: string): Promise<{
+    session_id: string;
+    created_by: string;
+    title: string;
+    parent_session_id: string;
+    is_contributor_session: boolean;
+    my_permission: string;
+  }> {
+    const response = await fetch(`${API_BASE_URL}/api/sessions/${parentSessionId}/contribute`, {
+      method: 'POST',
+    });
+
+    if (!response.ok) {
+      throw new ApiError(response.status, 'Failed to create contributor session');
     }
 
     return response.json();
@@ -423,16 +482,17 @@ export const api = {
    */
   async reorderSlides(
     newOrder: number[],
-    sessionId: string
+    sessionId: string,
+    expectedVersion?: number
   ): Promise<SlideDeck> {
     const response = await fetch(`${API_BASE_URL}/api/slides/reorder`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ new_order: newOrder, session_id: sessionId }),
+      body: JSON.stringify({ new_order: newOrder, session_id: sessionId, expected_version: expectedVersion }),
     });
 
     if (!response.ok) {
-      throw new ApiError(response.status, 'Failed to reorder slides');
+      throw new ApiError(response.status, response.status === 409 ? 'Deck was modified by another user' : 'Failed to reorder slides');
     }
 
     return response.json();
@@ -444,16 +504,17 @@ export const api = {
   async updateSlide(
     index: number,
     html: string,
-    sessionId: string
+    sessionId: string,
+    expectedVersion?: number
   ): Promise<Slide> {
     const response = await fetch(`${API_BASE_URL}/api/slides/${index}`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ html, session_id: sessionId }),
+      body: JSON.stringify({ html, session_id: sessionId, expected_version: expectedVersion }),
     });
 
     if (!response.ok) {
-      throw new ApiError(response.status, 'Failed to update slide');
+      throw new ApiError(response.status, response.status === 409 ? 'Deck was modified by another user' : 'Failed to update slide');
     }
 
     return response.json();
@@ -464,16 +525,17 @@ export const api = {
    */
   async duplicateSlide(
     index: number,
-    sessionId: string
+    sessionId: string,
+    expectedVersion?: number
   ): Promise<SlideDeck> {
     const response = await fetch(`${API_BASE_URL}/api/slides/${index}/duplicate`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ session_id: sessionId }),
+      body: JSON.stringify({ session_id: sessionId, expected_version: expectedVersion }),
     });
 
     if (!response.ok) {
-      throw new ApiError(response.status, 'Failed to duplicate slide');
+      throw new ApiError(response.status, response.status === 409 ? 'Deck was modified by another user' : 'Failed to duplicate slide');
     }
 
     return response.json();
@@ -484,14 +546,17 @@ export const api = {
    */
   async deleteSlide(
     index: number,
-    sessionId: string
+    sessionId: string,
+    expectedVersion?: number
   ): Promise<SlideDeck> {
-    const response = await fetch(`${API_BASE_URL}/api/slides/${index}?session_id=${sessionId}`, {
+    const params = new URLSearchParams({ session_id: sessionId });
+    if (expectedVersion !== undefined) params.set('expected_version', String(expectedVersion));
+    const response = await fetch(`${API_BASE_URL}/api/slides/${index}?${params}`, {
       method: 'DELETE',
     });
 
     if (!response.ok) {
-      throw new ApiError(response.status, 'Failed to delete slide');
+      throw new ApiError(response.status, response.status === 409 ? 'Deck was modified by another user' : 'Failed to delete slide');
     }
 
     return response.json();
@@ -1277,6 +1342,98 @@ export const api = {
     }
   },
 
+  // ============ Comments API ============
+
+  async getMentionableUsers(sessionId: string, query?: string): Promise<{ users: { username: string; display_name: string }[]; is_global: boolean }> {
+    let url = `${API_BASE_URL}/api/comments/mentionable-users?session_id=${sessionId}`;
+    if (query) url += `&query=${encodeURIComponent(query)}`;
+    const response = await fetch(url);
+    if (!response.ok) throw new ApiError(response.status, 'Failed to list mentionable users');
+    return response.json();
+  },
+
+  async listMentions(): Promise<{ mentions: SlideComment[]; count: number }> {
+    const response = await fetch(`${API_BASE_URL}/api/comments/mentions`);
+    if (!response.ok) throw new ApiError(response.status, 'Failed to list mentions');
+    return response.json();
+  },
+
+  async listComments(
+    sessionId: string,
+    slideId?: string,
+    includeResolved = false,
+  ): Promise<{ comments: SlideComment[]; count: number; current_user?: string }> {
+    const params = new URLSearchParams({ session_id: sessionId });
+    if (slideId) params.set('slide_id', slideId);
+    if (includeResolved) params.set('include_resolved', 'true');
+
+    const response = await fetch(`${API_BASE_URL}/api/comments?${params}`);
+    if (!response.ok) throw new ApiError(response.status, 'Failed to list comments');
+    return response.json();
+  },
+
+  async addComment(
+    sessionId: string,
+    slideId: string,
+    content: string,
+    parentCommentId?: number,
+  ): Promise<SlideComment> {
+    const response = await fetch(`${API_BASE_URL}/api/comments`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        session_id: sessionId,
+        slide_id: slideId,
+        content,
+        parent_comment_id: parentCommentId ?? null,
+      }),
+    });
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({}));
+      throw new ApiError(response.status, error.detail || 'Failed to add comment');
+    }
+    return response.json();
+  },
+
+  async updateComment(commentId: number, content: string): Promise<SlideComment> {
+    const response = await fetch(`${API_BASE_URL}/api/comments/${commentId}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ content }),
+    });
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({}));
+      throw new ApiError(response.status, error.detail || 'Failed to update comment');
+    }
+    return response.json();
+  },
+
+  async deleteComment(commentId: number): Promise<void> {
+    const response = await fetch(`${API_BASE_URL}/api/comments/${commentId}`, {
+      method: 'DELETE',
+    });
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({}));
+      throw new ApiError(response.status, error.detail || 'Failed to delete comment');
+    }
+  },
+
+  async resolveComment(commentId: number): Promise<SlideComment> {
+    const response = await fetch(`${API_BASE_URL}/api/comments/${commentId}/resolve`, {
+      method: 'POST',
+    });
+    if (!response.ok) throw new ApiError(response.status, 'Failed to resolve comment');
+    return response.json();
+  },
+
+  async unresolveComment(commentId: number): Promise<SlideComment> {
+    const response = await fetch(`${API_BASE_URL}/api/comments/${commentId}/unresolve`, {
+      method: 'POST',
+    });
+    if (!response.ok) throw new ApiError(response.status, 'Failed to unresolve comment');
+    return response.json();
+  },
+
   // --- Feedback ---
 
   async feedbackChat(messages: Array<{ role: string; content: string }>): Promise<{ content: string; summary_ready: boolean }> {
@@ -1381,6 +1538,38 @@ export const api = {
       throw new ApiError(response.status, error.detail || 'Failed to fetch feedback summary');
     }
 
+    return response.json();
+  },
+
+  // ============ Editing Lock API ============
+
+  async acquireEditingLock(sessionId: string): Promise<{ acquired: boolean; locked_by: string | null }> {
+    const response = await fetch(`${API_BASE_URL}/api/sessions/${sessionId}/lock`, { method: 'POST' });
+    if (!response.ok) throw new ApiError(response.status, 'Failed to acquire editing lock');
+    return response.json();
+  },
+
+  releaseEditingLock(sessionId: string): void {
+    // Use keepalive so the request survives page unload
+    try {
+      fetch(`${API_BASE_URL}/api/sessions/${sessionId}/lock`, {
+        method: 'DELETE',
+        keepalive: true,
+      });
+    } catch {
+      // Best-effort — lock will expire via timeout if this fails
+    }
+  },
+
+  async getEditingLockStatus(sessionId: string): Promise<{ locked: boolean; locked_by: string | null; locked_by_email?: string | null }> {
+    const response = await fetch(`${API_BASE_URL}/api/sessions/${sessionId}/lock`);
+    if (!response.ok) throw new ApiError(response.status, 'Failed to check editing lock');
+    return response.json();
+  },
+
+  async heartbeatEditingLock(sessionId: string): Promise<{ renewed: boolean }> {
+    const response = await fetch(`${API_BASE_URL}/api/sessions/${sessionId}/lock/heartbeat`, { method: 'PUT' });
+    if (!response.ok) throw new ApiError(response.status, 'Failed to renew editing lock');
     return response.json();
   },
 };

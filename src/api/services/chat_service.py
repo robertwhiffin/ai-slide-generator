@@ -434,8 +434,15 @@ class ChatService:
                             },
                         )
                         
+                        try:
+                            _add_user = get_current_username()
+                        except Exception:
+                            _add_user = None
+
                         for idx, slide in enumerate(new_deck.slides):
                             slide.slide_id = f"slide_{insert_position + idx}"
+                            if _add_user:
+                                slide.stamp_created(_add_user)
                             existing_deck.insert_slide(slide, insert_position + idx)
                         
                         # Update ALL slide IDs to reflect new positions (prevents duplicate keys)
@@ -488,6 +495,19 @@ class ChatService:
 
             # Persist slide deck to database
             if current_deck and slide_deck_dict:
+                try:
+                    _user = get_current_username()
+                except Exception:
+                    _user = None
+
+                # Stamp authorship on every slide that lacks it
+                if _user:
+                    for slide in current_deck.slides:
+                        if not slide.created_by:
+                            slide.stamp_created(_user)
+                    # Regenerate dict so stamps are included
+                    slide_deck_dict = current_deck.to_dict()
+
                 session_manager.save_slide_deck(
                     session_id=session_id,
                     title=current_deck.title,
@@ -495,6 +515,7 @@ class ChatService:
                     scripts_content=current_deck.scripts,
                     slide_count=len(current_deck.slides),
                     deck_dict=slide_deck_dict,
+                    modified_by=_user,
                 )
 
                 # Create save point immediately after persisting (sync path)
@@ -1067,9 +1088,16 @@ class ChatService:
                                 "insert_at": insert_position,
                             },
                         )
+
+                        try:
+                            _rc9_user = get_current_username()
+                        except Exception:
+                            _rc9_user = None
                         
                         for idx, slide in enumerate(new_deck.slides):
                             slide.slide_id = f"slide_{insert_position + idx}"
+                            if _rc9_user:
+                                slide.stamp_created(_rc9_user)
                             existing_deck.insert_slide(slide, insert_position + idx)
                         
                         # Update ALL slide IDs to reflect new positions (prevents duplicate keys)
@@ -1114,9 +1142,16 @@ class ChatService:
                             "insert_position": insert_position,
                         },
                     )
+
+                    try:
+                        _stream_add_user = get_current_username()
+                    except Exception:
+                        _stream_add_user = None
                     
                     for idx, slide in enumerate(new_deck.slides):
                         slide.slide_id = f"slide_{insert_position + idx}"
+                        if _stream_add_user:
+                            slide.stamp_created(_stream_add_user)
                         existing_deck.insert_slide(slide, insert_position + idx)
                     
                     # Update ALL slide IDs to reflect new positions (prevents duplicate keys)
@@ -1179,6 +1214,19 @@ class ChatService:
 
         # Persist slide deck to database
         if current_deck and slide_deck_dict:
+            try:
+                _user = get_current_username()
+            except Exception:
+                _user = None
+
+            # Stamp authorship on every slide that lacks it
+            if _user:
+                for slide in current_deck.slides:
+                    if not slide.created_by:
+                        slide.stamp_created(_user)
+                # Regenerate dict so stamps are included
+                slide_deck_dict = current_deck.to_dict()
+
             session_manager.save_slide_deck(
                 session_id=session_id,
                 title=current_deck.title,
@@ -1186,6 +1234,7 @@ class ChatService:
                 scripts_content=current_deck.scripts,
                 slide_count=len(current_deck.slides),
                 deck_dict=slide_deck_dict,
+                modified_by=_user,
             )
 
             # Create save point immediately after persisting (streaming path)
@@ -1898,7 +1947,7 @@ class ChatService:
             deck_data: Dictionary from get_slide_deck with slides array
             
         Returns:
-            Reconstructed SlideDeck with proper per-slide scripts
+            Reconstructed SlideDeck with proper per-slide scripts and metadata
         """
         slides = []
         for slide_data in deck_data.get("slides", []):
@@ -1906,6 +1955,10 @@ class ChatService:
                 html=slide_data.get("html", ""),
                 slide_id=slide_data.get("slide_id", f"slide_{len(slides)}"),
                 scripts=slide_data.get("scripts", ""),
+                created_by=slide_data.get("created_by"),
+                created_at=slide_data.get("created_at"),
+                modified_by=slide_data.get("modified_by"),
+                modified_at=slide_data.get("modified_at"),
             )
             slides.append(slide)
         
@@ -2016,6 +2069,12 @@ class ChatService:
         replacement_slides: List[Slide] = replacement_info["replacement_slides"]
         is_add_operation = replacement_info.get("is_add_operation", False)
 
+        # Resolve current user for authorship stamping
+        try:
+            _user = get_current_username()
+        except Exception:
+            _user = None
+
         # RC2: For add operations, insert at appropriate position
         if is_add_operation:
             # Get position intent from replacement_info
@@ -2096,6 +2155,8 @@ class ChatService:
             # Insert new slides at the calculated position
             for idx, slide in enumerate(replacement_slides):
                 slide.slide_id = f"slide_{insert_position + idx}"
+                if _user:
+                    slide.stamp_created(_user)
                 current_deck.insert_slide(slide, insert_position + idx)
                 logger.info(
                     "Inserted new slide (add operation)",
@@ -2132,6 +2193,15 @@ class ChatService:
         if start_idx + original_count > len(current_deck.slides):
             raise ValueError("Replacement range exceeds deck size")
 
+        # Capture original authorship before removal so replacements inherit it
+        original_authors = []
+        for i in range(original_count):
+            orig = current_deck.slides[start_idx + i]
+            original_authors.append({
+                "created_by": orig.created_by,
+                "created_at": orig.created_at,
+            })
+
         # Preserve scripts from original slides before removal
         # Map canvas IDs to their scripts for later re-attachment
         canvas_id_to_script: Dict[str, str] = {}
@@ -2163,6 +2233,15 @@ class ChatService:
         for idx, slide in enumerate(replacement_slides):
             # Update slide_id to reflect new position
             slide.slide_id = f"slide_{start_idx + idx}"
+
+            # Preserve original creator, stamp current user as modifier
+            if idx < len(original_authors):
+                slide.created_by = original_authors[idx]["created_by"]
+                slide.created_at = original_authors[idx]["created_at"]
+            if _user:
+                slide.stamp_modified(_user)
+                if not slide.created_by:
+                    slide.stamp_created(_user)
             
             # Extract canvas IDs from replacement slide HTML
             replacement_canvas_ids = extract_canvas_ids_from_html(slide.html)
@@ -2296,7 +2375,7 @@ class ChatService:
         deck_dict, _ = self._substitute_images_for_response(deck_dict)
         return deck_dict
 
-    def reorder_slides(self, session_id: str, new_order: List[int]) -> Dict[str, Any]:
+    def reorder_slides(self, session_id: str, new_order: List[int], *, expected_version: Optional[int] = None) -> Dict[str, Any]:
         """Reorder slides based on new index order.
 
         Args:
@@ -2361,6 +2440,7 @@ class ChatService:
             scripts_content=current_deck.scripts,
             slide_count=len(current_deck.slides),
             deck_dict=deck_dict,
+            expected_version=expected_version,
         )
 
         # Create save point
@@ -2381,7 +2461,7 @@ class ChatService:
         deck_dict, _ = self._substitute_images_for_response(deck_dict)
         return deck_dict
 
-    def update_slide(self, session_id: str, index: int, html: str) -> Dict[str, Any]:
+    def update_slide(self, session_id: str, index: int, html: str, *, expected_version: Optional[int] = None) -> Dict[str, Any]:
         """Update a single slide's HTML.
 
         Args:
@@ -2406,15 +2486,25 @@ class ChatService:
         if '<div class="slide"' not in html:
             raise ValueError("HTML must contain <div class='slide'> wrapper")
 
-        # Preserve original slide's scripts (charts, etc.) before updating
-        original_scripts = current_deck.slides[index].scripts
+        # Preserve original slide's metadata and scripts before updating
+        original_slide = current_deck.slides[index]
+        original_scripts = original_slide.scripts
 
-        # Update slide with preserved scripts
-        current_deck.slides[index] = Slide(
+        # Update slide with preserved scripts and original creation metadata
+        new_slide = Slide(
             html=html,
             slide_id=f"slide_{index}",
             scripts=original_scripts,
+            created_by=original_slide.created_by,
+            created_at=original_slide.created_at,
         )
+        try:
+            _user = get_current_username()
+        except Exception:
+            _user = None
+        if _user:
+            new_slide.stamp_modified(_user)
+        current_deck.slides[index] = new_slide
 
         # Persist to database
         deck_dict = current_deck.to_dict()
@@ -2426,6 +2516,7 @@ class ChatService:
             scripts_content=current_deck.scripts,
             slide_count=len(current_deck.slides),
             deck_dict=deck_dict,
+            expected_version=expected_version,
         )
 
         # Create save point immediately after persisting
@@ -2445,7 +2536,7 @@ class ChatService:
 
         return {"index": index, "slide_id": f"slide_{index}", "html": html}
 
-    def duplicate_slide(self, session_id: str, index: int) -> Dict[str, Any]:
+    def duplicate_slide(self, session_id: str, index: int, *, expected_version: Optional[int] = None) -> Dict[str, Any]:
         """Duplicate a slide.
 
         Args:
@@ -2465,8 +2556,15 @@ class ChatService:
         if index < 0 or index >= len(current_deck.slides):
             raise ValueError(f"Invalid slide index: {index}")
 
-        # Clone slide
+        # Clone slide and stamp as newly created by current user
         cloned = current_deck.slides[index].clone()
+        try:
+            _user = get_current_username()
+        except Exception:
+            _user = None
+        if _user:
+            cloned.stamp_created(_user)
+            cloned.created_by = _user  # override original author
 
         # Insert after original
         current_deck.insert_slide(cloned, index + 1)
@@ -2485,6 +2583,7 @@ class ChatService:
             scripts_content=current_deck.scripts,
             slide_count=len(current_deck.slides),
             deck_dict=deck_dict,
+            expected_version=expected_version,
         )
 
         # Create save point
@@ -2509,7 +2608,7 @@ class ChatService:
         deck_dict, _ = self._substitute_images_for_response(deck_dict)
         return deck_dict
 
-    def delete_slide(self, session_id: str, index: int) -> Dict[str, Any]:
+    def delete_slide(self, session_id: str, index: int, *, expected_version: Optional[int] = None) -> Dict[str, Any]:
         """Delete a slide.
 
         Args:
@@ -2549,6 +2648,7 @@ class ChatService:
             scripts_content=current_deck.scripts,
             slide_count=len(current_deck.slides),
             deck_dict=deck_dict,
+            expected_version=expected_version,
         )
 
         # Create save point

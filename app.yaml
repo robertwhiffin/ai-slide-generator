@@ -1,39 +1,45 @@
-# Databricks App Configuration
-# This file defines how the AI Slide Generator runs in Databricks Apps
+# =============================================================================
+# DOCUMENTATION ONLY - This file is NOT used during deployment!
+# =============================================================================
+#
+# The actual app.yaml is generated from:
+#   packages/databricks-tellr/databricks_tellr/_templates/app.yaml.template
+#
+# This file exists only as a reference for understanding the app configuration.
+# =============================================================================
 
-# App metadata
+# Databricks App Configuration
 name: "ai-slide-generator"
 description: "AI-powered slide deck generator using LLMs and Genie"
 
-# Startup command - install dependencies and run app
-# Multiple workers enabled for multi-user concurrency
 command:
   - "sh"
   - "-c"
   - |
-    pip install -r requirements.txt && \
-    python -m databricks_tellr_app.run
+    pip install -r requirements.txt && python -m databricks_tellr_app.run
 
-# Environment variables
 env:
+  # Core settings (auto-configured during deployment)
   - name: ENVIRONMENT
     value: "production"
   - name: DATABRICKS_HOST
-    valueFrom: "system.databricks_host"  # Injected by Databricks
+    valueFrom: "system.databricks_host"
   - name: DATABRICKS_TOKEN
-    valueFrom: "system.databricks_token"  # App service principal token
-  - name: LOG_LEVEL
-    value: "INFO"
-  - name: MLFLOW_TRACKING_URI
-    value: "databricks"
-  # Required for Google Slides OAuth credential/token encryption.
-  # Generate with: python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
-  # - name: GOOGLE_OAUTH_ENCRYPTION_KEY
-  #   value: "<your-fernet-key>"
-  # Lakebase schema configuration
-  # PGHOST and PGUSER are auto-set when database resource is attached
+    valueFrom: "system.databricks_token"
+  
+  # Lakebase settings (auto-configured during deployment)
+  - name: LAKEBASE_INSTANCE
+    value: "<set-by-deploy-script>"
   - name: LAKEBASE_SCHEMA
-    value: "app_data"
-
-# Note: compute_size is set programmatically during deployment via the Databricks SDK
-# Valid values configured in deployment.yaml: MEDIUM, LARGE, LIQUID
+    value: "<set-by-deploy-script>"
+  
+  # ==========================================================================
+  # Identity Provider
+  # ==========================================================================
+  # Users and groups are retrieved via the Workspace SCIM API using the
+  # app's service principal (DATABRICKS_TOKEN from system.databricks_token).
+  # No separate admin tokens are required.
+  #
+  # Falls back to the local identity table when the system client is
+  # unavailable (local development without Databricks).
+  # ==========================================================================

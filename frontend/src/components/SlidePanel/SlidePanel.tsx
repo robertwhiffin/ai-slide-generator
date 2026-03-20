@@ -31,12 +31,14 @@ interface SlideContext {
 interface SlidePanelProps {
   slideDeck: SlideDeck | null;
   rawHtml: string | null;
-  onSlideChange: (slideDeck: SlideDeck) => void;
+  onSlideChange?: (slideDeck: SlideDeck) => void;
   scrollToSlide?: { index: number; key: number } | null;
   onSendMessage?: (content: string, slideContext?: SlideContext) => void;
   onExportStatusChange?: (status: string | null) => void;
   versionKey?: string;
   readOnly?: boolean;
+  canManage?: boolean;
+  lockedBy?: string | null;
   onVerificationComplete?: () => void;
 }
 
@@ -49,7 +51,7 @@ export interface SlidePanelHandle {
 type ViewMode = 'tiles' | 'rawhtml' | 'rawtext';
 
 function SlidePanelComponent(props: SlidePanelProps, ref: React.Ref<SlidePanelHandle>) {
-  const { slideDeck, rawHtml: _rawHtml, onSlideChange, scrollToSlide, onSendMessage, onExportStatusChange, versionKey, readOnly = false, onVerificationComplete } = props;
+  const { slideDeck, rawHtml: _rawHtml, onSlideChange, scrollToSlide, onSendMessage, onExportStatusChange, versionKey, readOnly = false, canManage = false, lockedBy = null, onVerificationComplete } = props;
   const [_isReordering, setIsReordering] = useState(false);
   const [viewMode, _setViewMode] = useState<ViewMode>('tiles');
   const [isExportingPDF, setIsExportingPDF] = useState(false);
@@ -63,18 +65,49 @@ function SlidePanelComponent(props: SlidePanelProps, ref: React.Ref<SlidePanelHa
   const { sessionId } = useSession();
   const { showToast } = useToast();
   const slideRefs = useRef<Map<number, HTMLDivElement>>(new Map());
-  
+
+  // Mentions per slide (for notification badges)
+  const [mentionsBySlide, setMentionsBySlide] = useState<Record<string, Array<{ id: number; user_name: string; content: string; created_at: string }>>>({});
+  const [mentionsLastSeenMap, setMentionsLastSeenMap] = useState<Record<string, string>>(() => {
+    try {
+      const stored = localStorage.getItem('tellr_mentions_last_seen_map');
+      return stored ? JSON.parse(stored) : {};
+    } catch { return {}; }
+  });
+
+  const fetchMentions = useCallback(() => {
+    api.listMentions().then(({ mentions }) => {
+      const bySlide: Record<string, Array<{ id: number; user_name: string; content: string; created_at: string }>> = {};
+      for (const m of mentions) {
+        if (!bySlide[m.slide_id]) bySlide[m.slide_id] = [];
+        bySlide[m.slide_id].push({ id: m.id, user_name: m.user_name, content: m.content, created_at: m.created_at });
+      }
+      setMentionsBySlide(bySlide);
+    }).catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    fetchMentions();
+    const timer = setInterval(fetchMentions, 3_000);
+    return () => clearInterval(timer);
+  }, [fetchMentions]);
+
+  const handleMarkMentionsSeen = useCallback((slideId: string) => {
+    const now = new Date().toISOString();
+    setMentionsLastSeenMap(prev => {
+      const next = { ...prev, [slideId]: now };
+      localStorage.setItem('tellr_mentions_last_seen_map', JSON.stringify(next));
+      return next;
+    });
+  }, []);
+
   // Auto-verification state
   const [isAutoVerifying, setIsAutoVerifying] = useState(false);
   const [verifyingSlides, setVerifyingSlides] = useState<Set<number>>(new Set());
-  const autoVerifyTriggeredRef = useRef<Set<string>>(new Set()); // Track which content hashes we've tried to verify
+  const autoVerifyTriggeredRef = useRef<Set<string>>(new Set());
   const sessionIdRef = useRef(sessionId);
   sessionIdRef.current = sessionId;
 
-  // Deck edit counter: incremented on every user-initiated mutation (edit, delete,
-  // reorder).  Async callbacks (auto-verify, delayed getSlides) capture the counter
-  // at start and skip onSlideChange if it has since changed, preventing stale
-  // server responses from overwriting newer user edits.
   const deckEditCounterRef = useRef(0);
   const slideDeckRef = useRef(slideDeck);
   slideDeckRef.current = slideDeck;
@@ -86,6 +119,15 @@ function SlidePanelComponent(props: SlidePanelProps, ref: React.Ref<SlidePanelHa
     })
   );
 
+  const refreshDeck = async () => {
+    if (!sessionId || !onSlideChange) return;
+    const result = await api.getSlides(sessionId);
+    if (result.slide_deck) onSlideChange(result.slide_deck);
+  };
+
+  const isVersionConflict = (error: unknown): boolean =>
+    error instanceof Error && 'status' in error && (error as any).status === 409;
+
   const handleDragEnd = async (event: DragEndEvent) => {
     if (readOnly) return;
     const { active, over } = event;
@@ -96,14 +138,12 @@ function SlidePanelComponent(props: SlidePanelProps, ref: React.Ref<SlidePanelHa
       const oldIndex = slideDeck.slides.findIndex(s => s.slide_id === active.id);
       const newIndex = slideDeck.slides.findIndex(s => s.slide_id === over.id);
 
-      // Optimistic update
       const newSlides = arrayMove(slideDeck.slides, oldIndex, newIndex);
-      onSlideChange({ ...slideDeck, slides: newSlides });
+      onSlideChange?.({ ...slideDeck, slides: newSlides });
 
-      // Persist to backend
       if (!sessionId) {
         alert('Session not initialized');
-        onSlideChange(slideDeck);
+        onSlideChange?.(slideDeck);
         return;
       }
 
@@ -121,9 +161,13 @@ function SlidePanelComponent(props: SlidePanelProps, ref: React.Ref<SlidePanelHa
         clearSelection();
       } catch (error) {
         console.error('Failed to reorder:', error);
-        // Revert on error
-        onSlideChange(slideDeck);
-        alert('Failed to reorder slides');
+        if (isVersionConflict(error)) {
+          alert('This deck was modified by another user. Refreshing to latest version.');
+          await refreshDeck();
+        } else {
+          onSlideChange?.(slideDeck);
+          alert('Failed to reorder slides');
+        }
       } finally {
         setIsReordering(false);
       }
@@ -145,7 +189,12 @@ function SlidePanelComponent(props: SlidePanelProps, ref: React.Ref<SlidePanelHa
       clearSelection();
     } catch (error) {
       console.error('Failed to delete:', error);
-      alert('Failed to delete slide');
+      if (isVersionConflict(error)) {
+        alert('This deck was modified by another user. Refreshing to latest version.');
+        await refreshDeck();
+      } else {
+        alert('Failed to delete slide');
+      }
     }
   };
 
@@ -162,7 +211,11 @@ function SlidePanelComponent(props: SlidePanelProps, ref: React.Ref<SlidePanelHa
       clearSelection();
     } catch (error) {
       console.error('Failed to update:', error);
-      throw error; // Re-throw for editor to handle
+      if (isVersionConflict(error)) {
+        alert('This deck was modified by another user. Refreshing to latest version.');
+        await refreshDeck();
+      }
+      throw error;
     }
   };
 
@@ -172,12 +225,6 @@ function SlidePanelComponent(props: SlidePanelProps, ref: React.Ref<SlidePanelHa
     try {
       await api.updateSlideVerification(index, sessionId, verification);
 
-      // Only update the global deck state when SETTING verification (not clearing).
-      // When clearing (verification === null), this is typically called right after
-      // handleUpdateSlide's onSlideChange.  Because React hasn't re-rendered yet,
-      // slideDeck still holds the pre-edit value -- calling onSlideChange here would
-      // overwrite the edit with stale data.  SlideTile already handles the cleared
-      // badge locally via setVerificationResult(undefined).
       if (verification !== null && onSlideChange) {
         const currentDeck = slideDeckRef.current || slideDeck;
         const updatedSlides = [...currentDeck.slides];
@@ -215,11 +262,9 @@ function SlidePanelComponent(props: SlidePanelProps, ref: React.Ref<SlidePanelHa
 
       Focus on optimizing text layout, container sizing, and spacing while keeping all chart elements completely unchanged.`;
 
-    // Send through ChatPanel so message appears in chat UI
     onSendMessage(message, slideContext);
   };
 
-  // Clear optimizing state when slideDeck updates (optimization completed)
   useEffect(() => {
     if (optimizingSlideIndex !== null) {
       setOptimizingSlideIndex(null);
@@ -239,9 +284,9 @@ function SlidePanelComponent(props: SlidePanelProps, ref: React.Ref<SlidePanelHa
       await exportSlideDeckToPDF(slideDeck, filename, {
         format: 'a4',
         orientation: 'landscape',
-        scale: 1.2, // Optimized for file size vs quality
+        scale: 1.2,
         waitForCharts: 2000,
-        imageQuality: 0.85, // JPEG quality (good balance)
+        imageQuality: 0.85,
       });
     } catch (error) {
       console.error('PDF export failed:', error);
@@ -268,14 +313,12 @@ function SlidePanelComponent(props: SlidePanelProps, ref: React.Ref<SlidePanelHa
         sessionId, 
         true, 
         slideDeck,
-        // Progress callback
         (progress, total, status) => {
           setExportProgress({ current: progress, total, status });
           onExportStatusChange?.(status);
         }
       );
       
-      // Create download link
       const url = window.URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
@@ -300,7 +343,6 @@ function SlidePanelComponent(props: SlidePanelProps, ref: React.Ref<SlidePanelHa
     }
   };
 
-  // Expose functions via ref
   useImperativeHandle(ref, () => ({
     exportPDF: handleExportPDF,
     exportPPTX: handleExportPPTX,
@@ -325,7 +367,6 @@ function SlidePanelComponent(props: SlidePanelProps, ref: React.Ref<SlidePanelHa
     }
   }, [slideDeck, selectedIndices, clearSelection, setSelection]);
 
-  // Close export menu when clicking outside
   useEffect(() => {
     const handleClickOutside = (event: MouseEvent) => {
       if (exportMenuRef.current && !exportMenuRef.current.contains(event.target as Node)) {
@@ -339,7 +380,6 @@ function SlidePanelComponent(props: SlidePanelProps, ref: React.Ref<SlidePanelHa
     }
   }, [showExportMenu]);
 
-  // Scroll to slide when scrollToSlide changes
   useEffect(() => {
     if (scrollToSlide != null && viewMode === 'tiles') {
       const slideElement = slideRefs.current.get(scrollToSlide.index);
@@ -349,7 +389,6 @@ function SlidePanelComponent(props: SlidePanelProps, ref: React.Ref<SlidePanelHa
     }
   }, [scrollToSlide, viewMode]);
 
-  // Auto-verify slides that don't have verification
   const runAutoVerification = useCallback(async (slidesToVerify: Array<{ index: number; contentHash: string }>) => {
     if (!sessionId || slidesToVerify.length === 0 || isAutoVerifying) return;
     const capturedSessionId = sessionId;
@@ -358,15 +397,11 @@ function SlidePanelComponent(props: SlidePanelProps, ref: React.Ref<SlidePanelHa
     setIsAutoVerifying(true);
     console.log(`[Auto-verify] Starting verification for ${slidesToVerify.length} slides`);
 
-    // Mark all slides as being verified
     setVerifyingSlides(new Set(slidesToVerify.map(s => s.index)));
 
-    // Verify slides in parallel
     const verificationPromises = slidesToVerify.map(async ({ index, contentHash }) => {
       try {
-        // Mark this content hash as attempted (prevent re-triggering)
         autoVerifyTriggeredRef.current.add(contentHash);
-
         console.log(`[Auto-verify] Verifying slide ${index + 1} (hash: ${contentHash.substring(0, 8)}...)`);
         await api.verifySlide(capturedSessionId, index);
         console.log(`[Auto-verify] Slide ${index + 1} verified`);
@@ -379,10 +414,6 @@ function SlidePanelComponent(props: SlidePanelProps, ref: React.Ref<SlidePanelHa
 
     await Promise.all(verificationPromises);
 
-    // If the user switched sessions while verification was in-flight, discard
-    // results. Calling onSlideChange with a stale deck would overwrite the
-    // current session's tiles with the old session's content, causing all
-    // tiles to remount (their keys change when slide IDs differ between sessions).
     if (sessionIdRef.current !== capturedSessionId) {
       console.log('[Auto-verify] Session changed, discarding stale results');
       setIsAutoVerifying(false);
@@ -390,13 +421,6 @@ function SlidePanelComponent(props: SlidePanelProps, ref: React.Ref<SlidePanelHa
       return;
     }
 
-    // Merge only verification metadata into the CURRENT slideDeck (via ref to
-    // avoid stale closures).  We never replace the full deck here -- a stale
-    // getSlides response would overwrite user edits that landed while
-    // verification was running.
-    // Additionally, if the user mutated the deck (edit / delete / reorder)
-    // since we started, skip entirely -- the next auto-verify cycle will pick
-    // up the verification data after the user operation's own getSlides.
     try {
       const result = await api.getSlides(capturedSessionId);
       const currentDeck = slideDeckRef.current;
@@ -424,11 +448,9 @@ function SlidePanelComponent(props: SlidePanelProps, ref: React.Ref<SlidePanelHa
     onVerificationComplete?.();
   }, [sessionId, isAutoVerifying, onSlideChange, onVerificationComplete]);
 
-  // Effect to trigger auto-verification when slides change
   useEffect(() => {
     if (!slideDeck || !sessionId || isAutoVerifying) return;
 
-    // Find slides that need verification (no verification and not already attempted)
     const slidesNeedingVerification = slideDeck.slides
       .map((slide, index) => ({
         index,
@@ -436,11 +458,8 @@ function SlidePanelComponent(props: SlidePanelProps, ref: React.Ref<SlidePanelHa
         contentHash: slide.content_hash || '',
       }))
       .filter(({ slide, contentHash }) => {
-        // Skip if already has verification
         if (slide.verification) return false;
-        // Skip if no content hash (shouldn't happen, but be safe)
         if (!contentHash) return false;
-        // Skip if we've already tried to verify this content
         if (autoVerifyTriggeredRef.current.has(contentHash)) return false;
         return true;
       });
@@ -451,156 +470,12 @@ function SlidePanelComponent(props: SlidePanelProps, ref: React.Ref<SlidePanelHa
     }
   }, [slideDeck, sessionId, isAutoVerifying, runAutoVerification]);
 
-  // Clear auto-verify tracking when session changes
   useEffect(() => {
     autoVerifyTriggeredRef.current.clear();
     setIsAutoVerifying(false);
     setVerifyingSlides(new Set());
   }, [sessionId]);
 
-  const _handleSaveAsHTML = () => {
-    if (!slideDeck) return;
-
-    // Generate HTML for each slide with its own container
-    const slidesHtml = slideDeck.slides
-      .map((slide, index) => {
-        const slideScripts = slide.scripts || '';
-        return `
-    <div class="slide-wrapper" data-slide-index="${index}">
-      <div class="slide-container">
-        ${slide.html}
-      </div>
-      ${slideScripts ? `<script>
-        (function() {
-          ${slideScripts}
-        })();
-      </script>` : ''}
-    </div>`;
-      })
-      .join('\n');
-
-    const externalScriptsHtml = slideDeck.external_scripts
-      .map((src) => `<script src="${src}"></script>`)
-      .join('\n');
-
-    const html = `<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>${slideDeck.title || 'Presentation'}</title>
-  ${externalScriptsHtml}
-  <style>
-    * {
-      margin: 0;
-      padding: 0;
-      box-sizing: border-box;
-    }
-    html, body {
-      width: 100%;
-      height: 100%;
-      overflow: auto;
-      background: #f9fafb;
-    }
-    body {
-      padding: 40px 20px;
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      gap: 40px;
-    }
-    /* Slide wrapper - contains each slide with spacing */
-    .slide-wrapper {
-      width: 100%;
-      max-width: 1280px;
-      margin: 0 auto;
-      display: flex;
-      justify-content: center;
-      align-items: flex-start;
-      page-break-after: always; /* For printing */
-    }
-    /* Slide container - maintains 16:9 aspect ratio */
-    .slide-container {
-      width: 1280px;
-      height: 720px;
-      max-width: 100%;
-      max-height: calc(100vh - 80px);
-      position: relative;
-      background: #ffffff;
-      overflow: auto;
-      box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
-      border-radius: 8px;
-    }
-    /* Ensure slide content fills container */
-    .slide-container > * {
-      width: 100%;
-      min-height: 100%;
-    }
-    /* Chart canvas scaling */
-    canvas {
-      max-width: 100%;
-      height: auto;
-    }
-    ${slideDeck.css}
-  </style>
-</head>
-<body>
-  ${slidesHtml}
-  <script>
-    // Wait for Chart.js to be available before running scripts
-    function waitForChartJs(callback, maxAttempts = 50) {
-      let attempts = 0;
-      const check = () => {
-        attempts++;
-        if (typeof Chart !== 'undefined') {
-          callback();
-        } else if (attempts < maxAttempts) {
-          setTimeout(check, 100);
-        } else {
-          console.error('Chart.js failed to load');
-        }
-      };
-      check();
-    }
-
-    function initializeCharts() {
-      console.log('Initializing charts for all slides...');
-      try {
-        // Individual slide scripts are already executed in their own IIFEs above
-        // Deck-level scripts (if any) are also already wrapped in IIFEs
-        ${slideDeck.scripts || ''}
-        console.log('Charts initialized successfully');
-      } catch (err) {
-        console.error('Chart initialization error:', err);
-      }
-    }
-
-    // Initialize charts after DOM is ready
-    if (document.readyState === 'loading') {
-      document.addEventListener('DOMContentLoaded', () => {
-        waitForChartJs(initializeCharts);
-      });
-    } else {
-      waitForChartJs(initializeCharts);
-    }
-  </script>
-</body>
-</html>`;
-
-    const blob = new Blob([html], { type: 'text/html' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `${(slideDeck.title || 'presentation').replace(/[^a-z0-9]/gi, '-').toLowerCase()}.html`;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
-    
-    // Close the dropdown menu
-    setShowExportMenu(false);
-  };
-  void _handleSaveAsHTML; // reserved for export menu
   if (!slideDeck) {
     return (
       <div className="flex items-center justify-center h-full bg-gray-50">
@@ -614,7 +489,16 @@ function SlidePanelComponent(props: SlidePanelProps, ref: React.Ref<SlidePanelHa
 
   return (
     <div className="h-full flex flex-col bg-gray-50" data-testid="slide-panel">
-      {/* Slides Content */}
+      {lockedBy && (
+        <div className="bg-amber-50 border-b border-amber-200 px-4 py-2.5 flex items-center gap-2">
+          <svg className="w-4 h-4 text-amber-600 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
+          </svg>
+          <span className="text-sm text-amber-800">
+            <span className="font-semibold">{lockedBy}</span> is currently editing this session. You can view slides, add comments, and mention users but cannot edit slides.
+          </span>
+        </div>
+      )}
       <div className="h-full overflow-y-auto">
         <div className="p-4 space-y-4" key={versionKey}>
               <DndContext
@@ -649,6 +533,11 @@ function SlidePanelComponent(props: SlidePanelProps, ref: React.Ref<SlidePanelHa
               onOptimize={() => handleOptimizeLayout(index)}
               isOptimizing={optimizingSlideIndex === index}
               readOnly={readOnly}
+              mentions={mentionsBySlide[slide.slide_id] || []}
+              mentionsLastSeen={mentionsLastSeenMap[slide.slide_id] || new Date(0).toISOString()}
+              onMarkMentionsSeen={() => handleMarkMentionsSeen(slide.slide_id)}
+              onMentionsRefresh={fetchMentions}
+              canManage={canManage}
             />
           </div>
         ))}

@@ -59,49 +59,35 @@ def is_lakebase_environment() -> bool:
 def _generate_lakebase_token() -> str:
     """Generate a fresh OAuth token for Lakebase authentication.
 
-    Tries autoscaling API first (ws.postgres) when LAKEBASE_TYPE=autoscaling,
-    then falls back to provisioned API (ws.database). This mirrors the
-    deployment logic in deploy.py and ensures both backends are supported.
+    Routes to the correct API based on LAKEBASE_TYPE:
+    - autoscaling: ws.postgres.generate_database_credential(endpoint=...)
+    - provisioned: ws.database.generate_database_credential(instance_names=[...])
 
     Returns:
         OAuth token string to use as PostgreSQL password
 
     Raises:
-        RuntimeError: If neither autoscaling nor provisioned credential
-            generation succeeds
+        RuntimeError: If required env vars are missing or token generation fails
     """
     from src.core.databricks_client import get_system_client
 
     ws = get_system_client()
     lakebase_type = _get_lakebase_type()
 
-    # Autoscaling: use ws.postgres.generate_database_credential
     if lakebase_type == "autoscaling":
         endpoint_name = os.getenv("LAKEBASE_ENDPOINT_NAME")
-        if endpoint_name:
-            try:
-                cred = ws.postgres.generate_database_credential(
-                    endpoint=endpoint_name,
-                )
-                logger.info("Generated Lakebase OAuth token via ws.postgres (autoscaling)")
-                return cred.token
-            except Exception as e:
-                logger.warning(
-                    f"Autoscaling credential generation failed, "
-                    f"falling back to provisioned: {type(e).__name__}: {e}"
-                )
-        else:
-            logger.warning(
-                "LAKEBASE_TYPE=autoscaling but LAKEBASE_ENDPOINT_NAME not set, "
-                "falling back to provisioned API"
+        if not endpoint_name:
+            raise RuntimeError(
+                "LAKEBASE_ENDPOINT_NAME not set — cannot generate autoscaling Lakebase token."
             )
+        cred = ws.postgres.generate_database_credential(endpoint=endpoint_name)
+        logger.info("Generated Lakebase OAuth token via ws.postgres (autoscaling)")
+        return cred.token
 
-    # Provisioned fallback: use ws.database.generate_database_credential
     instance_name = os.getenv("LAKEBASE_INSTANCE")
     if not instance_name:
         raise RuntimeError(
-            "Cannot generate Lakebase token: LAKEBASE_INSTANCE not set "
-            "and autoscaling credential generation unavailable."
+            "LAKEBASE_INSTANCE not set — cannot generate Lakebase token."
         )
 
     cred = ws.database.generate_database_credential(
@@ -462,6 +448,44 @@ def _run_migrations(engine, schema: str | None = None):
             logger.info(f"Migration: adding deleted_at column to {table_name}")
             conn.execute(text(
                 f"ALTER TABLE {qualified_table} ADD COLUMN deleted_at TIMESTAMP NULL"
+            ))
+
+        # --- session_slide_decks: add modified_by ---
+        decks_table = "session_slide_decks"
+        try:
+            deck_cols = {c["name"] for c in inspector.get_columns(decks_table, schema=schema)}
+        except Exception:
+            deck_cols = set()
+        if deck_cols and "modified_by" not in deck_cols:
+            logger.info(f"Migration: adding modified_by column to {decks_table}")
+            conn.execute(text(
+                f"ALTER TABLE {_qual(decks_table)} ADD COLUMN modified_by VARCHAR(255) NULL"
+            ))
+
+        # --- slide_comments: add mentions column ---
+        comments_table = "slide_comments"
+        try:
+            comment_cols = {c["name"] for c in inspector.get_columns(comments_table, schema=schema)}
+        except Exception:
+            comment_cols = set()
+        if comment_cols and "mentions" not in comment_cols:
+            logger.info(f"Migration: adding mentions column to {comments_table}")
+            col_type = "TEXT" if is_sqlite else "JSON"
+            conn.execute(text(
+                f"ALTER TABLE {_qual(comments_table)} ADD COLUMN mentions {col_type} NULL"
+            ))
+
+        # --- config_profiles: add global_permission ---
+        if "global_permission" not in columns:
+            logger.info(f"Migration: adding global_permission column to {table_name}")
+            conn.execute(text(
+                f"ALTER TABLE {qualified_table} ADD COLUMN global_permission VARCHAR(20) NULL"
+            ))
+        # --- config_profiles: migrate is_global bool to global_permission ---
+        if "is_global" in columns:
+            logger.info(f"Migration: migrating is_global to global_permission")
+            conn.execute(text(
+                f"UPDATE {qualified_table} SET global_permission = 'CAN_VIEW' WHERE is_global = TRUE AND global_permission IS NULL"
             ))
 
         # --- Migrate google_credentials_encrypted to google_global_credentials ---

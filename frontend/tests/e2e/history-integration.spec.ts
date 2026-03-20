@@ -189,7 +189,7 @@ async function createTestSessionViaAPI(
 
 async function goToHistory(page: Page): Promise<void> {
   await page.goto('/history');
-  await expect(page.getByRole('heading', { name: 'All Decks' })).toBeVisible({ timeout: 10000 });
+  await expect(page.getByRole('heading', { name: 'Sessions', exact: true })).toBeVisible({ timeout: 10000 });
 }
 
 async function goToGenerator(page: Page): Promise<void> {
@@ -208,7 +208,7 @@ test.describe('Session History Display', () => {
     await goToHistory(page);
 
     // Page heading should be visible
-    await expect(page.getByRole('heading', { name: 'All Decks' })).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'Sessions', exact: true })).toBeVisible();
 
     // Either shows table or empty state
     const table = page.getByRole('table');
@@ -457,7 +457,7 @@ test.describe('Session Restore', () => {
       await restoreButton.click();
 
       // Should navigate away from History
-      await expect(page.getByRole('heading', { name: 'All Decks' })).not.toBeVisible({ timeout: 5000 });
+      await expect(page.getByRole('heading', { name: 'Sessions' })).not.toBeVisible({ timeout: 5000 });
     }
   });
 });
@@ -517,7 +517,7 @@ test.describe('Session History Navigation', () => {
     await expect(page.getByRole('heading', { name: /How to Use.*[Tt]ellr/i })).toBeVisible();
 
     await page.goto('/history');
-    await expect(page.getByRole('heading', { name: 'All Decks' })).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'Sessions', exact: true })).toBeVisible();
   });
 });
 
@@ -565,11 +565,12 @@ test.describe('Session History Edge Cases', () => {
       // UI uses limit 100 (SessionHistory.listSessions(100)); compare to same
       const apiData = await getSessionsViaAPI(request, 100);
 
-      const countEl = page.getByText(/\d+ session/).first();
-      await expect(countEl).toBeVisible({ timeout: 10000 });
-      const countText = await countEl.textContent();
-      const countMatch = countText?.match(/(\d+)\s+session/);
-      const uiCount = countMatch ? parseInt(countMatch[1], 10) : 0;
+      const mySessionsTab = page.locator('button', { hasText: 'My Sessions' }).filter({
+        has: page.locator('span.rounded-full'),
+      });
+      const tabText = await mySessionsTab.textContent();
+      const countMatch = tabText?.match(/(\d+)/);
+      const uiCount = countMatch ? parseInt(countMatch[1]) : 0;
 
       // UI displays sessions.length, so compare to length of returned list
       expect(uiCount).toBe(apiData.sessions.length);
