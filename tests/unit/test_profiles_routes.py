@@ -24,6 +24,7 @@ def _make_profile(
     created_at=None,
     created_by="user@test.com",
     is_deleted=False,
+    updated_at=None,
 ):
     """Create a mock ConfigProfile object."""
     p = MagicMock()
@@ -36,6 +37,7 @@ def _make_profile(
     p.created_by = created_by
     p.is_deleted = is_deleted
     p.deleted_at = None
+    p.updated_at = updated_at or datetime(2026, 1, 1, 12, 0, 0)
     return p
 
 
@@ -351,3 +353,22 @@ class TestDeleteProfile:
         # Verify soft-delete fields were set
         assert profile.is_deleted is True
         assert profile.deleted_at is not None
+
+
+class TestProfileSerialization:
+    @patch("src.api.routes.profiles.get_db_session")
+    def test_profile_response_includes_updated_at(self, mock_get_db, client):
+        """Profile responses should include updated_at field."""
+        updated_time = datetime(2026, 3, 15, 10, 30, 0)
+        p = _make_profile(id=1, name="Test", updated_at=updated_time)
+
+        mock_db = MagicMock()
+        mock_db.__enter__ = MagicMock(return_value=mock_db)
+        mock_db.__exit__ = MagicMock(return_value=False)
+        mock_db.query.return_value.filter.return_value.order_by.return_value.all.return_value = [p]
+        mock_get_db.return_value = mock_db
+
+        response = client.get("/api/profiles")
+        assert response.status_code == 200
+        data = response.json()
+        assert data[0]["updated_at"] == "2026-03-15T10:30:00"
