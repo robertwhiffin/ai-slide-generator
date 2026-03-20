@@ -132,7 +132,13 @@ async function setupProfileMocks(page: Page) {
       return;
     }
 
-    if (url.includes('limit=')) {
+    if (url.includes('/shared')) {
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ presentations: [], count: 0 }),
+      });
+    } else if (url.includes('limit=')) {
       route.fulfill({
         status: 200,
         contentType: 'application/json',
