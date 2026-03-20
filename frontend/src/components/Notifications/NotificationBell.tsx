@@ -4,7 +4,7 @@ import { FiBell, FiExternalLink } from 'react-icons/fi';
 import type { SlideComment } from '../../types/comment';
 import { api } from '../../services/api';
 
-const POLL_INTERVAL = 30_000;
+const POLL_INTERVAL = 3_000;
 
 function timeAgo(iso: string): string {
   const diff = Date.now() - new Date(iso).getTime();

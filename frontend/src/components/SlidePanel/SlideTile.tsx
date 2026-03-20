@@ -129,7 +129,7 @@ export const SlideTile: React.FC<SlideTileProps> = ({
       }).catch(() => {});
     };
     fetchCount();
-    const timer = setInterval(fetchCount, 10_000);
+    const timer = setInterval(fetchCount, 3_000);
     return () => { cancelled = true; clearInterval(timer); };
   }, [sessionId, slide.slide_id, showComments]);
 

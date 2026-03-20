@@ -2140,6 +2140,8 @@ class SessionManager:
         Always double-checks in Python to avoid false positives.
         """
         with get_db_session() as db:
+            lookup = user_name.lower()
+
             try:
                 is_sqlite = "sqlite" in str(db.bind.url)
             except Exception:
@@ -2149,7 +2151,7 @@ class SessionManager:
                 comments = (
                     db.query(SlideComment)
                     .filter(SlideComment.mentions.isnot(None))
-                    .filter(SlideComment.content.contains(f"@{user_name}"))
+                    .filter(SlideComment.content.contains(f"@{lookup}"))
                     .order_by(SlideComment.created_at.desc())
                     .limit(100)
                     .all()
@@ -2161,17 +2163,16 @@ class SessionManager:
                     .filter(SlideComment.mentions.isnot(None))
                     .filter(sa_text(
                         "mentions::jsonb @> :target"
-                    ).bindparams(target=f'["{user_name}"]'))
+                    ).bindparams(target=f'["{lookup}"]'))
                     .order_by(SlideComment.created_at.desc())
                     .limit(100)
                     .all()
                 )
 
             results = []
-            lookup = user_name.lower()
             for c in comments:
                 mentions_list = c.mentions if isinstance(c.mentions, list) else []
-                if lookup in [m.lower() for m in mentions_list]:
+                if lookup in mentions_list:
                     d = self._comment_to_dict(c)
                     d["session_id_str"] = self._get_session_id_str(db, c.session_id)
                     results.append(d)
