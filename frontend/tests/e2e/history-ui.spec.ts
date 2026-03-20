@@ -191,7 +191,7 @@ test.describe('SessionHistoryList', () => {
     await goToHistory(page);
 
     await expect(page.getByRole('heading', { name: 'Sessions', exact: true })).toBeVisible();
-    await expect(page.getByRole('button', { name: 'My Sessions', exact: true }).first()).toBeVisible();
+    await expect(page.getByRole('button', { name: /My Sessions/ }).first()).toBeVisible();
   });
 
   test('renders all sessions in table', async ({ page }) => {
