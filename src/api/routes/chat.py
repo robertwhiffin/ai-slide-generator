@@ -175,6 +175,7 @@ async def send_message_streaming(request: ChatRequest) -> StreamingResponse:
         thread = threading.Thread(target=lambda: ctx.run(run_streaming), daemon=True)
         thread.start()
 
+        was_cancelled = False
         try:
             # Yield events as they arrive
             while True:
@@ -182,6 +183,8 @@ async def send_message_streaming(request: ChatRequest) -> StreamingResponse:
                 event = await asyncio.to_thread(event_queue.get)
                 if event is None:
                     break
+                if event.type == StreamEventType.CANCELLED:
+                    was_cancelled = True
                 yield event.to_sse()
 
             # Check for errors after completion
@@ -201,14 +204,15 @@ async def send_message_streaming(request: ChatRequest) -> StreamingResponse:
                 yield error_event.to_sse()
 
         finally:
-            # Release lock only if not cancelled — cancel endpoint already released it
-            if not CancellationRegistry.is_cancelled(request.session_id):
+            # Release lock only if generation was not cancelled.
+            # The cancel endpoint already released the lock; chat_service already reset
+            # the registry flag — so checking is_cancelled() here is always False.
+            # We use was_cancelled (set when the CANCELLED event is observed) instead.
+            if not was_cancelled:
                 await asyncio.to_thread(
                     session_manager.release_session_lock,
                     request.session_id,
                 )
-            else:
-                CancellationRegistry.reset(request.session_id)
 
     return StreamingResponse(
         generate_events(),

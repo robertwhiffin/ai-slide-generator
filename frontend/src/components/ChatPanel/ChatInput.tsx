@@ -246,8 +246,10 @@ export const ChatInput: React.FC<ChatInputProps> = ({
           onCancel={() => setIsModalOpen(false)}
           onSend={(text) => {
             if (text.trim() && !disabled) {
-              onSend(text.trim(), undefined);
+              const imageIds = attachedImages.length > 0 ? attachedImages.map((a) => a.id) : undefined;
+              onSend(text.trim(), imageIds);
               setMessage('');
+              setAttachedImages([]);
               setIsModalOpen(false);
             }
           }}

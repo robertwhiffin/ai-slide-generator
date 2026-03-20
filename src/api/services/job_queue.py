@@ -91,14 +91,35 @@ async def process_chat_request(request_id: str, payload: dict) -> None:
     # Events are persisted to DB which is what polling reads
     event_queue: queue.Queue = queue.Queue()
 
+    def _handle_event(event, result_ref: dict, session_title_ref: dict) -> bool:
+        """Process one streaming event. Returns True if generation was cancelled."""
+        if event.type == StreamEventType.CANCELLED:
+            try:
+                session_manager.revert_slides_on_cancel(session_id, pre_gen_version, request_id)
+            except Exception as exc:
+                logger.warning(f"Failed to revert slides on cancel: {exc}")
+            return True
+        if event.type == StreamEventType.COMPLETE:
+            result_ref["value"] = {
+                "slides": event.slides,
+                "raw_html": event.raw_html,
+                "replacement_info": event.replacement_info,
+                "experiment_url": event.experiment_url,
+            }
+        elif event.type == StreamEventType.SESSION_TITLE:
+            session_title_ref["value"] = event.session_title
+        return False
+
+    was_cancelled = False
+    result_ref: dict = {}
+    session_title_ref: dict = {}
+
     try:
         # Update status
         session_manager.update_chat_request_status(request_id, "running")
 
         # Run blocking agent in thread pool via the generator-based streaming
         # Use captured context if available to preserve user auth
-        result = None
-        session_title = None
         if ctx:
             for event in await asyncio.to_thread(
                 ctx.run,
@@ -111,15 +132,9 @@ async def process_chat_request(request_id: str, payload: dict) -> None:
                 is_first_message,
                 image_ids,
             ):
-                if event.type == StreamEventType.COMPLETE:
-                    result = {
-                        "slides": event.slides,
-                        "raw_html": event.raw_html,
-                        "replacement_info": event.replacement_info,
-                        "experiment_url": event.experiment_url,
-                    }
-                elif event.type == StreamEventType.SESSION_TITLE:
-                    session_title = event.session_title
+                if _handle_event(event, result_ref, session_title_ref):
+                    was_cancelled = True
+                    break
         else:
             # Fallback for jobs without context (e.g., recovery)
             for event in await asyncio.to_thread(
@@ -132,15 +147,12 @@ async def process_chat_request(request_id: str, payload: dict) -> None:
                 is_first_message,
                 image_ids,
             ):
-                if event.type == StreamEventType.COMPLETE:
-                    result = {
-                        "slides": event.slides,
-                        "raw_html": event.raw_html,
-                        "replacement_info": event.replacement_info,
-                        "experiment_url": event.experiment_url,
-                    }
-                elif event.type == StreamEventType.SESSION_TITLE:
-                    session_title = event.session_title
+                if _handle_event(event, result_ref, session_title_ref):
+                    was_cancelled = True
+                    break
+
+        result = result_ref.get("value")
+        session_title = session_title_ref.get("value")
 
         # Include session title in result so poll endpoint can deliver it
         if result and session_title:
@@ -155,14 +167,18 @@ async def process_chat_request(request_id: str, payload: dict) -> None:
         raise
 
     finally:
-        if CancellationRegistry.is_cancelled(session_id):
-            # Revert slides only — preserve chat messages so history stays intact
+        if was_cancelled:
+            # Lock already released by cancel endpoint; flag already reset by chat_service.
+            pass
+        elif CancellationRegistry.is_cancelled(session_id):
+            # Cancel was set but an exception prevented the CANCELLED event from being
+            # yielded (e.g. Genie threw while cancel was in-flight). Revert best-effort
+            # and don't double-release — cancel endpoint already released the lock.
             try:
                 session_manager.revert_slides_on_cancel(session_id, pre_gen_version, request_id)
-            except Exception as e:
-                logger.warning(f"Failed to revert slides on cancel: {e}")
+            except Exception as exc:
+                logger.warning(f"Failed to revert slides on cancel (exception path): {exc}")
             CancellationRegistry.reset(session_id)
-            # Lock was already released by the cancel endpoint
         else:
             session_manager.release_session_lock(session_id)
         # Clean up in-memory tracking
