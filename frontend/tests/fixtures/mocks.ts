@@ -3,27 +3,39 @@
  * These mocks simulate the backend responses for testing.
  */
 
-// Profiles endpoint returns an array directly
+// Profiles endpoint returns an array directly (GET /api/profiles)
 export const mockProfiles = [
   {
     id: 1,
     name: "Sales Analytics",
     description: "Analytics profile for sales data insights",
     is_default: true,
+    agent_config: {
+      tools: [{ type: "genie", space_id: "01JGKX5N2PWQV8ABC123DEF456", space_name: "Sales Data Space", description: null, conversation_id: null }],
+      slide_style_id: 1,
+      deck_prompt_id: 1,
+      system_prompt: null,
+      slide_editing_instructions: null,
+    },
     created_at: "2026-01-08T20:10:29.720015",
     created_by: "system",
     updated_at: "2026-01-08T20:10:29.720025",
-    updated_by: null
   },
   {
     id: 2,
     name: "Marketing Reports",
     description: "Marketing campaign performance reports",
     is_default: false,
+    agent_config: {
+      tools: [{ type: "genie", space_id: "01JGKX5N2PWQV8XYZ789GHI012", space_name: "Marketing Analytics Space", description: null, conversation_id: null }],
+      slide_style_id: 2,
+      deck_prompt_id: 2,
+      system_prompt: null,
+      slide_editing_instructions: null,
+    },
     created_at: "2026-01-08T20:10:29.724407",
     created_by: "system",
     updated_at: "2026-01-08T20:10:29.724411",
-    updated_by: null
   }
 ];
 
@@ -209,39 +221,8 @@ export const mockDefaultAgentConfig = {
   slide_editing_instructions: null,
 };
 
-// Profile summaries returned by GET /api/profiles (new simplified API)
-export const mockProfileSummaries = [
-  {
-    id: 1,
-    name: "Sales Analytics",
-    description: "Analytics profile for sales data insights",
-    is_default: true,
-    agent_config: {
-      tools: [{ type: "genie", space_id: "01JGKX5N2PWQV8ABC123DEF456", space_name: "Sales Data Space" }],
-      slide_style_id: 1,
-      deck_prompt_id: 1,
-      system_prompt: null,
-      slide_editing_instructions: null,
-    },
-    created_at: "2026-01-08T20:10:29.720015",
-    created_by: "system",
-  },
-  {
-    id: 2,
-    name: "Marketing Reports",
-    description: "Marketing campaign performance reports",
-    is_default: false,
-    agent_config: {
-      tools: [{ type: "genie", space_id: "01JGKX5N2PWQV8XYZ789GHI012", space_name: "Marketing Analytics Space" }],
-      slide_style_id: 2,
-      deck_prompt_id: 2,
-      system_prompt: null,
-      slide_editing_instructions: null,
-    },
-    created_at: "2026-01-08T20:10:29.724407",
-    created_by: "system",
-  },
-];
+// Alias for backward compatibility — mockProfiles now has the unified shape
+export const mockProfileSummaries = mockProfiles;
 
 // Available tools returned by GET /api/tools/available
 export const mockAvailableTools = [

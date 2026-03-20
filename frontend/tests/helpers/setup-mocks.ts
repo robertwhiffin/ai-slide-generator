@@ -5,7 +5,6 @@
 import type { Page } from '@playwright/test';
 import {
   mockProfiles,
-  mockProfileSummaries,
   mockDefaultAgentConfig,
   mockAvailableTools,
   mockDeckPrompts,
@@ -30,21 +29,12 @@ export async function setupMocks(page: Page) {
     });
   });
 
-  // Mock new profiles API (GET /api/profiles) — used by AgentConfigContext
+  // Mock profiles API (GET /api/profiles) — used by both AgentConfigContext and ProfileContext
   await page.route(/\/api\/profiles$/, (route) => {
     route.fulfill({
       status: 200,
       contentType: 'application/json',
-      body: JSON.stringify(mockProfileSummaries),
-    });
-  });
-
-  // Mock legacy profiles endpoint (GET /api/settings/profiles) — used by ProfileList page
-  await page.route(/\/api\/settings\/profiles$/, (route) => {
-    route.fulfill({
-      status: 200,
-      contentType: 'application/json',
-      body: JSON.stringify(mockProfiles)
+      body: JSON.stringify(mockProfiles),
     });
   });
 
