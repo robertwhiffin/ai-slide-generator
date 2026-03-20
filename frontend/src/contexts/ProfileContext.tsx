@@ -1,49 +1,29 @@
 /**
- * Profile context for managing configuration profiles across the application.
- * 
- * Provides shared state for profiles and the currently loaded profile,
- * ensuring all components see the same profile state.
+ * Profile context for managing saved agent profiles.
+ *
+ * Provides list, rename, and delete operations.
+ * Profile saving and loading happen via AgentConfigContext on the generator page.
  */
 
-import React, { createContext, useContext, useState, useEffect, useCallback, useRef } from 'react';
-import type {
-  Profile,
-  ProfileUpdate,
-} from '../api/config';
+import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
+import type { Profile, ProfileUpdate } from '../api/config';
 import { configApi, ConfigApiError } from '../api/config';
 
 interface ProfileContextValue {
   profiles: Profile[];
-  currentProfile: Profile | null;
   loading: boolean;
   error: string | null;
   reload: () => Promise<void>;
-  createProfile: (data: ProfileCreate) => Promise<Profile>;
   updateProfile: (id: number, data: ProfileUpdate) => Promise<Profile>;
   deleteProfile: (id: number) => Promise<void>;
-  duplicateProfile: (id: number, newName: string) => Promise<Profile>;
-  setDefaultProfile: (id: number) => Promise<void>;
-  loadProfile: (id: number) => Promise<void>;
 }
 
 const ProfileContext = createContext<ProfileContextValue | undefined>(undefined);
 
-const LOADED_PROFILE_KEY = 'loadedProfileId';
-
-function readStoredProfileId(): number | null {
-  const raw = localStorage.getItem(LOADED_PROFILE_KEY);
-  if (!raw) return null;
-  const parsed = Number(raw);
-  return Number.isFinite(parsed) ? parsed : null;
-}
-
 export const ProfileProvider: React.FC<React.PropsWithChildren> = ({ children }) => {
   const [profiles, setProfiles] = useState<Profile[]>([]);
-  const [currentProfile, setCurrentProfile] = useState<Profile | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  // Track the last loaded profile ID (may differ from is_default)
-  const [loadedProfileId, setLoadedProfileId] = useState<number | null>(readStoredProfileId);
 
   // Ref-tracked loadedProfileId so loadProfiles can read the latest value without
   // needing it in its dependency array (which would create a new identity on every
@@ -115,29 +95,8 @@ export const ProfileProvider: React.FC<React.PropsWithChildren> = ({ children })
     return () => clearInterval(timer);
   }, [loadProfiles]);
 
-  /**
-   * Create a new profile
-   */
-  const createProfile = useCallback(async (data: ProfileCreate): Promise<Profile> => {
-    try {
-      setError(null);
-      const newProfile = await configApi.createProfile(data);
-      await loadProfiles();
-      return newProfile;
-    } catch (err) {
-      const message = err instanceof ConfigApiError 
-        ? err.message 
-        : 'Failed to create profile';
-      setError(message);
-      throw err;
-    }
-  }, [loadProfiles]);
-
-  /**
-   * Update profile metadata
-   */
   const updateProfile = useCallback(async (
-    id: number, 
+    id: number,
     data: ProfileUpdate
   ): Promise<Profile> => {
     try {
@@ -146,115 +105,35 @@ export const ProfileProvider: React.FC<React.PropsWithChildren> = ({ children })
       await loadProfiles();
       return updated;
     } catch (err) {
-      const message = err instanceof ConfigApiError 
-        ? err.message 
+      const message = err instanceof ConfigApiError
+        ? err.message
         : 'Failed to update profile';
       setError(message);
       throw err;
     }
   }, [loadProfiles]);
 
-  /**
-   * Delete a profile
-   */
   const deleteProfile = useCallback(async (id: number): Promise<void> => {
     try {
       setError(null);
       await configApi.deleteProfile(id);
       await loadProfiles();
     } catch (err) {
-      const message = err instanceof ConfigApiError 
-        ? err.message 
+      const message = err instanceof ConfigApiError
+        ? err.message
         : 'Failed to delete profile';
       setError(message);
       throw err;
     }
   }, [loadProfiles]);
 
-  /**
-   * Duplicate a profile with a new name
-   */
-  const duplicateProfile = useCallback(async (
-    id: number, 
-    newName: string
-  ): Promise<Profile> => {
-    try {
-      setError(null);
-      const data: ProfileDuplicate = { new_name: newName };
-      const duplicated = await configApi.duplicateProfile(id, data);
-      await loadProfiles();
-      return duplicated;
-    } catch (err) {
-      const message = err instanceof ConfigApiError 
-        ? err.message 
-        : 'Failed to duplicate profile';
-      setError(message);
-      throw err;
-    }
-  }, [loadProfiles]);
-
-  /**
-   * Set a profile as the default
-   */
-  const setDefaultProfile = useCallback(async (id: number): Promise<void> => {
-    try {
-      setError(null);
-      await configApi.setDefaultProfile(id);
-      await loadProfiles();
-    } catch (err) {
-      const message = err instanceof ConfigApiError 
-        ? err.message 
-        : 'Failed to set default profile';
-      setError(message);
-      throw err;
-    }
-  }, [loadProfiles]);
-
-  /**
-   * Load a profile and hot-reload the application configuration
-   */
-  const loadProfile = useCallback(async (id: number): Promise<void> => {
-    setError(null);
-
-    // Update ref + state IMMEDIATELY so the UI (sidebar, header,
-    // handleNewSession) reflects the new profile without waiting for the
-    // backend hot-reload.
-    loadedProfileIdRef.current = id;
-    setLoadedProfileId(id);
-    const profile = profiles.find(p => p.id === id);
-    if (profile) {
-      setCurrentProfile(profile);
-    }
-
-    // Fire backend hot-reload in the background — don't block the UI.
-    configApi.loadProfile(id).then(() => {
-      if (!profile) {
-        loadProfiles(true);
-      }
-    }).catch((err) => {
-      if (err instanceof ConfigApiError && err.status === 404 && err.message.includes('deleted')) {
-        loadedProfileIdRef.current = null;
-        setLoadedProfileId(null);
-        loadProfiles();
-        setError('That profile was deleted. Switched to default profile.');
-        return;
-      }
-      console.error('Background profile reload failed:', err);
-    });
-  }, [profiles, loadProfiles]);
-
   const value: ProfileContextValue = {
     profiles,
-    currentProfile,
     loading,
     error,
     reload: loadProfiles,
-    createProfile,
     updateProfile,
     deleteProfile,
-    duplicateProfile,
-    setDefaultProfile,
-    loadProfile,
   };
 
   return (
@@ -271,4 +150,3 @@ export const useProfiles = (): ProfileContextValue => {
   }
   return context;
 };
-
