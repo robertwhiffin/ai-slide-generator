@@ -42,6 +42,8 @@ class MockSessionForVersions:
         self.messages = []
         self.slide_deck = None
         self.versions = []
+        self.is_contributor_session = False
+        self.parent_session_id = None
 
 
 class MockSlideDeckRecord:
@@ -54,6 +56,8 @@ class MockSlideDeckRecord:
         self.title = "Test Deck"
         self.slide_count = 3
         self.updated_at = datetime.utcnow()
+        self.locked_by = None
+        self.locked_at = None
 
 
 class MockMessage:

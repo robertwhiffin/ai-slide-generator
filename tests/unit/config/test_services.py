@@ -90,20 +90,24 @@ def test_create_profile_copy(db_session):
 
 
 def test_set_default_profile(db_session):
-    """Test setting default profile."""
+    """Test setting default profile writes to per-user preferences."""
+    from src.database.models.user_preference import UserProfilePreference
+
     service = ProfileService(db_session)
 
     profile1 = service.create_profile("profile1", None, "test")
-    # First profile is automatically default
-
     profile2 = service.create_profile("profile2", None, "test")
 
-    # Set profile2 as default
-    service.set_default_profile(profile2.id, "test")
+    # Set profile2 as user's personal default
+    result = service.set_default_profile(profile2.id, "test")
+    assert result.id == profile2.id
 
-    db_session.refresh(profile1)
-    assert not profile1.is_default
-    assert profile2.is_default
+    # Verify the preference row was created
+    pref = db_session.query(UserProfilePreference).filter(
+        UserProfilePreference.user_name == "test"
+    ).first()
+    assert pref is not None
+    assert pref.default_profile_id == profile2.id
 
 
 def test_update_profile(db_session):
@@ -370,16 +374,21 @@ def test_validator_prompts_valid(db_session):
 
 
 def test_get_default_profile(db_session):
-    """Test getting default profile."""
+    """Test getting default profile resolves per-user preference."""
+    from unittest.mock import patch, MagicMock
+
     service = ProfileService(db_session)
 
     profile1 = service.create_profile("profile1", None, "test")
     profile2 = service.create_profile("profile2", None, "test")
 
-    # Set profile2 as default
+    # Set profile2 as user's personal default
     service.set_default_profile(profile2.id, "test")
 
-    # Get default
-    default = service.get_default_profile()
+    # Mock PermissionContext so get_default_profile finds the user preference
+    mock_ctx = MagicMock()
+    mock_ctx.user_name = "test"
+    with patch("src.services.profile_service.get_permission_context", return_value=mock_ctx):
+        default = service.get_default_profile()
     assert default.id == profile2.id
 
