@@ -17,7 +17,7 @@ function timeAgo(iso: string): string {
 }
 
 function renderContentWithMentions(content: string): React.ReactNode {
-  const parts = content.split(/(@[\w.+\-]+(?:@[\w.\-]+)?)/g);
+  const parts = content.split(/(@[\w.+\-]+@[\w.\-]+)/g);
   return parts.map((part, i) =>
     part.startsWith('@') ? (
       <span key={i} className="text-blue-600 font-medium">{part}</span>

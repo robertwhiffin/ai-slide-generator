@@ -33,7 +33,7 @@ export interface MentionableUser {
 
 function renderContentWithMentions(content: string, users: MentionableUser[] = []): React.ReactNode {
   const emailToName = new Map(users.map(u => [u.username.toLowerCase(), u.display_name]));
-  const parts = content.split(/(@[\w.+\-]+(?:@[\w.\-]+)?)/g);
+  const parts = content.split(/(@[\w.+\-]+@[\w.\-]+)/g);
   return parts.map((part, i) => {
     if (part.startsWith('@')) {
       const email = part.slice(1).toLowerCase();
@@ -44,17 +44,6 @@ function renderContentWithMentions(content: string, users: MentionableUser[] = [
   });
 }
 
-/**
- * Replace @DisplayName with @email before sending to the backend.
- */
-function resolveMentionsToEmails(content: string, users: MentionableUser[]): string {
-  let resolved = content;
-  const sorted = [...users].sort((a, b) => b.display_name.length - a.display_name.length);
-  for (const u of sorted) {
-    resolved = resolved.split(`@${u.display_name}`).join(`@${u.username}`);
-  }
-  return resolved;
-}
 
 // ---------------------------------------------------------------------------
 // Mention-aware text input
@@ -91,7 +80,7 @@ const MentionInput: React.FC<MentionInputProps> = ({
     onChange(v);
     const pos = e.target.selectionStart ?? v.length;
     const before = v.slice(0, pos);
-    const atMatch = before.match(/@([\w.\-]*(?:@[\w.\-]*)?)$/);
+    const atMatch = before.match(/@([\w.+\-]*(?:@[\w.\-]*)?)$/);
     if (atMatch) {
       setShowDropdown(true);
       setMentionQuery(atMatch[1]);
@@ -105,7 +94,7 @@ const MentionInput: React.FC<MentionInputProps> = ({
   const insertMention = (user: MentionableUser) => {
     const before = value.slice(0, mentionStart);
     const afterCursor = value.slice(mentionStart + 1 + mentionQuery.length);
-    onChange(`${before}@${user.display_name} ${afterCursor}`);
+    onChange(`${before}@${user.username} ${afterCursor}`);
     setShowDropdown(false);
     inputRef.current?.focus();
   };
@@ -184,14 +173,13 @@ const CommentBubble: React.FC<CommentBubbleProps> = ({
   const [isReplying, setIsReplying] = useState(false);
   const [replyContent, setReplyContent] = useState('');
   const [busy, setBusy] = useState(false);
-  const isAuthor = currentUser !== '' && (comment.user_email === currentUser || comment.user_name === currentUser);
+  const isAuthor = currentUser !== '' && comment.user_email?.toLowerCase() === currentUser.toLowerCase();
 
   const handleEdit = async () => {
     if (!editContent.trim() || busy) return;
     setBusy(true);
     try {
-      const resolved = resolveMentionsToEmails(editContent.trim(), mentionableUsers);
-      await api.updateComment(comment.id, resolved);
+      await api.updateComment(comment.id, editContent.trim());
       setIsEditing(false);
       onRefresh();
     } catch (err) {
@@ -218,8 +206,7 @@ const CommentBubble: React.FC<CommentBubbleProps> = ({
     if (!replyContent.trim() || busy) return;
     setBusy(true);
     try {
-      const resolved = resolveMentionsToEmails(replyContent.trim(), mentionableUsers);
-      await api.addComment(sessionId, slideId, resolved, comment.id);
+      await api.addComment(sessionId, slideId, replyContent.trim(), comment.id);
       setReplyContent('');
       setIsReplying(false);
       onRefresh();
@@ -471,8 +458,8 @@ export const CommentThread: React.FC<CommentThreadProps> = ({ sessionId, slideId
 
   const handleAdd = async () => {
     if (!newContent.trim() || posting) return;
-    const content = resolveMentionsToEmails(newContent.trim(), mentionableUsers);
-    const mentionMatches = content.match(/@[\w.+\-]+(?:@[\w.\-]+)?/g) || [];
+    const content = newContent.trim();
+    const mentionMatches = content.match(/@[\w.+\-]+@[\w.\-]+/g) || [];
     const hasMentions = mentionMatches.length > 0;
 
     // Optimistic: insert placeholder immediately
@@ -480,7 +467,8 @@ export const CommentThread: React.FC<CommentThreadProps> = ({ sessionId, slideId
     const optimistic: SlideComment = {
       id: optimisticId,
       slide_id: slideId,
-      user_name: currentUser || 'You',
+      user_name: 'You',
+      user_email: currentUser || '',
       content,
       mentions: mentionMatches.map(m => m.slice(1)),
       resolved: false,

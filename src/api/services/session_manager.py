@@ -1999,8 +1999,8 @@ class SessionManager:
                     raise ValueError("Parent comment not found")
 
             import re
-            mentioned = re.findall(r"@([\w.+\-]+(?:@[\w.\-]+)?)", content)
-            mentioned = list(dict.fromkeys(mentioned))  # dedupe, preserve order
+            mentioned = [m.lower() for m in re.findall(r"@([\w.+\-]+@[\w.\-]+)", content)]
+            mentioned = list(dict.fromkeys(mentioned))
 
             comment = SlideComment(
                 session_id=deck_owner.id,
@@ -2060,10 +2060,10 @@ class SessionManager:
             comment = db.query(SlideComment).filter(SlideComment.id == comment_id).first()
             if not comment:
                 raise ValueError("Comment not found")
-            if comment.user_name != user_name:
+            if comment.user_name.lower() != user_name.lower():
                 raise PermissionError("Only the author can edit a comment")
             comment.content = content
-            mentioned = re.findall(r"@([\w.+\-]+(?:@[\w.\-]+)?)", content)
+            mentioned = [m.lower() for m in re.findall(r"@([\w.+\-]+@[\w.\-]+)", content)]
             comment.mentions = list(dict.fromkeys(mentioned)) or None
             db.flush()
             return self._comment_to_dict(comment)
@@ -2074,7 +2074,7 @@ class SessionManager:
             comment = db.query(SlideComment).filter(SlideComment.id == comment_id).first()
             if not comment:
                 raise ValueError("Comment not found")
-            if comment.user_name != user_name and not is_manager:
+            if comment.user_name.lower() != user_name.lower() and not is_manager:
                 raise PermissionError("Only the author or a manager can delete this comment")
             db.delete(comment)
             return True
@@ -2168,9 +2168,10 @@ class SessionManager:
                 )
 
             results = []
+            lookup = user_name.lower()
             for c in comments:
                 mentions_list = c.mentions if isinstance(c.mentions, list) else []
-                if user_name in mentions_list:
+                if lookup in [m.lower() for m in mentions_list]:
                     d = self._comment_to_dict(c)
                     d["session_id_str"] = self._get_session_id_str(db, c.session_id)
                     results.append(d)
