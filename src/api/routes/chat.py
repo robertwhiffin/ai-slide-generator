@@ -378,6 +378,7 @@ async def submit_chat_async(
             request.session_id,
             profile_id,
             profile_name,
+            current_user,
         )
 
         # Capture first-message flag BEFORE persisting the user message,
