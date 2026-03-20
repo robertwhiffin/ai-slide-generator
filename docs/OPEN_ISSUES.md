@@ -4,17 +4,8 @@ Issues that are tabled but should be revisited.
 
 ---
 
-## Sidebar: deck name and slide number not updating
+## ~~Sidebar: deck name and slide number not updating~~
 
-**Status:** Tabled for later.
+**Status:** Resolved — removed redundant `autoSaveSession` in fix/remove-redundant-autosave.
 
-**Observed:** Last-saved time per deck is updated correctly in the sidebar. Deck name (session title) and slide count are still not showing correctly in the sidebar/list after generation (or after other updates).
-
-**Context:** We implemented:
-- After generation: save deck name + slide count via `autoSaveSession(deck)` → `renameSession(deck.title, deck.slide_count)` or `updateSession(sessionId, { slide_count })`.
-- Backend PATCH session accepts `title` and `slide_count`; `update_session` persists both to `user_sessions.title` and `session_slide_decks.slide_count`.
-- Sidebar reads only from `listSessions()` (no live overrides).
-
-**Possible causes to investigate later:** Refetch timing (list loaded before DB commit), backend list_sessions not returning updated values, or frontend not calling save in the right place. See conversation summary for debugging options (verify backend write, refetch delay, or temporary live override for current session only).
-
-**Revisit when:** Prioritizing sidebar/list correctness for deck name and slide count.
+**Root cause:** PR #125 added a frontend `autoSaveSession` that called `renameSession(deck.title, count)` after generation. This overwrote the backend-generated session title (from `run_title_gen` → `session_manager.rename_session`) with the deck's content title, which could be empty or different. The backend already persists both title (via LLM naming on first message) and slide_count (via `save_slide_deck`), so the frontend call was redundant and destructive.
