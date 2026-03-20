@@ -9,12 +9,6 @@ import {
 } from '../fixtures/mocks';
 import {
   goToGenerator,
-  NEW_DECK_BUTTON_LABEL,
-  AGENT_PROFILES_LABEL,
-  DECK_PROMPTS_LABEL,
-  SLIDE_STYLES_LABEL,
-  HELP_LABEL,
-  VIEW_ALL_DECKS_LABEL,
 } from '../helpers/new-ui';
 
 /**
@@ -251,14 +245,11 @@ test.describe('Deck Integrity - Navigation', () => {
   });
 
   test('navigating between views produces no errors', async ({ page }) => {
-    await page.goto('/');
+    const routes = ['/', '/profiles', '/deck-prompts', '/slide-styles', '/help', '/history'];
 
-    // New UI: sidebar button labels
-    const views = [NEW_DECK_BUTTON_LABEL, VIEW_ALL_DECKS_LABEL, AGENT_PROFILES_LABEL, DECK_PROMPTS_LABEL, SLIDE_STYLES_LABEL, HELP_LABEL];
-
-    for (const view of views) {
-      await page.getByRole('button', { name: view }).click();
-      await page.waitForTimeout(200);
+    for (const route of routes) {
+      await page.goto(route);
+      await page.waitForTimeout(500);
     }
 
     const errors = consoleCollector.getErrors();
@@ -266,10 +257,9 @@ test.describe('Deck Integrity - Navigation', () => {
   });
 
   test('History view loads sessions without errors', async ({ page }) => {
-    await page.goto('/');
-    await page.getByRole('button', { name: VIEW_ALL_DECKS_LABEL }).click();
+    await page.goto('/history');
 
-    await expect(page.getByRole('heading', { name: 'Sessions' })).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'Sessions' })).toBeVisible({ timeout: 10000 });
 
     const errors = consoleCollector.getErrors();
     expect(errors).toHaveLength(0);

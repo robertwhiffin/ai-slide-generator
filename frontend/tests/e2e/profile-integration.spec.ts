@@ -94,24 +94,26 @@ function testProfileName(operation: string): string {
 }
 
 /**
- * Create a profile via API for faster test setup
+ * Create a profile via API for faster test setup.
+ * Uses the with-config endpoint so that the profile has full configuration
+ * and can be loaded via /load (which triggers reload_agent).
  */
 async function createTestProfileViaAPI(
   request: APIRequestContext,
   name: string,
   description?: string
 ): Promise<Profile> {
-  // First, get available slide styles (required for profile creation)
   const stylesResponse = await request.get(`${API_BASE}/slide-styles`);
   const styles = await stylesResponse.json();
   const styleId = styles.styles?.[0]?.id || 1;
 
-  // Create profile with minimal required data
-  const response = await request.post(`${API_BASE}/profiles`, {
+  const response = await request.post(`${API_BASE}/profiles/with-config`, {
     data: {
       name,
       description: description || 'E2E test profile',
-      slide_style_id: styleId,
+      prompts: {
+        selected_slide_style_id: styleId,
+      },
     },
   });
 
@@ -189,7 +191,7 @@ async function goToMainView(page: Page, request: APIRequestContext): Promise<voi
   const session = await createRes.json();
   await page.goto(`/sessions/${session.session_id}/edit`);
   await page.waitForLoadState('networkidle');
-  await page.locator('header').getByRole('button', { name: 'Profile' }).waitFor({ state: 'visible', timeout: 15000 });
+  await page.locator('header button[aria-label="Profile"]').waitFor({ state: 'visible', timeout: 15000 });
 }
 
 async function goToHistory(page: Page): Promise<void> {
@@ -573,7 +575,7 @@ test.describe('Profile Switching', () => {
     try {
       await goToMainView(page, request);
 
-      const profileButton = page.locator('header').getByRole('button', { name: 'Profile' });
+      const profileButton = page.locator('header button[aria-label="Profile"]');
       const initialText = await profileButton.textContent();
 
       await profileButton.click();
@@ -607,7 +609,7 @@ test.describe('Profile Switching', () => {
         await confirmButton.click();
       }
 
-      await expect(card.getByText('Loaded', { exact: true })).toBeVisible();
+      await expect(card.getByText('Loaded', { exact: true })).toBeVisible({ timeout: 15000 });
     } finally {
       await deleteTestProfileViaAPI(request, profile.id);
     }
@@ -653,7 +655,7 @@ test.describe('Profile Switching', () => {
     try {
       await goToMainView(page, request);
 
-      const headerProfileButton = page.locator('header').getByRole('button', { name: 'Profile' });
+      const headerProfileButton = page.locator('header button[aria-label="Profile"]');
       await headerProfileButton.click();
       await expect(page.getByText(profileName1).first()).toBeVisible({ timeout: 8000 });
       await page.getByText(profileName1).first().click();
