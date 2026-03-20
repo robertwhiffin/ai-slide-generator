@@ -243,9 +243,9 @@ export const ProfileDetailView: React.FC<ProfileDetailProps> = ({
             <ConfigTabs
               profileId={profile.id}
               profileName={profile.name}
-              isGlobal={profile.is_global}
+              globalPermission={profile.global_permission}
               canManage={!profile.my_permission || profile.my_permission === 'CAN_MANAGE'}
-              onGlobalChange={(val) => setProfile(prev => prev ? { ...prev, is_global: val } : prev)}
+              onGlobalPermissionChange={(perm) => setProfile(prev => prev ? { ...prev, global_permission: perm } : prev)}
             />
           ) : (
             /* View Mode - Show Read-Only Details */

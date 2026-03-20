@@ -2,7 +2,7 @@
  * Contributors management component for sharing profiles.
  * 
  * Allows adding, updating, and removing contributors (users/groups)
- * with different permission levels, and toggling global visibility.
+ * with different permission levels, and sharing with all workspace users.
  */
 
 import React, { useState, useEffect, useCallback } from 'react';
@@ -15,7 +15,6 @@ import {
   type PermissionLevel,
 } from '../../api/config';
 
-// Permission level options
 const PERMISSION_OPTIONS: { value: PermissionLevel; label: string; description: string }[] = [
   { value: 'CAN_VIEW', label: 'Can View', description: 'View profile and use for presentations' },
   { value: 'CAN_EDIT', label: 'Can Edit', description: 'Edit profile settings' },
@@ -24,40 +23,39 @@ const PERMISSION_OPTIONS: { value: PermissionLevel; label: string; description: 
 
 interface ContributorsManagerProps {
   profileId: number;
-  isGlobal?: boolean;
+  globalPermission?: PermissionLevel | null;
   canManage?: boolean;
-  onGlobalChange?: (isGlobal: boolean) => void;
+  onGlobalPermissionChange?: (permission: PermissionLevel | null) => void;
 }
 
 export const ContributorsManager: React.FC<ContributorsManagerProps> = ({
   profileId,
-  isGlobal: initialIsGlobal,
+  globalPermission: initialGlobalPermission,
   canManage = true,
-  onGlobalChange,
+  onGlobalPermissionChange,
 }) => {
-  // Contributors list
   const [contributors, setContributors] = useState<Contributor[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  // Global visibility
-  const [isGlobal, setIsGlobal] = useState(initialIsGlobal ?? false);
-  const [togglingGlobal, setTogglingGlobal] = useState(false);
+  // Global permission level (null = private)
+  const [globalPermission, setGlobalPermission] = useState<PermissionLevel | null>(initialGlobalPermission ?? null);
+  const [updatingGlobal, setUpdatingGlobal] = useState(false);
 
   useEffect(() => {
-    if (initialIsGlobal !== undefined) setIsGlobal(initialIsGlobal);
-  }, [initialIsGlobal]);
+    if (initialGlobalPermission !== undefined) setGlobalPermission(initialGlobalPermission);
+  }, [initialGlobalPermission]);
 
-  const handleToggleGlobal = async () => {
-    setTogglingGlobal(true);
+  const handleSetGlobalPermission = async (permission: PermissionLevel | null) => {
+    setUpdatingGlobal(true);
     try {
-      const result = await configApi.setProfileGlobal(profileId, !isGlobal);
-      setIsGlobal(result.is_global);
-      onGlobalChange?.(result.is_global);
+      const result = await configApi.setProfileGlobal(profileId, permission);
+      setGlobalPermission(result.global_permission);
+      onGlobalPermissionChange?.(result.global_permission);
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to update visibility');
+      setError(err instanceof Error ? err.message : 'Failed to update global sharing');
     } finally {
-      setTogglingGlobal(false);
+      setUpdatingGlobal(false);
     }
   };
 
@@ -191,39 +189,6 @@ export const ContributorsManager: React.FC<ContributorsManagerProps> = ({
         </p>
       </div>
 
-      {/* Share with Everyone toggle */}
-      {canManage && (
-        <div className="flex items-center justify-between p-4 bg-blue-50 border border-blue-200 rounded-lg">
-          <div className="flex items-center gap-3">
-            <FiGlobe className={`text-lg ${isGlobal ? 'text-blue-600' : 'text-gray-400'}`} />
-            <div>
-              <p className="font-medium text-gray-900">Share with everyone</p>
-              <p className="text-sm text-gray-500">
-                {isGlobal
-                  ? 'All workspace users can view and use this profile'
-                  : 'Only you and contributors below can access this profile'}
-              </p>
-            </div>
-          </div>
-          <button
-            type="button"
-            role="switch"
-            aria-checked={isGlobal}
-            onClick={handleToggleGlobal}
-            disabled={togglingGlobal}
-            className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 disabled:opacity-50 ${
-              isGlobal ? 'bg-blue-600' : 'bg-gray-200'
-            }`}
-          >
-            <span
-              className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out ${
-                isGlobal ? 'translate-x-5' : 'translate-x-0'
-              }`}
-            />
-          </button>
-        </div>
-      )}
-
       {/* Error display */}
       {error && (
         <div className="p-3 bg-red-50 border border-red-200 rounded-md text-red-700 text-sm flex items-center justify-between">
@@ -276,8 +241,23 @@ export const ContributorsManager: React.FC<ContributorsManagerProps> = ({
         </div>
 
         {/* Search results dropdown */}
-        {searchResults.length > 0 && (
+        {(searchResults.length > 0 || (searchQuery.length >= 1 && !globalPermission && canManage)) && (
           <div className="mt-2 border border-gray-200 rounded-md shadow-sm max-h-48 overflow-y-auto bg-white">
+            {/* "All workspace users" suggestion when not already global */}
+            {!globalPermission && canManage && 'all workspace'.includes(searchQuery.toLowerCase()) && (
+              <button
+                onClick={() => handleSetGlobalPermission(selectedPermission)}
+                disabled={updatingGlobal}
+                className="w-full px-4 py-3 flex items-center gap-3 hover:bg-blue-50 border-b last:border-b-0 text-left disabled:opacity-50"
+              >
+                <FiGlobe className="text-green-600 flex-shrink-0" />
+                <div className="flex-1 min-w-0">
+                  <p className="font-medium text-gray-900">All workspace users</p>
+                  <p className="text-xs text-gray-500">Share with everyone in the workspace</p>
+                </div>
+                <span className="text-xs text-blue-600 font-medium">+ Add</span>
+              </button>
+            )}
             {searchResults.map(identity => (
               <button
                 key={identity.id}
@@ -313,21 +293,59 @@ export const ContributorsManager: React.FC<ContributorsManagerProps> = ({
       {/* Contributors list */}
       <div>
         <h4 className="text-sm font-medium text-gray-700 mb-3">
-          Current Contributors ({contributors.length})
+          Current Access ({contributors.length + (globalPermission ? 1 : 0)})
         </h4>
 
-        {contributors.length === 0 ? (
+        {contributors.length === 0 && !globalPermission ? (
           <div className="bg-blue-50 border border-blue-200 rounded-md p-4 text-center">
             <FiUsers className="mx-auto text-blue-400 mb-2" size={24} />
             <p className="text-sm text-blue-700">
               No contributors yet. This profile is private to you.
             </p>
             <p className="text-xs text-blue-600 mt-1">
-              Search above to add users or groups.
+              Search above to add users, groups, or "All workspace users".
             </p>
           </div>
         ) : (
           <div className="space-y-2">
+            {/* All workspace users row */}
+            {globalPermission && (
+              <div className="flex items-center gap-3 p-3 bg-green-50 rounded-md border border-green-200 hover:border-green-300 transition-colors">
+                <div className="w-10 h-10 rounded-full bg-green-100 flex items-center justify-center">
+                  <FiGlobe className="text-green-600" />
+                </div>
+                <div className="flex-1 min-w-0">
+                  <p className="font-medium text-gray-900">All workspace users</p>
+                  <p className="text-xs text-gray-500">Everyone in the workspace</p>
+                </div>
+                {canManage ? (
+                  <>
+                    <select
+                      value={globalPermission}
+                      onChange={(e) => handleSetGlobalPermission(e.target.value as PermissionLevel)}
+                      disabled={updatingGlobal}
+                      className="text-sm px-3 py-1.5 border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-500 bg-white disabled:opacity-50"
+                    >
+                      {PERMISSION_OPTIONS.map(opt => (
+                        <option key={opt.value} value={opt.value}>{opt.label}</option>
+                      ))}
+                    </select>
+                    <button
+                      onClick={() => handleSetGlobalPermission(null)}
+                      disabled={updatingGlobal}
+                      className="p-2 text-gray-400 hover:text-red-500 hover:bg-red-50 rounded transition-colors disabled:opacity-50"
+                      title="Remove global access"
+                    >
+                      <FiTrash2 />
+                    </button>
+                  </>
+                ) : (
+                  <span className="text-sm text-gray-600 px-3 py-1.5">
+                    {PERMISSION_OPTIONS.find(o => o.value === globalPermission)?.label}
+                  </span>
+                )}
+              </div>
+            )}
             {contributors.map(contributor => (
               <div
                 key={contributor.id}
