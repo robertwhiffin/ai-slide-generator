@@ -7,7 +7,7 @@ from typing import Optional
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
-from src.api.schemas.agent_config import AgentConfig, resolve_agent_config
+from src.api.schemas.agent_config import AgentConfig, GenieTool, resolve_agent_config
 from src.api.services.session_manager import SessionNotFoundError, get_session_manager
 from src.core.database import get_db_session
 from src.database.models.profile import ConfigProfile
@@ -92,11 +92,36 @@ async def save_from_session(session_id: str, body: SaveProfileRequest):
     raw_config = session.get("agent_config")
     config = resolve_agent_config(raw_config)
 
+    # Strip session-specific conversation_ids before persisting
+    for tool in config.tools:
+        if isinstance(tool, GenieTool):
+            tool.conversation_id = None
+
+    config_dict = config.model_dump()
+
     with get_db_session() as db:
+        # Check for duplicate agent_config among non-deleted profiles
+        existing_profiles = (
+            db.query(ConfigProfile)
+            .filter(ConfigProfile.is_deleted == False)  # noqa: E712
+            .all()
+        )
+        for existing in existing_profiles:
+            existing_config = resolve_agent_config(existing.agent_config)
+            # Strip conversation_ids from existing for fair comparison
+            for tool in existing_config.tools:
+                if isinstance(tool, GenieTool):
+                    tool.conversation_id = None
+            if existing_config.model_dump() == config_dict:
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"A profile with this configuration already exists: '{existing.name}'",
+                )
+
         profile = ConfigProfile(
             name=body.name,
             description=body.description,
-            agent_config=config.model_dump(),
+            agent_config=config_dict,
         )
         db.add(profile)
         db.flush()  # get the id

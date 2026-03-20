@@ -77,6 +77,7 @@ class TestSaveFromSession:
         mock_db = MagicMock()
         mock_db.__enter__ = MagicMock(return_value=mock_db)
         mock_db.__exit__ = MagicMock(return_value=False)
+        mock_db.query.return_value.filter.return_value.all.return_value = []
         mock_get_db.return_value = mock_db
 
         # Mock the flush to set an id on the profile
@@ -111,6 +112,7 @@ class TestSaveFromSession:
         mock_db = MagicMock()
         mock_db.__enter__ = MagicMock(return_value=mock_db)
         mock_db.__exit__ = MagicMock(return_value=False)
+        mock_db.query.return_value.filter.return_value.all.return_value = []
         mock_get_db.return_value = mock_db
 
         def set_id_on_flush():
@@ -127,6 +129,63 @@ class TestSaveFromSession:
         data = response.json()
         # Should have default agent config (empty tools, null ids)
         assert data["agent_config"]["tools"] == []
+
+    @patch("src.api.routes.profiles.get_db_session")
+    @patch("src.api.routes.profiles.get_session_manager")
+    def test_save_from_session_rejects_duplicate_config(self, mock_get_mgr, mock_get_db, client):
+        """POST /api/profiles/save-from-session rejects when identical agent_config already exists."""
+        config = {"tools": [{"type": "genie", "space_id": "g1", "space_name": "Sales"}]}
+        mgr = MagicMock()
+        mgr.get_session.return_value = {
+            "session_id": "sess-1",
+            "agent_config": config,
+        }
+        mock_get_mgr.return_value = mgr
+
+        existing_profile = _make_profile(id=99, name="Existing", agent_config=config)
+
+        mock_db = MagicMock()
+        mock_db.__enter__ = MagicMock(return_value=mock_db)
+        mock_db.__exit__ = MagicMock(return_value=False)
+        mock_db.query.return_value.filter.return_value.all.return_value = [existing_profile]
+        mock_get_db.return_value = mock_db
+
+        response = client.post(
+            "/api/profiles/save-from-session/sess-1",
+            json={"name": "New Profile"},
+        )
+        assert response.status_code == 409
+        assert "Existing" in response.json()["detail"]
+
+    @patch("src.api.routes.profiles.get_db_session")
+    @patch("src.api.routes.profiles.get_session_manager")
+    def test_save_from_session_allows_unique_config(self, mock_get_mgr, mock_get_db, client):
+        """POST /api/profiles/save-from-session succeeds when no matching config exists."""
+        config = {"tools": [{"type": "genie", "space_id": "g1", "space_name": "Sales"}]}
+        mgr = MagicMock()
+        mgr.get_session.return_value = {
+            "session_id": "sess-1",
+            "agent_config": config,
+        }
+        mock_get_mgr.return_value = mgr
+
+        mock_db = MagicMock()
+        mock_db.__enter__ = MagicMock(return_value=mock_db)
+        mock_db.__exit__ = MagicMock(return_value=False)
+        mock_db.query.return_value.filter.return_value.all.return_value = []
+        mock_get_db.return_value = mock_db
+
+        def set_id_on_flush():
+            added_obj = mock_db.add.call_args[0][0]
+            added_obj.id = 50
+
+        mock_db.flush.side_effect = set_id_on_flush
+
+        response = client.post(
+            "/api/profiles/save-from-session/sess-1",
+            json={"name": "New Profile"},
+        )
+        assert response.status_code == 201
 
 
 class TestLoadProfileIntoSession:
