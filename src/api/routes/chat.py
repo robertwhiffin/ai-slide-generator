@@ -402,6 +402,6 @@ async def cancel_generation(session_id: str):
     try:
         await asyncio.to_thread(session_manager.release_session_lock, session_id)
     except Exception:
-        pass  # Lock may already be released
+        logger.warning("Failed to release session lock on cancel", extra={"session_id": session_id})
 
     return {"status": "cancelled", "session_id": session_id}

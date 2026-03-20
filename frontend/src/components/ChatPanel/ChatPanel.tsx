@@ -346,7 +346,6 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(({
       },
     ]);
     // Fire-and-forget: tell backend to stop the agent and release the lock.
-    // The API layer retries on 409 if the lock hasn't released yet.
     api.cancelGeneration(sessionId).catch(() => {});
   };
 
