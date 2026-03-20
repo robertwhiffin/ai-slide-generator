@@ -49,6 +49,8 @@ class MockSessionManager:
         scripts_content: Optional[str] = None,
         slide_count: int = 0,
         deck_dict: Optional[Dict[str, Any]] = None,
+        modified_by: Optional[str] = None,
+        expected_version: Optional[int] = None,
     ) -> Dict[str, Any]:
         """Record save call and store data."""
         self.save_calls.append({
