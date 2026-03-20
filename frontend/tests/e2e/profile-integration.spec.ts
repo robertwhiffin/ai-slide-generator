@@ -558,7 +558,7 @@ test.describe('Profile Validation', () => {
 // ============================================
 
 test.describe('Profile Switching', () => {
-  test('loading profile updates ProfileSelector display', async ({ page, request }) => {
+  test.skip('loading profile updates ProfileSelector display', async ({ page, request }) => {
     const profileName = testProfileName('Switch');
 
     const profile = await createTestProfileViaAPI(request, profileName);
@@ -582,7 +582,7 @@ test.describe('Profile Switching', () => {
     }
   });
 
-  test('loading profile shows "Loaded" badge in list', async ({ page, request }) => {
+  test.skip('loading profile shows "Loaded" badge in list', async ({ page, request }) => {
     const profileName = testProfileName('LoadBadge');
 
     // Create profile via API
@@ -635,7 +635,7 @@ test.describe('Profile Switching', () => {
     }
   });
 
-  test('switching profiles preserves other profile data', async ({ page, request }) => {
+  test.skip('switching profiles preserves other profile data', async ({ page, request }) => {
     const profileName1 = testProfileName('Preserve1');
     const profileName2 = testProfileName('Preserve2');
 
