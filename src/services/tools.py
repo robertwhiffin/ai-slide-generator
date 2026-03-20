@@ -181,11 +181,18 @@ def query_genie_space(
                     )
                     # Extract data and columns from response
                     response_dict = attachment_response.as_dict()["statement_response"]
-                    columns = [_["name"] for _ in response_dict["manifest"]["schema"]["columns"]]
-                    data_array = response_dict["result"]["data_array"]
-                    # Create DataFrame and convert to records
-                    df = pd.DataFrame(data_array, columns=columns)
-                    data = df.to_csv(index=False)
+                    result_block = response_dict.get("result")
+                    data_array = result_block.get("data_array") if result_block else None
+
+                    if data_array is not None:
+                        columns = [_["name"] for _ in response_dict["manifest"]["schema"]["columns"]]
+                        df = pd.DataFrame(data_array, columns=columns)
+                        data = df.to_csv(index=False)
+                    else:
+                        logger.warning(
+                            "Genie returned no data (missing result or data_array)",
+                            extra={"query": query[:100], "conversation_id": conversation_id},
+                        )
                 if attachment.text:
                     message_content = attachment.text
 
