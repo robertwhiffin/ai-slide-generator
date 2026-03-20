@@ -143,7 +143,7 @@ async function setupProfileMocks(page: Page) {
     } else {
       // Individual session GET — return a valid empty session so the URL effect
       // doesn't 404 and navigate away when a new session is loaded.
-      route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ session_id: 'test-session-id', title: null, has_slide_deck: false, messages: [] }) });
+      route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ session_id: 'test-session-id', title: null, has_slide_deck: false, messages: [], my_permission: 'CAN_MANAGE' }) });
     }
   });
 
@@ -164,6 +164,33 @@ async function setupProfileMocks(page: Page) {
       body: JSON.stringify({ version: '0.1.21', latest: '0.1.21' }),
     });
   });
+
+  // Mock current user
+  await page.route('**/api/user/current', (route) => {
+    route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ username: 'test@example.com', display_name: 'Test User' }) });
+  });
+
+  // Mock editing lock endpoints
+  await page.route(/\/api\/sessions\/[^/]+\/lock$/, (route, request) => {
+    const method = request.method();
+    if (method === 'POST') {
+      route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ acquired: true, locked_by: null }) });
+    } else if (method === 'DELETE') {
+      route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ released: true }) });
+    } else {
+      route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ locked: false, locked_by: null }) });
+    }
+  });
+
+  // Mock mentions endpoint
+  await page.route('**/api/comments/mentions**', (route) => {
+    route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ mentions: [], count: 0 }) });
+  });
+
+  // Mock mentionable users
+  await page.route('**/api/comments/mentionable-users**', (route) => {
+    route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ users: [] }) });
+  });
 }
 
 async function goToProfiles(page: Page) {
@@ -173,7 +200,7 @@ async function goToProfiles(page: Page) {
 
 /** Profile selector button in the page header (not sidebar). */
 function getHeaderProfileButton(page: Page) {
-  return page.locator('header').getByRole('button', { name: /Sales Analytics|Default|Profile/i });
+  return page.locator('header button[aria-label="Profile"]');
 }
 
 // ============================================
@@ -323,7 +350,7 @@ test.describe('ProfileList', () => {
     await marketingCard.getByRole('button', { name: 'Expand' }).click();
     await marketingCard.getByRole('button', { name: /Set as Default/i }).click();
 
-    await expect(page.getByRole('heading', { name: /Set Default Profile/i })).toBeVisible();
+    await expect(page.getByRole('heading', { name: /Set (My )?Default Profile/i })).toBeVisible();
   });
 
   test('shows inline duplicate form on Duplicate click', async ({ page }) => {

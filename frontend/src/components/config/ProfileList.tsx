@@ -303,7 +303,7 @@ export const ProfileList: React.FC<ProfileListProps> = ({ onProfileChange }) => 
                         <h3 className="text-sm font-medium text-foreground">
                           {profile.name}
                         </h3>
-                        {profile.is_default && (
+                        {profile.is_my_default && (
                           <Badge variant="secondary" className="text-xs">
                             Default
                           </Badge>
@@ -428,7 +428,7 @@ export const ProfileList: React.FC<ProfileListProps> = ({ onProfileChange }) => 
                             </Button>
                           )}
 
-                          {!profile.is_default && (
+                          {!profile.is_my_default && (
                             <Button
                               variant="outline"
                               size="sm"
