@@ -6,11 +6,9 @@
  */
 
 import React, { createContext, useContext, useState, useEffect, useCallback, useRef } from 'react';
-import type { 
-  Profile, 
-  ProfileCreate, 
+import type {
+  Profile,
   ProfileUpdate,
-  ProfileDuplicate,
 } from '../api/config';
 import { configApi, ConfigApiError } from '../api/config';
 
