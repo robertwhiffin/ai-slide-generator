@@ -73,15 +73,15 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
   const { showToast } = useToast();
   const { showSurvey, closeSurvey, onGenerationComplete, onGenerationStart } = useSurveyTrigger();
 
-  // Permission level for the current session (CAN_VIEW, CAN_EDIT, CAN_MANAGE)
-  const [sessionPermission, setSessionPermission] = useState<'CAN_VIEW' | 'CAN_EDIT' | 'CAN_MANAGE'>('CAN_MANAGE');
+  // Permission level for the current session (null until loaded from server)
+  const [sessionPermission, setSessionPermission] = useState<'CAN_VIEW' | 'CAN_EDIT' | 'CAN_MANAGE' | null>(null);
 
   // Non-null when viewing a session whose profile has been deleted
   const [deletedProfileName, setDeletedProfileName] = useState<string | null>(null);
 
-  // Editing lock state
+  // Editing lock state (default false until acquire succeeds)
   const [editingLockHolder, setEditingLockHolder] = useState<string | null>(null);
-  const [isLockHolder, setIsLockHolder] = useState(true);
+  const [isLockHolder, setIsLockHolder] = useState(false);
   const lockSessionRef = useRef<string | null>(null);
   const currentUserEmailRef = useRef<string | null>(null);
   const lastActivityRef = useRef<number>(Date.now());
@@ -109,7 +109,7 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
 
   // Main lock lifecycle: acquire on open, heartbeat, idle release, poll status
   useEffect(() => {
-    if (!sessionId || initialView !== 'main') return;
+    if (!sessionId || initialView !== 'main' || sessionPermission === null) return;
     const isViewer = sessionPermission === 'CAN_VIEW';
     let cancelled = false;
 

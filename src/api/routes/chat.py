@@ -84,6 +84,11 @@ def _check_chat_permission(session_id: str, db: DBSession) -> None:
                 group_ids=ctx.group_ids,
             )
             if permission and PERMISSION_PRIORITY.get(permission, 0) >= PERMISSION_PRIORITY.get(PermissionLevel.CAN_EDIT, 0):
+                # Permission OK — now check editing lock on the parent deck
+                try:
+                    session_manager.require_editing_lock(session_id)
+                except PermissionError as e:
+                    raise HTTPException(status_code=423, detail=str(e))
                 return
 
         raise HTTPException(

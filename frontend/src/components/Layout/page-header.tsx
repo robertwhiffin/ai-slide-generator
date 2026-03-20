@@ -3,6 +3,7 @@ import { Save, Download, Play, Share2, ChevronDown, FileDown, FileText, Presenta
 import { Button } from "@/ui/button"
 import { SidebarTrigger } from "@/ui/sidebar"
 import { Separator } from "@/ui/separator"
+import { NotificationBell } from "@/components/Notifications/NotificationBell"
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -216,6 +217,8 @@ export function PageHeader({
             Present
           </Button>
         )}
+
+        <NotificationBell />
 
         {profileSelector && (
           <>
