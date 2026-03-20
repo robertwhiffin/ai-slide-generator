@@ -1616,6 +1616,7 @@ class SessionManager:
         session_id: str,
         profile_id: Optional[int] = None,
         profile_name: Optional[str] = None,
+        created_by: Optional[str] = None,
     ) -> str:
         """Create a new chat request, return request_id.
 
@@ -1646,6 +1647,7 @@ class SessionManager:
                     title=f"Session {datetime.utcnow().strftime('%Y-%m-%d %H:%M')}",
                     profile_id=profile_id,
                     profile_name=profile_name,
+                    created_by=created_by,
                 )
                 db.add(session)
                 db.flush()
