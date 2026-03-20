@@ -192,7 +192,7 @@ async function goToMainView(page: Page, request: APIRequestContext): Promise<voi
   const session = await createRes.json();
   await page.goto(`/sessions/${session.session_id}/edit`);
   await page.waitForLoadState('networkidle');
-  await page.locator('header').getByRole('button', { name: 'Profile' }).waitFor({ state: 'visible', timeout: 15000 });
+  await page.locator('header').getByRole('button', { name: 'Profile', exact: true }).waitFor({ state: 'visible', timeout: 15000 });
 }
 
 async function goToHistory(page: Page): Promise<void> {
@@ -569,7 +569,7 @@ test.describe('Profile Switching', () => {
     try {
       await goToMainView(page, request);
 
-      const profileButton = page.locator('header').getByRole('button', { name: 'Profile' });
+      const profileButton = page.locator('header').getByRole('button', { name: 'Profile', exact: true });
       const initialText = await profileButton.textContent();
 
       await profileButton.click();
@@ -599,9 +599,10 @@ test.describe('Profile Switching', () => {
       await card.getByRole('button', { name: 'Load' }).click();
 
       const confirmButton = page.getByRole('button', { name: /Confirm|Load/i }).last();
-      if (await confirmButton.isVisible()) {
+      try {
+        await confirmButton.waitFor({ state: 'visible', timeout: 2000 });
         await confirmButton.click();
-      }
+      } catch { /* no confirm dialog appeared */ }
 
       await expect(card.getByText('Loaded', { exact: true })).toBeVisible();
     } finally {
@@ -649,7 +650,7 @@ test.describe('Profile Switching', () => {
     try {
       await goToMainView(page, request);
 
-      const headerProfileButton = page.locator('header').getByRole('button', { name: 'Profile' });
+      const headerProfileButton = page.locator('header').getByRole('button', { name: 'Profile', exact: true });
       await headerProfileButton.click();
       await expect(page.getByText(profileName1).first()).toBeVisible({ timeout: 8000 });
       await page.getByText(profileName1).first().click();
@@ -743,7 +744,7 @@ test.describe('Session-Profile Association', () => {
       // Use UI to reach main view (avoids 404 on session created via API)
       await goToGenerator(page);
 
-      const profileButton = page.locator('header').getByRole('button', { name: 'Profile' });
+      const profileButton = page.locator('header').getByRole('button', { name: 'Profile', exact: true });
       await profileButton.click();
       await page.getByText(profileName).click();
       await page.waitForTimeout(1000);
