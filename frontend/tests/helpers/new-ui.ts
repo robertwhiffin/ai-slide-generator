@@ -24,6 +24,9 @@ export async function goToGenerator(page: Page) {
   await page.getByRole('button', { name: NEW_DECK_BUTTON_LABEL }).click();
   await page.waitForURL(/\/sessions\/[^/]+\/edit/);
   await page.getByRole('textbox').waitFor({ state: 'visible', timeout: 10000 });
+  // Wait for permission + lock resolution so the input is enabled
+  await page.getByRole('textbox').waitFor({ state: 'attached', timeout: 5000 });
+  await page.waitForTimeout(500);
 }
 
 /**
