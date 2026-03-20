@@ -76,24 +76,21 @@ function SlidePanelComponent(props: SlidePanelProps, ref: React.Ref<SlidePanelHa
   });
 
   const fetchMentions = useCallback(() => {
-    if (!sessionId) return;
     api.listMentions().then(({ mentions }) => {
       const bySlide: Record<string, Array<{ id: number; user_name: string; content: string; created_at: string }>> = {};
       for (const m of mentions) {
-        if (m.session_id_str === sessionId) {
-          if (!bySlide[m.slide_id]) bySlide[m.slide_id] = [];
-          bySlide[m.slide_id].push({ id: m.id, user_name: m.user_name, content: m.content, created_at: m.created_at });
-        }
+        if (!bySlide[m.slide_id]) bySlide[m.slide_id] = [];
+        bySlide[m.slide_id].push({ id: m.id, user_name: m.user_name, content: m.content, created_at: m.created_at });
       }
       setMentionsBySlide(bySlide);
     }).catch(() => {});
-  }, [sessionId]);
+  }, []);
 
   useEffect(() => {
     fetchMentions();
     const timer = setInterval(fetchMentions, 3_000);
     return () => clearInterval(timer);
-  }, [fetchMentions, slideDeck]);
+  }, [fetchMentions]);
 
   const handleMarkMentionsSeen = useCallback((slideId: string) => {
     const now = new Date().toISOString();

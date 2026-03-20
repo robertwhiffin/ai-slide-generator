@@ -6,6 +6,7 @@ interface SessionHistoryProps {
   onSessionSelect: (sessionId: string) => void;
   onBack?: () => void;
   refreshKey?: number;
+  activeProfileId?: number;
 }
 
 type TabType = 'my' | 'shared';
@@ -13,6 +14,7 @@ type TabType = 'my' | 'shared';
 export const SessionHistory: React.FC<SessionHistoryProps> = ({
   onSessionSelect,
   refreshKey,
+  activeProfileId,
 }) => {
   const [mySessions, setMySessions] = useState<Session[]>([]);
   const [sharedPresentations, setSharedPresentations] = useState<SharedPresentation[]>([]);
@@ -28,7 +30,7 @@ export const SessionHistory: React.FC<SessionHistoryProps> = ({
       setLoading(true);
       const [myResult, sharedResult] = await Promise.all([
         api.listSessions(100),
-        api.listSharedPresentations(100),
+        api.listSharedPresentations(100, activeProfileId),
       ]);
       setMySessions(myResult.sessions);
       setSharedPresentations(sharedResult.presentations);
@@ -43,7 +45,7 @@ export const SessionHistory: React.FC<SessionHistoryProps> = ({
 
   useEffect(() => {
     loadSessions();
-  }, [refreshKey]); // Reload when refresh is triggered
+  }, [refreshKey, activeProfileId]);
 
   const sessions = mySessions;
 
