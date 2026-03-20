@@ -113,7 +113,13 @@ async function setupMocks(page: Page) {
       return;
     }
 
-    if (url.includes('limit=')) {
+    if (url.includes('/shared')) {
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ presentations: [], count: 0 }),
+      });
+    } else if (url.includes('limit=')) {
       // Sessions list
       route.fulfill({
         status: 200,
