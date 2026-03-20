@@ -63,7 +63,7 @@ export const ContributorsManager: React.FC<ContributorsManagerProps> = ({
   const [searchQuery, setSearchQuery] = useState('');
   const [searchResults, setSearchResults] = useState<Identity[]>([]);
   const [searching, setSearching] = useState(false);
-  const [selectedPermission, setSelectedPermission] = useState<PermissionLevel>('CAN_VIEW');
+  const [selectedPermission, setSelectedPermission] = useState<PermissionLevel>('CAN_EDIT');
 
   // Operation states
   const [addingContributor, setAddingContributor] = useState(false);
