@@ -14,8 +14,8 @@
   font-size: 1rem;
 }
 
-.badge-text {
-  color: #1e40af;
+.selection-badge__text {
+  color: #171717 !important;
   font-weight: 500;
 }
 

@@ -687,7 +687,7 @@ class TestSessionEndpoints:
     def test_update_session_not_found(self, client, mock_session_manager):
         """PATCH /api/sessions/{id} returns 404 for missing session."""
         from src.api.services.session_manager import SessionNotFoundError
-        mock_session_manager.rename_session.side_effect = SessionNotFoundError("nonexistent")
+        mock_session_manager.update_session.side_effect = SessionNotFoundError("nonexistent")
 
         response = client.patch("/api/sessions/nonexistent?title=New")
         assert response.status_code == 404

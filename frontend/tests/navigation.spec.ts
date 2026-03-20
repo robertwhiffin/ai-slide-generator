@@ -9,37 +9,37 @@ test.describe('Navigation', () => {
 
   test('clicking nav buttons changes URL', async ({ page }) => {
     await page.goto('/');
-    await page.click('button:has-text("Profiles")');
+    await page.getByRole('button', { name: 'Agent profiles' }).click();
     await expect(page).toHaveURL('/profiles');
 
-    await page.click('button:has-text("Slide Styles")');
+    await page.getByRole('button', { name: 'Slide styles' }).click();
     await expect(page).toHaveURL('/slide-styles');
 
-    await page.click('button:has-text("Deck Prompts")');
+    await page.getByRole('button', { name: 'Deck prompts' }).click();
     await expect(page).toHaveURL('/deck-prompts');
 
-    await page.click('button:has-text("Images")');
+    await page.getByRole('button', { name: 'Images' }).click();
     await expect(page).toHaveURL('/images');
 
-    await page.click('button:has-text("My Sessions")');
+    await page.getByRole('button', { name: 'View All Decks' }).click();
     await expect(page).toHaveURL('/history');
 
-    await page.click('button:has-text("Help")');
+    await page.getByRole('button', { name: 'Help' }).click();
     await expect(page).toHaveURL('/help');
   });
 
   test('browser back button returns to previous page', async ({ page }) => {
     await page.goto('/help');
-    await page.click('button:has-text("My Sessions")');
+    await page.getByRole('button', { name: 'View All Decks' }).click();
     await expect(page).toHaveURL('/history');
 
     await page.goBack();
     await expect(page).toHaveURL('/help');
   });
 
-  test('New Session always creates a fresh session', async ({ page }) => {
+  test('New Deck always creates a fresh session', async ({ page }) => {
     await page.goto('/help');
-    await page.click('button:has-text("New Session")');
+    await page.getByRole('button', { name: 'New Deck' }).click();
 
     // Should create a new UUID session and navigate there
     await expect(page).toHaveURL(/\/sessions\/[^/]+\/edit/);
@@ -52,7 +52,7 @@ test.describe('Navigation', () => {
     await page.goto('/history');
 
     // Click Restore on a session from the mock data
-    await page.click('text=Restore');
-    await expect(page).toHaveURL(`/sessions/${sessionId}/edit`);
+    await page.getByRole('button', { name: 'Restore' }).first().click();
+    await expect(page).toHaveURL(new RegExp(`/sessions/${sessionId}/edit`));
   });
 });

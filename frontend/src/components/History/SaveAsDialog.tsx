@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
+import { Button } from '@/ui/button';
 
 interface SaveAsDialogProps {
   isOpen: boolean;
@@ -37,25 +38,20 @@ export const SaveAsDialog: React.FC<SaveAsDialogProps> = ({
 
   return (
     <div className="fixed inset-0 z-50 overflow-y-auto">
-      <div className="flex items-center justify-center min-h-screen px-4">
+      <div className="flex min-h-screen items-center justify-center px-4">
         {/* Backdrop */}
         <div
-          className="fixed inset-0 bg-black bg-opacity-30 transition-opacity"
+          className="fixed inset-0 bg-black/50 backdrop-blur-sm transition-opacity"
           onClick={onCancel}
         />
 
         {/* Dialog */}
-        <div className="relative bg-white rounded-lg shadow-xl max-w-md w-full p-6">
-          <h3 className="text-lg font-semibold text-gray-900 mb-4">
-            Save Session
-          </h3>
-          
+        <div className="relative w-full max-w-md rounded-lg border border-border bg-card p-6 shadow-xl">
+          <h3 className="mb-4 text-lg font-semibold text-foreground">Save Session</h3>
+
           <form onSubmit={handleSubmit}>
             <div className="mb-4">
-              <label
-                htmlFor="session-name"
-                className="block text-sm font-medium text-gray-700 mb-1"
-              >
+              <label htmlFor="session-name" className="mb-1 block text-sm font-medium text-foreground">
                 Session Name
               </label>
               <input
@@ -64,29 +60,21 @@ export const SaveAsDialog: React.FC<SaveAsDialogProps> = ({
                 id="session-name"
                 value={title}
                 onChange={(e) => setTitle(e.target.value)}
-                className="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                className="flex h-9 w-full rounded-md border border-input bg-background px-3 py-1 text-sm shadow-sm transition-colors file:border-0 file:bg-transparent file:text-sm file:font-medium placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
                 placeholder="Enter a name for this session"
               />
-              <p className="mt-1 text-xs text-gray-500">
+              <p className="mt-1 text-xs text-muted-foreground">
                 Give your session a memorable name to find it later.
               </p>
             </div>
 
-            <div className="flex justify-end gap-3">
-              <button
-                type="button"
-                onClick={onCancel}
-                className="px-4 py-2 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-md hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-blue-500"
-              >
+            <div className="flex justify-end gap-2">
+              <Button type="button" variant="outline" onClick={onCancel}>
                 Cancel
-              </button>
-              <button
-                type="submit"
-                disabled={!title.trim()}
-                className="px-4 py-2 text-sm font-medium text-white bg-blue-600 border border-transparent rounded-md hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-50 disabled:cursor-not-allowed"
-              >
+              </Button>
+              <Button type="submit" disabled={!title.trim()}>
                 Save
-              </button>
+              </Button>
             </div>
           </form>
         </div>

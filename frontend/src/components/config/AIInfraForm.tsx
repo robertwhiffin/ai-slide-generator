@@ -1,6 +1,6 @@
 /**
  * AI Infrastructure configuration form.
- * 
+ *
  * Allows editing:
  * - LLM Endpoint selection (with searchable dropdown)
  * - Temperature slider (0.0 - 1.0)
@@ -8,6 +8,8 @@
  */
 
 import React, { useState, useEffect } from 'react';
+import { AlertCircle, CheckCircle } from 'lucide-react';
+import { Button } from '@/ui/button';
 import type { AIInfraConfig, AIInfraConfigUpdate } from '../../api/config';
 import { configApi } from '../../api/config';
 import { useEndpoints } from '../../hooks/useEndpoints';
@@ -105,22 +107,29 @@ export const AIInfraForm: React.FC<AIInfraFormProps> = ({ config, onSave, saving
     <div className="space-y-6">
       {/* Status Messages */}
       {error && (
-        <div className="p-3 bg-red-50 border border-red-200 rounded text-red-700 text-sm">
-          {error}
+        <div className="flex items-center gap-2 rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm text-destructive">
+          <AlertCircle className="size-4 shrink-0" />
+          <span>{error}</span>
         </div>
       )}
       {success && (
-        <div className="p-3 bg-green-50 border border-green-200 rounded text-green-700 text-sm">
-          Configuration saved successfully!
+        <div className="flex items-center gap-2 rounded-md border border-green-200 bg-green-50 px-3 py-2 text-sm text-green-700">
+          <CheckCircle className="size-4 shrink-0" />
+          <span>Configuration saved successfully!</span>
         </div>
       )}
       {validationResult && (
-        <div className={`p-3 border rounded text-sm ${
-          validationResult.success 
-            ? 'bg-green-50 border-green-200 text-green-700' 
-            : 'bg-yellow-50 border-yellow-200 text-yellow-700'
+        <div className={`flex items-center gap-2 rounded-md border px-3 py-2 text-sm ${
+          validationResult.success
+            ? 'border-green-200 bg-green-50 text-green-700'
+            : 'border-yellow-200 bg-yellow-50 text-yellow-700'
         }`}>
-          <strong>Validation:</strong> {validationResult.message}
+          {validationResult.success ? (
+            <CheckCircle className="size-4 shrink-0" />
+          ) : (
+            <AlertCircle className="size-4 shrink-0" />
+          )}
+          <span><strong>Validation:</strong> {validationResult.message}</span>
         </div>
       )}
 
@@ -237,29 +246,28 @@ export const AIInfraForm: React.FC<AIInfraFormProps> = ({ config, onSave, saving
       </div>
 
       {/* Action Buttons */}
-      <div className="flex justify-between pt-4 border-t">
-        <button
+      <div className="flex justify-between border-t border-border pt-4">
+        <Button
+          variant="secondary"
           onClick={handleValidate}
           disabled={validating || saving || !llmEndpoint.trim()}
-          className="px-4 py-2 bg-purple-500 hover:bg-purple-600 text-white rounded transition-colors disabled:bg-purple-300 disabled:cursor-not-allowed"
         >
           {validating ? 'Validating...' : 'Test Connection'}
-        </button>
-        <div className="flex gap-3">
-          <button
+        </Button>
+        <div className="flex gap-2">
+          <Button
+            variant="outline"
             onClick={handleReset}
             disabled={!isDirty || saving}
-            className="px-4 py-2 bg-gray-200 hover:bg-gray-300 text-gray-800 rounded transition-colors disabled:bg-gray-100 disabled:text-gray-400 disabled:cursor-not-allowed"
           >
             Reset
-          </button>
-          <button
+          </Button>
+          <Button
             onClick={handleSave}
             disabled={!isDirty || saving}
-            className="px-4 py-2 bg-blue-500 hover:bg-blue-600 text-white rounded transition-colors disabled:bg-blue-300 disabled:cursor-not-allowed"
           >
             {saving ? 'Saving...' : 'Save Changes'}
-          </button>
+          </Button>
         </div>
       </div>
     </div>

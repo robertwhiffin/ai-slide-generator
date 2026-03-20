@@ -36,6 +36,13 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/sessions", tags=["sessions"])
 
 
+class UpdateSessionRequest(BaseModel):
+    """Optional body for PATCH /api/sessions/{session_id}."""
+
+    title: Optional[str] = Field(None, description="Session/deck title")
+    slide_count: Optional[int] = Field(None, ge=0, description="Deck slide count")
+
+
 def _get_session_permission(
     session_info: dict,
     db: Session,
@@ -419,18 +426,26 @@ async def get_session(session_id: str, db: Session = Depends(get_db)):
 
 
 @router.patch("/{session_id}")
-async def update_session(session_id: str, title: str = None, db: Session = Depends(get_db)):
-    """Update session (rename).
+async def update_session(
+    session_id: str,
+    title: Optional[str] = Query(None, description="Session title (legacy query)"),
+    body: Optional[UpdateSessionRequest] = None,
+    db: Session = Depends(get_db),
+):
+    """Update session metadata (title and/or slide_count).
 
     Requires CAN_EDIT permission (via ownership or profile access).
-
-    Args:
-        session_id: Session to update
-        title: New session title
-
-    Returns:
-        Updated session info
+    At least one of title (query or body) or body.slide_count is required.
     """
+    title_val = body.title if body else None
+    if title_val is None and title is not None:
+        title_val = title
+    slide_count_val = body.slide_count if body else None
+    if title_val is None and slide_count_val is None:
+        raise HTTPException(
+            status_code=400,
+            detail="At least one of title or slide_count is required",
+        )
     try:
         session_manager = get_session_manager()
         
@@ -439,14 +454,15 @@ async def update_session(session_id: str, title: str = None, db: Session = Depen
         _require_session_access(session, db, PermissionLevel.CAN_EDIT)
         
         result = await asyncio.to_thread(
-            session_manager.rename_session,
+            session_manager.update_session,
             session_id,
-            title,
+            title=title_val,
+            slide_count=slide_count_val,
         )
 
         logger.info(
-            "Session renamed via API",
-            extra={"session_id": session_id, "new_title": title},
+            "Session updated via API",
+            extra={"session_id": session_id, "title": title_val, "slide_count": slide_count_val},
         )
 
         return result
