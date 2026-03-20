@@ -149,16 +149,18 @@ async def create_session(request: CreateSessionRequest = None):
     request = request or CreateSessionRequest()
     current_user = get_current_user()
 
-    # Attach the currently loaded profile so the session is associated from the start
-    profile_id = None
-    profile_name = None
-    try:
-        from src.core.settings_db import get_settings
-        settings = get_settings()
-        profile_id = getattr(settings, 'profile_id', None)
-        profile_name = getattr(settings, 'profile_name', None)
-    except Exception:
-        pass
+    # Use profile from the request (sent by the frontend) if available,
+    # otherwise fall back to the server-side loaded profile.
+    profile_id = request.profile_id
+    profile_name = request.profile_name
+    if profile_id is None:
+        try:
+            from src.core.settings_db import get_settings
+            settings = get_settings()
+            profile_id = getattr(settings, 'profile_id', None)
+            profile_name = getattr(settings, 'profile_name', None)
+        except Exception:
+            pass
 
     try:
         session_manager = get_session_manager()
