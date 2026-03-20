@@ -115,7 +115,7 @@ export const ProfileCreationWizard: React.FC<ProfileCreationWizardProps> = ({
   const [identitySearch, setIdentitySearch] = useState('');
   const [searchResults, setSearchResults] = useState<Identity[]>([]);
   const [searchingIdentities, setSearchingIdentities] = useState(false);
-  const [selectedPermission, setSelectedPermission] = useState<PermissionLevel>('CAN_VIEW');
+  const [selectedPermission, setSelectedPermission] = useState<PermissionLevel>('CAN_EDIT');
 
   // Initialize defaults when wizard opens
   useEffect(() => {
