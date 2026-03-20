@@ -2178,14 +2178,20 @@ class SessionManager:
                     results.append(d)
             return results
 
-    def get_mentionable_users(self, session_id: str) -> List[Dict[str, str]]:
+    def get_mentionable_users(
+        self,
+        session_id: str,
+        query: Optional[str] = None,
+    ) -> List[Dict[str, str]]:
         """Return users that can be @mentioned for a session.
 
         Each entry has ``username`` (email) and ``display_name``
         (SCIM displayName, falling back to the email if absent).
 
-        When the profile has ``global_permission`` set, all workspace
-        users are included (they all have access to this profile).
+        When the profile has ``global_permission`` set and a *query* is
+        provided, workspace users matching the query are included via
+        server-side SCIM filtering.  Without a query the initial load
+        returns only the owner + explicit contributors (fast).
         """
         from src.database.models.profile import ConfigProfile
         from src.database.models.profile_contributor import ConfigProfileContributor
@@ -2209,21 +2215,23 @@ class SessionManager:
                 seen.add(email)
                 result.append({"username": email, "display_name": resolve_display_name(email)})
 
+            is_global = False
             if deck_owner.profile_id:
                 profile = db.query(ConfigProfile).filter(ConfigProfile.id == deck_owner.profile_id).first()
+                is_global = bool(profile and profile.global_permission)
 
-                # If profile is globally shared, include all workspace users
-                if profile and profile.global_permission and provider:
+                # For global profiles with a search query, use SCIM server-side filtering
+                if is_global and query and provider:
                     try:
-                        workspace_users = provider.list_users(max_results=500)
+                        workspace_users = provider.list_users(filter_query=query, max_results=20)
                         for wu in workspace_users:
-                            email = wu.get("userName") or wu.get("emails", [{}])[0].get("value")
+                            email = wu.get("userName")
                             if email and email not in seen:
                                 seen.add(email)
                                 display = wu.get("displayName") or email
                                 result.append({"username": email, "display_name": display})
                     except Exception:
-                        logger.warning("Failed to list workspace users for global profile mentions", exc_info=True)
+                        logger.warning("Failed to search workspace users for global profile mentions", exc_info=True)
 
                 contributors = (
                     db.query(
@@ -2253,7 +2261,7 @@ class SessionManager:
                         result.append({"username": email, "display_name": resolve_display_name(email)})
 
             result.sort(key=lambda u: u["display_name"])
-            return result
+            return {"users": result, "is_global": is_global}
 
     def _get_session_id_str(self, db, internal_id: int) -> Optional[str]:
         """Resolve internal DB id to the external session_id string."""

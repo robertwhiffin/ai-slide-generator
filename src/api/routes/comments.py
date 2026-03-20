@@ -52,10 +52,12 @@ class UpdateCommentRequest(BaseModel):
 @router.get("/mentionable-users")
 async def mentionable_users(
     session_id: str = Query(..., description="Session ID"),
+    query: Optional[str] = Query(None, description="Search filter for workspace users"),
 ):
     """List users who can be @mentioned in comments for a session.
 
-    Returns the session owner plus all profile contributors.
+    Returns the session owner, profile contributors, and — for globally
+    shared profiles — workspace users matching the optional *query*.
     """
     current_user = get_current_user()
     if not current_user:
@@ -63,11 +65,12 @@ async def mentionable_users(
 
     session_manager = get_session_manager()
     try:
-        users = await asyncio.to_thread(
+        result = await asyncio.to_thread(
             session_manager.get_mentionable_users,
             session_id,
+            query,
         )
-        return {"users": users}
+        return {"users": result["users"], "is_global": result["is_global"]}
     except SessionNotFoundError:
         raise HTTPException(status_code=404, detail="Session not found")
     except Exception as e:
