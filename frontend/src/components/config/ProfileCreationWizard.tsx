@@ -13,7 +13,7 @@
  */
 
 import React, { useState, useEffect, useCallback } from 'react';
-import { FiCheck, FiChevronLeft, FiChevronRight, FiX, FiInfo, FiExternalLink, FiSearch, FiUsers, FiUser, FiTrash2 } from 'react-icons/fi';
+import { FiCheck, FiChevronLeft, FiChevronRight, FiX, FiInfo, FiExternalLink, FiSearch, FiUsers, FiUser, FiTrash2, FiGlobe } from 'react-icons/fi';
 import { configApi, type DeckPrompt, type SlideStyle, type AvailableGenieSpaces, type Identity, type ContributorCreate, type PermissionLevel } from '../../api/config';
 import { DOCS_URLS } from '../../constants/docs';
 
@@ -49,7 +49,8 @@ interface WizardFormData {
   selectedSlideStyleId: number | null;
   // Deck prompt
   selectedDeckPromptId: number | null;
-  // Contributors (sharing)
+  // Sharing
+  isGlobal: boolean;
   contributors: ContributorCreate[];
 }
 
@@ -77,6 +78,7 @@ export const ProfileCreationWizard: React.FC<ProfileCreationWizardProps> = ({
     genieDescription: '',
     selectedSlideStyleId: null,
     selectedDeckPromptId: null,
+    isGlobal: false,
     contributors: [],
   });
   
@@ -127,6 +129,7 @@ export const ProfileCreationWizard: React.FC<ProfileCreationWizardProps> = ({
         genieDescription: '',
         selectedSlideStyleId: null,
         selectedDeckPromptId: null,
+        isGlobal: false,
         contributors: [],
       });
       setError(null);
@@ -359,12 +362,20 @@ export const ProfileCreationWizard: React.FC<ProfileCreationWizardProps> = ({
         prompts: promptsConfig,
       });
       
+      // Set global visibility if toggled on
+      if (formData.isGlobal) {
+        try {
+          await configApi.setProfileGlobal(response.id, true);
+        } catch (globalErr) {
+          console.error('Failed to set global visibility:', globalErr);
+        }
+      }
+
       // Add contributors if any were selected
       if (formData.contributors.length > 0) {
         try {
           await configApi.addContributorsBulk(response.id, formData.contributors);
         } catch (contributorErr) {
-          // Log but don't fail profile creation for contributor errors
           console.error('Failed to add contributors:', contributorErr);
         }
       }
@@ -761,6 +772,36 @@ export const ProfileCreationWizard: React.FC<ProfileCreationWizardProps> = ({
                 </p>
               </div>
 
+              {/* Share with everyone toggle */}
+              <div className="flex items-center justify-between p-4 bg-blue-50 border border-blue-200 rounded-lg">
+                <div className="flex items-center gap-3">
+                  <FiGlobe className={`text-lg ${formData.isGlobal ? 'text-blue-600' : 'text-gray-400'}`} />
+                  <div>
+                    <p className="font-medium text-gray-900">Share with everyone</p>
+                    <p className="text-sm text-gray-500">
+                      {formData.isGlobal
+                        ? 'All workspace users can view and use this profile'
+                        : 'Only you and contributors below can access this profile'}
+                    </p>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  role="switch"
+                  aria-checked={formData.isGlobal}
+                  onClick={() => setFormData(prev => ({ ...prev, isGlobal: !prev.isGlobal }))}
+                  className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none focus:ring-2 focus:ring-purple-500 focus:ring-offset-2 ${
+                    formData.isGlobal ? 'bg-blue-600' : 'bg-gray-200'
+                  }`}
+                >
+                  <span
+                    className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out ${
+                      formData.isGlobal ? 'translate-x-5' : 'translate-x-0'
+                    }`}
+                  />
+                </button>
+              </div>
+
               {/* Search and permission selector */}
               <div className="flex gap-3">
                 <div className="flex-1 relative">
@@ -945,11 +986,17 @@ export const ProfileCreationWizard: React.FC<ProfileCreationWizardProps> = ({
                   </dl>
                 </div>
 
-                {/* Contributors */}
+                {/* Sharing */}
                 <div className="bg-indigo-50 rounded-md p-4">
                   <h4 className="text-sm font-medium text-indigo-700 mb-2">
-                    Sharing ({formData.contributors.length} contributor{formData.contributors.length !== 1 ? 's' : ''})
+                    Sharing
                   </h4>
+                  {formData.isGlobal && (
+                    <div className="flex items-center gap-2 text-sm mb-2">
+                      <FiGlobe className="text-blue-600" size={14} />
+                      <span className="font-medium text-indigo-900">Visible to all workspace users</span>
+                    </div>
+                  )}
                   {formData.contributors.length > 0 ? (
                     <ul className="space-y-1">
                       {formData.contributors.map(c => (
@@ -966,11 +1013,11 @@ export const ProfileCreationWizard: React.FC<ProfileCreationWizardProps> = ({
                         </li>
                       ))}
                     </ul>
-                  ) : (
+                  ) : !formData.isGlobal ? (
                     <p className="text-sm text-indigo-600">
                       Private profile - no contributors added.
                     </p>
-                  )}
+                  ) : null}
                 </div>
 
                 {/* Defaults note */}
