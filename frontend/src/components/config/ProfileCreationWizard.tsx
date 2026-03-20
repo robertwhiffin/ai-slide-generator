@@ -364,20 +364,12 @@ export const ProfileCreationWizard: React.FC<ProfileCreationWizardProps> = ({
       
       // Set global visibility if toggled on
       if (formData.isGlobal) {
-        try {
-          await configApi.setProfileGlobal(response.id, true);
-        } catch (globalErr) {
-          console.error('Failed to set global visibility:', globalErr);
-        }
+        await configApi.setProfileGlobal(response.id, true);
       }
 
       // Add contributors if any were selected
       if (formData.contributors.length > 0) {
-        try {
-          await configApi.addContributorsBulk(response.id, formData.contributors);
-        } catch (contributorErr) {
-          console.error('Failed to add contributors:', contributorErr);
-        }
+        await configApi.addContributorsBulk(response.id, formData.contributors);
       }
       
       onSuccess(response.id);

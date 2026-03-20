@@ -176,6 +176,7 @@ def get_profile(
             name=profile.name,
             description=profile.description,
             is_default=profile.is_default,
+            is_global=profile.is_global,
             created_at=profile.created_at,
             created_by=profile.created_by,
             updated_at=profile.updated_at,
