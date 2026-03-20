@@ -354,6 +354,7 @@ async def submit_chat_async(
     _check_chat_permission(request.session_id, db)
 
     session_manager = get_session_manager()
+    current_user = get_current_user()
 
     # Check session lock first
     locked = await asyncio.to_thread(
