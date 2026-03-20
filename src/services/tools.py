@@ -182,7 +182,7 @@ def query_genie_space(
                     # Extract data and columns from response
                     response_dict = attachment_response.as_dict()["statement_response"]
                     columns = [_["name"] for _ in response_dict["manifest"]["schema"]["columns"]]
-                    data_array = response_dict["result"]["data_array"]
+                    data_array = response_dict.get("result", {}).get("data_array", [])
                     # Create DataFrame and convert to records
                     df = pd.DataFrame(data_array, columns=columns)
                     data = df.to_csv(index=False)
