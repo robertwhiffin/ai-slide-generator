@@ -1,6 +1,5 @@
 import { test, expect, Page } from '@playwright/test';
 import {
-  mockProfiles,
   mockProfileSummaries,
   mockDefaultAgentConfig,
   mockAvailableTools,
@@ -83,11 +82,6 @@ async function setupMocks(page: Page) {
   // New profiles API (GET /api/profiles)
   await page.route(/\/api\/profiles$/, (route) => {
     route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(mockProfileSummaries) });
-  });
-
-  // Legacy profiles endpoint
-  await page.route('http://127.0.0.1:8000/api/settings/profiles', (route) => {
-    route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(mockProfiles) });
   });
 
   // Available tools
@@ -430,12 +424,6 @@ test.describe('Form Submission', () => {
     });
 
     // Also set up other mocks
-    await page.route('http://127.0.0.1:8000/api/settings/profiles', (route) => {
-      route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(mockProfiles) });
-    });
-    await page.route(/http:\/\/127.0.0.1:8000\/api\/settings\/profiles\/\d+/, (route) => {
-      route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(mockProfiles[0]) });
-    });
     await page.route('http://127.0.0.1:8000/api/settings/slide-styles', (route) => {
       route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(mockSlideStyles) });
     });
@@ -490,12 +478,6 @@ test.describe('Empty State', () => {
     });
 
     // Set up other mocks
-    await page.route('http://127.0.0.1:8000/api/settings/profiles', (route) => {
-      route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(mockProfiles) });
-    });
-    await page.route(/http:\/\/127.0.0.1:8000\/api\/settings\/profiles\/\d+/, (route) => {
-      route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(mockProfiles[0]) });
-    });
     await page.route('http://127.0.0.1:8000/api/settings/slide-styles', (route) => {
       route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(mockSlideStyles) });
     });

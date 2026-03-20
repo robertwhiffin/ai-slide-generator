@@ -4,7 +4,7 @@
  */
 import type { Page } from '@playwright/test';
 import {
-  mockProfiles,
+  mockProfileSummaries,
   mockDefaultAgentConfig,
   mockAvailableTools,
   mockDeckPrompts,
@@ -34,7 +34,7 @@ export async function setupMocks(page: Page) {
     route.fulfill({
       status: 200,
       contentType: 'application/json',
-      body: JSON.stringify(mockProfiles),
+      body: JSON.stringify(mockProfileSummaries),
     });
   });
 

@@ -164,7 +164,6 @@ export class UserGuideCapture {
 export async function setupUserGuideMocks(page: Page): Promise<void> {
   // Import mocks from the fixtures
   const {
-    mockProfiles,
     mockProfileSummaries,
     mockDefaultAgentConfig,
     mockAvailableTools,
@@ -179,15 +178,6 @@ export async function setupUserGuideMocks(page: Page): Promise<void> {
       status: 200,
       contentType: 'application/json',
       body: JSON.stringify(mockProfileSummaries)
-    });
-  });
-
-  // Legacy profiles API (GET /api/settings/profiles) — used by ProfileContext/ProfileList
-  await page.route('**/api/settings/profiles', (route) => {
-    route.fulfill({
-      status: 200,
-      contentType: 'application/json',
-      body: JSON.stringify(mockProfiles)
     });
   });
 
