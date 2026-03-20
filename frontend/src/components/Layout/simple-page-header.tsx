@@ -6,8 +6,6 @@ import {
   BreadcrumbList,
   BreadcrumbPage,
 } from "@/ui/breadcrumb"
-import { NotificationBell } from "@/components/Notifications/NotificationBell"
-
 export function SimplePageHeader({ title }: { title: string }) {
   return (
     <header className="flex h-14 shrink-0 items-center gap-2 border-b border-border px-3">
@@ -27,7 +25,6 @@ export function SimplePageHeader({ title }: { title: string }) {
           </BreadcrumbList>
         </Breadcrumb>
       </div>
-      <NotificationBell />
     </header>
   )
 }

@@ -73,10 +73,6 @@ export function DeckHistory({
     return `${days}d ago`
   }
 
-  if (sessions.length === 0) {
-    return null
-  }
-
   return (
     <SidebarGroup className="group-data-[collapsible=icon]:hidden">
       <SidebarGroupLabel>Recent Decks</SidebarGroupLabel>

@@ -2183,7 +2183,11 @@ class SessionManager:
 
         Each entry has ``username`` (email) and ``display_name``
         (SCIM displayName, falling back to the email if absent).
+
+        When the profile has ``global_permission`` set, all workspace
+        users are included (they all have access to this profile).
         """
+        from src.database.models.profile import ConfigProfile
         from src.database.models.profile_contributor import ConfigProfileContributor
         from src.services.identity_provider import resolve_display_name
 
@@ -2206,6 +2210,21 @@ class SessionManager:
                 result.append({"username": email, "display_name": resolve_display_name(email)})
 
             if deck_owner.profile_id:
+                profile = db.query(ConfigProfile).filter(ConfigProfile.id == deck_owner.profile_id).first()
+
+                # If profile is globally shared, include all workspace users
+                if profile and profile.global_permission and provider:
+                    try:
+                        workspace_users = provider.list_users(max_results=500)
+                        for wu in workspace_users:
+                            email = wu.get("userName") or wu.get("emails", [{}])[0].get("value")
+                            if email and email not in seen:
+                                seen.add(email)
+                                display = wu.get("displayName") or email
+                                result.append({"username": email, "display_name": display})
+                    except Exception:
+                        logger.warning("Failed to list workspace users for global profile mentions", exc_info=True)
+
                 contributors = (
                     db.query(
                         ConfigProfileContributor.identity_id,
