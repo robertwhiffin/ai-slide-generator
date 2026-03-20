@@ -4,12 +4,10 @@
  * Displays all profiles in a list with actions:
  * - Rename profile
  * - Delete profile
- * - Set as default
- * - Load profile (hot-reload)
  */
 
 import React, { useState } from 'react';
-import { User, ChevronDown, Trash2, Play, Star, Pencil } from 'lucide-react';
+import { User, ChevronDown, Trash2, Pencil } from 'lucide-react';
 import { Button } from '@/ui/button';
 import { Badge } from '@/ui/badge';
 import type { Profile } from '../../api/config';
@@ -23,12 +21,9 @@ interface ProfileListProps {
 export const ProfileList: React.FC<ProfileListProps> = ({ onProfileChange }) => {
   const {
     profiles,
-    currentProfile,
     loading,
     error,
     deleteProfile,
-    setDefaultProfile,
-    loadProfile,
     updateProfile,
   } = useProfiles();
 
@@ -73,57 +68,6 @@ export const ProfileList: React.FC<ProfileListProps> = ({ onProfileChange }) => 
           setConfirmDialog(prev => ({ ...prev, isOpen: false, loading: false }));
         } catch (err) {
           const message = err instanceof Error ? err.message : 'Failed to delete profile';
-          setConfirmDialog(prev => ({ ...prev, error: message, loading: false }));
-        } finally {
-          setActionLoading(null);
-        }
-      },
-    });
-  };
-
-  // Handle set default with confirmation
-  const handleSetDefault = (profile: Profile) => {
-    setConfirmDialog({
-      isOpen: true,
-      title: 'Set Default Profile',
-      message: `Set "${profile.name}" as the default profile?\n\nThe default profile is loaded when the application starts.`,
-      error: null,
-      loading: false,
-      onConfirm: async () => {
-        setConfirmDialog(prev => ({ ...prev, loading: true, error: null }));
-        setActionLoading(profile.id);
-        try {
-          await setDefaultProfile(profile.id);
-          setConfirmDialog(prev => ({ ...prev, isOpen: false, loading: false }));
-        } catch (err) {
-          const message = err instanceof Error ? err.message : 'Failed to set default profile';
-          setConfirmDialog(prev => ({ ...prev, error: message, loading: false }));
-        } finally {
-          setActionLoading(null);
-        }
-      },
-    });
-  };
-
-  // Handle load profile with confirmation
-  const handleLoadProfile = (profile: Profile) => {
-    setConfirmDialog({
-      isOpen: true,
-      title: 'Load Profile',
-      message: `Load "${profile.name}" and hot-reload the application configuration?\n\nCurrent sessions will be preserved.`,
-      error: null,
-      loading: false,
-      onConfirm: async () => {
-        setConfirmDialog(prev => ({ ...prev, loading: true, error: null }));
-        setActionLoading(profile.id);
-        try {
-          await loadProfile(profile.id);
-          if (onProfileChange) {
-            onProfileChange();
-          }
-          setConfirmDialog(prev => ({ ...prev, isOpen: false, loading: false }));
-        } catch (err) {
-          const message = err instanceof Error ? err.message : 'Failed to load profile';
           setConfirmDialog(prev => ({ ...prev, error: message, loading: false }));
         } finally {
           setActionLoading(null);
@@ -194,23 +138,10 @@ export const ProfileList: React.FC<ProfileListProps> = ({ onProfileChange }) => 
         <div>
           <h1 className="text-xl font-bold text-foreground">Agent Profiles</h1>
           <p className="mt-1 text-sm text-muted-foreground">
-            Manage your saved configuration profiles. Load different profiles to switch settings without restarting.
-          </p>
-          <p className="mt-1 text-xs text-muted-foreground">
-            To create a new profile, use "Save as Profile" from the generator.
+            Manage your saved configuration profiles. Use "Save as Profile" from the generator to create new ones.
           </p>
         </div>
       </div>
-
-      {/* Current Profile Badge */}
-      {currentProfile && (
-        <div className="rounded-lg border border-primary/30 bg-primary/5 px-4 py-3">
-          <span className="text-sm text-primary">
-            <strong>Currently Loaded:</strong> {currentProfile.name}
-            {currentProfile.is_default && ' (Default)'}
-          </span>
-        </div>
-      )}
 
       {/* Profile Cards */}
       {profiles.length === 0 ? (
@@ -246,11 +177,6 @@ export const ProfileList: React.FC<ProfileListProps> = ({ onProfileChange }) => 
                         {profile.is_default && (
                           <Badge variant="secondary" className="text-xs">
                             Default
-                          </Badge>
-                        )}
-                        {currentProfile?.id === profile.id && (
-                          <Badge className="text-xs bg-green-500/10 text-green-700 hover:bg-green-500/20">
-                            Loaded
                           </Badge>
                         )}
                       </div>
@@ -353,32 +279,6 @@ export const ProfileList: React.FC<ProfileListProps> = ({ onProfileChange }) => 
                             <Pencil className="size-3.5" />
                             Rename
                           </Button>
-
-                          {currentProfile?.id !== profile.id && (
-                            <Button
-                              variant="outline"
-                              size="sm"
-                              onClick={() => handleLoadProfile(profile)}
-                              disabled={actionLoading === profile.id}
-                              className="gap-1.5"
-                            >
-                              <Play className="size-3.5" />
-                              Load
-                            </Button>
-                          )}
-
-                          {!profile.is_default && (
-                            <Button
-                              variant="outline"
-                              size="sm"
-                              onClick={() => handleSetDefault(profile)}
-                              disabled={actionLoading === profile.id}
-                              className="gap-1.5"
-                            >
-                              <Star className="size-3.5" />
-                              Set as Default
-                            </Button>
-                          )}
                         </div>
                       )}
                     </div>
