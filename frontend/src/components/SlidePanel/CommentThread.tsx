@@ -33,7 +33,7 @@ export interface MentionableUser {
 
 function renderContentWithMentions(content: string, users: MentionableUser[] = []): React.ReactNode {
   const emailToName = new Map(users.map(u => [u.username.toLowerCase(), u.display_name]));
-  const parts = content.split(/(@[\w.\-]+(?:@[\w.\-]+)?)/g);
+  const parts = content.split(/(@[\w.+\-]+(?:@[\w.\-]+)?)/g);
   return parts.map((part, i) => {
     if (part.startsWith('@')) {
       const email = part.slice(1).toLowerCase();
@@ -184,7 +184,7 @@ const CommentBubble: React.FC<CommentBubbleProps> = ({
   const [isReplying, setIsReplying] = useState(false);
   const [replyContent, setReplyContent] = useState('');
   const [busy, setBusy] = useState(false);
-  const isAuthor = currentUser !== '' && comment.user_name === currentUser;
+  const isAuthor = currentUser !== '' && (comment.user_email === currentUser || comment.user_name === currentUser);
 
   const handleEdit = async () => {
     if (!editContent.trim() || busy) return;
@@ -440,8 +440,12 @@ export const CommentThread: React.FC<CommentThreadProps> = ({ sessionId, slideId
     const resp = await api.listComments(sessionId, slideId, showResolved);
     setComments(resp.comments);
     if (resp.current_user) setCurrentUser(resp.current_user);
-    notifyParent(resp.comments.length, true);
-  }, [sessionId, slideId, showResolved, notifyParent]);
+    const user = resp.current_user || currentUser;
+    const hasMentions = resp.comments.some(
+      (c: { mentions?: string[] }) => c.mentions?.some(m => m.toLowerCase() === user.toLowerCase())
+    );
+    notifyParent(resp.comments.length, hasMentions);
+  }, [sessionId, slideId, showResolved, notifyParent, currentUser]);
 
   useEffect(() => {
     fetchComments();
@@ -468,7 +472,7 @@ export const CommentThread: React.FC<CommentThreadProps> = ({ sessionId, slideId
   const handleAdd = async () => {
     if (!newContent.trim() || posting) return;
     const content = resolveMentionsToEmails(newContent.trim(), mentionableUsers);
-    const mentionMatches = content.match(/@[\w.\-]+(?:@[\w.\-]+)?/g) || [];
+    const mentionMatches = content.match(/@[\w.+\-]+(?:@[\w.\-]+)?/g) || [];
     const hasMentions = mentionMatches.length > 0;
 
     // Optimistic: insert placeholder immediately

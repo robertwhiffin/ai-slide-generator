@@ -2,6 +2,7 @@ export interface SlideComment {
   id: number;
   slide_id: string;
   user_name: string;
+  user_email?: string;
   content: string;
   mentions: string[];
   resolved: boolean;

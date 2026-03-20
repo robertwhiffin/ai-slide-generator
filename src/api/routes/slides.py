@@ -19,6 +19,7 @@ from sqlalchemy.orm import Session
 
 from src.api.services.chat_service import get_chat_service
 from src.api.services.session_manager import SessionNotFoundError, VersionConflictError, get_session_manager
+from src.core.context_utils import run_in_thread_with_context
 from src.core.database import get_db
 from src.core.permission_context import get_permission_context
 from src.core.user_context import get_current_user
@@ -208,10 +209,14 @@ async def reorder_slides(request: ReorderRequest, db: Session = Depends(get_db))
     Raises:
         HTTPException: 403 if no permission, 400 for validation errors, 409 if session busy, 500 on error
     """
-    # Check permission first
     _require_slide_permission(request.session_id, db, PermissionLevel.CAN_EDIT)
     
     session_manager = get_session_manager()
+
+    try:
+        await run_in_thread_with_context(session_manager.require_editing_lock, request.session_id)
+    except PermissionError as e:
+        raise HTTPException(status_code=423, detail=str(e))
 
     locked = await asyncio.to_thread(
         session_manager.acquire_session_lock,
@@ -272,9 +277,13 @@ async def update_slide(index: int, request: UpdateSlideRequest, db: Session = De
     Raises:
         HTTPException: 403 if no permission, 400 for validation errors, 409 if session busy, 500 on error
     """
-    # Check permission first
     _require_slide_permission(request.session_id, db, PermissionLevel.CAN_EDIT)
     session_manager = get_session_manager()
+
+    try:
+        await run_in_thread_with_context(session_manager.require_editing_lock, request.session_id)
+    except PermissionError as e:
+        raise HTTPException(status_code=423, detail=str(e))
 
     locked = await asyncio.to_thread(
         session_manager.acquire_session_lock,
@@ -336,10 +345,14 @@ async def duplicate_slide(index: int, request: SlideActionRequest, db: Session =
     Raises:
         HTTPException: 403 if no permission, 400 for validation errors, 409 if session busy, 500 on error
     """
-    # Check permission first
     _require_slide_permission(request.session_id, db, PermissionLevel.CAN_EDIT)
     
     session_manager = get_session_manager()
+
+    try:
+        await run_in_thread_with_context(session_manager.require_editing_lock, request.session_id)
+    except PermissionError as e:
+        raise HTTPException(status_code=423, detail=str(e))
 
     locked = await asyncio.to_thread(
         session_manager.acquire_session_lock,
@@ -406,10 +419,14 @@ async def delete_slide(
     Raises:
         HTTPException: 403 if no permission, 400 for validation errors, 409 if session busy or version conflict, 500 on error
     """
-    # Check permission first
     _require_slide_permission(session_id, db, PermissionLevel.CAN_EDIT)
     
     session_manager = get_session_manager()
+
+    try:
+        await run_in_thread_with_context(session_manager.require_editing_lock, session_id)
+    except PermissionError as e:
+        raise HTTPException(status_code=423, detail=str(e))
 
     locked = await asyncio.to_thread(
         session_manager.acquire_session_lock,
@@ -839,7 +856,7 @@ async def restore_version(version_number: int, request: RestoreVersionRequest):
         )
 
     try:
-        result = await asyncio.to_thread(
+        result = await run_in_thread_with_context(
             session_manager.restore_version,
             request.session_id,
             version_number,

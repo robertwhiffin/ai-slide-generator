@@ -1284,22 +1284,11 @@ class SessionManager:
         Raises:
             ValueError: If version not found
         """
+        self.require_editing_lock(session_id)
+
         with get_db_session() as db:
             session = self._get_session_or_raise(db, session_id)
             deck_owner = self._get_deck_owner_session(db, session)
-
-            # Reject if another user holds an active editing lock
-            if deck_owner.slide_deck:
-                deck = deck_owner.slide_deck
-                from src.core.user_context import get_current_user
-                current_user = get_current_user()
-                if deck.locked_by and deck.locked_by != current_user and deck.locked_at:
-                    age = (datetime.utcnow() - deck.locked_at).total_seconds()
-                    if age < self.EDITING_LOCK_TIMEOUT_SECONDS:
-                        from src.services.identity_provider import resolve_display_name
-                        raise PermissionError(
-                            f"Session is locked by {resolve_display_name(deck.locked_by)}"
-                        )
 
             # Get the version to restore
             version = (
@@ -1417,6 +1406,29 @@ class SessionManager:
     # The lock auto-expires if the holder stops sending heartbeats.
     # ------------------------------------------------------------------
     EDITING_LOCK_TIMEOUT_SECONDS = 45  # safety net for browser crashes when heartbeat stops
+
+    def require_editing_lock(self, session_id: str) -> None:
+        """Raise PermissionError if another user holds an active editing lock.
+
+        Call this before any slide mutation (create, edit, delete, reorder,
+        restore) to enforce exclusive editing.
+        """
+        from src.core.user_context import get_current_user
+
+        with get_db_session() as db:
+            session = self._get_session_or_raise(db, session_id)
+            deck_owner = self._get_deck_owner_session(db, session)
+            if not deck_owner.slide_deck:
+                return
+            deck = deck_owner.slide_deck
+            current_user = get_current_user()
+            if deck.locked_by and deck.locked_by != current_user and deck.locked_at:
+                age = (datetime.utcnow() - deck.locked_at).total_seconds()
+                if age < self.EDITING_LOCK_TIMEOUT_SECONDS:
+                    from src.services.identity_provider import resolve_display_name
+                    raise PermissionError(
+                        f"Session is locked by {resolve_display_name(deck.locked_by)}"
+                    )
 
     def acquire_editing_lock(self, session_id: str, user: str) -> dict:
         """Try to acquire the editing lock before a mutation.
@@ -1987,7 +1999,7 @@ class SessionManager:
                     raise ValueError("Parent comment not found")
 
             import re
-            mentioned = re.findall(r"@([\w.\-]+(?:@[\w.\-]+)?)", content)
+            mentioned = re.findall(r"@([\w.+\-]+(?:@[\w.\-]+)?)", content)
             mentioned = list(dict.fromkeys(mentioned))  # dedupe, preserve order
 
             comment = SlideComment(
@@ -2051,7 +2063,7 @@ class SessionManager:
             if comment.user_name != user_name:
                 raise PermissionError("Only the author can edit a comment")
             comment.content = content
-            mentioned = re.findall(r"@([\w.\-]+(?:@[\w.\-]+)?)", content)
+            mentioned = re.findall(r"@([\w.+\-]+(?:@[\w.\-]+)?)", content)
             comment.mentions = list(dict.fromkeys(mentioned)) or None
             db.flush()
             return self._comment_to_dict(comment)
@@ -2103,6 +2115,7 @@ class SessionManager:
             "id": comment.id,
             "slide_id": comment.slide_id,
             "user_name": resolve_display_name(comment.user_name),
+            "user_email": comment.user_name,
             "content": comment.content,
             "mentions": comment.mentions or [],
             "resolved": comment.resolved,
