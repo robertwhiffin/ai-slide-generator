@@ -56,12 +56,13 @@ interface MentionInputProps {
   placeholder?: string;
   users: MentionableUser[];
   onSearch?: (query: string) => void;
+  searching?: boolean;
   autoFocus?: boolean;
   className?: string;
 }
 
 const MentionInput: React.FC<MentionInputProps> = ({
-  value, onChange, onSubmit, placeholder, users, onSearch, autoFocus, className,
+  value, onChange, onSubmit, placeholder, users, onSearch, searching = false, autoFocus, className,
 }) => {
   const inputRef = useRef<HTMLInputElement>(null);
   const [showDropdown, setShowDropdown] = useState(false);
@@ -90,7 +91,7 @@ const MentionInput: React.FC<MentionInputProps> = ({
       setSelectedIdx(0);
       if (onSearch && atMatch[1].length >= 2) {
         if (searchTimerRef.current) clearTimeout(searchTimerRef.current);
-        searchTimerRef.current = setTimeout(() => onSearch(atMatch[1]), 250);
+        searchTimerRef.current = setTimeout(() => onSearch(atMatch[1]), 150);
       }
     } else {
       setShowDropdown(false);
@@ -115,6 +116,8 @@ const MentionInput: React.FC<MentionInputProps> = ({
     if (e.key === 'Enter' && !showDropdown) onSubmit();
   };
 
+  const showPanel = showDropdown && (filtered.length > 0 || (searching && mentionQuery.length >= 2));
+
   return (
     <div className="relative flex-1">
       <input
@@ -126,7 +129,7 @@ const MentionInput: React.FC<MentionInputProps> = ({
         onKeyDown={handleKeyDown}
         autoFocus={autoFocus}
       />
-      {showDropdown && filtered.length > 0 && (
+      {showPanel && (
         <div className="absolute bottom-full left-0 mb-1 w-full bg-white border border-gray-200 rounded-lg shadow-lg z-50 max-h-40 overflow-y-auto">
           {filtered.map((user, idx) => (
             <button
@@ -143,6 +146,15 @@ const MentionInput: React.FC<MentionInputProps> = ({
               )}
             </button>
           ))}
+          {searching && (
+            <div className="px-3 py-1.5 text-xs text-gray-400 flex items-center gap-2">
+              <svg className="animate-spin h-3 w-3" viewBox="0 0 24 24">
+                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
+                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+              </svg>
+              Searching workspace users…
+            </div>
+          )}
         </div>
       )}
     </div>
@@ -160,6 +172,7 @@ interface CommentBubbleProps {
   onRefresh: () => void;
   mentionableUsers: MentionableUser[];
   onMentionSearch?: (query: string) => void;
+  mentionSearching?: boolean;
   depth?: number;
   currentUser?: string;
   canManage?: boolean;
@@ -172,6 +185,7 @@ const CommentBubble: React.FC<CommentBubbleProps> = ({
   onRefresh,
   mentionableUsers,
   onMentionSearch,
+  mentionSearching = false,
   depth = 0,
   currentUser = '',
   canManage = false,
@@ -352,6 +366,7 @@ const CommentBubble: React.FC<CommentBubbleProps> = ({
               onSubmit={handleReply}
               users={mentionableUsers}
               onSearch={onMentionSearch}
+              searching={mentionSearching}
               autoFocus
             />
             <button
@@ -383,6 +398,7 @@ const CommentBubble: React.FC<CommentBubbleProps> = ({
               onRefresh={onRefresh}
               mentionableUsers={mentionableUsers}
               onMentionSearch={onMentionSearch}
+              mentionSearching={mentionSearching}
               depth={depth + 1}
               currentUser={currentUser}
               canManage={canManage}
@@ -414,6 +430,7 @@ export const CommentThread: React.FC<CommentThreadProps> = ({ sessionId, slideId
   const [showResolved, setShowResolved] = useState(false);
   const [mentionableUsers, setMentionableUsers] = useState<MentionableUser[]>([]);
   const [isGlobalProfile, setIsGlobalProfile] = useState(false);
+  const [mentionSearching, setMentionSearching] = useState(false);
   const [currentUser, setCurrentUser] = useState<string>('');
   const listRef = useRef<HTMLDivElement>(null);
 
@@ -458,6 +475,7 @@ export const CommentThread: React.FC<CommentThreadProps> = ({ sessionId, slideId
 
   const handleMentionSearch = useCallback((query: string) => {
     if (!isGlobalProfile) return;
+    setMentionSearching(true);
     api.getMentionableUsers(sessionId, query).then(data => {
       setMentionableUsers(prev => {
         const seen = new Set(prev.map(u => u.username));
@@ -470,7 +488,7 @@ export const CommentThread: React.FC<CommentThreadProps> = ({ sessionId, slideId
         }
         return merged;
       });
-    }).catch(() => {});
+    }).catch(() => {}).finally(() => setMentionSearching(false));
   }, [sessionId, isGlobalProfile]);
 
   // Scroll to highlighted comment when thread opens or highlightCommentId changes
@@ -570,6 +588,7 @@ export const CommentThread: React.FC<CommentThreadProps> = ({ sessionId, slideId
               onRefresh={refreshAndNotify}
               mentionableUsers={mentionableUsers}
               onMentionSearch={handleMentionSearch}
+              mentionSearching={mentionSearching}
               currentUser={currentUser}
               canManage={canManage}
             />
@@ -587,6 +606,7 @@ export const CommentThread: React.FC<CommentThreadProps> = ({ sessionId, slideId
           onSubmit={handleAdd}
           users={mentionableUsers}
           onSearch={handleMentionSearch}
+          searching={mentionSearching}
         />
         <button
           onClick={handleAdd}
