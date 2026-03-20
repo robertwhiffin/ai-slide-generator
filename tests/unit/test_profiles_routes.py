@@ -187,6 +187,69 @@ class TestSaveFromSession:
         )
         assert response.status_code == 201
 
+    @patch("src.api.routes.profiles.get_db_session")
+    @patch("src.api.routes.profiles.get_session_manager")
+    def test_save_from_session_strips_conversation_id(self, mock_get_mgr, mock_get_db, client):
+        """Saved profile should have conversation_id set to None."""
+        config = {
+            "tools": [
+                {"type": "genie", "space_id": "g1", "space_name": "Sales", "conversation_id": "conv-abc"},
+                {"type": "genie", "space_id": "g2", "space_name": "Support", "conversation_id": "conv-def"},
+            ]
+        }
+        mgr = MagicMock()
+        mgr.get_session.return_value = {"session_id": "sess-1", "agent_config": config}
+        mock_get_mgr.return_value = mgr
+
+        mock_db = MagicMock()
+        mock_db.__enter__ = MagicMock(return_value=mock_db)
+        mock_db.__exit__ = MagicMock(return_value=False)
+        mock_db.query.return_value.filter.return_value.all.return_value = []
+        mock_get_db.return_value = mock_db
+
+        def set_id_on_flush():
+            added_obj = mock_db.add.call_args[0][0]
+            added_obj.id = 60
+
+        mock_db.flush.side_effect = set_id_on_flush
+
+        response = client.post(
+            "/api/profiles/save-from-session/sess-1",
+            json={"name": "Stripped Config"},
+        )
+        assert response.status_code == 201
+        data = response.json()
+        for tool in data["agent_config"]["tools"]:
+            assert tool.get("conversation_id") is None
+
+    @patch("src.api.routes.profiles.get_db_session")
+    @patch("src.api.routes.profiles.get_session_manager")
+    def test_save_rejects_duplicate_ignoring_conversation_id(self, mock_get_mgr, mock_get_db, client):
+        """Two configs identical except for conversation_id should be treated as duplicates."""
+        session_config = {
+            "tools": [{"type": "genie", "space_id": "g1", "space_name": "Sales", "conversation_id": "conv-new"}]
+        }
+        existing_config = {
+            "tools": [{"type": "genie", "space_id": "g1", "space_name": "Sales", "conversation_id": "conv-old"}]
+        }
+        mgr = MagicMock()
+        mgr.get_session.return_value = {"session_id": "sess-1", "agent_config": session_config}
+        mock_get_mgr.return_value = mgr
+
+        existing_profile = _make_profile(id=99, name="Existing", agent_config=existing_config)
+
+        mock_db = MagicMock()
+        mock_db.__enter__ = MagicMock(return_value=mock_db)
+        mock_db.__exit__ = MagicMock(return_value=False)
+        mock_db.query.return_value.filter.return_value.all.return_value = [existing_profile]
+        mock_get_db.return_value = mock_db
+
+        response = client.post(
+            "/api/profiles/save-from-session/sess-1",
+            json={"name": "Should Fail"},
+        )
+        assert response.status_code == 409
+
 
 class TestLoadProfileIntoSession:
     @patch("src.api.routes.profiles.get_db_session")
