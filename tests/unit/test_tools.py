@@ -231,6 +231,54 @@ def test_query_genie_space_empty_data(mock_databricks_client, mock_settings):
     assert "col1" in lines[0]
 
 
+def test_query_genie_space_no_result_key(mock_databricks_client, mock_settings):
+    """Test Genie query where 'result' is an empty dict (query returned no rows).
+
+    Regression test: Genie returns `"result": {}` when a
+    SQL query executes successfully but matches zero rows. The bare dict access
+    `response_dict["result"]["data_array"]` raises KeyError: 'data_array',
+    which after 3 retries surfaces as:
+      "Slide generation failed: Failed to query Genie space after 3 attempts: 'data_array'"
+
+    Verified against the real Databricks Genie API — confirmed `"result": {}`
+    is the actual response shape for a zero-row result set.
+    """
+    conversation_response = Mock()
+    conversation_response.conversation_id = "conv-no-result"
+    conversation_response.message_id = "msg-no-result"
+
+    attachment = Mock()
+    attachment.attachment_id = "attach-no-result"
+    attachment.query = True
+    attachment.text = "No results found"
+    conversation_response.attachments = [attachment]
+
+    mock_databricks_client.genie.start_conversation_and_wait.return_value = conversation_response
+
+    attachment_result = Mock()
+    attachment_result.as_dict.return_value = {
+        "statement_response": {
+            "manifest": {
+                "schema": {
+                    "columns": [{"name": "col1"}, {"name": "col2"}]
+                },
+                "total_row_count": 0,
+            },
+            "result": {},  # Real Genie API shape for zero rows — "data_array" key absent
+            "status": {"state": "SUCCEEDED"},
+        }
+    }
+    mock_databricks_client.genie.get_message_attachment_query_result.return_value = attachment_result
+
+    response = query_genie_space(query="Query with no results")
+
+    assert response["conversation_id"] == "conv-no-result"
+    assert response["message"] == "No results found"
+    lines = response["data"].strip().split("\n")
+    assert len(lines) == 1  # Header only, no data rows
+    assert "col1" in lines[0]
+
+
 def test_query_genie_space_error(mock_databricks_client, mock_settings):
     """Test Genie query with error."""
     # Setup mock to raise exception
