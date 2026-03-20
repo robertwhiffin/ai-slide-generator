@@ -11,6 +11,7 @@ const API_BASE_URL = import.meta.env.VITE_API_URL || (
 );
 
 const API_BASE = `${API_BASE_URL}/api/settings`;
+const PROFILES_API_BASE = `${API_BASE_URL}/api/profiles`;
 
 // Types
 
@@ -22,57 +23,19 @@ export interface Profile {
   description: string | null;
   is_default: boolean;
   global_permission: PermissionLevel | null;
+  agent_config: Record<string, unknown> | null;
   created_at: string;
   created_by: string | null;
-  updated_at: string;
+  updated_at: string | null;
   updated_by: string | null;
   my_permission?: PermissionLevel;
   /** True if this is the current user's personal default profile */
   is_my_default?: boolean;
 }
 
-export interface ProfileDetail extends Profile {
-  ai_infra: AIInfraConfig;
-  genie_spaces: GenieSpace[];
-  prompts: PromptsConfig;
-}
-
-export interface ProfileCreate {
-  name: string;
-  description?: string | null;
-}
-
-/**
- * Extended profile creation with inline configurations.
- * Used by the creation wizard to create a complete profile in one request.
- */
-export interface ProfileCreateWithConfig {
-  name: string;
-  description?: string | null;
-  genie_space?: {
-    space_id: string;
-    space_name: string;
-    description?: string | null;
-  };
-  ai_infra?: {
-    llm_endpoint?: string;
-    llm_temperature?: number;
-    llm_max_tokens?: number;
-  };
-  prompts?: {
-    selected_deck_prompt_id?: number | null;
-    system_prompt?: string;
-    slide_editing_instructions?: string;
-  };
-}
-
 export interface ProfileUpdate {
   name?: string;
   description?: string | null;
-}
-
-export interface ProfileDuplicate {
-  new_name: string;
 }
 
 export interface AIInfraConfig {
@@ -325,76 +288,52 @@ async function fetchJson<T>(url: string, options?: RequestInit): Promise<T> {
  * Configuration API methods
  */
 export const configApi = {
-  // Profiles
-  
+  // Profiles (simplified — list, rename, delete only)
+
   listProfiles: (): Promise<Profile[]> =>
-    fetchJson(`${API_BASE}/profiles`),
-  
-  getProfile: (id: number): Promise<ProfileDetail> =>
-    fetchJson(`${API_BASE}/profiles/${id}`),
-  
-  getDefaultProfile: (): Promise<ProfileDetail> =>
-    fetchJson(`${API_BASE}/profiles/default`),
-  
-  createProfile: (data: ProfileCreate): Promise<ProfileDetail> =>
-    fetchJson(`${API_BASE}/profiles`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(data),
-    }),
-  
-  /**
-   * Create a profile with all configurations in one request.
-   * Used by the creation wizard for complete profile setup.
-   */
-  createProfileWithConfig: (data: ProfileCreateWithConfig): Promise<ProfileDetail> =>
-    fetchJson(`${API_BASE}/profiles/with-config`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(data),
-    }),
-  
-  updateProfile: (id: number, data: ProfileUpdate): Promise<ProfileDetail> =>
-    fetchJson(`${API_BASE}/profiles/${id}`, {
+    fetchJson(`${PROFILES_API_BASE}`),
+
+  updateProfile: (id: number, data: ProfileUpdate): Promise<Profile> =>
+    fetchJson(`${PROFILES_API_BASE}/${id}`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(data),
     }),
-  
+
   deleteProfile: (id: number): Promise<void> =>
-    fetchJson(`${API_BASE}/profiles/${id}`, {
+    fetchJson(`${PROFILES_API_BASE}/${id}`, {
       method: 'DELETE',
     }),
-  
-  setDefaultProfile: (id: number): Promise<ProfileDetail> =>
-    fetchJson(`${API_BASE}/profiles/${id}/set-default`, {
+
+  setDefaultProfile: (id: number): Promise<Profile> =>
+    fetchJson(`${PROFILES_API_BASE}/${id}/set-default`, {
       method: 'POST',
     }),
-  
+
   loadProfile: (id: number): Promise<ReloadResponse> =>
-    fetchJson(`${API_BASE}/profiles/${id}/load`, {
+    fetchJson(`${PROFILES_API_BASE}/${id}/load`, {
       method: 'POST',
     }),
-  
+
   setProfileGlobal: (id: number, permission: PermissionLevel | null): Promise<{ id: number; global_permission: PermissionLevel | null }> =>
-    fetchJson(`${API_BASE}/profiles/${id}/global${permission ? `?permission=${permission}` : ''}`, {
+    fetchJson(`${PROFILES_API_BASE}/${id}/global${permission ? `?permission=${permission}` : ''}`, {
       method: 'PATCH',
     }),
 
-  duplicateProfile: (id: number, data: ProfileDuplicate): Promise<ProfileDetail> =>
-    fetchJson(`${API_BASE}/profiles/${id}/duplicate`, {
+  duplicateProfile: (id: number, data: ProfileDuplicate): Promise<Profile> =>
+    fetchJson(`${PROFILES_API_BASE}/${id}/duplicate`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(data),
     }),
-  
+
   reloadConfiguration: (profileId?: number): Promise<ReloadResponse> => {
-    const url = profileId 
-      ? `${API_BASE}/profiles/reload?profile_id=${profileId}`
-      : `${API_BASE}/profiles/reload`;
+    const url = profileId
+      ? `${PROFILES_API_BASE}/reload?profile_id=${profileId}`
+      : `${PROFILES_API_BASE}/reload`;
     return fetchJson(url, { method: 'POST' });
   },
-  
+
   // AI Infrastructure
   
   getAIInfraConfig: (profileId: number): Promise<AIInfraConfig> =>
