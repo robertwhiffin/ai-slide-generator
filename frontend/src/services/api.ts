@@ -110,6 +110,7 @@ interface SendMessageParams {
   sessionId: string;
   slideContext?: SlideContext;
   imageIds?: number[];
+  profileId?: number;
 }
 
 /**
@@ -372,6 +373,7 @@ export const api = {
     sessionId,
     slideContext,
     imageIds,
+    profileId,
   }: SendMessageParams): Promise<ChatResponse> {
     const response = await fetch(`${API_BASE_URL}/api/chat`, {
       method: 'POST',
@@ -383,6 +385,7 @@ export const api = {
         message,
         slide_context: slideContext,
         image_ids: imageIds,
+        profile_id: profileId,
       }),
     });
 
@@ -536,6 +539,7 @@ export const api = {
     onEvent: (event: StreamEvent) => void,
     onError: (error: Error) => void,
     imageIds?: number[],
+    profileId?: number,
   ): () => void {
     const controller = new AbortController();
 
@@ -551,6 +555,7 @@ export const api = {
             message,
             slide_context: slideContext,
             image_ids: imageIds,
+            profile_id: profileId,
           }),
           signal: controller.signal,
         });
@@ -626,6 +631,7 @@ export const api = {
     message: string,
     slideContext?: SlideContext,
     imageIds?: number[],
+    profileId?: number,
   ): Promise<{ request_id: string }> {
     const response = await fetch(`${API_BASE_URL}/api/chat/async`, {
       method: 'POST',
@@ -635,6 +641,7 @@ export const api = {
         message,
         slide_context: slideContext,
         image_ids: imageIds,
+        profile_id: profileId,
       }),
     });
 
@@ -683,13 +690,14 @@ export const api = {
     onEvent: (event: StreamEvent) => void,
     onError: (error: Error) => void,
     imageIds?: number[],
+    profileId?: number,
   ): () => void {
     let cancelled = false;
     let pollInterval: ReturnType<typeof setInterval> | null = null;
 
     (async () => {
       try {
-        const { request_id } = await this.submitChatAsync(sessionId, message, slideContext, imageIds);
+        const { request_id } = await this.submitChatAsync(sessionId, message, slideContext, imageIds, profileId);
 
         let lastMessageId = 0;
 
@@ -771,11 +779,12 @@ export const api = {
     onEvent: (event: StreamEvent) => void,
     onError: (error: Error) => void,
     imageIds?: number[],
+    profileId?: number,
   ): () => void {
     if (isPollingMode()) {
-      return this.startPolling(sessionId, message, slideContext, onEvent, onError, imageIds);
+      return this.startPolling(sessionId, message, slideContext, onEvent, onError, imageIds, profileId);
     } else {
-      return this.streamChat(sessionId, message, slideContext, onEvent, onError, imageIds);
+      return this.streamChat(sessionId, message, slideContext, onEvent, onError, imageIds, profileId);
     }
   },
 

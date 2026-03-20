@@ -192,6 +192,7 @@ class ChatService:
         message: str,
         slide_context: Optional[Dict[str, Any]] = None,
         image_ids: Optional[List[int]] = None,
+        profile_id: Optional[int] = None,
     ) -> Dict[str, Any]:
         """Send a message to the agent and get response.
 
@@ -200,6 +201,7 @@ class ChatService:
             message: User's message
             slide_context: Optional context for slide editing
             image_ids: Optional list of image IDs attached to this message
+            profile_id: Optional profile ID from the request (avoids cross-worker race)
 
         Returns:
             Dictionary containing:
@@ -227,13 +229,18 @@ class ChatService:
 
         # Get or create session in database (auto-create on first message)
         session_manager = get_session_manager()
-        
-        # Get current profile info for session association
-        from src.core.settings_db import get_settings
-        settings = get_settings()
-        profile_id = getattr(settings, 'profile_id', None)
-        profile_name = getattr(settings, 'profile_name', None)
-        
+
+        # Resolve profile: prefer explicit profile_id from request (worker-safe),
+        # fall back to process-global for backward compatibility.
+        if profile_id is not None:
+            from src.core.settings_db import _get_profile_name
+            profile_name = _get_profile_name(profile_id)
+        else:
+            from src.core.settings_db import get_settings
+            settings = get_settings()
+            profile_id = getattr(settings, 'profile_id', None)
+            profile_name = getattr(settings, 'profile_name', None)
+
         try:
             db_session = session_manager.get_session(session_id)
             # Update profile for existing session without one
@@ -581,6 +588,7 @@ class ChatService:
         request_id: Optional[str] = None,
         image_ids: Optional[List[int]] = None,
         is_first_message_override: Optional[bool] = None,
+        profile_id: Optional[int] = None,
     ) -> Generator[StreamEvent, None, None]:
         """Send a message and yield streaming events.
 
@@ -598,6 +606,7 @@ class ChatService:
             is_first_message_override: If set, overrides the DB-based first-message
                 detection. Used by the async path where the user message is
                 persisted before the job runs.
+            profile_id: Optional profile ID from the request (avoids cross-worker race)
 
         Yields:
             StreamEvent objects for real-time display
@@ -621,13 +630,18 @@ class ChatService:
 
         # Get or create session in database
         session_manager = get_session_manager()
-        
-        # Get current profile info for session association
-        from src.core.settings_db import get_settings
-        settings = get_settings()
-        profile_id = getattr(settings, 'profile_id', None)
-        profile_name = getattr(settings, 'profile_name', None)
-        
+
+        # Resolve profile: prefer explicit profile_id from request (worker-safe),
+        # fall back to process-global for backward compatibility.
+        if profile_id is not None:
+            from src.core.settings_db import _get_profile_name
+            profile_name = _get_profile_name(profile_id)
+        else:
+            from src.core.settings_db import get_settings
+            settings = get_settings()
+            profile_id = getattr(settings, 'profile_id', None)
+            profile_name = getattr(settings, 'profile_name', None)
+
         try:
             db_session = session_manager.get_session(session_id)
             # Update profile for existing session without one

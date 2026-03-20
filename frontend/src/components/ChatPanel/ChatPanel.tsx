@@ -13,6 +13,7 @@ import { LoadingIndicator } from './LoadingIndicator';
 import { useSelection } from '../../contexts/SelectionContext';
 import { useSession } from '../../contexts/SessionContext';
 import { useGeneration } from '../../contexts/GenerationContext';
+import { useProfiles } from '../../contexts/ProfileContext';
 import { useKeyboardShortcuts } from '../../hooks/useKeyboardShortcuts';
 
 interface SlideContext {
@@ -57,6 +58,7 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(({
   } = useSelection();
   const { sessionId, isInitializing, error: sessionError, setExperimentUrl, setSessionTitle } = useSession();
   const { setIsGenerating } = useGeneration();
+  const { currentProfile } = useProfiles();
 
   // Synchronously clear messages when sessionId changes (avoids old-message flash on session switch).
   // React discards the intermediate render and immediately re-renders with empty messages,
@@ -304,6 +306,7 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(({
         setIsGenerating(false);
       },
       imageIds,
+      currentProfile?.id,
     );
   };
 

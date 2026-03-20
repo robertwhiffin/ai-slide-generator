@@ -162,6 +162,13 @@ def get_active_profile_id() -> Optional[int]:
     return _active_profile_id
 
 
+def _get_profile_name(profile_id: int) -> Optional[str]:
+    """Look up a profile name by ID from the database."""
+    with get_db_session() as db:
+        profile = db.query(ConfigProfile).filter_by(id=profile_id).first()
+        return profile.name if profile else None
+
+
 def _resolve_profile(db, profile_id: Optional[int] = None) -> "ConfigProfile":
     """Resolve a profile by ID, falling back to active then default.
 
