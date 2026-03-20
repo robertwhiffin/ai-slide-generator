@@ -1342,11 +1342,12 @@ export const api = {
 
   // ============ Comments API ============
 
-  async getMentionableUsers(sessionId: string): Promise<{ username: string; display_name: string }[]> {
-    const response = await fetch(`${API_BASE_URL}/api/comments/mentionable-users?session_id=${sessionId}`);
+  async getMentionableUsers(sessionId: string, query?: string): Promise<{ users: { username: string; display_name: string }[]; is_global: boolean }> {
+    let url = `${API_BASE_URL}/api/comments/mentionable-users?session_id=${sessionId}`;
+    if (query) url += `&query=${encodeURIComponent(query)}`;
+    const response = await fetch(url);
     if (!response.ok) throw new ApiError(response.status, 'Failed to list mentionable users');
-    const data = await response.json();
-    return data.users;
+    return response.json();
   },
 
   async listMentions(): Promise<{ mentions: SlideComment[]; count: number }> {

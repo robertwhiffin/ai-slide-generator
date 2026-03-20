@@ -55,18 +55,20 @@ interface MentionInputProps {
   onSubmit: () => void;
   placeholder?: string;
   users: MentionableUser[];
+  onSearch?: (query: string) => void;
   autoFocus?: boolean;
   className?: string;
 }
 
 const MentionInput: React.FC<MentionInputProps> = ({
-  value, onChange, onSubmit, placeholder, users, autoFocus, className,
+  value, onChange, onSubmit, placeholder, users, onSearch, autoFocus, className,
 }) => {
   const inputRef = useRef<HTMLInputElement>(null);
   const [showDropdown, setShowDropdown] = useState(false);
   const [mentionQuery, setMentionQuery] = useState('');
   const [mentionStart, setMentionStart] = useState(-1);
   const [selectedIdx, setSelectedIdx] = useState(0);
+  const searchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const filtered = mentionQuery
     ? users.filter(u =>
@@ -86,6 +88,10 @@ const MentionInput: React.FC<MentionInputProps> = ({
       setMentionQuery(atMatch[1]);
       setMentionStart(atMatch.index!);
       setSelectedIdx(0);
+      if (onSearch && atMatch[1].length >= 2) {
+        if (searchTimerRef.current) clearTimeout(searchTimerRef.current);
+        searchTimerRef.current = setTimeout(() => onSearch(atMatch[1]), 250);
+      }
     } else {
       setShowDropdown(false);
     }
@@ -153,6 +159,7 @@ interface CommentBubbleProps {
   slideId: string;
   onRefresh: () => void;
   mentionableUsers: MentionableUser[];
+  onMentionSearch?: (query: string) => void;
   depth?: number;
   currentUser?: string;
   canManage?: boolean;
@@ -164,6 +171,7 @@ const CommentBubble: React.FC<CommentBubbleProps> = ({
   slideId,
   onRefresh,
   mentionableUsers,
+  onMentionSearch,
   depth = 0,
   currentUser = '',
   canManage = false,
@@ -343,6 +351,7 @@ const CommentBubble: React.FC<CommentBubbleProps> = ({
               onChange={setReplyContent}
               onSubmit={handleReply}
               users={mentionableUsers}
+              onSearch={onMentionSearch}
               autoFocus
             />
             <button
@@ -373,6 +382,7 @@ const CommentBubble: React.FC<CommentBubbleProps> = ({
               slideId={slideId}
               onRefresh={onRefresh}
               mentionableUsers={mentionableUsers}
+              onMentionSearch={onMentionSearch}
               depth={depth + 1}
               currentUser={currentUser}
               canManage={canManage}
@@ -403,6 +413,7 @@ export const CommentThread: React.FC<CommentThreadProps> = ({ sessionId, slideId
   const [posting, setPosting] = useState(false);
   const [showResolved, setShowResolved] = useState(false);
   const [mentionableUsers, setMentionableUsers] = useState<MentionableUser[]>([]);
+  const [isGlobalProfile, setIsGlobalProfile] = useState(false);
   const [currentUser, setCurrentUser] = useState<string>('');
   const listRef = useRef<HTMLDivElement>(null);
 
@@ -439,8 +450,28 @@ export const CommentThread: React.FC<CommentThreadProps> = ({ sessionId, slideId
   }, [fetchComments]);
 
   useEffect(() => {
-    api.getMentionableUsers(sessionId).then(setMentionableUsers).catch(() => {});
+    api.getMentionableUsers(sessionId).then(data => {
+      setMentionableUsers(data.users);
+      setIsGlobalProfile(data.is_global);
+    }).catch(() => {});
   }, [sessionId]);
+
+  const handleMentionSearch = useCallback((query: string) => {
+    if (!isGlobalProfile) return;
+    api.getMentionableUsers(sessionId, query).then(data => {
+      setMentionableUsers(prev => {
+        const seen = new Set(prev.map(u => u.username));
+        const merged = [...prev];
+        for (const u of data.users) {
+          if (!seen.has(u.username)) {
+            merged.push(u);
+            seen.add(u.username);
+          }
+        }
+        return merged;
+      });
+    }).catch(() => {});
+  }, [sessionId, isGlobalProfile]);
 
   // Scroll to highlighted comment when thread opens or highlightCommentId changes
   useEffect(() => {
@@ -538,6 +569,7 @@ export const CommentThread: React.FC<CommentThreadProps> = ({ sessionId, slideId
               slideId={slideId}
               onRefresh={refreshAndNotify}
               mentionableUsers={mentionableUsers}
+              onMentionSearch={handleMentionSearch}
               currentUser={currentUser}
               canManage={canManage}
             />
@@ -554,6 +586,7 @@ export const CommentThread: React.FC<CommentThreadProps> = ({ sessionId, slideId
           onChange={setNewContent}
           onSubmit={handleAdd}
           users={mentionableUsers}
+          onSearch={handleMentionSearch}
         />
         <button
           onClick={handleAdd}
