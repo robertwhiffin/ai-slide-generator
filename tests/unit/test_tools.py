@@ -259,9 +259,9 @@ def test_query_genie_space_null_result_block(mock_databricks_client, mock_settin
                 "schema": {
                     "column_count": 3,
                     "columns": [
-                        {"name": "media_partners", "position": 0, "type_name": "STRING"},
-                        {"name": "reach_1plus", "position": 1, "type_name": "FLOAT"},
-                        {"name": "mmr_rate", "position": 2, "type_name": "FLOAT"},
+                        {"name": "category", "position": 0, "type_name": "STRING"},
+                        {"name": "value", "position": 1, "type_name": "FLOAT"},
+                        {"name": "rate", "position": 2, "type_name": "FLOAT"},
                     ]
                 }
             },
@@ -274,7 +274,7 @@ def test_query_genie_space_null_result_block(mock_databricks_client, mock_settin
     mock_databricks_client.genie.get_message_attachment_query_result.return_value = attachment_result
 
     # Should NOT raise - previously this caused KeyError: 'data_array'
-    response = query_genie_space(query="Show me reach metrics")
+    response = query_genie_space(query="Show me summary metrics")
 
     assert response["conversation_id"] == "conv-null"
     assert response["message"] == "No data was returned for this query"

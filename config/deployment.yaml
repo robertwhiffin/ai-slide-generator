@@ -21,24 +21,6 @@ environments:
       schema: "tellr_app_data_dev"
       capacity: "CU_1"  # Options: CU_1, CU_2, CU_4, CU_8
 
-  jss-sandbox:
-    app_name: "ai-slide-generator"
-    description: "AI Slide Generator - jss-sandbox"
-    workspace_path: "/Workspace/Users/jack.sandom@databricks.com/.apps/dev/tellr"
-    permissions:
-      - user_name: "jack.sandom@databricks.com"
-        permission_level: "CAN_MANAGE"
-    compute_size: "MEDIUM"
-    env_vars:
-      ENVIRONMENT: "development"
-      LOG_LEVEL: "DEBUG"
-      LAKEBASE_INSTANCE: "db-tellr"
-      LAKEBASE_SCHEMA: "app_data_jss"
-    lakebase:
-      database_name: "db-tellr"
-      schema: "tellr_app_data_jss"
-      capacity: "CU_1"
-
   production:
     app_name: "db-tellr-prod"
     description: "Databricks tellr AI Slide Generator - Production"

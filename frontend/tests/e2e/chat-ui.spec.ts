@@ -386,7 +386,9 @@ test.describe('LoadingStates', () => {
     await page.getByRole('button', { name: 'Send' }).click();
 
     // Should show some loading message in the LoadingIndicator component
-    await expect(page.locator('.bg-blue-50').getByText(/./)).toBeVisible({ timeout: 2000 });
+    // Target the message span specifically — the Stop button also lives inside .bg-blue-50
+    // and would cause a strict-mode violation with the broader getByText(/./) selector.
+    await expect(page.locator('.bg-blue-50 span.italic')).toBeVisible({ timeout: 2000 });
   });
 });
 

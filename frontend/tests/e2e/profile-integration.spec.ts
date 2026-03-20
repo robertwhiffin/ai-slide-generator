@@ -171,7 +171,10 @@ async function getSlideStyles(request: APIRequestContext): Promise<SlideStyle[]>
 
 async function goToProfiles(page: Page): Promise<void> {
   await page.goto('/profiles');
-  await expect(page.getByRole('heading', { name: /Agent Profiles|Configuration Profiles/i })).toBeVisible();
+  // SimplePageHeader renders "Agent Profiles" as a breadcrumb immediately on route mount,
+  // with no API dependency. The ProfileList h1 only appears after the profiles API responds,
+  // which can race with the assertion timeout when the backend is slow.
+  await expect(page.getByText('Agent Profiles').first()).toBeVisible();
 }
 
 async function goToGenerator(page: Page): Promise<void> {

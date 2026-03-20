@@ -75,9 +75,6 @@ frontend/test-results/
 
 config/deployment.yaml
 
-# Personal planning docs
-*-plan.md
-
 # Google OAuth tokens (generated at runtime)
 token.json
 
