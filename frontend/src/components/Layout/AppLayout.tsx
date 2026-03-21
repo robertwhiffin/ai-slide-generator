@@ -158,14 +158,6 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
     chatPanelRef.current?.sendMessage(content, slideContext);
   }, []);
 
-  // Reset chat state and create new session when profile changes
-  const handleProfileChange = useCallback(() => {
-    setSlideDeck(null);
-    setRawHtml(null);
-    setLastSavedTime(null);
-    // Create new session for the new profile (ChatPanel cancels in-flight poll when sessionId changes)
-    createNewSession();
-  }, [createNewSession]);
 
   // Handle selecting a session from sidebar or history — just navigate.
   // The URL effect is the single source of truth for session loading.
@@ -523,7 +515,7 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
             <div className="flex-1 overflow-y-auto">
               <div className="mx-auto w-full max-w-4xl px-4 py-8">
                 <ProfileProvider>
-                  <ProfileList onProfileChange={handleProfileChange} />
+                  <ProfileList />
                 </ProfileProvider>
               </div>
             </div>

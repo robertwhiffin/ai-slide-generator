@@ -14,11 +14,7 @@ import type { Profile } from '../../api/config';
 import { useProfiles } from '../../hooks/useProfiles';
 import { ConfirmDialog } from './ConfirmDialog';
 
-interface ProfileListProps {
-  onProfileChange?: () => void;
-}
-
-export const ProfileList: React.FC<ProfileListProps> = ({ onProfileChange }) => {
+export const ProfileList: React.FC = () => {
   const {
     profiles,
     loading,
