@@ -32,11 +32,13 @@ from src.api.routes.settings import (
 from src.api.services.export_job_queue import start_export_worker
 from src.api.services.job_queue import recover_stuck_requests, start_worker
 from src.core.database import (
+    get_session_local,
     init_db,
     is_lakebase_environment,
     start_token_refresh,
     stop_token_refresh,
 )
+from src.core.migrate_profiles_to_agent_config import migrate_profiles, backfill_sessions
 
 logger = logging.getLogger(__name__)
 
@@ -75,6 +77,13 @@ async def lifespan(app: FastAPI):
         try:
             init_db()
             logger.info("Database tables initialized")
+
+            migrated = migrate_profiles(get_session_local())
+            if migrated:
+                logger.info(f"Migrated {migrated} profiles to agent_config")
+            backfilled = backfill_sessions(get_session_local())
+            if backfilled:
+                logger.info(f"Backfilled {backfilled} sessions with agent_config")
         except Exception as e:
             logger.error(f"Failed to initialize database: {e}")
             raise

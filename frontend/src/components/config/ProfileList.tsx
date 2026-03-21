@@ -6,11 +6,12 @@
  * - Delete profile
  */
 
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { User, ChevronDown, Trash2, Pencil, MessageSquare, Palette, FileText, Wrench } from 'lucide-react';
 import { Button } from '@/ui/button';
 import { Badge } from '@/ui/badge';
 import type { Profile } from '../../api/config';
+import { configApi } from '../../api/config';
 import { useProfiles } from '../../hooks/useProfiles';
 import { ConfirmDialog } from './ConfirmDialog';
 
@@ -31,7 +32,12 @@ interface AgentConfigShape {
   slide_editing_instructions?: string | null;
 }
 
-const ConfigSummary: React.FC<{ config: Record<string, unknown> | null }> = ({ config }) => {
+interface NameLookups {
+  slideStyles: Map<number, string>;
+  deckPrompts: Map<number, string>;
+}
+
+const ConfigSummary: React.FC<{ config: Record<string, unknown> | null; names: NameLookups }> = ({ config, names }) => {
   if (!config || Object.keys(config).length === 0) {
     return (
       <div className="rounded-md border border-border bg-muted/20 px-3 py-2 text-sm text-muted-foreground">
@@ -46,6 +52,13 @@ const ConfigSummary: React.FC<{ config: Record<string, unknown> | null }> = ({ c
   const mcpTools = tools.filter(t => t.type === 'mcp');
   const hasCustomSystemPrompt = !!cfg.system_prompt;
   const hasCustomSlideInstructions = !!cfg.slide_editing_instructions;
+
+  const styleName = cfg.slide_style_id != null
+    ? names.slideStyles.get(cfg.slide_style_id) ?? `Unknown (ID ${cfg.slide_style_id})`
+    : null;
+  const promptName = cfg.deck_prompt_id != null
+    ? names.deckPrompts.get(cfg.deck_prompt_id) ?? `Unknown (ID ${cfg.deck_prompt_id})`
+    : null;
 
   return (
     <div className="grid gap-2 rounded-md border border-border bg-muted/20 p-3 text-sm">
@@ -81,7 +94,7 @@ const ConfigSummary: React.FC<{ config: Record<string, unknown> | null }> = ({ c
         <div>
           <span className="font-medium text-foreground">Slide Style</span>
           <span className="ml-2 text-muted-foreground">
-            {cfg.slide_style_id != null ? `ID ${cfg.slide_style_id}` : 'Default'}
+            {styleName ?? 'Default'}
           </span>
         </div>
       </div>
@@ -91,7 +104,7 @@ const ConfigSummary: React.FC<{ config: Record<string, unknown> | null }> = ({ c
         <div>
           <span className="font-medium text-foreground">Deck Prompt</span>
           <span className="ml-2 text-muted-foreground">
-            {cfg.deck_prompt_id != null ? `ID ${cfg.deck_prompt_id}` : 'Default'}
+            {promptName ?? 'Default'}
           </span>
         </div>
       </div>
@@ -140,6 +153,31 @@ export const ProfileList: React.FC = () => {
   });
   const [actionLoading, setActionLoading] = useState<number | null>(null);
   const [expandedId, setExpandedId] = useState<number | null>(null);
+  const [nameLookups, setNameLookups] = useState<NameLookups>({
+    slideStyles: new Map(),
+    deckPrompts: new Map(),
+  });
+
+  useEffect(() => {
+    let cancelled = false;
+    async function fetchLookups() {
+      try {
+        const [stylesRes, promptsRes] = await Promise.all([
+          configApi.listSlideStyles(),
+          configApi.listDeckPrompts(),
+        ]);
+        if (cancelled) return;
+        setNameLookups({
+          slideStyles: new Map(stylesRes.styles.map(s => [s.id, s.name])),
+          deckPrompts: new Map(promptsRes.prompts.map(p => [p.id, p.name])),
+        });
+      } catch {
+        // Non-critical — falls back to "Unknown (ID X)"
+      }
+    }
+    fetchLookups();
+    return () => { cancelled = true; };
+  }, []);
   const [renamingId, setRenamingId] = useState<number | null>(null);
   const [renameValue, setRenameValue] = useState('');
   const [renameError, setRenameError] = useState<string | null>(null);
@@ -360,7 +398,7 @@ export const ProfileList: React.FC = () => {
                   {expandedId === profile.id && (
                     <div className="mt-3 space-y-3">
                       {/* Config Summary */}
-                      <ConfigSummary config={profile.agent_config} />
+                      <ConfigSummary config={profile.agent_config} names={nameLookups} />
 
                       {/* Rename Input (when active) */}
                       {renamingId === profile.id && (
