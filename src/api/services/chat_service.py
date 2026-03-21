@@ -12,7 +12,6 @@ import logging
 import queue
 import re
 import threading
-from datetime import datetime
 from typing import Any, Dict, Generator, List, Optional
 
 from langchain_community.chat_message_histories import ChatMessageHistory
@@ -28,7 +27,8 @@ from src.core.databricks_client import (
 )
 from src.domain.slide import Slide
 from src.domain.slide_deck import SlideDeck
-from src.services.agent import create_agent
+from src.api.schemas.agent_config import resolve_agent_config
+from src.services.agent_factory import build_agent_for_request
 from src.services.streaming_callback import StreamingCallbackHandler
 from src.utils.html_utils import (
     extract_canvas_ids_from_html,
@@ -60,24 +60,20 @@ class ChatService:
     """Service for managing chat interactions with the AI agent.
 
     All session state is persisted in the database via SessionManager.
-    This service handles the AI agent lifecycle and message processing.
-
-    Attributes:
-        agent: SlideGeneratorAgent instance
+    The agent is built per-request from the session's agent_config,
+    replacing the previous singleton agent pattern.
     """
 
     def __init__(self):
-        """Initialize the chat service with agent."""
-        logger.info("Initializing ChatService")
+        """Initialize the chat service.
 
-        # Thread lock for safe agent reloading
-        self._reload_lock = threading.Lock()
+        The agent is no longer a singleton — it is built per-request from the
+        session's agent_config via build_agent_for_request().
+        """
+        logger.info("Initializing ChatService")
 
         # Thread lock for safe deck cache access
         self._cache_lock = threading.Lock()
-
-        # Create agent instance
-        self.agent = create_agent()
 
         # In-memory cache of slide decks (keyed by session_id)
         # This avoids re-parsing HTML on every request
@@ -108,83 +104,153 @@ class ChatService:
                     raw_html = substitute_image_placeholders(raw_html, db)
         return deck_dict, raw_html
 
-    def reload_agent(self, profile_id: Optional[int] = None) -> Dict[str, Any]:
-        """
-        Reload agent with new settings from database.
+    def _build_agent_for_session(
+        self, session_id: str, db_session: Dict[str, Any]
+    ) -> tuple:
+        """Build a per-request agent from session's agent_config.
 
-        This allows hot-reload of configuration without restarting the application.
-        Genie conversation IDs are preserved - each session tracks its profile_id
-        and the genie_conversation_id remains valid for that profile's Genie space.
+        Also ensures the MLflow experiment exists and hydrates chat history.
 
         Args:
-            profile_id: Profile ID to load, or None for default profile
+            session_id: Session identifier
+            db_session: Session dict from session_manager.get_session()
 
         Returns:
-            Dictionary with reload status and profile information
-
-        Raises:
-            Exception: If reload fails (agent remains in previous state)
+            Tuple of (agent, session_data, experiment_url)
         """
-        with self._reload_lock:
+        # Resolve agent config from session
+        agent_config = resolve_agent_config(db_session.get("agent_config"))
+
+        # Ensure user experiment
+        try:
+            username = get_current_username()
+        except Exception as e:
+            logger.warning(f"ChatService: Failed to get current username: {e}")
+            username = "unknown"
+
+        experiment_id, experiment_url = self._ensure_user_experiment(
+            session_id, username
+        )
+
+        # Persist experiment_id to database if newly created
+        if experiment_id and experiment_id != db_session.get("experiment_id"):
+            session_manager = get_session_manager()
+            session_manager.set_experiment_id(session_id, experiment_id)
+
+        # Build session_data for agent factory (mutable — Genie tool updates it)
+        session_data = {
+            "session_id": session_id,
+            "genie_conversation_id": db_session.get("genie_conversation_id"),
+            "experiment_id": experiment_id or db_session.get("experiment_id"),
+        }
+
+        # Build agent
+        agent = build_agent_for_request(agent_config, session_data)
+
+        # Hydrate chat history from DB into the agent's session
+        chat_history = ChatMessageHistory()
+        message_count = self._hydrate_chat_history(session_id, chat_history)
+
+        # Register session with the agent so it has conversation context
+        agent.sessions[session_id] = {
+            "chat_history": chat_history,
+            "genie_conversation_id": session_data.get("genie_conversation_id"),
+            "experiment_id": session_data.get("experiment_id"),
+            "experiment_url": experiment_url,
+            "username": username,
+            "profile_name": db_session.get("profile_name") or "default",
+            "message_count": message_count,
+        }
+
+        return agent, session_data, experiment_url
+
+    def _persist_genie_conversation_ids(
+        self, session_id: str, session_data: Dict[str, Any], original_genie_id: Optional[str]
+    ) -> None:
+        """Persist genie conversation_ids after a request completes.
+
+        Updates both:
+        1. The legacy genie_conversation_id column (backward compat)
+        2. Per-space conversation_ids in the session's agent_config JSON
+
+        The Genie tool closure updates session_data in-place when a new
+        conversation is initialized. This method reads those updates and
+        persists them to the database.
+        """
+        session_manager = get_session_manager()
+
+        # 1. Legacy column persistence
+        new_genie_id = session_data.get("genie_conversation_id")
+        if new_genie_id != original_genie_id:
+            session_manager.set_genie_conversation_id(session_id, new_genie_id)
             logger.info(
-                "Reloading agent with new configuration",
-                extra={"profile_id": profile_id},
+                "Persisted updated genie_conversation_id",
+                extra={
+                    "session_id": session_id,
+                    "old_genie_id": original_genie_id,
+                    "new_genie_id": new_genie_id,
+                },
             )
 
-            try:
-                # Reload settings from database
-                from src.core.settings_db import reload_settings
+        # 2. Per-space conversation_ids in agent_config
+        self._persist_conversation_ids_to_agent_config(
+            session_id, session_data, session_manager
+        )
 
-                new_settings = reload_settings(profile_id)
+    def _persist_conversation_ids_to_agent_config(
+        self,
+        session_id: str,
+        session_data: Dict[str, Any],
+        session_manager: Any,
+    ) -> None:
+        """Write per-space conversation_ids from session_data back into agent_config.
+
+        Reads the session's current agent_config, updates each GenieTool's
+        conversation_id from session_data, and saves if any changed.
+        """
+        from src.api.schemas.agent_config import GenieTool
+
+        try:
+            session = session_manager.get_session(session_id)
+            agent_config = resolve_agent_config(session.get("agent_config"))
+
+            updated = False
+            for tool in agent_config.tools:
+                if isinstance(tool, GenieTool):
+                    conv_key = f"genie_conversation_id:{tool.space_id}"
+                    new_conv_id = session_data.get(conv_key)
+                    if new_conv_id and new_conv_id != tool.conversation_id:
+                        tool.conversation_id = new_conv_id
+                        updated = True
+
+            if updated:
+                from src.core.database import get_db_session
+                from src.database.models import UserSession
+
+                with get_db_session() as db:
+                    db_session = (
+                        db.query(UserSession)
+                        .filter(UserSession.session_id == session_id)
+                        .first()
+                    )
+                    if db_session:
+                        db_session.agent_config = agent_config.model_dump()
+
                 logger.info(
-                    "Loaded new settings",
+                    "Persisted per-space conversation_ids to agent_config",
                     extra={
-                        "profile_id": new_settings.profile_id,
-                        "profile_name": new_settings.profile_name,
-                        "llm_endpoint": new_settings.llm.endpoint,
-                        "genie_space_id": new_settings.genie.space_id if new_settings.genie else None,
-                        "prompt_only_mode": new_settings.genie is None,
+                        "session_id": session_id,
+                        "tools_updated": [
+                            t.space_id for t in agent_config.tools
+                            if isinstance(t, GenieTool) and t.conversation_id
+                        ],
                     },
                 )
-
-                # Note: Genie conversation IDs are no longer cleared on profile switch.
-                # Each session is associated with a profile_id, and the genie_conversation_id
-                # remains valid when the user switches back to that profile.
-                # See: profile-switch-genie-flow.md for details.
-
-                # Create new agent with new settings
-                new_agent = create_agent()
-                logger.info("Created new agent instance")
-
-                # Atomic swap
-                self.agent = new_agent
-
-                # Clear deck cache (settings may affect rendering)
-                with self._cache_lock:
-                    self._deck_cache.clear()
-
-                logger.info(
-                    "Agent reloaded successfully",
-                    extra={
-                        "profile_id": new_settings.profile_id,
-                        "profile_name": new_settings.profile_name,
-                    },
-                )
-
-                return {
-                    "status": "reloaded",
-                    "profile_id": new_settings.profile_id,
-                    "profile_name": new_settings.profile_name,
-                    "llm_endpoint": new_settings.llm.endpoint,
-                }
-
-            except Exception as e:
-                logger.error(
-                    f"Failed to reload agent: {e}",
-                    exc_info=True,
-                    extra={"profile_id": profile_id},
-                )
-                raise Exception(f"Agent reload failed: {e}") from e
+        except Exception as e:
+            logger.error(
+                f"Failed to persist conversation_ids to agent_config: {e}",
+                extra={"session_id": session_id},
+            )
 
     def send_message(
         self,
@@ -253,9 +319,11 @@ class ChatService:
                 extra={"session_id": session_id, "profile_id": profile_id},
             )
 
-        # Ensure session is registered with the agent
-        # The agent maintains its own in-memory session store for conversation state
-        experiment_url = self._ensure_agent_session(session_id, db_session.get("genie_conversation_id"))
+        # Build per-request agent from session's agent_config
+        original_genie_id = db_session.get("genie_conversation_id")
+        agent, session_data, experiment_url = self._build_agent_for_session(
+            session_id, db_session
+        )
 
         # Issue 2 FIX: Detect intent ONCE and store for reuse (sync path)
         _is_edit = self._detect_edit_intent(message)
@@ -348,12 +416,15 @@ class ChatService:
             if slide_context:
                 slide_context = self._replace_slide_htmls_from_cache(session_id, slide_context)
 
-            # Call agent to generate slides
-            result = self.agent.generate_slides(
+            # Call per-request agent to generate slides
+            result = agent.generate_slides(
                 question=message,
                 session_id=session_id,
                 slide_context=slide_context,
             )
+
+            # Persist genie_conversation_id if it changed during the request
+            self._persist_genie_conversation_ids(session_id, session_data, original_genie_id)
 
             html_output = result.get("html")
             replacement_info = result.get("replacement_info")
@@ -667,8 +738,11 @@ class ChatService:
                 extra={"session_id": session_id, "message_id": user_msg.get("id")},
             )
 
-        # Ensure session is registered with the agent (hydrates history)
-        experiment_url = self._ensure_agent_session(session_id, db_session.get("genie_conversation_id"))
+        # Build per-request agent from session's agent_config
+        original_genie_id = db_session.get("genie_conversation_id")
+        agent, session_data, experiment_url = self._build_agent_for_session(
+            session_id, db_session
+        )
 
         # Issue 2 FIX: Detect intent ONCE and store for reuse throughout the function
         # This avoids running regex patterns twice on every request
@@ -864,13 +938,15 @@ class ChatService:
 
         def run_agent():
             try:
-                result = self.agent.generate_slides_streaming(
+                result = agent.generate_slides_streaming(
                     question=message,
                     session_id=session_id,
                     callback_handler=callback_handler,
                     slide_context=slide_context,
                 )
                 result_container["result"] = result
+                # Persist genie_conversation_id if it changed during the request
+                self._persist_genie_conversation_ids(session_id, session_data, original_genie_id)
             except Exception as e:
                 error_container["error"] = e
                 callback_handler.event_queue.put(
@@ -1250,128 +1326,6 @@ class ChatService:
                     type=StreamEventType.SESSION_TITLE,
                     session_title=title_container["title"],
                 )
-
-    def _ensure_agent_session(
-        self, session_id: str, genie_conversation_id: Optional[str] = None
-    ) -> Optional[str]:
-        """Ensure the session is registered with the agent.
-
-        The agent maintains its own in-memory session store for conversation
-        state (chat history, Genie conversation, MLflow experiment). This method
-        ensures the database session is registered with the agent and hydrates
-        the chat history from persisted messages.
-
-        Args:
-            session_id: Session ID from database
-            genie_conversation_id: Optional existing Genie conversation ID
-
-        Returns:
-            experiment_url for the session, or None if experiment creation failed
-        """
-        # Check if agent already has this session
-        if session_id in self.agent.sessions:
-            # Update profile_name if settings have changed (handles profile switching)
-            from src.core.settings_db import get_settings
-            current_settings = get_settings()
-            current_profile = current_settings.profile_name or "default"
-            if self.agent.sessions[session_id].get("profile_name") != current_profile:
-                self.agent.sessions[session_id]["profile_name"] = current_profile
-                logger.info(
-                    "Updated session profile after switch",
-                    extra={"session_id": session_id, "profile_name": current_profile},
-                )
-            
-            # Agent session exists - ensure genie_conversation_id is persisted to DB
-            agent_genie_id = self.agent.sessions[session_id].get("genie_conversation_id")
-            if agent_genie_id and not genie_conversation_id:
-                # Agent has genie ID but DB doesn't - save it now
-                session_manager = get_session_manager()
-                session_manager.set_genie_conversation_id(session_id, agent_genie_id)
-                logger.info(
-                    "Persisted existing genie_conversation_id to database",
-                    extra={"session_id": session_id, "genie_conversation_id": agent_genie_id},
-                )
-            return self.agent.sessions[session_id].get("experiment_url")
-
-        logger.info(
-            "Registering session with agent",
-            extra={"session_id": session_id, "genie_conversation_id": genie_conversation_id},
-        )
-
-        from src.core.settings_db import get_settings
-        from src.services.tools import initialize_genie_conversation
-
-        settings = get_settings()
-
-        try:
-            # Get current username for experiment path and permissions
-            try:
-                username = get_current_username()
-                logger.warning(f"ChatService: Got current username: {username}")
-            except Exception as e:
-                logger.warning(f"ChatService: Failed to get current username: {e}")
-                username = "unknown"
-
-            # Ensure user's MLflow experiment exists (one per user)
-            profile_name = settings.profile_name or "default"
-            experiment_id, experiment_url = self._ensure_user_experiment(
-                session_id, username
-            )
-
-            # Use existing Genie conversation or create new one (only if Genie configured)
-            if genie_conversation_id:
-                genie_conv_id = genie_conversation_id
-            elif settings.genie:
-                genie_conv_id = initialize_genie_conversation()
-                # Save the new Genie conversation ID to database
-                session_manager = get_session_manager()
-                session_manager.set_genie_conversation_id(session_id, genie_conv_id)
-            else:
-                # Prompt-only mode - no Genie conversation needed
-                genie_conv_id = None
-                logger.info(
-                    "Prompt-only mode - skipping Genie conversation initialization",
-                    extra={"session_id": session_id},
-                )
-
-            # Create chat history and hydrate from database
-            chat_history = ChatMessageHistory()
-            message_count = self._hydrate_chat_history(session_id, chat_history)
-
-            # Initialize agent session data with experiment info and session metadata
-            session_timestamp = datetime.utcnow().isoformat()
-            self.agent.sessions[session_id] = {
-                "chat_history": chat_history,
-                "genie_conversation_id": genie_conv_id,
-                "experiment_id": experiment_id,
-                "experiment_url": experiment_url,
-                "username": username,
-                "profile_name": profile_name,
-                "created_at": session_timestamp,
-                "message_count": message_count,
-            }
-
-            # Persist experiment_id to database for verification endpoint access
-            if experiment_id:
-                session_manager = get_session_manager()
-                session_manager.set_experiment_id(session_id, experiment_id)
-
-            logger.info(
-                "Session registered with agent",
-                extra={
-                    "session_id": session_id,
-                    "genie_conversation_id": genie_conv_id,
-                    "experiment_id": experiment_id,
-                    "experiment_url": experiment_url,
-                    "hydrated_messages": message_count,
-                },
-            )
-
-            return experiment_url
-
-        except Exception as e:
-            logger.error(f"Failed to register session with agent: {e}", exc_info=True)
-            raise
 
     def _ensure_user_experiment(
         self, session_id: str, username: str

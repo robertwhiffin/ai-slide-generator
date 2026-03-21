@@ -19,24 +19,15 @@ def db_session():
     # Use SQLite in-memory database for testing
     engine = create_engine("sqlite:///:memory:")
     
-    # Create tables (excluding history table which uses PostgreSQL-specific JSONB)
-    tables_to_create = [
-        table for table in Base.metadata.sorted_tables
-        if table.name != 'config_history'
-    ]
-    
-    for table in tables_to_create:
-        table.create(bind=engine, checkfirst=True)
-    
+    Base.metadata.create_all(bind=engine)
+
     SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
     session = SessionLocal()
-    
+
     yield session
-    
-    # Cleanup
+
     session.close()
-    for table in reversed(tables_to_create):
-        table.drop(bind=engine, checkfirst=True)
+    Base.metadata.drop_all(bind=engine)
 
 
 def test_create_profile(db_session):

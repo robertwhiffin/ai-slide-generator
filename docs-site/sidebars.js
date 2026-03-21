@@ -59,26 +59,15 @@ const sidebars = {
         'technical/multi-user-concurrency',
         'technical/presentation-mode',
         'technical/profile-switch-genie-flow',
+        'technical/save-points-versioning',
+        'technical/url-routing',
+        'technical/image-upload',
+        'technical/google-slides-integration',
+        'technical/feedback-system',
       ],
     },
   ],
 
-  api: [
-    {
-      type: 'category',
-      label: 'API Reference',
-      items: [
-        'api/overview',
-        'api/sessions',
-        'api/chat',
-        'api/slides',
-        'api/export',
-        'api/verification',
-        'api/settings',
-        'api/openapi-schema',
-      ],
-    },
-  ],
 };
 
 module.exports = sidebars;

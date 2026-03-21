@@ -5,7 +5,6 @@ from src.database.models.feedback import FeedbackConversation, SurveyResponse
 from src.database.models.genie_space import ConfigGenieSpace
 from src.database.models.google_global_credentials import GoogleGlobalCredentials
 from src.database.models.google_oauth_token import GoogleOAuthToken
-from src.database.models.history import ConfigHistory
 from src.database.models.image import ImageAsset
 from src.database.models.profile import ConfigProfile
 from src.database.models.prompts import ConfigPrompts
@@ -28,7 +27,6 @@ __all__ = [
     "ConfigGenieSpace",
     "GoogleGlobalCredentials",
     "GoogleOAuthToken",
-    "ConfigHistory",
     "ConfigProfile",
     "ConfigPrompts",
     "ImageAsset",

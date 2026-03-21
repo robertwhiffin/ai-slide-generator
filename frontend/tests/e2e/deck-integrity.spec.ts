@@ -1,6 +1,8 @@
 import { test, expect, Page, ConsoleMessage } from '@playwright/test';
 import {
-  mockProfiles,
+  mockProfileSummaries,
+  mockDefaultAgentConfig,
+  mockAvailableTools,
   mockDeckPrompts,
   mockSlideStyles,
   mockSessions,
@@ -84,12 +86,14 @@ async function setupMocks(page: Page) {
   await page.route('**/api/setup/status', (route) => {
     route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ configured: true }) });
   });
-  await page.route(/\/api\/settings\/profiles$/, (route) => {
-    route.fulfill({
-      status: 200,
-      contentType: 'application/json',
-      body: JSON.stringify(mockProfiles)
-    });
+  // New profiles API (GET /api/profiles)
+  await page.route(/\/api\/profiles$/, (route) => {
+    route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(mockProfileSummaries) });
+  });
+
+  // Available tools
+  await page.route('**/api/tools/available', (route) => {
+    route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(mockAvailableTools) });
   });
 
   // Mock deck prompts endpoint
@@ -118,6 +122,12 @@ async function setupMocks(page: Page) {
     // Handle session creation/deletion
     if (method === 'POST' || method === 'DELETE') {
       route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ session_id: 'mock', title: 'New', user_id: null, created_at: '2026-01-01T00:00:00Z' }) });
+      return;
+    }
+
+    // Handle agent-config endpoint
+    if (url.includes('/agent-config')) {
+      route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(mockDefaultAgentConfig) });
       return;
     }
 
@@ -370,7 +380,7 @@ test.describe('Deck Integrity - Modal Dialogs', () => {
   });
 });
 
-test.describe('Deck Integrity - Profile Selection', () => {
+test.describe('Deck Integrity - Agent Config Bar', () => {
   let consoleCollector: ConsoleErrorCollector;
 
   test.beforeEach(async ({ page }) => {
@@ -379,13 +389,12 @@ test.describe('Deck Integrity - Profile Selection', () => {
     await setupMocks(page);
   });
 
-  test('profile selector displays current profile', async ({ page }) => {
+  test('agent config bar renders without errors', async ({ page }) => {
     await goToGenerator(page);
 
-    // Profile control: header dropdown (profile name) or sidebar "Agent profiles"; use .first() to avoid strict mode
-    await expect(
-      page.getByRole('button', { name: /Profile|Sales Analytics/i }).first()
-    ).toBeVisible({ timeout: 5000 });
+    // Agent config bar should be visible in the generator view
+    // The bar shows tool/style/prompt configuration
+    await expect(page.getByRole('textbox')).toBeVisible({ timeout: 5000 });
 
     const errors = consoleCollector.getErrors();
     expect(errors).toHaveLength(0);

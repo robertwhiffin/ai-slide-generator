@@ -108,6 +108,21 @@ fi
 # Create log directory
 mkdir -p logs
 
+# --- Stop any already-running instance ---
+is_running=false
+
+if [ -f logs/backend.pid ] && ps -p "$(cat logs/backend.pid)" > /dev/null 2>&1; then
+    is_running=true
+elif lsof -ti:8000 > /dev/null 2>&1; then
+    is_running=true
+fi
+
+if [ "$is_running" = true ]; then
+    echo -e "${YELLOW}🔄 App is already running — restarting...${NC}"
+    "$PROJECT_ROOT/stop_app.sh"
+    echo ""
+fi
+
 # Start backend in background
 echo -e "${BLUE}🔧 Starting backend on port 8000...${NC}"
 nohup uvicorn src.api.main:app --reload --port 8000 > logs/backend.log 2>&1 &

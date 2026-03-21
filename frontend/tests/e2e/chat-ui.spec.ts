@@ -1,6 +1,8 @@
 import { test, expect, Page } from '@playwright/test';
 import {
-  mockProfiles,
+  mockProfileSummaries,
+  mockDefaultAgentConfig,
+  mockAvailableTools,
   mockDeckPrompts,
   mockSlideStyles,
   mockSessions,
@@ -60,28 +62,22 @@ function createStreamingResponseWithDeck(slideDeck: typeof mockSlideDeck): strin
 // ============================================
 
 async function setupMocks(page: Page) {
-  // Mock profiles endpoint
-  await page.route('http://127.0.0.1:8000/api/settings/profiles', (route) => {
+  // Mock new profiles API (GET /api/profiles) — used by AgentConfigContext
+  await page.route(/\/api\/profiles$/, (route) => {
     route.fulfill({
       status: 200,
       contentType: 'application/json',
-      body: JSON.stringify(mockProfiles),
+      body: JSON.stringify(mockProfileSummaries),
     });
   });
 
-  // Mock individual profile endpoints
-  await page.route(/http:\/\/127.0.0.1:8000\/api\/settings\/profiles\/\d+$/, (route, request) => {
-    if (request.method() === 'GET') {
-      const id = parseInt(request.url().split('/').pop() || '1');
-      const profile = mockProfiles.find((p) => p.id === id) || mockProfiles[0];
-      route.fulfill({
-        status: 200,
-        contentType: 'application/json',
-        body: JSON.stringify(profile),
-      });
-    } else {
-      route.continue();
-    }
+  // Mock available tools endpoint
+  await page.route('**/api/tools/available', (route) => {
+    route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify(mockAvailableTools),
+    });
   });
 
   // Mock deck prompts
@@ -110,6 +106,26 @@ async function setupMocks(page: Page) {
     // Handle session creation/deletion
     if (method === 'POST' || method === 'DELETE') {
       route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ session_id: 'mock', title: 'New', user_id: null, created_at: '2026-01-01T00:00:00Z' }) });
+      return;
+    }
+
+    // Handle agent-config endpoint
+    if (url.includes('/agent-config')) {
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify(mockDefaultAgentConfig),
+      });
+      return;
+    }
+
+    // Handle load-profile endpoint
+    if (url.includes('/load-profile/')) {
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ status: 'loaded', agent_config: mockDefaultAgentConfig }),
+      });
       return;
     }
 

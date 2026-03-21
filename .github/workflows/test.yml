@@ -59,9 +59,15 @@ jobs:
               - 'tests/integration/test_streaming.py'
             config:
               - 'src/api/routes/settings/**'
+              - 'src/api/routes/agent_config.py'
+              - 'src/api/routes/profiles.py'
+              - 'src/api/routes/tools.py'
+              - 'src/api/schemas/agent_config.py'
               - 'src/services/config*.py'
               - 'src/database/**'
-              - 'tests/integration/test_config_api.py'
+              - 'tests/unit/test_agent_config_routes.py'
+              - 'tests/unit/test_profiles_routes.py'
+              - 'tests/unit/test_tools_routes.py'
             slides:
               - 'src/core/slide*.py'
               - 'src/api/routes/slides.py'
@@ -193,7 +199,11 @@ jobs:
           DATABRICKS_HOST: https://test.cloud.databricks.com
           DATABRICKS_TOKEN: test-token
         run: |
-          pytest tests/integration/test_config_api.py -v --tb=short \
+          pytest tests/unit/test_agent_config_routes.py \
+            tests/unit/test_profiles_routes.py \
+            tests/unit/test_tools_routes.py \
+            tests/unit/test_agent_config_schema.py \
+            -v --tb=short \
             --log-cli-level=WARNING -s \
             --junitxml=test-results/config-api-results.xml -m "not live"
       - uses: actions/upload-artifact@v4

@@ -1,7 +1,7 @@
 import React, { useMemo, useRef, useState, useEffect } from 'react';
 import { useSortable } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
-import { GripVertical, Edit3, Trash2, MessageSquare, Database, Maximize2, Loader2 } from 'lucide-react';
+import { GripVertical, Edit3, Trash2, MessageSquare, Maximize2, Loader2 } from 'lucide-react';
 import { Button } from '@/ui/button';
 import { Tooltip } from '../common/Tooltip';
 import type { Slide, SlideDeck } from '../../types/slide';
@@ -56,30 +56,9 @@ export const SlideTile: React.FC<SlideTileProps> = ({
   );
   const [isManualVerifying, setIsManualVerifying] = useState(false);
   const [isStale, setIsStale] = useState(false);
-  const [isLoadingGenieLink, setIsLoadingGenieLink] = useState(false);
-  
+
   // Combined verifying state (manual or auto)
   const isVerifying = isManualVerifying || isAutoVerifying;
-
-  // Handle opening Genie conversation link
-  const handleOpenGenieLink = async () => {
-    if (isLoadingGenieLink) return;
-    
-    setIsLoadingGenieLink(true);
-    try {
-      const link = await api.getGenieLink(sessionId);
-      if (link.url) {
-        window.open(link.url, '_blank');
-      } else {
-        alert(link.message || 'No Genie conversation available');
-      }
-    } catch (error) {
-      console.error('Failed to get Genie link:', error);
-      alert('Failed to get Genie conversation link');
-    } finally {
-      setIsLoadingGenieLink(false);
-    }
-  };
 
   // Sync verification state when slide.verification changes (e.g., session restore)
   useEffect(() => {
@@ -265,19 +244,6 @@ export const SlideTile: React.FC<SlideTileProps> = ({
               onVerify={handleVerify}
               isStale={isStale}
             />
-
-            {/* Genie Source Data Link */}
-            <Tooltip text="View source data">
-              <Button
-                variant="ghost"
-                size="icon"
-                onClick={handleOpenGenieLink}
-                disabled={isLoadingGenieLink}
-                className="h-7 w-7"
-              >
-                <Database className="size-3.5" />
-              </Button>
-            </Tooltip>
 
             <Tooltip text={isSelected ? 'Selected for editing' : 'Add to chat context'}>
               <Button

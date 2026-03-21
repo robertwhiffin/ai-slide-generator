@@ -2,6 +2,7 @@ import type { ChatResponse } from '../types/message';
 import type { ImageAsset, ImageListResponse, ImageDataResponse } from '../types/image';
 import type { SlideDeck, Slide, SlideContext, ReplacementInfo } from '../types/slide';
 import type { VerificationResult } from '../types/verification';
+import type { AgentConfig, ToolEntry, AvailableTool, ProfileSummary } from '../types/agentConfig';
 
 // Use relative URLs in production, explicit IPv4 in development
 // Note: Using 127.0.0.1 instead of localhost to avoid IPv6 resolution issues in CI
@@ -58,7 +59,7 @@ const isPollingMode = (): boolean => {
 };
 
 // Streaming event types matching backend StreamEventType
-export type StreamEventType = 'assistant' | 'tool_call' | 'tool_result' | 'error' | 'complete' | 'session_title';
+export type StreamEventType = 'assistant' | 'tool_call' | 'tool_result' | 'error' | 'complete' | 'session_title' | 'session_created';
 
 export interface StreamEvent {
   type: StreamEventType;
@@ -74,6 +75,7 @@ export interface StreamEvent {
   metadata?: Record<string, any>;
   experiment_url?: string;
   session_title?: string;
+  session_id?: string;
 }
 
 export interface SessionMessage {
@@ -102,6 +104,7 @@ export interface Session {
   profile_name?: string | null;
   google_slides_url?: string | null;
   google_slides_presentation_id?: string | null;
+  experiment_url?: string | null;
   profile_deleted?: boolean;
 }
 
@@ -536,6 +539,7 @@ export const api = {
     onEvent: (event: StreamEvent) => void,
     onError: (error: Error) => void,
     imageIds?: number[],
+    agentConfig?: AgentConfig,
   ): () => void {
     const controller = new AbortController();
 
@@ -547,10 +551,11 @@ export const api = {
             'Content-Type': 'application/json',
           },
           body: JSON.stringify({
-            session_id: sessionId,
+            session_id: sessionId || undefined,
             message,
             slide_context: slideContext,
             image_ids: imageIds,
+            agent_config: agentConfig,
           }),
           signal: controller.signal,
         });
@@ -626,15 +631,17 @@ export const api = {
     message: string,
     slideContext?: SlideContext,
     imageIds?: number[],
+    agentConfig?: AgentConfig,
   ): Promise<{ request_id: string }> {
     const response = await fetch(`${API_BASE_URL}/api/chat/async`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        session_id: sessionId,
+        session_id: sessionId || undefined,
         message,
         slide_context: slideContext,
         image_ids: imageIds,
+        agent_config: agentConfig,
       }),
     });
 
@@ -683,13 +690,14 @@ export const api = {
     onEvent: (event: StreamEvent) => void,
     onError: (error: Error) => void,
     imageIds?: number[],
+    agentConfig?: AgentConfig,
   ): () => void {
     let cancelled = false;
     let pollInterval: ReturnType<typeof setInterval> | null = null;
 
     (async () => {
       try {
-        const { request_id } = await this.submitChatAsync(sessionId, message, slideContext, imageIds);
+        const { request_id } = await this.submitChatAsync(sessionId, message, slideContext, imageIds, agentConfig);
 
         let lastMessageId = 0;
 
@@ -771,11 +779,12 @@ export const api = {
     onEvent: (event: StreamEvent) => void,
     onError: (error: Error) => void,
     imageIds?: number[],
+    agentConfig?: AgentConfig,
   ): () => void {
     if (isPollingMode()) {
-      return this.startPolling(sessionId, message, slideContext, onEvent, onError, imageIds);
+      return this.startPolling(sessionId, message, slideContext, onEvent, onError, imageIds, agentConfig);
     } else {
-      return this.streamChat(sessionId, message, slideContext, onEvent, onError, imageIds);
+      return this.streamChat(sessionId, message, slideContext, onEvent, onError, imageIds, agentConfig);
     }
   },
 
@@ -907,15 +916,17 @@ export const api = {
   /**
    * Get the Genie conversation link for viewing source data
    */
-  async getGenieLink(sessionId: string): Promise<{
+  async getGenieLink(sessionId: string, spaceId?: string): Promise<{
     has_genie_conversation: boolean;
     conversation_id?: string;
     url?: string;
     message: string;
   }> {
-    const response = await fetch(
-      `${API_BASE_URL}/api/verification/genie-link?session_id=${encodeURIComponent(sessionId)}`
-    );
+    let url = `${API_BASE_URL}/api/verification/genie-link?session_id=${encodeURIComponent(sessionId)}`;
+    if (spaceId) {
+      url += `&space_id=${encodeURIComponent(spaceId)}`;
+    }
+    const response = await fetch(url);
 
     if (!response.ok) {
       const error = await response.json().catch(() => ({}));
@@ -1382,5 +1393,160 @@ export const api = {
     }
 
     return response.json();
+  },
+
+  // =========================================================================
+  // Agent Config API
+  // =========================================================================
+
+  /**
+   * Get the agent config for a session.
+   */
+  async getAgentConfig(sessionId: string): Promise<AgentConfig> {
+    const response = await fetch(
+      `${API_BASE_URL}/api/sessions/${sessionId}/agent-config`
+    );
+
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({}));
+      throw new ApiError(response.status, error.detail || 'Failed to fetch agent config');
+    }
+
+    return response.json();
+  },
+
+  /**
+   * Replace the full agent config for a session.
+   */
+  async updateAgentConfig(sessionId: string, config: AgentConfig): Promise<AgentConfig> {
+    const response = await fetch(
+      `${API_BASE_URL}/api/sessions/${sessionId}/agent-config`,
+      {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(config),
+      }
+    );
+
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({}));
+      throw new ApiError(response.status, error.detail || 'Failed to update agent config');
+    }
+
+    return response.json();
+  },
+
+  /**
+   * Add or remove a single tool from the session's agent config.
+   */
+  async patchTools(sessionId: string, action: 'add' | 'remove', tool: ToolEntry): Promise<AgentConfig> {
+    const response = await fetch(
+      `${API_BASE_URL}/api/sessions/${sessionId}/agent-config/tools`,
+      {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action, tool }),
+      }
+    );
+
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({}));
+      throw new ApiError(response.status, error.detail || 'Failed to update tools');
+    }
+
+    return response.json();
+  },
+
+  // =========================================================================
+  // Tools Discovery API
+  // =========================================================================
+
+  /**
+   * List all available tools (Genie spaces, MCP servers, etc.).
+   */
+  async getAvailableTools(): Promise<AvailableTool[]> {
+    const response = await fetch(`${API_BASE_URL}/api/tools/available`);
+
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({}));
+      throw new ApiError(response.status, error.detail || 'Failed to fetch available tools');
+    }
+
+    return response.json();
+  },
+
+  // =========================================================================
+  // Profiles API (simplified)
+  // =========================================================================
+
+  /**
+   * List all profiles.
+   */
+  async listProfiles(): Promise<ProfileSummary[]> {
+    const response = await fetch(`${API_BASE_URL}/api/profiles`);
+
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({}));
+      throw new ApiError(response.status, error.detail || 'Failed to fetch profiles');
+    }
+
+    return response.json();
+  },
+
+  /**
+   * Save the current session's agent config as a named profile.
+   */
+  async saveAsProfile(sessionId: string, name: string, description?: string): Promise<ProfileSummary> {
+    const response = await fetch(
+      `${API_BASE_URL}/api/profiles/save-from-session/${sessionId}`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name, description }),
+      }
+    );
+
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({}));
+      throw new ApiError(response.status, error.detail || 'Failed to save profile');
+    }
+
+    return response.json();
+  },
+
+  /**
+   * Load a profile's agent config into a session.
+   */
+  async loadProfile(sessionId: string, profileId: number): Promise<{ status: string; agent_config: AgentConfig }> {
+    const response = await fetch(
+      `${API_BASE_URL}/api/sessions/${sessionId}/load-profile/${profileId}`,
+      {
+        method: 'POST',
+      }
+    );
+
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({}));
+      throw new ApiError(response.status, error.detail || 'Failed to load profile');
+    }
+
+    return response.json();
+  },
+
+  /**
+   * Delete a profile.
+   */
+  async deleteProfile(profileId: number): Promise<void> {
+    const response = await fetch(
+      `${API_BASE_URL}/api/profiles/${profileId}`,
+      {
+        method: 'DELETE',
+      }
+    );
+
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({}));
+      throw new ApiError(response.status, error.detail || 'Failed to delete profile');
+    }
   },
 };

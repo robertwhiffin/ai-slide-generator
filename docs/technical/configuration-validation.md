@@ -2,59 +2,62 @@
 
 ## Overview
 
-The configuration validation feature tests all components of a profile configuration to ensure they are working correctly before use.
+The configuration validation feature tests components of a session's agent configuration to ensure they are working correctly before use. Validation is performed against the session's `agent_config` (validated with Pydantic models on every write).
 
 ## Components Tested
 
 ### 1. LLM Endpoint
-- **Test**: Sends a simple "hello" message to the configured LLM endpoint
-- **Validates**: 
+- **Test**: Sends a simple "hello" message to the backend's fixed LLM endpoint
+- **Validates**:
   - Endpoint is accessible
   - Authentication is working
   - Model responds correctly
 - **Error Example**: "Failed to call LLM: Endpoint not found"
 
-### 2. Genie Space (Optional)
-- **Test**: Executes query "Return a table of how many rows you have per table"
+### 2. Genie Spaces (Optional)
+- **Test**: Executes query "Return a table of how many rows you have per table" against each configured Genie space
 - **Validates**:
-  - Genie space exists and is accessible
+  - Each Genie space exists and is accessible
   - User has permissions to query the space
   - Space contains data
 - **Error Example**: "Failed to query Genie: Permission denied"
-- **Prompt-only mode**: When no Genie space is configured, validation is skipped with success message "Genie not configured (prompt-only mode)"
+- **Prompt-only mode**: When no Genie tools are in the agent config, validation is skipped with success message "No Genie tools configured (prompt-only mode)"
 
 ### 3. MLflow Experiment
-- **Test**: Creates or accesses the configured MLflow experiment
+- **Test**: Creates or accesses the MLflow experiment
 - **Validates**:
   - Experiment path is valid
   - User has write permissions
   - Tracking URI is configured correctly
 - **Error Example**: "Failed to create MLflow experiment: Directory does not exist"
 
+## Agent Config Validation (Pydantic)
+
+The `agent_config` JSON is validated by Pydantic models on every write (`PUT /api/sessions/{id}/agent-config` and `PATCH /api/sessions/{id}/agent-config/tools`). This ensures structural correctness (valid tool types, required fields) before persistence.
+
 ## API Endpoint
 
-### POST `/api/config/validate/{profile_id}`
+### POST `/api/config/validate/{session_id}`
 
 **Request:**
 ```http
-POST /api/config/validate/1
+POST /api/config/validate/abc123
 ```
 
 **Response:**
 ```json
 {
   "success": true,
-  "profile_id": 1,
-  "profile_name": "default",
+  "session_id": "abc123",
   "results": [
     {
       "component": "LLM",
       "success": true,
-      "message": "Successfully connected to LLM endpoint: databricks-claude-sonnet-4-5",
+      "message": "Successfully connected to LLM endpoint",
       "details": "Response received: Hello! How can I help you today?..."
     },
     {
-      "component": "Genie",
+      "component": "Genie: Sales Data",
       "success": true,
       "message": "Successfully connected to Genie space: 01abc123...",
       "details": "Query executed and returned data"
@@ -69,46 +72,18 @@ POST /api/config/validate/1
 }
 ```
 
-**Error Response:**
-```json
-{
-  "success": false,
-  "profile_id": 1,
-  "profile_name": "default",
-  "results": [
-    {
-      "component": "LLM",
-      "success": false,
-      "message": "Failed to call LLM: Endpoint not found",
-      "details": "Endpoint: databricks-invalid-endpoint"
-    }
-  ]
-}
-```
-
 ## Frontend Integration
 
-The validation button is integrated into the ProfileDetail view in "View" mode.
-
-### Location
-- Profile Detail Modal → View Mode → Configuration Validation section
-- Click "Test Configuration" button to run validation
+The validation is available from the AgentConfigBar for the current session.
 
 ### UI Flow
-1. User clicks "Test Configuration" button
-2. Button shows loading spinner with "Testing Configuration..."
-3. Backend runs validation tests (LLM, Genie, MLflow)
+1. User triggers configuration validation
+2. Loading spinner shown during testing
+3. Backend runs validation tests (LLM, each Genie space, MLflow)
 4. Results displayed with:
-   - Overall status (✅ All Tests Passed / ❌ Configuration Issues Detected)
+   - Overall status
    - Individual component results with pass/fail indicators
    - Detailed messages and error information
-   - Help text explaining what each test does
-
-### Visual Indicators
-- ✅ Green background for passing tests
-- ❌ Red background for failing tests
-- Loading spinner during validation
-- Detailed error messages for troubleshooting
 
 ## Backend Implementation
 
@@ -118,20 +93,14 @@ The validation button is integrated into the ProfileDetail view in "View" mode.
 ```python
 class ConfigurationValidator:
     """Validates configuration by testing each component."""
-    
+
     def validate_all(self) -> Dict[str, Any]:
         """Run all validation tests."""
         self._validate_llm()      # Test LLM endpoint
-        # Genie validation is conditional
-        if self.settings.genie:
-            self._validate_genie()    # Test Genie query
-        else:
-            # Profile in prompt-only mode - Genie skipped
-            self.results.append(ValidationResult(
-                component="Genie",
-                success=True,
-                message="Genie not configured (prompt-only mode)",
-            ))
+        # Genie validation for each configured tool
+        for tool in self.agent_config.get("tools", []):
+            if tool["type"] == "genie":
+                self._validate_genie(tool)
         self._validate_mlflow()   # Test MLflow experiment
         return results
 ```
@@ -139,12 +108,12 @@ class ConfigurationValidator:
 ### API Layer
 **File**: `src/api/routes/config/validation.py`
 
-Provides REST endpoint for triggering validation.
+Provides REST endpoint for triggering validation against a session's agent config.
 
 ## Use Cases
 
-### 1. Profile Setup
-After creating or editing a profile, validate to ensure all components are configured correctly.
+### 1. Session Setup
+After configuring tools via the AgentConfigBar, validate to ensure all components are working.
 
 ### 2. Troubleshooting
 When experiencing issues, run validation to identify which component is failing.

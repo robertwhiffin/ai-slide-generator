@@ -643,4 +643,22 @@ def _migrate_to_v0_2(conn, inspector, schema, _qual, is_sqlite):
             f"ALTER TABLE {q_us} ADD COLUMN google_slides_url VARCHAR(512) NULL"
         ))
 
+    # --- 5. agent_config on user_sessions ---
+    us_cols = _get_columns("user_sessions")
+    if us_cols and "agent_config" not in us_cols:
+        q_us = _qual("user_sessions")
+        logger.info("Migration: adding agent_config column to user_sessions")
+        conn.execute(text(
+            f"ALTER TABLE {q_us} ADD COLUMN agent_config JSON NULL"
+        ))
+
+    # --- 6. agent_config on config_profiles ---
+    cp_cols = _get_columns("config_profiles")
+    if cp_cols and "agent_config" not in cp_cols:
+        q_cp = _qual("config_profiles")
+        logger.info("Migration: adding agent_config column to config_profiles")
+        conn.execute(text(
+            f"ALTER TABLE {q_cp} ADD COLUMN agent_config JSON NULL"
+        ))
+
     logger.info("Migration: v0.2 schema migration complete")

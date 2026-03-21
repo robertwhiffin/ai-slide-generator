@@ -6,7 +6,6 @@ from sqlalchemy.orm import Session
 from src.core.databricks_client import get_databricks_client
 from src.database.models import (
     ConfigAIInfra,
-    ConfigHistory,
     ConfigPrompts,
 )
 
@@ -50,16 +49,6 @@ class ConfigService:
         if llm_max_tokens is not None and llm_max_tokens != config.llm_max_tokens:
             changes["llm_max_tokens"] = {"old": config.llm_max_tokens, "new": llm_max_tokens}
             config.llm_max_tokens = llm_max_tokens
-
-        if changes:
-            history = ConfigHistory(
-                profile_id=profile_id,
-                domain="ai_infra",
-                action="update",
-                changed_by=user or "system",
-                changes=changes,
-            )
-            self.db.add(history)
 
         self.db.commit()
         self.db.refresh(config)
@@ -148,37 +137,9 @@ class ConfigService:
             changes["slide_editing_instructions"] = {"old": "...", "new": "..."}
             config.slide_editing_instructions = slide_editing_instructions
 
-        if changes:
-            history = ConfigHistory(
-                profile_id=profile_id,
-                domain="prompts",
-                action="update",
-                changed_by=user or "system",
-                changes=changes,
-            )
-            self.db.add(history)
-
         self.db.commit()
         self.db.refresh(config)
 
         return config
 
-    # History
-
-    def get_config_history(
-        self,
-        profile_id: int = None,
-        domain: str = None,
-        limit: int = 100,
-    ) -> List[ConfigHistory]:
-        """Get configuration change history."""
-        query = self.db.query(ConfigHistory)
-
-        if profile_id:
-            query = query.filter(ConfigHistory.profile_id == profile_id)
-
-        if domain:
-            query = query.filter(ConfigHistory.domain == domain)
-
-        return query.order_by(ConfigHistory.timestamp.desc()).limit(limit).all()
 

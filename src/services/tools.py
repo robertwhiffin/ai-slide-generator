@@ -22,7 +22,7 @@ class GenieToolError(Exception):
     pass
 
 
-def initialize_genie_conversation() -> str:
+def initialize_genie_conversation(space_id: Optional[str] = None) -> str:
     """
     Initialize a Genie conversation with a placeholder message.
 
@@ -30,7 +30,8 @@ def initialize_genie_conversation() -> str:
     across multiple queries within a session, eliminating the need for
     the LLM to track conversation IDs.
 
-    Args: None
+    Args:
+        space_id: Genie space ID. If not provided, reads from global settings.
     Returns:
         Genie conversation ID string
 
@@ -38,8 +39,8 @@ def initialize_genie_conversation() -> str:
         GenieToolError: If conversation initialization fails
 
     Example:
-        >>> conv_id = initialize_genie_conversation()
-        >>> result = query_genie_space("show me data", conv_id)
+        >>> conv_id = initialize_genie_conversation("space123")
+        >>> result = query_genie_space("show me data", conv_id, space_id="space123")
     """
     logger.warning("Genie tool: initialize_genie_conversation called")
     client = get_user_client()
@@ -47,23 +48,13 @@ def initialize_genie_conversation() -> str:
         "Genie tool: got client for conversation init",
         extra={"client_config_host": client.config.host},
     )
-    settings = get_settings()
-    
-    if not settings.genie:
-        raise GenieToolError("Genie space not configured for this profile")
-    
-    space_id = settings.genie.space_id
+    if not space_id:
+        settings = get_settings()
+        if not settings.genie:
+            raise GenieToolError("Genie space not configured for this profile")
+        space_id = settings.genie.space_id
 
-    # Log with safe attribute access
-    extra_info = {
-        "space_id": space_id,
-    }
-    if hasattr(settings, 'profile_id'):
-        extra_info['profile_id'] = settings.profile_id
-    if hasattr(settings, 'profile_name'):
-        extra_info['profile_name'] = settings.profile_name
-
-    logger.info("Initializing Genie conversation", extra=extra_info)
+    logger.info("Initializing Genie conversation", extra={"space_id": space_id})
 
     conversation_start_message: str = """
     You are a data analyst agent for an AI slide generation system. 
@@ -97,6 +88,7 @@ def query_genie_space(
     query: str,
     conversation_id: Optional[str] = None,
     max_retries: int = 2,
+    space_id: Optional[str] = None,
 ) -> dict[str, Any]:
     """
     Query Databricks Genie space for data using natural language or SQL.
@@ -129,22 +121,19 @@ def query_genie_space(
         "Genie tool: got client for query",
         extra={"client_config_host": client.config.host},
     )
-    settings = get_settings()
-    
-    if not settings.genie:
-        raise GenieToolError("Genie space not configured for this profile")
-    
-    space_id = settings.genie.space_id
+    # Use explicitly provided space_id (from agent_factory per-space tools),
+    # falling back to global settings for legacy single-Genie path.
+    if not space_id:
+        settings = get_settings()
+        if not settings.genie:
+            raise GenieToolError("Genie space not configured for this profile")
+        space_id = settings.genie.space_id
 
     # Log with safe attribute access
     extra_info = {
         "space_id": space_id,
         "query": query[:100],
     }
-    if hasattr(settings, 'profile_id'):
-        extra_info['profile_id'] = settings.profile_id
-    if hasattr(settings, 'profile_name'):
-        extra_info['profile_name'] = settings.profile_name
 
     logger.info("Querying Genie space", extra=extra_info)
 

@@ -1,6 +1,8 @@
 import { test, expect, Page } from '@playwright/test';
 import {
-  mockProfiles,
+  mockProfileSummaries,
+  mockDefaultAgentConfig,
+  mockAvailableTools,
   mockDeckPrompts,
   mockSlideStyles,
   mockSessions,
@@ -28,6 +30,17 @@ async function setupMocks(page: Page) {
   await page.route('**/api/setup/status', (route) => {
     route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ configured: true }) });
   });
+
+  // New profiles API (GET /api/profiles)
+  await page.route(/\/api\/profiles$/, (route) => {
+    route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(mockProfileSummaries) });
+  });
+
+  // Available tools
+  await page.route('**/api/tools/available', (route) => {
+    route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(mockAvailableTools) });
+  });
+
   await page.route('http://127.0.0.1:8000/api/sessions**', (route, request) => {
     const url = request.url();
     const method = request.method();
@@ -35,6 +48,18 @@ async function setupMocks(page: Page) {
     // Handle session creation
     if (method === 'POST') {
       route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ session_id: 'mock', title: 'New', user_id: null, created_at: '2026-01-01T00:00:00Z' }) });
+      return;
+    }
+
+    // Handle agent-config endpoint
+    if (url.includes('/agent-config')) {
+      route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(mockDefaultAgentConfig) });
+      return;
+    }
+
+    // Handle load-profile endpoint
+    if (url.includes('/load-profile/')) {
+      route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ status: 'loaded', agent_config: mockDefaultAgentConfig }) });
       return;
     }
 
@@ -58,33 +83,6 @@ async function setupMocks(page: Page) {
     } else {
       route.fulfill({ status: 404 });
     }
-  });
-
-  // Mock profiles endpoint
-  await page.route('http://127.0.0.1:8000/api/settings/profiles', (route) => {
-    route.fulfill({
-      status: 200,
-      contentType: 'application/json',
-      body: JSON.stringify(mockProfiles),
-    });
-  });
-
-  // Mock individual profile endpoints
-  await page.route(/http:\/\/127.0.0.1:8000\/api\/settings\/profiles\/\d+$/, (route) => {
-    route.fulfill({
-      status: 200,
-      contentType: 'application/json',
-      body: JSON.stringify(mockProfiles[0]),
-    });
-  });
-
-  // Mock profile load endpoint
-  await page.route(/http:\/\/127.0.0.1:8000\/api\/settings\/profiles\/\d+\/load/, (route) => {
-    route.fulfill({
-      status: 200,
-      contentType: 'application/json',
-      body: JSON.stringify({ status: 'reloaded', profile_id: 1 }),
-    });
   });
 
   // Mock deck prompts

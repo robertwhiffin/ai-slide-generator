@@ -1,118 +1,84 @@
-# Creating Profiles
+# Saving and Loading Configurations
 
-This guide explains how to create and manage configuration profiles in Databricks Tellr.
+This guide explains how to save and load configuration snapshots (profiles) in Databricks Tellr.
 
 ## Overview
 
-Profiles bundle together:
-- **Genie Room** - Your data source for queries
+Each session carries its own agent configuration that controls:
+- **Tools** - Genie spaces and MCP servers for data queries
 - **Slide Style** - CSS styling for generated slides
 - **Deck Prompt** - Template that guides slide structure
 
-Creating profiles for different use cases (e.g., "Quarterly Reviews", "Customer Presentations") allows you to quickly switch contexts.
+You can save a session's configuration as a named **profile** for reuse, or load a previously saved profile into any session. Profiles are optional -- you can start generating slides immediately without one.
 
 ## Prerequisites
 
 - Access to Databricks Tellr
-- Knowledge of available Genie rooms in your workspace
-- (Optional) Custom slide styles or deck prompts
+- An active session (created automatically on first message)
 
-## Step-by-Step Instructions
+## Configuring a Session
 
-### Step 01: Navigate to Profiles
+### Step 01: Open the AgentConfigBar
 
-Click "Profiles" in the navigation bar to open the profile management page.
-The page displays all available profiles with their descriptions and settings.
+The AgentConfigBar at the top of the generator shows your current session's tools and settings. From here you can add Genie spaces, select a slide style, and choose a deck prompt.
 
-![Profiles page](images/02-creating-profiles/01-profiles-page.png)
+### Step 02: Add Data Sources
 
+Click the add button to browse available Genie spaces and MCP servers. Select one or more to add them to your session. Each Genie space appears as a chip in the toolbar.
 
+### Step 03: Select Style and Prompt
 
-### Step 02: Create New Profile
+Use the AgentConfigBar to pick a slide style (visual appearance) and optionally a deck prompt (content template).
 
-Click the "+ Create Profile" button to start the creation wizard.
+## Saving a Configuration as a Profile
 
-![Create Profile button](images/02-creating-profiles/03-create-profile-button.png)
+Once you have a session configured the way you want, you can save it as a reusable profile.
 
-### Step 03: Enter Basic Information
+### Step 04: Save as Profile
 
-In Step 1 of the wizard, enter:
-- **Name** - A unique, descriptive name (required)
-- **Description** - What this profile is used for (optional)
+Click "Save as Profile" in the AgentConfigBar or profile menu. Enter a name and optional description, then save. The current session's entire agent configuration is snapshotted.
 
-![Wizard Step 1](images/02-creating-profiles/04-wizard-step1-basics.png)
+## Loading a Saved Profile
 
-Fill in both fields with clear, descriptive text.
+### Step 05: Browse Profiles
 
-![Wizard Step 1 Filled](images/02-creating-profiles/05-wizard-step1-filled.png)
+Click the profile menu to see available saved profiles.
 
-### Step 04: Genie Space (Optional)
+### Step 06: Load Profile
 
-Genie Space is optional. Skip to create a prompt-only profile, or connect a Genie room for data queries.
+Select a profile to load its configuration into your current session. This replaces the session's tools, style, and prompt settings with those from the profile. Genie conversation IDs are reset (new conversations will be initialized on the next query).
 
-![Genie Space Step](images/02-creating-profiles/06-wizard-step2-genie.png)
+## Managing Profiles
 
-### Step 05: Select Slide Style (Required)
+### View All Profiles
 
-Choose a slide style that matches your presentation needs. This is required to proceed.
+Navigate to "Profiles" in the navigation bar to see all saved profiles.
 
-![Style Selection](images/02-creating-profiles/07-wizard-step3-style.png)
+### Edit a Profile
 
-Select a style to define the visual appearance of your slides.
+Select a profile to update its name or description.
 
-![Style Selected](images/02-creating-profiles/08-wizard-step3-style-selected.png)
+### Delete a Profile
 
-### Step 06: Deck Prompt (Optional)
+Remove profiles you no longer need. This does not affect sessions that previously loaded from the profile.
 
-Optionally select a deck prompt template to guide slide structure.
+## Configuration Reference
 
-![Prompt Selection](images/02-creating-profiles/09-wizard-step4-prompt.png)
-
-### Step 07: Review & Create
-
-Review your settings and click "Create Profile" to finish.
-
-![Review Step](images/02-creating-profiles/10-wizard-step5-review.png)
-
-## Editing Profiles
-
-### Open Profile Details
-
-Click on any profile card to view its details.
-
-![Profile card](images/02-creating-profiles/12-profile-card.png)
-
-### View Details
-
-The detail view shows all profile settings.
-
-![Profile details](images/02-creating-profiles/13-profile-details.png)
-
-### Edit Profile
-
-Click the Edit button to modify settings.
-
-![Edit button](images/02-creating-profiles/14-profile-edit-button.png)
-
-## Profile Settings Reference
-
-| Setting | Description | Can Change After Creation |
-|---------|-------------|---------------------------|
-| Name | Profile identifier | Yes |
-| Description | Usage notes | Yes |
-| Genie Room | Data source | Yes |
-| Slide Style | Visual styling | Yes |
-| Deck Prompt | Generation template | Yes |
-| Default | Whether this loads on startup | Yes |
+| Setting | Description | Stored In |
+|---------|-------------|-----------|
+| Tools | Genie spaces and MCP servers | `agent_config.tools` |
+| Slide Style | Visual styling | `agent_config.slide_style_id` |
+| Deck Prompt | Generation template | `agent_config.deck_prompt_id` |
+| System Prompt | Custom system instructions (advanced) | `agent_config.system_prompt` |
 
 ## Tips
 
-- **Use descriptive names**: "Q4 Customer Review" is better than "Profile 1"
-- **Match prompts to use case**: Different deck prompts suit different presentation types
-- **Test with sample prompts**: After creating a profile, generate a test presentation
-- **One profile per workflow**: Create separate profiles for different reporting needs
+- **Start without a profile**: Just open the app and start chatting -- configure tools as needed
+- **Save after tuning**: Once you find a good combination of tools and settings, save it as a profile
+- **Multiple Genie spaces**: A single session can query multiple Genie spaces simultaneously
+- **Quick context switch**: Load different profiles to switch between reporting workflows
 
 ## Related Guides
 
-- [Generating Slides](./01-generating-slides.md) - Use your profile to create presentations
+- [Generating Slides](./01-generating-slides.md) - Create presentations with your configuration
 - [Advanced Configuration](./03-advanced-configuration.md) - Create custom prompts and styles
