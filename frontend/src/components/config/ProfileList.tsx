@@ -7,12 +7,112 @@
  */
 
 import React, { useState } from 'react';
-import { User, ChevronDown, Trash2, Pencil } from 'lucide-react';
+import { User, ChevronDown, Trash2, Pencil, MessageSquare, Palette, FileText, Wrench } from 'lucide-react';
 import { Button } from '@/ui/button';
 import { Badge } from '@/ui/badge';
 import type { Profile } from '../../api/config';
 import { useProfiles } from '../../hooks/useProfiles';
 import { ConfirmDialog } from './ConfirmDialog';
+
+interface ToolEntry {
+  type: 'genie' | 'mcp';
+  space_id?: string;
+  space_name?: string;
+  description?: string;
+  server_uri?: string;
+  server_name?: string;
+}
+
+interface AgentConfigShape {
+  tools?: ToolEntry[];
+  slide_style_id?: number | null;
+  deck_prompt_id?: number | null;
+  system_prompt?: string | null;
+  slide_editing_instructions?: string | null;
+}
+
+const ConfigSummary: React.FC<{ config: Record<string, unknown> | null }> = ({ config }) => {
+  if (!config || Object.keys(config).length === 0) {
+    return (
+      <div className="rounded-md border border-border bg-muted/20 px-3 py-2 text-sm text-muted-foreground">
+        No configuration saved
+      </div>
+    );
+  }
+
+  const cfg = config as unknown as AgentConfigShape;
+  const tools = cfg.tools ?? [];
+  const genieTools = tools.filter(t => t.type === 'genie');
+  const mcpTools = tools.filter(t => t.type === 'mcp');
+  const hasCustomSystemPrompt = !!cfg.system_prompt;
+  const hasCustomSlideInstructions = !!cfg.slide_editing_instructions;
+
+  return (
+    <div className="grid gap-2 rounded-md border border-border bg-muted/20 p-3 text-sm">
+      {/* Tools */}
+      <div className="flex items-start gap-2">
+        <Wrench className="mt-0.5 size-3.5 shrink-0 text-muted-foreground" />
+        <div className="min-w-0">
+          <span className="font-medium text-foreground">Tools</span>
+          {tools.length === 0 ? (
+            <span className="ml-2 text-muted-foreground">None configured</span>
+          ) : (
+            <div className="mt-1 flex flex-wrap gap-1.5">
+              {genieTools.map(t => (
+                <Badge key={t.space_id} variant="outline" className="text-xs font-normal gap-1">
+                  <MessageSquare className="size-3" />
+                  {t.space_name}
+                </Badge>
+              ))}
+              {mcpTools.map(t => (
+                <Badge key={t.server_uri} variant="outline" className="text-xs font-normal gap-1">
+                  <Wrench className="size-3" />
+                  {t.server_name}
+                </Badge>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* Style & Prompt selections */}
+      <div className="flex items-start gap-2">
+        <Palette className="mt-0.5 size-3.5 shrink-0 text-muted-foreground" />
+        <div>
+          <span className="font-medium text-foreground">Slide Style</span>
+          <span className="ml-2 text-muted-foreground">
+            {cfg.slide_style_id != null ? `ID ${cfg.slide_style_id}` : 'Default'}
+          </span>
+        </div>
+      </div>
+
+      <div className="flex items-start gap-2">
+        <FileText className="mt-0.5 size-3.5 shrink-0 text-muted-foreground" />
+        <div>
+          <span className="font-medium text-foreground">Deck Prompt</span>
+          <span className="ml-2 text-muted-foreground">
+            {cfg.deck_prompt_id != null ? `ID ${cfg.deck_prompt_id}` : 'Default'}
+          </span>
+        </div>
+      </div>
+
+      {/* Custom prompts indicator */}
+      {(hasCustomSystemPrompt || hasCustomSlideInstructions) && (
+        <div className="flex items-start gap-2">
+          <MessageSquare className="mt-0.5 size-3.5 shrink-0 text-muted-foreground" />
+          <div className="flex flex-wrap gap-1.5">
+            {hasCustomSystemPrompt && (
+              <Badge variant="secondary" className="text-xs font-normal">Custom system prompt</Badge>
+            )}
+            {hasCustomSlideInstructions && (
+              <Badge variant="secondary" className="text-xs font-normal">Custom slide instructions</Badge>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};
 
 export const ProfileList: React.FC = () => {
   const {
@@ -214,6 +314,9 @@ export const ProfileList: React.FC = () => {
                   {/* Expanded Details */}
                   {expandedId === profile.id && (
                     <div className="mt-3 space-y-3">
+                      {/* Config Summary */}
+                      <ConfigSummary config={profile.agent_config} />
+
                       {/* Rename Input (when active) */}
                       {renamingId === profile.id && (
                         <div className="rounded-md border border-border bg-muted/30 p-3 space-y-2">
