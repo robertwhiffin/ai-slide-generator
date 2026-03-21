@@ -692,7 +692,7 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
             <div className="flex-1 overflow-y-auto">
               <div className="mx-auto w-full max-w-4xl px-4 py-8">
                 <ProfileProvider>
-                  <ProfileList onProfileChange={handleProfileChange} />
+                  <ProfileList />
                 </ProfileProvider>
               </div>
             </div>
