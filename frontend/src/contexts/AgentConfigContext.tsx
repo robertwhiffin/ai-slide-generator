@@ -147,8 +147,22 @@ export const AgentConfigProvider: React.FC<{ children: React.ReactNode }> = ({ c
 
     let cancelled = false;
     api.getAgentConfig(urlSessionId)
-      .then(config => {
-        if (!cancelled) setAgentConfig(config);
+      .then(async (config) => {
+        if (cancelled) return;
+        // If session has no style, apply user default or system default
+        if (config.slide_style_id == null) {
+          const userStyleId = localStorage.getItem('userDefaultSlideStyleId');
+          if (userStyleId) {
+            config.slide_style_id = Number(userStyleId);
+          } else {
+            try {
+              const { styles } = await configApi.listSlideStyles();
+              const defaultStyle = styles.find(s => s.is_default) ?? styles.find(s => s.is_system);
+              if (defaultStyle) config.slide_style_id = defaultStyle.id;
+            } catch { /* fallback handled by backend on chat */ }
+          }
+        }
+        setAgentConfig(config);
       })
       .catch(err => {
         console.error('Failed to load agent config for session:', err);
