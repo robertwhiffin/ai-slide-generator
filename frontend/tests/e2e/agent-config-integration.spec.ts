@@ -5,6 +5,8 @@ import {
   createTestDeckPrompt,
   getSessionConfig,
   cleanupSession,
+  createTestProfile,
+  cleanupProfile,
   API_BASE,
 } from '../helpers/integration-helpers';
 import { mockAvailableTools } from '../fixtures/mocks';
@@ -216,5 +218,207 @@ test.describe('Pre-session configuration', () => {
 
     const config = await getSessionConfig(request, sessionId);
     expect(config.slide_style_id).not.toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Mid-session configuration tests
+// ---------------------------------------------------------------------------
+
+test.describe('Mid-session configuration', () => {
+  test('add Genie tool mid-session', async ({ page, request }) => {
+    await page.goto('/');
+    await sendMessage(page, 'Start a session');
+    const sessionId = await getSessionIdFromUrl(page);
+
+    await expandConfigBar(page);
+    await addGenieSpace(page, 'Sales Data Space');
+    await page.waitForTimeout(1000);
+
+    const config = await getSessionConfig(request, sessionId);
+    const tools = config.tools as Array<Record<string, unknown>>;
+    expect(tools).toHaveLength(1);
+    expect(tools[0].type).toBe('genie');
+    expect(tools[0].space_id).toBe(mockAvailableTools[0].space_id);
+  });
+
+  test('remove tool mid-session', async ({ page, request }) => {
+    await page.goto('/');
+    await sendMessage(page, 'Start a session');
+    const sessionId = await getSessionIdFromUrl(page);
+
+    await expandConfigBar(page);
+    await addGenieSpace(page, 'Sales Data Space');
+    await page.waitForTimeout(500);
+
+    // Verify tool was added
+    let config = await getSessionConfig(request, sessionId);
+    let tools = config.tools as Array<Record<string, unknown>>;
+    expect(tools).toHaveLength(1);
+
+    // Remove the tool
+    await page.getByRole('button', { name: 'Remove Sales Data Space' }).click();
+    await page.waitForTimeout(1000);
+
+    config = await getSessionConfig(request, sessionId);
+    tools = config.tools as Array<Record<string, unknown>>;
+    expect(tools).toHaveLength(0);
+  });
+
+  test('change deck prompt mid-session', async ({ page, request }) => {
+    await page.goto('/');
+    await sendMessage(page, 'Start a session');
+    const sessionId = await getSessionIdFromUrl(page);
+
+    await expandConfigBar(page);
+    await page.locator('[data-testid="deck-prompt-selector"]').selectOption({
+      label: testPrompt.name as string,
+    });
+    await page.waitForTimeout(1000);
+
+    const config = await getSessionConfig(request, sessionId);
+    expect(config.deck_prompt_id).toBe(testPrompt.id);
+  });
+
+  test('change slide style mid-session', async ({ page, request }) => {
+    await page.goto('/');
+    await sendMessage(page, 'Start a session');
+    const sessionId = await getSessionIdFromUrl(page);
+
+    await expandConfigBar(page);
+    await page.locator('[data-testid="style-selector"]').selectOption({
+      label: testStyle.name as string,
+    });
+    await page.waitForTimeout(1000);
+
+    const config = await getSessionConfig(request, sessionId);
+    expect(config.slide_style_id).toBe(testStyle.id);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Load profile into session tests
+// ---------------------------------------------------------------------------
+
+test.describe('Load profile into session', () => {
+  let profileA: Record<string, unknown>;
+  let profileB: Record<string, unknown>;
+
+  test.beforeAll(async ({ request }) => {
+    profileA = await createTestProfile(request, {
+      name: `E2E Profile A ${Date.now()}`,
+      agentConfig: {
+        tools: [
+          {
+            type: 'genie',
+            space_id: mockAvailableTools[0].space_id,
+            space_name: mockAvailableTools[0].space_name,
+            description: mockAvailableTools[0].description,
+            conversation_id: null,
+          },
+        ],
+        slide_style_id: testStyle.id,
+        deck_prompt_id: null,
+        system_prompt: null,
+        slide_editing_instructions: null,
+      },
+    });
+
+    profileB = await createTestProfile(request, {
+      name: `E2E Profile B ${Date.now()}`,
+      agentConfig: {
+        tools: [
+          {
+            type: 'genie',
+            space_id: mockAvailableTools[1].space_id,
+            space_name: mockAvailableTools[1].space_name,
+            description: mockAvailableTools[1].description,
+            conversation_id: null,
+          },
+        ],
+        slide_style_id: null,
+        deck_prompt_id: testPrompt.id,
+        system_prompt: null,
+        slide_editing_instructions: null,
+      },
+    });
+  });
+
+  test.afterAll(async ({ request }) => {
+    if (profileA?.id) {
+      await cleanupProfile(request, profileA.id as number);
+    }
+    if (profileB?.id) {
+      await cleanupProfile(request, profileB.id as number);
+    }
+  });
+
+  test('load profile into new session', async ({ page, request }) => {
+    await page.goto('/');
+    await sendMessage(page, 'Start a session');
+    const sessionId = await getSessionIdFromUrl(page);
+
+    await expandConfigBar(page);
+    await page.locator('[data-testid="load-profile-button"]').click();
+    await page.getByText(profileA.name as string).click();
+    await page.waitForTimeout(1000);
+
+    const config = await getSessionConfig(request, sessionId);
+    const tools = config.tools as Array<Record<string, unknown>>;
+    expect(tools).toHaveLength(1);
+    expect(tools[0].space_id).toBe(mockAvailableTools[0].space_id);
+    expect(config.slide_style_id).toBe(testStyle.id);
+  });
+
+  // TDD test — fails because confirmation dialog is not implemented yet.
+  test.fail('load profile mid-session shows confirmation', async ({ page }) => {
+    await page.goto('/');
+    await sendMessage(page, 'Start a session');
+    await getSessionIdFromUrl(page);
+
+    await expandConfigBar(page);
+    await addGenieSpace(page, 'Sales Data Space');
+    await page.waitForTimeout(500);
+
+    let dialogAppeared = false;
+    page.on('dialog', async (dialog) => {
+      dialogAppeared = true;
+      await dialog.accept();
+    });
+
+    await page.locator('[data-testid="load-profile-button"]').click();
+    await page.getByText(profileB.name as string).click();
+    await page.waitForTimeout(1000);
+
+    // Fails because confirmation dialog not implemented yet
+    expect(dialogAppeared).toBe(true);
+  });
+
+  test('load profile replaces config entirely', async ({ page, request }) => {
+    await page.goto('/');
+    await sendMessage(page, 'Start a session');
+    const sessionId = await getSessionIdFromUrl(page);
+
+    // Load profile A
+    await expandConfigBar(page);
+    await page.locator('[data-testid="load-profile-button"]').click();
+    await page.getByText(profileA.name as string).click();
+    await page.waitForTimeout(1000);
+
+    let config = await getSessionConfig(request, sessionId);
+    let tools = config.tools as Array<Record<string, unknown>>;
+    expect(tools[0].space_id).toBe(mockAvailableTools[0].space_id);
+
+    // Load profile B — should fully replace config
+    await page.locator('[data-testid="load-profile-button"]').click();
+    await page.getByText(profileB.name as string).click();
+    await page.waitForTimeout(1000);
+
+    config = await getSessionConfig(request, sessionId);
+    tools = config.tools as Array<Record<string, unknown>>;
+    expect(tools).toHaveLength(1);
+    expect(tools[0].space_id).toBe(mockAvailableTools[1].space_id);
+    expect(config.deck_prompt_id).toBe(testPrompt.id);
+    expect(config.slide_style_id).toBeNull();
   });
 });
