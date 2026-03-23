@@ -92,9 +92,13 @@ export const AgentConfigProvider: React.FC<{ children: React.ReactNode }> = ({ c
     defaultProfileLoaded.current = true;
 
     const storedConfig = readStoredConfig();
+    console.log('[AgentConfigContext] Pre-session default load: storedConfig=', storedConfig, 'isPreSession=', isPreSession);
 
     // If we have a stored config with a style already set, use it as-is
-    if (storedConfig?.slide_style_id != null) return;
+    if (storedConfig?.slide_style_id != null) {
+      console.log('[AgentConfigContext] Stored config has style, skipping default load:', storedConfig.slide_style_id);
+      return;
+    }
 
     // Otherwise, load profile config and apply default style
     api.listProfiles()
@@ -102,9 +106,11 @@ export const AgentConfigProvider: React.FC<{ children: React.ReactNode }> = ({ c
         const defaultProfile = profiles.find(p => p.is_default);
         const config = storedConfig
           ?? (defaultProfile?.agent_config ? { ...defaultProfile.agent_config } : { ...DEFAULT_AGENT_CONFIG });
+        console.log('[AgentConfigContext] After profile load, config.slide_style_id=', config.slide_style_id);
 
         // User default overrides profile's style
         const userStyleId = localStorage.getItem('userDefaultSlideStyleId');
+        console.log('[AgentConfigContext] userDefaultSlideStyleId from localStorage=', userStyleId);
         if (userStyleId) {
           config.slide_style_id = Number(userStyleId);
         }
@@ -122,6 +128,7 @@ export const AgentConfigProvider: React.FC<{ children: React.ReactNode }> = ({ c
           }
         }
 
+        console.log('[AgentConfigContext] Final config.slide_style_id=', config.slide_style_id);
         setAgentConfig(config);
       })
       .catch(err => {
