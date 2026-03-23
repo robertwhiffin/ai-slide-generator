@@ -484,7 +484,8 @@ jobs:
           - help-ui
           - history-integration
           - history-ui
-          - profile-integration
+          - agent-config-integration
+          - profiles-integration
           - profile-ui
           - slide-operations-ui
           - slide-styles-integration
