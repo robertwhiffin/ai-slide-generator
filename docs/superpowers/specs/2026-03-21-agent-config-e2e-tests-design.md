@@ -16,10 +16,11 @@ Two new Playwright integration test files, following the existing pattern (`deck
 
 ### Mocked (Playwright route interception)
 
-| Endpoint | Reason |
-|---|---|
-| `GET /api/chat/stream` | SSE response — avoids real LLM calls. Returns a simple slide deck via the same `createStreamingResponseWithDeck()` pattern used in `slide-operations-ui.spec.ts`. |
-| `GET /api/tools/available` | Calls `client.genie.list_spaces()` which requires a real Databricks connection. Returns a fixed list of Genie spaces and MCP servers. |
+| Endpoint | Pattern | Reason |
+|---|---|---|
+| `/api/chat/stream` | `**/api/chat/stream` | SSE response — avoids real LLM calls. Returns a simple slide deck. The `createStreamingResponseWithDeck()` helper is extracted into `integration-helpers.ts` (currently duplicated across 4+ test files). |
+| `/api/tools/available` | `**/api/tools/available` | Calls `client.genie.list_spaces()` which requires a real Databricks connection. Returns a fixed list of Genie spaces and MCP servers. |
+| `/api/setup/status` | `**/api/setup/status` | Returns `{ configured: true }` to bypass the welcome/setup screen. Required by all E2E tests. |
 
 Since `/api/chat/stream` is intercepted before hitting the backend, no Genie spaces are invoked during generation either.
 
@@ -31,29 +32,37 @@ Everything else:
 - Profile operations (`/api/profiles/*`)
 - Slide styles (`/api/settings/slide-styles`)
 - Deck prompts (`/api/settings/deck-prompts`)
-- Setup status (`/api/setup/status`)
 
 ## Test Data Lifecycle
 
 - **`beforeAll`** — create shared library data via API (a slide style + a deck prompt)
-- **`beforeEach`** — create per-test sessions/profiles as needed
+- **`beforeEach`** — create per-test sessions/profiles as needed; clear `localStorage` (specifically the `pendingAgentConfig` key) to prevent state leaking between pre-session tests
 - **`afterEach`** — clean up sessions and profiles created during the test
 - **`afterAll`** — clean up the shared library data
+
+### Profile deduplication constraint
+
+The backend's `save-from-session` endpoint rejects duplicate agent configs with a 409. Each test profile must have a unique config — e.g., by using a distinct `deck_prompt_id`, `slide_style_id`, or unique tool entry. The `createTestProfile` helper should accept parameters that ensure uniqueness.
 
 ## Shared Helpers
 
 New file: `frontend/tests/helpers/integration-helpers.ts`
 
 Functions:
+
+**API helpers (use Playwright `request` fixture):**
 - `createTestSession(request)` → POST `/api/sessions`, returns session_id
-- `createTestProfile(request, name, config)` → save-from-session flow
-- `createTestStyle(request)` → POST `/api/settings/slide-styles`, returns style
-- `createTestDeckPrompt(request)` → POST `/api/settings/deck-prompts`, returns prompt
+- `createTestProfile(request, { name, description?, tools?, styleId?, promptId? })` → multi-step: (1) create a throwaway session, (2) PUT the desired agent_config onto it, (3) POST `/api/profiles/save-from-session/{sessionId}` with name/description, (4) return the profile. The caller passes config ingredients; the helper assembles a unique `AgentConfig`.
+- `createTestStyle(request, data)` → POST `/api/settings/slide-styles`, returns style
+- `createTestDeckPrompt(request, data)` → POST `/api/settings/deck-prompts`, returns prompt
 - `cleanupSession(request, id)` → DELETE session
 - `cleanupProfile(request, id)` → DELETE profile (soft-delete)
 - `getSessionConfig(request, sessionId)` → GET `/api/sessions/{id}/agent-config`
-- `mockChatStream(page)` → route-intercept SSE endpoint
-- `mockAvailableTools(page)` → route-intercept tool discovery
+
+**Page-level mocks:**
+- `mockChatStream(page)` → route-intercept `**/api/chat/stream` with SSE response (contains `createStreamingResponseWithDeck()` extracted from existing duplicated implementations)
+- `mockAvailableTools(page)` → route-intercept `**/api/tools/available`
+- `mockSetupStatus(page)` → route-intercept `**/api/setup/status` with `{ configured: true }`
 
 ## File 1: `agent-config-integration.spec.ts`
 
@@ -109,14 +118,17 @@ Functions:
 
 ## CI Integration
 
-Add two entries to the E2E matrix in `.github/workflows/test.yml`:
+Update the E2E matrix in `.github/workflows/test.yml`:
+
+1. **Replace** the existing `profile-integration` entry with `profiles-integration` (plural — new file replaces old)
+2. **Add** `agent-config-integration`
 
 ```yaml
 matrix:
   test:
     # ... existing entries ...
     - agent-config-integration
-    - profiles-integration
+    - profiles-integration    # replaces old profile-integration
 ```
 
 Each runs with its own isolated Postgres service, seeded database, and real backend — identical to existing integration test entries.
