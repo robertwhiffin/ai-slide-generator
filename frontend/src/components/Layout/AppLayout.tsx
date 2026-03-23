@@ -341,17 +341,18 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
     const newId = createNewSession();
     setViewMode('main');
     try {
+      const profile = currentProfileRef.current;
       await api.createSession({
         sessionId: newId,
-        profileId: currentProfile?.id,
-        profileName: currentProfile?.name,
+        profileId: profile?.id,
+        profileName: profile?.name,
       });
       setSessionsRefreshKey(prev => prev + 1);
       navigate(`/sessions/${newId}/edit`);
     } catch (err) {
       console.error('Failed to create session:', err);
     }
-  }, [createNewSession, navigate, currentProfile]);
+  }, [createNewSession, navigate]);
 
   const handleSaveAs = useCallback(async (title: string) => {
     try {

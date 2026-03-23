@@ -130,6 +130,8 @@ interface SendMessageParams {
   sessionId: string;
   slideContext?: SlideContext;
   imageIds?: number[];
+  profileId?: number;
+  profileName?: string;
 }
 
 /**
@@ -431,6 +433,8 @@ export const api = {
     sessionId,
     slideContext,
     imageIds,
+    profileId,
+    profileName,
   }: SendMessageParams): Promise<ChatResponse> {
     const response = await fetch(`${API_BASE_URL}/api/chat`, {
       method: 'POST',
@@ -442,6 +446,8 @@ export const api = {
         message,
         slide_context: slideContext,
         image_ids: imageIds,
+        profile_id: profileId,
+        profile_name: profileName,
       }),
     });
 

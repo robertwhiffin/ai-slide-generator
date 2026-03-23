@@ -155,6 +155,8 @@ async def send_message(
             request.message,
             request.slide_context.model_dump() if request.slide_context else None,
             request.image_ids,
+            request.profile_id,
+            request.profile_name,
         )
 
         return ChatResponse(**result)
@@ -367,11 +369,15 @@ async def submit_chat_async(
         )
 
     try:
-        # Get current profile info for session association
-        from src.core.settings_db import get_settings
-        settings = get_settings()
-        profile_id = getattr(settings, 'profile_id', None)
-        profile_name = getattr(settings, 'profile_name', None)
+        # Prefer profile info from the frontend request (always up-to-date),
+        # fall back to server-side cached settings only when not provided.
+        profile_id = request.profile_id
+        profile_name = request.profile_name
+        if profile_id is None:
+            from src.core.settings_db import get_settings
+            settings = get_settings()
+            profile_id = getattr(settings, 'profile_id', None)
+            profile_name = getattr(settings, 'profile_name', None)
 
         # Create request record with profile info
         request_id = await asyncio.to_thread(

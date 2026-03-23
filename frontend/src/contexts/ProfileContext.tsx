@@ -216,39 +216,35 @@ export const ProfileProvider: React.FC<React.PropsWithChildren> = ({ children })
    * Load a profile and hot-reload the application configuration
    */
   const loadProfile = useCallback(async (id: number): Promise<void> => {
-    try {
-      setError(null);
-      
-      // Call load profile endpoint (triggers hot-reload on backend)
-      await configApi.loadProfile(id);
-      
-      // Profile loaded successfully
-      
-      // Track this as the loaded profile
-      setLoadedProfileId(id);
-      
-      // Update current profile
-      const profile = profiles.find(p => p.id === id);
-      if (profile) {
-        setCurrentProfile(profile);
-      } else {
-        // Reload profiles to ensure we have the latest
-        await loadProfiles();
+    setError(null);
+
+    // Update ref + state IMMEDIATELY so the UI (sidebar, header,
+    // handleNewSession) reflects the new profile without waiting for the
+    // backend hot-reload.
+    loadedProfileIdRef.current = id;
+    setLoadedProfileId(id);
+    const profile = profiles.find(p => p.id === id);
+    if (profile) {
+      setCurrentProfile(profile);
+    }
+
+    // Fire backend hot-reload in the background — don't block the UI.
+    // Errors are handled silently; the next chat message will trigger
+    // a reload if needed.
+    configApi.loadProfile(id).then(() => {
+      if (!profile) {
+        loadProfiles(true);
       }
-    } catch (err) {
-      // Profile was deleted: clear stored id, fall back to default, show friendly message
+    }).catch((err) => {
       if (err instanceof ConfigApiError && err.status === 404 && err.message.includes('deleted')) {
+        loadedProfileIdRef.current = null;
         setLoadedProfileId(null);
-        await loadProfiles();
+        loadProfiles();
         setError('That profile was deleted. Switched to default profile.');
         return;
       }
-      const message = err instanceof ConfigApiError 
-        ? err.message 
-        : 'Failed to load profile';
-      setError(message);
-      throw err;
-    }
+      console.error('Background profile reload failed:', err);
+    });
   }, [profiles, loadProfiles]);
 
   const value: ProfileContextValue = {
