@@ -99,7 +99,13 @@ export const AgentConfigProvider: React.FC<{ children: React.ReactNode }> = ({ c
       .then((profiles: ProfileSummary[]) => {
         const defaultProfile = profiles.find(p => p.is_default);
         if (defaultProfile?.agent_config) {
-          setAgentConfig(defaultProfile.agent_config);
+          const config = { ...defaultProfile.agent_config };
+          // User default style overrides profile's style
+          const userStyleId = localStorage.getItem('userDefaultSlideStyleId');
+          if (userStyleId) {
+            config.slide_style_id = Number(userStyleId);
+          }
+          setAgentConfig(config);
         }
       })
       .catch(err => {
