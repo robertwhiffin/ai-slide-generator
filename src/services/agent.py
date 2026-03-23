@@ -16,12 +16,14 @@ import mlflow
 from bs4 import BeautifulSoup
 from databricks_langchain import ChatDatabricks
 from langchain_classic.agents import AgentExecutor, create_tool_calling_agent
+
+from src.services.cancellation import CancellationRegistry
 from langchain_community.chat_message_histories import ChatMessageHistory
 from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.tools import StructuredTool
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, PrivateAttr
 
 from src.core.databricks_client import (
     get_current_username,
@@ -56,6 +58,30 @@ class ToolExecutionError(AgentError):
     """Raised when tool execution fails."""
 
     pass
+
+
+class CancellableAgentExecutor(AgentExecutor):
+    """AgentExecutor that checks a cancellation flag between iterations.
+
+    When a user cancels generation, CancellationRegistry is set for the session.
+    This executor checks the flag in _should_continue() so the agent loop
+    exits cleanly after the current step finishes.
+
+    We use a PrivateAttr for session_id to bypass Pydantic's field storage
+    (AgentExecutor has extra='ignore' which silently drops model fields from
+    subclasses). PrivateAttr is stored separately and not subject to extras.
+    """
+
+    _session_id: str = PrivateAttr(default="")
+
+    def _should_continue(self, iterations: int, time_elapsed: float) -> bool:
+        if CancellationRegistry.is_cancelled(self._session_id):
+            logger.info(
+                "Agent cancelled by user",
+                extra={"session_id": self._session_id, "iterations": iterations},
+            )
+            return False
+        return super()._should_continue(iterations, time_elapsed)
 
 
 class GenieQueryInput(BaseModel):
@@ -116,12 +142,11 @@ class SlideGeneratorAgent:
             mlflow.set_tracking_uri(tracking_uri)
             logger.info("MLflow tracking configured", extra={"tracking_uri": tracking_uri})
 
-            # Enable LangChain autologging
-            try:
-                mlflow.langchain.autolog()
-                logger.info("MLflow LangChain autologging enabled")
-            except Exception as e:
-                logger.warning(f"Failed to enable MLflow LangChain autologging: {e}")
+            # LangChain autologging is intentionally disabled: mlflow.langchain.autolog()
+            # patches invoke() on AgentExecutor instances, replacing it with a wrapper
+            # that calls the base AgentExecutor._call — bypassing our
+            # CancellableAgentExecutor._should_continue override. Explicit MLflow spans
+            # (mlflow.start_span) are used for tracing instead.
         except Exception as e:
             logger.warning(f"Failed to configure MLflow tracking: {e}")
 
@@ -506,7 +531,9 @@ class SlideGeneratorAgent:
         )
         return prompt
 
-    def _create_agent_executor(self, tools: list[StructuredTool]) -> AgentExecutor:
+    def _create_agent_executor(
+        self, tools: list[StructuredTool], session_id: str = ""
+    ) -> CancellableAgentExecutor:
         """
         Create agent executor with model, tools, and fresh prompt content.
 
@@ -515,9 +542,10 @@ class SlideGeneratorAgent:
 
         Args:
             tools: List of tools to bind to this executor
+            session_id: Session ID for cancellation support
 
         Returns:
-            Configured AgentExecutor
+            Configured CancellableAgentExecutor
         """
         try:
             model = self._create_model()
@@ -526,8 +554,8 @@ class SlideGeneratorAgent:
             prompt = self._create_prompt(prompts)
             agent = create_tool_calling_agent(model, tools, prompt)
 
-            # Create executor with intermediate steps enabled
-            agent_executor = AgentExecutor(
+            # Create executor with intermediate steps enabled and cancellation support
+            agent_executor = CancellableAgentExecutor(
                 agent=agent,
                 tools=tools,
                 return_intermediate_steps=True,
@@ -535,6 +563,8 @@ class SlideGeneratorAgent:
                 max_iterations=1000,
                 max_execution_time=self.settings.llm.timeout,
             )
+            # Set session_id via PrivateAttr to bypass Pydantic's extra='ignore'
+            agent_executor._session_id = session_id
 
             logger.info("Agent executor created")
             return agent_executor
@@ -1146,9 +1176,13 @@ class SlideGeneratorAgent:
         session = self.get_session(session_id)
         chat_history = session["chat_history"]
 
+        # NOTE: Do NOT reset the cancel flag here. The cancel endpoint may have
+        # set it before this job started processing (job was queued). The flag is
+        # reset in process_chat_request.finally after the agent exits.
+
         # Create tools with session_id bound via closure (thread-safe)
         tools = self._create_tools_for_session(session_id)
-        agent_executor = self._create_agent_executor(tools)
+        agent_executor = self._create_agent_executor(tools, session_id=session_id)
 
         editing_mode = slide_context is not None
         is_add_operation = False
@@ -1367,12 +1401,16 @@ class SlideGeneratorAgent:
         session = self.get_session(session_id)
         chat_history = session["chat_history"]
 
+        # NOTE: Do NOT reset the cancel flag here. The cancel endpoint may have
+        # set it before this job started processing (job was queued). The flag is
+        # reset in process_chat_request.finally after the agent exits.
+
         # Create tools with session_id bound via closure (thread-safe)
         tools = self._create_tools_for_session(session_id)
 
-        # Create agent executor with callback handler
+        # Create agent executor with callback handler and cancellation support
         agent_executor = self._create_agent_executor_with_callbacks(
-            tools, [callback_handler]
+            tools, [callback_handler], session_id=session_id
         )
 
         editing_mode = slide_context is not None
@@ -1549,7 +1587,8 @@ class SlideGeneratorAgent:
         self,
         tools: list[StructuredTool],
         callbacks: list[BaseCallbackHandler],
-    ) -> AgentExecutor:
+        session_id: str = "",
+    ) -> CancellableAgentExecutor:
         """
         Create agent executor with callback handlers for streaming.
 
@@ -1559,9 +1598,10 @@ class SlideGeneratorAgent:
         Args:
             tools: List of tools to bind to this executor
             callbacks: List of callback handlers for event streaming
+            session_id: Session ID for cancellation support
 
         Returns:
-            Configured AgentExecutor with callbacks
+            Configured CancellableAgentExecutor with callbacks
         """
         try:
             model = self._create_model()
@@ -1570,7 +1610,7 @@ class SlideGeneratorAgent:
             prompt = self._create_prompt(prompts)
             agent = create_tool_calling_agent(model, tools, prompt)
 
-            agent_executor = AgentExecutor(
+            agent_executor = CancellableAgentExecutor(
                 agent=agent,
                 tools=tools,
                 callbacks=callbacks,
@@ -1579,6 +1619,8 @@ class SlideGeneratorAgent:
                 max_iterations=1000,
                 max_execution_time=self.settings.llm.timeout,
             )
+            # Set session_id via PrivateAttr to bypass Pydantic's extra='ignore'
+            agent_executor._session_id = session_id
 
             logger.info("Agent executor created with streaming callbacks")
             return agent_executor

@@ -24,6 +24,7 @@ from src.api.services.chat_service import get_chat_service
 from src.api.services.job_queue import enqueue_job
 from src.api.services.session_manager import SessionNotFoundError, get_session_manager
 from src.core.context_utils import run_in_thread_with_context
+from src.services.cancellation import CancellationRegistry
 
 logger = logging.getLogger(__name__)
 
@@ -200,11 +201,14 @@ async def send_message_streaming(request: ChatRequest) -> StreamingResponse:
                 yield error_event.to_sse()
 
         finally:
-            # Always release the lock
-            await asyncio.to_thread(
-                session_manager.release_session_lock,
-                request.session_id,
-            )
+            # Release lock only if not cancelled — cancel endpoint already released it
+            if not CancellationRegistry.is_cancelled(request.session_id):
+                await asyncio.to_thread(
+                    session_manager.release_session_lock,
+                    request.session_id,
+                )
+            else:
+                CancellationRegistry.reset(request.session_id)
 
     return StreamingResponse(
         generate_events(),
@@ -292,6 +296,11 @@ async def submit_chat_async(request: ChatRequest):
         )
         is_first_message = session_data.get("message_count", 0) == 0
 
+        # Record the current save-point version so we can revert on cancel
+        pre_gen_version = await asyncio.to_thread(
+            session_manager.get_current_version_number, request.session_id
+        )
+
         # Persist user message
         await asyncio.to_thread(
             session_manager.add_message,
@@ -313,6 +322,7 @@ async def submit_chat_async(request: ChatRequest):
                 ),
                 "is_first_message": is_first_message,
                 "image_ids": request.image_ids,
+                "pre_gen_version": pre_gen_version,
             },
         )
 
@@ -369,3 +379,29 @@ async def poll_chat(
         "result": chat_request.get("result") if chat_request["status"] == "completed" else None,
         "error": chat_request.get("error_message") if chat_request["status"] == "error" else None,
     }
+
+
+@router.post("/chat/{session_id}/cancel")
+async def cancel_generation(session_id: str):
+    """Cancel an in-progress slide generation for a session.
+
+    Sets the cancellation flag so the agent stops after the current step completes.
+    Also releases the session lock so a new generation can start immediately.
+
+    Args:
+        session_id: Session ID to cancel
+
+    Returns:
+        Dictionary with cancellation status
+    """
+    logger.info("Cancel requested", extra={"session_id": session_id})
+    CancellationRegistry.cancel(session_id)
+
+    # Release session lock so user can start a new generation immediately
+    session_manager = get_session_manager()
+    try:
+        await asyncio.to_thread(session_manager.release_session_lock, session_id)
+    except Exception:
+        pass  # Lock may already be released
+
+    return {"status": "cancelled", "session_id": session_id}

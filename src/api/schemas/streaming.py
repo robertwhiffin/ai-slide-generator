@@ -18,6 +18,7 @@ class StreamEventType(str, Enum):
     TOOL_RESULT = "tool_result"  # Tool returned result
     ERROR = "error"  # Error occurred
     COMPLETE = "complete"  # Generation finished
+    CANCELLED = "cancelled"  # Generation cancelled by user
     SESSION_TITLE = "session_title"  # Auto-generated session title
 
 
