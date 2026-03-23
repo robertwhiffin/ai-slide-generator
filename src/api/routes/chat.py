@@ -32,11 +32,24 @@ router = APIRouter(prefix="/api", tags=["chat"])
 
 
 def _get_default_style_id() -> int | None:
-    """Return the ID of the default slide style (is_system=True, is_active=True), or None."""
+    """Return the ID of the default slide style (is_default=True, is_active=True), or None."""
     from src.core.database import get_db_session
     from src.database.models import SlideStyleLibrary
 
     with get_db_session() as db:
+        # Primary: explicit default
+        style = (
+            db.query(SlideStyleLibrary.id)
+            .filter(
+                SlideStyleLibrary.is_default == True,  # noqa: E712
+                SlideStyleLibrary.is_active == True,  # noqa: E712
+            )
+            .first()
+        )
+        if style:
+            return style.id
+
+        # Fallback: system style (defensive, for mid-migration)
         style = (
             db.query(SlideStyleLibrary.id)
             .filter(
