@@ -497,6 +497,8 @@ def _run_migrations(engine, schema: str | None = None):
         # --- v0.2 breaking changes: image_guidelines, session truncation, created_by ---
         _migrate_to_v0_2(conn, inspector, schema, _qual, is_sqlite)
 
+        _migrate_slide_style_default(conn, inspector, schema, _qual, is_sqlite)
+
 
 def _migrate_google_credentials_to_global(conn, inspector, schema, _qual, is_sqlite):
     """Copy first non-null google_credentials_encrypted to global table, then null out profiles."""
@@ -686,3 +688,47 @@ def _migrate_to_v0_2(conn, inspector, schema, _qual, is_sqlite):
         ))
 
     logger.info("Migration: v0.2 schema migration complete")
+
+
+def _migrate_slide_style_default(conn, inspector, schema, _qual, is_sqlite):
+    """Add is_default column to slide_style_library and seed the system style as default."""
+    from sqlalchemy import text
+
+    table_name = "slide_style_library"
+    qualified_table = _qual(table_name)
+
+    try:
+        columns = {c["name"] for c in inspector.get_columns(table_name, schema=schema)}
+    except Exception:
+        return
+
+    if "is_default" not in columns:
+        logger.info(f"Migration: adding is_default column to {table_name}")
+        conn.execute(text(
+            f"ALTER TABLE {qualified_table} ADD COLUMN is_default BOOLEAN DEFAULT FALSE NOT NULL"
+        ))
+
+    # Only seed a default if none exists yet (first deploy only).
+    # LIMIT 1 ensures exactly one row even if multiple is_system rows exist.
+    if is_sqlite:
+        conn.execute(text(f"""
+            UPDATE {qualified_table} SET is_default = 1
+            WHERE id = (
+                SELECT id FROM {qualified_table}
+                WHERE is_system = 1 AND is_active = 1
+                LIMIT 1
+            )
+            AND NOT EXISTS (SELECT 1 FROM {qualified_table} WHERE is_default = 1)
+        """))
+    else:
+        conn.execute(text(f"""
+            UPDATE {qualified_table} SET is_default = TRUE
+            WHERE id = (
+                SELECT id FROM {qualified_table}
+                WHERE is_system = TRUE AND is_active = TRUE
+                LIMIT 1
+            )
+            AND NOT EXISTS (SELECT 1 FROM {qualified_table} WHERE is_default = TRUE)
+        """))
+
+    logger.info("Migration: slide_style_library is_default migration complete")

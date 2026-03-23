@@ -41,6 +41,7 @@ class SlideStyleLibrary(Base):
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     updated_by = Column(String(255), nullable=True)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+    is_default = Column(Boolean, default=False, nullable=False)  # Which style is applied to new sessions by default
 
     def __repr__(self):
         return f"<SlideStyleLibrary(id={self.id}, name='{self.name}', category='{self.category}')>"
