@@ -115,6 +115,14 @@ def _maybe_create_session(request: ChatRequest, session_manager) -> bool:
         config = AgentConfig.model_validate(request.agent_config)
         agent_config_data = config.model_dump()
 
+    # Auto-populate slide_style_id with the default system style when not set
+    if agent_config_data is None:
+        agent_config_data = AgentConfig().model_dump()
+    if agent_config_data.get("slide_style_id") is None:
+        default_id = _get_default_style_id()
+        if default_id is not None:
+            agent_config_data["slide_style_id"] = default_id
+
     if request.session_id:
         # Session ID provided — sync agent_config if available
         if agent_config_data:
