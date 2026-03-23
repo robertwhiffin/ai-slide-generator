@@ -451,16 +451,6 @@ export const configApi = {
       method: 'DELETE',
     }),
 
-  async setDefaultSlideStyle(styleId: number): Promise<SlideStyle> {
-    const response = await fetch(`${API_BASE_URL}/api/settings/slide-styles/${styleId}/set-default`, {
-      method: 'POST',
-    })
-    if (!response.ok) {
-      const error = await response.json().catch(() => ({}))
-      throw new Error(error.detail || 'Failed to set default slide style')
-    }
-    return response.json()
-  },
 
   // Google OAuth Credentials (global, admin-only)
 

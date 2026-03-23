@@ -59,6 +59,24 @@ function readStoredConfig(): AgentConfig | null {
   }
 }
 
+/**
+ * Resolve the default slide style ID from user preference or system default.
+ * Priority: user localStorage > server is_default > server is_system.
+ * Returns null if no default can be determined (caller should leave style as-is).
+ */
+async function resolveDefaultStyleId(): Promise<number | null> {
+  const userStyleId = localStorage.getItem('userDefaultSlideStyleId');
+  if (userStyleId) return Number(userStyleId);
+
+  try {
+    const { styles } = await configApi.listSlideStyles();
+    const defaultStyle = styles.find(s => s.is_default) ?? styles.find(s => s.is_system);
+    return defaultStyle?.id ?? null;
+  } catch {
+    return null;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Provider
 // ---------------------------------------------------------------------------
@@ -112,23 +130,9 @@ export const AgentConfigProvider: React.FC<{ children: React.ReactNode }> = ({ c
         const defaultProfile = profiles.find(p => p.is_default);
         const config = storedConfig
           ?? (defaultProfile?.agent_config ? { ...defaultProfile.agent_config } : { ...DEFAULT_AGENT_CONFIG });
-        // User default overrides profile's style
-        const userStyleId = localStorage.getItem('userDefaultSlideStyleId');
-        if (userStyleId) {
-          config.slide_style_id = Number(userStyleId);
-        }
 
-        // If still no style, fetch the system default from slide styles
         if (config.slide_style_id == null) {
-          try {
-            const { styles } = await configApi.listSlideStyles();
-            const defaultStyle = styles.find(s => s.is_default) ?? styles.find(s => s.is_system);
-            if (defaultStyle) {
-              config.slide_style_id = defaultStyle.id;
-            }
-          } catch {
-            // Non-critical — backend will apply system default on session creation
-          }
+          config.slide_style_id = await resolveDefaultStyleId();
         }
 
         setAgentConfig(config);
@@ -149,18 +153,8 @@ export const AgentConfigProvider: React.FC<{ children: React.ReactNode }> = ({ c
     api.getAgentConfig(urlSessionId)
       .then(async (config) => {
         if (cancelled) return;
-        // If session has no style, apply user default or system default
         if (config.slide_style_id == null) {
-          const userStyleId = localStorage.getItem('userDefaultSlideStyleId');
-          if (userStyleId) {
-            config.slide_style_id = Number(userStyleId);
-          } else {
-            try {
-              const { styles } = await configApi.listSlideStyles();
-              const defaultStyle = styles.find(s => s.is_default) ?? styles.find(s => s.is_system);
-              if (defaultStyle) config.slide_style_id = defaultStyle.id;
-            } catch { /* fallback handled by backend on chat */ }
-          }
+          config.slide_style_id = await resolveDefaultStyleId();
         }
         setAgentConfig(config);
       })
