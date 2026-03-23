@@ -86,13 +86,14 @@ function getSessionIdFromUrl(page: Page, trackingArray: string[]): string {
 }
 
 /**
- * Type a message and send it, then wait for the slide container to appear
- * (indicating the mocked SSE response was processed).
+ * Type a message and send it, then wait for the URL to change to a session
+ * edit page (indicating the session was created and the SSE session_created
+ * event was processed).
  */
 async function sendMessage(page: Page, message: string): Promise<void> {
   await page.getByRole('textbox').fill(message);
   await page.getByRole('button', { name: 'Send' }).click();
-  await page.locator('.slide-container').waitFor({ state: 'visible', timeout: 15000 });
+  await page.waitForURL(/\/sessions\/[^/]+\/edit/, { timeout: 15000 });
 }
 
 // ---------------------------------------------------------------------------
@@ -177,9 +178,7 @@ test.describe('Pre-session configuration', () => {
     expect(config.deck_prompt_id).toBeNull();
   });
 
-  // TDD placeholder — this test is expected to fail until default styles are implemented.
-  // Fails because there is no concept of default styles yet.
-  test.fail('new session gets default slide style', async ({ page, request }) => {
+  test('new session gets default slide style', async ({ page, request }) => {
     await page.goto('/');
     await sendMessage(page, 'Create a presentation');
     const sessionId = getSessionIdFromUrl(page, testSessionIds);
@@ -348,10 +347,13 @@ test.describe('Load profile into session', () => {
     await sendMessage(page, 'Start a session');
     const sessionId = getSessionIdFromUrl(page, testSessionIds);
 
+    // Auto-accept confirmation dialog (session may have default style set)
+    page.on('dialog', dialog => dialog.accept());
+
     await expandConfigBar(page);
     const loadResponse = page.waitForResponse(resp => resp.url().includes('/load-profile/') && resp.ok());
     await page.locator('[data-testid="load-profile-button"]').click();
-    await page.getByText(profileA.name as string).click();
+    await page.getByText(profileA.name as string).first().click();
     await loadResponse;
 
     const config = await getSessionConfig(request, sessionId);
@@ -361,8 +363,7 @@ test.describe('Load profile into session', () => {
     expect(config.slide_style_id).toBe(testStyle.id);
   });
 
-  // TDD test — fails because confirmation dialog is not implemented yet.
-  test.fail('load profile mid-session shows confirmation', async ({ page }) => {
+  test('load profile mid-session shows confirmation', async ({ page }) => {
     await page.goto('/');
     await sendMessage(page, 'Start a session');
     getSessionIdFromUrl(page, testSessionIds);
@@ -380,7 +381,7 @@ test.describe('Load profile into session', () => {
 
     await page.locator('[data-testid="load-profile-button"]').click();
     const loadResponse = page.waitForResponse(resp => resp.url().includes('/load-profile/') && resp.ok());
-    await page.getByText(profileB.name as string).click();
+    await page.getByText(profileB.name as string).first().click();
     await loadResponse;
 
     // Fails because confirmation dialog not implemented yet
@@ -388,6 +389,9 @@ test.describe('Load profile into session', () => {
   });
 
   test('load profile replaces config entirely', async ({ page, request }) => {
+    // Auto-accept confirmation dialogs (both loads may trigger confirm)
+    page.on('dialog', dialog => dialog.accept());
+
     await page.goto('/');
     await sendMessage(page, 'Start a session');
     const sessionId = getSessionIdFromUrl(page, testSessionIds);
@@ -396,7 +400,7 @@ test.describe('Load profile into session', () => {
     await expandConfigBar(page);
     await page.locator('[data-testid="load-profile-button"]').click();
     const loadResponseA = page.waitForResponse(resp => resp.url().includes('/load-profile/') && resp.ok());
-    await page.getByText(profileA.name as string).click();
+    await page.getByText(profileA.name as string).first().click();
     await loadResponseA;
 
     let config = await getSessionConfig(request, sessionId);
@@ -406,7 +410,7 @@ test.describe('Load profile into session', () => {
     // Load profile B — should fully replace config
     await page.locator('[data-testid="load-profile-button"]').click();
     const loadResponseB = page.waitForResponse(resp => resp.url().includes('/load-profile/') && resp.ok());
-    await page.getByText(profileB.name as string).click();
+    await page.getByText(profileB.name as string).first().click();
     await loadResponseB;
 
     config = await getSessionConfig(request, sessionId);

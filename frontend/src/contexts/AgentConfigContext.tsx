@@ -245,6 +245,20 @@ export const AgentConfigProvider: React.FC<{ children: React.ReactNode }> = ({ c
   }, [isPreSession, urlSessionId]);
 
   const loadProfile = useCallback(async (profileId: number) => {
+    // If the session already has non-default config, confirm before overwriting
+    const hasConfig =
+      agentConfig.tools.length > 0 ||
+      agentConfig.slide_style_id !== null ||
+      agentConfig.deck_prompt_id !== null ||
+      agentConfig.system_prompt !== null ||
+      agentConfig.slide_editing_instructions !== null;
+    if (hasConfig) {
+      const confirmed = window.confirm(
+        'Loading a profile will replace your current configuration. Continue?',
+      );
+      if (!confirmed) return;
+    }
+
     if (!isPreSession && urlSessionId) {
       // Active session: call backend, then update local state
       try {
@@ -271,7 +285,7 @@ export const AgentConfigProvider: React.FC<{ children: React.ReactNode }> = ({ c
         showToast('Failed to load profile', 'error');
       }
     }
-  }, [isPreSession, urlSessionId, showToast]);
+  }, [agentConfig, isPreSession, urlSessionId, showToast]);
 
   // ------------------------------------------------------------------
   // Render

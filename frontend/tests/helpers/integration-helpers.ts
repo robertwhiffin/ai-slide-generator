@@ -46,14 +46,23 @@ export const mockSlideDeck = {
 /**
  * Build an SSE string containing start → progress → complete events that
  * carry `mockSlideDeck` in the completion payload.
+ *
+ * If sessionId is provided, a session_created event is prepended (matching
+ * real backend behaviour for first-message requests).
  */
-export function createStreamingResponseWithDeck(): string {
+export function createStreamingResponseWithDeck(sessionId?: string): string {
   const events: string[] = [];
+
+  if (sessionId) {
+    events.push(
+      `data: ${JSON.stringify({ type: 'session_created', session_id: sessionId })}\n\n`,
+    );
+  }
 
   events.push('data: {"type": "start", "message": "Starting slide generation..."}\n\n');
   events.push('data: {"type": "progress", "message": "Generating slides..."}\n\n');
   events.push(
-    `data: ${JSON.stringify({ type: 'complete', message: 'Generation complete', slide_deck: mockSlideDeck })}\n\n`,
+    `data: ${JSON.stringify({ type: 'complete', message: 'Generation complete', slides: mockSlideDeck })}\n\n`,
   );
 
   return events.join('');
@@ -85,13 +94,57 @@ export async function mockAvailableToolsEndpoint(page: Page): Promise<void> {
   });
 }
 
-/** Route-intercept POST /api/chat/stream with an SSE response. */
+/**
+ * Route-intercept POST /api/chat/stream.
+ *
+ * Instead of fully mocking, we forward the request body to the real backend's
+ * session creation logic so that session + agent_config are persisted to the
+ * DB. Then we return a mock SSE response (avoiding real LLM calls) that
+ * includes the session_created event the frontend needs to navigate.
+ */
 export async function mockChatStream(page: Page): Promise<void> {
-  await page.route('**/api/chat/stream', (route) => {
+  await page.route('**/api/chat/stream', async (route) => {
+    const postBody = route.request().postDataJSON();
+    let sessionId = postBody?.session_id as string | undefined;
+    const agentConfig = postBody?.agent_config;
+
+    try {
+      // Create session via /api/sessions
+      const createRes = await globalThis.fetch(`${API_BASE}/sessions`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(sessionId ? { session_id: sessionId } : {}),
+      });
+      const createData = await createRes.json();
+      sessionId = createData.session_id ?? sessionId;
+
+      // Build agent config to sync — apply default style if not set
+      // (mirrors _maybe_create_session in chat.py)
+      const configToSync = agentConfig ?? { tools: [], slide_style_id: null, deck_prompt_id: null, system_prompt: null, slide_editing_instructions: null };
+      if (configToSync.slide_style_id == null) {
+        const stylesRes = await globalThis.fetch(`${API_BASE}/settings/slide-styles`);
+        const stylesData = await stylesRes.json();
+        const systemStyle = (stylesData.styles ?? []).find((s: Record<string, unknown>) => s.is_system);
+        if (systemStyle) {
+          configToSync.slide_style_id = systemStyle.id;
+        }
+      }
+
+      if (sessionId) {
+        await globalThis.fetch(`${API_BASE}/sessions/${sessionId}/agent-config`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(configToSync),
+        });
+      }
+    } catch (err) {
+      console.error('[mockChatStream] Failed to create session/sync config:', err);
+    }
+
     route.fulfill({
       status: 200,
       contentType: 'text/event-stream',
-      body: createStreamingResponseWithDeck(),
+      body: createStreamingResponseWithDeck(sessionId),
     });
   });
 }
