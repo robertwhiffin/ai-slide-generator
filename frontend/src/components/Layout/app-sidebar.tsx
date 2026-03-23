@@ -81,6 +81,8 @@ export function AppSidebar({
   onSessionSelect,
   onNewSession,
   currentSessionId,
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  profileName,
   sessionsRefreshKey,
   ...props
 }: AppSidebarProps) {
