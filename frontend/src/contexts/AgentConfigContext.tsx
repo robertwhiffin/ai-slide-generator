@@ -103,7 +103,13 @@ export const AgentConfigProvider: React.FC<{ children: React.ReactNode }> = ({ c
           ? { ...defaultProfile.agent_config }
           : { ...DEFAULT_AGENT_CONFIG };
 
-        // If no style from profile, fetch the system default from slide styles
+        // User default overrides profile's style
+        const userStyleId = localStorage.getItem('userDefaultSlideStyleId');
+        if (userStyleId) {
+          config.slide_style_id = Number(userStyleId);
+        }
+
+        // If still no style, fetch the system default from slide styles
         if (config.slide_style_id == null) {
           try {
             const { styles } = await configApi.listSlideStyles();

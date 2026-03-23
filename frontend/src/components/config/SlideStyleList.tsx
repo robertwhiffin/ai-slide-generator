@@ -25,7 +25,11 @@ export const SlideStyleList: React.FC = () => {
   const [editingStyle, setEditingStyle] = useState<SlideStyle | null>(null);
   const [actionLoading, setActionLoading] = useState<number | null>(null);
   const [expandedStyleId, setExpandedStyleId] = useState<number | null>(null);
-  
+  const [userDefaultStyleId, setUserDefaultStyleId] = useState<number | null>(() => {
+    const stored = localStorage.getItem('userDefaultSlideStyleId');
+    return stored ? Number(stored) : null;
+  });
+
 
   const [confirmDialog, setConfirmDialog] = useState<{
     isOpen: boolean;
@@ -192,7 +196,7 @@ export const SlideStyleList: React.FC = () => {
                             System
                           </Badge>
                         )}
-                        {style.is_default && (
+                        {(userDefaultStyleId != null ? style.id === userDefaultStyleId : style.is_default) && (
                           <Badge className="text-xs bg-amber-500/10 text-amber-700 hover:bg-amber-500/20">
                             Default
                           </Badge>
@@ -216,23 +220,15 @@ export const SlideStyleList: React.FC = () => {
 
                     {/* Actions */}
                     <div className="flex shrink-0 items-center gap-1">
-                      {!style.is_default && style.is_active && (
+                      {!(userDefaultStyleId != null ? style.id === userDefaultStyleId : style.is_default) && style.is_active && (
                         <Button
                           variant="ghost"
                           size="sm"
                           className="h-8 px-2 text-xs text-muted-foreground"
-                          onClick={async () => {
-                            setActionLoading(style.id);
-                            try {
-                              await configApi.setDefaultSlideStyle(style.id);
-                              await loadStyles();
-                            } catch (err) {
-                              console.error('Failed to set default style:', err);
-                            } finally {
-                              setActionLoading(null);
-                            }
+                          onClick={() => {
+                            localStorage.setItem('userDefaultSlideStyleId', String(style.id));
+                            setUserDefaultStyleId(style.id);
                           }}
-                          disabled={actionLoading === style.id}
                           aria-label="Set as default"
                         >
                           Set as default
