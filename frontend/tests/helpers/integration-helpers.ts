@@ -107,12 +107,38 @@ export async function setupIntegrationMocks(page: Page): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
+// Shared UI helpers
+// ---------------------------------------------------------------------------
+
+/** Expand the agent config bar by clicking its toggle. */
+export async function expandConfigBar(page: Page): Promise<void> {
+  await page.locator('[data-testid="agent-config-toggle"]').click();
+  await page.locator('[data-testid="add-tool-button"]').waitFor({ state: 'visible', timeout: 10000 });
+}
+
+/**
+ * Add a Genie space via the tool picker flow:
+ *   1. Click add-tool-button → tool-picker appears
+ *   2. Click the space name → genie-detail-panel appears
+ *   3. Click "Save & Add" → panel hides
+ */
+export async function addGenieSpace(page: Page, spaceName: string): Promise<void> {
+  await page.locator('[data-testid="add-tool-button"]').click();
+  await page.locator('[data-testid="tool-picker"]').waitFor({ state: 'visible', timeout: 10000 });
+  await page.getByText(spaceName).click();
+  await page.locator('[data-testid="genie-detail-panel"]').waitFor({ state: 'visible', timeout: 10000 });
+  await page.getByRole('button', { name: 'Save & Add' }).click();
+  await page.locator('[data-testid="genie-detail-panel"]').waitFor({ state: 'hidden', timeout: 10000 });
+}
+
+// ---------------------------------------------------------------------------
 // API helpers (Task 2) — real backend calls via APIRequestContext
 // ---------------------------------------------------------------------------
 
 /** POST `/api/sessions` → returns the new session_id. */
 export async function createTestSession(request: APIRequestContext): Promise<string> {
   const res = await request.post(`${API_BASE}/sessions`);
+  if (!res.ok()) throw new Error(`POST /sessions failed: ${res.status()} ${await res.text()}`);
   const body = await res.json();
   return body.session_id as string;
 }
@@ -123,6 +149,7 @@ export async function getSessionConfig(
   sessionId: string,
 ): Promise<Record<string, unknown>> {
   const res = await request.get(`${API_BASE}/sessions/${sessionId}/agent-config`);
+  if (!res.ok()) throw new Error(`GET /sessions/${sessionId}/agent-config failed: ${res.status()} ${await res.text()}`);
   return (await res.json()) as Record<string, unknown>;
 }
 
@@ -135,6 +162,7 @@ export async function putSessionConfig(
   const res = await request.put(`${API_BASE}/sessions/${sessionId}/agent-config`, {
     data: config,
   });
+  if (!res.ok()) throw new Error(`PUT /sessions/${sessionId}/agent-config failed: ${res.status()} ${await res.text()}`);
   return (await res.json()) as Record<string, unknown>;
 }
 
@@ -171,6 +199,7 @@ export async function createTestProfile(
         },
       },
     );
+    if (!res.ok()) throw new Error(`POST /profiles/save-from-session/${throwawaySessionId} failed: ${res.status()} ${await res.text()}`);
     return (await res.json()) as Record<string, unknown>;
   } finally {
     await cleanupSession(request, throwawaySessionId);
@@ -190,6 +219,7 @@ export async function createTestStyle(
       style_content: '/* test */',
     },
   });
+  if (!res.ok()) throw new Error(`POST /settings/slide-styles failed: ${res.status()} ${await res.text()}`);
   return (await res.json()) as Record<string, unknown>;
 }
 
@@ -206,6 +236,7 @@ export async function createTestDeckPrompt(
       prompt_content: 'Test prompt content.',
     },
   });
+  if (!res.ok()) throw new Error(`POST /settings/deck-prompts failed: ${res.status()} ${await res.text()}`);
   return (await res.json()) as Record<string, unknown>;
 }
 
@@ -233,10 +264,35 @@ export async function cleanupProfile(
   }
 }
 
+/** DELETE `/api/settings/slide-styles/{id}` — ignores errors. */
+export async function cleanupStyle(
+  request: APIRequestContext,
+  id: number | string,
+): Promise<void> {
+  try {
+    await request.delete(`${API_BASE}/settings/slide-styles/${id}`);
+  } catch {
+    // ignore — style may already be gone
+  }
+}
+
+/** DELETE `/api/settings/deck-prompts/{id}` — ignores errors. */
+export async function cleanupDeckPrompt(
+  request: APIRequestContext,
+  id: number | string,
+): Promise<void> {
+  try {
+    await request.delete(`${API_BASE}/settings/deck-prompts/${id}`);
+  } catch {
+    // ignore — prompt may already be gone
+  }
+}
+
 /** GET `/api/profiles` → returns the array of profile dicts. */
 export async function listProfiles(
   request: APIRequestContext,
 ): Promise<Record<string, unknown>[]> {
   const res = await request.get(`${API_BASE}/profiles`);
+  if (!res.ok()) throw new Error(`GET /profiles failed: ${res.status()} ${await res.text()}`);
   return (await res.json()) as Record<string, unknown>[];
 }

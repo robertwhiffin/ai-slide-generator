@@ -1,13 +1,16 @@
-import { test, expect, Page, APIRequestContext } from '@playwright/test';
+import { test, expect, Page } from '@playwright/test';
 import {
   setupIntegrationMocks,
   createTestStyle,
   createTestDeckPrompt,
   getSessionConfig,
   cleanupSession,
+  cleanupStyle,
+  cleanupDeckPrompt,
   createTestProfile,
   cleanupProfile,
-  API_BASE,
+  expandConfigBar,
+  addGenieSpace,
 } from '../helpers/integration-helpers';
 import { mockAvailableTools } from '../fixtures/mocks';
 
@@ -45,28 +48,13 @@ test.beforeAll(async ({ request }) => {
 });
 
 test.afterAll(async ({ request }) => {
-  // Clean up library data created in beforeAll
-  try {
-    if (testStyle?.id) {
-      await request.delete(`${API_BASE}/settings/slide-styles/${testStyle.id}`);
-    }
-  } catch {
-    // ignore — may already be gone
+  if (testStyle?.id) {
+    await cleanupStyle(request, testStyle.id as number);
   }
-  try {
-    if (testPrompt?.id) {
-      await request.delete(`${API_BASE}/settings/deck-prompts/${testPrompt.id}`);
-    }
-  } catch {
-    // ignore — may already be gone
+  if (testPrompt?.id) {
+    await cleanupDeckPrompt(request, testPrompt.id as number);
   }
 });
-
-// ---------------------------------------------------------------------------
-// Per-test session tracking and cleanup
-// ---------------------------------------------------------------------------
-
-const testSessionIds: string[] = [];
 
 test.beforeEach(async ({ page }) => {
   await setupIntegrationMocks(page);
@@ -78,14 +66,6 @@ test.beforeEach(async ({ page }) => {
   });
 });
 
-test.afterEach(async ({ request }) => {
-  // Clean up every session created during the test
-  for (const id of testSessionIds) {
-    await cleanupSession(request, id);
-  }
-  testSessionIds.length = 0;
-});
-
 // ---------------------------------------------------------------------------
 // File-local helpers
 // ---------------------------------------------------------------------------
@@ -94,14 +74,14 @@ test.afterEach(async ({ request }) => {
  * Extract the session ID from the current URL (pattern: /sessions/{uuid}/edit)
  * and track it for cleanup.
  */
-async function getSessionIdFromUrl(page: Page): Promise<string> {
+function getSessionIdFromUrl(page: Page, trackingArray: string[]): string {
   const url = page.url();
   const match = url.match(/\/sessions\/([^/]+)\/edit/);
   if (!match) {
     throw new Error(`Could not extract session ID from URL: ${url}`);
   }
   const sessionId = match[1];
-  testSessionIds.push(sessionId);
+  trackingArray.push(sessionId);
   return sessionId;
 }
 
@@ -115,38 +95,26 @@ async function sendMessage(page: Page, message: string): Promise<void> {
   await page.locator('.slide-container').waitFor({ state: 'visible', timeout: 15000 });
 }
 
-/** Expand the agent config bar by clicking its toggle. */
-async function expandConfigBar(page: Page): Promise<void> {
-  await page.locator('[data-testid="agent-config-toggle"]').click();
-  await page.locator('[data-testid="add-tool-button"]').waitFor({ state: 'visible', timeout: 10000 });
-}
-
-/**
- * Add a Genie space via the tool picker flow:
- *   1. Click add-tool-button → tool-picker appears
- *   2. Click the space name → genie-detail-panel appears
- *   3. Click "Save & Add" → panel hides
- */
-async function addGenieSpace(page: Page, spaceName: string): Promise<void> {
-  await page.locator('[data-testid="add-tool-button"]').click();
-  await page.locator('[data-testid="tool-picker"]').waitFor({ state: 'visible', timeout: 10000 });
-  await page.getByText(spaceName).click();
-  await page.locator('[data-testid="genie-detail-panel"]').waitFor({ state: 'visible', timeout: 10000 });
-  await page.getByRole('button', { name: 'Save & Add' }).click();
-  await page.locator('[data-testid="genie-detail-panel"]').waitFor({ state: 'hidden', timeout: 10000 });
-}
-
 // ---------------------------------------------------------------------------
 // Pre-session configuration tests
 // ---------------------------------------------------------------------------
 
 test.describe('Pre-session configuration', () => {
+  const testSessionIds: string[] = [];
+
+  test.afterEach(async ({ request }) => {
+    for (const id of testSessionIds) {
+      await cleanupSession(request, id);
+    }
+    testSessionIds.length = 0;
+  });
+
   test('configure Genie tool before first message', async ({ page, request }) => {
     await page.goto('/');
     await expandConfigBar(page);
     await addGenieSpace(page, 'Sales Data Space');
     await sendMessage(page, 'Create a sales report');
-    const sessionId = await getSessionIdFromUrl(page);
+    const sessionId = getSessionIdFromUrl(page, testSessionIds);
 
     const config = await getSessionConfig(request, sessionId);
     const tools = config.tools as Array<Record<string, unknown>>;
@@ -162,7 +130,7 @@ test.describe('Pre-session configuration', () => {
       label: testPrompt.name as string,
     });
     await sendMessage(page, 'Create a presentation');
-    const sessionId = await getSessionIdFromUrl(page);
+    const sessionId = getSessionIdFromUrl(page, testSessionIds);
 
     const config = await getSessionConfig(request, sessionId);
     expect(config.deck_prompt_id).toBe(testPrompt.id);
@@ -175,7 +143,7 @@ test.describe('Pre-session configuration', () => {
       label: testStyle.name as string,
     });
     await sendMessage(page, 'Create a presentation');
-    const sessionId = await getSessionIdFromUrl(page);
+    const sessionId = getSessionIdFromUrl(page, testSessionIds);
 
     const config = await getSessionConfig(request, sessionId);
     expect(config.slide_style_id).toBe(testStyle.id);
@@ -189,7 +157,7 @@ test.describe('Pre-session configuration', () => {
       label: testPrompt.name as string,
     });
     await sendMessage(page, 'Create a combined report');
-    const sessionId = await getSessionIdFromUrl(page);
+    const sessionId = getSessionIdFromUrl(page, testSessionIds);
 
     const config = await getSessionConfig(request, sessionId);
     const tools = config.tools as Array<Record<string, unknown>>;
@@ -201,7 +169,7 @@ test.describe('Pre-session configuration', () => {
   test('send message with no configuration uses defaults', async ({ page, request }) => {
     await page.goto('/');
     await sendMessage(page, 'Create a presentation with defaults');
-    const sessionId = await getSessionIdFromUrl(page);
+    const sessionId = getSessionIdFromUrl(page, testSessionIds);
 
     const config = await getSessionConfig(request, sessionId);
     const tools = config.tools as Array<Record<string, unknown>>;
@@ -214,7 +182,7 @@ test.describe('Pre-session configuration', () => {
   test.fail('new session gets default slide style', async ({ page, request }) => {
     await page.goto('/');
     await sendMessage(page, 'Create a presentation');
-    const sessionId = await getSessionIdFromUrl(page);
+    const sessionId = getSessionIdFromUrl(page, testSessionIds);
 
     const config = await getSessionConfig(request, sessionId);
     expect(config.slide_style_id).not.toBeNull();
@@ -226,14 +194,24 @@ test.describe('Pre-session configuration', () => {
 // ---------------------------------------------------------------------------
 
 test.describe('Mid-session configuration', () => {
+  const testSessionIds: string[] = [];
+
+  test.afterEach(async ({ request }) => {
+    for (const id of testSessionIds) {
+      await cleanupSession(request, id);
+    }
+    testSessionIds.length = 0;
+  });
+
   test('add Genie tool mid-session', async ({ page, request }) => {
     await page.goto('/');
     await sendMessage(page, 'Start a session');
-    const sessionId = await getSessionIdFromUrl(page);
+    const sessionId = getSessionIdFromUrl(page, testSessionIds);
 
     await expandConfigBar(page);
+    const toolResponse = page.waitForResponse(resp => resp.url().includes('/agent-config') && resp.ok());
     await addGenieSpace(page, 'Sales Data Space');
-    await page.waitForTimeout(1000);
+    await toolResponse;
 
     const config = await getSessionConfig(request, sessionId);
     const tools = config.tools as Array<Record<string, unknown>>;
@@ -245,11 +223,12 @@ test.describe('Mid-session configuration', () => {
   test('remove tool mid-session', async ({ page, request }) => {
     await page.goto('/');
     await sendMessage(page, 'Start a session');
-    const sessionId = await getSessionIdFromUrl(page);
+    const sessionId = getSessionIdFromUrl(page, testSessionIds);
 
     await expandConfigBar(page);
+    const addToolResponse = page.waitForResponse(resp => resp.url().includes('/agent-config') && resp.ok());
     await addGenieSpace(page, 'Sales Data Space');
-    await page.waitForTimeout(500);
+    await addToolResponse;
 
     // Verify tool was added
     let config = await getSessionConfig(request, sessionId);
@@ -257,8 +236,9 @@ test.describe('Mid-session configuration', () => {
     expect(tools).toHaveLength(1);
 
     // Remove the tool
+    const removeToolResponse = page.waitForResponse(resp => resp.url().includes('/agent-config') && resp.ok());
     await page.getByRole('button', { name: 'Remove Sales Data Space' }).click();
-    await page.waitForTimeout(1000);
+    await removeToolResponse;
 
     config = await getSessionConfig(request, sessionId);
     tools = config.tools as Array<Record<string, unknown>>;
@@ -268,13 +248,14 @@ test.describe('Mid-session configuration', () => {
   test('change deck prompt mid-session', async ({ page, request }) => {
     await page.goto('/');
     await sendMessage(page, 'Start a session');
-    const sessionId = await getSessionIdFromUrl(page);
+    const sessionId = getSessionIdFromUrl(page, testSessionIds);
 
     await expandConfigBar(page);
+    const configResponse = page.waitForResponse(resp => resp.url().includes('/agent-config') && resp.ok());
     await page.locator('[data-testid="deck-prompt-selector"]').selectOption({
       label: testPrompt.name as string,
     });
-    await page.waitForTimeout(1000);
+    await configResponse;
 
     const config = await getSessionConfig(request, sessionId);
     expect(config.deck_prompt_id).toBe(testPrompt.id);
@@ -283,13 +264,14 @@ test.describe('Mid-session configuration', () => {
   test('change slide style mid-session', async ({ page, request }) => {
     await page.goto('/');
     await sendMessage(page, 'Start a session');
-    const sessionId = await getSessionIdFromUrl(page);
+    const sessionId = getSessionIdFromUrl(page, testSessionIds);
 
     await expandConfigBar(page);
+    const configResponse = page.waitForResponse(resp => resp.url().includes('/agent-config') && resp.ok());
     await page.locator('[data-testid="style-selector"]').selectOption({
       label: testStyle.name as string,
     });
-    await page.waitForTimeout(1000);
+    await configResponse;
 
     const config = await getSessionConfig(request, sessionId);
     expect(config.slide_style_id).toBe(testStyle.id);
@@ -301,6 +283,7 @@ test.describe('Mid-session configuration', () => {
 // ---------------------------------------------------------------------------
 
 test.describe('Load profile into session', () => {
+  const testSessionIds: string[] = [];
   let profileA: Record<string, unknown>;
   let profileB: Record<string, unknown>;
 
@@ -344,6 +327,13 @@ test.describe('Load profile into session', () => {
     });
   });
 
+  test.afterEach(async ({ request }) => {
+    for (const id of testSessionIds) {
+      await cleanupSession(request, id);
+    }
+    testSessionIds.length = 0;
+  });
+
   test.afterAll(async ({ request }) => {
     if (profileA?.id) {
       await cleanupProfile(request, profileA.id as number);
@@ -356,12 +346,13 @@ test.describe('Load profile into session', () => {
   test('load profile into new session', async ({ page, request }) => {
     await page.goto('/');
     await sendMessage(page, 'Start a session');
-    const sessionId = await getSessionIdFromUrl(page);
+    const sessionId = getSessionIdFromUrl(page, testSessionIds);
 
     await expandConfigBar(page);
+    const loadResponse = page.waitForResponse(resp => resp.url().includes('/load-profile/') && resp.ok());
     await page.locator('[data-testid="load-profile-button"]').click();
     await page.getByText(profileA.name as string).click();
-    await page.waitForTimeout(1000);
+    await loadResponse;
 
     const config = await getSessionConfig(request, sessionId);
     const tools = config.tools as Array<Record<string, unknown>>;
@@ -374,11 +365,12 @@ test.describe('Load profile into session', () => {
   test.fail('load profile mid-session shows confirmation', async ({ page }) => {
     await page.goto('/');
     await sendMessage(page, 'Start a session');
-    await getSessionIdFromUrl(page);
+    getSessionIdFromUrl(page, testSessionIds);
 
     await expandConfigBar(page);
+    const toolResponse = page.waitForResponse(resp => resp.url().includes('/agent-config') && resp.ok());
     await addGenieSpace(page, 'Sales Data Space');
-    await page.waitForTimeout(500);
+    await toolResponse;
 
     let dialogAppeared = false;
     page.on('dialog', async (dialog) => {
@@ -387,8 +379,9 @@ test.describe('Load profile into session', () => {
     });
 
     await page.locator('[data-testid="load-profile-button"]').click();
+    const loadResponse = page.waitForResponse(resp => resp.url().includes('/load-profile/') && resp.ok());
     await page.getByText(profileB.name as string).click();
-    await page.waitForTimeout(1000);
+    await loadResponse;
 
     // Fails because confirmation dialog not implemented yet
     expect(dialogAppeared).toBe(true);
@@ -397,13 +390,14 @@ test.describe('Load profile into session', () => {
   test('load profile replaces config entirely', async ({ page, request }) => {
     await page.goto('/');
     await sendMessage(page, 'Start a session');
-    const sessionId = await getSessionIdFromUrl(page);
+    const sessionId = getSessionIdFromUrl(page, testSessionIds);
 
     // Load profile A
     await expandConfigBar(page);
     await page.locator('[data-testid="load-profile-button"]').click();
+    const loadResponseA = page.waitForResponse(resp => resp.url().includes('/load-profile/') && resp.ok());
     await page.getByText(profileA.name as string).click();
-    await page.waitForTimeout(1000);
+    await loadResponseA;
 
     let config = await getSessionConfig(request, sessionId);
     let tools = config.tools as Array<Record<string, unknown>>;
@@ -411,8 +405,9 @@ test.describe('Load profile into session', () => {
 
     // Load profile B — should fully replace config
     await page.locator('[data-testid="load-profile-button"]').click();
+    const loadResponseB = page.waitForResponse(resp => resp.url().includes('/load-profile/') && resp.ok());
     await page.getByText(profileB.name as string).click();
-    await page.waitForTimeout(1000);
+    await loadResponseB;
 
     config = await getSessionConfig(request, sessionId);
     tools = config.tools as Array<Record<string, unknown>>;
