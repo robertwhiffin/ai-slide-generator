@@ -13,7 +13,7 @@ import React, { useState, useEffect } from 'react';
 import { User, ChevronDown, Trash2, Plus, Copy, Play, Star } from 'lucide-react';
 import { Button } from '@/ui/button';
 import { Badge } from '@/ui/badge';
-import type { Profile, ProfileCreate, ProfileUpdate } from '../../api/config';
+import type { Profile } from '../../api/config';
 import { useProfiles } from '../../hooks/useProfiles';
 import { ProfileForm } from './ProfileForm';
 import { ProfileCreationWizard } from './ProfileCreationWizard';
@@ -103,7 +103,7 @@ export const ProfileList: React.FC<ProfileListProps> = ({ onProfileChange }) => 
   };
 
   // Handle form submit (edit mode only - create uses wizard)
-  const handleFormSubmit = async (_data: ProfileCreate | ProfileUpdate) => {
+  const handleFormSubmit = async () => {
     // This is only used for editing, which is now handled in ProfileDetailView
     setFormMode(null);
     setEditingProfile(null);

@@ -2135,8 +2135,15 @@ class SessionManager:
             result["replies"] = []
         return result
 
-    def list_mentions(self, user_name: str) -> List[Dict[str, Any]]:
+    def list_mentions(
+        self,
+        user_name: str,
+        session_id: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
         """List comments that @mention a specific user, newest first.
+
+        When *session_id* is provided, only mentions from that deck
+        (resolved to the deck-owner session) are returned.
 
         Uses JSONB containment on PostgreSQL, LIKE fallback on SQLite.
         Always double-checks in Python to avoid false positives.
@@ -2144,15 +2151,28 @@ class SessionManager:
         with get_db_session() as db:
             lookup = user_name.lower()
 
+            owner_internal_id: Optional[int] = None
+            if session_id:
+                try:
+                    session = self._get_session_or_raise(db, session_id)
+                    deck_owner = self._get_deck_owner_session(db, session)
+                    owner_internal_id = deck_owner.id
+                except Exception:
+                    pass
+
             try:
                 is_sqlite = "sqlite" in str(db.bind.url)
             except Exception:
                 is_sqlite = False
 
+            base_query = db.query(SlideComment).filter(SlideComment.mentions.isnot(None))
+
+            if owner_internal_id is not None:
+                base_query = base_query.filter(SlideComment.session_id == owner_internal_id)
+
             if is_sqlite:
                 comments = (
-                    db.query(SlideComment)
-                    .filter(SlideComment.mentions.isnot(None))
+                    base_query
                     .filter(SlideComment.content.contains(f"@{lookup}"))
                     .order_by(SlideComment.created_at.desc())
                     .limit(100)
@@ -2161,8 +2181,7 @@ class SessionManager:
             else:
                 from sqlalchemy import text as sa_text
                 comments = (
-                    db.query(SlideComment)
-                    .filter(SlideComment.mentions.isnot(None))
+                    base_query
                     .filter(sa_text(
                         "mentions::jsonb @> :target"
                     ).bindparams(target=f'["{lookup}"]'))

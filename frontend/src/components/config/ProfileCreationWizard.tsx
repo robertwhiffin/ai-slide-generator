@@ -283,7 +283,7 @@ export const ProfileCreationWizard: React.FC<ProfileCreationWizardProps> = ({
         genieDescription: response.description || '',
       }));
       setManualSpaceId('');
-    } catch (err) {
+    } catch {
       setLookupError('Space not found or inaccessible');
     } finally {
       setLookingUp(false);
@@ -381,7 +381,7 @@ export const ProfileCreationWizard: React.FC<ProfileCreationWizardProps> = ({
 
   // Filter Genie spaces
   const filteredSpaces = Object.entries(availableSpaces)
-    .filter(([_, details]) => 
+    .filter(([, details]) => 
       !spaceFilter || details.title.toLowerCase().includes(spaceFilter.toLowerCase())
     )
     .sort((a, b) => a[1].title.localeCompare(b[1].title));
