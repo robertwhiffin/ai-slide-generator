@@ -255,10 +255,8 @@ export const AgentConfigBar: React.FC = () => {
   const [stylesLoading, setStylesLoading] = useState(false);
   const [promptsLoading, setPromptsLoading] = useState(false);
 
-  // Fetch options when expanded
+  // Fetch style/prompt options eagerly so the collapsed summary can show names
   useEffect(() => {
-    if (!expanded) return;
-
     let cancelled = false;
 
     setStylesLoading(true);
@@ -274,7 +272,7 @@ export const AgentConfigBar: React.FC = () => {
       .finally(() => { if (!cancelled) setPromptsLoading(false); });
 
     return () => { cancelled = true; };
-  }, [expanded]);
+  }, []);
 
   // Handlers
   const handleSaveProfile = useCallback(async (name: string, description?: string) => {
