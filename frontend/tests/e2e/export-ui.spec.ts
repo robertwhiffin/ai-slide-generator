@@ -64,12 +64,9 @@ async function setupMocks(page: Page) {
     route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ configured: true }) });
   });
 
-  // Permission / lock / mention mocks required by the permissions system
+  // Permission / mention mocks required by the permissions system
   await page.route('**/api/user/current', (route) => {
     route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ username: 'test@test.com', display_name: 'Test User' }) });
-  });
-  await page.route(/\/api\/sessions\/[^/]+\/lock$/, (route) => {
-    route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ locked_by: 'test@test.com', locked_at: new Date().toISOString() }) });
   });
   await page.route('**/api/comments/mentions**', (route) => {
     route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ mentions: [], count: 0 }) });
@@ -125,6 +122,19 @@ async function setupMocks(page: Page) {
 
     if (url.includes('/sessions/shared')) {
       route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ presentations: [], count: 0 }) });
+      return;
+    }
+
+    if (url.includes('/lock')) {
+      if (method === 'POST') {
+        route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ acquired: true, locked_by: null }) });
+      } else if (method === 'PUT') {
+        route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ renewed: true }) });
+      } else if (method === 'DELETE') {
+        route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ status: 'released' }) });
+      } else {
+        route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ locked: false, locked_by: null }) });
+      }
       return;
     }
 
@@ -261,6 +271,19 @@ test.describe('ExportButtons', () => {
 
       if (url.includes('/sessions/shared')) {
         route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ presentations: [], count: 0 }) });
+        return;
+      }
+
+      if (url.includes('/lock')) {
+        if (method === 'POST') {
+          route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ acquired: true, locked_by: null }) });
+        } else if (method === 'PUT') {
+          route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ renewed: true }) });
+        } else if (method === 'DELETE') {
+          route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ status: 'released' }) });
+        } else {
+          route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ locked: false, locked_by: null }) });
+        }
         return;
       }
 
@@ -590,6 +613,19 @@ test.describe('PresentButton', () => {
 
       if (url.includes('/sessions/shared')) {
         route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ presentations: [], count: 0 }) });
+        return;
+      }
+
+      if (url.includes('/lock')) {
+        if (method === 'POST') {
+          route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ acquired: true, locked_by: null }) });
+        } else if (method === 'PUT') {
+          route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ renewed: true }) });
+        } else if (method === 'DELETE') {
+          route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ status: 'released' }) });
+        } else {
+          route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ locked: false, locked_by: null }) });
+        }
         return;
       }
 
