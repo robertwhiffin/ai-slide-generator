@@ -281,6 +281,7 @@ interface SlideStyle {
 | `src/utils/loadingMessages.ts` | Rotating messages during LLM calls | None |
 | `src/components/common/Tooltip.tsx` | Lightweight hover tooltip wrapper using Tailwind; appears instantly on hover | None |
 | `src/components/config/AgentConfigBar.tsx` | Session tool configuration bar; add/remove Genie spaces, select style/prompt, save/load profiles | `api.getAgentConfig`, `api.updateAgentConfig`, `api.updateAgentConfigTools` |
+| `src/components/AgentConfigBar/GenieDetailPanel.tsx` | Inline panel for viewing and editing a Genie space description before adding or after selecting a tool; supports add and edit modes | None (callback props via `AgentConfigBar`) |
 | `src/components/config/DeckPromptList.tsx` | Deck prompt library management: list, create, edit, delete prompts | `configApi.listDeckPrompts`, `configApi.createDeckPrompt`, `configApi.updateDeckPrompt`, `configApi.deleteDeckPrompt` |
 | `src/components/config/DeckPromptForm.tsx` | Modal form for creating/editing deck prompts with Monaco editor | None (callback props) |
 | `src/components/config/DeckPromptSelector.tsx` | Session configuration for selecting a deck prompt from the library | `configApi.listDeckPrompts`, `api.updateAgentConfig` |
