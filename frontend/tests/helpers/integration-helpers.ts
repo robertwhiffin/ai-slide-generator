@@ -124,7 +124,8 @@ export async function mockChatStream(page: Page): Promise<void> {
       if (configToSync.slide_style_id == null) {
         const stylesRes = await globalThis.fetch(`${API_BASE}/settings/slide-styles`);
         const stylesData = await stylesRes.json();
-        const systemStyle = (stylesData.styles ?? []).find((s: Record<string, unknown>) => s.is_system);
+        const systemStyle = (stylesData.styles ?? []).find((s: Record<string, unknown>) => s.is_default)
+          ?? (stylesData.styles ?? []).find((s: Record<string, unknown>) => s.is_system);
         if (systemStyle) {
           configToSync.slide_style_id = systemStyle.id;
         }
