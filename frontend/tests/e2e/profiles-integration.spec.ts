@@ -1,15 +1,16 @@
-import { test, expect, Page, APIRequestContext } from '@playwright/test';
+import { test, expect, Page } from '@playwright/test';
 import {
   setupIntegrationMocks,
   createTestStyle,
   createTestDeckPrompt,
   createTestProfile,
-  createTestSession,
-  putSessionConfig,
   cleanupSession,
   cleanupProfile,
+  cleanupStyle,
+  cleanupDeckPrompt,
   listProfiles,
-  API_BASE,
+  expandConfigBar,
+  addGenieSpace,
 } from '../helpers/integration-helpers';
 import { mockAvailableTools } from '../fixtures/mocks';
 
@@ -45,19 +46,11 @@ test.beforeAll(async ({ request }) => {
 });
 
 test.afterAll(async ({ request }) => {
-  try {
-    if (testStyle?.id) {
-      await request.delete(`${API_BASE}/settings/slide-styles/${testStyle.id}`);
-    }
-  } catch {
-    // ignore
+  if (testStyle?.id) {
+    await cleanupStyle(request, testStyle.id as number);
   }
-  try {
-    if (testPrompt?.id) {
-      await request.delete(`${API_BASE}/settings/deck-prompts/${testPrompt.id}`);
-    }
-  } catch {
-    // ignore
+  if (testPrompt?.id) {
+    await cleanupDeckPrompt(request, testPrompt.id as number);
   }
 });
 
@@ -74,20 +67,6 @@ async function goToProfiles(page: Page): Promise<void> {
   await expect(page.getByRole('heading', { name: /Agent Profiles/i })).toBeVisible({ timeout: 10000 });
 }
 
-async function expandConfigBar(page: Page): Promise<void> {
-  await page.locator('[data-testid="agent-config-toggle"]').click();
-  await page.locator('[data-testid="add-tool-button"]').waitFor({ state: 'visible', timeout: 10000 });
-}
-
-async function addGenieSpace(page: Page, spaceName: string): Promise<void> {
-  await page.locator('[data-testid="add-tool-button"]').click();
-  await page.locator('[data-testid="tool-picker"]').waitFor({ state: 'visible', timeout: 10000 });
-  await page.getByText(spaceName).click();
-  await page.locator('[data-testid="genie-detail-panel"]').waitFor({ state: 'visible', timeout: 10000 });
-  await page.getByRole('button', { name: 'Save & Add' }).click();
-  await page.locator('[data-testid="genie-detail-panel"]').waitFor({ state: 'hidden', timeout: 10000 });
-}
-
 function profileCard(page: Page, name: string) {
   return page.getByTestId('profile-card').filter({ hasText: name }).first();
 }
@@ -96,7 +75,7 @@ function profileCard(page: Page, name: string) {
 // Profile list and display
 // ---------------------------------------------------------------------------
 
-test.describe('Profile list and display', () => {
+test.describe.serial('Profile list and display', () => {
   let createdProfileIds: (number | string)[] = [];
 
   test.afterEach(async ({ request }) => {
@@ -313,9 +292,9 @@ test.describe('Profile operations', () => {
 
     // Add a Genie space to the config
     await expandConfigBar(page);
+    const toolResponse = page.waitForResponse(resp => resp.url().includes('/agent-config') && resp.ok());
     await addGenieSpace(page, 'Sales Data Space');
-    // Wait for config to persist
-    await page.waitForTimeout(1000);
+    await toolResponse;
 
     // Save as profile
     const profileName = `SavedProfile-${Date.now()}`;
