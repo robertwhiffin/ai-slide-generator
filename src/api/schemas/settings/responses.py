@@ -14,10 +14,13 @@ class ProfileSummary(BaseModel):
     name: str
     description: Optional[str]
     is_default: bool
+    global_permission: Optional[str] = None
     created_at: datetime
     created_by: Optional[str]
     updated_at: datetime
     updated_by: Optional[str]
+    my_permission: Optional[str] = None
+    is_my_default: bool = False
 
 
 class AIInfraConfig(BaseModel):
@@ -76,6 +79,7 @@ class ProfileDetail(BaseModel):
     name: str
     description: Optional[str]
     is_default: bool
+    global_permission: Optional[str] = None
     created_at: datetime
     created_by: Optional[str]
     updated_at: datetime
@@ -83,6 +87,8 @@ class ProfileDetail(BaseModel):
     ai_infra: AIInfraConfig
     genie_spaces: List[GenieSpace]
     prompts: PromptsConfig
+    my_permission: Optional[str] = None
+    is_my_default: bool = False
 
 
 class ConfigHistoryEntry(BaseModel):

@@ -243,4 +243,5 @@ Fresh deployments create these tables automatically via SQLAlchemy model definit
 - [Real-Time Streaming](real-time-streaming.md) – SSE events and message persistence
 - [Database Configuration](database-configuration.md) – session schema details
 - [Frontend Overview](frontend-overview.md) – how the UI passes session IDs
+- [Permissions Model](permissions-model.md) – exclusive editing lock, contributor sessions, and @mentions
 

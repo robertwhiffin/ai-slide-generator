@@ -1,6 +1,7 @@
 """Slide class for representing individual slides as raw HTML."""
 
 import copy
+from datetime import datetime
 from typing import Optional
 
 
@@ -14,38 +15,58 @@ class Slide:
         html: The complete HTML for this slide
         slide_id: Optional unique identifier for this slide
         scripts: JavaScript code for this slide's charts (e.g., Chart.js initialization)
+        created_by: Username of the user who created this slide
+        created_at: ISO timestamp when the slide was first created
+        modified_by: Username of the last user who modified this slide
+        modified_at: ISO timestamp of the last modification
     """
 
-    def __init__(self, html: str, slide_id: Optional[str] = None, scripts: str = ""):
-        """Initialize a Slide with HTML content.
-        
-        Args:
-            html: The complete HTML for this slide (including outer <div class="slide">)
-            slide_id: Optional unique identifier for this slide
-            scripts: JavaScript code for this slide's charts
-        """
+    def __init__(
+        self,
+        html: str,
+        slide_id: Optional[str] = None,
+        scripts: str = "",
+        created_by: Optional[str] = None,
+        created_at: Optional[str] = None,
+        modified_by: Optional[str] = None,
+        modified_at: Optional[str] = None,
+    ):
         self.html = html
         self.slide_id = slide_id
         self.scripts = scripts
+        self.created_by = created_by
+        self.created_at = created_at
+        self.modified_by = modified_by
+        self.modified_at = modified_at
 
     def to_html(self) -> str:
-        """Return the HTML string for this slide.
-        
-        Returns:
-            The complete HTML content of the slide
-        """
+        """Return the HTML string for this slide."""
         return self.html
 
+    def stamp_created(self, user: str) -> None:
+        """Set creation metadata. Only sets if not already stamped."""
+        if not self.created_by:
+            now = datetime.utcnow().isoformat() + "Z"
+            self.created_by = user
+            self.created_at = now
+            self.modified_by = user
+            self.modified_at = now
+
+    def stamp_modified(self, user: str) -> None:
+        """Update modification metadata."""
+        self.modified_by = user
+        self.modified_at = datetime.utcnow().isoformat() + "Z"
+
     def clone(self) -> 'Slide':
-        """Create a deep copy of this slide.
-        
-        Returns:
-            A new Slide instance with copied HTML and scripts content
-        """
+        """Create a deep copy of this slide."""
         return Slide(
             html=copy.deepcopy(self.html),
             slide_id=self.slide_id,
-            scripts=copy.deepcopy(self.scripts)
+            scripts=copy.deepcopy(self.scripts),
+            created_by=self.created_by,
+            created_at=self.created_at,
+            modified_by=self.modified_by,
+            modified_at=self.modified_at,
         )
 
     def __str__(self) -> str:

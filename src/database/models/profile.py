@@ -16,6 +16,7 @@ class ConfigProfile(Base):
     name = Column(String(100), nullable=False, unique=True, index=True)
     description = Column(Text)
     is_default = Column(Boolean, default=False, nullable=False)
+    global_permission = Column(String(20), nullable=True)
     is_deleted = Column(Boolean, default=False, nullable=False, index=True)
     deleted_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
@@ -28,6 +29,7 @@ class ConfigProfile(Base):
     genie_spaces = relationship("ConfigGenieSpace", back_populates="profile", cascade="all, delete-orphan")
     prompts = relationship("ConfigPrompts", back_populates="profile", uselist=False, cascade="all, delete-orphan")
     history = relationship("ConfigHistory", back_populates="profile", cascade="all, delete-orphan")
+    contributors = relationship("ConfigProfileContributor", back_populates="profile", cascade="all, delete-orphan")
 
     # Note: single_default_profile constraint handled in migration
 

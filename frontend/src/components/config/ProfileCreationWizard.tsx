@@ -12,19 +12,27 @@
  * Profiles without Genie run in prompt-only mode.
  */
 
-import React, { useState, useEffect } from 'react';
-import { FiCheck, FiChevronLeft, FiChevronRight, FiX, FiInfo, FiExternalLink } from 'react-icons/fi';
-import { configApi, type DeckPrompt, type SlideStyle, type AvailableGenieSpaces } from '../../api/config';
+import React, { useState, useEffect, useCallback } from 'react';
+import { FiCheck, FiChevronLeft, FiChevronRight, FiX, FiInfo, FiExternalLink, FiSearch, FiUsers, FiUser, FiTrash2, FiGlobe } from 'react-icons/fi';
+import { configApi, type DeckPrompt, type SlideStyle, type AvailableGenieSpaces, type Identity, type ContributorCreate, type PermissionLevel } from '../../api/config';
 import { DOCS_URLS } from '../../constants/docs';
 
-// Wizard step definitions (5 steps - LLM uses backend defaults)
+// Wizard step definitions (6 steps - LLM uses backend defaults)
 const STEPS = [
   { id: 'basic', title: 'Basic Info', description: 'Name and description' },
   { id: 'genie', title: 'Genie Space', description: 'Data source (optional)' },
   { id: 'slide-style', title: 'Slide Style', description: 'Visual appearance' },
   { id: 'deck-prompt', title: 'Deck Prompt', description: 'Optional template' },
+  { id: 'share', title: 'Share', description: 'Add contributors' },
   { id: 'review', title: 'Review', description: 'Confirm and create' },
 ] as const;
+
+// Permission level options for contributors
+const PERMISSION_OPTIONS: { value: PermissionLevel; label: string; description: string }[] = [
+  { value: 'CAN_VIEW', label: 'Can View', description: 'View profile and use for presentations' },
+  { value: 'CAN_EDIT', label: 'Can Edit', description: 'Edit profile settings' },
+  { value: 'CAN_MANAGE', label: 'Can Manage', description: 'Full control including sharing' },
+];
 
 type StepId = typeof STEPS[number]['id'];
 
@@ -41,6 +49,9 @@ interface WizardFormData {
   selectedSlideStyleId: number | null;
   // Deck prompt
   selectedDeckPromptId: number | null;
+  // Sharing
+  globalPermission: PermissionLevel | null;
+  contributors: ContributorCreate[];
 }
 
 interface ProfileCreationWizardProps {
@@ -67,6 +78,8 @@ export const ProfileCreationWizard: React.FC<ProfileCreationWizardProps> = ({
     genieDescription: '',
     selectedSlideStyleId: null,
     selectedDeckPromptId: null,
+    globalPermission: null,
+    contributors: [],
   });
   
   // Loading states
@@ -97,6 +110,12 @@ export const ProfileCreationWizard: React.FC<ProfileCreationWizardProps> = ({
   
   // Filter for Genie spaces
   const [spaceFilter, setSpaceFilter] = useState('');
+  
+  // Identity search for sharing
+  const [identitySearch, setIdentitySearch] = useState('');
+  const [searchResults, setSearchResults] = useState<Identity[]>([]);
+  const [searchingIdentities, setSearchingIdentities] = useState(false);
+  const [selectedPermission, setSelectedPermission] = useState<PermissionLevel>('CAN_EDIT');
 
   // Initialize defaults when wizard opens
   useEffect(() => {
@@ -110,8 +129,12 @@ export const ProfileCreationWizard: React.FC<ProfileCreationWizardProps> = ({
         genieDescription: '',
         selectedSlideStyleId: null,
         selectedDeckPromptId: null,
+        globalPermission: null,
+        contributors: [],
       });
       setError(null);
+      setIdentitySearch('');
+      setSearchResults([]);
       loadSlideStyles();
       loadDeckPrompts();
     }
@@ -159,6 +182,71 @@ export const ProfileCreationWizard: React.FC<ProfileCreationWizardProps> = ({
     }
   };
 
+  // Search for users/groups (debounced)
+  const searchIdentities = useCallback(async (query: string) => {
+    if (!query.trim() || query.length < 2) {
+      setSearchResults([]);
+      return;
+    }
+    setSearchingIdentities(true);
+    try {
+      const response = await configApi.searchIdentities(query.trim());
+      // Filter out already-added contributors
+      const addedIds = new Set(formData.contributors.map(c => c.identity_id));
+      setSearchResults(response.identities.filter(i => !addedIds.has(i.id)));
+    } catch (err) {
+      console.error('Failed to search identities:', err);
+      setSearchResults([]);
+    } finally {
+      setSearchingIdentities(false);
+    }
+  }, [formData.contributors]);
+
+  // Debounce identity search
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      if (identitySearch) {
+        searchIdentities(identitySearch);
+      }
+    }, 300);
+    return () => clearTimeout(timer);
+  }, [identitySearch, searchIdentities]);
+
+  // Add a contributor
+  const addContributor = (identity: Identity) => {
+    const newContributor: ContributorCreate = {
+      identity_id: identity.id,
+      identity_type: identity.type,
+      identity_name: identity.user_name || identity.display_name || 'Unknown',
+      user_name: identity.user_name,
+      permission_level: selectedPermission,
+    };
+    setFormData(prev => ({
+      ...prev,
+      contributors: [...prev.contributors, newContributor],
+    }));
+    setIdentitySearch('');
+    setSearchResults([]);
+  };
+
+  // Remove a contributor
+  const removeContributor = (identityId: string) => {
+    setFormData(prev => ({
+      ...prev,
+      contributors: prev.contributors.filter(c => c.identity_id !== identityId),
+    }));
+  };
+
+  // Update contributor permission
+  const updateContributorPermission = (identityId: string, permission: PermissionLevel) => {
+    setFormData(prev => ({
+      ...prev,
+      contributors: prev.contributors.map(c =>
+        c.identity_id === identityId ? { ...c, permission_level: permission } : c
+      ),
+    }));
+  };
+
   // Handle Genie space selection from dropdown
   const handleGenieSpaceSelect = (spaceId: string) => {
     if (spaceId && availableSpaces[spaceId]) {
@@ -195,7 +283,7 @@ export const ProfileCreationWizard: React.FC<ProfileCreationWizardProps> = ({
         genieDescription: response.description || '',
       }));
       setManualSpaceId('');
-    } catch (err) {
+    } catch {
       setLookupError('Space not found or inaccessible');
     } finally {
       setLookingUp(false);
@@ -218,6 +306,8 @@ export const ProfileCreationWizard: React.FC<ProfileCreationWizardProps> = ({
         return formData.selectedSlideStyleId !== null; // Required - must select a style
       case 'deck-prompt':
         return true; // Optional
+      case 'share':
+        return true; // Optional - can skip sharing
       case 'review':
         return true;
       default:
@@ -272,6 +362,15 @@ export const ProfileCreationWizard: React.FC<ProfileCreationWizardProps> = ({
         prompts: promptsConfig,
       });
       
+      if (formData.globalPermission) {
+        await configApi.setProfileGlobal(response.id, formData.globalPermission);
+      }
+
+      // Add contributors if any were selected
+      if (formData.contributors.length > 0) {
+        await configApi.addContributorsBulk(response.id, formData.contributors);
+      }
+      
       onSuccess(response.id);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to create profile');
@@ -282,7 +381,7 @@ export const ProfileCreationWizard: React.FC<ProfileCreationWizardProps> = ({
 
   // Filter Genie spaces
   const filteredSpaces = Object.entries(availableSpaces)
-    .filter(([_, details]) => 
+    .filter(([, details]) => 
       !spaceFilter || details.title.toLowerCase().includes(spaceFilter.toLowerCase())
     )
     .sort((a, b) => a[1].title.localeCompare(b[1].title));
@@ -653,7 +752,185 @@ export const ProfileCreationWizard: React.FC<ProfileCreationWizardProps> = ({
             </div>
           )}
 
-          {/* Step 4: Review */}
+          {/* Step 5: Share */}
+          {currentStep === 'share' && (
+            <div className="space-y-4">
+              <div>
+                <h3 className="text-lg font-medium text-gray-900 mb-2">Share Profile (Optional)</h3>
+                <p className="text-sm text-gray-500 mb-4">
+                  Add users or groups from your Databricks workspace who can access this profile.
+                  You can also configure sharing later from the profile settings.
+                </p>
+              </div>
+
+              {/* Search and permission selector */}
+              <div className="flex gap-3">
+                <div className="flex-1 relative">
+                  <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
+                    <FiSearch className="text-gray-400" />
+                  </div>
+                  <input
+                    type="text"
+                    value={identitySearch}
+                    onChange={(e) => setIdentitySearch(e.target.value)}
+                    placeholder="Search users, groups, or &quot;All workspace users&quot;..."
+                    className="w-full pl-10 pr-3 py-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-purple-500 focus:border-purple-500"
+                  />
+                  {searchingIdentities && (
+                    <div className="absolute inset-y-0 right-0 pr-3 flex items-center">
+                      <div className="w-4 h-4 border-2 border-purple-500 border-t-transparent rounded-full animate-spin" />
+                    </div>
+                  )}
+                </div>
+                <select
+                  value={selectedPermission}
+                  onChange={(e) => setSelectedPermission(e.target.value as PermissionLevel)}
+                  className="px-3 py-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-purple-500"
+                >
+                  {PERMISSION_OPTIONS.map(opt => (
+                    <option key={opt.value} value={opt.value}>{opt.label}</option>
+                  ))}
+                </select>
+              </div>
+
+              {/* Search results dropdown */}
+              {(searchResults.length > 0 || (identitySearch.length >= 1 && !formData.globalPermission)) && (
+                <div className="border border-gray-200 rounded-md shadow-sm max-h-48 overflow-y-auto">
+                  {/* "All workspace users" suggestion */}
+                  {!formData.globalPermission && 'all workspace'.includes(identitySearch.toLowerCase()) && (
+                    <button
+                      onClick={() => {
+                        setFormData(prev => ({ ...prev, globalPermission: selectedPermission }));
+                        setIdentitySearch('');
+                      }}
+                      className="w-full px-4 py-3 flex items-center gap-3 hover:bg-blue-50 border-b last:border-b-0 text-left"
+                    >
+                      <FiGlobe className="text-green-600 flex-shrink-0" />
+                      <div className="flex-1 min-w-0">
+                        <p className="font-medium text-gray-900">All workspace users</p>
+                        <p className="text-xs text-gray-500">Share with everyone in the workspace</p>
+                      </div>
+                      <span className="text-xs text-blue-600 font-medium">+ Add</span>
+                    </button>
+                  )}
+                  {searchResults.map(identity => (
+                    <button
+                      key={identity.id}
+                      onClick={() => addContributor(identity)}
+                      className="w-full px-4 py-3 flex items-center gap-3 hover:bg-gray-50 border-b last:border-b-0 text-left"
+                    >
+                      {identity.type === 'USER' ? (
+                        <FiUser className="text-blue-500 flex-shrink-0" />
+                      ) : (
+                        <FiUsers className="text-purple-500 flex-shrink-0" />
+                      )}
+                      <div className="flex-1 min-w-0">
+                        <p className="font-medium text-gray-900 truncate">{identity.display_name}</p>
+                        {identity.user_name && identity.user_name !== identity.display_name && (
+                          <p className="text-xs text-gray-500 truncate">{identity.user_name}</p>
+                        )}
+                      </div>
+                      <span className="text-xs text-blue-600 font-medium">+ Add</span>
+                    </button>
+                  ))}
+                </div>
+              )}
+
+              {/* No results message */}
+              {identitySearch.length >= 2 && !searchingIdentities && searchResults.length === 0 && (
+                <p className="text-sm text-gray-500 text-center py-4">
+                  No users or groups found matching "{identitySearch}"
+                </p>
+              )}
+
+              {/* Current access list */}
+              <div className="mt-4">
+                <h4 className="text-sm font-medium text-gray-700 mb-3">
+                  Current Access ({formData.contributors.length + (formData.globalPermission ? 1 : 0)})
+                </h4>
+
+                {formData.contributors.length === 0 && !formData.globalPermission ? (
+                  <div className="bg-blue-50 border border-blue-200 rounded-md p-4">
+                    <h4 className="font-medium text-blue-900">No contributors added</h4>
+                    <p className="text-sm text-blue-700 mt-1">
+                      This profile will be private to you. Search above to add users, groups, or "All workspace users".
+                    </p>
+                  </div>
+                ) : (
+                  <div className="space-y-2">
+                    {/* All workspace users row */}
+                    {formData.globalPermission && (
+                      <div className="flex items-center gap-3 p-3 bg-green-50 rounded-md border border-green-200">
+                        <div className="w-10 h-10 rounded-full bg-green-100 flex items-center justify-center">
+                          <FiGlobe className="text-green-600" />
+                        </div>
+                        <div className="flex-1 min-w-0">
+                          <p className="font-medium text-gray-900">All workspace users</p>
+                          <p className="text-xs text-gray-500">Everyone in the workspace</p>
+                        </div>
+                        <select
+                          value={formData.globalPermission}
+                          onChange={(e) => setFormData(prev => ({ ...prev, globalPermission: e.target.value as PermissionLevel }))}
+                          className="text-sm px-2 py-1 border border-gray-300 rounded focus:ring-2 focus:ring-purple-500"
+                        >
+                          {PERMISSION_OPTIONS.map(opt => (
+                            <option key={opt.value} value={opt.value}>{opt.label}</option>
+                          ))}
+                        </select>
+                        <button
+                          onClick={() => setFormData(prev => ({ ...prev, globalPermission: null }))}
+                          className="p-1 text-gray-400 hover:text-red-500 transition-colors"
+                          title="Remove global access"
+                        >
+                          <FiTrash2 />
+                        </button>
+                      </div>
+                    )}
+                    {formData.contributors.map(contributor => (
+                      <div
+                        key={contributor.identity_id}
+                        className="flex items-center gap-3 p-3 bg-gray-50 rounded-md border border-gray-200"
+                      >
+                        {contributor.identity_type === 'USER' ? (
+                          <div className="w-10 h-10 rounded-full bg-blue-100 flex items-center justify-center">
+                            <FiUser className="text-blue-500" />
+                          </div>
+                        ) : (
+                          <div className="w-10 h-10 rounded-full bg-purple-100 flex items-center justify-center">
+                            <FiUsers className="text-purple-500" />
+                          </div>
+                        )}
+                        <div className="flex-1 min-w-0">
+                          <p className="font-medium text-gray-900 truncate">{contributor.identity_name}</p>
+                          <p className="text-xs text-gray-500 truncate">
+                            {contributor.user_name || contributor.identity_type}
+                          </p>
+                        </div>
+                        <select
+                          value={contributor.permission_level}
+                          onChange={(e) => updateContributorPermission(contributor.identity_id, e.target.value as PermissionLevel)}
+                          className="text-sm px-2 py-1 border border-gray-300 rounded focus:ring-2 focus:ring-purple-500"
+                        >
+                          {PERMISSION_OPTIONS.map(opt => (
+                            <option key={opt.value} value={opt.value}>{opt.label}</option>
+                          ))}
+                        </select>
+                        <button
+                          onClick={() => removeContributor(contributor.identity_id)}
+                          className="p-1 text-gray-400 hover:text-red-500 transition-colors"
+                          title="Remove contributor"
+                        >
+                          <FiTrash2 />
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+
+          {/* Step 6: Review */}
           {currentStep === 'review' && (
             <div className="space-y-4">
               <div>
@@ -715,6 +992,43 @@ export const ProfileCreationWizard: React.FC<ProfileCreationWizardProps> = ({
                       {selectedDeckPrompt ? selectedDeckPrompt.name : 'None selected'}
                     </dd>
                   </dl>
+                </div>
+
+                {/* Sharing */}
+                <div className="bg-indigo-50 rounded-md p-4">
+                  <h4 className="text-sm font-medium text-indigo-700 mb-2">
+                    Sharing
+                  </h4>
+                  {formData.globalPermission && (
+                    <div className="flex items-center gap-2 text-sm mb-2">
+                      <FiGlobe className="text-green-600" size={14} />
+                      <span className="font-medium text-indigo-900">All workspace users</span>
+                      <span className="text-indigo-500">
+                        ({PERMISSION_OPTIONS.find(p => p.value === formData.globalPermission)?.label})
+                      </span>
+                    </div>
+                  )}
+                  {formData.contributors.length > 0 ? (
+                    <ul className="space-y-1">
+                      {formData.contributors.map(c => (
+                        <li key={c.identity_id} className="flex items-center gap-2 text-sm">
+                          {c.identity_type === 'USER' ? (
+                            <FiUser className="text-blue-500" size={14} />
+                          ) : (
+                            <FiUsers className="text-purple-500" size={14} />
+                          )}
+                          <span className="font-medium text-indigo-900">{c.identity_name}</span>
+                          <span className="text-indigo-500">
+                            ({PERMISSION_OPTIONS.find(p => p.value === c.permission_level)?.label})
+                          </span>
+                        </li>
+                      ))}
+                    </ul>
+                  ) : !formData.globalPermission ? (
+                    <p className="text-sm text-indigo-600">
+                      Private profile - no contributors added.
+                    </p>
+                  ) : null}
                 </div>
 
                 {/* Defaults note */}

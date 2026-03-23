@@ -71,7 +71,7 @@ export const ProfileSelector: React.FC<ProfileSelectorProps> = ({
         <span className="text-gray-700">
           <strong>{currentProfile?.name || 'Loading...'}</strong>
         </span>
-        {currentProfile?.is_default && (
+        {currentProfile?.is_my_default && (
           <span className="px-2 py-0.5 bg-blue-100 text-blue-700 text-xs rounded">
             Default
           </span>
@@ -113,7 +113,7 @@ export const ProfileSelector: React.FC<ProfileSelectorProps> = ({
                       <span className="text-sm font-medium text-gray-900 truncate">
                         {profile.name}
                       </span>
-                      {profile.is_default && (
+                      {profile.is_my_default && (
                         <span className="px-1.5 py-0.5 bg-blue-100 text-blue-700 text-xs rounded">
                           Default
                         </span>

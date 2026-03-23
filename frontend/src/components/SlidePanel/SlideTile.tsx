@@ -1,15 +1,30 @@
-import React, { useMemo, useRef, useState, useEffect } from 'react';
+import React, { useMemo, useRef, useState, useEffect, useCallback } from 'react';
 import { useSortable } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
-import { GripVertical, Edit3, Trash2, MessageSquare, Database, Maximize2, Loader2 } from 'lucide-react';
+import { GripVertical, Edit3, Trash2, MessageSquare, Database, Maximize2, Loader2, Bell, MessageCircle, User, Clock } from 'lucide-react';
 import { Button } from '@/ui/button';
 import { Tooltip } from '../common/Tooltip';
 import type { Slide, SlideDeck } from '../../types/slide';
 import type { VerificationResult } from '../../types/verification';
 import { HTMLEditorModal } from './HTMLEditorModal';
+import { CommentThread } from './CommentThread';
 import { useSelection } from '../../contexts/SelectionContext';
 import { VerificationBadge } from './VerificationBadge';
 import { api } from '../../services/api';
+
+function formatRelativeTime(iso: string): string {
+  const date = new Date(iso);
+  const now = new Date();
+  const diffMs = now.getTime() - date.getTime();
+  const diffMin = Math.floor(diffMs / 60_000);
+  if (diffMin < 1) return 'just now';
+  if (diffMin < 60) return `${diffMin}m ago`;
+  const diffHr = Math.floor(diffMin / 60);
+  if (diffHr < 24) return `${diffHr}h ago`;
+  const diffDays = Math.floor(diffHr / 24);
+  if (diffDays < 7) return `${diffDays}d ago`;
+  return date.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+}
 
 interface SlideTileProps {
   slide: Slide;
@@ -19,10 +34,15 @@ interface SlideTileProps {
   onDelete: () => void;
   onUpdate: (html: string) => Promise<void>;
   onVerificationUpdate: (verification: VerificationResult | null) => Promise<void>;
-  isAutoVerifying?: boolean;  // True when auto-verification is running for this slide
+  isAutoVerifying?: boolean;
   onOptimize?: () => void;
   isOptimizing?: boolean;
   readOnly?: boolean;
+  mentions?: Array<{ id: number; user_name: string; content: string; created_at: string }>;
+  mentionsLastSeen?: string;
+  onMarkMentionsSeen?: () => void;
+  onMentionsRefresh?: () => void;
+  canManage?: boolean;
 }
 
 const SLIDE_WIDTH = 1280;
@@ -41,16 +61,24 @@ export const SlideTile: React.FC<SlideTileProps> = ({
   onOptimize,
   isOptimizing = false,
   readOnly = false,
+  mentions = [],
+  mentionsLastSeen = new Date(0).toISOString(),
+  onMarkMentionsSeen,
+  onMentionsRefresh,
+  canManage = false,
 }) => {
   const [isEditing, setIsEditing] = useState(false);
+  const [showComments, setShowComments] = useState(false);
+  const [showMentions, setShowMentions] = useState(false);
+  const [scrollToCommentId, setScrollToCommentId] = useState<number | null>(null);
+  const mentionsRef = useRef<HTMLDivElement>(null);
+  const [commentCount, setCommentCount] = useState<number | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const [scale, setScale] = useState(1);
-  /** Content height from iframe (px, unscaled); used so card height fits content and avoids inner scrollbar */
   const [contentHeight, setContentHeight] = useState<number>(SLIDE_HEIGHT);
   const { selectedIndices, setSelection } = useSelection();
   
-  // Verification state - initialize from persisted slide.verification
   const [verificationResult, setVerificationResult] = useState<VerificationResult | undefined>(
     slide.verification
   );
@@ -58,10 +86,8 @@ export const SlideTile: React.FC<SlideTileProps> = ({
   const [isStale, setIsStale] = useState(false);
   const [isLoadingGenieLink, setIsLoadingGenieLink] = useState(false);
   
-  // Combined verifying state (manual or auto)
   const isVerifying = isManualVerifying || isAutoVerifying;
 
-  // Handle opening Genie conversation link
   const handleOpenGenieLink = async () => {
     if (isLoadingGenieLink) return;
     
@@ -81,13 +107,42 @@ export const SlideTile: React.FC<SlideTileProps> = ({
     }
   };
 
-  // Sync verification state when slide.verification changes (e.g., session restore)
+  // Close mentions dropdown on outside click
+  useEffect(() => {
+    if (!showMentions) return;
+    function handleClickOutside(e: MouseEvent) {
+      if (mentionsRef.current && !mentionsRef.current.contains(e.target as Node)) {
+        setShowMentions(false);
+      }
+    }
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, [showMentions]);
+
+  // Fetch comment count on mount and poll
+  useEffect(() => {
+    if (!sessionId || !slide.slide_id) return;
+    let cancelled = false;
+    const fetchCount = () => {
+      api.listComments(sessionId, slide.slide_id).then(({ count }) => {
+        if (!cancelled) setCommentCount(count);
+      }).catch(() => {});
+    };
+    fetchCount();
+    const timer = setInterval(fetchCount, 3_000);
+    return () => { cancelled = true; clearInterval(timer); };
+  }, [sessionId, slide.slide_id, showComments]);
+
+  const handleCommentChange = useCallback((count: number, hasMentions: boolean) => {
+    setCommentCount(count);
+    if (hasMentions) onMentionsRefresh?.();
+  }, [onMentionsRefresh]);
+
   useEffect(() => {
     setVerificationResult(slide.verification);
-    setIsStale(false);  // Reset stale when verification is loaded
+    setIsStale(false);
   }, [slide.verification]);
 
-  // Handle manual verification (user clicks verify button)
   const handleVerify = async () => {
     if (!sessionId || isVerifying) return;
     
@@ -100,7 +155,6 @@ export const SlideTile: React.FC<SlideTileProps> = ({
         timestamp: new Date().toISOString(),
       };
       
-      // Log trace_id for easy access
       console.log(`[Verification] Slide ${index + 1} verified:`, {
         score: verification.score,
         rating: verification.rating,
@@ -110,9 +164,6 @@ export const SlideTile: React.FC<SlideTileProps> = ({
       
       setVerificationResult(verification);
       setIsStale(false);
-      
-      // Note: Backend now saves verification automatically by content hash
-      // This call updates local state for the parent component
       await onVerificationUpdate(verification);
     } catch (error) {
       console.error('Verification failed:', error);
@@ -126,7 +177,6 @@ export const SlideTile: React.FC<SlideTileProps> = ({
         error_message: error instanceof Error ? error.message : 'Unknown error',
       };
       setVerificationResult(errorResult);
-      // Don't persist error results
     } finally {
       setIsManualVerifying(false);
     }
@@ -141,27 +191,21 @@ export const SlideTile: React.FC<SlideTileProps> = ({
     isDragging,
   } = useSortable({ id: slide.slide_id });
 
-  // Calculate scale based on container width
   useEffect(() => {
     const updateScale = () => {
       if (containerRef.current) {
         const containerWidth = containerRef.current.offsetWidth;
-        // Scale to fit width, but cap at MAX_SCALE (1.5x)
         const calculatedScale = Math.min(containerWidth / SLIDE_WIDTH, MAX_SCALE);
         setScale(calculatedScale);
       }
     };
 
-    // Initial calculation
     updateScale();
 
-    // Update on window resize
     window.addEventListener('resize', updateScale);
     return () => window.removeEventListener('resize', updateScale);
   }, []);
 
-  // Build complete HTML for iframe using slide-specific scripts
-  // Each slide is rendered in its own iframe, so no IIFE wrapping needed
   const slideHTML = useMemo(() => {
     const slideScripts = slide.scripts || '';
     const slideId = slide.slide_id.replace(/'/g, "\\'");
@@ -195,7 +239,6 @@ export const SlideTile: React.FC<SlideTileProps> = ({
     `.trim();
   }, [slide.html, slide.scripts, slide.slide_id, slideDeck.css, slideDeck.external_scripts]);
 
-  // Listen for height from iframe (postMessage) so card can adapt and avoid inner scrollbar
   useEffect(() => {
     const onMessage = (e: MessageEvent) => {
       const d = e.data;
@@ -206,12 +249,10 @@ export const SlideTile: React.FC<SlideTileProps> = ({
     return () => window.removeEventListener('message', onMessage);
   }, [slide.slide_id]);
 
-  // Reset content height when slide content changes so we re-measure on next load
   useEffect(() => {
     setContentHeight(SLIDE_HEIGHT);
   }, [slide.html]);
 
-  // Calculate scaled dimensions; use measured content height so card fits content (no inner scrollbar)
   const displayHeight = Math.max(SLIDE_HEIGHT, contentHeight);
   const scaledHeight = displayHeight * scale;
 
@@ -226,6 +267,10 @@ export const SlideTile: React.FC<SlideTileProps> = ({
     isSelected ? 'ring-2 ring-blue-500' : ''
   }`;
 
+  const unreadCount = mentions.filter(m => m.created_at > mentionsLastSeen).length;
+  const hasUnread = unreadCount > 0;
+  const hasMentions = mentions.length > 0;
+
   return (
     <>
       <div
@@ -236,7 +281,6 @@ export const SlideTile: React.FC<SlideTileProps> = ({
         {/* Slide Header with Actions */}
       <div className="flex items-center gap-2 border-b border-border bg-card px-3 py-2" data-testid="slide-tile-header">
           <div className="flex items-center gap-2 flex-1">
-            {/* Drag Handle */}
             {!readOnly && (
               <Tooltip text="Drag to reorder">
                 <button
@@ -256,7 +300,6 @@ export const SlideTile: React.FC<SlideTileProps> = ({
 
           {/* Action Buttons */}
           <div className="flex items-center gap-1">
-            {/* Verification Badge/Button */}
             <VerificationBadge
               slideIndex={index}
               sessionId={sessionId}
@@ -266,7 +309,6 @@ export const SlideTile: React.FC<SlideTileProps> = ({
               isStale={isStale}
             />
 
-            {/* Genie Source Data Link */}
             <Tooltip text="View source data">
               <Button
                 variant="ghost"
@@ -279,17 +321,104 @@ export const SlideTile: React.FC<SlideTileProps> = ({
               </Button>
             </Tooltip>
 
-            <Tooltip text={isSelected ? 'Selected for editing' : 'Add to chat context'}>
+            {/* Mentions notification bell */}
+            <div className="relative" ref={mentionsRef}>
+              <Tooltip text={hasUnread ? `${unreadCount} new mention${unreadCount > 1 ? 's' : ''}` : 'Mentions'}>
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  onClick={() => {
+                    if (hasMentions) {
+                      setShowMentions(v => {
+                        if (!v && hasUnread) onMarkMentionsSeen?.();
+                        return !v;
+                      });
+                    }
+                  }}
+                  className={`h-7 w-7 relative ${
+                    showMentions ? 'text-red-700 bg-red-50'
+                    : hasUnread ? 'text-red-500 hover:bg-red-50'
+                    : hasMentions ? 'text-muted-foreground hover:bg-muted'
+                    : 'text-muted-foreground/40 cursor-default'
+                  }`}
+                >
+                  <Bell className={`size-3.5 ${hasUnread ? 'animate-[bell-ring_1s_ease-in-out_infinite]' : ''}`} />
+                  {hasUnread && (
+                    <span className="absolute -top-1 -right-1 bg-red-500 text-white text-[10px] leading-none font-bold rounded-full min-w-[16px] h-4 flex items-center justify-center px-0.5">
+                      {unreadCount}
+                    </span>
+                  )}
+                </Button>
+              </Tooltip>
+              {showMentions && hasMentions && (
+                <div className="absolute right-0 top-full mt-1 w-72 bg-white rounded-lg shadow-xl border border-gray-200 z-50 overflow-hidden">
+                  <div className="px-3 py-2 border-b border-gray-100 bg-gray-50">
+                    <span className="text-xs font-semibold text-gray-600">Mentions</span>
+                  </div>
+                  <div className="max-h-56 overflow-y-auto">
+                    {mentions.map(m => {
+                      const isNew = m.created_at > mentionsLastSeen;
+                      return (
+                        <button
+                          key={m.id}
+                          onClick={() => {
+                            setScrollToCommentId(m.id);
+                            setShowMentions(false);
+                            setShowComments(true);
+                          }}
+                          className={`w-full text-left px-3 py-2.5 border-b border-gray-50 last:border-0 transition-colors ${
+                            isNew ? 'bg-blue-50 hover:bg-blue-100' : 'bg-white hover:bg-gray-50'
+                          }`}
+                        >
+                          <p className={`text-xs ${isNew ? 'text-gray-800' : 'text-gray-500'}`}>
+                            <span className={isNew ? 'font-semibold' : 'font-medium'}>{m.user_name}</span>
+                            {' mentioned you'}
+                            {isNew && <span className="ml-1.5 inline-block w-2 h-2 rounded-full bg-blue-500" />}
+                          </p>
+                          <p className={`text-[11px] mt-0.5 line-clamp-1 ${isNew ? 'text-gray-600' : 'text-gray-400'}`}>{m.content}</p>
+                          <p className="text-[10px] text-gray-400 mt-0.5">{formatRelativeTime(m.created_at)}</p>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {/* Comments toggle */}
+            <Tooltip text={showComments ? 'Hide comments' : 'Comments'}>
               <Button
-                variant={isSelected ? "secondary" : "ghost"}
+                variant="ghost"
                 size="icon"
-                onClick={() => setSelection([index], [slide])}
-                className="h-7 w-7"
-                aria-pressed={isSelected}
+                onClick={() => setShowComments((v) => !v)}
+                className={`h-7 w-7 relative ${
+                  showComments
+                    ? 'text-orange-700 bg-orange-50'
+                    : 'text-orange-600 hover:bg-orange-50'
+                }`}
               >
-                <MessageSquare className="size-3.5" />
+                <MessageCircle className="size-3.5" />
+                {commentCount != null && commentCount > 0 && (
+                  <span className="absolute -top-1 -right-1 bg-orange-500 text-white text-[10px] leading-none font-bold rounded-full min-w-[16px] h-4 flex items-center justify-center px-0.5">
+                    {commentCount}
+                  </span>
+                )}
               </Button>
             </Tooltip>
+
+            {!readOnly && (
+              <Tooltip text={isSelected ? 'Selected for editing' : 'Add to chat context'}>
+                <Button
+                  variant={isSelected ? "secondary" : "ghost"}
+                  size="icon"
+                  onClick={() => setSelection([index], [slide])}
+                  className="h-7 w-7"
+                  aria-pressed={isSelected}
+                >
+                  <MessageSquare className="size-3.5" />
+                </Button>
+              </Tooltip>
+            )}
 
             {!readOnly && onOptimize && (
               <Tooltip text={isOptimizing ? 'Optimizing layout...' : 'Optimize layout'}>
@@ -339,7 +468,7 @@ export const SlideTile: React.FC<SlideTileProps> = ({
           </div>
       </div>
 
-      {/* Slide Preview - height adapts to content to avoid inner scrollbar */}
+      {/* Slide Preview */}
       <div
         ref={containerRef}
         className="relative bg-muted/20 overflow-hidden"
@@ -359,6 +488,46 @@ export const SlideTile: React.FC<SlideTileProps> = ({
           }}
         />
       </div>
+
+      {/* Slide Metadata Footer */}
+      <div className="px-3 py-1.5 bg-gray-50 border-t text-xs text-gray-500 flex flex-wrap items-center gap-x-3 gap-y-0.5">
+        <span className="inline-flex items-center gap-1 whitespace-nowrap">
+          <User className="size-2.5 text-gray-400" />
+          <span className="text-gray-400">Created by</span>
+          <span className="text-gray-700 font-medium">{slide.created_by || '—'}</span>
+        </span>
+        <span className="inline-flex items-center gap-1 whitespace-nowrap">
+          <Clock className="size-2.5 text-gray-400" />
+          <span className="text-gray-400">Created</span>
+          <span className="text-gray-700" title={slide.created_at ? new Date(slide.created_at).toLocaleString() : ''}>
+            {slide.created_at ? formatRelativeTime(slide.created_at) : '—'}
+          </span>
+        </span>
+        <span className="text-gray-300">|</span>
+        <span className="inline-flex items-center gap-1 whitespace-nowrap">
+          <User className="size-2.5 text-gray-400" />
+          <span className="text-gray-400">Last modified by</span>
+          <span className="text-gray-700 font-medium">{slide.modified_by || '—'}</span>
+        </span>
+        <span className="inline-flex items-center gap-1 whitespace-nowrap">
+          <Clock className="size-2.5 text-gray-400" />
+          <span className="text-gray-400">Modified</span>
+          <span className="text-gray-700" title={slide.modified_at ? new Date(slide.modified_at).toLocaleString() : ''}>
+            {slide.modified_at ? formatRelativeTime(slide.modified_at) : '—'}
+          </span>
+        </span>
+      </div>
+
+      {/* Comments Panel */}
+      {showComments && (
+        <CommentThread
+          sessionId={sessionId}
+          slideId={slide.slide_id}
+          onCommentChange={handleCommentChange}
+          highlightCommentId={scrollToCommentId}
+          canManage={canManage}
+        />
+      )}
     </div>
 
       {/* HTML Editor Modal */}
@@ -370,11 +539,9 @@ export const SlideTile: React.FC<SlideTileProps> = ({
           onSave={async (newHtml) => {
             await onUpdate(newHtml);
             
-            // Clear verification when slide is edited
             if (verificationResult) {
               setVerificationResult(undefined);
               setIsStale(false);
-              // Persist the cleared verification
               await onVerificationUpdate(null);
             }
             setIsEditing(false);
