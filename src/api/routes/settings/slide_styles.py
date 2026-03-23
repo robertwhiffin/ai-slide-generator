@@ -397,12 +397,16 @@ def delete_slide_style(
                 detail="System styles cannot be deleted",
             )
 
-        # Protect default style from deletion/deactivation
+        # If deleting the default style, reassign default to the system style
         if style.is_default:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Cannot delete/deactivate the default style. Set another style as default first.",
-            )
+            system_style = db.query(SlideStyleLibrary).filter(
+                SlideStyleLibrary.is_system == True,  # noqa: E712
+                SlideStyleLibrary.is_active == True,  # noqa: E712
+            ).first()
+            if system_style:
+                style.is_default = False
+                system_style.is_default = True
+                logger.info(f"Reassigned default style to system style: {system_style.name}")
 
         if hard_delete:
             db.delete(style)
