@@ -2,7 +2,7 @@
  * Selectors and helpers for the new frontend UI (v0 refresh).
  * Use these in e2e tests so updates only need to happen in one place.
  */
-import type { Page } from '@playwright/test';
+import { type Page, expect } from '@playwright/test';
 
 // --- Sidebar / nav labels (new UI) ---
 export const NEW_DECK_BUTTON_LABEL = 'New Deck';
@@ -24,6 +24,8 @@ export async function goToGenerator(page: Page) {
   await page.getByRole('button', { name: NEW_DECK_BUTTON_LABEL }).click();
   await page.waitForURL(/\/sessions\/[^/]+\/edit/);
   await page.getByRole('textbox').waitFor({ state: 'visible', timeout: 10000 });
+  // Wait for permission + lock resolution so the input is enabled
+  await expect(page.getByRole('textbox')).toBeEnabled({ timeout: 15000 });
 }
 
 /**

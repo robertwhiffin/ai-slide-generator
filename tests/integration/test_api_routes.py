@@ -119,14 +119,24 @@ def mock_session_manager():
         with patch("src.api.routes.slides.get_session_manager") as mock_slides:
             with patch("src.api.routes.sessions.get_session_manager") as mock_sessions:
                 with patch("src.api.routes.verification.get_session_manager") as mock_verify:
-                    manager = MagicMock()
-                    manager.acquire_session_lock.return_value = True
-                    manager.release_session_lock.return_value = None
-                    mock_chat.return_value = manager
-                    mock_slides.return_value = manager
-                    mock_sessions.return_value = manager
-                    mock_verify.return_value = manager
-                    yield manager
+                    # Also mock get_current_user so permission checks pass
+                    with patch("src.api.routes.chat.get_current_user", return_value="test@local.dev"):
+                        with patch("src.api.routes.slides.get_current_user", return_value="test@local.dev"):
+                            with patch("src.api.routes.sessions.get_current_user", return_value="test@local.dev"):
+                                manager = MagicMock()
+                                manager.acquire_session_lock.return_value = True
+                                manager.release_session_lock.return_value = None
+                                # Return session info where user is the creator (bypasses permission check)
+                                manager.get_session.return_value = {
+                                    "session_id": "test-123",
+                                    "created_by": "test@local.dev",
+                                    "profile_id": None,
+                                }
+                                mock_chat.return_value = manager
+                                mock_slides.return_value = manager
+                                mock_sessions.return_value = manager
+                                mock_verify.return_value = manager
+                                yield manager
 
 
 # ============================================
@@ -348,7 +358,7 @@ class TestSlideEndpoints:
         response = client.get("/api/slides")
         assert response.status_code == 422
 
-    def test_get_slides_not_found(self, client, mock_chat_service):
+    def test_get_slides_not_found(self, client, mock_chat_service, mock_session_manager):
         """GET /api/slides returns 404 when no slides exist."""
         mock_chat_service.get_slides.return_value = None
 
@@ -356,7 +366,7 @@ class TestSlideEndpoints:
         assert response.status_code == 404
         assert "No slides available" in response.json()["detail"]
 
-    def test_get_slides_success(self, client, mock_chat_service):
+    def test_get_slides_success(self, client, mock_chat_service, mock_session_manager):
         """GET /api/slides returns slide deck."""
         mock_chat_service.get_slides.return_value = {
             "slides": [{"index": 0, "html": "<div>Slide 1</div>"}],
@@ -641,7 +651,9 @@ class TestSessionEndpoints:
         """GET /api/sessions/{id} returns session details."""
         mock_session_manager.get_session.return_value = {
             "session_id": "test-123",
-            "title": "Test Session"
+            "title": "Test Session",
+            "created_by": "test@local.dev",  # Required for permission check
+            "profile_id": None,
         }
         mock_session_manager.get_messages.return_value = []
         mock_session_manager.get_slide_deck.return_value = None

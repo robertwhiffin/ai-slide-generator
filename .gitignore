@@ -29,6 +29,9 @@ ENV/
 *.swo
 *~
 
+# Databricks AI Dev Kit
+.ai-dev-kit/
+
 # Testing
 .pytest_cache/
 .coverage

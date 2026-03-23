@@ -63,6 +63,17 @@ async function setupMocks(page: Page) {
   await page.route('**/api/setup/status', (route) => {
     route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ configured: true }) });
   });
+
+  // Permission / mention mocks required by the permissions system
+  await page.route('**/api/user/current', (route) => {
+    route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ username: 'test@test.com', display_name: 'Test User' }) });
+  });
+  await page.route('**/api/comments/mentions**', (route) => {
+    route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ mentions: [], count: 0 }) });
+  });
+  await page.route('**/api/comments/mentionable-users**', (route) => {
+    route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ users: [], is_global: false }) });
+  });
   await page.route(/\/api\/settings\/profiles$/, (route) => {
     route.fulfill({
       status: 200,
@@ -109,6 +120,24 @@ async function setupMocks(page: Page) {
     const url = request.url();
     const method = request.method();
 
+    if (url.includes('/sessions/shared')) {
+      route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ presentations: [], count: 0 }) });
+      return;
+    }
+
+    if (url.includes('/lock')) {
+      if (method === 'POST') {
+        route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ acquired: true, locked_by: null }) });
+      } else if (method === 'PUT') {
+        route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ renewed: true }) });
+      } else if (method === 'DELETE') {
+        route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ status: 'released' }) });
+      } else {
+        route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ locked: false, locked_by: null }) });
+      }
+      return;
+    }
+
     // Handle session creation/deletion
     if (method === 'POST' || method === 'DELETE') {
       route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ session_id: 'mock', title: 'New', user_id: null, created_at: '2026-01-01T00:00:00Z' }) });
@@ -140,6 +169,7 @@ async function setupMocks(page: Page) {
         body: JSON.stringify({
           session_id: 'test-session-id',
           messages: [],
+          my_permission: 'CAN_MANAGE',
         }),
       });
     }
@@ -220,6 +250,7 @@ async function goToGenerator(page: Page) {
 
 async function generateSlides(page: Page) {
   const chatInput = page.getByRole('textbox');
+  await expect(chatInput).toBeEnabled({ timeout: 15000 });
   await chatInput.fill('Create a presentation about cloud computing');
   await page.getByRole('button', { name: 'Send' }).click();
   // Wait for first slide title to appear
@@ -237,6 +268,24 @@ test.describe('ExportButtons', () => {
     await page.route('http://127.0.0.1:8000/api/sessions**', (route, request) => {
       const url = request.url();
       const method = request.method();
+
+      if (url.includes('/sessions/shared')) {
+        route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ presentations: [], count: 0 }) });
+        return;
+      }
+
+      if (url.includes('/lock')) {
+        if (method === 'POST') {
+          route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ acquired: true, locked_by: null }) });
+        } else if (method === 'PUT') {
+          route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ renewed: true }) });
+        } else if (method === 'DELETE') {
+          route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ status: 'released' }) });
+        } else {
+          route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ locked: false, locked_by: null }) });
+        }
+        return;
+      }
 
       // Handle session creation/deletion
       if (method === 'POST' || method === 'DELETE') {
@@ -257,13 +306,17 @@ test.describe('ExportButtons', () => {
           body: JSON.stringify({ slide_deck: null }),
         });
       } else {
-        route.fulfill({ status: 404 });
+        route.fulfill({
+          status: 200,
+          contentType: 'application/json',
+          body: JSON.stringify({ session_id: 'test-session-id', messages: [], my_permission: 'CAN_MANAGE' }),
+        });
       }
     });
     await goToGenerator(page);
 
     // Empty state - no slides
-    await expect(page.getByText('No slides yet')).toBeVisible();
+    await expect(page.getByText('No slides yet')).toBeVisible({ timeout: 10000 });
 
     // Export button should not be visible when there are no slides
     const exportButton = page.getByRole('button', { name: 'Export' });
@@ -558,6 +611,24 @@ test.describe('PresentButton', () => {
       const url = request.url();
       const method = request.method();
 
+      if (url.includes('/sessions/shared')) {
+        route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ presentations: [], count: 0 }) });
+        return;
+      }
+
+      if (url.includes('/lock')) {
+        if (method === 'POST') {
+          route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ acquired: true, locked_by: null }) });
+        } else if (method === 'PUT') {
+          route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ renewed: true }) });
+        } else if (method === 'DELETE') {
+          route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ status: 'released' }) });
+        } else {
+          route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ locked: false, locked_by: null }) });
+        }
+        return;
+      }
+
       // Handle session creation/deletion
       if (method === 'POST' || method === 'DELETE') {
         route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ session_id: 'mock', title: 'New', user_id: null, created_at: '2026-01-01T00:00:00Z' }) });
@@ -577,13 +648,17 @@ test.describe('PresentButton', () => {
           body: JSON.stringify({ slide_deck: null }),
         });
       } else {
-        route.fulfill({ status: 404 });
+        route.fulfill({
+          status: 200,
+          contentType: 'application/json',
+          body: JSON.stringify({ session_id: 'test-session-id', messages: [], my_permission: 'CAN_MANAGE' }),
+        });
       }
     });
     await goToGenerator(page);
 
     // Empty state
-    await expect(page.getByText('No slides yet')).toBeVisible();
+    await expect(page.getByText('No slides yet')).toBeVisible({ timeout: 10000 });
 
     // Present button should not be visible
     await expect(page.getByRole('button', { name: 'Present' })).not.toBeVisible();

@@ -141,8 +141,8 @@ async def auth_url(
     try:
         auth = _get_auth(db)
         redirect_uri = _build_redirect_uri(request)
-        state_data = {"user": _get_user_identity()}
-        url, _ = auth.get_auth_url(redirect_uri=redirect_uri, state_data=state_data)
+        state = json.dumps({"user": _get_user_identity()})
+        url = auth.get_auth_url(redirect_uri=redirect_uri, state=state)
 
         return AuthUrlResponse(url=url)
     except GoogleSlidesAuthError as exc:
@@ -180,29 +180,18 @@ async def auth_callback(
 
         auth = _get_auth(db)
         redirect_uri = _build_redirect_uri(request)
-        code_verifier = state_data.get("cv")
-        logger.info(
-            "OAuth callback: exchanging code for tokens",
-            extra={"redirect_uri": redirect_uri, "user": user, "has_cv": bool(code_verifier)},
-        )
-        auth.authorize(code=code, redirect_uri=redirect_uri, code_verifier=code_verifier)
+        auth.authorize(code=code, redirect_uri=redirect_uri)
         logger.info(
             "Google Slides OAuth callback successful",
             extra={"user": _get_user_identity()},
         )
-    except Exception as exc:
-        logger.error(
-            "OAuth callback failed: %s: %s",
-            type(exc).__name__,
-            exc,
-            exc_info=True,
-        )
-        safe_msg = f"{type(exc).__name__}: {exc}"
+    except (GoogleSlidesAuthError, ValueError, json.JSONDecodeError) as exc:
+        logger.error("OAuth callback failed", exc_info=True)
         return HTMLResponse(
             content=f"""
             <html><body>
                 <h2>Authorization Failed</h2>
-                <p>{safe_msg}</p>
+                <p>{exc}</p>
                 <script>
                     if (window.opener) {{
                         window.opener.postMessage({{ type: 'google-slides-auth', success: false }}, '*');

@@ -10,6 +10,7 @@ import { DeckPromptList } from '../config/DeckPromptList';
 import { SlideStyleList } from '../config/SlideStyleList';
 import { SessionHistory } from '../History/SessionHistory';
 import { SaveAsDialog } from '../History/SaveAsDialog';
+import { NotificationsPanel } from '../Notifications/NotificationsPanel';
 import { ImageLibrary } from '../ImageLibrary/ImageLibrary';
 import { HelpPage } from '../Help';
 import { UpdateBanner } from '../UpdateBanner';
@@ -29,7 +30,7 @@ import { AppSidebar } from './app-sidebar';
 import { PageHeader } from './page-header';
 import { SimplePageHeader } from './simple-page-header';
 
-type ViewMode = 'main' | 'profiles' | 'deck_prompts' | 'slide_styles' | 'images' | 'history' | 'help';
+type ViewMode = 'main' | 'profiles' | 'deck_prompts' | 'slide_styles' | 'images' | 'history' | 'notifications' | 'help';
 
 interface AppLayoutProps {
   initialView?: ViewMode;
@@ -44,9 +45,7 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
   const [viewMode, setViewMode] = useState<ViewMode>(initialView);
   const [showSaveDialog, setShowSaveDialog] = useState(false);
   const [lastSavedTime, setLastSavedTime] = useState<Date | null>(null);
-  // Key to trigger session list refresh in sidebar and history
   const [sessionsRefreshKey, setSessionsRefreshKey] = useState<number>(0);
-  // Track which slide to scroll to in the main panel (uses key to allow re-scroll to same index)
   const [scrollTarget, setScrollTarget] = useState<{ index: number; key: number } | null>(null);
   const [exportStatus, setExportStatus] = useState<string | null>(null);
   // Save Points / versioning
@@ -59,16 +58,13 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
   const [revertTargetVersion, setRevertTargetVersion] = useState<number | null>(null);
   const chatPanelRef = useRef<ChatPanelHandle>(null);
   const slidePanelRef = useRef<SlidePanelHandle>(null);
-  /** Ref-tracked slideDeck so the URL restoration effect doesn't re-fire on setSlideDeck(null) during new-session creation. */
   const slideDeckRef = useRef(slideDeck);
   slideDeckRef.current = slideDeck;
   const { sessionTitle, sessionId, createNewSession, switchSession, renameSession } = useSession();
   const { isGenerating } = useGeneration();
   const { currentProfile, loadProfile } = useProfiles();
-  /** Ref-tracked sessionId so the URL effect guard doesn't need sessionId as a dep (which would cause it to re-fire when switchSession internally calls setSessionId). */
   const sessionIdRef = useRef(sessionId);
   sessionIdRef.current = sessionId;
-  /** Refs for profile-related values so the URL effect can access them without adding them as deps. */
   const currentProfileRef = useRef(currentProfile);
   currentProfileRef.current = currentProfile;
   const loadProfileRef = useRef(loadProfile);
@@ -77,34 +73,166 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
   const { showToast } = useToast();
   const { showSurvey, closeSurvey, onGenerationComplete, onGenerationStart } = useSurveyTrigger();
 
+  // Permission level for the current session (null until loaded from server)
+  const [sessionPermission, setSessionPermission] = useState<'CAN_VIEW' | 'CAN_EDIT' | 'CAN_MANAGE' | null>(null);
+
+  // Non-null when viewing a session whose profile has been deleted
+  const [deletedProfileName, setDeletedProfileName] = useState<string | null>(null);
+
+  // Editing lock state (default false until acquire succeeds)
+  const [editingLockHolder, setEditingLockHolder] = useState<string | null>(null);
+  const [isLockHolder, setIsLockHolder] = useState(false);
+  const lockSessionRef = useRef<string | null>(null);
+  const currentUserEmailRef = useRef<string | null>(null);
+  const lastActivityRef = useRef<number>(Date.now());
+  const IDLE_TIMEOUT_MS = 5 * 60 * 1000;
+
+  // Fetch current user email once for lock comparison
+  useEffect(() => {
+    fetch('/api/user/current').then(r => r.json()).then(data => {
+      currentUserEmailRef.current = data.username || null;
+    }).catch(() => {});
+  }, []);
+
+  // Track user activity (mouse, keyboard, scroll) to detect idle
+  useEffect(() => {
+    const markActive = () => { lastActivityRef.current = Date.now(); };
+    window.addEventListener('mousemove', markActive);
+    window.addEventListener('keydown', markActive);
+    window.addEventListener('scroll', markActive, true);
+    return () => {
+      window.removeEventListener('mousemove', markActive);
+      window.removeEventListener('keydown', markActive);
+      window.removeEventListener('scroll', markActive, true);
+    };
+  }, []);
+
+  // Main lock lifecycle: acquire on open, heartbeat, idle release, poll status
+  useEffect(() => {
+    if (!sessionId || initialView !== 'main' || sessionPermission === null) return;
+    const isViewer = sessionPermission === 'CAN_VIEW';
+    let cancelled = false;
+
+    const isSelf = (status: { locked_by_email?: string | null }) =>
+      lockSessionRef.current === sessionId ||
+      (currentUserEmailRef.current != null && status.locked_by_email === currentUserEmailRef.current);
+
+    const applyStatus = (status: { locked: boolean; locked_by: string | null; locked_by_email?: string | null }) => {
+      if (!status.locked) {
+        if (lockSessionRef.current === sessionId) lockSessionRef.current = null;
+        setIsLockHolder(!isViewer);
+        setEditingLockHolder(null);
+      } else if (isSelf(status)) {
+        lockSessionRef.current = sessionId;
+        setIsLockHolder(true);
+        setEditingLockHolder(null);
+      } else {
+        setIsLockHolder(false);
+        setEditingLockHolder(isViewer ? null : status.locked_by);
+      }
+    };
+
+    const tryAcquire = async () => {
+      if (isViewer) return;
+      try {
+        const result = await api.acquireEditingLock(sessionId);
+        if (!cancelled) {
+          if (result.acquired) {
+            lockSessionRef.current = sessionId;
+            setIsLockHolder(true);
+            setEditingLockHolder(null);
+          } else {
+            setIsLockHolder(false);
+            setEditingLockHolder(result.locked_by);
+          }
+        }
+      } catch { /* ignore */ }
+    };
+
+    tryAcquire();
+
+    const pollTimer = setInterval(async () => {
+      if (cancelled) return;
+
+      if (!isViewer && lockSessionRef.current === sessionId) {
+        const idleMs = Date.now() - lastActivityRef.current;
+        if (idleMs >= IDLE_TIMEOUT_MS) {
+          try { await api.releaseEditingLock(sessionId); } catch { /* ignore */ }
+          lockSessionRef.current = null;
+          setIsLockHolder(true);
+          setEditingLockHolder(null);
+          return;
+        }
+        try { await api.heartbeatEditingLock(sessionId); } catch { /* ignore */ }
+      }
+
+      try {
+        const [status, slideResult] = await Promise.all([
+          api.getEditingLockStatus(sessionId),
+          api.getSlides(sessionId),
+        ]);
+        if (cancelled) return;
+
+        if (slideResult.slide_deck && !isSelf(status)) {
+          setSlideDeck(slideResult.slide_deck as SlideDeck);
+        }
+
+        applyStatus(status);
+
+        if (!isViewer && !status.locked && lockSessionRef.current !== sessionId) {
+          const idleMs = Date.now() - lastActivityRef.current;
+          if (idleMs < IDLE_TIMEOUT_MS) {
+            await tryAcquire();
+          }
+        }
+      } catch { /* ignore */ }
+    }, 10_000);
+
+    return () => {
+      cancelled = true;
+      clearInterval(pollTimer);
+      if (lockSessionRef.current === sessionId) {
+        api.releaseEditingLock(sessionId);
+        lockSessionRef.current = null;
+      }
+    };
+  }, [sessionId, initialView, sessionPermission]);
+
+  // Release lock on page unload (tab close, refresh)
+  useEffect(() => {
+    const handleUnload = () => {
+      if (lockSessionRef.current) {
+        api.releaseEditingLock(lockSessionRef.current);
+        lockSessionRef.current = null;
+      }
+    };
+    window.addEventListener('beforeunload', handleUnload);
+    return () => window.removeEventListener('beforeunload', handleUnload);
+  }, []);
+
   // Sync viewMode when initialView changes (e.g. route change)
   useEffect(() => {
     setViewMode(initialView);
   }, [initialView]);
 
-  // When URL has sessionId, restore that session (load deck if we don't have it yet).
-  // sessionId is intentionally NOT in deps — we use sessionIdRef.current in the guard instead.
-  // This prevents the effect from re-firing when switchSession internally calls setSessionId,
-  // which would cancel the in-flight load and trigger another one, causing chat to reload 3×.
-  // currentProfile/loadProfile are also excluded — accessed via refs so they don't cause re-runs.
+  // When URL has sessionId, restore that session
   useEffect(() => {
     if (!urlSessionId) return;
-    // Skip if the URL already matches the current session AND we have a deck loaded.
-    // This prevents a spurious getSession call for newly-created sessions (deck=null)
-    // that would otherwise return 404 in tests (or redundantly call switchSession in prod).
-    // Note: if deck is null (new session), we DO fire so switchSession can run and restore
-    // api.setCurrentSessionId(newId) after api.createSession may have overwritten it.
     if (urlSessionId === sessionIdRef.current && slideDeckRef.current != null) return;
     let cancelled = false;
     (async () => {
       try {
-        // Fetch session info first so we can check the profile before loading the deck.
-        // Pass it to switchSession as existingSessionInfo to avoid a second getSession call.
         const sessionInfo = await api.getSession(urlSessionId);
         if (cancelled) return;
 
-        // Auto-switch profile if the session was created with a different profile
-        if (sessionInfo.profile_id && currentProfileRef.current && sessionInfo.profile_id !== currentProfileRef.current.id) {
+        // Store permission level from session info
+        setSessionPermission(sessionInfo.my_permission || 'CAN_MANAGE');
+
+        if (sessionInfo.profile_deleted) {
+          setDeletedProfileName(
+            sessionInfo.profile_name || `Profile ${sessionInfo.profile_id}`,
+          );
+        } else if (sessionInfo.profile_id && currentProfileRef.current && sessionInfo.profile_id !== currentProfileRef.current.id) {
           try {
             await loadProfileRef.current(sessionInfo.profile_id);
           } catch {
@@ -165,27 +293,23 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
     setPreviewDescription('');
   }, [sessionId]);
 
-  // Handle navigation from ribbon to main slide panel
   const handleSlideNavigate = useCallback((index: number) => {
     setScrollTarget(prev => ({ index, key: (prev?.key ?? 0) + 1 }));
   }, []);
 
-  // Send a message through the chat panel (used by SlidePanel for optimize layout)
   const handleSendMessage = useCallback((content: string, slideContext?: { indices: number[]; slide_htmls: string[] }) => {
     chatPanelRef.current?.sendMessage(content, slideContext);
   }, []);
 
-  // Reset chat state and create new session when profile changes
   const handleProfileChange = useCallback(() => {
     setSlideDeck(null);
     setRawHtml(null);
     setLastSavedTime(null);
-    // Create new session for the new profile (ChatPanel cancels in-flight poll when sessionId changes)
+    setDeletedProfileName(null);
+    setSessionPermission('CAN_MANAGE');
     createNewSession();
   }, [createNewSession]);
 
-  // Handle selecting a session from sidebar or history — just navigate.
-  // The URL effect is the single source of truth for session loading.
   const handleSessionRestore = useCallback(
     (restoredSessionId: string) => {
       navigate(`/sessions/${restoredSessionId}/edit`);
@@ -198,11 +322,9 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
     try {
       await renameSession(newTitle);
       setLastSavedTime(new Date());
-      // Update slide deck title if it exists
       if (slideDeck) {
         setSlideDeck({ ...slideDeck, title: newTitle });
       }
-      // Trigger session list refresh in sidebar and history
       setSessionsRefreshKey(prev => prev + 1);
     } catch (err) {
       console.error('Failed to update title:', err);
@@ -210,23 +332,27 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
     }
   }, [renameSession, slideDeck]);
 
-  // Start a new session and persist + navigate to edit URL
   const handleNewSession = useCallback(async () => {
     setSlideDeck(null);
     setRawHtml(null);
     setLastSavedTime(null);
+    setDeletedProfileName(null);
+    setSessionPermission('CAN_MANAGE');
     const newId = createNewSession();
     setViewMode('main');
     try {
-      await api.createSession({ sessionId: newId });
+      await api.createSession({
+        sessionId: newId,
+        profileId: currentProfile?.id,
+        profileName: currentProfile?.name,
+      });
       setSessionsRefreshKey(prev => prev + 1);
       navigate(`/sessions/${newId}/edit`);
     } catch (err) {
       console.error('Failed to create session:', err);
     }
-  }, [createNewSession, navigate]);
+  }, [createNewSession, navigate, currentProfile]);
 
-  // Save As: rename session with custom title
   const handleSaveAs = useCallback(async (title: string) => {
     try {
       await renameSession(title);
@@ -239,7 +365,6 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
     }
   }, [renameSession]);
 
-  // Share: copy view-only link to clipboard
   const handleShare = useCallback(() => {
     if (!sessionId) return;
     const viewUrl = `${window.location.origin}/sessions/${sessionId}/view`;
@@ -263,23 +388,21 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
     }
   }, [sessionId, showToast]);
 
-  // Save Points: open revert modal (from PreviewBanner)
   const handleRevertClick = useCallback(() => {
     if (previewVersion == null) return;
     setRevertTargetVersion(previewVersion);
     setShowRevertModal(true);
   }, [previewVersion]);
 
-  // Save Points: cancel preview
   const handlePreviewCancel = useCallback(() => {
     setPreviewVersion(null);
     setPreviewDeck(null);
     setPreviewDescription('');
   }, []);
 
-  // Save Points: confirm revert
   const handleRevertConfirm = useCallback(async () => {
-    if (!sessionId || revertTargetVersion == null) return;
+    if (!sessionId || revertTargetVersion == null || !isLockHolder) return;
+
     try {
       const result = await api.restoreVersion(sessionId, revertTargetVersion);
       setSlideDeck(result.deck);
@@ -295,7 +418,7 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
       console.error('Failed to revert:', err);
       showToast('Failed to revert to version', 'error');
     }
-  }, [sessionId, revertTargetVersion, loadVersions]);
+  }, [sessionId, revertTargetVersion, isLockHolder, loadVersions, showToast]);
 
   const handleVerificationComplete = useCallback(async () => {
     if (!sessionId) return;
@@ -309,13 +432,13 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
     }
   }, [sessionId]);
 
-  // Version key and read-only for preview/view mode
   const versionKey = previewVersion != null
     ? `preview-v${previewVersion}`
     : 'current';
-  const isReadOnly = !!previewVersion || viewOnly;
 
-  // Format time ago string
+  const effectiveReadOnly = !!previewVersion || viewOnly || !!deletedProfileName || sessionPermission === 'CAN_VIEW' || !isLockHolder;
+  const isReadOnly = effectiveReadOnly;
+
   const getTimeAgo = (date: Date) => {
     const seconds = Math.floor((new Date().getTime() - date.getTime()) / 1000);
     if (seconds < 60) return 'Just now';
@@ -327,26 +450,21 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
     return `${days}d ago`;
   };
 
-  // Generate subtitle for page header with status
   const getSubtitle = () => {
     if (!slideDeck) return undefined;
     const parts = [`${slideDeck.slide_count} slide${slideDeck.slide_count !== 1 ? 's' : ''}`];
 
-    // Add last saved time
     if (lastSavedTime) {
       parts.push(`Saved ${getTimeAgo(lastSavedTime)}`);
     }
 
-    // Add status indicators (export status shown next to Export button in header)
     if (isGenerating) parts.push('Generating...');
 
     return parts.join(' • ');
   };
 
-  // Deck to show: preview snapshot or live (use preview only when we have the deck)
   const displayDeck = previewVersion != null && previewDeck ? previewDeck : slideDeck;
 
-  // Handle export and present via SlidePanel ref
   const handleExportPPTX = useCallback(() => {
     slidePanelRef.current?.exportPPTX();
   }, []);
@@ -389,10 +507,19 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
       else if (view === 'slide_styles') navigate('/slide-styles');
       else if (view === 'images') navigate('/images');
       else if (view === 'history') navigate('/history');
-      // 'main' is handled by New Deck button -> handleNewSession
+      else if (view === 'notifications') navigate('/notifications');
     },
     [navigate]
   );
+
+  const viewOnlyReason =
+    !isLockHolder && editingLockHolder
+      ? `${editingLockHolder} is currently editing this session`
+      : sessionPermission === 'CAN_VIEW'
+      ? 'You have view-only access to this session'
+      : deletedProfileName
+      ? `Profile "${deletedProfileName}" was deleted — session is read-only`
+      : undefined;
 
   return (
     <SidebarProvider className="h-svh max-h-svh">
@@ -430,7 +557,7 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
                       previewVersion={previewVersion}
                       onPreview={handlePreviewVersion}
                       onRevert={handleRevertClick}
-                      disabled={isGenerating}
+                      disabled={isGenerating || !isLockHolder}
                       minimal
                     />
                   ) : undefined
@@ -448,9 +575,21 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
                 <PreviewBanner
                   versionNumber={previewVersion}
                   description={previewDescription}
-                  onRevert={handleRevertClick}
+                  onRevert={isLockHolder ? handleRevertClick : () => {}}
                   onCancel={handlePreviewCancel}
                 />
+              )}
+
+              {deletedProfileName && (
+                <div className="bg-amber-50 border-b border-amber-200 px-4 py-2 text-sm text-amber-800 flex items-center gap-2">
+                  <svg className="w-4 h-4 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20">
+                    <path fillRule="evenodd" d="M8.485 2.495c.673-1.167 2.357-1.167 3.03 0l6.28 10.875c.673 1.167-.17 2.625-1.516 2.625H3.72c-1.347 0-2.189-1.458-1.515-2.625L8.485 2.495zM10 6a.75.75 0 01.75.75v3.5a.75.75 0 01-1.5 0v-3.5A.75.75 0 0110 6zm0 9a1 1 0 100-2 1 1 0 000 2z" clipRule="evenodd" />
+                  </svg>
+                  <span>
+                    This session was created with profile &ldquo;{deletedProfileName}&rdquo; which has been deleted.
+                    The session is read-only and cannot continue.
+                  </span>
+                </div>
               )}
 
               {updateAvailable && !dismissed && latestVersion && updateType && (
@@ -485,6 +624,7 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
                         }
                       }
                     }}
+                    viewOnlyReason={viewOnlyReason}
                   />
                 </div>
 
@@ -499,12 +639,14 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
                     ref={slidePanelRef}
                     slideDeck={displayDeck}
                     rawHtml={rawHtml}
-                    onSlideChange={setSlideDeck}
+                    onSlideChange={isReadOnly ? undefined : setSlideDeck}
                     scrollToSlide={scrollTarget}
-                    onSendMessage={handleSendMessage}
+                    onSendMessage={isReadOnly ? undefined : handleSendMessage}
                     onExportStatusChange={setExportStatus}
                     versionKey={versionKey}
                     readOnly={isReadOnly}
+                    canManage={sessionPermission === 'CAN_MANAGE'}
+                    lockedBy={!isLockHolder ? editingLockHolder : null}
                     onVerificationComplete={handleVerificationComplete}
                   />
                 </div>
@@ -516,7 +658,7 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
         {viewMode === 'history' && (
           <div className="flex h-full flex-col">
             <div className="shrink-0">
-              <SimplePageHeader title="All Decks" />
+              <SimplePageHeader title="Sessions" />
             </div>
             <div className="flex-1 overflow-y-auto">
               <div className="mx-auto w-full max-w-4xl px-4 py-8">
@@ -538,6 +680,19 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
             <div className="flex-1 overflow-y-auto">
               <div className="mx-auto w-full max-w-4xl px-4 py-8">
                 <ProfileList onProfileChange={handleProfileChange} />
+              </div>
+            </div>
+          </div>
+        )}
+
+        {viewMode === 'notifications' && (
+          <div className="flex h-full flex-col">
+            <div className="shrink-0">
+              <SimplePageHeader title="Notifications" />
+            </div>
+            <div className="flex-1 overflow-y-auto">
+              <div className="mx-auto w-full max-w-4xl px-4 py-8">
+                <NotificationsPanel />
               </div>
             </div>
           </div>

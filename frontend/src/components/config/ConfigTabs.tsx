@@ -16,8 +16,9 @@ import { GenieForm } from './GenieForm';
 import { DeckPromptSelector } from './DeckPromptSelector';
 import { SlideStyleSelector } from './SlideStyleSelector';
 import { AdvancedSettingsEditor } from './AdvancedSettingsEditor';
+import { ContributorsManager } from './ContributorsManager';
 
-type TabId = 'ai_infra' | 'genie' | 'deck_prompt' | 'slide_style' | 'advanced';
+type TabId = 'ai_infra' | 'genie' | 'deck_prompt' | 'slide_style' | 'sharing' | 'advanced';
 
 interface Tab {
   id: TabId;
@@ -36,15 +37,19 @@ const allTabs: Tab[] = [
   { id: 'deck_prompt', label: 'Deck Prompt', icon: '📋' },
   { id: 'slide_style', label: 'Slide Style', icon: '🎨' },
   { id: 'ai_infra', label: 'AI Infrastructure', icon: '🤖' },
+  { id: 'sharing', label: 'Sharing', icon: '👥' },
   { id: 'advanced', label: 'Advanced', icon: '⚙️', debugOnly: true },
 ];
 
 interface ConfigTabsProps {
   profileId: number;
   profileName: string;
+  globalPermission?: import('../../api/config').PermissionLevel | null;
+  canManage?: boolean;
+  onGlobalPermissionChange?: (permission: import('../../api/config').PermissionLevel | null) => void;
 }
 
-export const ConfigTabs: React.FC<ConfigTabsProps> = ({ profileId, profileName }) => {
+export const ConfigTabs: React.FC<ConfigTabsProps> = ({ profileId, profileName, globalPermission, canManage, onGlobalPermissionChange }) => {
   const [activeTab, setActiveTab] = useState<TabId>('genie');
   
   const {
@@ -142,6 +147,15 @@ export const ConfigTabs: React.FC<ConfigTabsProps> = ({ profileId, profileName }
             currentPrompts={config.prompts}
             onSave={reload}
             saving={saving}
+          />
+        )}
+
+        {activeTab === 'sharing' && (
+          <ContributorsManager
+            profileId={profileId}
+            globalPermission={globalPermission}
+            canManage={canManage}
+            onGlobalPermissionChange={onGlobalPermissionChange}
           />
         )}
 

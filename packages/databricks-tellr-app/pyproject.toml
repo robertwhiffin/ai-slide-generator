@@ -14,7 +14,7 @@ dependencies = [
     "python-multipart==0.0.20",
     "pydantic==2.12.4",
     "pydantic-settings==2.12.0",
-    "databricks-sdk==0.96.0",
+    "databricks-sdk==0.91.0",
     "databricks-langchain==0.9.0",
     "langchain==1.0.5",
     "langchain-core==1.0.4",

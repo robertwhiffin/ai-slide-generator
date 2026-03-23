@@ -10,20 +10,24 @@ export const mockProfiles = [
     name: "Sales Analytics",
     description: "Analytics profile for sales data insights",
     is_default: true,
+    is_my_default: true,
     created_at: "2026-01-08T20:10:29.720015",
-    created_by: "system",
+    created_by: "dev@local.dev",
     updated_at: "2026-01-08T20:10:29.720025",
-    updated_by: null
+    updated_by: null,
+    my_permission: "CAN_MANAGE"
   },
   {
     id: 2,
     name: "Marketing Reports",
     description: "Marketing campaign performance reports",
     is_default: false,
+    is_my_default: false,
     created_at: "2026-01-08T20:10:29.724407",
-    created_by: "system",
+    created_by: "dev@local.dev",
     updated_at: "2026-01-08T20:10:29.724411",
-    updated_by: null
+    updated_by: null,
+    my_permission: "CAN_MANAGE"
   }
 ];
 
@@ -128,7 +132,8 @@ export const mockSessions = {
       message_count: 4,
       has_slide_deck: true,
       profile_id: 1,
-      profile_name: "Sales Analytics"
+      profile_name: "Sales Analytics",
+      my_permission: "CAN_MANAGE"
     },
     {
       session_id: "a2c5f1d9-8ef7-48dc-be69-0ead7be316dd",
@@ -140,7 +145,8 @@ export const mockSessions = {
       message_count: 4,
       has_slide_deck: true,
       profile_id: 2,
-      profile_name: "Marketing Reports"
+      profile_name: "Marketing Reports",
+      my_permission: "CAN_MANAGE"
     }
   ],
   count: 2
@@ -213,9 +219,10 @@ export const mockProfileCreateResponse = {
   description: "A test profile created via wizard",
   is_default: false,
   created_at: "2026-01-30T10:00:00.000000",
-  created_by: "test",
+  created_by: "dev@local.dev",
   updated_at: "2026-01-30T10:00:00.000000",
-  updated_by: null
+  updated_by: null,
+  my_permission: "CAN_MANAGE"
 };
 
 // Profile update response

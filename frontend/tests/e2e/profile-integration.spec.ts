@@ -94,24 +94,26 @@ function testProfileName(operation: string): string {
 }
 
 /**
- * Create a profile via API for faster test setup
+ * Create a profile via API for faster test setup.
+ * Uses the with-config endpoint so that the profile has full configuration
+ * and can be loaded via /load (which triggers reload_agent).
  */
 async function createTestProfileViaAPI(
   request: APIRequestContext,
   name: string,
   description?: string
 ): Promise<Profile> {
-  // First, get available slide styles (required for profile creation)
   const stylesResponse = await request.get(`${API_BASE}/slide-styles`);
   const styles = await stylesResponse.json();
   const styleId = styles.styles?.[0]?.id || 1;
 
-  // Create profile with minimal required data
-  const response = await request.post(`${API_BASE}/profiles`, {
+  const response = await request.post(`${API_BASE}/profiles/with-config`, {
     data: {
       name,
       description: description || 'E2E test profile',
-      slide_style_id: styleId,
+      prompts: {
+        selected_slide_style_id: styleId,
+      },
     },
   });
 
@@ -189,12 +191,12 @@ async function goToMainView(page: Page, request: APIRequestContext): Promise<voi
   const session = await createRes.json();
   await page.goto(`/sessions/${session.session_id}/edit`);
   await page.waitForLoadState('networkidle');
-  await page.locator('header').getByRole('button', { name: 'Profile' }).waitFor({ state: 'visible', timeout: 15000 });
+  await page.locator('header button[aria-label="Profile"]').waitFor({ state: 'visible', timeout: 15000 });
 }
 
 async function goToHistory(page: Page): Promise<void> {
   await page.goto('/history');
-  await expect(page.getByRole('heading', { name: 'All Decks' })).toBeVisible({ timeout: 10000 });
+  await expect(page.getByRole('heading', { name: 'Sessions', exact: true })).toBeVisible({ timeout: 10000 });
 }
 
 function profileCard(page: Page, name: string) {
@@ -233,6 +235,11 @@ async function skipWizardStep4(page: Page): Promise<void> {
   await page.getByRole('button', { name: /Next/i }).click();
 }
 
+async function skipWizardStep5(page: Page): Promise<void> {
+  // Step 5: Share (contributors) - skip by clicking Next
+  await page.getByRole('button', { name: /Next/i }).click();
+}
+
 async function submitWizard(page: Page): Promise<void> {
   // Step 5: Review - click Create Profile (exact match to avoid matching "+ Create Profile" button)
   await page.getByRole('button', { name: 'Create Profile', exact: true }).click();
@@ -257,6 +264,7 @@ test.describe('Profile CRUD Operations', () => {
     await skipWizardStep2(page);
     await completeWizardStep3(page);
     await skipWizardStep4(page);
+    await skipWizardStep5(page);
     await submitWizard(page);
 
     // Wait for wizard to close
@@ -477,6 +485,7 @@ test.describe('Profile Validation', () => {
       await skipWizardStep2(page);
       await completeWizardStep3(page);
       await skipWizardStep4(page);
+    await skipWizardStep5(page);
       await submitWizard(page);
 
       // Should show error - use more specific selector to avoid matching "Duplicate" buttons
@@ -566,7 +575,7 @@ test.describe('Profile Switching', () => {
     try {
       await goToMainView(page, request);
 
-      const profileButton = page.locator('header').getByRole('button', { name: 'Profile' });
+      const profileButton = page.locator('header button[aria-label="Profile"]');
       const initialText = await profileButton.textContent();
 
       await profileButton.click();
@@ -600,7 +609,7 @@ test.describe('Profile Switching', () => {
         await confirmButton.click();
       }
 
-      await expect(card.getByText('Loaded', { exact: true })).toBeVisible();
+      await expect(card.getByText('Loaded', { exact: true })).toBeVisible({ timeout: 15000 });
     } finally {
       await deleteTestProfileViaAPI(request, profile.id);
     }
@@ -646,7 +655,7 @@ test.describe('Profile Switching', () => {
     try {
       await goToMainView(page, request);
 
-      const headerProfileButton = page.locator('header').getByRole('button', { name: 'Profile' });
+      const headerProfileButton = page.locator('header button[aria-label="Profile"]');
       await headerProfileButton.click();
       await expect(page.getByText(profileName1).first()).toBeVisible({ timeout: 8000 });
       await page.getByText(profileName1).first().click();
@@ -756,7 +765,7 @@ test.describe('Session-Profile Association', () => {
       await page.waitForTimeout(2000);
 
       await page.goto('/history');
-      await expect(page.getByRole('heading', { name: 'All Decks' })).toBeVisible({ timeout: 10000 });
+      await expect(page.getByRole('heading', { name: 'Sessions', exact: true })).toBeVisible({ timeout: 10000 });
 
       await page.waitForLoadState('networkidle');
       await page.waitForTimeout(1500);
@@ -871,6 +880,7 @@ test.describe('Profile Edge Cases', () => {
     await skipWizardStep2(page);
     await completeWizardStep3(page);
     await skipWizardStep4(page);
+    await skipWizardStep5(page);
     await submitWizard(page);
 
     // Wait for wizard to close
@@ -901,6 +911,7 @@ test.describe('Profile Edge Cases', () => {
     await skipWizardStep2(page);
     await completeWizardStep3(page);
     await skipWizardStep4(page);
+    await skipWizardStep5(page);
     await submitWizard(page);
 
     // Wait for wizard to close

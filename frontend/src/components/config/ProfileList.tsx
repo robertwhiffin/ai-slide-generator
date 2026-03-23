@@ -13,7 +13,7 @@ import React, { useState, useEffect } from 'react';
 import { User, ChevronDown, Trash2, Plus, Copy, Play, Star } from 'lucide-react';
 import { Button } from '@/ui/button';
 import { Badge } from '@/ui/badge';
-import type { Profile, ProfileCreate, ProfileUpdate } from '../../api/config';
+import type { Profile } from '../../api/config';
 import { useProfiles } from '../../hooks/useProfiles';
 import { ProfileForm } from './ProfileForm';
 import { ProfileCreationWizard } from './ProfileCreationWizard';
@@ -103,7 +103,7 @@ export const ProfileList: React.FC<ProfileListProps> = ({ onProfileChange }) => 
   };
 
   // Handle form submit (edit mode only - create uses wizard)
-  const handleFormSubmit = async (_data: ProfileCreate | ProfileUpdate) => {
+  const handleFormSubmit = async () => {
     // This is only used for editing, which is now handled in ProfileDetailView
     setFormMode(null);
     setEditingProfile(null);
@@ -137,8 +137,8 @@ export const ProfileList: React.FC<ProfileListProps> = ({ onProfileChange }) => 
   const handleSetDefault = (profile: Profile) => {
     setConfirmDialog({
       isOpen: true,
-      title: 'Set Default Profile',
-      message: `Set "${profile.name}" as the default profile?\n\nThe default profile is loaded when the application starts.`,
+      title: 'Set My Default Profile',
+      message: `Set "${profile.name}" as your default profile?\n\nThis profile will load when you open the application. Other users are not affected.`,
       error: null,
       loading: false,
       onConfirm: async () => {
@@ -267,7 +267,7 @@ export const ProfileList: React.FC<ProfileListProps> = ({ onProfileChange }) => 
         <div className="rounded-lg border border-primary/30 bg-primary/5 px-4 py-3">
           <span className="text-sm text-primary">
             <strong>Currently Loaded:</strong> {currentProfile.name}
-            {currentProfile.is_default && ' (Default)'}
+            {currentProfile.is_my_default && ' (My Default)'}
           </span>
         </div>
       )}
@@ -303,7 +303,7 @@ export const ProfileList: React.FC<ProfileListProps> = ({ onProfileChange }) => 
                         <h3 className="text-sm font-medium text-foreground">
                           {profile.name}
                         </h3>
-                        {profile.is_default && (
+                        {profile.is_my_default && (
                           <Badge variant="secondary" className="text-xs">
                             Default
                           </Badge>
@@ -334,7 +334,7 @@ export const ProfileList: React.FC<ProfileListProps> = ({ onProfileChange }) => 
                           }`}
                         />
                       </Button>
-                      {profiles.length > 1 && (
+                      {profiles.length > 1 && (!profile.my_permission || profile.my_permission === 'CAN_MANAGE') && (
                         <Button
                           variant="ghost"
                           size="sm"
@@ -428,7 +428,7 @@ export const ProfileList: React.FC<ProfileListProps> = ({ onProfileChange }) => 
                             </Button>
                           )}
 
-                          {!profile.is_default && (
+                          {!profile.is_my_default && (
                             <Button
                               variant="outline"
                               size="sm"

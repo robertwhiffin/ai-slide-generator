@@ -166,11 +166,18 @@ def mock_chat_service():
 def mock_session_manager():
     """Mock the session manager."""
     with patch("src.api.routes.chat.get_session_manager") as mock_get:
-        manager = MagicMock()
-        # Default: lock is acquired successfully
-        manager.acquire_session_lock.return_value = True
-        mock_get.return_value = manager
-        yield manager
+        with patch("src.api.routes.chat.get_current_user", return_value="test@local.dev"):
+            manager = MagicMock()
+            # Default: lock is acquired successfully
+            manager.acquire_session_lock.return_value = True
+            # Return session info where user is the creator (bypasses permission check)
+            manager.get_session.return_value = {
+                "session_id": "test-session-123",
+                "created_by": "test@local.dev",
+                "profile_id": None,
+            }
+            mock_get.return_value = manager
+            yield manager
 
 
 @pytest.fixture

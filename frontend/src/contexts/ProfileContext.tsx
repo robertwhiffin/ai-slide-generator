@@ -63,12 +63,15 @@ export const ProfileProvider: React.FC<React.PropsWithChildren> = ({ children })
   }, [loadedProfileId]);
 
   /**
-   * Load all profiles and determine the current profile
+   * Load all profiles and determine the current profile.
+   * When silent=true, skips setting loading/error state (used by background polling).
    */
-  const loadProfiles = useCallback(async () => {
+  const loadProfiles = useCallback(async (silent = false) => {
     try {
-      setLoading(true);
-      setError(null);
+      if (!silent) {
+        setLoading(true);
+        setError(null);
+      }
 
       const data = await configApi.listProfiles();
       setProfiles(data);
@@ -82,32 +85,36 @@ export const ProfileProvider: React.FC<React.PropsWithChildren> = ({ children })
         if (loadedProfile) {
           setCurrentProfile(loadedProfile);
         } else {
-          // Loaded profile no longer exists, fall back to default
-          const defaultProfile = data.find(p => p.is_default);
+          // Loaded profile no longer exists, fall back to user's default
+          const defaultProfile = data.find(p => p.is_my_default) || data.find(p => p.is_default);
           setCurrentProfile(defaultProfile || null);
           setLoadedProfileId(null);
         }
       } else {
-        // No loaded profile, use default
-        const defaultProfile = data.find(p => p.is_default);
+        // No loaded profile, use user's personal default (then system default)
+        const defaultProfile = data.find(p => p.is_my_default) || data.find(p => p.is_default);
         setCurrentProfile(defaultProfile || null);
       }
     } catch (err) {
-      const message = err instanceof ConfigApiError
-        ? err.message
-        : 'Failed to load profiles';
-      setError(message);
+      if (!silent) {
+        const message = err instanceof ConfigApiError
+          ? err.message
+          : 'Failed to load profiles';
+        setError(message);
+      }
       console.error('Error loading profiles:', err);
     } finally {
-      setLoading(false);
+      if (!silent) setLoading(false);
     }
   }, []);
 
   /**
-   * Load profiles on mount
+   * Load profiles on mount and poll for updates every 15 seconds
    */
   useEffect(() => {
     loadProfiles();
+    const timer = setInterval(() => loadProfiles(true), 15_000);
+    return () => clearInterval(timer);
   }, [loadProfiles]);
 
   /**

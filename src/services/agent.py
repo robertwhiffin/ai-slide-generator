@@ -30,7 +30,7 @@ from src.core.databricks_client import (
     get_system_client,
     get_user_client,
 )
-from src.core.settings_db import fetch_prompt_content, get_settings
+from src.core.settings_db import get_settings
 from src.domain.slide import Slide
 from src.services.image_tools import SearchImagesInput, search_images
 from src.services.tools import initialize_genie_conversation, query_genie_space
@@ -98,6 +98,9 @@ class SlideGeneratorAgent:
 
         # Set up MLflow tracking (experiment created per-session)
         self._setup_mlflow_tracking()
+
+        # Create LangChain prompt (model created per-request for user context)
+        self.prompt = self._create_prompt()
 
         # Session storage for multi-turn conversations
         # Structure: {session_id: {chat_history, genie_conversation_id, experiment_id, experiment_url, username, metadata}}
@@ -406,26 +409,22 @@ class SlideGeneratorAgent:
         logger.info("Tools created for session", extra={"session_id": session_id})
         return [genie_tool, image_search_tool]
 
-    def _create_prompt(self, prompts: dict[str, str]) -> ChatPromptTemplate:
-        """Create prompt template from prompt content and chat history.
-
-        Called per-request so that edits to slide styles, deck prompts, or
-        system prompts in the database take effect immediately.
-
-        Args:
-            prompts: Dict with keys deck_prompt, slide_style, system_prompt,
-                     slide_editing_instructions, image_guidelines.
-
+    def _create_prompt(self) -> ChatPromptTemplate:
+        """Create prompt template with system prompt from settings and chat history.
+        
         Prompt structure (when all components present):
         1. Deck prompt (from library) - defines presentation type/content (WHAT to create)
         2. Slide style (from library) - defines visual appearance (HOW it should look)
         3. System prompt - defines technical generation rules (HOW to generate valid HTML/charts)
         4. Slide editing instructions - defines editing behavior
+        
+        The system prompt is tool-agnostic - the LLM discovers available tools
+        through the tool binding mechanism, not the prompt.
         """
-        deck_prompt = prompts.get("deck_prompt", "")
-        slide_style = prompts.get("slide_style", "")
-        system_prompt = prompts.get("system_prompt", "")
-        editing_prompt = prompts.get("slide_editing_instructions", "")
+        deck_prompt = self.settings.prompts.get("deck_prompt", "")
+        slide_style = self.settings.prompts.get("slide_style", "")
+        system_prompt = self.settings.prompts.get("system_prompt", "")
+        editing_prompt = self.settings.prompts.get("slide_editing_instructions", "")
 
         if not system_prompt:
             raise AgentError("System prompt not found in configuration")
@@ -450,7 +449,8 @@ class SlideGeneratorAgent:
         if editing_prompt:
             prompt_parts.append(editing_prompt.strip())
 
-        image_guidelines = prompts.get("image_guidelines", "")
+        # Image tool instructions (conditional on image_guidelines)
+        image_guidelines = self.settings.prompts.get("image_guidelines", "")
 
         image_section = (
             "IMAGE SUPPORT:\n"
@@ -508,23 +508,26 @@ class SlideGeneratorAgent:
 
     def _create_agent_executor(self, tools: list[StructuredTool]) -> AgentExecutor:
         """
-        Create agent executor with model, tools, and fresh prompt content.
-
-        Fetches the latest prompt content from the database so that edits to
-        slide styles, deck prompts, or system prompts take effect immediately.
+        Create agent executor with model, tools, and prompt.
 
         Args:
             tools: List of tools to bind to this executor
 
         Returns:
             Configured AgentExecutor
+
+        IMPORTANT: Set return_intermediate_steps=True to capture all
+        messages for chat interface display.
+
+        Note: Chat history is managed per-session and passed via agent_input.
+        Model is created per-request to use user-scoped credentials.
         """
         try:
+            # Create model per-request for user context (Genie/LLM permissions)
             model = self._create_model()
 
-            prompts = fetch_prompt_content()
-            prompt = self._create_prompt(prompts)
-            agent = create_tool_calling_agent(model, tools, prompt)
+            # Create agent with session-specific tools
+            agent = create_tool_calling_agent(model, tools, self.prompt)
 
             # Create executor with intermediate steps enabled
             agent_executor = AgentExecutor(
@@ -1553,22 +1556,20 @@ class SlideGeneratorAgent:
         """
         Create agent executor with callback handlers for streaming.
 
-        Fetches the latest prompt content from the database so that edits to
-        slide styles, deck prompts, or system prompts take effect immediately.
-
         Args:
             tools: List of tools to bind to this executor
             callbacks: List of callback handlers for event streaming
 
         Returns:
             Configured AgentExecutor with callbacks
+
+        Note: Model is created per-request to use user-scoped credentials.
         """
         try:
+            # Create model per-request for user context (Genie/LLM permissions)
             model = self._create_model()
 
-            prompts = fetch_prompt_content()
-            prompt = self._create_prompt(prompts)
-            agent = create_tool_calling_agent(model, tools, prompt)
+            agent = create_tool_calling_agent(model, tools, self.prompt)
 
             agent_executor = AgentExecutor(
                 agent=agent,
