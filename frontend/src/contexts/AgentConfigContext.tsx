@@ -89,19 +89,19 @@ export const AgentConfigProvider: React.FC<{ children: React.ReactNode }> = ({ c
   useEffect(() => {
     if (!isPreSession) return;
     if (defaultProfileLoaded.current) return;
-    if (readStoredConfig() !== null) {
-      defaultProfileLoaded.current = true;
-      return;
-    }
-
     defaultProfileLoaded.current = true;
 
+    const storedConfig = readStoredConfig();
+
+    // If we have a stored config with a style already set, use it as-is
+    if (storedConfig?.slide_style_id != null) return;
+
+    // Otherwise, load profile config and apply default style
     api.listProfiles()
       .then(async (profiles: ProfileSummary[]) => {
         const defaultProfile = profiles.find(p => p.is_default);
-        const config = defaultProfile?.agent_config
-          ? { ...defaultProfile.agent_config }
-          : { ...DEFAULT_AGENT_CONFIG };
+        const config = storedConfig
+          ?? (defaultProfile?.agent_config ? { ...defaultProfile.agent_config } : { ...DEFAULT_AGENT_CONFIG });
 
         // User default overrides profile's style
         const userStyleId = localStorage.getItem('userDefaultSlideStyleId');
