@@ -26,6 +26,11 @@ export const SlideStyleList: React.FC = () => {
   const [actionLoading, setActionLoading] = useState<number | null>(null);
   const [expandedStyleId, setExpandedStyleId] = useState<number | null>(null);
   
+  const [userDefaultStyleId, setUserDefaultStyleId] = useState<number | null>(() => {
+    const stored = localStorage.getItem('userDefaultSlideStyleId');
+    return stored ? Number(stored) : null;
+  });
+
   const [confirmDialog, setConfirmDialog] = useState<{
     isOpen: boolean;
     title: string;
@@ -55,6 +60,17 @@ export const SlideStyleList: React.FC = () => {
   useEffect(() => {
     loadStyles();
   }, [loadStyles]);
+
+  // Clear stale user default if the style no longer exists in the active list
+  useEffect(() => {
+    if (userDefaultStyleId && styles.length > 0) {
+      const exists = styles.some(s => s.id === userDefaultStyleId && s.is_active);
+      if (!exists) {
+        localStorage.removeItem('userDefaultSlideStyleId');
+        setUserDefaultStyleId(null);
+      }
+    }
+  }, [styles, userDefaultStyleId]);
 
   // Handle create
   const handleCreate = () => {
@@ -195,6 +211,11 @@ export const SlideStyleList: React.FC = () => {
                             Default
                           </Badge>
                         )}
+                        {style.id === userDefaultStyleId && (
+                          <Badge className="text-xs bg-green-500/10 text-green-700 hover:bg-green-500/20">
+                            My Default
+                          </Badge>
+                        )}
                         {!style.is_active && (
                           <Badge variant="outline" className="text-xs">
                             Inactive
@@ -234,6 +255,20 @@ export const SlideStyleList: React.FC = () => {
                           aria-label="Set as default"
                         >
                           Set as default
+                        </Button>
+                      )}
+                      {style.id !== userDefaultStyleId && style.is_active && (
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          className="h-8 px-2 text-xs text-muted-foreground"
+                          onClick={() => {
+                            localStorage.setItem('userDefaultSlideStyleId', String(style.id));
+                            setUserDefaultStyleId(style.id);
+                          }}
+                          aria-label="Set as my default"
+                        >
+                          My default
                         </Button>
                       )}
                       <Button
