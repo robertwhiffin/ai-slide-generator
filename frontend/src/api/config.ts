@@ -135,6 +135,7 @@ export interface SlideStyle {
   image_guidelines: string | null;
   is_active: boolean;
   is_system: boolean;  // Protected system styles cannot be edited/deleted
+  is_default: boolean;
   created_by: string | null;
   created_at: string;
   updated_by: string | null;
@@ -366,7 +367,18 @@ export const configApi = {
     fetchJson(`${API_BASE}/slide-styles/${styleId}`, {
       method: 'DELETE',
     }),
-  
+
+  async setDefaultSlideStyle(styleId: number): Promise<SlideStyle> {
+    const response = await fetch(`${API_BASE_URL}/api/settings/slide-styles/${styleId}/set-default`, {
+      method: 'POST',
+    })
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({}))
+      throw new Error(error.detail || 'Failed to set default slide style')
+    }
+    return response.json()
+  },
+
   // Google OAuth Credentials (global, admin-only)
 
   /**
