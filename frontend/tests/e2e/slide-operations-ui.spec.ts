@@ -108,10 +108,39 @@ async function setupWithSlides(page: Page) {
     });
   });
 
+  // Permission / mention mocks required by the permissions system
+  await page.route('**/api/user/current', (route) => {
+    route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ username: 'test@test.com', display_name: 'Test User' }) });
+  });
+  await page.route('**/api/comments/mentions**', (route) => {
+    route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ mentions: [], count: 0 }) });
+  });
+  await page.route('**/api/comments/mentionable-users**', (route) => {
+    route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ users: [], is_global: false }) });
+  });
+
   // Mock sessions endpoints
   await page.route('http://127.0.0.1:8000/api/sessions**', (route, request) => {
     const url = request.url();
     const method = request.method();
+
+    if (url.includes('/sessions/shared')) {
+      route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ presentations: [], count: 0 }) });
+      return;
+    }
+
+    if (url.includes('/lock')) {
+      if (method === 'POST') {
+        route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ acquired: true, locked_by: null }) });
+      } else if (method === 'PUT') {
+        route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ renewed: true }) });
+      } else if (method === 'DELETE') {
+        route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ status: 'released' }) });
+      } else {
+        route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ locked: false, locked_by: null }) });
+      }
+      return;
+    }
 
     // Handle session creation/deletion
     if (method === 'POST' || method === 'DELETE') {
@@ -144,6 +173,7 @@ async function setupWithSlides(page: Page) {
         body: JSON.stringify({
           session_id: 'test-session-id',
           messages: [],
+          my_permission: 'CAN_MANAGE',
         }),
       });
     }
