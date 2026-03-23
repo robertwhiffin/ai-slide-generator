@@ -81,7 +81,6 @@ export function AppSidebar({
   onSessionSelect,
   onNewSession,
   currentSessionId,
-  profileName,
   sessionsRefreshKey,
   ...props
 }: AppSidebarProps) {

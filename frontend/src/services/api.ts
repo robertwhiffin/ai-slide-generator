@@ -1352,8 +1352,9 @@ export const api = {
     return response.json();
   },
 
-  async listMentions(): Promise<{ mentions: SlideComment[]; count: number }> {
-    const response = await fetch(`${API_BASE_URL}/api/comments/mentions`);
+  async listMentions(sessionId?: string): Promise<{ mentions: SlideComment[]; count: number }> {
+    const params = sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : '';
+    const response = await fetch(`${API_BASE_URL}/api/comments/mentions${params}`);
     if (!response.ok) throw new ApiError(response.status, 'Failed to list mentions');
     return response.json();
   },

@@ -76,7 +76,8 @@ function SlidePanelComponent(props: SlidePanelProps, ref: React.Ref<SlidePanelHa
   });
 
   const fetchMentions = useCallback(() => {
-    api.listMentions().then(({ mentions }) => {
+    if (!sessionId) return;
+    api.listMentions(sessionId).then(({ mentions }) => {
       const bySlide: Record<string, Array<{ id: number; user_name: string; content: string; created_at: string }>> = {};
       for (const m of mentions) {
         if (!bySlide[m.slide_id]) bySlide[m.slide_id] = [];
@@ -84,7 +85,7 @@ function SlidePanelComponent(props: SlidePanelProps, ref: React.Ref<SlidePanelHa
       }
       setMentionsBySlide(bySlide);
     }).catch(() => {});
-  }, []);
+  }, [sessionId]);
 
   useEffect(() => {
     fetchMentions();

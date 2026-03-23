@@ -33,7 +33,7 @@ export interface MentionableUser {
 
 function renderContentWithMentions(content: string, users: MentionableUser[] = []): React.ReactNode {
   const emailToName = new Map(users.map(u => [u.username.toLowerCase(), u.display_name]));
-  const parts = content.split(/(@[\w.+\-]+@[\w.\-]+)/g);
+  const parts = content.split(/(@[\w.+-]+@[\w.-]+)/g);
   return parts.map((part, i) => {
     if (part.startsWith('@')) {
       const email = part.slice(1).toLowerCase();
@@ -83,7 +83,7 @@ const MentionInput: React.FC<MentionInputProps> = ({
     onChange(v);
     const pos = e.target.selectionStart ?? v.length;
     const before = v.slice(0, pos);
-    const atMatch = before.match(/@([\w.+\-]*(?:@[\w.\-]*)?)$/);
+    const atMatch = before.match(/@([\w.+-]*(?:@[\w.-]*)?)$/);
     if (atMatch) {
       setShowDropdown(true);
       setMentionQuery(atMatch[1]);
@@ -509,7 +509,7 @@ export const CommentThread: React.FC<CommentThreadProps> = ({ sessionId, slideId
   const handleAdd = async () => {
     if (!newContent.trim() || posting) return;
     const content = newContent.trim();
-    const mentionMatches = content.match(/@[\w.+\-]+@[\w.\-]+/g) || [];
+    const mentionMatches = content.match(/@[\w.+-]+@[\w.-]+/g) || [];
     const hasMentions = mentionMatches.length > 0;
 
     // Optimistic: insert placeholder immediately

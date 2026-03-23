@@ -79,8 +79,14 @@ async def mentionable_users(
 
 
 @router.get("/mentions")
-async def list_mentions():
-    """List comments that @mention the current user (for notifications)."""
+async def list_mentions(
+    session_id: Optional[str] = Query(None, description="Scope mentions to a specific session/deck"),
+):
+    """List comments that @mention the current user (for notifications).
+
+    When *session_id* is provided, only mentions belonging to that deck
+    (resolved to the deck-owner session) are returned.
+    """
     current_user = get_current_user()
     if not current_user:
         raise HTTPException(status_code=401, detail="Authentication required")
@@ -90,6 +96,7 @@ async def list_mentions():
         mentions = await asyncio.to_thread(
             session_manager.list_mentions,
             current_user,
+            session_id,
         )
         return {"mentions": mentions, "count": len(mentions)}
     except Exception as e:
