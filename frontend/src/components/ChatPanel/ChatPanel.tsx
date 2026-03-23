@@ -102,16 +102,19 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(({
       try {
         const session = await api.getSession(sessionId);
         if (session.messages && session.messages.length > 0) {
-          // Convert database messages to UI Message format
-          const uiMessages: Message[] = session.messages.map(msg => ({
-            role: msg.role as 'user' | 'assistant' | 'tool',
-            content: msg.content,
-            timestamp: msg.created_at,
-            tool_call: msg.metadata?.tool_name ? {
-              name: msg.metadata.tool_name,
-              arguments: msg.metadata.tool_input || {},
-            } : undefined,
-          }));
+          // Convert database messages to UI Message format, skipping
+          // AI/tool messages from cancelled generations
+          const uiMessages: Message[] = session.messages
+            .filter(msg => !msg.metadata?.cancelled)
+            .map(msg => ({
+              role: msg.role as 'user' | 'assistant' | 'tool',
+              content: msg.content,
+              timestamp: msg.created_at,
+              tool_call: msg.metadata?.tool_name ? {
+                name: msg.metadata.tool_name,
+                arguments: msg.metadata.tool_input || {},
+              } : undefined,
+            }));
           setMessages(uiMessages);
         } else {
           setMessages([]);
@@ -255,6 +258,23 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(({
           setIsGenerating(false);
           break;
 
+        case 'cancelled':
+          stopLoadingMessages();
+          setIsLoading(false);
+          setIsGenerating(false);
+          setMessages(prev => [
+            ...prev,
+            {
+              role: 'assistant',
+              content: 'Generation was cancelled.',
+              timestamp: new Date().toISOString(),
+            },
+          ]);
+          if (event.slides) {
+            onSlidesGenerated(event.slides, rawHtml);
+          }
+          break;
+
         case 'complete':
           stopLoadingMessages();
           setIsLoading(false);
@@ -290,7 +310,7 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(({
       }
     };
 
-    // Start streaming (automatically uses SSE or polling based on environment)
+    // Start chat (automatically uses SSE or polling based on environment)
     cancelStreamRef.current = api.sendChatMessage(
       sessionId,
       trimmedContent,
@@ -305,6 +325,29 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(({
       },
       imageIds,
     );
+  };
+
+  const handleCancel = () => {
+    if (!sessionId) return;
+    // Stop client-side SSE/polling immediately
+    if (cancelStreamRef.current) {
+      cancelStreamRef.current();
+      cancelStreamRef.current = null;
+    }
+    stopLoadingMessages();
+    setIsLoading(false);
+    setIsGenerating(false);
+    setMessages(prev => [
+      ...prev,
+      {
+        role: 'assistant',
+        content: 'Generation was cancelled.',
+        timestamp: new Date().toISOString(),
+      },
+    ]);
+    // Fire-and-forget: tell backend to stop the agent and release the lock.
+    // The API layer retries on 409 if the lock hasn't released yet.
+    api.cancelGeneration(sessionId).catch(() => {});
   };
 
   // Expose sendMessage method to parent components via ref
@@ -355,7 +398,9 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(({
         <ErrorDisplay error={error} onDismiss={() => setError(null)} />
       )}
 
-      {loadingMessage && <LoadingIndicator message={loadingMessage} />}
+      {loadingMessage && (
+        <LoadingIndicator message={loadingMessage} onCancel={handleCancel} />
+      )}
 
       <ChatInput
         onSend={handleSendMessage}

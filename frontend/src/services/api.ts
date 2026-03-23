@@ -58,7 +58,7 @@ const isPollingMode = (): boolean => {
 };
 
 // Streaming event types matching backend StreamEventType
-export type StreamEventType = 'assistant' | 'tool_call' | 'tool_result' | 'error' | 'complete' | 'session_title';
+export type StreamEventType = 'assistant' | 'tool_call' | 'tool_result' | 'error' | 'complete' | 'cancelled' | 'session_title';
 
 export interface StreamEvent {
   type: StreamEventType;
@@ -397,6 +397,15 @@ export const api = {
     return response.json();
   },
 
+  /**
+   * Cancel an in-progress generation for a session
+   */
+  async cancelGeneration(sessionId: string): Promise<void> {
+    await fetch(`${API_BASE_URL}/api/chat/${sessionId}/cancel`, {
+      method: 'POST',
+    });
+  },
+
   async healthCheck(): Promise<{ status: string }> {
     const response = await fetch(`${API_BASE_URL}/api/health`);
     if (!response.ok) {
@@ -701,6 +710,9 @@ export const api = {
 
           try {
             const response = await this.pollChat(request_id, lastMessageId);
+
+            // Drop in-flight response if cancelled while the fetch was in-flight
+            if (cancelled) return;
 
             // Process new events
             for (const event of response.events) {
