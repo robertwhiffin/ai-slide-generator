@@ -18,6 +18,7 @@ import React, {
 } from 'react';
 import { useLocation } from 'react-router-dom';
 import { api } from '../services/api';
+import { configApi } from '../api/config';
 import { useToast } from './ToastContext';
 import type { AgentConfig, ToolEntry, ProfileSummary } from '../types/agentConfig';
 import { DEFAULT_AGENT_CONFIG } from '../types/agentConfig';
@@ -96,17 +97,32 @@ export const AgentConfigProvider: React.FC<{ children: React.ReactNode }> = ({ c
     defaultProfileLoaded.current = true;
 
     api.listProfiles()
-      .then((profiles: ProfileSummary[]) => {
+      .then(async (profiles: ProfileSummary[]) => {
         const defaultProfile = profiles.find(p => p.is_default);
-        if (defaultProfile?.agent_config) {
-          const config = { ...defaultProfile.agent_config };
-          // User default style overrides profile's style
-          const userStyleId = localStorage.getItem('userDefaultSlideStyleId');
-          if (userStyleId) {
-            config.slide_style_id = Number(userStyleId);
-          }
-          setAgentConfig(config);
+        const config = defaultProfile?.agent_config
+          ? { ...defaultProfile.agent_config }
+          : { ...DEFAULT_AGENT_CONFIG };
+
+        // User default style overrides profile's style
+        const userStyleId = localStorage.getItem('userDefaultSlideStyleId');
+        if (userStyleId) {
+          config.slide_style_id = Number(userStyleId);
         }
+
+        // If still no style, fetch the system default from slide styles
+        if (config.slide_style_id == null) {
+          try {
+            const { styles } = await configApi.listSlideStyles();
+            const defaultStyle = styles.find(s => s.is_default) ?? styles.find(s => s.is_system);
+            if (defaultStyle) {
+              config.slide_style_id = defaultStyle.id;
+            }
+          } catch {
+            // Non-critical — backend will apply system default on session creation
+          }
+        }
+
+        setAgentConfig(config);
       })
       .catch(err => {
         console.error('Failed to load default profile for pre-session config:', err);
