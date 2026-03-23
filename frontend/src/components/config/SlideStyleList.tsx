@@ -26,10 +26,6 @@ export const SlideStyleList: React.FC = () => {
   const [actionLoading, setActionLoading] = useState<number | null>(null);
   const [expandedStyleId, setExpandedStyleId] = useState<number | null>(null);
   
-  const [userDefaultStyleId, setUserDefaultStyleId] = useState<number | null>(() => {
-    const stored = localStorage.getItem('userDefaultSlideStyleId');
-    return stored ? Number(stored) : null;
-  });
 
   const [confirmDialog, setConfirmDialog] = useState<{
     isOpen: boolean;
@@ -61,16 +57,6 @@ export const SlideStyleList: React.FC = () => {
     loadStyles();
   }, [loadStyles]);
 
-  // Clear stale user default if the style no longer exists in the active list
-  useEffect(() => {
-    if (userDefaultStyleId && styles.length > 0) {
-      const exists = styles.some(s => s.id === userDefaultStyleId && s.is_active);
-      if (!exists) {
-        localStorage.removeItem('userDefaultSlideStyleId');
-        setUserDefaultStyleId(null);
-      }
-    }
-  }, [styles, userDefaultStyleId]);
 
   // Handle create
   const handleCreate = () => {
@@ -196,7 +182,7 @@ export const SlideStyleList: React.FC = () => {
                         <h3 className="text-sm font-medium text-foreground">
                           {style.name}
                         </h3>
-                        {style.category && (
+                        {style.category && !(style.is_system && style.category === 'System') && (
                           <Badge variant="secondary" className="text-xs">
                             {style.category}
                           </Badge>
@@ -209,11 +195,6 @@ export const SlideStyleList: React.FC = () => {
                         {style.is_default && (
                           <Badge className="text-xs bg-amber-500/10 text-amber-700 hover:bg-amber-500/20">
                             Default
-                          </Badge>
-                        )}
-                        {style.id === userDefaultStyleId && (
-                          <Badge className="text-xs bg-green-500/10 text-green-700 hover:bg-green-500/20">
-                            My Default
                           </Badge>
                         )}
                         {!style.is_active && (
@@ -255,20 +236,6 @@ export const SlideStyleList: React.FC = () => {
                           aria-label="Set as default"
                         >
                           Set as default
-                        </Button>
-                      )}
-                      {style.id !== userDefaultStyleId && style.is_active && (
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          className="h-8 px-2 text-xs text-muted-foreground"
-                          onClick={() => {
-                            localStorage.setItem('userDefaultSlideStyleId', String(style.id));
-                            setUserDefaultStyleId(style.id);
-                          }}
-                          aria-label="Set as my default"
-                        >
-                          My default
                         </Button>
                       )}
                       <Button
