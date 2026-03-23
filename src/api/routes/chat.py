@@ -31,6 +31,23 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api", tags=["chat"])
 
 
+def _get_default_style_id() -> int | None:
+    """Return the ID of the default slide style (is_system=True, is_active=True), or None."""
+    from src.core.database import get_db_session
+    from src.database.models import SlideStyleLibrary
+
+    with get_db_session() as db:
+        style = (
+            db.query(SlideStyleLibrary.id)
+            .filter(
+                SlideStyleLibrary.is_system == True,  # noqa: E712
+                SlideStyleLibrary.is_active == True,  # noqa: E712
+            )
+            .first()
+        )
+        return style.id if style else None
+
+
 def _maybe_create_session(request: ChatRequest, session_manager) -> bool:
     """Create a session if request.session_id is missing, or sync agent_config if provided.
 
@@ -43,6 +60,14 @@ def _maybe_create_session(request: ChatRequest, session_manager) -> bool:
     if request.agent_config:
         config = AgentConfig.model_validate(request.agent_config)
         agent_config_data = config.model_dump()
+
+    # Auto-populate slide_style_id with the default system style when not set
+    if agent_config_data is None:
+        agent_config_data = AgentConfig().model_dump()
+    if agent_config_data.get("slide_style_id") is None:
+        default_id = _get_default_style_id()
+        if default_id is not None:
+            agent_config_data["slide_style_id"] = default_id
 
     if request.session_id:
         # Session ID provided — sync agent_config if available
