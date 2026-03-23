@@ -382,7 +382,7 @@ async function getSessionIdFromUrl(page: import('@playwright/test').Page): Promi
 async function sendMessage(page: import('@playwright/test').Page, message: string) {
   const input = page.getByRole('textbox');
   await input.fill(message);
-  await page.getByRole('button', { name: /Send message/i }).click();
+  await page.getByRole('button', { name: 'Send' }).click();
   // Wait for the streaming response to complete (slide appears)
   await page.waitForSelector('.slide-container', { timeout: 15000 });
 }
@@ -989,7 +989,7 @@ test.describe('Profile operations', () => {
     // Send a message to create the session
     const input = page.getByRole('textbox');
     await input.fill('Create test slides');
-    await page.getByRole('button', { name: /Send message/i }).click();
+    await page.getByRole('button', { name: 'Send' }).click();
     await page.waitForSelector('.slide-container', { timeout: 15000 });
 
     await page.waitForURL(/\/sessions\/[^/]+\/edit/, { timeout: 15000 });
