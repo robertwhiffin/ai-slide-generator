@@ -241,10 +241,21 @@ class TestChatStreamSessionCreation:
         assert "event: session_created" in body
 
     def test_chat_stream_with_existing_session_id_skips_creation(
-        self, client, mock_session_manager, mock_chat_service
+        self, client, mock_session_manager, mock_chat_service, test_db
     ):
         """POST /chat/stream with session_id should NOT create a new session."""
         from src.api.schemas.streaming import StreamEvent
+        from src.database.models import UserSession
+
+        # Insert a session so the DB lookup in _maybe_create_session finds it
+        session = UserSession(
+            session_id="existing-session",
+            user_id="test",
+            title="Existing",
+            created_by="test",
+        )
+        test_db.add(session)
+        test_db.commit()
 
         complete_event = StreamEvent(
             type=StreamEventType.COMPLETE,
@@ -252,10 +263,18 @@ class TestChatStreamSessionCreation:
         )
         mock_chat_service.send_message_streaming.return_value = iter([complete_event])
 
-        response = client.post(
-            "/api/chat/stream",
-            json={"session_id": "existing-session", "message": "Hello"},
-        )
+        # Mock get_db_session to use the test DB so the lookup finds our session
+        from contextlib import contextmanager
+
+        @contextmanager
+        def _mock_db_session():
+            yield test_db
+
+        with patch("src.core.database.get_db_session", _mock_db_session):
+            response = client.post(
+                "/api/chat/stream",
+                json={"session_id": "existing-session", "message": "Hello"},
+            )
 
         assert response.status_code == 200
         mock_session_manager.create_session.assert_not_called()

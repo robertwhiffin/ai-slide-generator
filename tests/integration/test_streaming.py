@@ -352,12 +352,14 @@ class TestEventSequence:
 
         events = collect_stream_events(client, standard_request_body)
 
-        assert len(events) == 5
-        assert events[0]["type"] == "assistant"
-        assert events[1]["type"] == "tool_call"
-        assert events[2]["type"] == "tool_result"
-        assert events[3]["type"] == "assistant"
-        assert events[4]["type"] == "complete"
+        # First event is session_created (session_id not in DB triggers auto-create)
+        assert events[0]["type"] == "session_created"
+        assert len(events) == 6
+        assert events[1]["type"] == "assistant"
+        assert events[2]["type"] == "tool_call"
+        assert events[3]["type"] == "tool_result"
+        assert events[4]["type"] == "assistant"
+        assert events[5]["type"] == "complete"
 
 
 class TestSlideEvents:
