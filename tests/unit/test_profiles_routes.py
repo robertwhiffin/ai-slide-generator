@@ -41,9 +41,29 @@ def _make_profile(
     return p
 
 
+def _mock_perm_service_allow_all():
+    """Return a mock PermissionService that allows all operations."""
+    svc = MagicMock()
+    svc.require_use_profile.return_value = None
+    svc.require_edit_profile.return_value = None
+    svc.require_manage_profile.return_value = None
+    svc.get_accessible_profile_ids.return_value = list(range(1, 100))
+    return svc
+
+
+def _mock_permission_context(user_name="creator@test.com"):
+    """Return a mock PermissionContext."""
+    ctx = MagicMock()
+    ctx.user_name = user_name
+    ctx.user_id = "uid-creator"
+    ctx.group_ids = []
+    return ctx
+
+
 class TestListProfiles:
     @patch("src.api.routes.profiles.get_db_session")
-    def test_list_profiles(self, mock_get_db, client):
+    @patch("src.api.routes.profiles.get_permission_service", return_value=_mock_perm_service_allow_all())
+    def test_list_profiles(self, mock_perm, mock_get_db, client):
         """GET /api/profiles returns non-deleted profiles."""
         p1 = _make_profile(id=1, name="Profile A", is_default=True)
         p2 = _make_profile(id=2, name="Profile B", is_default=False)
@@ -67,11 +87,13 @@ class TestListProfiles:
 class TestSaveFromSession:
     @patch("src.api.routes.profiles.get_db_session")
     @patch("src.api.routes.profiles.get_session_manager")
-    def test_save_from_session_creates_profile(self, mock_get_mgr, mock_get_db, client):
+    @patch("src.api.routes.profiles.get_permission_context", return_value=_mock_permission_context())
+    def test_save_from_session_creates_profile(self, mock_ctx, mock_get_mgr, mock_get_db, client):
         """POST /api/profiles/save-from-session/{session_id} creates a profile from session config."""
         mgr = MagicMock()
         mgr.get_session.return_value = {
             "session_id": "sess-1",
+            "created_by": "creator@test.com",
             "agent_config": {"tools": [{"type": "genie", "space_id": "g1", "space_name": "Sales"}]},
         }
         mock_get_mgr.return_value = mgr
@@ -102,11 +124,13 @@ class TestSaveFromSession:
 
     @patch("src.api.routes.profiles.get_db_session")
     @patch("src.api.routes.profiles.get_session_manager")
-    def test_save_from_session_defaults_when_no_config(self, mock_get_mgr, mock_get_db, client):
+    @patch("src.api.routes.profiles.get_permission_context", return_value=_mock_permission_context())
+    def test_save_from_session_defaults_when_no_config(self, mock_ctx, mock_get_mgr, mock_get_db, client):
         """When session has no agent_config, saves AgentConfig() defaults."""
         mgr = MagicMock()
         mgr.get_session.return_value = {
             "session_id": "sess-1",
+            "created_by": "creator@test.com",
             "agent_config": None,
         }
         mock_get_mgr.return_value = mgr
@@ -134,12 +158,14 @@ class TestSaveFromSession:
 
     @patch("src.api.routes.profiles.get_db_session")
     @patch("src.api.routes.profiles.get_session_manager")
-    def test_save_from_session_rejects_duplicate_config(self, mock_get_mgr, mock_get_db, client):
+    @patch("src.api.routes.profiles.get_permission_context", return_value=_mock_permission_context())
+    def test_save_from_session_rejects_duplicate_config(self, mock_ctx, mock_get_mgr, mock_get_db, client):
         """POST /api/profiles/save-from-session rejects when identical agent_config already exists."""
         config = {"tools": [{"type": "genie", "space_id": "g1", "space_name": "Sales"}]}
         mgr = MagicMock()
         mgr.get_session.return_value = {
             "session_id": "sess-1",
+            "created_by": "creator@test.com",
             "agent_config": config,
         }
         mock_get_mgr.return_value = mgr
@@ -161,12 +187,14 @@ class TestSaveFromSession:
 
     @patch("src.api.routes.profiles.get_db_session")
     @patch("src.api.routes.profiles.get_session_manager")
-    def test_save_from_session_allows_unique_config(self, mock_get_mgr, mock_get_db, client):
+    @patch("src.api.routes.profiles.get_permission_context", return_value=_mock_permission_context())
+    def test_save_from_session_allows_unique_config(self, mock_ctx, mock_get_mgr, mock_get_db, client):
         """POST /api/profiles/save-from-session succeeds when no matching config exists."""
         config = {"tools": [{"type": "genie", "space_id": "g1", "space_name": "Sales"}]}
         mgr = MagicMock()
         mgr.get_session.return_value = {
             "session_id": "sess-1",
+            "created_by": "creator@test.com",
             "agent_config": config,
         }
         mock_get_mgr.return_value = mgr
@@ -191,7 +219,8 @@ class TestSaveFromSession:
 
     @patch("src.api.routes.profiles.get_db_session")
     @patch("src.api.routes.profiles.get_session_manager")
-    def test_save_from_session_strips_conversation_id(self, mock_get_mgr, mock_get_db, client):
+    @patch("src.api.routes.profiles.get_permission_context", return_value=_mock_permission_context())
+    def test_save_from_session_strips_conversation_id(self, mock_ctx, mock_get_mgr, mock_get_db, client):
         """Saved profile should have conversation_id set to None."""
         config = {
             "tools": [
@@ -200,7 +229,7 @@ class TestSaveFromSession:
             ]
         }
         mgr = MagicMock()
-        mgr.get_session.return_value = {"session_id": "sess-1", "agent_config": config}
+        mgr.get_session.return_value = {"session_id": "sess-1", "created_by": "creator@test.com", "agent_config": config}
         mock_get_mgr.return_value = mgr
 
         mock_db = MagicMock()
@@ -226,7 +255,8 @@ class TestSaveFromSession:
 
     @patch("src.api.routes.profiles.get_db_session")
     @patch("src.api.routes.profiles.get_session_manager")
-    def test_save_rejects_duplicate_ignoring_conversation_id(self, mock_get_mgr, mock_get_db, client):
+    @patch("src.api.routes.profiles.get_permission_context", return_value=_mock_permission_context())
+    def test_save_rejects_duplicate_ignoring_conversation_id(self, mock_ctx, mock_get_mgr, mock_get_db, client):
         """Two configs identical except for conversation_id should be treated as duplicates."""
         session_config = {
             "tools": [{"type": "genie", "space_id": "g1", "space_name": "Sales", "conversation_id": "conv-new"}]
@@ -235,7 +265,7 @@ class TestSaveFromSession:
             "tools": [{"type": "genie", "space_id": "g1", "space_name": "Sales", "conversation_id": "conv-old"}]
         }
         mgr = MagicMock()
-        mgr.get_session.return_value = {"session_id": "sess-1", "agent_config": session_config}
+        mgr.get_session.return_value = {"session_id": "sess-1", "created_by": "creator@test.com", "agent_config": session_config}
         mock_get_mgr.return_value = mgr
 
         existing_profile = _make_profile(id=99, name="Existing", agent_config=existing_config)
@@ -256,7 +286,8 @@ class TestSaveFromSession:
 class TestLoadProfileIntoSession:
     @patch("src.api.routes.profiles.get_db_session")
     @patch("src.api.routes.profiles.get_session_manager")
-    def test_load_profile_into_session(self, mock_get_mgr, mock_get_db, client):
+    @patch("src.api.routes.profiles.get_permission_service", return_value=_mock_perm_service_allow_all())
+    def test_load_profile_into_session(self, mock_perm, mock_get_mgr, mock_get_db, client):
         """POST /api/sessions/{sid}/load-profile/{pid} copies profile config to session."""
         agent_cfg = {"tools": [{"type": "genie", "space_id": "g1", "space_name": "Sales"}]}
         profile = _make_profile(id=5, agent_config=agent_cfg)
@@ -296,7 +327,8 @@ class TestLoadProfileIntoSession:
 
 class TestUpdateProfile:
     @patch("src.api.routes.profiles.get_db_session")
-    def test_update_profile_name(self, mock_get_db, client):
+    @patch("src.api.routes.profiles.get_permission_service", return_value=_mock_perm_service_allow_all())
+    def test_update_profile_name(self, mock_perm, mock_get_db, client):
         """PUT /api/profiles/{id} updates profile name."""
         profile = _make_profile(id=3, name="Old Name")
 
@@ -312,7 +344,8 @@ class TestUpdateProfile:
         assert data["name"] == "New Name"
 
     @patch("src.api.routes.profiles.get_db_session")
-    def test_set_default_clears_others(self, mock_get_db, client):
+    @patch("src.api.routes.profiles.get_permission_service", return_value=_mock_perm_service_allow_all())
+    def test_set_default_clears_others(self, mock_perm, mock_get_db, client):
         """PUT /api/profiles/{id} with is_default=true clears other defaults."""
         profile = _make_profile(id=3, name="Profile C", is_default=False)
 
@@ -335,7 +368,8 @@ class TestUpdateProfile:
 
 class TestDeleteProfile:
     @patch("src.api.routes.profiles.get_db_session")
-    def test_delete_profile(self, mock_get_db, client):
+    @patch("src.api.routes.profiles.get_permission_service", return_value=_mock_perm_service_allow_all())
+    def test_delete_profile(self, mock_perm, mock_get_db, client):
         """DELETE /api/profiles/{id} soft-deletes the profile."""
         profile = _make_profile(id=7, name="To Delete")
 
@@ -357,7 +391,8 @@ class TestDeleteProfile:
 
 class TestProfileSerialization:
     @patch("src.api.routes.profiles.get_db_session")
-    def test_profile_response_includes_updated_at(self, mock_get_db, client):
+    @patch("src.api.routes.profiles.get_permission_service", return_value=_mock_perm_service_allow_all())
+    def test_profile_response_includes_updated_at(self, mock_perm, mock_get_db, client):
         """Profile responses should include updated_at field."""
         updated_time = datetime(2026, 3, 15, 10, 30, 0)
         p = _make_profile(id=1, name="Test", updated_at=updated_time)

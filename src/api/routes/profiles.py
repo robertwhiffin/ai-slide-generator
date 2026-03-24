@@ -71,11 +71,24 @@ def _get_profile(db, profile_id: int) -> ConfigProfile:
 
 @router.get("")
 async def list_profiles():
-    """List all non-deleted profiles."""
+    """List non-deleted profiles accessible to the current user."""
+    perm_ctx = get_permission_context()
+    perm_service = get_permission_service()
+
     with get_db_session() as db:
+        accessible_ids = set(perm_service.get_accessible_profile_ids(
+            db,
+            user_id=perm_ctx.user_id if perm_ctx else None,
+            user_name=perm_ctx.user_name if perm_ctx else None,
+            group_ids=perm_ctx.group_ids if perm_ctx else None,
+        ))
+
         profiles = (
             db.query(ConfigProfile)
-            .filter(ConfigProfile.is_deleted == False)  # noqa: E712
+            .filter(
+                ConfigProfile.is_deleted == False,  # noqa: E712
+                ConfigProfile.id.in_(accessible_ids) if accessible_ids else False,
+            )
             .order_by(ConfigProfile.name)
             .all()
         )
@@ -156,8 +169,10 @@ async def save_from_session(session_id: str, body: SaveProfileRequest):
 
 @load_router.post("/{session_id}/load-profile/{profile_id}")
 async def load_profile_into_session(session_id: str, profile_id: int):
-    """Copy a profile's agent_config into a session."""
+    """Copy a profile's agent_config into a session. Requires CAN_USE on the profile."""
+    perm_service = get_permission_service()
     with get_db_session() as db:
+        perm_service.require_use_profile(db, profile_id)
         profile = _get_profile(db, profile_id)
         agent_config = profile.agent_config
 
@@ -178,8 +193,10 @@ async def load_profile_into_session(session_id: str, profile_id: int):
 
 @router.put("/{profile_id}")
 async def update_profile(profile_id: int, body: UpdateProfileRequest):
-    """Update profile name, description, or is_default."""
+    """Update profile name, description, or is_default. Requires CAN_EDIT."""
+    perm_service = get_permission_service()
     with get_db_session() as db:
+        perm_service.require_edit_profile(db, profile_id)
         profile = _get_profile(db, profile_id)
 
         if body.name is not None:
@@ -206,8 +223,10 @@ async def update_profile(profile_id: int, body: UpdateProfileRequest):
 
 @router.delete("/{profile_id}")
 async def delete_profile(profile_id: int):
-    """Soft-delete a profile."""
+    """Soft-delete a profile. Requires CAN_MANAGE."""
+    perm_service = get_permission_service()
     with get_db_session() as db:
+        perm_service.require_manage_profile(db, profile_id)
         profile = _get_profile(db, profile_id)
         profile.is_deleted = True
         profile.deleted_at = datetime.utcnow()
