@@ -11,7 +11,7 @@ Redesign the permissions model to make decks (sessions with slide decks) the pri
 - Decks are the fact table; everything else is a dimension.
 - Sharing a profile never grants access to any deck. Sharing a deck never grants access to any profile.
 - Conversations (chat messages) are always private to the session creator.
-- All identity matching uses email addresses (case-insensitive, exact match).
+- Identity matching uses Databricks user/group IDs as the primary key, with email (case-insensitive) as fallback. The `identity_id` column stores the Databricks ID; `identity_name` stores the email/group name for display.
 
 ## Current State (What's Changing)
 
@@ -35,18 +35,35 @@ class DeckContributor(Base):
     __tablename__ = "deck_contributors"
 
     id: int                          # PK
-    session_id: int                  # FK to user_sessions (root/owner session)
+    user_session_id: int             # FK to user_sessions.id (integer PK, not the string session_id)
     identity_type: str               # "USER" or "GROUP"
     identity_id: str                 # Databricks user/group ID
     identity_name: str               # Email for users, name for groups
     permission_level: str            # CAN_VIEW, CAN_EDIT, CAN_MANAGE
-    added_by: str | None
-    added_at: datetime
+    created_by: str | None
+    created_at: datetime
+    updated_at: datetime
 
-    # Unique constraint: (session_id, identity_id)
+    # Unique constraint: (user_session_id, identity_id)
 ```
 
 Created automatically by `Base.metadata.create_all()` on app startup.
+
+### Permission Level Enums
+
+A single combined enum with four values is used across both contributor tables:
+
+```python
+class PermissionLevel(str, Enum):
+    CAN_USE = "CAN_USE"        # Profile-only: can see and load the profile
+    CAN_VIEW = "CAN_VIEW"      # Deck-only: read-only access to presentations
+    CAN_EDIT = "CAN_EDIT"      # Modify content (profile config or deck slides)
+    CAN_MANAGE = "CAN_MANAGE"  # Full control (delete, manage sharing)
+```
+
+- **Deck contributors** use: CAN_VIEW, CAN_EDIT, CAN_MANAGE
+- **Profile contributors** use: CAN_USE, CAN_EDIT, CAN_MANAGE
+- Validation ensures the correct subset is used for each context
 
 ### ConfigProfileContributor (repurposed)
 
@@ -163,11 +180,13 @@ All require CAN_MANAGE on the deck.
 ### Deck Contributor Sessions (updated)
 
 ```
-POST   /api/sessions/{session_id}/contribute    # Create/get contributor session
+POST   /api/sessions/{session_id}/contribute    # Create/get contributor session (requires CAN_VIEW+ on deck)
 GET    /api/sessions/shared                      # Queries deck_contributors
 ```
 
-`/api/sessions/shared` now queries `deck_contributors` for the current user instead of resolving through profile IDs.
+`POST /api/sessions/{session_id}/contribute` requires CAN_VIEW or higher on the deck. This is the minimum permission needed to open a shared presentation and get a contributor session.
+
+`GET /api/sessions/shared` now queries `deck_contributors` for the current user (by user ID and group IDs) instead of resolving through profile IDs. The response shape is unchanged: presentation-only data (slides, metadata), no chat messages.
 
 ### Profile Contributors (existing routes, updated permission levels)
 
@@ -179,6 +198,8 @@ DELETE /api/settings/profiles/{id}/contributors/{contrib_id}
 ```
 
 Permission levels in request/response: CAN_USE, CAN_EDIT, CAN_MANAGE.
+
+Managing contributors (add/update/delete) requires CAN_MANAGE on the profile. This is a change from the current code which gates on CAN_EDIT — the permission table is authoritative.
 
 ### Profile Endpoints (updated with permission checks)
 
@@ -254,6 +275,9 @@ Handled by a new `_migrate_deck_permissions_model()` function in `_run_migration
 **Update `config_profile_contributors`:**
 - Update any existing `CAN_VIEW` permission levels to `CAN_USE`
 
+**Update `config_profiles`:**
+- Update any existing `global_permission = 'CAN_VIEW'` to `'CAN_USE'`
+
 All migration steps are idempotent and run on every app startup via `init_db()` → `_run_migrations()`.
 
 ## Group Resolution (unchanged)
@@ -274,11 +298,11 @@ All migration steps are idempotent and run on every app startup via `init_db()` 
 
 ## Security Notes
 
-1. **Creator protection:** Session creators get CAN_MANAGE automatically and cannot be removed from deck contributors
+1. **Creator protection:** Session creators get CAN_MANAGE automatically via the resolution algorithm (step 1 checks `created_by`). Creators are not stored in `deck_contributors` — protection is at the resolution layer, not a table constraint. The DELETE endpoint should reject attempts to remove the creator.
 2. **Profile creator protection:** Profile creators get CAN_MANAGE automatically
 3. **No cross-pollination:** Deck and profile permissions are completely independent
 4. **App identity:** User and group lookups use the app's service principal — no admin PATs
 5. **Group cache:** 5-minute TTL balances API efficiency with permission propagation
 6. **Exclusive lock:** One editor at a time; 45-second server expiry; 5-minute idle release
 7. **Server-side enforcement:** All slide mutations check `require_editing_lock()`
-8. **Email-based identity:** All permission checks use lowercase email, case-insensitive exact match
+8. **Identity matching:** Primary match by Databricks user/group ID (`identity_id`), fallback match by email (`identity_name`), case-insensitive
