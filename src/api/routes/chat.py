@@ -39,6 +39,40 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api", tags=["chat"])
 
 
+def _get_default_style_id() -> int | None:
+    """Return the ID of the default slide style (is_default=True, is_active=True), or None."""
+    from src.core.database import get_db_session
+    from src.database.models import SlideStyleLibrary
+
+    try:
+        with get_db_session() as db:
+            # Primary: explicit default
+            style = (
+                db.query(SlideStyleLibrary.id)
+                .filter(
+                    SlideStyleLibrary.is_default == True,  # noqa: E712
+                    SlideStyleLibrary.is_active == True,  # noqa: E712
+                )
+                .first()
+            )
+            if style:
+                return style.id
+
+            # Fallback: system style (defensive, for mid-migration)
+            style = (
+                db.query(SlideStyleLibrary.id)
+                .filter(
+                    SlideStyleLibrary.is_system == True,  # noqa: E712
+                    SlideStyleLibrary.is_active == True,  # noqa: E712
+                )
+                .first()
+            )
+            return style.id if style else None
+    except Exception:
+        # Column may not exist yet (pre-migration)
+        return None
+
+
 def _check_chat_permission(session_id: str, db: DBSession) -> None:
     """Verify user can send chat messages in this session.
 
