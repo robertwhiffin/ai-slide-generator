@@ -47,9 +47,20 @@ def test_db_engine():
 
 @pytest.fixture(scope="function")
 def test_db(test_db_engine):
-    """Create test database session."""
+    """Create test database session with a default session for permission checks."""
+    from src.database.models.session import UserSession
+
     SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=test_db_engine)
     db = SessionLocal()
+
+    # Seed a session so deck permission checks can find the creator
+    session = UserSession(
+        session_id="test-123",
+        created_by="test@local.dev",
+    )
+    db.add(session)
+    db.commit()
+
     yield db
     db.close()
 
@@ -85,28 +96,38 @@ def mock_chat_service():
 @pytest.fixture
 def mock_session_manager():
     """Mock the session manager for route testing."""
-    with patch("src.api.routes.chat.get_session_manager") as mock_chat:
-        with patch("src.api.routes.slides.get_session_manager") as mock_slides:
-            with patch("src.api.routes.sessions.get_session_manager") as mock_sessions:
-                with patch("src.api.routes.verification.get_session_manager") as mock_verify:
-                    # Also mock get_current_user so permission checks pass
-                    with patch("src.api.routes.chat.get_current_user", return_value="test@local.dev"):
-                        with patch("src.api.routes.slides.get_current_user", return_value="test@local.dev"):
-                            with patch("src.api.routes.sessions.get_current_user", return_value="test@local.dev"):
-                                manager = MagicMock()
-                                manager.acquire_session_lock.return_value = True
-                                manager.release_session_lock.return_value = None
-                                # Return session info where user is the creator (bypasses permission check)
-                                manager.get_session.return_value = {
-                                    "session_id": "test-123",
-                                    "created_by": "test@local.dev",
-                                    "profile_id": None,
-                                }
-                                mock_chat.return_value = manager
-                                mock_slides.return_value = manager
-                                mock_sessions.return_value = manager
-                                mock_verify.return_value = manager
-                                yield manager
+    from src.core.permission_context import PermissionContext
+
+    perm_ctx = PermissionContext(user_id="test-uid", user_name="test@local.dev")
+
+    with patch("src.api.routes.chat.get_session_manager") as mock_chat, \
+         patch("src.api.routes.slides.get_session_manager") as mock_slides, \
+         patch("src.api.routes.sessions.get_session_manager") as mock_sessions, \
+         patch("src.api.routes.verification.get_session_manager") as mock_verify, \
+         patch("src.api.routes.chat.get_current_user", return_value="test@local.dev"), \
+         patch("src.api.routes.slides.get_current_user", return_value="test@local.dev"), \
+         patch("src.api.routes.sessions.get_current_user", return_value="test@local.dev"), \
+         patch("src.api.routes.chat.get_permission_context", return_value=perm_ctx), \
+         patch("src.api.routes.slides.get_permission_context", return_value=perm_ctx), \
+         patch("src.api.routes.sessions.get_permission_context", return_value=perm_ctx):
+
+        manager = MagicMock()
+        manager.acquire_session_lock.return_value = True
+        manager.release_session_lock.return_value = None
+        # Return session info where user is the creator (bypasses permission check)
+        manager.get_session.return_value = {
+            "id": 1,
+            "session_id": "test-123",
+            "created_by": "test@local.dev",
+            "profile_id": None,
+            "is_contributor_session": False,
+            "parent_session_internal_id": None,
+        }
+        mock_chat.return_value = manager
+        mock_slides.return_value = manager
+        mock_sessions.return_value = manager
+        mock_verify.return_value = manager
+        yield manager
 
 
 # ============================================
@@ -649,10 +670,13 @@ class TestSessionEndpoints:
     def test_get_session_success(self, client, mock_session_manager):
         """GET /api/sessions/{id} returns session details."""
         mock_session_manager.get_session.return_value = {
+            "id": 1,
             "session_id": "test-123",
             "title": "Test Session",
             "created_by": "test@local.dev",  # Required for permission check
             "profile_id": None,
+            "is_contributor_session": False,
+            "parent_session_internal_id": None,
         }
         mock_session_manager.get_messages.return_value = []
         mock_session_manager.get_slide_deck.return_value = None

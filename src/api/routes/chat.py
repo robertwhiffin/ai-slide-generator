@@ -32,7 +32,7 @@ from src.core.database import get_db
 from src.core.permission_context import get_permission_context
 from src.core.user_context import get_current_user
 from src.database.models.profile_contributor import PermissionLevel
-from src.services.permission_service import PermissionService, PERMISSION_PRIORITY
+from src.services.permission_service import get_permission_service, PERMISSION_PRIORITY
 
 logger = logging.getLogger(__name__)
 
@@ -79,6 +79,7 @@ def _check_chat_permission(session_id: str, db: DBSession) -> None:
     Conversations are always private. A user can chat only if:
     1. They are the session creator (owner session), OR
     2. This is their own contributor session AND they have CAN_EDIT or CAN_MANAGE
+       on the parent deck via deck_contributors.
 
     Viewers get a contributor session so they can see the shared slide deck,
     but they cannot chat (which would modify slides).
@@ -105,15 +106,15 @@ def _check_chat_permission(session_id: str, db: DBSession) -> None:
     if is_creator and not is_contributor:
         return
 
-    # Contributor session: must be the creator AND have at least CAN_EDIT on the profile
+    # Contributor session: must be the creator AND have at least CAN_EDIT on the parent deck
     if is_creator and is_contributor:
-        profile_id = session_info.get("profile_id")
+        parent_internal_id = session_info.get("parent_session_internal_id")
         ctx = get_permission_context()
-        if profile_id and ctx:
-            perm_service = PermissionService()
-            permission = perm_service.get_profile_permission(
+        if parent_internal_id is not None and ctx:
+            perm_service = get_permission_service()
+            permission = perm_service.get_deck_permission(
                 db,
-                profile_id=profile_id,
+                session_id=parent_internal_id,
                 user_id=ctx.user_id,
                 user_name=ctx.user_name,
                 group_ids=ctx.group_ids,
@@ -499,22 +500,12 @@ async def submit_chat_async(
         )
 
     try:
-        # Prefer profile info from the frontend request (always up-to-date),
-        # fall back to server-side cached settings only when not provided.
-        profile_id = request.profile_id
-        profile_name = request.profile_name
-        if profile_id is None:
-            from src.core.settings_db import get_settings
-            settings = get_settings()
-            profile_id = getattr(settings, 'profile_id', None)
-            profile_name = getattr(settings, 'profile_name', None)
-
-        # Create request record with profile info
+        # Create request record
         request_id = await asyncio.to_thread(
             session_manager.create_chat_request,
             request.session_id,
-            profile_id,
-            profile_name,
+            None,  # profile_id — no longer used for permissions
+            None,  # profile_name — no longer used for permissions
             current_user,
         )
 
