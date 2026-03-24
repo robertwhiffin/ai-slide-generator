@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, type ReactNode } from "react"
-import { Save, Download, Play, Share2, ChevronDown, FileDown, FileText, Presentation } from "lucide-react"
+import { Save, Download, Play, Share2, Link, ChevronDown, FileDown, FileText, Presentation } from "lucide-react"
 import { Button } from "@/ui/button"
 import { SidebarTrigger } from "@/ui/sidebar"
 import { Separator } from "@/ui/separator"
@@ -15,6 +15,7 @@ interface PageHeaderProps {
   subtitle?: ReactNode
   onSave?: () => void
   onShare?: () => void
+  onCopyLink?: () => void
   /** Single export action (legacy); ignored if export menu items are provided */
   onExport?: () => void
   onExportPPTX?: () => void
@@ -35,6 +36,7 @@ export function PageHeader({
   subtitle,
   onSave,
   onShare,
+  onCopyLink,
   onExport,
   onExportPPTX,
   onExportPDF,
@@ -189,6 +191,19 @@ export function PageHeader({
               Export
             </Button>
           )
+        )}
+        {onCopyLink && (
+          <Button
+            variant="outline"
+            size="sm"
+            className="gap-1.5"
+            onClick={onCopyLink}
+            disabled={isGenerating}
+            title="Copy view link to clipboard"
+          >
+            <Link className="size-3.5" />
+            Copy Link
+          </Button>
         )}
         {onShare && (
           <Button

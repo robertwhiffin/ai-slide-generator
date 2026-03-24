@@ -101,12 +101,9 @@ export interface Session {
   slide_count?: number;
   messages?: SessionMessage[];
   slide_deck?: SlideDeck | null;
-  profile_id?: number | null;
-  profile_name?: string | null;
   google_slides_url?: string | null;
   google_slides_presentation_id?: string | null;
   experiment_url?: string | null;
-  profile_deleted?: boolean;
   /** User's permission level on this session (CAN_VIEW, CAN_EDIT, CAN_MANAGE) */
   my_permission?: 'CAN_VIEW' | 'CAN_EDIT' | 'CAN_MANAGE';
   /** True if this is a contributor session (shares parent's slide deck) */
@@ -123,8 +120,6 @@ export interface SharedPresentation {
   last_activity: string | null;
   modified_by: string | null;
   modified_at: string | null;
-  profile_id: number | null;
-  profile_name: string | null;
   my_permission: 'CAN_VIEW' | 'CAN_EDIT' | 'CAN_MANAGE';
 }
 
@@ -252,7 +247,7 @@ export const api = {
   /**
    * Create a new session
    */
-  async createSession(options?: { sessionId?: string; title?: string; profileId?: number; profileName?: string }): Promise<Session> {
+  async createSession(options?: { sessionId?: string; title?: string }): Promise<Session> {
     const response = await fetch(`${API_BASE_URL}/api/sessions`, {
       method: 'POST',
       headers: {
@@ -261,8 +256,6 @@ export const api = {
       body: JSON.stringify({
         session_id: options?.sessionId,
         title: options?.title,
-        profile_id: options?.profileId,
-        profile_name: options?.profileName,
       }),
     });
 

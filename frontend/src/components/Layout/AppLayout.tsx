@@ -16,6 +16,7 @@ import { HelpPage } from '../Help';
 import { UpdateBanner } from '../UpdateBanner';
 import { SavePointDropdown, PreviewBanner, RevertConfirmModal } from '../SavePoints';
 import type { SavePointVersion } from '../SavePoints';
+import { DeckContributorsManager } from '../DeckContributorsManager';
 import { FeedbackButton } from '../Feedback/FeedbackButton';
 import { SurveyModal } from '../Feedback/SurveyModal';
 import { useSurveyTrigger } from '../../hooks/useSurveyTrigger';
@@ -44,6 +45,7 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
   const [rawHtml, setRawHtml] = useState<string | null>(null);
   const [viewMode, setViewMode] = useState<ViewMode>(initialView);
   const [showSaveDialog, setShowSaveDialog] = useState(false);
+  const [showShareDialog, setShowShareDialog] = useState(false);
   const [lastSavedTime, setLastSavedTime] = useState<Date | null>(null);
   const [sessionsRefreshKey, setSessionsRefreshKey] = useState<number>(0);
   const [scrollTarget, setScrollTarget] = useState<{ index: number; key: number } | null>(null);
@@ -331,6 +333,11 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
 
   const handleShare = useCallback(() => {
     if (!sessionId) return;
+    setShowShareDialog(true);
+  }, [sessionId]);
+
+  const handleCopyLink = useCallback(() => {
+    if (!sessionId) return;
     const viewUrl = `${window.location.origin}/sessions/${sessionId}/view`;
     navigator.clipboard.writeText(viewUrl).then(
       () => showToast('Link copied to clipboard', 'success'),
@@ -511,6 +518,7 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
                 onTitleChange={handleTitleChange}
                 onSave={() => setShowSaveDialog(true)}
                 onShare={!viewOnly && sessionId ? handleShare : undefined}
+                onCopyLink={!viewOnly && sessionId ? handleCopyLink : undefined}
                 onExportPPTX={slideDeck ? handleExportPPTX : undefined}
                 onExportPDF={slideDeck ? handleExportPDF : undefined}
                 onExportGoogleSlides={slideDeck ? handleExportGoogleSlides : undefined}
@@ -723,6 +731,26 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
           setRevertTargetVersion(null);
         }}
       />
+
+      {/* Share Deck Dialog */}
+      {showShareDialog && sessionId && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm">
+          <div className="w-full max-w-lg mx-4 rounded-lg border border-border bg-card shadow-lg max-h-[80vh] flex flex-col">
+            <div className="flex items-center justify-between border-b border-border px-6 py-4">
+              <h2 className="text-lg font-semibold text-foreground">Share Deck</h2>
+              <button
+                onClick={() => setShowShareDialog(false)}
+                className="text-muted-foreground hover:text-foreground transition-colors"
+              >
+                ✕
+              </button>
+            </div>
+            <div className="flex-1 overflow-y-auto px-6 py-4">
+              <DeckContributorsManager sessionId={sessionId} />
+            </div>
+          </div>
+        </div>
+      )}
 
       <FeedbackButton />
       <SurveyModal isOpen={showSurvey} onClose={closeSurvey} />
