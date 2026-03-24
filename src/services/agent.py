@@ -146,7 +146,8 @@ class SlideGeneratorAgent:
         self._setup_mlflow_tracking()
 
         # Create LangChain prompt (model created per-request for user context)
-        self.prompt = self._create_prompt()
+        prompts = pre_built_prompts if pre_built_prompts is not None else self.settings.prompts
+        self.prompt = self._create_prompt(prompts)
 
         # Session storage for multi-turn conversations
         # Structure: {session_id: {chat_history, genie_conversation_id, experiment_id, experiment_url, username, metadata}}
@@ -463,7 +464,7 @@ class SlideGeneratorAgent:
         logger.info("Tools created for session", extra={"session_id": session_id})
         return [genie_tool, image_search_tool]
 
-    def _create_prompt(self) -> ChatPromptTemplate:
+    def _create_prompt(self, prompts: dict) -> ChatPromptTemplate:
         """Create prompt template with system prompt from settings and chat history.
         
         Prompt structure (when all components present):
@@ -583,7 +584,7 @@ class SlideGeneratorAgent:
             if self._pre_built_prompts is not None:
                 prompts = self._pre_built_prompts
             else:
-                prompts = fetch_prompt_content()
+                prompts = get_settings().prompts
             prompt = self._create_prompt(prompts)
             agent = create_tool_calling_agent(model, tools, prompt)
 
@@ -1630,7 +1631,7 @@ class SlideGeneratorAgent:
             if self._pre_built_prompts is not None:
                 prompts = self._pre_built_prompts
             else:
-                prompts = fetch_prompt_content()
+                prompts = get_settings().prompts
             prompt = self._create_prompt(prompts)
             agent = create_tool_calling_agent(model, tools, prompt)
 
