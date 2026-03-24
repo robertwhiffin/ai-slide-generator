@@ -62,23 +62,12 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
   slideDeckRef.current = slideDeck;
   const { sessionTitle, sessionId, experimentUrl, createNewSession, switchSession, renameSession } = useSession();
   const { isGenerating } = useGeneration();
-  const { currentProfile, loadProfile } = useProfiles();
   /** Ref-tracked sessionId so the URL effect guard doesn't need sessionId as a dep (which would cause it to re-fire when switchSession internally calls setSessionId). */
   const sessionIdRef = useRef(sessionId);
   sessionIdRef.current = sessionId;
-  const currentProfileRef = useRef(currentProfile);
-  currentProfileRef.current = currentProfile;
-  const loadProfileRef = useRef(loadProfile);
-  loadProfileRef.current = loadProfile;
   const { updateAvailable, latestVersion, updateType, dismissed, dismiss } = useVersionCheck();
   const { showToast } = useToast();
   const { showSurvey, closeSurvey, onGenerationComplete, onGenerationStart } = useSurveyTrigger();
-
-  // Permission level for the current session (null until loaded from server)
-  const [sessionPermission, setSessionPermission] = useState<'CAN_VIEW' | 'CAN_EDIT' | 'CAN_MANAGE' | null>(null);
-
-  // Non-null when viewing a session whose profile has been deleted
-  const [deletedProfileName, setDeletedProfileName] = useState<string | null>(null);
 
   // Editing lock state (default false until acquire succeeds)
   const [editingLockHolder, setEditingLockHolder] = useState<string | null>(null);
@@ -110,8 +99,8 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
 
   // Main lock lifecycle: acquire on open, heartbeat, idle release, poll status
   useEffect(() => {
-    if (!sessionId || initialView !== 'main' || sessionPermission === null) return;
-    const isViewer = sessionPermission === 'CAN_VIEW';
+    if (!sessionId || initialView !== 'main') return;
+    const isViewer = false;
     let cancelled = false;
 
     const isSelf = (status: { locked_by_email?: string | null }) =>
@@ -197,7 +186,7 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
         lockSessionRef.current = null;
       }
     };
-  }, [sessionId, initialView, sessionPermission]);
+  }, [sessionId, initialView]);
 
   // Release lock on page unload (tab close, refresh)
   useEffect(() => {
@@ -229,22 +218,6 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
         // Fetch session info first so we can pass it to switchSession as existingSessionInfo
         // to avoid a second getSession call.
         const sessionInfo = await api.getSession(urlSessionId);
-        if (cancelled) return;
-
-        // Store permission level from session info
-        setSessionPermission(sessionInfo.my_permission || 'CAN_MANAGE');
-
-        if (sessionInfo.profile_deleted) {
-          setDeletedProfileName(
-            sessionInfo.profile_name || `Profile ${sessionInfo.profile_id}`,
-          );
-        } else if (sessionInfo.profile_id && currentProfileRef.current && sessionInfo.profile_id !== currentProfileRef.current.id) {
-          try {
-            await loadProfileRef.current(sessionInfo.profile_id);
-          } catch {
-            // Profile may have been deleted; continue with current profile
-          }
-        }
         if (cancelled) return;
 
         const { slideDeck: restoredDeck, rawHtml: restoredRawHtml } = await switchSession(
@@ -307,15 +280,6 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
     chatPanelRef.current?.sendMessage(content, slideContext);
   }, []);
 
-  const handleProfileChange = useCallback(() => {
-    setSlideDeck(null);
-    setRawHtml(null);
-    setLastSavedTime(null);
-    setDeletedProfileName(null);
-    setSessionPermission('CAN_MANAGE');
-    createNewSession();
-  }, [createNewSession]);
-
   const handleSessionRestore = useCallback(
     (restoredSessionId: string) => {
       navigate(`/sessions/${restoredSessionId}/edit`);
@@ -342,17 +306,10 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
     setSlideDeck(null);
     setRawHtml(null);
     setLastSavedTime(null);
-    setDeletedProfileName(null);
-    setSessionPermission('CAN_MANAGE');
     const newId = createNewSession();
     setViewMode('main');
     try {
-      const profile = currentProfileRef.current;
-      await api.createSession({
-        sessionId: newId,
-        profileId: profile?.id,
-        profileName: profile?.name,
-      });
+      await api.createSession({ sessionId: newId });
       setSessionsRefreshKey(prev => prev + 1);
       navigate(`/sessions/${newId}/edit`);
     } catch (err) {
@@ -443,7 +400,7 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
     ? `preview-v${previewVersion}`
     : 'current';
 
-  const effectiveReadOnly = !!previewVersion || viewOnly || !!deletedProfileName || sessionPermission === 'CAN_VIEW' || !isLockHolder;
+  const effectiveReadOnly = !!previewVersion || viewOnly || !isLockHolder;
   const isReadOnly = effectiveReadOnly;
 
   const getTimeAgo = (date: Date) => {
@@ -532,10 +489,6 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
   const viewOnlyReason =
     !isLockHolder && editingLockHolder
       ? `${editingLockHolder} is currently editing this session`
-      : sessionPermission === 'CAN_VIEW'
-      ? 'You have view-only access to this session'
-      : deletedProfileName
-      ? `Profile "${deletedProfileName}" was deleted — session is read-only`
       : undefined;
 
   return (
@@ -587,18 +540,6 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
                   onRevert={isLockHolder ? handleRevertClick : () => {}}
                   onCancel={handlePreviewCancel}
                 />
-              )}
-
-              {deletedProfileName && (
-                <div className="bg-amber-50 border-b border-amber-200 px-4 py-2 text-sm text-amber-800 flex items-center gap-2">
-                  <svg className="w-4 h-4 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20">
-                    <path fillRule="evenodd" d="M8.485 2.495c.673-1.167 2.357-1.167 3.03 0l6.28 10.875c.673 1.167-.17 2.625-1.516 2.625H3.72c-1.347 0-2.189-1.458-1.515-2.625L8.485 2.495zM10 6a.75.75 0 01.75.75v3.5a.75.75 0 01-1.5 0v-3.5A.75.75 0 0110 6zm0 9a1 1 0 100-2 1 1 0 000 2z" clipRule="evenodd" />
-                  </svg>
-                  <span>
-                    This session was created with profile &ldquo;{deletedProfileName}&rdquo; which has been deleted.
-                    The session is read-only and cannot continue.
-                  </span>
-                </div>
               )}
 
               {updateAvailable && !dismissed && latestVersion && updateType && (
@@ -657,7 +598,6 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
                     onExportStatusChange={setExportStatus}
                     versionKey={versionKey}
                     readOnly={isReadOnly}
-                    canManage={sessionPermission === 'CAN_MANAGE'}
                     lockedBy={!isLockHolder ? editingLockHolder : null}
                     onVerificationComplete={handleVerificationComplete}
                   />

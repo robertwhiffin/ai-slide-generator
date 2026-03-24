@@ -321,13 +321,6 @@ export const configApi = {
       method: 'PATCH',
     }),
 
-  duplicateProfile: (id: number, data: ProfileDuplicate): Promise<Profile> =>
-    fetchJson(`${PROFILES_API_BASE}/${id}/duplicate`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(data),
-    }),
-
   reloadConfiguration: (profileId?: number): Promise<ReloadResponse> => {
     const url = profileId
       ? `${PROFILES_API_BASE}/reload?profile_id=${profileId}`
