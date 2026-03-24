@@ -110,8 +110,9 @@ def _check_chat_permission(session_id: str, db: DBSession) -> None:
         profile_id = session_info.get("profile_id")
         ctx = get_permission_context()
         if profile_id and ctx:
-            perm_service = PermissionService(db)
-            permission = perm_service.get_user_permission(
+            perm_service = PermissionService()
+            permission = perm_service.get_profile_permission(
+                db,
                 profile_id=profile_id,
                 user_id=ctx.user_id,
                 user_name=ctx.user_name,
