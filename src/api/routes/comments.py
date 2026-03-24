@@ -21,12 +21,40 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from src.api.services.session_manager import SessionNotFoundError, get_session_manager
-from src.core.database import get_db
+from src.core.database import get_db, get_db_session
+from src.core.permission_context import get_permission_context
 from src.core.user_context import get_current_user
+from src.database.models.profile_contributor import PermissionLevel
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/comments", tags=["comments"])
+
+
+def _require_deck_view_for_session(session_id: str) -> None:
+    """Require CAN_VIEW on the deck that owns *session_id*.
+
+    Resolves root session (follows parent_session_id for contributors),
+    then checks DeckContributor via PermissionService.  Opens its own
+    DB session via ``get_db_session``.
+
+    Raises:
+        HTTPException 403: If user lacks CAN_VIEW permission.
+    """
+    from src.services.permission_service import get_permission_service
+
+    session_manager = get_session_manager()
+    session_info = session_manager.get_session(session_id)
+    root_id = session_info.get("parent_session_internal_id") or session_info.get("id")
+    perm_ctx = get_permission_context()
+    perm_service = get_permission_service()
+    with get_db_session() as db:
+        perm_service.require_view_deck(
+            db, root_id,
+            user_id=perm_ctx.user_id if perm_ctx else None,
+            user_name=perm_ctx.user_name if perm_ctx else None,
+            group_ids=perm_ctx.group_ids if perm_ctx else None,
+        )
 
 
 def _require_comment_edit_permission(comment_id: int, db: Session) -> None:
@@ -104,6 +132,9 @@ async def mentionable_users(
     if not current_user:
         raise HTTPException(status_code=401, detail="Authentication required")
 
+    # Permission check: require CAN_VIEW on the deck
+    await asyncio.to_thread(_require_deck_view_for_session, session_id)
+
     session_manager = get_session_manager()
     try:
         result = await asyncio.to_thread(
@@ -132,6 +163,10 @@ async def list_mentions(
     if not current_user:
         raise HTTPException(status_code=401, detail="Authentication required")
 
+    # Permission check: require CAN_VIEW when scoped to a specific deck
+    if session_id:
+        await asyncio.to_thread(_require_deck_view_for_session, session_id)
+
     session_manager = get_session_manager()
     try:
         mentions = await asyncio.to_thread(
@@ -156,6 +191,10 @@ async def list_comments(
     Returns top-level comments with nested replies, plus the current user name.
     """
     current_user = get_current_user()
+
+    # Permission check: require CAN_VIEW on the deck
+    await asyncio.to_thread(_require_deck_view_for_session, session_id)
+
     session_manager = get_session_manager()
     try:
         comments = await asyncio.to_thread(
@@ -178,6 +217,9 @@ async def add_comment(request: AddCommentRequest):
     current_user = get_current_user()
     if not current_user:
         raise HTTPException(status_code=401, detail="Authentication required")
+
+    # Permission check: require CAN_VIEW on the deck
+    await asyncio.to_thread(_require_deck_view_for_session, request.session_id)
 
     session_manager = get_session_manager()
     try:

@@ -25,7 +25,7 @@ from src.api.services.session_manager import (
     SessionNotFoundError,
     get_session_manager,
 )
-from src.core.database import get_db
+from src.core.database import get_db, get_db_session
 from src.core.permission_context import get_permission_context
 from src.core.user_context import get_current_user
 from src.database.models.profile_contributor import PermissionLevel
@@ -109,6 +109,30 @@ def _require_session_access(
         )
     
     return permission
+
+
+def _check_deck_permission_for_session(
+    session_id: str,
+    min_permission: PermissionLevel = PermissionLevel.CAN_VIEW,
+) -> None:
+    """Look up a session by string ID, resolve root, and enforce deck permission.
+
+    This is the standard pattern for endpoints that only have a session_id string
+    and need to gate on deck permissions.  It opens its own DB session via
+    ``get_db_session`` so it can be called from endpoints that do not already
+    have one.
+
+    Args:
+        session_id: The string session_id passed to the endpoint.
+        min_permission: Minimum required permission level.
+
+    Raises:
+        HTTPException 403: If the caller lacks the required permission.
+    """
+    session_manager = get_session_manager()
+    session_info = session_manager.get_session(session_id)
+    with get_db_session() as db:
+        _require_session_access(session_info, db, min_permission)
 
 
 def _substitute_deck_images(deck_dict: dict) -> None:
@@ -627,6 +651,11 @@ async def get_session_slides(session_id: str):
         Slide deck info or null if no deck
     """
     try:
+        # Permission check: require CAN_VIEW on the deck
+        await asyncio.to_thread(
+            _check_deck_permission_for_session, session_id, PermissionLevel.CAN_VIEW
+        )
+
         session_manager = get_session_manager()
         deck = await asyncio.to_thread(session_manager.get_slide_deck, session_id)
 
@@ -640,6 +669,8 @@ async def get_session_slides(session_id: str):
             status_code=404,
             detail=f"Session not found: {session_id}",
         )
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Failed to get session slides: {e}", exc_info=True)
         raise HTTPException(
@@ -687,8 +718,13 @@ async def export_session(session_id: str):
         Export confirmation with file path
     """
     try:
+        # Permission check: require CAN_VIEW on the deck
+        await asyncio.to_thread(
+            _check_deck_permission_for_session, session_id, PermissionLevel.CAN_VIEW
+        )
+
         session_manager = get_session_manager()
-        
+
         # Get all session data
         session = await asyncio.to_thread(session_manager.get_session, session_id)
         messages = await asyncio.to_thread(session_manager.get_messages, session_id)
@@ -738,6 +774,8 @@ async def export_session(session_id: str):
             status_code=404,
             detail=f"Session not found: {session_id}",
         )
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Failed to export session: {e}", exc_info=True)
         raise HTTPException(
@@ -757,6 +795,11 @@ async def acquire_editing_lock(session_id: str):
     current_user = get_current_user()
     if not current_user:
         raise HTTPException(status_code=401, detail="Authentication required")
+
+    # Permission check: require CAN_EDIT on the deck
+    await asyncio.to_thread(
+        _check_deck_permission_for_session, session_id, PermissionLevel.CAN_EDIT
+    )
 
     session_manager = get_session_manager()
     try:
@@ -780,6 +823,11 @@ async def release_editing_lock(session_id: str):
     if not current_user:
         raise HTTPException(status_code=401, detail="Authentication required")
 
+    # Permission check: require CAN_EDIT on the deck
+    await asyncio.to_thread(
+        _check_deck_permission_for_session, session_id, PermissionLevel.CAN_EDIT
+    )
+
     session_manager = get_session_manager()
     try:
         await asyncio.to_thread(
@@ -796,6 +844,11 @@ async def release_editing_lock(session_id: str):
 @router.get("/{session_id}/lock")
 async def get_editing_lock_status(session_id: str):
     """Check who holds the editing lock."""
+    # Permission check: require CAN_VIEW on the deck
+    await asyncio.to_thread(
+        _check_deck_permission_for_session, session_id, PermissionLevel.CAN_VIEW
+    )
+
     session_manager = get_session_manager()
     try:
         return await asyncio.to_thread(
@@ -813,6 +866,11 @@ async def heartbeat_editing_lock(session_id: str):
     current_user = get_current_user()
     if not current_user:
         raise HTTPException(status_code=401, detail="Authentication required")
+
+    # Permission check: require CAN_EDIT on the deck
+    await asyncio.to_thread(
+        _check_deck_permission_for_session, session_id, PermissionLevel.CAN_EDIT
+    )
 
     session_manager = get_session_manager()
     try:
