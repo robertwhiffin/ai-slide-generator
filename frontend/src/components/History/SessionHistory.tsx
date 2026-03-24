@@ -50,7 +50,7 @@ export const SessionHistory: React.FC<SessionHistoryProps> = ({
     return () => clearInterval(timer);
   }, [refreshKey]);
 
-  const sessions = mySessions;
+  const sessions = mySessions.filter(s => s.has_slide_deck);
 
   const handleOpenPresentation = async (presentation: SharedPresentation) => {
     try {
@@ -133,7 +133,7 @@ export const SessionHistory: React.FC<SessionHistoryProps> = ({
             >
               My Sessions
               <span className="ml-2 py-0.5 px-2 rounded-full text-xs bg-gray-100 text-gray-600">
-                {mySessions.length}
+                {sessions.length}
               </span>
             </button>
             <button
@@ -176,11 +176,10 @@ export const SessionHistory: React.FC<SessionHistoryProps> = ({
             <table className="w-full divide-y divide-gray-200 table-fixed">
               <thead className="bg-gray-50">
                 <tr>
-                  <th className="w-[13%] px-3 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Profile</th>
-                  <th className="w-[28%] px-3 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Session Name</th>
-                  <th className="w-[12%] px-3 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Created</th>
-                  <th className="w-[12%] px-3 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Last Activity</th>
-                  <th className="w-[8%] px-3 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Slides</th>
+                  <th className="w-[15%] px-3 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Profile</th>
+                  <th className="w-[32%] px-3 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Session Name</th>
+                  <th className="w-[14%] px-3 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Created</th>
+                  <th className="w-[14%] px-3 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Last Activity</th>
                   <th className="w-[18%] px-3 py-3 text-center text-xs font-medium text-gray-500 uppercase tracking-wider">Actions</th>
                 </tr>
               </thead>
@@ -219,18 +218,9 @@ export const SessionHistory: React.FC<SessionHistoryProps> = ({
                     </td>
                     <td className="px-3 py-3 text-xs text-gray-500">{formatDate(session.created_at)}</td>
                     <td className="px-3 py-3 text-xs text-gray-500">{session.last_activity ? formatDate(session.last_activity) : '-'}</td>
-                    <td className="px-3 py-3 text-xs text-gray-500">
-                      {session.has_slide_deck ? (
-                        <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-800">Yes</span>
-                      ) : (
-                        <span className="text-gray-400">No</span>
-                      )}
-                    </td>
                     <td className="px-3 py-3 text-center text-sm font-medium">
                       <div className="flex items-center justify-center gap-2">
-                        {session.has_slide_deck && (
-                          <button onClick={() => handleRestore(session.session_id)} className="text-blue-600 hover:text-blue-900 text-xs">Open</button>
-                        )}
+                        <button onClick={() => handleRestore(session.session_id)} className="text-blue-600 hover:text-blue-900 text-xs">Open</button>
                         <button
                           onClick={() => { setEditingId(session.session_id); setEditTitle(session.title); }}
                           className="text-gray-600 hover:text-gray-900 text-xs"
