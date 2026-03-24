@@ -135,12 +135,3 @@ class CreateSessionRequest(BaseModel):
         description="Optional session title",
         max_length=255,
     )
-    profile_id: Optional[int] = Field(
-        default=None,
-        description="Profile ID to associate with this session",
-    )
-    profile_name: Optional[str] = Field(
-        default=None,
-        description="Profile name (cached for display)",
-        max_length=255,
-    )

@@ -96,32 +96,11 @@ def migrate_profiles(session_factory) -> int:
 
 
 def backfill_sessions(session_factory) -> int:
-    """Backfill agent_config on existing sessions from their profile_id."""
-    from src.database.models.profile import ConfigProfile
-    from src.database.models.session import UserSession
+    """Backfill agent_config on existing sessions.
 
-    db = session_factory()
-    try:
-        sessions = (
-            db.query(UserSession)
-            .filter(
-                UserSession.agent_config.is_(None),
-                UserSession.profile_id.isnot(None),
-            )
-            .all()
-        )
-
-        count = 0
-        for session in sessions:
-            profile = db.query(ConfigProfile).filter(
-                ConfigProfile.id == session.profile_id
-            ).first()
-            if profile and profile.agent_config:
-                session.agent_config = profile.agent_config
-                count += 1
-
-        db.commit()
-        logger.info(f"Backfilled agent_config on {count} sessions")
-        return count
-    finally:
-        db.close()
+    Previously used profile_id on UserSession to look up the profile's
+    agent_config.  Now that profile_id has been removed from the model this
+    migration is a no-op — kept for backward-compatible call sites.
+    """
+    logger.info("backfill_sessions is a no-op (profile_id removed from UserSession)")
+    return 0

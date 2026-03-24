@@ -370,12 +370,12 @@ class TestChatAsyncSessionCreation:
 class TestCreateSessionRequest:
     """Tests for CreateSessionRequest schema changes."""
 
-    def test_create_session_request_profile_id_is_optional(self):
-        """CreateSessionRequest profile_id should be optional (defaults to None)."""
+    def test_create_session_request_has_no_profile_id(self):
+        """CreateSessionRequest should not have profile_id (removed in deck-centric redesign)."""
         from src.api.schemas.requests import CreateSessionRequest
 
         req = CreateSessionRequest()
-        assert req.profile_id is None
+        assert not hasattr(req, "profile_id")
 
 
 # ============================================

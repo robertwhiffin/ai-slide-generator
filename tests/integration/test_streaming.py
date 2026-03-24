@@ -174,7 +174,6 @@ def mock_session_manager():
             manager.get_session.return_value = {
                 "session_id": "test-session-123",
                 "created_by": "test@local.dev",
-                "profile_id": None,
             }
             mock_get.return_value = manager
             yield manager

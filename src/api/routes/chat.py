@@ -504,8 +504,6 @@ async def submit_chat_async(
         request_id = await asyncio.to_thread(
             session_manager.create_chat_request,
             request.session_id,
-            None,  # profile_id — no longer used for permissions
-            None,  # profile_name — no longer used for permissions
             current_user,
         )
 

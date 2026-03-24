@@ -158,7 +158,7 @@ class ChatService:
             "experiment_id": session_data.get("experiment_id"),
             "experiment_url": experiment_url,
             "username": username,
-            "profile_name": db_session.get("profile_name") or "default",
+            "profile_name": "default",
             "message_count": message_count,
         }
 
