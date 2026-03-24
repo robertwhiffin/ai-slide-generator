@@ -92,8 +92,6 @@ class TestSendMessageBuildsAgentPerRequest:
             "experiment_id": "exp-456",
             "agent_config": {"tools": []},
             "message_count": 1,
-            "profile_id": 1,
-            "profile_name": "test",
         }
 
         mock_agent_config = MagicMock()

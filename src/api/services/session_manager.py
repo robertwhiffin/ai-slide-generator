@@ -65,8 +65,6 @@ class SessionManager:
         user_id: Optional[str] = None,
         title: Optional[str] = None,
         session_id: Optional[str] = None,
-        profile_id: Optional[int] = None,
-        profile_name: Optional[str] = None,
         created_by: Optional[str] = None,
         agent_config: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
@@ -76,8 +74,6 @@ class SessionManager:
             user_id: Legacy user identifier (kept for backward compat)
             title: Optional session title
             session_id: Optional session ID (if not provided, one is generated)
-            profile_id: Optional profile ID this session belongs to
-            profile_name: Optional profile name (cached for display)
             created_by: Username of the authenticated user creating the session
             agent_config: Optional agent configuration JSON (tools, style, prompts)
 
@@ -101,8 +97,6 @@ class SessionManager:
                     "created_by": existing.created_by,
                     "title": existing.title,
                     "created_at": existing.created_at.isoformat(),
-                    "profile_id": existing.profile_id,
-                    "profile_name": existing.profile_name,
                 }
 
             session = UserSession(
@@ -110,8 +104,6 @@ class SessionManager:
                 user_id=user_id,
                 created_by=created_by,
                 title=title or f"Session {datetime.utcnow().strftime('%Y-%m-%d %H:%M')}",
-                profile_id=profile_id,
-                profile_name=profile_name,
                 agent_config=agent_config,
             )
             db.add(session)
@@ -122,7 +114,6 @@ class SessionManager:
                 extra={
                     "session_id": session_id,
                     "created_by": created_by,
-                    "profile_id": profile_id,
                 },
             )
 
@@ -132,8 +123,6 @@ class SessionManager:
                 "created_by": created_by,
                 "title": session.title,
                 "created_at": session.created_at.isoformat(),
-                "profile_id": profile_id,
-                "profile_name": profile_name,
             }
 
     def get_session(self, session_id: str) -> Dict[str, Any]:
@@ -150,8 +139,6 @@ class SessionManager:
         """
         with get_db_session() as db:
             session = self._get_session_or_raise(db, session_id)
-
-            profile_deleted = self._is_profile_deleted(db, session.profile_id)
 
             # Resolve parent session and shared slide deck for contributor sessions
             parent_session_id_str = None
@@ -178,11 +165,8 @@ class SessionManager:
                 "agent_config": session.agent_config,
                 "message_count": len(session.messages),
                 "has_slide_deck": deck_owner.slide_deck is not None,
-                "profile_id": session.profile_id,
-                "profile_name": session.profile_name,
                 "google_slides_url": deck_owner.google_slides_url,
                 "google_slides_presentation_id": deck_owner.google_slides_presentation_id,
-                "profile_deleted": profile_deleted,
                 "is_contributor_session": session.is_contributor_session,
                 "parent_session_id": parent_session_id_str,
                 "parent_session_internal_id": session.parent_session_id,
@@ -319,12 +303,6 @@ class SessionManager:
                 .all()
             )
 
-            # Batch-check which profiles are deleted to avoid N+1 queries
-            deleted_profiles = self._get_deleted_profile_ids(
-                db,
-                [s.profile_id for s in sessions if s.profile_id is not None],
-            )
-
             return [
                 {
                     "session_id": s.session_id,
@@ -336,9 +314,6 @@ class SessionManager:
                     "message_count": len(s.messages),
                     "has_slide_deck": s.slide_deck is not None,
                     "slide_count": s.slide_deck.slide_count if s.slide_deck is not None else 0,
-                    "profile_id": s.profile_id,
-                    "profile_name": s.profile_name,
-                    "profile_deleted": s.profile_id in deleted_profiles if s.profile_id else False,
                 }
                 for s in sessions
             ]
@@ -361,72 +336,6 @@ class SessionManager:
             List of session info dictionaries
         """
         return self.list_sessions(created_by=created_by, limit=limit)
-
-    def list_sessions_by_profile_ids(
-        self,
-        profile_ids: List[int],
-        exclude_created_by: Optional[str] = None,
-        limit: int = 50,
-    ) -> List[Dict[str, Any]]:
-        """List sessions belonging to specific profiles.
-
-        Used for permission-based session listing where users can see sessions
-        from profiles they have access to.
-
-        Args:
-            profile_ids: List of profile IDs to include
-            exclude_created_by: Optionally exclude sessions by this creator
-                (to avoid duplicates when combining with own sessions)
-            limit: Maximum number of sessions to return
-
-        Returns:
-            List of session info dictionaries
-        """
-        if not profile_ids:
-            return []
-
-        with get_db_session() as db:
-            query = db.query(UserSession).filter(
-                UserSession.messages.any(),
-                UserSession.profile_id.in_(profile_ids),
-                UserSession.parent_session_id.is_(None),  # Only root sessions
-            )
-
-            if exclude_created_by:
-                query = query.filter(UserSession.created_by != exclude_created_by)
-
-            sessions = (
-                query.order_by(UserSession.last_activity.desc())
-                .limit(limit)
-                .all()
-            )
-
-            # Batch-check which profiles are deleted to avoid N+1 queries
-            deleted_profiles = self._get_deleted_profile_ids(
-                db,
-                [s.profile_id for s in sessions if s.profile_id is not None],
-            )
-
-            result = []
-            for s in sessions:
-                deck = s.slide_deck
-                info = {
-                    "session_id": s.session_id,
-                    "user_id": s.user_id,
-                    "created_by": s.created_by,
-                    "title": s.title,
-                    "created_at": s.created_at.isoformat(),
-                    "last_activity": s.last_activity.isoformat(),
-                    "message_count": len(s.messages),
-                    "has_slide_deck": deck is not None,
-                    "profile_id": s.profile_id,
-                    "profile_name": s.profile_name,
-                    "profile_deleted": s.profile_id in deleted_profiles if s.profile_id else False,
-                    "modified_by": getattr(deck, "modified_by", None) or s.created_by if deck else None,
-                    "modified_at": deck.updated_at.isoformat() if deck and deck.updated_at else None,
-                }
-                result.append(info)
-            return result
 
     def delete_session(self, session_id: str) -> bool:
         """Delete a session and all associated data.
@@ -523,37 +432,6 @@ class SessionManager:
                 "Updated Genie conversation ID",
                 extra={"session_id": session_id, "conversation_id": conversation_id},
             )
-
-    def set_session_profile(
-        self,
-        session_id: str,
-        profile_id: int,
-        profile_name: str,
-    ) -> None:
-        """Set the profile for a session.
-
-        Used to associate a session with a profile when it's first used.
-
-        Args:
-            session_id: Session to update
-            profile_id: Profile ID to associate
-            profile_name: Profile name (cached for display)
-        """
-        with get_db_session() as db:
-            session = self._get_session_or_raise(db, session_id)
-            # Only set if not already set (preserve original profile)
-            if session.profile_id is None:
-                session.profile_id = profile_id
-                session.profile_name = profile_name
-
-                logger.info(
-                    "Set session profile",
-                    extra={
-                        "session_id": session_id,
-                        "profile_id": profile_id,
-                        "profile_name": profile_name,
-                    },
-                )
 
     def set_google_slides_info(
         self,
@@ -1629,8 +1507,6 @@ class SessionManager:
     def create_chat_request(
         self,
         session_id: str,
-        profile_id: Optional[int] = None,
-        profile_name: Optional[str] = None,
         created_by: Optional[str] = None,
     ) -> str:
         """Create a new chat request, return request_id.
@@ -1639,8 +1515,7 @@ class SessionManager:
 
         Args:
             session_id: Session to create request for
-            profile_id: Profile ID to associate with new sessions
-            profile_name: Profile name (cached for display)
+            created_by: Username of the authenticated user
 
         Returns:
             Generated request_id
@@ -1660,23 +1535,13 @@ class SessionManager:
                 session = UserSession(
                     session_id=session_id,
                     title=f"Session {datetime.utcnow().strftime('%Y-%m-%d %H:%M')}",
-                    profile_id=profile_id,
-                    profile_name=profile_name,
                     created_by=created_by,
                 )
                 db.add(session)
                 db.flush()
                 logger.info(
                     "Auto-created session for chat request",
-                    extra={"session_id": session_id, "profile_id": profile_id},
-                )
-            elif session.profile_id is None and profile_id is not None:
-                # Update profile for existing session without one
-                session.profile_id = profile_id
-                session.profile_name = profile_name
-                logger.info(
-                    "Updated session profile on chat request",
-                    extra={"session_id": session_id, "profile_id": profile_id},
+                    extra={"session_id": session_id},
                 )
 
             chat_request = ChatRequest(
@@ -1932,35 +1797,6 @@ class SessionManager:
                 )
 
             return count
-
-    @staticmethod
-    def _is_profile_deleted(db: Session, profile_id: Optional[int]) -> bool:
-        """Check if a profile has been soft-deleted or no longer exists."""
-        if profile_id is None:
-            return False
-        from src.database.models import ConfigProfile
-        profile = db.query(ConfigProfile).filter_by(id=profile_id).first()
-        if profile is None:
-            return True
-        return bool(profile.is_deleted)
-
-    @staticmethod
-    def _get_deleted_profile_ids(db: Session, profile_ids: List[int]) -> set:
-        """Return the subset of profile_ids that are deleted or missing."""
-        if not profile_ids:
-            return set()
-        from src.database.models import ConfigProfile
-        unique_ids = set(profile_ids)
-        active_profiles = (
-            db.query(ConfigProfile.id)
-            .filter(
-                ConfigProfile.id.in_(unique_ids),
-                ConfigProfile.is_deleted == False,  # noqa: E712
-            )
-            .all()
-        )
-        active_ids = {row[0] for row in active_profiles}
-        return unique_ids - active_ids
 
     def _get_session_or_raise(self, db: Session, session_id: str) -> UserSession:
         """Get session by ID or raise error.

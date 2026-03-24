@@ -125,7 +125,6 @@ def mock_session_manager(test_db):
             "id": 1,
             "session_id": "test-123",
             "created_by": "test@local.dev",
-            "profile_id": None,
             "is_contributor_session": False,
             "parent_session_internal_id": None,
         }
@@ -152,8 +151,6 @@ class TestChatEndpoints:
             "created_by": "test-user",
             "title": "Session 2026-03-18 12:00",
             "created_at": "2026-03-18T12:00:00",
-            "profile_id": None,
-            "profile_name": None,
         }
         mock_chat_service.send_message.return_value = {
             "messages": [],
@@ -186,8 +183,6 @@ class TestChatEndpoints:
             "created_by": "test-user",
             "title": "Session 2026-03-18 12:00",
             "created_at": "2026-03-18T12:00:00",
-            "profile_id": None,
-            "profile_name": None,
         }
         mock_chat_service.send_message.return_value = {
             "messages": [],
@@ -680,7 +675,6 @@ class TestSessionEndpoints:
             "session_id": "test-123",
             "title": "Test Session",
             "created_by": "test@local.dev",  # Required for permission check
-            "profile_id": None,
             "is_contributor_session": False,
             "parent_session_internal_id": None,
         }

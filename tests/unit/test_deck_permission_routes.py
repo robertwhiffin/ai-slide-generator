@@ -405,11 +405,11 @@ class TestMentionableUsers:
         assert result["is_global"] is False
 
     def test_no_profile_dependency(self, db, owner_session, deck_contributor_edit):
-        """Mentionable users should work even when session has no profile_id."""
+        """Mentionable users should work without profile_id on UserSession."""
         from src.api.services.session_manager import SessionManager
 
-        # Verify owner_session has no profile_id
-        assert owner_session.profile_id is None
+        # profile_id has been removed from UserSession model
+        assert "profile_id" not in [c.name for c in owner_session.__table__.columns]
 
         sm = SessionManager()
 
