@@ -20,9 +20,9 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/profiles/{profile_id}/contributors", tags=["contributors"])
 
 
-def get_permission_service(db: Session = Depends(get_db)) -> PermissionService:
+def get_permission_service() -> PermissionService:
     """Dependency to get PermissionService."""
-    return PermissionService(db)
+    return PermissionService()
 
 
 # Request/Response models
@@ -154,7 +154,7 @@ def list_contributors(
         List of contributors with their permissions
     """
     # Check permission first
-    perm_service.require_view(profile_id)
+    perm_service.require_use_profile(db, profile_id)
     
     _get_profile_or_404(db, profile_id)
     
@@ -211,7 +211,7 @@ def add_contributor(
         409: Contributor already exists
     """
     # Check permission first
-    perm_service.require_edit(profile_id)
+    perm_service.require_edit_profile(db, profile_id)
     
     _get_profile_or_404(db, profile_id)
     
@@ -293,7 +293,7 @@ def add_contributors_bulk(
         List of created contributors (skips duplicates)
     """
     # Check permission first
-    perm_service.require_edit(profile_id)
+    perm_service.require_edit_profile(db, profile_id)
     
     _get_profile_or_404(db, profile_id)
     
@@ -380,7 +380,7 @@ def update_contributor(
         Updated contributor
     """
     # Check permission first
-    perm_service.require_edit(profile_id)
+    perm_service.require_edit_profile(db, profile_id)
     
     _get_profile_or_404(db, profile_id)
     
@@ -442,7 +442,7 @@ def remove_contributor(
         contributor_id: Contributor ID
     """
     # Check permission first
-    perm_service.require_edit(profile_id)
+    perm_service.require_edit_profile(db, profile_id)
     
     _get_profile_or_404(db, profile_id)
     

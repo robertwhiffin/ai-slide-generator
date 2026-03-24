@@ -52,8 +52,9 @@ class ProfileService:
         if not ctx:
             return []
         
-        perm_service = PermissionService(self.db)
+        perm_service = PermissionService()
         return perm_service.get_profiles_with_permissions(
+            self.db,
             user_id=ctx.user_id,
             user_name=ctx.user_name,
             group_ids=ctx.group_ids,

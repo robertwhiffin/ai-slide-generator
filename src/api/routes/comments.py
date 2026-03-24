@@ -206,7 +206,7 @@ async def delete_comment(comment_id: int):
                 session = db.query(UserSession).filter(UserSession.id == comment.session_id).first()
                 if session and session.profile_id:
                     perm_service = PermissionService()
-                    is_manager = perm_service.can_manage(session.profile_id)
+                    is_manager = perm_service.can_manage_profile(db, session.profile_id)
     except Exception as e:
         logger.warning(f"Could not check manager permission for comment delete: {e}")
 

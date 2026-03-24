@@ -70,8 +70,9 @@ def _get_session_permission(
     # For contributor sessions (or non-creator access), use profile permission
     profile_id = session_info.get("profile_id")
     if profile_id and ctx:
-        perm_service = PermissionService(db)
-        permission = perm_service.get_user_permission(
+        perm_service = PermissionService()
+        permission = perm_service.get_profile_permission(
+            db,
             profile_id=profile_id,
             user_id=ctx.user_id,
             user_name=ctx.user_name,
@@ -79,7 +80,7 @@ def _get_session_permission(
         )
         if permission:
             return True, permission
-    
+
     # Fallback: contributor session creator can at least view
     if is_contributor and session_info.get("created_by") == current_user:
         return True, PermissionLevel.CAN_VIEW
@@ -251,8 +252,9 @@ async def list_shared_presentations(
         return {"presentations": [], "count": 0}
 
     try:
-        perm_service = PermissionService(db)
+        perm_service = PermissionService()
         accessible_profile_ids = perm_service.get_accessible_profile_ids(
+            db,
             user_id=ctx.user_id,
             user_name=ctx.user_name,
             group_ids=ctx.group_ids,
@@ -277,7 +279,8 @@ async def list_shared_presentations(
             profile_id = session.get("profile_id")
             permission = None
             if profile_id:
-                permission = perm_service.get_user_permission(
+                permission = perm_service.get_profile_permission(
+                    db,
                     profile_id=profile_id,
                     user_id=ctx.user_id,
                     user_name=ctx.user_name,
