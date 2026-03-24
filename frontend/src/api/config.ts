@@ -12,10 +12,11 @@ const API_BASE_URL = import.meta.env.VITE_API_URL || (
 
 const API_BASE = `${API_BASE_URL}/api/settings`;
 const PROFILES_API_BASE = `${API_BASE_URL}/api/profiles`;
+const SESSIONS_API_BASE = `${API_BASE_URL}/api/sessions`;
 
 // Types
 
-export type PermissionLevel = 'CAN_MANAGE' | 'CAN_EDIT' | 'CAN_VIEW';
+export type PermissionLevel = 'CAN_MANAGE' | 'CAN_EDIT' | 'CAN_VIEW' | 'CAN_USE';
 
 export interface Profile {
   id: number;
@@ -585,6 +586,46 @@ export const configApi = {
    */
   removeContributor: (profileId: number, contributorId: number): Promise<void> =>
     fetchJson(`${API_BASE}/profiles/${profileId}/contributors/${contributorId}`, {
+      method: 'DELETE',
+    }),
+
+  // Deck Contributors (Sharing)
+
+  /**
+   * List contributors for a deck (session).
+   */
+  listDeckContributors: (sessionId: string): Promise<ContributorListResponse> =>
+    fetchJson(`${SESSIONS_API_BASE}/${sessionId}/contributors`),
+
+  /**
+   * Add a contributor to a deck (session).
+   */
+  addDeckContributor: (sessionId: string, data: ContributorCreate): Promise<Contributor> =>
+    fetchJson(`${SESSIONS_API_BASE}/${sessionId}/contributors`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(data),
+    }),
+
+  /**
+   * Update a deck contributor's permission level.
+   */
+  updateDeckContributor: (
+    sessionId: string,
+    contributorId: number,
+    data: { permission_level: string }
+  ): Promise<Contributor> =>
+    fetchJson(`${SESSIONS_API_BASE}/${sessionId}/contributors/${contributorId}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(data),
+    }),
+
+  /**
+   * Remove a contributor from a deck (session).
+   */
+  removeDeckContributor: (sessionId: string, contributorId: number): Promise<void> =>
+    fetchJson(`${SESSIONS_API_BASE}/${sessionId}/contributors/${contributorId}`, {
       method: 'DELETE',
     }),
 };

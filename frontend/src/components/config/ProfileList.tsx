@@ -7,13 +7,14 @@
  */
 
 import React, { useEffect, useState } from 'react';
-import { User, ChevronDown, Trash2, Pencil, MessageSquare, Palette, FileText, Wrench } from 'lucide-react';
+import { User, ChevronDown, Trash2, Pencil, Share2, MessageSquare, Palette, FileText, Wrench } from 'lucide-react';
 import { Button } from '@/ui/button';
 import { Badge } from '@/ui/badge';
 import type { Profile } from '../../api/config';
 import { configApi } from '../../api/config';
 import { useProfiles } from '../../hooks/useProfiles';
 import { ConfirmDialog } from './ConfirmDialog';
+import { ContributorsManager } from './ContributorsManager';
 
 interface ToolEntry {
   type: 'genie' | 'mcp';
@@ -153,6 +154,7 @@ export const ProfileList: React.FC = () => {
   });
   const [actionLoading, setActionLoading] = useState<number | null>(null);
   const [expandedId, setExpandedId] = useState<number | null>(null);
+  const [sharingProfileId, setSharingProfileId] = useState<number | null>(null);
   const [nameLookups, setNameLookups] = useState<NameLookups>({
     slideStyles: new Map(),
     deckPrompts: new Map(),
@@ -406,15 +408,26 @@ export const ProfileList: React.FC = () => {
                       {/* Action Buttons */}
                       {renamingId !== profile.id && (
                         <div className="flex flex-wrap gap-2">
+                          {(!profile.my_permission || profile.my_permission === 'CAN_EDIT' || profile.my_permission === 'CAN_MANAGE') && (
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              onClick={() => handleRenameClick(profile)}
+                              disabled={actionLoading === profile.id}
+                              className="gap-1.5"
+                            >
+                              <Pencil className="size-3.5" />
+                              Rename
+                            </Button>
+                          )}
                           <Button
                             variant="outline"
                             size="sm"
-                            onClick={() => handleRenameClick(profile)}
-                            disabled={actionLoading === profile.id}
+                            onClick={() => setSharingProfileId(profile.id)}
                             className="gap-1.5"
                           >
-                            <Pencil className="size-3.5" />
-                            Rename
+                            <Share2 className="size-3.5" />
+                            Share
                           </Button>
                         </div>
                       )}
@@ -424,6 +437,37 @@ export const ProfileList: React.FC = () => {
               </div>
             </div>
           ))}
+        </div>
+      )}
+
+      {/* Share Profile Dialog */}
+      {sharingProfileId != null && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm">
+          <div className="w-full max-w-lg mx-4 rounded-lg border border-border bg-card shadow-lg max-h-[80vh] flex flex-col">
+            <div className="flex items-center justify-between border-b border-border px-6 py-4">
+              <h2 className="text-lg font-semibold text-foreground">
+                Share Profile
+              </h2>
+              <button
+                onClick={() => setSharingProfileId(null)}
+                className="text-muted-foreground hover:text-foreground transition-colors"
+              >
+                ✕
+              </button>
+            </div>
+            <div className="flex-1 overflow-y-auto px-6 py-4">
+              <ContributorsManager
+                profileId={sharingProfileId}
+                globalPermission={profiles.find(p => p.id === sharingProfileId)?.global_permission}
+                canManage={
+                  (() => {
+                    const prof = profiles.find(p => p.id === sharingProfileId);
+                    return !prof?.my_permission || prof.my_permission === 'CAN_MANAGE';
+                  })()
+                }
+              />
+            </div>
+          </div>
         </div>
       )}
 
