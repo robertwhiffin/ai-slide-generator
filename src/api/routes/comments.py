@@ -29,6 +29,47 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/comments", tags=["comments"])
 
 
+def _require_comment_edit_permission(comment_id: int, db: Session) -> None:
+    """Require CAN_EDIT deck permission for operations on a comment.
+
+    Resolves the comment -> session -> root session, then checks
+    DeckContributor for at least CAN_EDIT.
+
+    Args:
+        comment_id: Comment to check
+        db: Database session
+
+    Raises:
+        HTTPException 403: If user doesn't have edit permission
+        HTTPException 404: If comment not found
+    """
+    from src.database.models.slide_comment import SlideComment
+    from src.database.models.session import UserSession
+    from src.services.permission_service import get_permission_service
+    from src.core.permission_context import get_permission_context
+
+    comment = db.query(SlideComment).filter(SlideComment.id == comment_id).first()
+    if not comment:
+        raise HTTPException(status_code=404, detail="Comment not found")
+
+    session = db.query(UserSession).filter(UserSession.id == comment.session_id).first()
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    root_id = session.parent_session_id if session.parent_session_id else session.id
+    perm_service = get_permission_service()
+    ctx = get_permission_context()
+    if not ctx:
+        raise HTTPException(status_code=403, detail="Authentication required")
+
+    perm_service.require_edit_deck(
+        db, root_id,
+        user_id=ctx.user_id,
+        user_name=ctx.user_name,
+        group_ids=ctx.group_ids,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Request / response schemas
 # ---------------------------------------------------------------------------
@@ -192,21 +233,31 @@ async def delete_comment(comment_id: int):
 
     session_manager = get_session_manager()
 
-    # Determine if user has CAN_MANAGE on this comment's profile
+    # Determine if user has CAN_MANAGE on this comment's deck
     is_manager = False
     try:
         from src.database.models.slide_comment import SlideComment
         from src.database.models.session import UserSession
-        from src.services.permission_service import PermissionService
+        from src.services.permission_service import get_permission_service
+        from src.core.permission_context import get_permission_context
         from src.core.database import get_db_session
 
         with get_db_session() as db:
             comment = db.query(SlideComment).filter(SlideComment.id == comment_id).first()
             if comment:
                 session = db.query(UserSession).filter(UserSession.id == comment.session_id).first()
-                if session and session.profile_id:
-                    perm_service = PermissionService()
-                    is_manager = perm_service.can_manage_profile(db, session.profile_id)
+                if session:
+                    # Resolve to root session for deck permission check
+                    root_id = session.parent_session_id if session.parent_session_id else session.id
+                    perm_service = get_permission_service()
+                    ctx = get_permission_context()
+                    if ctx:
+                        is_manager = perm_service.can_manage_deck(
+                            db, root_id,
+                            user_id=ctx.user_id,
+                            user_name=ctx.user_name,
+                            group_ids=ctx.group_ids,
+                        )
     except Exception as e:
         logger.warning(f"Could not check manager permission for comment delete: {e}")
 
@@ -228,11 +279,14 @@ async def delete_comment(comment_id: int):
 
 
 @router.post("/{comment_id}/resolve")
-async def resolve_comment(comment_id: int):
-    """Mark a comment as resolved."""
+async def resolve_comment(comment_id: int, db: Session = Depends(get_db)):
+    """Mark a comment as resolved. Requires CAN_EDIT on the deck."""
     current_user = get_current_user()
     if not current_user:
         raise HTTPException(status_code=401, detail="Authentication required")
+
+    # Check deck-level edit permission
+    _require_comment_edit_permission(comment_id, db)
 
     session_manager = get_session_manager()
     try:
@@ -250,11 +304,14 @@ async def resolve_comment(comment_id: int):
 
 
 @router.post("/{comment_id}/unresolve")
-async def unresolve_comment(comment_id: int):
-    """Re-open a resolved comment."""
+async def unresolve_comment(comment_id: int, db: Session = Depends(get_db)):
+    """Re-open a resolved comment. Requires CAN_EDIT on the deck."""
     current_user = get_current_user()
     if not current_user:
         raise HTTPException(status_code=401, detail="Authentication required")
+
+    # Check deck-level edit permission
+    _require_comment_edit_permission(comment_id, db)
 
     session_manager = get_session_manager()
     try:

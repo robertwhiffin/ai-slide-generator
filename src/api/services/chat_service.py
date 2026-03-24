@@ -295,32 +295,17 @@ class ChatService:
 
         # Get or create session in database (auto-create on first message)
         session_manager = get_session_manager()
-        
-        # Prefer profile info passed from the frontend; fall back to
-        # server-side settings only when not provided.
-        if profile_id is None:
-            from src.core.settings_db import get_settings
-            settings = get_settings()
-            profile_id = getattr(settings, 'profile_id', None)
-            profile_name = getattr(settings, 'profile_name', None)
-        
+
         try:
             db_session = session_manager.get_session(session_id)
-            # Update profile for existing session without one
-            if db_session.get("profile_id") is None and profile_id is not None:
-                session_manager.set_session_profile(session_id, profile_id, profile_name)
-                db_session["profile_id"] = profile_id
-                db_session["profile_name"] = profile_name
         except SessionNotFoundError:
             # Auto-create session on first message
             db_session = session_manager.create_session(
                 session_id=session_id,
-                profile_id=profile_id,
-                profile_name=profile_name,
             )
             logger.info(
                 "Auto-created session on first message",
-                extra={"session_id": session_id, "profile_id": profile_id},
+                extra={"session_id": session_id},
             )
 
         # Build per-request agent from session's agent_config
@@ -719,31 +704,20 @@ class ChatService:
 
         # Get or create session in database
         session_manager = get_session_manager()
-        
-        # Prefer profile info passed from the frontend; fall back to
-        # server-side settings only when not provided.
-        if profile_id is None:
-            from src.core.settings_db import get_settings
-            settings = get_settings()
-            profile_id = getattr(settings, 'profile_id', None)
-            profile_name = getattr(settings, 'profile_name', None)
-        
+
+        # Load settings for LLM endpoint (used by run_title_gen below)
+        from src.core.settings_db import get_settings
+        settings = get_settings()
+
         try:
             db_session = session_manager.get_session(session_id)
-            # Update profile for existing session without one
-            if db_session.get("profile_id") is None and profile_id is not None:
-                session_manager.set_session_profile(session_id, profile_id, profile_name)
-                db_session["profile_id"] = profile_id
-                db_session["profile_name"] = profile_name
         except SessionNotFoundError:
             db_session = session_manager.create_session(
                 session_id=session_id,
-                profile_id=profile_id,
-                profile_name=profile_name,
             )
             logger.info(
                 "Auto-created session on first streaming message",
-                extra={"session_id": session_id, "profile_id": profile_id},
+                extra={"session_id": session_id},
             )
 
         # Capture first-message flag BEFORE add_message increments the count.

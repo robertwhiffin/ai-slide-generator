@@ -165,6 +165,7 @@ class SessionManager:
                     deck_owner = parent
 
             return {
+                "id": session.id,
                 "session_id": session.session_id,
                 "user_id": session.user_id,
                 "created_by": session.created_by,
@@ -184,6 +185,7 @@ class SessionManager:
                 "profile_deleted": profile_deleted,
                 "is_contributor_session": session.is_contributor_session,
                 "parent_session_id": parent_session_id_str,
+                "parent_session_internal_id": session.parent_session_id,
             }
 
     def get_or_create_contributor_session(
@@ -229,8 +231,6 @@ class SessionManager:
                     "title": parent.title,
                     "parent_session_id": parent.session_id,
                     "is_contributor_session": True,
-                    "profile_id": parent.profile_id,
-                    "profile_name": parent.profile_name,
                     "created_at": existing.created_at.isoformat(),
                 }
 
@@ -239,8 +239,6 @@ class SessionManager:
                 created_by=created_by,
                 title=parent.title,
                 parent_session_id=parent.id,
-                profile_id=parent.profile_id,
-                profile_name=parent.profile_name,
             )
             db.add(contributor)
             db.flush()
@@ -260,8 +258,6 @@ class SessionManager:
                 "title": parent.title,
                 "parent_session_id": parent.session_id,
                 "is_contributor_session": True,
-                "profile_id": parent.profile_id,
-                "profile_name": parent.profile_name,
                 "created_at": contributor.created_at.isoformat(),
             }
 
@@ -2228,12 +2224,13 @@ class SessionManager:
         Each entry has ``username`` (email) and ``display_name``
         (SCIM displayName, falling back to the email if absent).
 
-        When *query* is provided and the profile is globally shared,
-        only the SCIM search results are returned (fast path — skips
-        contributor resolution since the frontend already has them).
+        When *query* is provided, searches the workspace via SCIM
+        (fast path — skips contributor resolution since the frontend
+        already has them).
+
+        Uses DeckContributor for contributor resolution (not profile contributors).
         """
-        from src.database.models.profile import ConfigProfile
-        from src.database.models.profile_contributor import ConfigProfileContributor
+        from src.database.models.deck_contributor import DeckContributor
         from src.services.identity_provider import resolve_display_name
 
         with get_db_session() as db:
@@ -2246,13 +2243,8 @@ class SessionManager:
             except Exception:
                 provider = None
 
-            is_global = False
-            if deck_owner.profile_id:
-                profile = db.query(ConfigProfile).filter(ConfigProfile.id == deck_owner.profile_id).first()
-                is_global = bool(profile and profile.global_permission)
-
-            # Fast path: search query on a global profile → SCIM only
-            if query and is_global and provider:
+            # Fast path: search query → SCIM only
+            if query and provider:
                 results: List[Dict[str, str]] = []
                 try:
                     workspace_users = provider.list_users(filter_query=query, max_results=15)
@@ -2262,9 +2254,9 @@ class SessionManager:
                             results.append({"username": email, "display_name": wu.get("displayName") or email})
                 except Exception:
                     logger.warning("Failed to search workspace users for mentions", exc_info=True)
-                return {"users": results, "is_global": True}
+                return {"users": results, "is_global": False}
 
-            # Initial load: owner + explicit contributors
+            # Initial load: owner + deck contributors
             seen: set[str] = set()
             result: List[Dict[str, str]] = []
 
@@ -2273,36 +2265,36 @@ class SessionManager:
                 seen.add(email)
                 result.append({"username": email, "display_name": resolve_display_name(email)})
 
-            if deck_owner.profile_id:
-                contributors = (
-                    db.query(
-                        ConfigProfileContributor.identity_id,
-                        ConfigProfileContributor.identity_name,
-                        ConfigProfileContributor.identity_type,
-                    )
-                    .filter(ConfigProfileContributor.profile_id == deck_owner.profile_id)
-                    .all()
+            # Query DeckContributor for this deck's contributors
+            contributors = (
+                db.query(
+                    DeckContributor.identity_id,
+                    DeckContributor.identity_name,
+                    DeckContributor.identity_type,
                 )
+                .filter(DeckContributor.user_session_id == deck_owner.id)
+                .all()
+            )
 
-                for identity_id, identity_name, identity_type in contributors:
-                    if identity_type != "USER":
-                        continue
-                    email = None
-                    if provider:
-                        try:
-                            user_info = provider.get_user_by_id(identity_id)
-                            if user_info:
-                                email = user_info.get("userName")
-                        except Exception:
-                            pass
-                    if not email and identity_name and "@" in identity_name:
-                        email = identity_name
-                    if email and email not in seen:
-                        seen.add(email)
-                        result.append({"username": email, "display_name": resolve_display_name(email)})
+            for identity_id, identity_name, identity_type in contributors:
+                if identity_type != "USER":
+                    continue
+                email = None
+                if provider:
+                    try:
+                        user_info = provider.get_user_by_id(identity_id)
+                        if user_info:
+                            email = user_info.get("userName")
+                    except Exception:
+                        pass
+                if not email and identity_name and "@" in identity_name:
+                    email = identity_name
+                if email and email not in seen:
+                    seen.add(email)
+                    result.append({"username": email, "display_name": resolve_display_name(email)})
 
             result.sort(key=lambda u: u["display_name"])
-            return {"users": result, "is_global": is_global}
+            return {"users": result, "is_global": False}
 
     def _get_session_id_str(self, db, internal_id: int) -> Optional[str]:
         """Resolve internal DB id to the external session_id string."""
