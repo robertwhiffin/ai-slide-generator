@@ -212,7 +212,6 @@ test.describe('SessionHistoryList', () => {
     await expect(page.getByRole('columnheader', { name: /Session Name/i })).toBeVisible();
     await expect(page.getByRole('columnheader', { name: /Created/i })).toBeVisible();
     await expect(page.getByRole('columnheader', { name: /Last Activity/i })).toBeVisible();
-    await expect(page.getByRole('columnheader', { name: /Slides/i })).toBeVisible();
     await expect(page.getByRole('columnheader', { name: /Actions/i })).toBeVisible();
   });
 
@@ -224,12 +223,12 @@ test.describe('SessionHistoryList', () => {
     await expect(page.getByText('Marketing Reports').first()).toBeVisible();
   });
 
-  test('shows slides badge for sessions with slides', async ({ page }) => {
+  test('only shows sessions with slide decks', async ({ page }) => {
     await goToHistory(page);
 
-    // Sessions with slides should show "Yes" badge
-    const yesCount = await page.getByText('Yes').count();
-    expect(yesCount).toBeGreaterThan(0);
+    // All visible sessions should have an Open button (no deck = filtered out)
+    const openCount = await page.getByRole('button', { name: 'Open' }).count();
+    expect(openCount).toBeGreaterThan(0);
   });
 
   test('shows action buttons per session', async ({ page }) => {
