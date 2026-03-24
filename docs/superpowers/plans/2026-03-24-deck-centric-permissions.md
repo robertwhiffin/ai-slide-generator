@@ -10,7 +10,7 @@
 
 **Spec:** `docs/superpowers/specs/2026-03-24-deck-centric-permissions-design.md`
 
-**Task ordering:** 1 (model) → 2 (migration) → 4 (PermissionService) → 5 (session routes) → 6 (chat + session manager + comments + slides) → 3 (remove columns) → 7-9 (new routes) → 10-13 (frontend) → 14-15 (docs + validation). The new permission infrastructure must be in place before removing the old columns to avoid a broken intermediate state.
+**Task ordering:** 1 (model) → 2 (migration) → 4 (PermissionService) → 5 (session routes) → 6 (chat + session manager + comments + slides) → 6b (security: missing permission checks) → 3 (remove columns) → 7-9 (new routes) → 10-13 (frontend) → 14-15 (docs + validation). The new permission infrastructure must be in place before removing the old columns to avoid a broken intermediate state.
 
 **PermissionService constructor note:** The current `PermissionService.__init__` takes `db: Session`. This plan changes to a stateless constructor (no `db`), with `db` passed per-method call. All callers need updating (Task 4, Step 5). The factory `get_permission_service()` also changes to take no args.
 
@@ -164,6 +164,7 @@ class DeckContributor(Base):
     identity_name = Column(String(255), nullable=False)  # email or group name
     permission_level = Column(String(20), nullable=False)
     created_by = Column(String(255), nullable=True)
+    # Note: match whatever datetime pattern existing models use (datetime.utcnow or datetime.now(timezone.utc))
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
 
@@ -737,7 +738,7 @@ from fastapi.testclient import TestClient
 from src.core.database import Base, get_db
 from src.database.models.session import UserSession
 from src.database.models.deck_contributor import DeckContributor
-from src.main import app
+from src.api.main import app
 
 
 @pytest.fixture(scope="function")
@@ -911,12 +912,25 @@ git commit -m "feat: session routes use deck_contributors for permission checks"
 
 **Files:**
 - Modify: `src/api/routes/chat.py:76-136` (`_check_chat_permission` update)
+- Modify: `src/api/routes/chat.py:498-511` (`submit_chat_async` — remove profile_id/profile_name from `create_chat_request`)
 - Modify: `src/api/routes/comments.py:207-209` (permission check update)
-- Modify: `src/api/routes/slides.py:69` (permission check update)
+- Modify: `src/api/routes/comments.py` (add `require_view_deck` to `list_comments`, `add_comment`, `mentionable_users`, `list_mentions`)
+- Modify: `src/api/routes/comments.py` (add `require_edit_deck` to `resolve_comment`, `unresolve_comment`)
+- Modify: `src/api/routes/slides.py:34-84` (**full rewrite** of `_get_session_permission` — this is a parallel copy, not the same function as sessions.py)
+- Modify: `src/api/routes/slides.py` (per-action permission thresholds: CAN_EDIT for edit/reorder/duplicate, CAN_MANAGE for delete)
 - Modify: `src/api/services/session_manager.py:369-433` (remove `list_sessions_by_profile_ids`)
 - Modify: `src/api/services/session_manager.py:2221-2305` (`get_mentionable_users` update)
-- Modify: `src/api/services/session_manager.py:63-137` (`create_session` — remove profile_id)
+- Modify: `src/api/services/session_manager.py:63-137` (`create_session` — remove profile_id/profile_name params)
+- Modify: `src/api/services/session_manager.py` (`get_or_create_contributor_session` — remove profile_id/profile_name copy from parent)
+- Modify: `src/api/services/session_manager.py` (`create_chat_request` — remove profile_id/profile_name from settings)
+- Modify: `src/api/services/chat_service.py` or equivalent (`set_session_profile` — remove or gut this method, it backfills profile_id/profile_name on UserSession)
 - Test: `tests/unit/test_chat_deck_permissions.py`
+
+**Important notes for subagent:**
+- `slides.py` has its OWN `_get_session_permission` (lines 34-84) with a different signature (`session_id: str`) than `sessions.py` (`session_info: dict`). This is a **complete parallel implementation** that needs a full rewrite to use `get_deck_permission`. Consider consolidating into a shared helper or rewriting inline.
+- `slides.py` needs **per-action permission thresholds**: slide edit/reorder/duplicate endpoints require CAN_EDIT, slide delete requires CAN_MANAGE. The current helper uses a single threshold — the new implementation must pass the correct threshold per endpoint.
+- `comments.py` line 207 has a pre-existing bug (`PermissionService()` called without `db`, exception silently swallowed). There is no working behavior to regress against — tests should verify the new correct behavior.
+- `chat_service.py` has a `set_session_profile` method that writes `profile_id`/`profile_name` back to `UserSession` during chat. This will crash after the column drop. Remove or gut this method.
 
 - [ ] **Step 1: Write tests for chat and comment permission checks**
 
@@ -1028,11 +1042,47 @@ git commit -m "refactor: update chat/comments/slides permissions and session man
 
 ---
 
+### Task 6b: Add Missing Permission Checks to Existing Endpoints
+
+All of these endpoints currently have no caller permission check and must be gated now that we have deck-level permissions.
+
+**Files:**
+- Modify: `src/api/routes/sessions.py:650-678` (`get_session_slides` — add `require_view_deck`)
+- Modify: `src/api/routes/sessions.py:785-858` (editing lock endpoints — add `require_edit_deck` for acquire/heartbeat, `require_view_deck` for status)
+- Modify: `src/api/routes/sessions.py:705-777` (export endpoint — add `require_view_deck`)
+- Modify: `src/api/routes/comments.py` (`list_comments`, `add_comment`, `mentionable_users`, `list_mentions` — add `require_view_deck`)
+- Modify: `src/api/routes/comments.py` (`resolve_comment`, `unresolve_comment` — add `require_edit_deck` per spec permission table)
+- Modify: `src/api/routes/profiles.py:83-131` (`save_from_session` — add authorization check that caller can access the source session)
+
+- [ ] **Step 1: Add `require_view_deck` to slides, export, and comment read endpoints**
+
+For each endpoint, resolve the root session ID (following `parent_session_id` if contributor session) and call `perm_service.require_view_deck(db, root_session_id, ...)`.
+
+- [ ] **Step 2: Add `require_edit_deck` to editing lock acquire/heartbeat and comment resolve/unresolve**
+
+- [ ] **Step 3: Add session access check to `save_from_session`**
+
+The caller must be the session creator or have deck access to extract agent config from a session. Add a check that `current_user == session.created_by` or `get_deck_permission` returns non-None.
+
+- [ ] **Step 4: Run full test suite**
+
+Run: `cd /Users/robert.whiffin/Documents/slide-generator/ai-slide-generator && python -m pytest tests/ -x --timeout=60 -q`
+Expected: PASS
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add -A
+git commit -m "security: add missing permission checks to slides, lock, export, and comment endpoints"
+```
+
+---
+
 ### Task 7: Deck Contributor CRUD Routes
 
 **Files:**
 - Create: `src/api/routes/deck_contributors.py`
-- Modify: `src/main.py` or router registration (add new routes)
+- Modify: `src/api/main.py` (register new router)
 - Test: `tests/unit/test_deck_contributor_routes.py`
 
 - [ ] **Step 1: Write failing tests for deck contributor CRUD**
@@ -1049,7 +1099,7 @@ from fastapi.testclient import TestClient
 from src.core.database import Base, get_db
 from src.database.models.session import UserSession
 from src.database.models.deck_contributor import DeckContributor
-from src.main import app
+from src.api.main import app
 
 
 @pytest.fixture(scope="function")
@@ -1150,6 +1200,46 @@ class TestAddDeckContributor:
                     },
                 )
         assert resp.status_code == 403
+
+
+class TestDeckContributorEdgeCases:
+    def test_unknown_user_gets_403(self, client, owner_session):
+        """Zero access user cannot hit contributor endpoints."""
+        with patch("src.api.routes.deck_contributors.get_current_user", return_value="stranger@test.com"):
+            with patch("src.api.routes.deck_contributors.get_permission_context", return_value=MagicMock(
+                user_id="stranger-id", user_name="stranger@test.com", group_ids=[],
+            )):
+                resp = client.get(f"/api/sessions/{owner_session.session_id}/contributors")
+        assert resp.status_code == 403
+
+    def test_cannot_add_creator_as_contributor(self, client, owner_session):
+        with _mock_owner_context()[0], _mock_owner_context()[1]:
+            resp = client.post(
+                f"/api/sessions/{owner_session.session_id}/contributors",
+                json={
+                    "identity_type": "USER", "identity_id": "owner-id",
+                    "identity_name": "owner@test.com", "permission_level": "CAN_EDIT",
+                },
+            )
+        assert resp.status_code == 400
+        assert "creator" in resp.json()["detail"].lower()
+
+    def test_overlapping_user_and_group_permissions(self, db_session, client, owner_session):
+        """User has direct CAN_VIEW and group CAN_EDIT — highest wins."""
+        db_session.add_all([
+            DeckContributor(
+                user_session_id=owner_session.id, identity_type="USER",
+                identity_id="u-multi", identity_name="multi@test.com",
+                permission_level="CAN_VIEW",
+            ),
+            DeckContributor(
+                user_session_id=owner_session.id, identity_type="GROUP",
+                identity_id="grp-editors", identity_name="Editors",
+                permission_level="CAN_EDIT",
+            ),
+        ])
+        db_session.commit()
+        # Verified via PermissionService in Task 4 tests, but ensure routes handle it
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -1204,7 +1294,8 @@ def _require_manage(db: DbSession, session: UserSession):
         db, session.id, user_id=perm_ctx.user_id,
         user_name=perm_ctx.user_name, group_ids=perm_ctx.group_ids,
     )
-    if perm is None or perm.value != "CAN_MANAGE":
+    if not perm_service.can_manage_deck(db, session.id, user_id=perm_ctx.user_id,
+                                       user_name=perm_ctx.user_name, group_ids=perm_ctx.group_ids):
         raise HTTPException(status_code=403, detail="Requires CAN_MANAGE on this deck")
 
 
@@ -1241,6 +1332,11 @@ def add_contributor(session_id: str, body: DeckContributorCreate, db: DbSession 
     valid_levels = {"CAN_VIEW", "CAN_EDIT", "CAN_MANAGE"}
     if body.permission_level not in valid_levels:
         raise HTTPException(status_code=400, detail=f"Invalid permission level. Must be one of: {valid_levels}")
+
+    # Prevent adding the session creator as a contributor
+    # (creators get CAN_MANAGE implicitly via the resolution algorithm)
+    if body.identity_name.lower() == session.created_by.lower():
+        raise HTTPException(status_code=400, detail="Cannot add the deck creator as a contributor — they already have full access")
 
     # Check for duplicate
     existing = db.query(DeckContributor).filter(
@@ -1312,7 +1408,8 @@ def remove_contributor(session_id: str, contributor_id: int, db: DbSession = Dep
     if not contrib:
         raise HTTPException(status_code=404, detail="Contributor not found")
 
-    # Creator protection: cannot remove the session creator
+    # Defense-in-depth: creators should never be in this table (blocked at add time),
+    # but guard against it anyway
     if contrib.identity_name.lower() == session.created_by.lower():
         raise HTTPException(status_code=400, detail="Cannot remove the deck creator")
 
@@ -1321,7 +1418,7 @@ def remove_contributor(session_id: str, contributor_id: int, db: DbSession = Dep
     return {"detail": "Contributor removed"}
 ```
 
-Register in the app router (e.g., `src/main.py` or wherever routes are registered).
+Register in the app router at `src/api/main.py` (NOT `src/main.py`).
 
 - [ ] **Step 4: Run tests**
 
@@ -1388,9 +1485,9 @@ git commit -m "refactor: update profile contributor routes to use CAN_USE and re
 - `delete_profile`: Add `require_manage_profile` check
 - `save_from_session`: No check needed — creator gets CAN_MANAGE automatically
 
-- [ ] **Step 2: Remove profile_id writes from save_from_session**
+- [ ] **Step 2: Verify save_from_session has no profile_id writes**
 
-The `save_from_session` endpoint currently writes `profile_id` back to the session. Remove this.
+Note: `save_from_session` does NOT write `profile_id` to sessions — that happens in `session_manager.create_session` and `chat_service.set_session_profile`, which are cleaned up in Task 6. No changes needed here.
 
 - [ ] **Step 3: Run tests**
 
@@ -1528,7 +1625,12 @@ Search for `profile_id` and `profile_name` in `frontend/src/` and remove or upda
 Run: `cd /Users/robert.whiffin/Documents/slide-generator/ai-slide-generator/frontend && npm run build`
 Expected: PASS — no TypeScript errors
 
-- [ ] **Step 3: Commit**
+- [ ] **Step 3: Run existing frontend tests**
+
+Run: `cd /Users/robert.whiffin/Documents/slide-generator/ai-slide-generator/frontend && npm test -- --watchAll=false`
+Expected: PASS — update any failing tests that reference profile_id/profile_name
+
+- [ ] **Step 4: Commit**
 
 ```bash
 git add frontend/src/
