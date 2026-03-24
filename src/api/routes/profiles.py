@@ -10,8 +10,10 @@ from pydantic import BaseModel, Field
 from src.api.schemas.agent_config import AgentConfig, GenieTool, resolve_agent_config
 from src.api.services.session_manager import SessionNotFoundError, get_session_manager
 from src.core.database import get_db_session
+from src.core.permission_context import get_permission_context
 from src.database.models.profile import ConfigProfile
 from src.database.models.session import UserSession
+from src.services.permission_service import get_permission_service
 
 logger = logging.getLogger(__name__)
 
@@ -89,6 +91,27 @@ async def save_from_session(session_id: str, body: SaveProfileRequest):
         session = mgr.get_session(session_id)
     except SessionNotFoundError:
         raise HTTPException(status_code=404, detail=f"Session not found: {session_id}")
+
+    # Permission check: caller must be session creator OR have deck access
+    perm_ctx = get_permission_context()
+    created_by = session.get("created_by")
+    is_creator = perm_ctx and perm_ctx.user_name and perm_ctx.user_name == created_by
+    if not is_creator:
+        # Check deck-level access
+        root_id = session.get("parent_session_internal_id") or session.get("id")
+        perm_service = get_permission_service()
+        with get_db_session() as db:
+            deck_perm = perm_service.get_deck_permission(
+                db, root_id,
+                user_id=perm_ctx.user_id if perm_ctx else None,
+                user_name=perm_ctx.user_name if perm_ctx else None,
+                group_ids=perm_ctx.group_ids if perm_ctx else None,
+            )
+        if deck_perm is None:
+            raise HTTPException(
+                status_code=403,
+                detail="You don't have permission to save a profile from this session",
+            )
 
     raw_config = session.get("agent_config")
     config = resolve_agent_config(raw_config)

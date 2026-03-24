@@ -94,11 +94,16 @@ def mock_chat_service():
 
 
 @pytest.fixture
-def mock_session_manager():
+def mock_session_manager(test_db):
     """Mock the session manager for route testing."""
+    from contextlib import contextmanager
     from src.core.permission_context import PermissionContext
 
     perm_ctx = PermissionContext(user_id="test-uid", user_name="test@local.dev")
+
+    @contextmanager
+    def _fake_db_session():
+        yield test_db
 
     with patch("src.api.routes.chat.get_session_manager") as mock_chat, \
          patch("src.api.routes.slides.get_session_manager") as mock_slides, \
@@ -109,7 +114,8 @@ def mock_session_manager():
          patch("src.api.routes.sessions.get_current_user", return_value="test@local.dev"), \
          patch("src.api.routes.chat.get_permission_context", return_value=perm_ctx), \
          patch("src.api.routes.slides.get_permission_context", return_value=perm_ctx), \
-         patch("src.api.routes.sessions.get_permission_context", return_value=perm_ctx):
+         patch("src.api.routes.sessions.get_permission_context", return_value=perm_ctx), \
+         patch("src.api.routes.sessions.get_db_session", _fake_db_session):
 
         manager = MagicMock()
         manager.acquire_session_lock.return_value = True
@@ -787,8 +793,12 @@ class TestSessionEndpoints:
     def test_export_session_success(self, client, mock_session_manager, tmp_path):
         """POST /api/sessions/{id}/export exports session data."""
         mock_session_manager.get_session.return_value = {
+            "id": 1,
             "session_id": "test-123",
-            "title": "Test"
+            "created_by": "test@local.dev",
+            "title": "Test",
+            "is_contributor_session": False,
+            "parent_session_internal_id": None,
         }
         mock_session_manager.get_messages.return_value = [
             {"role": "user", "content": "Hello"}
