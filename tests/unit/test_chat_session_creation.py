@@ -61,7 +61,14 @@ def client(test_db):
 
 
 @pytest.fixture
-def mock_session_manager():
+def mock_chat_permission():
+    """Bypass chat permission checks — these tests focus on session creation."""
+    with patch("src.api.routes.chat._check_chat_permission"):
+        yield
+
+
+@pytest.fixture
+def mock_session_manager(mock_chat_permission):
     """Mock the session manager for route testing."""
     with patch("src.api.routes.chat.get_session_manager") as mock_chat:
         with patch("src.api.routes.sessions.get_session_manager") as mock_sessions:
@@ -363,12 +370,12 @@ class TestChatAsyncSessionCreation:
 class TestCreateSessionRequest:
     """Tests for CreateSessionRequest schema changes."""
 
-    def test_create_session_request_has_no_profile_id(self):
-        """CreateSessionRequest should not have profile_id field."""
+    def test_create_session_request_profile_id_is_optional(self):
+        """CreateSessionRequest profile_id should be optional (defaults to None)."""
         from src.api.schemas.requests import CreateSessionRequest
 
-        # profile_id should not be a field
-        assert "profile_id" not in CreateSessionRequest.model_fields
+        req = CreateSessionRequest()
+        assert req.profile_id is None
 
 
 # ============================================

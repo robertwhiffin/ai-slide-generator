@@ -264,7 +264,15 @@ def test_backward_compatible_init():
 
     with patch("src.services.agent.get_settings") as mock_settings, \
          patch("src.services.agent.get_databricks_client") as mock_client:
-        mock_settings.return_value = MagicMock()
+        settings_mock = MagicMock()
+        settings_mock.prompts = {
+            "system_prompt": "You are a test assistant.",
+            "slide_style": "Default style",
+            "slide_editing_instructions": "Edit slides.",
+            "deck_prompt": "",
+            "image_guidelines": "",
+        }
+        mock_settings.return_value = settings_mock
         mock_client.return_value = MagicMock()
 
         agent = SlideGeneratorAgent()
