@@ -182,53 +182,8 @@ export const ProfileList: React.FC = () => {
   const [renameValue, setRenameValue] = useState('');
   const [renameError, setRenameError] = useState<string | null>(null);
 
-  // Fetch current username from Databricks on mount
-  useEffect(() => {
-    const fetchUsername = async () => {
-      try {
-        // Use environment-aware URL
-        const apiBase = import.meta.env.VITE_API_URL || (
-          import.meta.env.MODE === 'production' ? '' : 'http://localhost:8000'
-        );
-        const response = await fetch(`${apiBase}/api/user/current`);
-        if (response.ok) {
-          const data = await response.json();
-          setCurrentUsername(data.username || 'user');
-        }
-      } catch {
-        // Use default if fetch fails
-        setCurrentUsername('user');
-      }
-    };
-    fetchUsername();
-  }, []);
-
   const toggleExpand = (id: number) => {
     setExpandedId(expandedId === id ? null : id);
-  };
-
-  // Handle create profile - show wizard
-  const handleCreate = () => {
-    setShowCreationWizard(true);
-  };
-
-  // Handle wizard success
-  const handleWizardSuccess = async (profileId: number) => {
-    setShowCreationWizard(false);
-    try {
-      await loadProfile(profileId);
-      if (onProfileChange) {
-        onProfileChange();
-      }
-    } catch (err) {
-      console.error('Failed to load new profile:', err);
-    }
-  };
-
-  // Handle form submit (edit mode only - create uses wizard)
-  const handleFormSubmit = async () => {
-    setFormMode(null);
-    setEditingProfile(null);
   };
 
   // Handle delete with confirmation
