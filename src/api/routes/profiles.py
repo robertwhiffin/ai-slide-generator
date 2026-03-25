@@ -11,6 +11,7 @@ from src.api.schemas.agent_config import AgentConfig, GenieTool, resolve_agent_c
 from src.api.services.session_manager import SessionNotFoundError, get_session_manager
 from src.core.database import get_db_session
 from src.core.permission_context import get_permission_context
+from src.core.user_context import get_current_user
 from src.database.models.profile import ConfigProfile
 from src.database.models.session import UserSession
 from src.services.permission_service import get_permission_service
@@ -155,10 +156,12 @@ async def save_from_session(session_id: str, body: SaveProfileRequest):
                     detail=f"A profile with this configuration already exists: '{existing.name}'",
                 )
 
+        current_user = get_current_user()
         profile = ConfigProfile(
             name=body.name,
             description=body.description,
             agent_config=config_dict,
+            created_by=current_user,
         )
         db.add(profile)
         db.flush()  # get the id
