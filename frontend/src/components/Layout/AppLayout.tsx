@@ -102,6 +102,15 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
   // Main lock lifecycle: acquire on open, heartbeat, idle release, poll status
   useEffect(() => {
     if (!sessionId || initialView !== 'main') return;
+
+    // New session (no URL session ID) — not persisted to DB yet, so no lock needed.
+    // The user is the sole owner until the first message persists the session.
+    if (!urlSessionId) {
+      setIsLockHolder(true);
+      setEditingLockHolder(null);
+      return;
+    }
+
     const isViewer = false;
     let cancelled = false;
 
@@ -188,7 +197,7 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
         lockSessionRef.current = null;
       }
     };
-  }, [sessionId, initialView]);
+  }, [sessionId, initialView, urlSessionId]);
 
   // Release lock on page unload (tab close, refresh)
   useEffect(() => {
