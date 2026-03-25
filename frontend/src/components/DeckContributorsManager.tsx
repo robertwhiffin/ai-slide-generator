@@ -7,9 +7,10 @@
  */
 
 import React, { useState, useEffect, useCallback } from 'react';
-import { FiSearch, FiUser, FiUsers, FiTrash2, FiUserPlus } from 'react-icons/fi';
+import { FiSearch, FiUser, FiUsers, FiTrash2, FiUserPlus, FiLock } from 'react-icons/fi';
 import {
   configApi,
+  ConfigApiError,
   type Contributor,
   type ContributorCreate,
   type Identity,
@@ -29,11 +30,12 @@ interface DeckContributorsManagerProps {
 
 export const DeckContributorsManager: React.FC<DeckContributorsManagerProps> = ({
   sessionId,
-  canManage = true,
+  canManage: canManageProp,
 }) => {
   const [contributors, setContributors] = useState<Contributor[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [canManage, setCanManage] = useState(canManageProp ?? true);
 
   // Search state
   const [searchQuery, setSearchQuery] = useState('');
@@ -54,7 +56,11 @@ export const DeckContributorsManager: React.FC<DeckContributorsManagerProps> = (
       const response = await configApi.listDeckContributors(sessionId);
       setContributors(response.contributors);
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to load contributors');
+      if (err instanceof ConfigApiError && err.status === 403) {
+        setCanManage(false);
+      } else {
+        setError(err instanceof Error ? err.message : 'Failed to load contributors');
+      }
     } finally {
       setLoading(false);
     }
@@ -150,6 +156,27 @@ export const DeckContributorsManager: React.FC<DeckContributorsManagerProps> = (
         <div className="flex items-center gap-2 text-gray-600">
           <div className="w-5 h-5 border-2 border-blue-500 border-t-transparent rounded-full animate-spin" />
           Loading contributors...
+        </div>
+      </div>
+    );
+  }
+
+  if (!canManage) {
+    return (
+      <div className="space-y-4">
+        <div>
+          <h3 className="text-lg font-medium text-gray-900">Share Deck</h3>
+        </div>
+        <div className="bg-amber-50 border border-amber-200 rounded-md p-4 flex items-start gap-3">
+          <FiLock className="text-amber-600 mt-0.5 flex-shrink-0" size={18} />
+          <div>
+            <p className="text-sm font-medium text-amber-800">
+              You need the "Can Manage" permission to share this deck
+            </p>
+            <p className="text-sm text-amber-700 mt-1">
+              You currently have edit access. Ask the deck owner to grant you "Can Manage" permission to add or remove contributors.
+            </p>
+          </div>
         </div>
       </div>
     );
