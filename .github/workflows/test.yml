@@ -607,8 +607,6 @@ jobs:
                       session_id=str(uuid.uuid4()),
                       user_id='system',
                       title='Seeded Test Session',
-                      profile_id=profile.id,
-                      profile_name=profile.name
                   )
                   db.add(session)
                   db.commit()
