@@ -376,8 +376,6 @@ async def send_message_streaming(
                     if request.slide_context
                     else None,
                     image_ids=request.image_ids,
-                    profile_id=request.profile_id,
-                    profile_name=request.profile_name,
                 ):
                     event_queue.put(event)
             except Exception as e:
