@@ -203,20 +203,11 @@ test.describe('SessionHistoryList', () => {
   test('shows correct table columns', async ({ page }) => {
     await goToHistory(page);
 
-    // Check column headers
-    await expect(page.getByRole('columnheader', { name: /Profile/i })).toBeVisible();
+    // Check column headers (Profile column was removed in deck-centric permissions)
     await expect(page.getByRole('columnheader', { name: /Session Name/i })).toBeVisible();
     await expect(page.getByRole('columnheader', { name: /Created/i })).toBeVisible();
     await expect(page.getByRole('columnheader', { name: /Last Activity/i })).toBeVisible();
     await expect(page.getByRole('columnheader', { name: /Actions/i })).toBeVisible();
-  });
-
-  test('shows profile name in Profile column', async ({ page }) => {
-    await goToHistory(page);
-
-    // Profile names should be visible in the table
-    await expect(page.getByText('Sales Analytics').first()).toBeVisible();
-    await expect(page.getByText('Marketing Reports').first()).toBeVisible();
   });
 
   test('only shows sessions with slide decks', async ({ page }) => {

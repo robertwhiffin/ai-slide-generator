@@ -98,6 +98,7 @@ test.describe.serial('Profile list and display', () => {
         slide_editing_instructions: null,
       },
     });
+    createdProfileIds.push(p1.id as number);
 
     const p2 = await createTestProfile(request, {
       name: `Profile-Prompt-${ts}`,
@@ -109,6 +110,7 @@ test.describe.serial('Profile list and display', () => {
         slide_editing_instructions: null,
       },
     });
+    createdProfileIds.push(p2.id as number);
 
     const p3 = await createTestProfile(request, {
       name: `Profile-Genie-${ts}`,
@@ -128,14 +130,13 @@ test.describe.serial('Profile list and display', () => {
         slide_editing_instructions: null,
       },
     });
-
-    createdProfileIds.push(p1.id as number, p2.id as number, p3.id as number);
+    createdProfileIds.push(p3.id as number);
 
     await goToProfiles(page);
 
-    await expect(page.getByText(`Profile-Style-${ts}`)).toBeVisible();
-    await expect(page.getByText(`Profile-Prompt-${ts}`)).toBeVisible();
-    await expect(page.getByText(`Profile-Genie-${ts}`)).toBeVisible();
+    await expect(page.getByText(`Profile-Style-${ts}`).first()).toBeVisible();
+    await expect(page.getByText(`Profile-Prompt-${ts}`).first()).toBeVisible();
+    await expect(page.getByText(`Profile-Genie-${ts}`).first()).toBeVisible();
   });
 
   test('expanded profile shows agent config details', async ({ page, request }) => {
@@ -216,13 +217,30 @@ test.describe('Profile operations', () => {
     const ts = Date.now();
 
     // Create TWO profiles so delete button is visible (hidden when only 1)
+    // Each needs a unique agent_config to avoid duplicate-config detection
     const keeper = await createTestProfile(request, {
       name: `Keeper-${ts}`,
+      agentConfig: {
+        tools: [],
+        slide_style_id: testStyle.id,
+        deck_prompt_id: null,
+        system_prompt: null,
+        slide_editing_instructions: null,
+      },
     });
+    createdProfileIds.push(keeper.id as number);
+
     const target = await createTestProfile(request, {
       name: `ToDelete-${ts}`,
+      agentConfig: {
+        tools: [],
+        slide_style_id: null,
+        deck_prompt_id: testPrompt.id,
+        system_prompt: null,
+        slide_editing_instructions: null,
+      },
     });
-    createdProfileIds.push(keeper.id as number, target.id as number);
+    createdProfileIds.push(target.id as number);
 
     await goToProfiles(page);
 
@@ -233,8 +251,8 @@ test.describe('Profile operations', () => {
     await expect(page.getByRole('heading', { name: /Delete Profile/i })).toBeVisible();
     await page.getByRole('button', { name: 'Confirm' }).click();
 
-    // Verify the profile name disappears from the page
-    await expect(page.getByText(`ToDelete-${ts}`)).not.toBeVisible({ timeout: 10000 });
+    // Verify the profile card disappears from the page
+    await expect(profileCard(page, `ToDelete-${ts}`)).not.toBeVisible({ timeout: 10000 });
 
     // Verify via API
     const remaining = await listProfiles(request);
@@ -281,7 +299,8 @@ test.describe('Profile operations', () => {
     await page.goto('/');
     await page.getByRole('textbox').fill('Create a test presentation');
     await page.getByRole('button', { name: 'Send' }).click();
-    await page.locator('.slide-container').waitFor({ state: 'visible', timeout: 15000 });
+    // Wait for session creation (URL changes to /sessions/{id}/edit)
+    await page.waitForURL(/\/sessions\/[^/]+\/edit/, { timeout: 15000 });
 
     // Extract session ID for cleanup
     const url = page.url();
@@ -301,10 +320,10 @@ test.describe('Profile operations', () => {
     await page.locator('[data-testid="save-profile-button"]').click();
     await page.getByPlaceholder('Profile name').fill(profileName);
     await page.getByPlaceholder('Description (optional)').fill('Integration test profile');
-    await page.getByRole('button', { name: 'Save' }).click();
+    await page.getByRole('button', { name: 'Save', exact: true }).click();
 
     // Wait for dialog to close
-    await expect(page.getByText('Save as Profile')).not.toBeVisible({ timeout: 10000 });
+    await expect(page.getByRole('heading', { name: 'Save as Profile' })).not.toBeVisible({ timeout: 10000 });
 
     // Navigate to profiles page and verify the new profile appears
     await goToProfiles(page);
