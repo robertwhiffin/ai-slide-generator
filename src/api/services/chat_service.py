@@ -258,8 +258,6 @@ class ChatService:
         message: str,
         slide_context: Optional[Dict[str, Any]] = None,
         image_ids: Optional[List[int]] = None,
-        profile_id: Optional[int] = None,
-        profile_name: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Send a message to the agent and get response.
 
@@ -662,8 +660,6 @@ class ChatService:
         request_id: Optional[str] = None,
         image_ids: Optional[List[int]] = None,
         is_first_message_override: Optional[bool] = None,
-        profile_id: Optional[int] = None,
-        profile_name: Optional[str] = None,
     ) -> Generator[StreamEvent, None, None]:
         """Send a message and yield streaming events.
 

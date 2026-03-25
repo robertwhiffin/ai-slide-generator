@@ -71,14 +71,6 @@ class ChatRequest(BaseModel):
         default=None,
         description="IDs of images attached to this message (from upload or paste)",
     )
-    profile_id: Optional[int] = Field(
-        default=None,
-        description="Active profile ID (passed by frontend for accurate session association)",
-    )
-    profile_name: Optional[str] = Field(
-        default=None,
-        description="Active profile name (cached for display)",
-    )
     agent_config: Optional[dict] = Field(
         default=None,
         description="Agent configuration for session creation (tools, style, prompts)",
