@@ -146,23 +146,25 @@ def _maybe_create_session(request: ChatRequest, session_manager) -> bool:
     """
     from src.api.schemas.agent_config import AgentConfig
 
-    agent_config_data = None
+    # Parse explicit agent_config from request (None if not sent by client)
+    explicit_config = None
     if request.agent_config:
         config = AgentConfig.model_validate(request.agent_config)
-        agent_config_data = config.model_dump()
+        explicit_config = config.model_dump()
 
-    # Auto-populate slide_style_id with the default system style when not set
-    if agent_config_data is None:
-        agent_config_data = AgentConfig().model_dump()
+    # Build full agent_config_data with defaults (used for session creation)
+    agent_config_data = explicit_config or AgentConfig().model_dump()
     if agent_config_data.get("slide_style_id") is None:
         default_id = _get_default_style_id()
         if default_id is not None:
             agent_config_data["slide_style_id"] = default_id
 
     if request.session_id:
-        # Session ID provided — sync agent_config if available
-        if agent_config_data:
+        # Session ID provided — only sync if client explicitly sent agent_config
+        if explicit_config:
             try:
+                session_manager.get_session(request.session_id)
+                # Session exists — update agent_config via DB
                 from src.core.database import get_db_session
                 from src.database.models import UserSession
 
@@ -176,20 +178,20 @@ def _maybe_create_session(request: ChatRequest, session_manager) -> bool:
                             "Synced agent_config from chat request",
                             extra={"session_id": request.session_id},
                         )
-                    else:
-                        # Session ID was generated client-side but never persisted.
-                        # Create it now with the agent_config.
-                        current_user = get_current_user()
-                        session_manager.create_session(
-                            session_id=request.session_id,
-                            agent_config=agent_config_data,
-                            created_by=current_user,
-                        )
-                        logger.info(
-                            "Created session from client-generated ID with agent_config",
-                            extra={"session_id": request.session_id},
-                        )
-                        return True
+            except SessionNotFoundError:
+                # Session ID was generated client-side but never persisted.
+                # Create it now with the agent_config.
+                current_user = get_current_user()
+                session_manager.create_session(
+                    session_id=request.session_id,
+                    agent_config=agent_config_data,
+                    created_by=current_user,
+                )
+                logger.info(
+                    "Created session from client-generated ID with agent_config",
+                    extra={"session_id": request.session_id},
+                )
+                return True
             except Exception as e:
                 logger.warning(f"Failed to sync agent_config: {e}")
         return False
