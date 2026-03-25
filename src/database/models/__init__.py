@@ -1,6 +1,7 @@
 """Database models."""
 
 from src.database.models.ai_infra import ConfigAIInfra
+from src.database.models.deck_contributor import DeckContributor
 from src.database.models.feedback import FeedbackConversation, SurveyResponse
 from src.database.models.genie_space import ConfigGenieSpace
 from src.database.models.google_global_credentials import GoogleGlobalCredentials
@@ -33,6 +34,7 @@ __all__ = [
     "ChatRequest",
     "ConfigAIInfra",
     "ConfigGenieSpace",
+    "DeckContributor",
     "ConfigProfile",
     "ConfigProfileContributor",
     "ConfigPrompts",
