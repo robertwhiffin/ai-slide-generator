@@ -10,6 +10,7 @@ export const mockProfiles = [
     name: "Sales Analytics",
     description: "Analytics profile for sales data insights",
     is_default: true,
+    is_my_default: true,
     agent_config: {
       tools: [{ type: "genie", space_id: "01JGKX5N2PWQV8ABC123DEF456", space_name: "Sales Data Space", description: null, conversation_id: null }],
       slide_style_id: 1,
