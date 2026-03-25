@@ -1,6 +1,8 @@
 import { test, expect, Page } from '@playwright/test';
 import {
-  mockProfiles,
+  mockProfileSummaries,
+  mockDefaultAgentConfig,
+  mockAvailableTools,
   mockDeckPrompts,
   mockSlideStyles,
   mockSessions,
@@ -42,6 +44,15 @@ async function setupMocks(page: Page) {
   await page.route('**/api/comments/mentionable-users**', (route) => {
     route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ users: [], is_global: false }) });
   });
+  // New profiles API (GET /api/profiles)
+  await page.route(/\/api\/profiles$/, (route) => {
+    route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(mockProfileSummaries) });
+  });
+
+  // Available tools
+  await page.route('**/api/tools/available', (route) => {
+    route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(mockAvailableTools) });
+  });
 
   await page.route('http://127.0.0.1:8000/api/sessions**', (route, request) => {
     const url = request.url();
@@ -56,6 +67,18 @@ async function setupMocks(page: Page) {
     // Handle session creation
     if (method === 'POST') {
       route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ session_id: 'mock', title: 'New', user_id: null, created_at: '2026-01-01T00:00:00Z' }) });
+      return;
+    }
+
+    // Handle agent-config endpoint
+    if (url.includes('/agent-config')) {
+      route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(mockDefaultAgentConfig) });
+      return;
+    }
+
+    // Handle load-profile endpoint
+    if (url.includes('/load-profile/')) {
+      route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ status: 'loaded', agent_config: mockDefaultAgentConfig }) });
       return;
     }
 
@@ -79,33 +102,6 @@ async function setupMocks(page: Page) {
     } else {
       route.fulfill({ status: 404 });
     }
-  });
-
-  // Mock profiles endpoint
-  await page.route('http://127.0.0.1:8000/api/settings/profiles', (route) => {
-    route.fulfill({
-      status: 200,
-      contentType: 'application/json',
-      body: JSON.stringify(mockProfiles),
-    });
-  });
-
-  // Mock individual profile endpoints
-  await page.route(/http:\/\/127.0.0.1:8000\/api\/settings\/profiles\/\d+$/, (route) => {
-    route.fulfill({
-      status: 200,
-      contentType: 'application/json',
-      body: JSON.stringify(mockProfiles[0]),
-    });
-  });
-
-  // Mock profile load endpoint
-  await page.route(/http:\/\/127.0.0.1:8000\/api\/settings\/profiles\/\d+\/load/, (route) => {
-    route.fulfill({
-      status: 200,
-      contentType: 'application/json',
-      body: JSON.stringify({ status: 'reloaded', profile_id: 1 }),
-    });
   });
 
   // Mock deck prompts
@@ -207,20 +203,11 @@ test.describe('SessionHistoryList', () => {
   test('shows correct table columns', async ({ page }) => {
     await goToHistory(page);
 
-    // Check column headers
-    await expect(page.getByRole('columnheader', { name: /Profile/i })).toBeVisible();
+    // Check column headers (Profile column was removed in deck-centric permissions)
     await expect(page.getByRole('columnheader', { name: /Session Name/i })).toBeVisible();
     await expect(page.getByRole('columnheader', { name: /Created/i })).toBeVisible();
     await expect(page.getByRole('columnheader', { name: /Last Activity/i })).toBeVisible();
     await expect(page.getByRole('columnheader', { name: /Actions/i })).toBeVisible();
-  });
-
-  test('shows profile name in Profile column', async ({ page }) => {
-    await goToHistory(page);
-
-    // Profile names should be visible in the table
-    await expect(page.getByText('Sales Analytics').first()).toBeVisible();
-    await expect(page.getByText('Marketing Reports').first()).toBeVisible();
   });
 
   test('only shows sessions with slide decks', async ({ page }) => {

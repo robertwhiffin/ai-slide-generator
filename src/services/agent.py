@@ -89,22 +89,77 @@ class SlideGeneratorAgent:
     All intermediate steps are captured for chat interface display.
     """
 
-    def __init__(self):
-        """Initialize agent with LangChain model and tools."""
+    def __init__(
+        self,
+        pre_built_model=None,
+        pre_built_tools: list | None = None,
+        pre_built_prompts: dict[str, Any] | None = None,
+    ):
+        """Initialize agent with LangChain model and tools.
+
+        Args:
+            pre_built_model: Optional pre-created ChatDatabricks model.
+                When provided, _create_agent_executor uses this instead of
+                calling _create_model(). Used by agent_factory.
+            pre_built_tools: Optional pre-created list of StructuredTool
+                instances. When provided, generate_slides uses these instead
+                of calling _create_tools_for_session(). Used by agent_factory.
+            pre_built_prompts: Optional pre-resolved prompt dict with keys
+                system_prompt, slide_editing_instructions, deck_prompt,
+                slide_style, image_guidelines. When provided,
+                _create_agent_executor uses these instead of calling
+                fetch_prompt_content(). Used by agent_factory.
+        """
         logger.info("Initializing SlideGeneratorAgent")
 
-        self.settings = get_settings()
+        # Store pre-built components (None = use legacy behavior)
+        self._pre_built_model = pre_built_model
+        self._pre_built_tools = pre_built_tools
+        self._pre_built_prompts = pre_built_prompts
+
+        # When using pre-built components (factory path), get_settings() may fail
+        # because the old profile tables are deprecated. Use defaults for the few
+        # settings still needed (e.g., llm.timeout).
+        if pre_built_prompts is not None:
+            try:
+                self.settings = get_settings()
+            except Exception:
+                from src.core.defaults import DEFAULT_CONFIG
+                from src.core.settings_db import LLMSettings, AppSettings
+                llm_defaults = DEFAULT_CONFIG["llm"]
+                self.settings = AppSettings(
+                    profile_id=0,
+                    profile_name="default",
+                    llm=LLMSettings(
+                        endpoint=llm_defaults["endpoint"],
+                        temperature=llm_defaults["temperature"],
+                        max_tokens=llm_defaults["max_tokens"],
+                    ),
+                    genie=None,
+                    prompts={},
+                )
+        else:
+            self.settings = get_settings()
         self.client = get_databricks_client()  # System client for non-user operations
 
         # Set up MLflow tracking (experiment created per-session)
         self._setup_mlflow_tracking()
 
         # Create LangChain prompt (model created per-request for user context)
-        self.prompt = self._create_prompt()
+        prompts = pre_built_prompts if pre_built_prompts is not None else self.settings.prompts
+        self.prompt = self._create_prompt(prompts)
 
         # Session storage for multi-turn conversations
         # Structure: {session_id: {chat_history, genie_conversation_id, experiment_id, experiment_url, username, metadata}}
         self.sessions: dict[str, dict[str, Any]] = {}
+
+        # Expose tools list for introspection (used by tests and agent_factory)
+        self.tools = pre_built_tools or []
+
+        # Expose resolved system_prompt for introspection
+        self.system_prompt = (
+            pre_built_prompts.get("system_prompt") if pre_built_prompts else None
+        )
 
         logger.info("SlideGeneratorAgent initialized successfully")
 
@@ -409,7 +464,7 @@ class SlideGeneratorAgent:
         logger.info("Tools created for session", extra={"session_id": session_id})
         return [genie_tool, image_search_tool]
 
-    def _create_prompt(self) -> ChatPromptTemplate:
+    def _create_prompt(self, prompts: dict) -> ChatPromptTemplate:
         """Create prompt template with system prompt from settings and chat history.
         
         Prompt structure (when all components present):
@@ -421,10 +476,10 @@ class SlideGeneratorAgent:
         The system prompt is tool-agnostic - the LLM discovers available tools
         through the tool binding mechanism, not the prompt.
         """
-        deck_prompt = self.settings.prompts.get("deck_prompt", "")
-        slide_style = self.settings.prompts.get("slide_style", "")
-        system_prompt = self.settings.prompts.get("system_prompt", "")
-        editing_prompt = self.settings.prompts.get("slide_editing_instructions", "")
+        deck_prompt = prompts.get("deck_prompt") or ""
+        slide_style = prompts.get("slide_style") or ""
+        system_prompt = prompts.get("system_prompt") or ""
+        editing_prompt = prompts.get("slide_editing_instructions") or ""
 
         if not system_prompt:
             raise AgentError("System prompt not found in configuration")
@@ -449,8 +504,7 @@ class SlideGeneratorAgent:
         if editing_prompt:
             prompt_parts.append(editing_prompt.strip())
 
-        # Image tool instructions (conditional on image_guidelines)
-        image_guidelines = self.settings.prompts.get("image_guidelines", "")
+        image_guidelines = prompts.get("image_guidelines") or ""
 
         image_section = (
             "IMAGE SUPPORT:\n"
@@ -523,11 +577,16 @@ class SlideGeneratorAgent:
         Model is created per-request to use user-scoped credentials.
         """
         try:
-            # Create model per-request for user context (Genie/LLM permissions)
-            model = self._create_model()
+            # Use pre-built components when available (agent_factory path),
+            # otherwise fall back to legacy per-request creation.
+            model = self._pre_built_model or self._create_model()
 
-            # Create agent with session-specific tools
-            agent = create_tool_calling_agent(model, tools, self.prompt)
+            if self._pre_built_prompts is not None:
+                prompts = self._pre_built_prompts
+            else:
+                prompts = get_settings().prompts
+            prompt = self._create_prompt(prompts)
+            agent = create_tool_calling_agent(model, tools, prompt)
 
             # Create executor with intermediate steps enabled
             agent_executor = AgentExecutor(
@@ -1149,8 +1208,8 @@ class SlideGeneratorAgent:
         session = self.get_session(session_id)
         chat_history = session["chat_history"]
 
-        # Create tools with session_id bound via closure (thread-safe)
-        tools = self._create_tools_for_session(session_id)
+        # Use pre-built tools (factory path) or create per-session (legacy path)
+        tools = self._pre_built_tools or self._create_tools_for_session(session_id)
         agent_executor = self._create_agent_executor(tools)
 
         editing_mode = slide_context is not None
@@ -1370,8 +1429,8 @@ class SlideGeneratorAgent:
         session = self.get_session(session_id)
         chat_history = session["chat_history"]
 
-        # Create tools with session_id bound via closure (thread-safe)
-        tools = self._create_tools_for_session(session_id)
+        # Use pre-built tools (factory path) or create per-session (legacy path)
+        tools = self._pre_built_tools or self._create_tools_for_session(session_id)
 
         # Create agent executor with callback handler
         agent_executor = self._create_agent_executor_with_callbacks(
@@ -1566,10 +1625,15 @@ class SlideGeneratorAgent:
         Note: Model is created per-request to use user-scoped credentials.
         """
         try:
-            # Create model per-request for user context (Genie/LLM permissions)
-            model = self._create_model()
+            # Use pre-built components when available (agent_factory path)
+            model = self._pre_built_model or self._create_model()
 
-            agent = create_tool_calling_agent(model, tools, self.prompt)
+            if self._pre_built_prompts is not None:
+                prompts = self._pre_built_prompts
+            else:
+                prompts = get_settings().prompts
+            prompt = self._create_prompt(prompts)
+            agent = create_tool_calling_agent(model, tools, prompt)
 
             agent_executor = AgentExecutor(
                 agent=agent,

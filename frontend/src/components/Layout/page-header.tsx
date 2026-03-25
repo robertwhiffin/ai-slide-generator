@@ -1,5 +1,5 @@
-import { useState, useRef, useEffect } from "react"
-import { Save, Download, Play, Share2, ChevronDown, FileDown, FileText, Presentation } from "lucide-react"
+import { useState, useRef, useEffect, type ReactNode } from "react"
+import { Save, Download, Play, Share2, Link, ChevronDown, FileDown, FileText, Presentation } from "lucide-react"
 import { Button } from "@/ui/button"
 import { SidebarTrigger } from "@/ui/sidebar"
 import { Separator } from "@/ui/separator"
@@ -12,9 +12,10 @@ import {
 
 interface PageHeaderProps {
   title: string
-  subtitle?: string
+  subtitle?: ReactNode
   onSave?: () => void
   onShare?: () => void
+  onCopyLink?: () => void
   /** Single export action (legacy); ignored if export menu items are provided */
   onExport?: () => void
   onExportPPTX?: () => void
@@ -23,7 +24,6 @@ interface PageHeaderProps {
   onPresent?: () => void
   onTitleChange?: (newTitle: string) => void
   savePointDropdown?: React.ReactNode
-  profileSelector?: React.ReactNode
   /** Shown next to Export button (e.g. "Capturing charts...", "Exporting to Google Slides…") */
   exportStatus?: string | null
   isGenerating?: boolean
@@ -36,6 +36,7 @@ export function PageHeader({
   subtitle,
   onSave,
   onShare,
+  onCopyLink,
   onExport,
   onExportPPTX,
   onExportPDF,
@@ -43,7 +44,6 @@ export function PageHeader({
   onPresent,
   onTitleChange,
   savePointDropdown,
-  profileSelector,
   exportStatus,
   isGenerating = false,
   viewOnly = false,
@@ -192,6 +192,19 @@ export function PageHeader({
             </Button>
           )
         )}
+        {onCopyLink && (
+          <Button
+            variant="outline"
+            size="sm"
+            className="gap-1.5"
+            onClick={onCopyLink}
+            disabled={isGenerating}
+            title="Copy view link to clipboard"
+          >
+            <Link className="size-3.5" />
+            Copy Link
+          </Button>
+        )}
         {onShare && (
           <Button
             variant="outline"
@@ -217,12 +230,6 @@ export function PageHeader({
           </Button>
         )}
 
-        {profileSelector && (
-          <>
-            <div className="mx-2 h-5 w-px bg-border" />
-            {profileSelector}
-          </>
-        )}
       </div>
     </header>
   )

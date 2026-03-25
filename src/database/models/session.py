@@ -13,6 +13,7 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     Integer,
+    JSON,
     String,
     Text,
 )
@@ -113,10 +114,6 @@ class UserSession(Base):
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     last_activity = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
 
-    # Profile tracking - which profile this session was created under
-    profile_id = Column(Integer, nullable=True, index=True)
-    profile_name = Column(String(255), nullable=True)  # Cached for display in history
-
     # Genie conversation tracking (persists across profile switches)
     genie_conversation_id = Column(String(255), nullable=True)
 
@@ -126,6 +123,9 @@ class UserSession(Base):
     # Google Slides export tracking (reuse existing presentation on re-export)
     google_slides_presentation_id = Column(String(255), nullable=True)
     google_slides_url = Column(String(512), nullable=True)
+
+    # Agent configuration override (tools, style, prompts) — stored as JSON blob
+    agent_config = Column(JSON, nullable=True, default=None)
 
     # Processing lock for concurrent request handling
     is_processing = Column(Boolean, default=False, nullable=False)

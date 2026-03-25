@@ -16,7 +16,7 @@ import {
 } from '../../api/config';
 
 const PERMISSION_OPTIONS: { value: PermissionLevel; label: string; description: string }[] = [
-  { value: 'CAN_VIEW', label: 'Can View', description: 'View profile and use for presentations' },
+  { value: 'CAN_USE', label: 'Can Use', description: 'Use profile for generating presentations' },
   { value: 'CAN_EDIT', label: 'Can Edit', description: 'Edit profile settings' },
   { value: 'CAN_MANAGE', label: 'Can Manage', description: 'Full control including sharing' },
 ];

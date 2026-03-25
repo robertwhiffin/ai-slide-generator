@@ -1,0 +1,149 @@
+# Agent Config E2E Tests — Design Spec
+
+**Date:** 2026-03-21
+**Branch:** feature/profile-rebuild
+**Status:** Approved design, pending implementation
+
+## Purpose
+
+End-to-end integration tests for the agent config workflow introduced by the profile rebuild. These tests validate the full user journey — from configuring tools/prompts/styles before and during sessions, to saving and loading profiles, to managing profiles on the dedicated page — against a real backend and Postgres database.
+
+## Approach
+
+Two new Playwright integration test files, following the existing pattern (`deck-prompts-integration.spec.ts`, `history-integration.spec.ts`). All database operations are real. Only the LLM chat stream and Databricks tool discovery are mocked at the Playwright route level.
+
+## Mocking Strategy
+
+### Mocked (Playwright route interception)
+
+| Endpoint | Pattern | Reason |
+|---|---|---|
+| `/api/chat/stream` | `**/api/chat/stream` | SSE response — avoids real LLM calls. Returns a structured slide deck with start/progress/complete events. |
+| `/api/tools/available` | `**/api/tools/available` | Calls `client.genie.list_spaces()` which requires a real Databricks connection. Returns a fixed list of Genie spaces and MCP servers. |
+| `/api/setup/status` | `**/api/setup/status` | Returns `{ configured: true }` to bypass the welcome/setup screen. Required by all E2E tests. |
+
+Since `/api/chat/stream` is intercepted before hitting the backend, no Genie spaces are invoked during generation either.
+
+### Real (backend + Postgres)
+
+Everything else:
+- Session CRUD (`/api/sessions/*`)
+- Agent config reads/writes (`/api/sessions/{id}/agent-config`, PUT/PATCH)
+- Profile operations (`/api/profiles/*`)
+- Slide styles (`/api/settings/slide-styles`)
+- Deck prompts (`/api/settings/deck-prompts`)
+
+## Test Data Lifecycle
+
+- **`beforeAll`** — create shared read-only library data via API (a slide style + a deck prompt). These are reference data that no test mutates — they exist so tests can select a style/prompt from the dropdowns. This diverges from existing integration tests (which use `beforeEach` for everything) because creating library data per-test is wasteful when it's never modified. Add a comment in the test file explaining this choice.
+- **`beforeEach`** — create per-test sessions/profiles as needed; clear `localStorage` (specifically the `pendingAgentConfig` key) to prevent state leaking between pre-session tests
+- **`afterEach`** — clean up sessions and profiles created during the test
+- **`afterAll`** — clean up the shared library data. If a test run is aborted, this won't fire — but library data is inert (styles/prompts don't affect other test suites) and the CI database is ephemeral per matrix entry.
+
+### Profile deduplication constraint
+
+The backend's `save-from-session` endpoint rejects duplicate agent configs with a 409. Each test profile must have a unique config — e.g., by using a distinct `deck_prompt_id`, `slide_style_id`, or unique tool entry. The `createTestProfile` helper should accept parameters that ensure uniqueness.
+
+## Shared Helpers
+
+New file: `frontend/tests/helpers/integration-helpers.ts`
+
+Functions:
+
+**API helpers (use Playwright `request` fixture):**
+- `createTestSession(request)` → POST `/api/sessions`, returns session_id
+- `createTestProfile(request, { name, description?, tools?, styleId?, promptId? })` → multi-step: (1) create a throwaway session, (2) PUT the desired agent_config onto it, (3) POST `/api/profiles/save-from-session/{sessionId}` with name/description, (4) DELETE the throwaway session, (5) return the profile. The throwaway session is always cleaned up — even on error (use try/finally). The caller passes config ingredients; the helper assembles a unique `AgentConfig`.
+- `createTestStyle(request, data)` → POST `/api/settings/slide-styles`, returns style
+- `createTestDeckPrompt(request, data)` → POST `/api/settings/deck-prompts`, returns prompt
+- `cleanupSession(request, id)` → DELETE session
+- `cleanupProfile(request, id)` → DELETE profile (soft-delete)
+- `getSessionConfig(request, sessionId)` → GET `/api/sessions/{id}/agent-config`
+
+**Page-level mocks:**
+- `mockChatStream(page)` → route-intercept `**/api/chat/stream` with SSE response. Contains a new `createStreamingResponseWithDeck()` function — the full structured variant (start → progress → complete with slide deck). This is distinct from the simpler `createStreamingResponse` in `mocks.ts` which remains for unit-like E2E tests. Both coexist: `createStreamingResponse` for tests that don't need slide content, `createStreamingResponseWithDeck` for integration tests that verify slide generation.
+- `mockAvailableTools(page)` → route-intercept `**/api/tools/available`. Returns the existing `mockAvailableTools` payload from `mocks.ts` (which defines Genie spaces with specific `space_id` values). Tests that configure tools reference these same `space_id` values for assertions.
+- `mockSetupStatus(page)` → route-intercept `**/api/setup/status` with `{ configured: true }`
+
+## File 1: `agent-config-integration.spec.ts`
+
+13 tests across 3 describe blocks.
+
+### `describe('Pre-session configuration')`
+
+| # | Test | What it verifies |
+|---|---|---|
+| 1 | Configure Genie tool before first message | Land on `/`, open tool picker, add Genie space, send message. Verify created session's `agent_config.tools` includes the Genie tool via API. |
+| 2 | Configure deck prompt before first message | Land on `/`, select deck prompt from dropdown, send message. Verify session's `agent_config.deck_prompt_id` matches. |
+| 3 | Configure slide style before first message | Land on `/`, select slide style from dropdown, send message. Verify session's `agent_config.slide_style_id` matches. |
+| 4 | Configure Genie + deck prompt together | Add both before sending. Verify both present in session config. |
+| 5 | Send message with no configuration | Land on `/`, send message immediately. Verify session created with default agent_config values. |
+| 6 | New session gets default slide style *(test.fail)* | Land on `/`, send message with no config changes. Fetch session config via API. Assert: `expect(config.slide_style_id).not.toBeNull()` — the session should have a style assigned even though the user didn't pick one. **Fails** — no concept of default styles yet. When implemented, this test should also verify the assigned ID matches a style marked as default in the library. |
+
+### `describe('Mid-session configuration')`
+
+| # | Test | What it verifies |
+|---|---|---|
+| 7 | Add Genie tool mid-session | Create session (send first message), open tool picker, add Genie. Verify config updated via API. |
+| 8 | Remove tool mid-session | Start with a tool configured, remove via chip X button. Verify config updated via API. |
+| 9 | Change deck prompt mid-session | Switch deck prompt dropdown in active session. Verify new `deck_prompt_id` persisted. |
+| 10 | Change slide style mid-session | Switch style dropdown. Verify new `slide_style_id` persisted. |
+
+### `describe('Load profile into session')`
+
+| # | Test | What it verifies |
+|---|---|---|
+| 11 | Load profile into new session | Create session, load a saved profile. Verify session config matches profile's config via API. |
+| 12 | Load profile mid-session shows confirmation *(test.fail)* | Create session, configure tools, load a different profile. Assert a `window.confirm()` dialog appears (consistent with existing destructive action pattern — e.g., session delete in `history-integration.spec.ts`). Use `page.on('dialog')` to detect it. **Fails** — not implemented yet. |
+| 13 | Load profile replaces config entirely | Create session with Genie tool A (space_id='A'), load profile containing Genie tool B (space_id='B'). Fetch config via API. Assert: `expect(config.tools).toHaveLength(1)` and `expect(config.tools[0].space_id).toBe('B')` — replacement, not merge. Distinct from #11 which loads into a bare session; this tests that existing tools are removed. |
+
+## File 2: `profiles-integration.spec.ts`
+
+6 tests across 2 describe blocks.
+
+### `describe('Profile list and display')`
+
+| # | Test | What it verifies |
+|---|---|---|
+| 1 | List profiles from database | Create 2-3 profiles via API, navigate to `/profiles`. Verify all appear with correct names. |
+| 2 | Expanded profile shows agent config details | Create profile with Genie tools, style, and deck prompt. Click to expand. Verify config details are rendered (whatever current UI shows). |
+| 3 | Empty state | Delete all profiles via API in this test's setup (not relying on global state). Navigate to `/profiles`. Verify appropriate empty state message. Profiles are re-created by other tests' `beforeEach`, so this doesn't affect them. |
+
+### `describe('Profile operations')`
+
+| # | Test | What it verifies |
+|---|---|---|
+| 4 | Delete a profile | Create profile, navigate to `/profiles`, delete it. Verify removed from list. Verify soft-deleted via API. |
+| 5 | Rename a profile | Create profile, rename via UI. Verify new name persists via API. |
+| 6 | Save current session as profile | Create session with tools configured, click "Save as Profile", enter name/description. Navigate to `/profiles`, verify new profile appears with correct config. |
+
+## CI Integration
+
+Update the E2E matrix in `.github/workflows/test.yml`:
+
+1. **Remove** the broken `profile-integration` entry (the test file was deleted in commit `9c002d5` but the matrix entry was never removed)
+2. **Add** `agent-config-integration` and `profiles-integration`
+
+```yaml
+matrix:
+  test:
+    # ... existing entries ...
+    - agent-config-integration
+    - profiles-integration
+```
+
+Each runs with its own isolated Postgres service, seeded database, and real backend — identical to existing integration test entries.
+
+## Failing Tests (TDD)
+
+Two tests are intentionally written to fail using Playwright's `test.fail()`:
+
+1. **New session gets default slide style** — asserts `expect(config.slide_style_id).not.toBeNull()` on a session created with no explicit config. Fails because there's no concept of default styles yet. When implemented, also verify the ID matches a style marked as default.
+2. **Load profile mid-session shows confirmation** — listens for a `window.confirm()` dialog via `page.on('dialog')` when loading a profile into a session that already has config. Fails because not implemented yet.
+
+These keep CI green while documenting the desired behavior. When the features are implemented, remove the `test.fail()` marker and the tests should pass.
+
+## Out of Scope (tracked for future work)
+
+- **409 deduplication UI feedback** — what happens in the UI when a user saves a duplicate profile. Unit tests cover the backend; E2E coverage deferred.
+- **MCP tool configuration** — all tool tests use Genie spaces. MCP tools may have a different picker flow. Deferred until MCP branch lands.
+- **Consolidating duplicated `createStreamingResponseWithDeck`** across 4 existing test files. The new `integration-helpers.ts` defines its own copy; refactoring the others is a separate cleanup task.

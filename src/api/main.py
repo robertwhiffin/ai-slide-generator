@@ -16,7 +16,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from src.api.routes import admin, chat, comments, export, feedback, images, sessions, slides, verification, version, google_slides, setup, local_version
+from src.api.routes import admin, agent_config, chat, comments, export, feedback, images, profiles, sessions, slides, tools, verification, version, google_slides, setup, local_version
+from src.api.routes.deck_contributors import router as deck_contributors_router
 from src.core.databricks_client import get_or_create_user_client, set_user_client
 from src.core.user_context import get_current_user as get_ctx_user, set_current_user
 from src.core.permission_context import (
@@ -24,23 +25,21 @@ from src.core.permission_context import (
     set_permission_context,
 )
 from src.api.routes.settings import (
-    ai_infra_router,
     contributors_router,
     deck_prompts_router,
-    genie_router,
     identities_router,
-    profiles_router,
-    prompts_router,
     slide_styles_router,
 )
 from src.api.services.export_job_queue import start_export_worker
 from src.api.services.job_queue import recover_stuck_requests, start_worker
 from src.core.database import (
+    get_session_local,
     init_db,
     is_lakebase_environment,
     start_token_refresh,
     stop_token_refresh,
 )
+from src.core.migrate_profiles_to_agent_config import migrate_profiles, backfill_sessions
 
 logger = logging.getLogger(__name__)
 
@@ -79,6 +78,13 @@ async def lifespan(app: FastAPI):
         try:
             init_db()
             logger.info("Database tables initialized")
+
+            migrated = migrate_profiles(get_session_local())
+            if migrated:
+                logger.info(f"Migrated {migrated} profiles to agent_config")
+            backfilled = backfill_sessions(get_session_local())
+            if backfilled:
+                logger.info(f"Backfilled {backfilled} sessions with agent_config")
         except Exception as e:
             logger.error(f"Failed to initialize database: {e}")
             raise
@@ -312,11 +318,13 @@ async def user_auth_middleware(request: Request, call_next):
 
 # Include API routers
 app.include_router(admin.router)
+app.include_router(agent_config.router)
 app.include_router(chat.router)
 app.include_router(feedback.router)
 app.include_router(images.router)
 app.include_router(slides.router)
 app.include_router(comments.router)
+app.include_router(tools.router)
 app.include_router(export.router)
 app.include_router(sessions.router)
 app.include_router(verification.router)
@@ -324,15 +332,14 @@ app.include_router(version.router)
 app.include_router(google_slides.router)
 app.include_router(setup.router)
 app.include_router(local_version.router)
+app.include_router(profiles.router)
+app.include_router(profiles.load_router)
+app.include_router(deck_contributors_router)
 
-# Configuration management routers
-app.include_router(profiles_router, prefix="/api/settings", tags=["settings"])
-app.include_router(ai_infra_router, prefix="/api/settings", tags=["settings"])
+# Configuration management routers (slide_styles and deck_prompts are global libraries, still needed)
 app.include_router(contributors_router, prefix="/api/settings", tags=["settings"])
 app.include_router(deck_prompts_router, prefix="/api/settings", tags=["settings"])
-app.include_router(genie_router, prefix="/api/settings", tags=["settings"])
 app.include_router(identities_router, prefix="/api/settings", tags=["settings"])
-app.include_router(prompts_router, prefix="/api/settings", tags=["settings"])
 app.include_router(slide_styles_router, prefix="/api/settings", tags=["settings"])
 
 

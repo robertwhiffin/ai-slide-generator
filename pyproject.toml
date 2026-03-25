@@ -63,6 +63,9 @@ dev = [
     "twine>=6.2.0",
 ]
 
+[tool.uv]
+index-url = "https://pypi-proxy.dev.databricks.com/simple/"
+
 [tool.ruff]
 line-length = 100
 target-version = "py39"

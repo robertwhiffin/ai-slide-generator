@@ -91,20 +91,6 @@ class ProfileDetail(BaseModel):
     is_my_default: bool = False
 
 
-class ConfigHistoryEntry(BaseModel):
-    """Configuration change history entry."""
-
-    model_config = ConfigDict(from_attributes=True)
-
-    id: int
-    profile_id: int
-    domain: str
-    action: str
-    changed_by: str
-    changes: dict
-    timestamp: datetime
-
-
 class EndpointsList(BaseModel):
     """List of available serving endpoints."""
 

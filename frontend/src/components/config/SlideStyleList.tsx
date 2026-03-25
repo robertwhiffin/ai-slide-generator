@@ -25,7 +25,12 @@ export const SlideStyleList: React.FC = () => {
   const [editingStyle, setEditingStyle] = useState<SlideStyle | null>(null);
   const [actionLoading, setActionLoading] = useState<number | null>(null);
   const [expandedStyleId, setExpandedStyleId] = useState<number | null>(null);
-  
+  const [userDefaultStyleId, setUserDefaultStyleId] = useState<number | null>(() => {
+    const stored = localStorage.getItem('userDefaultSlideStyleId');
+    return stored ? Number(stored) : null;
+  });
+
+
   const [confirmDialog, setConfirmDialog] = useState<{
     isOpen: boolean;
     title: string;
@@ -55,6 +60,7 @@ export const SlideStyleList: React.FC = () => {
   useEffect(() => {
     loadStyles();
   }, [loadStyles]);
+
 
   // Handle create
   const handleCreate = () => {
@@ -180,7 +186,7 @@ export const SlideStyleList: React.FC = () => {
                         <h3 className="text-sm font-medium text-foreground">
                           {style.name}
                         </h3>
-                        {style.category && (
+                        {style.category && !(style.is_system && style.category === 'System') && (
                           <Badge variant="secondary" className="text-xs">
                             {style.category}
                           </Badge>
@@ -188,6 +194,11 @@ export const SlideStyleList: React.FC = () => {
                         {style.is_system && (
                           <Badge className="text-xs bg-blue-500/10 text-blue-700 hover:bg-blue-500/20">
                             System
+                          </Badge>
+                        )}
+                        {(userDefaultStyleId != null ? style.id === userDefaultStyleId : style.is_default) && (
+                          <Badge className="text-xs bg-amber-500/10 text-amber-700 hover:bg-amber-500/20">
+                            Default
                           </Badge>
                         )}
                         {!style.is_active && (
@@ -209,6 +220,20 @@ export const SlideStyleList: React.FC = () => {
 
                     {/* Actions */}
                     <div className="flex shrink-0 items-center gap-1">
+                      {!(userDefaultStyleId != null ? style.id === userDefaultStyleId : style.is_default) && style.is_active && (
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          className="h-8 px-2 text-xs text-muted-foreground"
+                          onClick={() => {
+                            localStorage.setItem('userDefaultSlideStyleId', String(style.id));
+                            setUserDefaultStyleId(style.id);
+                          }}
+                          aria-label="Set as default"
+                        >
+                          Set as default
+                        </Button>
+                      )}
                       <Button
                         variant="ghost"
                         size="sm"

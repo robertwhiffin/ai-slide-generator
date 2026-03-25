@@ -18,7 +18,6 @@ from src.core.database import Base, get_db
 from src.database.models import (  # noqa: F401
     ConfigAIInfra,
     ConfigGenieSpace,
-    ConfigHistory,
     ConfigProfile,
     ConfigPrompts,
 )
@@ -38,48 +37,30 @@ def test_db_engine():
         poolclass=StaticPool,
     )
 
-    # Create tables (excluding config_history which uses PostgreSQL-specific JSONB)
-    tables_to_create = [
-        table for table in Base.metadata.sorted_tables
-        if table.name != 'config_history'
-    ]
-
-    for table in tables_to_create:
-        table.create(bind=engine, checkfirst=True)
-
-    # Create simplified history table for tests (TEXT instead of JSONB)
-    with engine.connect() as conn:
-        conn.execute(text("""
-            CREATE TABLE IF NOT EXISTS config_history (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                profile_id INTEGER NOT NULL,
-                domain VARCHAR(50) NOT NULL,
-                action VARCHAR(50) NOT NULL,
-                changed_by VARCHAR(255) NOT NULL,
-                changes TEXT NOT NULL,
-                snapshot TEXT,
-                timestamp DATETIME NOT NULL,
-                FOREIGN KEY (profile_id) REFERENCES config_profiles (id) ON DELETE CASCADE
-            )
-        """))
-        conn.commit()
+    Base.metadata.create_all(bind=engine)
 
     yield engine
 
-    # Cleanup
-    for table in reversed(tables_to_create):
-        table.drop(bind=engine, checkfirst=True)
-    with engine.connect() as conn:
-        conn.execute(text("DROP TABLE IF EXISTS config_history"))
-        conn.commit()
+    Base.metadata.drop_all(bind=engine)
     engine.dispose()
 
 
 @pytest.fixture(scope="function")
 def test_db(test_db_engine):
-    """Create test database session."""
+    """Create test database session with a default session for permission checks."""
+    from src.database.models.session import UserSession
+
     SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=test_db_engine)
     db = SessionLocal()
+
+    # Seed a session so deck permission checks can find the creator
+    session = UserSession(
+        session_id="test-123",
+        created_by="test@local.dev",
+    )
+    db.add(session)
+    db.commit()
+
     yield db
     db.close()
 
@@ -113,30 +94,45 @@ def mock_chat_service():
 
 
 @pytest.fixture
-def mock_session_manager():
+def mock_session_manager(test_db):
     """Mock the session manager for route testing."""
-    with patch("src.api.routes.chat.get_session_manager") as mock_chat:
-        with patch("src.api.routes.slides.get_session_manager") as mock_slides:
-            with patch("src.api.routes.sessions.get_session_manager") as mock_sessions:
-                with patch("src.api.routes.verification.get_session_manager") as mock_verify:
-                    # Also mock get_current_user so permission checks pass
-                    with patch("src.api.routes.chat.get_current_user", return_value="test@local.dev"):
-                        with patch("src.api.routes.slides.get_current_user", return_value="test@local.dev"):
-                            with patch("src.api.routes.sessions.get_current_user", return_value="test@local.dev"):
-                                manager = MagicMock()
-                                manager.acquire_session_lock.return_value = True
-                                manager.release_session_lock.return_value = None
-                                # Return session info where user is the creator (bypasses permission check)
-                                manager.get_session.return_value = {
-                                    "session_id": "test-123",
-                                    "created_by": "test@local.dev",
-                                    "profile_id": None,
-                                }
-                                mock_chat.return_value = manager
-                                mock_slides.return_value = manager
-                                mock_sessions.return_value = manager
-                                mock_verify.return_value = manager
-                                yield manager
+    from contextlib import contextmanager
+    from src.core.permission_context import PermissionContext
+
+    perm_ctx = PermissionContext(user_id="test-uid", user_name="test@local.dev")
+
+    @contextmanager
+    def _fake_db_session():
+        yield test_db
+
+    with patch("src.api.routes.chat.get_session_manager") as mock_chat, \
+         patch("src.api.routes.slides.get_session_manager") as mock_slides, \
+         patch("src.api.routes.sessions.get_session_manager") as mock_sessions, \
+         patch("src.api.routes.verification.get_session_manager") as mock_verify, \
+         patch("src.api.routes.chat.get_current_user", return_value="test@local.dev"), \
+         patch("src.api.routes.slides.get_current_user", return_value="test@local.dev"), \
+         patch("src.api.routes.sessions.get_current_user", return_value="test@local.dev"), \
+         patch("src.api.routes.chat.get_permission_context", return_value=perm_ctx), \
+         patch("src.api.routes.slides.get_permission_context", return_value=perm_ctx), \
+         patch("src.api.routes.sessions.get_permission_context", return_value=perm_ctx), \
+         patch("src.api.routes.sessions.get_db_session", _fake_db_session):
+
+        manager = MagicMock()
+        manager.acquire_session_lock.return_value = True
+        manager.release_session_lock.return_value = None
+        # Return session info where user is the creator (bypasses permission check)
+        manager.get_session.return_value = {
+            "id": 1,
+            "session_id": "test-123",
+            "created_by": "test@local.dev",
+            "is_contributor_session": False,
+            "parent_session_internal_id": None,
+        }
+        mock_chat.return_value = manager
+        mock_slides.return_value = manager
+        mock_sessions.return_value = manager
+        mock_verify.return_value = manager
+        yield manager
 
 
 # ============================================
@@ -147,11 +143,23 @@ def mock_session_manager():
 class TestChatEndpoints:
     """Tests for /api/chat endpoints."""
 
-    def test_chat_requires_session_id(self, client):
-        """POST /api/chat returns 422 without session_id."""
+    def test_chat_without_session_id_creates_session(self, client, mock_chat_service, mock_session_manager):
+        """POST /api/chat without session_id creates a session on the fly."""
+        mock_session_manager.create_session.return_value = {
+            "session_id": "auto-created-session",
+            "user_id": None,
+            "created_by": "test-user",
+            "title": "Session 2026-03-18 12:00",
+            "created_at": "2026-03-18T12:00:00",
+        }
+        mock_chat_service.send_message.return_value = {
+            "messages": [],
+            "slide_deck": None,
+            "metadata": {},
+        }
         response = client.post("/api/chat", json={"message": "Hello"})
-        assert response.status_code == 422
-        assert "detail" in response.json()
+        assert response.status_code == 200
+        mock_session_manager.create_session.assert_called_once()
 
     def test_chat_requires_message(self, client):
         """POST /api/chat returns 422 without message."""
@@ -167,13 +175,26 @@ class TestChatEndpoints:
         })
         assert response.status_code == 422
 
-    def test_chat_empty_session_id_rejected(self, client):
-        """POST /api/chat returns 422 with empty session_id."""
+    def test_chat_empty_session_id_creates_session(self, client, mock_chat_service, mock_session_manager):
+        """POST /api/chat with empty session_id creates a session on the fly."""
+        mock_session_manager.create_session.return_value = {
+            "session_id": "auto-created-session",
+            "user_id": None,
+            "created_by": "test-user",
+            "title": "Session 2026-03-18 12:00",
+            "created_at": "2026-03-18T12:00:00",
+        }
+        mock_chat_service.send_message.return_value = {
+            "messages": [],
+            "slide_deck": None,
+            "metadata": {},
+        }
         response = client.post("/api/chat", json={
             "session_id": "",
             "message": "Hello"
         })
-        assert response.status_code == 422
+        assert response.status_code == 200
+        mock_session_manager.create_session.assert_called_once()
 
     def test_chat_session_not_found(self, client, mock_chat_service, mock_session_manager):
         """POST /api/chat returns 404 for nonexistent session."""
@@ -650,10 +671,12 @@ class TestSessionEndpoints:
     def test_get_session_success(self, client, mock_session_manager):
         """GET /api/sessions/{id} returns session details."""
         mock_session_manager.get_session.return_value = {
+            "id": 1,
             "session_id": "test-123",
             "title": "Test Session",
             "created_by": "test@local.dev",  # Required for permission check
-            "profile_id": None,
+            "is_contributor_session": False,
+            "parent_session_internal_id": None,
         }
         mock_session_manager.get_messages.return_value = []
         mock_session_manager.get_slide_deck.return_value = None
@@ -764,8 +787,12 @@ class TestSessionEndpoints:
     def test_export_session_success(self, client, mock_session_manager, tmp_path):
         """POST /api/sessions/{id}/export exports session data."""
         mock_session_manager.get_session.return_value = {
+            "id": 1,
             "session_id": "test-123",
-            "title": "Test"
+            "created_by": "test@local.dev",
+            "title": "Test",
+            "is_contributor_session": False,
+            "parent_session_internal_id": None,
         }
         mock_session_manager.get_messages.return_value = [
             {"role": "user", "content": "Hello"}

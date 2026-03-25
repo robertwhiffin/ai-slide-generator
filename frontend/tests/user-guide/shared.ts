@@ -163,24 +163,35 @@ export class UserGuideCapture {
  */
 export async function setupUserGuideMocks(page: Page): Promise<void> {
   // Import mocks from the fixtures
-  const { 
-    mockProfiles, 
-    mockDeckPrompts, 
-    mockSlideStyles, 
-    mockSessions 
+  const {
+    mockProfileSummaries,
+    mockDefaultAgentConfig,
+    mockAvailableTools,
+    mockDeckPrompts,
+    mockSlideStyles,
+    mockSessions
   } = await import('../fixtures/mocks');
 
-  // Mock profiles
-  await page.route('http://127.0.0.1:8000/api/settings/profiles', (route) => {
+  // New profiles API (GET /api/profiles) — used by AgentConfigContext
+  await page.route(/\/api\/profiles$/, (route) => {
     route.fulfill({
       status: 200,
       contentType: 'application/json',
-      body: JSON.stringify(mockProfiles)
+      body: JSON.stringify(mockProfileSummaries)
+    });
+  });
+
+  // Available tools
+  await page.route('**/api/tools/available', (route) => {
+    route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify(mockAvailableTools)
     });
   });
 
   // Mock deck prompts
-  await page.route('http://127.0.0.1:8000/api/settings/deck-prompts', (route) => {
+  await page.route('**/api/settings/deck-prompts', (route) => {
     route.fulfill({
       status: 200,
       contentType: 'application/json',
@@ -189,7 +200,7 @@ export async function setupUserGuideMocks(page: Page): Promise<void> {
   });
 
   // Mock slide styles
-  await page.route('http://127.0.0.1:8000/api/settings/slide-styles', (route) => {
+  await page.route('**/api/settings/slide-styles', (route) => {
     route.fulfill({
       status: 200,
       contentType: 'application/json',
@@ -198,7 +209,7 @@ export async function setupUserGuideMocks(page: Page): Promise<void> {
   });
 
   // Mock sessions
-  await page.route('http://127.0.0.1:8000/api/sessions**', (route, request) => {
+  await page.route('**/api/sessions**', (route, request) => {
     const url = request.url();
     const method = request.method();
 
@@ -208,14 +219,39 @@ export async function setupUserGuideMocks(page: Page): Promise<void> {
       return;
     }
 
+    // Handle agent-config endpoint
+    if (url.includes('/agent-config')) {
+      route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(mockDefaultAgentConfig) });
+      return;
+    }
+
     if (url.includes('limit=')) {
       route.fulfill({
         status: 200,
         contentType: 'application/json',
         body: JSON.stringify(mockSessions)
       });
+    } else if (url.match(/\/api\/sessions\/[^/]+$/)) {
+      // Individual session GET — return a mock session object
+      const idMatch = url.match(/\/api\/sessions\/([^/]+)$/);
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          session_id: idMatch ? idMatch[1] : 'mock',
+          title: 'New Deck',
+          user_id: null,
+          created_by: 'dev@local.dev',
+          created_at: '2026-01-01T00:00:00Z',
+          last_activity: '2026-01-01T00:00:00Z',
+          message_count: 0,
+          has_slide_deck: false,
+          agent_config: mockDefaultAgentConfig
+        })
+      });
     } else {
-      route.fulfill({ status: 404 });
+      // Pass through anything else
+      route.fulfill({ status: 200, contentType: 'application/json', body: '{}' });
     }
   });
 }
@@ -227,6 +263,15 @@ export async function goToGenerator(page: Page): Promise<void> {
   await page.goto('/');
   await page.getByRole('button', { name: 'New Deck' }).click();
   await page.waitForURL(/\/sessions\/[^/]+\/edit/);
+  await page.getByRole('textbox').waitFor({ state: 'visible', timeout: 10000 });
+}
+
+/**
+ * Navigate to the pre-session generator (landing page, no session created).
+ * Use this when you want to capture the config bar before a session exists.
+ */
+export async function goToPreSessionGenerator(page: Page): Promise<void> {
+  await page.goto('/');
   await page.getByRole('textbox').waitFor({ state: 'visible', timeout: 10000 });
 }
 

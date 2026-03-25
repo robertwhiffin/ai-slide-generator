@@ -1,6 +1,8 @@
 import { test, expect, Page } from '@playwright/test';
 import {
-  mockProfiles,
+  mockProfileSummaries,
+  mockDefaultAgentConfig,
+  mockAvailableTools,
   mockDeckPrompts,
   mockSlideStyles,
   mockSessions,
@@ -18,8 +20,13 @@ import {
 // ============================================
 
 async function setupMocks(page: Page) {
-  await page.route('http://127.0.0.1:8000/api/settings/profiles', (route) => {
-    route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(mockProfiles) });
+  // New profiles API (GET /api/profiles)
+  await page.route(/\/api\/profiles$/, (route) => {
+    route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(mockProfileSummaries) });
+  });
+  // Available tools
+  await page.route('**/api/tools/available', (route) => {
+    route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(mockAvailableTools) });
   });
   await page.route('http://127.0.0.1:8000/api/settings/deck-prompts', (route) => {
     route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(mockDeckPrompts) });
@@ -28,11 +35,18 @@ async function setupMocks(page: Page) {
     route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(mockSlideStyles) });
   });
   await page.route('http://127.0.0.1:8000/api/sessions**', (route, request) => {
+    const url = request.url();
     const method = request.method();
 
     // Handle session creation/deletion
     if (method === 'POST' || method === 'DELETE') {
       route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ session_id: 'mock', title: 'New', user_id: null, created_at: '2026-01-01T00:00:00Z' }) });
+      return;
+    }
+
+    // Handle agent-config endpoint
+    if (url.includes('/agent-config')) {
+      route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(mockDefaultAgentConfig) });
       return;
     }
 

@@ -113,10 +113,10 @@ function QuickStartSection() {
       linkText: 'User Guide →',
     },
     {
-      title: 'API Reference',
-      description: 'Complete API documentation with request/response schemas and examples',
-      link: '/docs/api/overview',
-      linkText: 'API Docs →',
+      title: 'Technical Docs',
+      description: 'Architecture, deployment, and implementation details for developers',
+      link: '/docs/technical/backend-overview',
+      linkText: 'Technical Docs →',
     },
   ];
 
@@ -164,15 +164,15 @@ function DocumentationSections() {
       ],
     },
     {
-      title: 'API Reference',
-      description: 'Complete API documentation for all endpoints',
+      title: 'User Guide',
+      description: 'Step-by-step workflows for generating and managing slides',
       items: [
-        {label: 'API Overview', to: '/docs/api/overview'},
-        {label: 'Sessions API', to: '/docs/api/sessions'},
-        {label: 'Chat API', to: '/docs/api/chat'},
-        {label: 'Slides API', to: '/docs/api/slides'},
-        {label: 'Export API', to: '/docs/api/export'},
-        {label: 'Verification API', to: '/docs/api/verification'},
+        {label: 'Generating Slides', to: '/docs/user-guide/generating-slides'},
+        {label: 'Creating Profiles', to: '/docs/user-guide/creating-profiles'},
+        {label: 'Advanced Configuration', to: '/docs/user-guide/advanced-configuration'},
+        {label: 'Custom Styles', to: '/docs/user-guide/creating-custom-styles'},
+        {label: 'Uploading Images', to: '/docs/user-guide/uploading-images'},
+        {label: 'Exporting to Google Slides', to: '/docs/user-guide/exporting-to-google-slides'},
       ],
     },
   ];

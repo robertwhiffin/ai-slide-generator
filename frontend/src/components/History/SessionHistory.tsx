@@ -176,25 +176,16 @@ export const SessionHistory: React.FC<SessionHistoryProps> = ({
             <table className="w-full divide-y divide-gray-200 table-fixed">
               <thead className="bg-gray-50">
                 <tr>
-                  <th className="w-[15%] px-3 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Profile</th>
                   <th className="w-[32%] px-3 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Session Name</th>
                   <th className="w-[14%] px-3 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Created</th>
                   <th className="w-[14%] px-3 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Last Activity</th>
-                  <th className="w-[18%] px-3 py-3 text-center text-xs font-medium text-gray-500 uppercase tracking-wider">Actions</th>
+                  <th className="w-[10%] px-3 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Slides</th>
+                  <th className="w-[20%] px-3 py-3 text-center text-xs font-medium text-gray-500 uppercase tracking-wider">Actions</th>
                 </tr>
               </thead>
               <tbody className="bg-white divide-y divide-gray-200">
                 {sessions.map((session) => (
                   <tr key={session.session_id} className="hover:bg-gray-50">
-                    <td className="px-3 py-3">
-                      {session.profile_name ? (
-                        <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-purple-100 text-purple-800 truncate max-w-full" title={session.profile_name}>
-                          {session.profile_name}
-                        </span>
-                      ) : (
-                        <span className="text-gray-400 text-xs">—</span>
-                      )}
-                    </td>
                     <td className="px-3 py-3 overflow-hidden max-w-0">
                       {editingId === session.session_id ? (
                         <div className="flex items-center gap-1">
@@ -251,7 +242,6 @@ export const SessionHistory: React.FC<SessionHistoryProps> = ({
             <table className="w-full divide-y divide-gray-200">
               <thead className="bg-gray-50">
                 <tr>
-                  <th className="px-3 py-3 text-left text-xs font-medium text-gray-500 uppercase whitespace-nowrap">Profile</th>
                   <th className="px-3 py-3 text-left text-xs font-medium text-gray-500 uppercase whitespace-nowrap">Presentation</th>
                   <th className="px-3 py-3 text-left text-xs font-medium text-gray-500 uppercase whitespace-nowrap">Created by</th>
                   <th className="px-3 py-3 text-left text-xs font-medium text-gray-500 uppercase whitespace-nowrap">Created at</th>
@@ -264,15 +254,6 @@ export const SessionHistory: React.FC<SessionHistoryProps> = ({
               <tbody className="bg-white divide-y divide-gray-200">
                 {sharedPresentations.map((pres) => (
                   <tr key={pres.session_id} className="hover:bg-gray-50">
-                    <td className="px-3 py-3">
-                      {pres.profile_name ? (
-                        <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-purple-100 text-purple-800 truncate max-w-full" title={pres.profile_name}>
-                          {pres.profile_name}
-                        </span>
-                      ) : (
-                        <span className="text-gray-400 text-xs">—</span>
-                      )}
-                    </td>
                     <td className="px-3 py-3 overflow-hidden max-w-0">
                       <span className="block text-sm font-medium text-gray-900 truncate" title={pres.title || ''}>
                         {pres.title || 'Untitled'}

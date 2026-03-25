@@ -30,7 +30,6 @@ interface AppSidebarProps extends React.ComponentProps<typeof Sidebar> {
   onSessionSelect: (sessionId: string) => void
   onNewSession: () => void
   currentSessionId?: string | null
-  profileName?: string
   sessionsRefreshKey?: number
 }
 
@@ -81,8 +80,6 @@ export function AppSidebar({
   onSessionSelect,
   onNewSession,
   currentSessionId,
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
-  profileName,
   sessionsRefreshKey,
   ...props
 }: AppSidebarProps) {
