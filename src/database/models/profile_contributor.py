@@ -15,7 +15,8 @@ class IdentityType(str, Enum):
 
 
 class PermissionLevel(str, Enum):
-    """Permission level for profile access."""
+    """Permission level for profile and deck access."""
+    CAN_USE = "CAN_USE"        # Use only (e.g. generate slides with a profile)
     CAN_MANAGE = "CAN_MANAGE"  # Full control: edit, delete, share
     CAN_EDIT = "CAN_EDIT"      # Edit profile settings
     CAN_VIEW = "CAN_VIEW"      # View only
@@ -48,7 +49,7 @@ class ConfigProfileContributor(Base):
     identity_name = Column(String(255), nullable=False)  # Display name (email or group name)
     
     # Permission level
-    permission_level = Column(String(20), nullable=False, default=PermissionLevel.CAN_VIEW.value)
+    permission_level = Column(String(20), nullable=False, default=PermissionLevel.CAN_USE.value)
 
     # Audit fields
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)

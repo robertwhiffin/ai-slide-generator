@@ -11,10 +11,12 @@ const API_BASE_URL = import.meta.env.VITE_API_URL || (
 );
 
 const API_BASE = `${API_BASE_URL}/api/settings`;
+const PROFILES_API_BASE = `${API_BASE_URL}/api/profiles`;
+const SESSIONS_API_BASE = `${API_BASE_URL}/api/sessions`;
 
 // Types
 
-export type PermissionLevel = 'CAN_MANAGE' | 'CAN_EDIT' | 'CAN_VIEW';
+export type PermissionLevel = 'CAN_MANAGE' | 'CAN_EDIT' | 'CAN_VIEW' | 'CAN_USE';
 
 export interface Profile {
   id: number;
@@ -22,57 +24,19 @@ export interface Profile {
   description: string | null;
   is_default: boolean;
   global_permission: PermissionLevel | null;
+  agent_config: Record<string, unknown> | null;
   created_at: string;
   created_by: string | null;
-  updated_at: string;
+  updated_at: string | null;
   updated_by: string | null;
   my_permission?: PermissionLevel;
   /** True if this is the current user's personal default profile */
   is_my_default?: boolean;
 }
 
-export interface ProfileDetail extends Profile {
-  ai_infra: AIInfraConfig;
-  genie_spaces: GenieSpace[];
-  prompts: PromptsConfig;
-}
-
-export interface ProfileCreate {
-  name: string;
-  description?: string | null;
-}
-
-/**
- * Extended profile creation with inline configurations.
- * Used by the creation wizard to create a complete profile in one request.
- */
-export interface ProfileCreateWithConfig {
-  name: string;
-  description?: string | null;
-  genie_space?: {
-    space_id: string;
-    space_name: string;
-    description?: string | null;
-  };
-  ai_infra?: {
-    llm_endpoint?: string;
-    llm_temperature?: number;
-    llm_max_tokens?: number;
-  };
-  prompts?: {
-    selected_deck_prompt_id?: number | null;
-    system_prompt?: string;
-    slide_editing_instructions?: string;
-  };
-}
-
 export interface ProfileUpdate {
   name?: string;
   description?: string | null;
-}
-
-export interface ProfileDuplicate {
-  new_name: string;
 }
 
 export interface AIInfraConfig {
@@ -179,6 +143,7 @@ export interface SlideStyle {
   image_guidelines: string | null;
   is_active: boolean;
   is_system: boolean;  // Protected system styles cannot be edited/deleted
+  is_default: boolean;
   created_by: string | null;
   created_at: string;
   updated_by: string | null;
@@ -325,76 +290,45 @@ async function fetchJson<T>(url: string, options?: RequestInit): Promise<T> {
  * Configuration API methods
  */
 export const configApi = {
-  // Profiles
-  
+  // Profiles (simplified — list, rename, delete only)
+
   listProfiles: (): Promise<Profile[]> =>
-    fetchJson(`${API_BASE}/profiles`),
-  
-  getProfile: (id: number): Promise<ProfileDetail> =>
-    fetchJson(`${API_BASE}/profiles/${id}`),
-  
-  getDefaultProfile: (): Promise<ProfileDetail> =>
-    fetchJson(`${API_BASE}/profiles/default`),
-  
-  createProfile: (data: ProfileCreate): Promise<ProfileDetail> =>
-    fetchJson(`${API_BASE}/profiles`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(data),
-    }),
-  
-  /**
-   * Create a profile with all configurations in one request.
-   * Used by the creation wizard for complete profile setup.
-   */
-  createProfileWithConfig: (data: ProfileCreateWithConfig): Promise<ProfileDetail> =>
-    fetchJson(`${API_BASE}/profiles/with-config`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(data),
-    }),
-  
-  updateProfile: (id: number, data: ProfileUpdate): Promise<ProfileDetail> =>
-    fetchJson(`${API_BASE}/profiles/${id}`, {
+    fetchJson(`${PROFILES_API_BASE}`),
+
+  updateProfile: (id: number, data: ProfileUpdate): Promise<Profile> =>
+    fetchJson(`${PROFILES_API_BASE}/${id}`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(data),
     }),
-  
+
   deleteProfile: (id: number): Promise<void> =>
-    fetchJson(`${API_BASE}/profiles/${id}`, {
+    fetchJson(`${PROFILES_API_BASE}/${id}`, {
       method: 'DELETE',
     }),
-  
-  setDefaultProfile: (id: number): Promise<ProfileDetail> =>
-    fetchJson(`${API_BASE}/profiles/${id}/set-default`, {
+
+  setDefaultProfile: (id: number): Promise<Profile> =>
+    fetchJson(`${PROFILES_API_BASE}/${id}/set-default`, {
       method: 'POST',
     }),
-  
+
   loadProfile: (id: number): Promise<ReloadResponse> =>
-    fetchJson(`${API_BASE}/profiles/${id}/load`, {
+    fetchJson(`${PROFILES_API_BASE}/${id}/load`, {
       method: 'POST',
     }),
-  
+
   setProfileGlobal: (id: number, permission: PermissionLevel | null): Promise<{ id: number; global_permission: PermissionLevel | null }> =>
-    fetchJson(`${API_BASE}/profiles/${id}/global${permission ? `?permission=${permission}` : ''}`, {
+    fetchJson(`${PROFILES_API_BASE}/${id}/global${permission ? `?permission=${permission}` : ''}`, {
       method: 'PATCH',
     }),
 
-  duplicateProfile: (id: number, data: ProfileDuplicate): Promise<ProfileDetail> =>
-    fetchJson(`${API_BASE}/profiles/${id}/duplicate`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(data),
-    }),
-  
   reloadConfiguration: (profileId?: number): Promise<ReloadResponse> => {
-    const url = profileId 
-      ? `${API_BASE}/profiles/reload?profile_id=${profileId}`
-      : `${API_BASE}/profiles/reload`;
+    const url = profileId
+      ? `${PROFILES_API_BASE}/reload?profile_id=${profileId}`
+      : `${PROFILES_API_BASE}/reload`;
     return fetchJson(url, { method: 'POST' });
   },
-  
+
   // AI Infrastructure
   
   getAIInfraConfig: (profileId: number): Promise<AIInfraConfig> =>
@@ -510,7 +444,8 @@ export const configApi = {
     fetchJson(`${API_BASE}/slide-styles/${styleId}`, {
       method: 'DELETE',
     }),
-  
+
+
   // Google OAuth Credentials (global, admin-only)
 
   /**
@@ -651,6 +586,46 @@ export const configApi = {
    */
   removeContributor: (profileId: number, contributorId: number): Promise<void> =>
     fetchJson(`${API_BASE}/profiles/${profileId}/contributors/${contributorId}`, {
+      method: 'DELETE',
+    }),
+
+  // Deck Contributors (Sharing)
+
+  /**
+   * List contributors for a deck (session).
+   */
+  listDeckContributors: (sessionId: string): Promise<ContributorListResponse> =>
+    fetchJson(`${SESSIONS_API_BASE}/${sessionId}/contributors`),
+
+  /**
+   * Add a contributor to a deck (session).
+   */
+  addDeckContributor: (sessionId: string, data: ContributorCreate): Promise<Contributor> =>
+    fetchJson(`${SESSIONS_API_BASE}/${sessionId}/contributors`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(data),
+    }),
+
+  /**
+   * Update a deck contributor's permission level.
+   */
+  updateDeckContributor: (
+    sessionId: string,
+    contributorId: number,
+    data: { permission_level: string }
+  ): Promise<Contributor> =>
+    fetchJson(`${SESSIONS_API_BASE}/${sessionId}/contributors/${contributorId}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(data),
+    }),
+
+  /**
+   * Remove a contributor from a deck (session).
+   */
+  removeDeckContributor: (sessionId: string, contributorId: number): Promise<void> =>
+    fetchJson(`${SESSIONS_API_BASE}/${sessionId}/contributors/${contributorId}`, {
       method: 'DELETE',
     }),
 };

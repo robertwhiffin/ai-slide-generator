@@ -229,6 +229,7 @@ SYSTEM_SLIDE_STYLES = [
         "category": "System",
         "style_content": DEFAULT_SLIDE_STYLE,
         "is_system": True,  # Cannot be edited or deleted
+        "is_default": True,
     },
 ]
 
@@ -284,6 +285,7 @@ def _seed_slide_styles(db, include_databricks: bool = False) -> int | None:
             style_content=style_data["style_content"],
             is_active=True,
             is_system=style_data.get("is_system", False),
+            is_default=style_data.get("is_default", False),
             created_by="system",
             updated_by="system",
         )

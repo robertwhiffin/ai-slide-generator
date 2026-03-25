@@ -1,6 +1,8 @@
 import { test, expect, Page } from '@playwright/test';
 import {
-  mockProfiles,
+  mockProfileSummaries,
+  mockDefaultAgentConfig,
+  mockAvailableTools,
   mockDeckPrompts,
   mockSlideStyles,
   mockSessions,
@@ -78,22 +80,14 @@ async function setupSavePointMocks(
 
   // --- Standard mocks (same as slide-operations-ui) ---
 
-  await page.route('http://127.0.0.1:8000/api/settings/profiles', (route, request) => {
-    if (request.method() === 'GET') {
-      route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(mockProfiles) });
-    } else {
-      route.continue();
-    }
+  // New profiles API (GET /api/profiles)
+  await page.route(/\/api\/profiles$/, (route) => {
+    route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(mockProfileSummaries) });
   });
 
-  await page.route(/http:\/\/127.0.0.1:8000\/api\/settings\/profiles\/\d+$/, (route, request) => {
-    if (request.method() === 'GET') {
-      const id = parseInt(request.url().split('/').pop() || '1');
-      const profile = mockProfiles.find((p) => p.id === id) || mockProfiles[0];
-      route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(profile) });
-    } else {
-      route.continue();
-    }
+  // Available tools
+  await page.route('**/api/tools/available', (route) => {
+    route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(mockAvailableTools) });
   });
 
   await page.route('http://127.0.0.1:8000/api/settings/deck-prompts', (route) => {
@@ -110,6 +104,11 @@ async function setupSavePointMocks(
 
     if (method === 'POST' || method === 'DELETE') {
       route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ session_id: 'mock', title: 'New', user_id: null, created_at: '2026-01-01T00:00:00Z' }) });
+      return;
+    }
+    // Handle agent-config endpoint
+    if (url.includes('/agent-config')) {
+      route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(mockDefaultAgentConfig) });
       return;
     }
     if (url.includes('limit=')) {
@@ -971,18 +970,13 @@ async function setupStatefulMocks(
 ) {
   const { currentDeck, updateSlideCallCount, getSlidesCalls, verifyDelayMs = 3000 } = state;
 
-  // Profiles
-  await page.route('http://127.0.0.1:8000/api/settings/profiles', (route, request) => {
-    if (request.method() === 'GET') {
-      route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(mockProfiles) });
-    } else { route.continue(); }
+  // New profiles API (GET /api/profiles)
+  await page.route(/\/api\/profiles$/, (route) => {
+    route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(mockProfileSummaries) });
   });
-  await page.route(/http:\/\/127.0.0.1:8000\/api\/settings\/profiles\/\d+$/, (route, request) => {
-    if (request.method() === 'GET') {
-      const id = parseInt(request.url().split('/').pop() || '1');
-      const profile = mockProfiles.find(p => p.id === id) || mockProfiles[0];
-      route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(profile) });
-    } else { route.continue(); }
+  // Available tools
+  await page.route('**/api/tools/available', (route) => {
+    route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(mockAvailableTools) });
   });
   await page.route('http://127.0.0.1:8000/api/settings/deck-prompts', r =>
     r.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(mockDeckPrompts) }));
@@ -1050,6 +1044,11 @@ async function setupStatefulMocks(
     const method = request.method();
     if (method === 'POST' || method === 'DELETE') {
       route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ session_id: 'mock', title: 'New', user_id: null, created_at: '2026-01-01T00:00:00Z' }) });
+      return;
+    }
+    // Handle agent-config endpoint
+    if (url.includes('/agent-config')) {
+      route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(mockDefaultAgentConfig) });
       return;
     }
     if (url.includes('limit=')) {

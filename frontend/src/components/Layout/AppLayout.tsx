@@ -4,7 +4,7 @@ import type { SlideDeck } from '../../types/slide';
 import { ChatPanel, type ChatPanelHandle } from '../ChatPanel/ChatPanel';
 import { SlidePanel, type SlidePanelHandle } from '../SlidePanel/SlidePanel';
 import { SelectionRibbon } from '../SlidePanel/SelectionRibbon';
-import { ProfileSelector } from '../config/ProfileSelector';
+import { AgentConfigBar } from '../AgentConfigBar/AgentConfigBar';
 import { ProfileList } from '../config/ProfileList';
 import { DeckPromptList } from '../config/DeckPromptList';
 import { SlideStyleList } from '../config/SlideStyleList';
@@ -16,12 +16,13 @@ import { HelpPage } from '../Help';
 import { UpdateBanner } from '../UpdateBanner';
 import { SavePointDropdown, PreviewBanner, RevertConfirmModal } from '../SavePoints';
 import type { SavePointVersion } from '../SavePoints';
+import { DeckContributorsManager } from '../DeckContributorsManager';
 import { FeedbackButton } from '../Feedback/FeedbackButton';
 import { SurveyModal } from '../Feedback/SurveyModal';
 import { useSurveyTrigger } from '../../hooks/useSurveyTrigger';
 import { useSession } from '../../contexts/SessionContext';
 import { useGeneration } from '../../contexts/GenerationContext';
-import { useProfiles } from '../../contexts/ProfileContext';
+import { ProfileProvider } from '../../contexts/ProfileContext';
 import { useVersionCheck } from '../../hooks/useVersionCheck';
 import { useToast } from '../../contexts/ToastContext';
 import { api } from '../../services/api';
@@ -44,6 +45,7 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
   const [rawHtml, setRawHtml] = useState<string | null>(null);
   const [viewMode, setViewMode] = useState<ViewMode>(initialView);
   const [showSaveDialog, setShowSaveDialog] = useState(false);
+  const [showShareDialog, setShowShareDialog] = useState(false);
   const [lastSavedTime, setLastSavedTime] = useState<Date | null>(null);
   const [sessionsRefreshKey, setSessionsRefreshKey] = useState<number>(0);
   const [scrollTarget, setScrollTarget] = useState<{ index: number; key: number } | null>(null);
@@ -60,24 +62,14 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
   const slidePanelRef = useRef<SlidePanelHandle>(null);
   const slideDeckRef = useRef(slideDeck);
   slideDeckRef.current = slideDeck;
-  const { sessionTitle, sessionId, createNewSession, switchSession, renameSession } = useSession();
+  const { sessionTitle, sessionId, experimentUrl, createNewSession, switchSession, renameSession } = useSession();
   const { isGenerating } = useGeneration();
-  const { currentProfile, loadProfile } = useProfiles();
+  /** Ref-tracked sessionId so the URL effect guard doesn't need sessionId as a dep (which would cause it to re-fire when switchSession internally calls setSessionId). */
   const sessionIdRef = useRef(sessionId);
   sessionIdRef.current = sessionId;
-  const currentProfileRef = useRef(currentProfile);
-  currentProfileRef.current = currentProfile;
-  const loadProfileRef = useRef(loadProfile);
-  loadProfileRef.current = loadProfile;
   const { updateAvailable, latestVersion, updateType, dismissed, dismiss } = useVersionCheck();
   const { showToast } = useToast();
   const { showSurvey, closeSurvey, onGenerationComplete, onGenerationStart } = useSurveyTrigger();
-
-  // Permission level for the current session (null until loaded from server)
-  const [sessionPermission, setSessionPermission] = useState<'CAN_VIEW' | 'CAN_EDIT' | 'CAN_MANAGE' | null>(null);
-
-  // Non-null when viewing a session whose profile has been deleted
-  const [deletedProfileName, setDeletedProfileName] = useState<string | null>(null);
 
   // Editing lock state (default false until acquire succeeds)
   const [editingLockHolder, setEditingLockHolder] = useState<string | null>(null);
@@ -109,8 +101,17 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
 
   // Main lock lifecycle: acquire on open, heartbeat, idle release, poll status
   useEffect(() => {
-    if (!sessionId || initialView !== 'main' || sessionPermission === null) return;
-    const isViewer = sessionPermission === 'CAN_VIEW';
+    if (!sessionId || initialView !== 'main') return;
+
+    // New session (no URL session ID) — not persisted to DB yet, so no lock needed.
+    // The user is the sole owner until the first message persists the session.
+    if (!urlSessionId) {
+      setIsLockHolder(true);
+      setEditingLockHolder(null);
+      return;
+    }
+
+    const isViewer = false;
     let cancelled = false;
 
     const isSelf = (status: { locked_by_email?: string | null }) =>
@@ -196,7 +197,7 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
         lockSessionRef.current = null;
       }
     };
-  }, [sessionId, initialView, sessionPermission]);
+  }, [sessionId, initialView, urlSessionId]);
 
   // Release lock on page unload (tab close, refresh)
   useEffect(() => {
@@ -215,35 +216,24 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
     setViewMode(initialView);
   }, [initialView]);
 
-  // When URL has sessionId, restore that session
+  // When URL has sessionId, restore that session (load deck if we don't have it yet).
+  // sessionId is intentionally NOT in deps — we use sessionIdRef.current in the guard instead.
+  // This prevents the effect from re-firing when switchSession internally calls setSessionId,
+  // which would cancel the in-flight load and trigger another one, causing chat to reload 3×.
   useEffect(() => {
     if (!urlSessionId) return;
     if (urlSessionId === sessionIdRef.current && slideDeckRef.current != null) return;
     let cancelled = false;
     (async () => {
       try {
+        // Fetch session info first so we can pass it to switchSession as existingSessionInfo
+        // to avoid a second getSession call.
         const sessionInfo = await api.getSession(urlSessionId);
-        if (cancelled) return;
-
-        // Store permission level from session info
-        setSessionPermission(sessionInfo.my_permission || 'CAN_MANAGE');
-
-        if (sessionInfo.profile_deleted) {
-          setDeletedProfileName(
-            sessionInfo.profile_name || `Profile ${sessionInfo.profile_id}`,
-          );
-        } else if (sessionInfo.profile_id && currentProfileRef.current && sessionInfo.profile_id !== currentProfileRef.current.id) {
-          try {
-            await loadProfileRef.current(sessionInfo.profile_id);
-          } catch {
-            // Profile may have been deleted; continue with current profile
-          }
-        }
         if (cancelled) return;
 
         const { slideDeck: restoredDeck, rawHtml: restoredRawHtml } = await switchSession(
           urlSessionId,
-          { title: sessionInfo.title, has_slide_deck: sessionInfo.has_slide_deck },
+          { title: sessionInfo.title, has_slide_deck: sessionInfo.has_slide_deck, experiment_url: sessionInfo.experiment_url },
           () => cancelled,
         );
         if (!cancelled) {
@@ -301,15 +291,6 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
     chatPanelRef.current?.sendMessage(content, slideContext);
   }, []);
 
-  const handleProfileChange = useCallback(() => {
-    setSlideDeck(null);
-    setRawHtml(null);
-    setLastSavedTime(null);
-    setDeletedProfileName(null);
-    setSessionPermission('CAN_MANAGE');
-    createNewSession();
-  }, [createNewSession]);
-
   const handleSessionRestore = useCallback(
     (restoredSessionId: string) => {
       navigate(`/sessions/${restoredSessionId}/edit`);
@@ -336,17 +317,10 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
     setSlideDeck(null);
     setRawHtml(null);
     setLastSavedTime(null);
-    setDeletedProfileName(null);
-    setSessionPermission('CAN_MANAGE');
     const newId = createNewSession();
     setViewMode('main');
     try {
-      const profile = currentProfileRef.current;
-      await api.createSession({
-        sessionId: newId,
-        profileId: profile?.id,
-        profileName: profile?.name,
-      });
+      await api.createSession({ sessionId: newId });
       setSessionsRefreshKey(prev => prev + 1);
       navigate(`/sessions/${newId}/edit`);
     } catch (err) {
@@ -367,6 +341,11 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
   }, [renameSession]);
 
   const handleShare = useCallback(() => {
+    if (!sessionId) return;
+    setShowShareDialog(true);
+  }, [sessionId]);
+
+  const handleCopyLink = useCallback(() => {
     if (!sessionId) return;
     const viewUrl = `${window.location.origin}/sessions/${sessionId}/view`;
     navigator.clipboard.writeText(viewUrl).then(
@@ -437,7 +416,7 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
     ? `preview-v${previewVersion}`
     : 'current';
 
-  const effectiveReadOnly = !!previewVersion || viewOnly || !!deletedProfileName || sessionPermission === 'CAN_VIEW' || !isLockHolder;
+  const effectiveReadOnly = !!previewVersion || viewOnly || !isLockHolder;
   const isReadOnly = effectiveReadOnly;
 
   const getTimeAgo = (date: Date) => {
@@ -451,17 +430,27 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
     return `${days}d ago`;
   };
 
-  const getSubtitle = () => {
+  // Generate subtitle for page header with status
+  const getSubtitle = (): React.ReactNode | undefined => {
     if (!slideDeck) return undefined;
-    const parts = [`${slideDeck.slide_count} slide${slideDeck.slide_count !== 1 ? 's' : ''}`];
+    const slideCount = `${slideDeck.slide_count} slide${slideDeck.slide_count !== 1 ? 's' : ''}`;
+    const saved = lastSavedTime ? `Saved ${getTimeAgo(lastSavedTime)}` : null;
 
-    if (lastSavedTime) {
-      parts.push(`Saved ${getTimeAgo(lastSavedTime)}`);
-    }
-
-    if (isGenerating) parts.push('Generating...');
-
-    return parts.join(' • ');
+    return (
+      <>
+        {slideCount}
+        {experimentUrl && (
+          <>
+            {' \u2022 '}
+            <a href={experimentUrl} target="_blank" rel="noopener noreferrer" className="hover:underline text-primary">
+              Agent Trace
+            </a>
+          </>
+        )}
+        {saved && ` \u2022 ${saved}`}
+        {isGenerating && ' \u2022 Generating...'}
+      </>
+    );
   };
 
   const displayDeck = previewVersion != null && previewDeck ? previewDeck : slideDeck;
@@ -516,10 +505,6 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
   const viewOnlyReason =
     !isLockHolder && editingLockHolder
       ? `${editingLockHolder} is currently editing this session`
-      : sessionPermission === 'CAN_VIEW'
-      ? 'You have view-only access to this session'
-      : deletedProfileName
-      ? `Profile "${deletedProfileName}" was deleted — session is read-only`
       : undefined;
 
   return (
@@ -530,7 +515,6 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
         onSessionSelect={handleSessionRestore}
         onNewSession={handleNewSession}
         currentSessionId={sessionId}
-        profileName={currentProfile?.name}
         sessionsRefreshKey={sessionsRefreshKey}
       />
       <SidebarInset className="h-full overflow-hidden">
@@ -543,6 +527,7 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
                 onTitleChange={handleTitleChange}
                 onSave={() => setShowSaveDialog(true)}
                 onShare={!viewOnly && sessionId ? handleShare : undefined}
+                onCopyLink={!viewOnly && sessionId ? handleCopyLink : undefined}
                 onExportPPTX={slideDeck ? handleExportPPTX : undefined}
                 onExportPDF={slideDeck ? handleExportPDF : undefined}
                 onExportGoogleSlides={slideDeck ? handleExportGoogleSlides : undefined}
@@ -563,13 +548,6 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
                     />
                   ) : undefined
                 }
-                profileSelector={
-                  <ProfileSelector
-                    onManageClick={() => setViewMode('profiles')}
-                    onProfileChange={handleProfileChange}
-                    disabled={isGenerating}
-                  />
-                }
               />
 
               {previewVersion != null && (
@@ -579,18 +557,6 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
                   onRevert={isLockHolder ? handleRevertClick : () => {}}
                   onCancel={handlePreviewCancel}
                 />
-              )}
-
-              {deletedProfileName && (
-                <div className="bg-amber-50 border-b border-amber-200 px-4 py-2 text-sm text-amber-800 flex items-center gap-2">
-                  <svg className="w-4 h-4 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20">
-                    <path fillRule="evenodd" d="M8.485 2.495c.673-1.167 2.357-1.167 3.03 0l6.28 10.875c.673 1.167-.17 2.625-1.516 2.625H3.72c-1.347 0-2.189-1.458-1.515-2.625L8.485 2.495zM10 6a.75.75 0 01.75.75v3.5a.75.75 0 01-1.5 0v-3.5A.75.75 0 0110 6zm0 9a1 1 0 100-2 1 1 0 000 2z" clipRule="evenodd" />
-                  </svg>
-                  <span>
-                    This session was created with profile &ldquo;{deletedProfileName}&rdquo; which has been deleted.
-                    The session is read-only and cannot continue.
-                  </span>
-                </div>
               )}
 
               {updateAvailable && !dismissed && latestVersion && updateType && (
@@ -604,7 +570,10 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
 
             <div className="relative flex-1 overflow-hidden">
               <div className="absolute inset-0 flex">
-                <div className="w-[32%] min-w-[260px] border-r border-border bg-card">
+                <div className="w-[32%] min-w-[260px] border-r border-border bg-card flex flex-col">
+                  <div className="shrink-0 relative z-10 overflow-visible">
+                    <AgentConfigBar />
+                  </div>
                   <ChatPanel
                     key="chat-panel"
                     ref={chatPanelRef}
@@ -646,7 +615,6 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
                     onExportStatusChange={setExportStatus}
                     versionKey={versionKey}
                     readOnly={isReadOnly}
-                    canManage={sessionPermission === 'CAN_MANAGE'}
                     lockedBy={!isLockHolder ? editingLockHolder : null}
                     onVerificationComplete={handleVerificationComplete}
                   />
@@ -680,7 +648,9 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
             </div>
             <div className="flex-1 overflow-y-auto">
               <div className="mx-auto w-full max-w-4xl px-4 py-8">
-                <ProfileList onProfileChange={handleProfileChange} />
+                <ProfileProvider>
+                  <ProfileList />
+                </ProfileProvider>
               </div>
             </div>
           </div>
@@ -770,6 +740,26 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
           setRevertTargetVersion(null);
         }}
       />
+
+      {/* Share Deck Dialog */}
+      {showShareDialog && sessionId && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm">
+          <div className="w-full max-w-lg mx-4 rounded-lg border border-border bg-card shadow-lg max-h-[80vh] flex flex-col">
+            <div className="flex items-center justify-between border-b border-border px-6 py-4">
+              <h2 className="text-lg font-semibold text-foreground">Share Deck</h2>
+              <button
+                onClick={() => setShowShareDialog(false)}
+                className="text-muted-foreground hover:text-foreground transition-colors"
+              >
+                ✕
+              </button>
+            </div>
+            <div className="flex-1 overflow-y-auto px-6 py-4">
+              <DeckContributorsManager sessionId={sessionId} />
+            </div>
+          </div>
+        </div>
+      )}
 
       <FeedbackButton />
       <SurveyModal isOpen={showSurvey} onClose={closeSurvey} />

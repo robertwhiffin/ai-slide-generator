@@ -1,11 +1,11 @@
 """Database models."""
 
 from src.database.models.ai_infra import ConfigAIInfra
+from src.database.models.deck_contributor import DeckContributor
 from src.database.models.feedback import FeedbackConversation, SurveyResponse
 from src.database.models.genie_space import ConfigGenieSpace
 from src.database.models.google_global_credentials import GoogleGlobalCredentials
 from src.database.models.google_oauth_token import GoogleOAuthToken
-from src.database.models.history import ConfigHistory
 from src.database.models.identity import AppIdentity
 from src.database.models.image import ImageAsset
 from src.database.models.profile import ConfigProfile
@@ -34,7 +34,7 @@ __all__ = [
     "ChatRequest",
     "ConfigAIInfra",
     "ConfigGenieSpace",
-    "ConfigHistory",
+    "DeckContributor",
     "ConfigProfile",
     "ConfigProfileContributor",
     "ConfigPrompts",

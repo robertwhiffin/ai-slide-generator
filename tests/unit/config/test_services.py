@@ -1,6 +1,6 @@
 """Test configuration services."""
 import pytest
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from src.core.database import Base
@@ -20,43 +20,15 @@ def db_session():
     # Use SQLite in-memory database for testing
     engine = create_engine("sqlite:///:memory:")
     
-    # Create tables (excluding history table which uses PostgreSQL-specific JSONB)
-    tables_to_create = [
-        table for table in Base.metadata.sorted_tables
-        if table.name != 'config_history'
-    ]
-    
-    for table in tables_to_create:
-        table.create(bind=engine, checkfirst=True)
-    
-    # Create a simplified history table for tests (using TEXT instead of JSONB)
-    with engine.connect() as conn:
-        conn.execute(text("""
-            CREATE TABLE config_history (
-                id INTEGER PRIMARY KEY,
-                profile_id INTEGER NOT NULL,
-                domain VARCHAR(50) NOT NULL,
-                action VARCHAR(50) NOT NULL,
-                changed_by VARCHAR(255) NOT NULL,
-                changes TEXT NOT NULL,
-                snapshot TEXT,
-                timestamp DATETIME NOT NULL
-            )
-        """))
-        conn.commit()
-    
+    Base.metadata.create_all(bind=engine)
+
     SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
     session = SessionLocal()
-    
+
     yield session
-    
-    # Cleanup
+
     session.close()
-    for table in reversed(tables_to_create):
-        table.drop(bind=engine, checkfirst=True)
-    with engine.connect() as conn:
-        conn.execute(text("DROP TABLE IF EXISTS config_history"))
-        conn.commit()
+    Base.metadata.drop_all(bind=engine)
 
 
 def test_create_profile_with_defaults(db_session):

@@ -20,9 +20,9 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/profiles/{profile_id}/contributors", tags=["contributors"])
 
 
-def get_permission_service(db: Session = Depends(get_db)) -> PermissionService:
+def get_permission_service() -> PermissionService:
     """Dependency to get PermissionService."""
-    return PermissionService(db)
+    return PermissionService()
 
 
 # Request/Response models
@@ -33,8 +33,8 @@ class ContributorCreate(BaseModel):
     identity_type: str = Field(..., description="USER or GROUP")
     identity_name: str = Field(..., description="Display name (email or group name)")
     permission_level: str = Field(
-        default=PermissionLevel.CAN_VIEW.value,
-        description="Permission level: CAN_MANAGE, CAN_EDIT, or CAN_VIEW",
+        default=PermissionLevel.CAN_USE.value,
+        description="Permission level: CAN_MANAGE, CAN_EDIT, or CAN_USE",
     )
 
 
@@ -42,7 +42,7 @@ class ContributorUpdate(BaseModel):
     """Request to update a contributor's permission level."""
 
     permission_level: str = Field(
-        ..., description="Permission level: CAN_MANAGE, CAN_EDIT, or CAN_VIEW"
+        ..., description="Permission level: CAN_MANAGE, CAN_EDIT, or CAN_USE"
     )
 
 
@@ -76,13 +76,28 @@ class ContributorBulkCreate(BaseModel):
     contributors: list[ContributorCreate]
 
 
+_PROFILE_PERMISSION_LEVELS = {
+    PermissionLevel.CAN_USE,
+    PermissionLevel.CAN_EDIT,
+    PermissionLevel.CAN_MANAGE,
+}
+
+
 def _validate_permission_level(level: str) -> str:
-    """Validate and normalize permission level."""
+    """Validate and normalize permission level for profiles.
+
+    Profiles accept CAN_USE, CAN_EDIT, CAN_MANAGE.
+    CAN_VIEW is deck-only and rejected here.
+    """
     try:
-        return PermissionLevel(level).value
+        parsed = PermissionLevel(level)
     except ValueError:
-        valid = [p.value for p in PermissionLevel]
+        valid = [p.value for p in _PROFILE_PERMISSION_LEVELS]
         raise ValueError(f"Invalid permission level. Must be one of: {valid}")
+    if parsed not in _PROFILE_PERMISSION_LEVELS:
+        valid = [p.value for p in _PROFILE_PERMISSION_LEVELS]
+        raise ValueError(f"Invalid permission level. Must be one of: {valid}")
+    return parsed.value
 
 
 def _validate_identity_type(type_str: str) -> str:
@@ -154,7 +169,7 @@ def list_contributors(
         List of contributors with their permissions
     """
     # Check permission first
-    perm_service.require_view(profile_id)
+    perm_service.require_use_profile(db, profile_id)
     
     _get_profile_or_404(db, profile_id)
     
@@ -194,24 +209,24 @@ def add_contributor(
 ):
     """
     Add a contributor to a profile.
-    
-    Requires CAN_EDIT permission on the profile.
-    
+
+    Requires CAN_MANAGE permission on the profile.
+
     Args:
         profile_id: Profile ID
         request: Contributor details
-        
+
     Returns:
         Created contributor
-        
+
     Raises:
-        403: No permission to edit this profile
+        403: No permission to manage this profile
         400: Invalid request
         404: Profile not found
         409: Contributor already exists
     """
     # Check permission first
-    perm_service.require_edit(profile_id)
+    perm_service.require_manage_profile(db, profile_id)
     
     _get_profile_or_404(db, profile_id)
     
@@ -282,18 +297,18 @@ def add_contributors_bulk(
 ):
     """
     Add multiple contributors to a profile at once.
-    
-    Requires CAN_EDIT permission on the profile.
-    
+
+    Requires CAN_MANAGE permission on the profile.
+
     Args:
         profile_id: Profile ID
         request: List of contributors to add
-        
+
     Returns:
         List of created contributors (skips duplicates)
     """
     # Check permission first
-    perm_service.require_edit(profile_id)
+    perm_service.require_manage_profile(db, profile_id)
     
     _get_profile_or_404(db, profile_id)
     
@@ -368,19 +383,19 @@ def update_contributor(
 ):
     """
     Update a contributor's permission level.
-    
-    Requires CAN_EDIT permission on the profile.
-    
+
+    Requires CAN_MANAGE permission on the profile.
+
     Args:
         profile_id: Profile ID
         contributor_id: Contributor ID
         request: New permission level
-        
+
     Returns:
         Updated contributor
     """
     # Check permission first
-    perm_service.require_edit(profile_id)
+    perm_service.require_manage_profile(db, profile_id)
     
     _get_profile_or_404(db, profile_id)
     
@@ -434,15 +449,15 @@ def remove_contributor(
 ):
     """
     Remove a contributor from a profile.
-    
-    Requires CAN_EDIT permission on the profile.
-    
+
+    Requires CAN_MANAGE permission on the profile.
+
     Args:
         profile_id: Profile ID
         contributor_id: Contributor ID
     """
     # Check permission first
-    perm_service.require_edit(profile_id)
+    perm_service.require_manage_profile(db, profile_id)
     
     _get_profile_or_404(db, profile_id)
     

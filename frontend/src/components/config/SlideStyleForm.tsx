@@ -10,7 +10,6 @@ import Editor from '@monaco-editor/react';
 import { Button } from '@/ui/button';
 import type { SlideStyle, SlideStyleCreate, SlideStyleUpdate } from '../../api/config';
 import { ImagePicker } from '../ImageLibrary/ImagePicker';
-import { ExpandableEditor } from './ExpandableEditor';
 import { DOCS_URLS } from '../../constants/docs';
 
 interface SlideStyleFormProps {
@@ -216,12 +215,22 @@ export const SlideStyleForm: React.FC<SlideStyleFormProps> = ({
                 <label className="mb-1 block text-sm font-medium text-foreground">
                   Style Content <span className="text-destructive">*</span>
                 </label>
-                <ExpandableEditor
-                  value={styleContent}
-                  onChange={setStyleContent}
-                  readOnly={saving}
-                  modalTitle="Style Content"
-                />
+                <div className="overflow-hidden rounded-md border border-input">
+                  <Editor
+                    height="200px"
+                    defaultLanguage="markdown"
+                    value={styleContent}
+                    onChange={(value) => setStyleContent(value || '')}
+                    options={{
+                      minimap: { enabled: false },
+                      wordWrap: 'on',
+                      lineNumbers: 'on',
+                      scrollBeyondLastLine: false,
+                      fontSize: 13,
+                      readOnly: saving,
+                    }}
+                  />
+                </div>
                 <p className="mt-1 text-xs text-muted-foreground">
                   Define typography, colors, layout rules, and visual guidelines.
                   Include font sizes, color codes, spacing, and chart color palettes.

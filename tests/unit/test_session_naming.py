@@ -86,18 +86,13 @@ class TestSessionNamingInStreaming:
     """
 
     def _make_chat_service(self):
-        """Create a ChatService with a mocked agent."""
-        with patch("src.api.services.chat_service.create_agent") as mock_create:
-            mock_agent = MagicMock()
-            mock_create.return_value = mock_agent
+        """Create a ChatService without agent (agent is now per-request)."""
+        from src.api.services.chat_service import ChatService
 
-            from src.api.services.chat_service import ChatService
-
-            service = ChatService.__new__(ChatService)
-            service.agent = mock_agent
-            service._deck_cache = {}
-            service._cache_lock = __import__("threading").Lock()
-            return service
+        service = ChatService.__new__(ChatService)
+        service._deck_cache = {}
+        service._cache_lock = __import__("threading").Lock()
+        return service
 
     def _make_session_manager_mock(self, message_count: int = 0):
         """Create a mock session manager with controlled message_count.
@@ -115,6 +110,8 @@ class TestSessionNamingInStreaming:
             "created_at": "2026-02-13T14:30:00",
             "last_activity": "2026-02-13T14:30:00",
             "genie_conversation_id": None,
+            "experiment_id": None,
+            "agent_config": None,
             "message_count": message_count,
             "has_slide_deck": False,
             "profile_id": None,
@@ -143,9 +140,15 @@ class TestSessionNamingInStreaming:
             pass
         return events
 
-    def _setup_agent_to_return_html(self, service):
-        """Configure the mock agent to produce a simple slide result via the callback queue."""
+    def _setup_agent_mock(self, service):
+        """Configure a mock agent returned by _build_agent_for_session.
+
+        Returns:
+            The mock agent so callers can verify calls on it.
+        """
         from src.api.schemas.streaming import StreamEvent, StreamEventType
+
+        mock_agent = MagicMock()
 
         def fake_generate_streaming(question, session_id, callback_handler, slide_context=None):
             # Simulate the agent emitting an assistant message
@@ -158,7 +161,14 @@ class TestSessionNamingInStreaming:
                 "metadata": {},
             }
 
-        service.agent.generate_slides_streaming.side_effect = fake_generate_streaming
+        mock_agent.generate_slides_streaming.side_effect = fake_generate_streaming
+        mock_agent.sessions = {}
+
+        # Mock _build_agent_for_session to return the mock agent
+        service._build_agent_for_session = MagicMock(
+            return_value=(mock_agent, {"session_id": "test-session-123", "genie_conversation_id": None}, None)
+        )
+        return mock_agent
 
     @patch("src.api.services.chat_service.generate_session_title")
     @patch("src.api.services.chat_service.get_session_manager")
@@ -177,10 +187,9 @@ class TestSessionNamingInStreaming:
         mock_gen_title.return_value = "Q3 Revenue Analysis"
 
         service = self._make_chat_service()
-        self._setup_agent_to_return_html(service)
+        self._setup_agent_mock(service)
 
         # Also mock internal methods that aren't relevant to this test
-        service._ensure_agent_session = MagicMock(return_value=None)
         service._detect_edit_intent = MagicMock(return_value=False)
         service._detect_generation_intent = MagicMock(return_value=True)
         service._detect_add_intent = MagicMock(return_value=False)
@@ -190,6 +199,7 @@ class TestSessionNamingInStreaming:
         service._substitute_images_for_response = MagicMock(
             side_effect=lambda d, r=None: (d, r)
         )
+        service._persist_genie_conversation_ids = MagicMock()
 
         with patch("src.core.settings_db.get_settings") as mock_settings, \
              patch("databricks_langchain.ChatDatabricks") as mock_chat_cls, \
@@ -251,9 +261,8 @@ class TestSessionNamingInStreaming:
         mock_gen_title.return_value = "Should Not Appear"
 
         service = self._make_chat_service()
-        self._setup_agent_to_return_html(service)
+        self._setup_agent_mock(service)
 
-        service._ensure_agent_session = MagicMock(return_value=None)
         service._detect_edit_intent = MagicMock(return_value=False)
         service._detect_generation_intent = MagicMock(return_value=True)
         service._detect_add_intent = MagicMock(return_value=False)
@@ -263,6 +272,7 @@ class TestSessionNamingInStreaming:
         service._substitute_images_for_response = MagicMock(
             side_effect=lambda d, r=None: (d, r)
         )
+        service._persist_genie_conversation_ids = MagicMock()
 
         with patch("src.core.settings_db.get_settings") as mock_settings:
             mock_settings.return_value = MagicMock(profile_id=None, profile_name=None)
@@ -302,9 +312,8 @@ class TestSessionNamingInStreaming:
         mock_gen_title.return_value = None  # Simulates failure
 
         service = self._make_chat_service()
-        self._setup_agent_to_return_html(service)
+        self._setup_agent_mock(service)
 
-        service._ensure_agent_session = MagicMock(return_value=None)
         service._detect_edit_intent = MagicMock(return_value=False)
         service._detect_generation_intent = MagicMock(return_value=True)
         service._detect_add_intent = MagicMock(return_value=False)
@@ -314,6 +323,7 @@ class TestSessionNamingInStreaming:
         service._substitute_images_for_response = MagicMock(
             side_effect=lambda d, r=None: (d, r)
         )
+        service._persist_genie_conversation_ids = MagicMock()
 
         with patch("src.core.settings_db.get_settings") as mock_settings:
             mock_settings.return_value = MagicMock(profile_id=None, profile_name=None)

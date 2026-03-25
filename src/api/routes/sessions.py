@@ -25,11 +25,11 @@ from src.api.services.session_manager import (
     SessionNotFoundError,
     get_session_manager,
 )
-from src.core.database import get_db
+from src.core.database import get_db, get_db_session
 from src.core.permission_context import get_permission_context
 from src.core.user_context import get_current_user
 from src.database.models.profile_contributor import PermissionLevel
-from src.services.permission_service import PermissionService
+from src.services.permission_service import get_permission_service
 
 logger = logging.getLogger(__name__)
 
@@ -47,44 +47,31 @@ def _get_session_permission(
     session_info: dict,
     db: Session,
 ) -> Tuple[bool, Optional[PermissionLevel]]:
-    """Check if current user has access to a session and return their permission level.
+    """Check user's permission on a session via deck_contributors.
 
-    For root (owner) sessions, the creator gets CAN_MANAGE.
-    For contributor sessions, permission comes from the profile.
-    
+    Resolves to the root session (parent for contributor sessions) and checks
+    the DeckContributor table for the current user's permission level.
+
     Args:
-        session_info: Session dict with created_by, profile_id, is_contributor_session
+        session_info: Session dict with id, created_by, parent_session_id, etc.
         db: Database session
-        
+
     Returns:
         Tuple of (has_access, permission_level)
     """
-    current_user = get_current_user()
-    ctx = get_permission_context()
-    is_contributor = session_info.get("is_contributor_session", False)
-    
-    # For root sessions, creator gets full control
-    if not is_contributor and session_info.get("created_by") == current_user:
-        return True, PermissionLevel.CAN_MANAGE
-    
-    # For contributor sessions (or non-creator access), use profile permission
-    profile_id = session_info.get("profile_id")
-    if profile_id and ctx:
-        perm_service = PermissionService(db)
-        permission = perm_service.get_user_permission(
-            profile_id=profile_id,
-            user_id=ctx.user_id,
-            user_name=ctx.user_name,
-            group_ids=ctx.group_ids,
-        )
-        if permission:
-            return True, permission
-    
-    # Fallback: contributor session creator can at least view
-    if is_contributor and session_info.get("created_by") == current_user:
-        return True, PermissionLevel.CAN_VIEW
-    
-    return False, None
+    perm_ctx = get_permission_context()
+    perm_service = get_permission_service()
+    parent_id = session_info.get("parent_session_internal_id")
+    root_session_id = parent_id if parent_id is not None else session_info.get("id")
+    perm = perm_service.get_deck_permission(
+        db, root_session_id,
+        user_id=perm_ctx.user_id if perm_ctx else None,
+        user_name=perm_ctx.user_name if perm_ctx else None,
+        group_ids=perm_ctx.group_ids if perm_ctx else None,
+    )
+    if perm is None:
+        return False, None
+    return True, perm
 
 
 def _require_session_access(
@@ -106,7 +93,7 @@ def _require_session_access(
         HTTPException 403: If user doesn't have required permission
     """
     from src.services.permission_service import PERMISSION_PRIORITY
-    
+
     has_access, permission = _get_session_permission(session_info, db)
     
     if not has_access or permission is None:
@@ -122,6 +109,30 @@ def _require_session_access(
         )
     
     return permission
+
+
+def _check_deck_permission_for_session(
+    session_id: str,
+    min_permission: PermissionLevel = PermissionLevel.CAN_VIEW,
+) -> None:
+    """Look up a session by string ID, resolve root, and enforce deck permission.
+
+    This is the standard pattern for endpoints that only have a session_id string
+    and need to gate on deck permissions.  It opens its own DB session via
+    ``get_db_session`` so it can be called from endpoints that do not already
+    have one.
+
+    Args:
+        session_id: The string session_id passed to the endpoint.
+        min_permission: Minimum required permission level.
+
+    Raises:
+        HTTPException 403: If the caller lacks the required permission.
+    """
+    session_manager = get_session_manager()
+    session_info = session_manager.get_session(session_id)
+    with get_db_session() as db:
+        _require_session_access(session_info, db, min_permission)
 
 
 def _substitute_deck_images(deck_dict: dict) -> None:
@@ -149,19 +160,6 @@ async def create_session(request: CreateSessionRequest = None):
     request = request or CreateSessionRequest()
     current_user = get_current_user()
 
-    # Use profile from the request (sent by the frontend) if available,
-    # otherwise fall back to the server-side loaded profile.
-    profile_id = request.profile_id
-    profile_name = request.profile_name
-    if profile_id is None:
-        try:
-            from src.core.settings_db import get_settings
-            settings = get_settings()
-            profile_id = getattr(settings, 'profile_id', None)
-            profile_name = getattr(settings, 'profile_name', None)
-        except Exception:
-            pass
-
     try:
         session_manager = get_session_manager()
         result = await asyncio.to_thread(
@@ -169,8 +167,6 @@ async def create_session(request: CreateSessionRequest = None):
             session_id=request.session_id,
             title=request.title,
             created_by=current_user,
-            profile_id=profile_id,
-            profile_name=profile_name,
         )
 
         logger.info(
@@ -232,9 +228,9 @@ async def list_shared_presentations(
     limit: int = Query(50, ge=1, le=100, description="Maximum presentations to return"),
     db: Session = Depends(get_db),
 ):
-    """List presentations (slide decks) shared with the current user via profile access.
+    """List presentations (slide decks) shared with the current user via deck_contributors.
 
-    Returns presentation-only data from profiles where the user has CAN_VIEW, CAN_EDIT,
+    Returns presentation-only data from decks where the user has CAN_VIEW, CAN_EDIT,
     or CAN_MANAGE permission. Conversations (chat messages) are never exposed —
     contributors only see the slide decks.
 
@@ -244,56 +240,60 @@ async def list_shared_presentations(
     Returns:
         List of presentation summaries with my_permission and slide metadata
     """
-    current_user = get_current_user()
     ctx = get_permission_context()
 
     if not ctx:
         return {"presentations": [], "count": 0}
 
     try:
-        perm_service = PermissionService(db)
-        accessible_profile_ids = perm_service.get_accessible_profile_ids(
+        perm_service = get_permission_service()
+        shared_session_ids = perm_service.get_shared_session_ids(
+            db,
             user_id=ctx.user_id,
             user_name=ctx.user_name,
             group_ids=ctx.group_ids,
         )
 
-        if not accessible_profile_ids:
+        if not shared_session_ids:
             return {"presentations": [], "count": 0}
 
-        session_manager = get_session_manager()
-        sessions = await asyncio.to_thread(
-            session_manager.list_sessions_by_profile_ids,
-            profile_ids=accessible_profile_ids,
-            exclude_created_by=current_user,
-            limit=limit,
+        # Query the actual sessions from DB
+        from src.database.models.session import UserSession as UserSessionModel
+
+        sessions = (
+            db.query(UserSessionModel)
+            .filter(
+                UserSessionModel.id.in_(shared_session_ids),
+                UserSessionModel.parent_session_id.is_(None),  # Only root sessions
+            )
+            .order_by(UserSessionModel.last_activity.desc())
+            .limit(limit)
+            .all()
         )
 
         presentations = []
-        for session in sessions:
-            if not session.get("has_slide_deck"):
+        for s in sessions:
+            deck = s.slide_deck
+            if not deck:
                 continue
 
-            profile_id = session.get("profile_id")
-            permission = None
-            if profile_id:
-                permission = perm_service.get_user_permission(
-                    profile_id=profile_id,
-                    user_id=ctx.user_id,
-                    user_name=ctx.user_name,
-                    group_ids=ctx.group_ids,
-                )
+            permission = perm_service.get_deck_permission(
+                db, s.id,
+                user_id=ctx.user_id,
+                user_name=ctx.user_name,
+                group_ids=ctx.group_ids,
+            )
 
             presentations.append({
-                "session_id": session["session_id"],
-                "title": session.get("title"),
-                "created_by": session.get("created_by"),
-                "created_at": session.get("created_at"),
-                "last_activity": session.get("last_activity"),
-                "modified_by": session.get("modified_by"),
-                "modified_at": session.get("modified_at"),
-                "profile_id": profile_id,
-                "profile_name": session.get("profile_name"),
+                "session_id": s.session_id,
+                "title": s.title,
+                "created_by": s.created_by,
+                "created_at": s.created_at.isoformat() if s.created_at else None,
+                "last_activity": s.last_activity.isoformat() if s.last_activity else None,
+                "has_slide_deck": True,
+                "slide_count": deck.slide_count if deck else 0,
+                "modified_by": getattr(deck, "modified_by", None) or s.created_by,
+                "modified_at": deck.updated_at.isoformat() if deck and deck.updated_at else None,
                 "my_permission": permission.value if permission else "CAN_VIEW",
             })
 
@@ -347,14 +347,7 @@ async def get_or_create_contributor_session(
                 detail="You are the owner of this session. Use it directly.",
             )
 
-        # Check profile-level permission
-        profile_id = parent_session.get("profile_id")
-        if not profile_id:
-            raise HTTPException(
-                status_code=403,
-                detail="This session has no profile — cannot determine access.",
-            )
-
+        # Check deck-level permission on parent session
         permission = _require_session_access(parent_session, db, PermissionLevel.CAN_VIEW)
 
         # Create or retrieve contributor session
@@ -658,6 +651,11 @@ async def get_session_slides(session_id: str):
         Slide deck info or null if no deck
     """
     try:
+        # Permission check: require CAN_VIEW on the deck
+        await asyncio.to_thread(
+            _check_deck_permission_for_session, session_id, PermissionLevel.CAN_VIEW
+        )
+
         session_manager = get_session_manager()
         deck = await asyncio.to_thread(session_manager.get_slide_deck, session_id)
 
@@ -671,6 +669,8 @@ async def get_session_slides(session_id: str):
             status_code=404,
             detail=f"Session not found: {session_id}",
         )
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Failed to get session slides: {e}", exc_info=True)
         raise HTTPException(
@@ -718,8 +718,13 @@ async def export_session(session_id: str):
         Export confirmation with file path
     """
     try:
+        # Permission check: require CAN_VIEW on the deck
+        await asyncio.to_thread(
+            _check_deck_permission_for_session, session_id, PermissionLevel.CAN_VIEW
+        )
+
         session_manager = get_session_manager()
-        
+
         # Get all session data
         session = await asyncio.to_thread(session_manager.get_session, session_id)
         messages = await asyncio.to_thread(session_manager.get_messages, session_id)
@@ -769,6 +774,8 @@ async def export_session(session_id: str):
             status_code=404,
             detail=f"Session not found: {session_id}",
         )
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Failed to export session: {e}", exc_info=True)
         raise HTTPException(
@@ -788,6 +795,11 @@ async def acquire_editing_lock(session_id: str):
     current_user = get_current_user()
     if not current_user:
         raise HTTPException(status_code=401, detail="Authentication required")
+
+    # Permission check: require CAN_EDIT on the deck
+    await asyncio.to_thread(
+        _check_deck_permission_for_session, session_id, PermissionLevel.CAN_EDIT
+    )
 
     session_manager = get_session_manager()
     try:
@@ -811,6 +823,11 @@ async def release_editing_lock(session_id: str):
     if not current_user:
         raise HTTPException(status_code=401, detail="Authentication required")
 
+    # Permission check: require CAN_EDIT on the deck
+    await asyncio.to_thread(
+        _check_deck_permission_for_session, session_id, PermissionLevel.CAN_EDIT
+    )
+
     session_manager = get_session_manager()
     try:
         await asyncio.to_thread(
@@ -827,6 +844,11 @@ async def release_editing_lock(session_id: str):
 @router.get("/{session_id}/lock")
 async def get_editing_lock_status(session_id: str):
     """Check who holds the editing lock."""
+    # Permission check: require CAN_VIEW on the deck
+    await asyncio.to_thread(
+        _check_deck_permission_for_session, session_id, PermissionLevel.CAN_VIEW
+    )
+
     session_manager = get_session_manager()
     try:
         return await asyncio.to_thread(
@@ -844,6 +866,11 @@ async def heartbeat_editing_lock(session_id: str):
     current_user = get_current_user()
     if not current_user:
         raise HTTPException(status_code=401, detail="Authentication required")
+
+    # Permission check: require CAN_EDIT on the deck
+    await asyncio.to_thread(
+        _check_deck_permission_for_session, session_id, PermissionLevel.CAN_EDIT
+    )
 
     session_manager = get_session_manager()
     try:

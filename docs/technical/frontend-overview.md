@@ -7,7 +7,7 @@ How the React/Vite frontend is structured, how it communicates with backend APIs
 ## Stack & Entry Points
 
 - **Tooling:** Vite + React + TypeScript, Tailwind utility classes, `@dnd-kit` for drag/drop, `@monaco-editor/react` for HTML editing, standard Fetch for API calls.
-- **Entrypoint:** `src/main.tsx` wraps `<App />` in `<BrowserRouter>` and injects into `#root`. `src/App.tsx` wraps the tree in `ProfileProvider`, `SessionProvider`, `GenerationProvider`, `SelectionProvider`, `ToastProvider` and defines routes via React Router v7 — each route renders `AppLayout` with `initialView` and optional `viewOnly` props.
+- **Entrypoint:** `src/main.tsx` wraps `<App />` in `<BrowserRouter>` and injects into `#root`. `src/App.tsx` wraps the tree in `AgentConfigProvider`, `SessionProvider`, `GenerationProvider`, `SelectionProvider`, `ToastProvider` and defines routes via React Router v7 — each route renders `AppLayout` (which adds `ProfileProvider`) with `initialView` and optional `viewOnly` props.
 - **Env configuration:** `src/services/api.ts` reads `import.meta.env.VITE_API_URL` (defaults to `http://localhost:8000` in dev, relative URLs in production).
 
 ---
@@ -32,11 +32,13 @@ Each page has a dedicated URL. Navigation buttons use `useNavigate()` to change 
 - **New Session** (`/sessions/:id/edit`): The primary slide generation interface
 - **Viewer** (`/sessions/:id/view`): Read-only presentation viewer (chat disabled, editing disabled)
 - **My Sessions** (`/history`): Session list and restore functionality
-- **Profiles** (`/profiles`): Configuration profile management
+- **Profiles** (`/profiles`): Saved configuration snapshots
 - **Deck Prompts** (`/deck-prompts`): Presentation template library management
 - **Slide Styles** (`/slide-styles`): Visual style library management (typography, colors, layout)
 - **Images** (`/images`): Image library management
-- **Help** (`/`, `/help`): Documentation and usage guide
+- **Help** (`/help`): Documentation and usage guide
+
+The landing page (`/`) now shows the generator directly in pre-session mode.
 
 - **ChatPanel** owns chat history and calls backend APIs to generate or edit slides.
 - **SelectionRibbon** mirrors the current `SlideDeck` with dual interaction:
@@ -102,7 +104,45 @@ Slides are HTML snippets embedded in iframes for preview. The optional `verifica
 
 - Tracks `isGenerating` boolean for navigation locking
 - Set by `ChatPanel` during streaming, consumed by `AppLayout`
-- Disables navigation buttons, profile selector, and session actions during generation
+- Disables navigation buttons, AgentConfigBar, and session actions during generation
+
+### 4b. Agent Config Context (`src/contexts/AgentConfigContext.tsx`)
+
+Manages the active agent configuration (tools, slide style, deck prompt). Operates in two modes:
+
+- **Pre-session mode** (no `/sessions/:id/` in URL): Config stored in React state + localStorage. Persists across navigation until a session is created.
+- **Active session mode**: Config loaded from backend on session change. Updates synced via `PUT /api/sessions/{id}/agent-config` with optimistic updates (reverts on failure).
+
+```typescript
+// Key operations
+updateConfig(config)       // Replace full agent config
+addTool(tool)              // Add a Genie space or MCP server
+removeTool(tool)           // Remove a tool
+setStyle(styleId)          // Set slide style
+setDeckPrompt(promptId)    // Set deck prompt
+saveAsProfile(name, desc)  // Save current config as a named profile (active session only)
+loadProfile(profileId)     // Load a profile's config into current session
+```
+
+Used by: `AgentConfigBar`, `ChatPanel`.
+
+### 4c. Profile Context (`src/contexts/ProfileContext.tsx`)
+
+Manages profile CRUD operations and the profile list. Wraps inside `AppLayout` (not app-level) because it's only needed by the profile management page.
+
+```typescript
+// Key operations
+reload()                   // Refresh profile list from backend
+createProfile(data)        // Create new profile
+updateProfile(id, data)    // Update profile metadata (name, description)
+deleteProfile(id)          // Delete a profile
+setDefaultProfile(id)      // Mark profile as default
+loadProfile(id)            // Load profile and trigger hot-reload
+```
+
+Used by: `ProfileList` on the `/profiles` page.
+
+**How they interact:** `AgentConfigContext` handles the active session's tool/style/prompt configuration. `ProfileContext` handles profile metadata (names, defaults, CRUD). Users save configs as profiles via `AgentConfigContext.saveAsProfile()` and browse/manage profiles via `ProfileContext`.
 
 ### 5. Version Check (`src/hooks/useVersionCheck.ts`)
 
@@ -130,31 +170,15 @@ The `UpdateBanner` component displays at the top of the app with different messa
 
 Parsed tiles, rendered raw HTML (`iframe`), and raw HTML text (`<pre>`). Users can compare parser output vs. model output.
 
-### 7. Profile Creation Wizard (`src/components/config/ProfileCreationWizard.tsx`)
+### 7. AgentConfigBar (`src/components/config/AgentConfigBar.tsx`)
 
-Profile creation uses a 5-step wizard that collects essential configuration. LLM and MLflow settings use backend defaults.
+The AgentConfigBar replaces the old ProfileSelector and ProfileCreationWizard. It displays the session's current tool configuration as chips and provides controls to:
+- **Add/remove tools** (Genie spaces, MCP servers) via the tool discovery endpoint
+- **View Genie conversation links** directly from tool chips
+- **Select slide style and deck prompt** for the session
+- **Save/load profiles** as named configuration snapshots
 
-**Wizard Steps:**
-1. **Basic Info** - Profile name and description
-2. **Genie Space** - Optional data source selection with description (enables data queries)
-3. **Slide Style** - Required visual appearance selection
-4. **Deck Prompt** - Optional presentation template selection
-5. **Review** - Summary of settings before creation
-
-**Genie Space is Optional:**
-- Profiles without a Genie space run in **prompt-only mode**
-- The agent generates slides purely from conversation without data queries
-- A Genie space can be added later from the profile settings
-
-**Default Values (applied automatically by backend):**
-- **LLM**: `databricks-claude-sonnet-4-5`, temperature 0.7, max tokens 60000
-- **MLflow**: `/Workspace/Users/{username}/ai-slide-generator`
-
-**Key behaviors:**
-- The "Next" button is disabled until required fields are completed (Genie is skippable)
-- Profile is created with all configurations in a single transaction via `POST /api/settings/profiles/with-config`
-- LLM, MLflow, and Genie settings can be customized after profile creation in the profile settings
-- After creation, the new profile is automatically set as default and loaded
+Configuration is session-bound: changes update the session's `agent_config` JSON column via `PUT/PATCH /api/sessions/{id}/agent-config`.
 
 ### 8. Deck Prompt Library (`src/components/config/DeckPromptList.tsx`)
 
@@ -174,7 +198,7 @@ interface DeckPrompt {
 
 **How they work:**
 1. Prompts are managed globally via the **Deck Prompts** page
-2. Each Profile can select one prompt via the **Deck Prompt** tab in profile settings
+2. Each session can select one prompt via `agent_config.deck_prompt_id`
 3. When generating slides, the selected prompt content is prepended to the system prompt
 4. User chat messages combine with the deck prompt for context-aware generation
 
@@ -229,14 +253,9 @@ interface SlideStyle {
 
 **How they work:**
 1. Styles are managed globally via the **Slide Styles** page
-2. Each Profile can select one style via the **Slide Style** tab in profile settings
+2. Each session can select one style via `agent_config.slide_style_id`
 3. When generating slides, the selected style content is included in the system prompt
 4. Styles define typography (fonts, sizes), colors (brand palette, accents), and layout rules
-
-**Profile Configuration Tabs:**
-- **Deck Prompt**: Select a presentation template (WHAT to create)
-- **Slide Style**: Select visual appearance (HOW it should look)
-- **Advanced**: Edit system prompts directly (debug mode only - hidden by default)
 
 ---
 
@@ -261,14 +280,14 @@ interface SlideStyle {
 | `src/hooks/useKeyboardShortcuts.ts` | `Esc` clears selection globally | None |
 | `src/utils/loadingMessages.ts` | Rotating messages during LLM calls | None |
 | `src/components/common/Tooltip.tsx` | Lightweight hover tooltip wrapper using Tailwind; appears instantly on hover | None |
-| `src/components/config/ProfileCreationWizard.tsx` | 4-step wizard for profile creation; LLM and MLflow use backend defaults | `configApi.createProfileWithConfig` |
+| `src/components/config/AgentConfigBar.tsx` | Session tool configuration bar; add/remove Genie spaces, select style/prompt, save/load profiles | `api.getAgentConfig`, `api.updateAgentConfig`, `api.updateAgentConfigTools` |
+| `src/components/AgentConfigBar/GenieDetailPanel.tsx` | Inline panel for viewing and editing a Genie space description before adding or after selecting a tool; supports add and edit modes | None (callback props via `AgentConfigBar`) |
 | `src/components/config/DeckPromptList.tsx` | Deck prompt library management: list, create, edit, delete prompts | `configApi.listDeckPrompts`, `configApi.createDeckPrompt`, `configApi.updateDeckPrompt`, `configApi.deleteDeckPrompt` |
 | `src/components/config/DeckPromptForm.tsx` | Modal form for creating/editing deck prompts with Monaco editor | None (callback props) |
-| `src/components/config/DeckPromptSelector.tsx` | Profile configuration tab for selecting a deck prompt from the library | `configApi.listDeckPrompts`, `configApi.updatePromptsConfig` |
+| `src/components/config/DeckPromptSelector.tsx` | Session configuration for selecting a deck prompt from the library | `configApi.listDeckPrompts`, `api.updateAgentConfig` |
 | `src/components/config/SlideStyleList.tsx` | Slide style library management: list, create, edit, delete styles | `configApi.listSlideStyles`, `configApi.createSlideStyle`, `configApi.updateSlideStyle`, `configApi.deleteSlideStyle` |
 | `src/components/config/SlideStyleForm.tsx` | Modal form for creating/editing slide styles with Monaco editor | None (callback props) |
-| `src/components/config/SlideStyleSelector.tsx` | Profile configuration tab for selecting a slide style from the library | `configApi.listSlideStyles`, `configApi.updatePromptsConfig` |
-| `src/components/config/AdvancedSettingsEditor.tsx` | Power-user interface for editing system prompts (debug mode only) | `configApi.updatePromptsConfig` |
+| `src/components/config/SlideStyleSelector.tsx` | Session configuration for selecting a slide style from the library | `configApi.listSlideStyles`, `api.updateAgentConfig` |
 | `src/components/UpdateBanner/UpdateBanner.tsx` | Displays update notification when new version available; different messaging for patch vs major updates | None (props only) |
 | `src/hooks/useVersionCheck.ts` | Checks PyPI for new versions on app load; returns update availability and type | `GET /api/version/check` |
 | `src/components/SavePoints/SavePointDropdown.tsx` | Version selection dropdown, triggers preview on selection | `api.listVersions`, `api.previewVersion` |
@@ -410,16 +429,11 @@ Errors bubble up as `ApiError` (status + message). Common statuses:
 
 ## User Flow Reference
 
-### Profile Creation
-1. **Open Profiles page** – Click "Profiles" in navigation
-2. **Start wizard** – Click "Create Profile" button
-3. **Basic Info** – Enter profile name and optional description
-4. **Genie Space** – Select data source and provide AI description
-5. **LLM Settings** – Configure model (defaults pre-populated)
-6. **MLflow** – Review experiment path (auto-populated with username)
-7. **Deck Prompt** – Optionally select a presentation template
-8. **Review & Create** – Confirm settings and create
-9. **Auto-activate** – New profile is automatically set as default and loaded
+### Session Configuration
+1. **Open generator** – Landing page (`/`) shows the generator directly
+2. **Add tools** – Use AgentConfigBar to add Genie spaces or MCP servers
+3. **Select style/prompt** – Choose a slide style and optional deck prompt
+4. **Save as profile** – Optionally save the configuration as a named profile for reuse
 
 ### Slide Generation
 1. **Start session** – Load app, session created on first interaction

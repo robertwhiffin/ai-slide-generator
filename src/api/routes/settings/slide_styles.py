@@ -13,7 +13,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
-from src.core.database import get_db
+from src.core.database import get_db, get_db_session
 from src.database.models import SlideStyleLibrary
 
 logger = logging.getLogger(__name__)
@@ -51,6 +51,7 @@ class SlideStyleResponse(SlideStyleBase):
     id: int
     is_active: bool
     is_system: bool  # Protected system styles cannot be edited/deleted
+    is_default: bool  # Whether this is the system-wide default style
     created_by: Optional[str]
     created_at: str
     updated_by: Optional[str]
@@ -106,6 +107,7 @@ def list_slide_styles(
                     image_guidelines=s.image_guidelines,
                     is_active=s.is_active,
                     is_system=s.is_system,
+                    is_default=s.is_default,
                     created_by=s.created_by,
                     created_at=s.created_at.isoformat(),
                     updated_by=s.updated_by,
@@ -160,6 +162,7 @@ def get_slide_style(
             image_guidelines=style.image_guidelines,
             is_active=style.is_active,
             is_system=style.is_system,
+            is_default=style.is_default,
             created_by=style.created_by,
             created_at=style.created_at.isoformat(),
             updated_by=style.updated_by,
@@ -241,6 +244,7 @@ def create_slide_style(
             image_guidelines=style.image_guidelines,
             is_active=style.is_active,
             is_system=style.is_system,
+            is_default=style.is_default,
             created_by=style.created_by,
             created_at=style.created_at.isoformat(),
             updated_by=style.updated_by,
@@ -342,6 +346,7 @@ def update_slide_style(
             image_guidelines=style.image_guidelines,
             is_active=style.is_active,
             is_system=style.is_system,
+            is_default=style.is_default,
             created_by=style.created_by,
             created_at=style.created_at.isoformat(),
             updated_by=style.updated_by,
@@ -391,7 +396,18 @@ def delete_slide_style(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="System styles cannot be deleted",
             )
-        
+
+        # If deleting the default style, reassign default to the system style
+        if style.is_default:
+            system_style = db.query(SlideStyleLibrary).filter(
+                SlideStyleLibrary.is_system == True,  # noqa: E712
+                SlideStyleLibrary.is_active == True,  # noqa: E712
+            ).first()
+            if system_style:
+                style.is_default = False
+                system_style.is_default = True
+                logger.info(f"Reassigned default style to system style: {system_style.name}")
+
         if hard_delete:
             db.delete(style)
             logger.info(f"Hard deleted slide style: {style.name} (id={style.id})")
@@ -418,4 +434,66 @@ def delete_slide_style(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to delete slide style",
+        )
+
+
+@router.post("/{style_id}/set-default", response_model=SlideStyleResponse)
+def set_default_slide_style(style_id: int):
+    """Set a slide style as the system-wide default.
+
+    Unsets the previous default in a single transaction.
+    Idempotent: setting the already-default style returns 200.
+    """
+    try:
+        with get_db_session() as db:
+            style = db.query(SlideStyleLibrary).filter(
+                SlideStyleLibrary.id == style_id,
+            ).first()
+
+            if not style:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail=f"Slide style {style_id} not found",
+                )
+
+            if not style.is_active:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Cannot set an inactive style as default",
+                )
+
+            if not style.is_default:
+                # Unset previous default
+                db.query(SlideStyleLibrary).filter(
+                    SlideStyleLibrary.is_default == True,  # noqa: E712
+                ).update({"is_default": False})
+
+                style.is_default = True
+                db.commit()
+                db.refresh(style)
+
+            logger.info(f"Set default slide style: {style.name} (id={style.id})")
+
+            return SlideStyleResponse(
+                id=style.id,
+                name=style.name,
+                description=style.description,
+                category=style.category,
+                style_content=style.style_content,
+                image_guidelines=style.image_guidelines,
+                is_active=style.is_active,
+                is_system=style.is_system,
+                is_default=style.is_default,
+                created_by=style.created_by,
+                created_at=style.created_at.isoformat(),
+                updated_by=style.updated_by,
+                updated_at=style.updated_at.isoformat(),
+            )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error setting default slide style {style_id}: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to set default slide style",
         )

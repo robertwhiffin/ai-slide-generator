@@ -3,7 +3,7 @@
  * These mocks simulate the backend responses for testing.
  */
 
-// Profiles endpoint returns an array directly
+// Profiles endpoint returns an array directly (GET /api/profiles)
 export const mockProfiles = [
   {
     id: 1,
@@ -11,23 +11,32 @@ export const mockProfiles = [
     description: "Analytics profile for sales data insights",
     is_default: true,
     is_my_default: true,
+    agent_config: {
+      tools: [{ type: "genie", space_id: "01JGKX5N2PWQV8ABC123DEF456", space_name: "Sales Data Space", description: null, conversation_id: null }],
+      slide_style_id: 1,
+      deck_prompt_id: 1,
+      system_prompt: null,
+      slide_editing_instructions: null,
+    },
     created_at: "2026-01-08T20:10:29.720015",
-    created_by: "dev@local.dev",
+    created_by: "system",
     updated_at: "2026-01-08T20:10:29.720025",
-    updated_by: null,
-    my_permission: "CAN_MANAGE"
   },
   {
     id: 2,
     name: "Marketing Reports",
     description: "Marketing campaign performance reports",
     is_default: false,
-    is_my_default: false,
+    agent_config: {
+      tools: [{ type: "genie", space_id: "01JGKX5N2PWQV8XYZ789GHI012", space_name: "Marketing Analytics Space", description: null, conversation_id: null }],
+      slide_style_id: 2,
+      deck_prompt_id: 2,
+      system_prompt: null,
+      slide_editing_instructions: null,
+    },
     created_at: "2026-01-08T20:10:29.724407",
-    created_by: "dev@local.dev",
+    created_by: "system",
     updated_at: "2026-01-08T20:10:29.724411",
-    updated_by: null,
-    my_permission: "CAN_MANAGE"
   }
 ];
 
@@ -132,8 +141,7 @@ export const mockSessions = {
       message_count: 4,
       has_slide_deck: true,
       profile_id: 1,
-      profile_name: "Sales Analytics",
-      my_permission: "CAN_MANAGE"
+      profile_name: "Sales Analytics"
     },
     {
       session_id: "a2c5f1d9-8ef7-48dc-be69-0ead7be316dd",
@@ -145,8 +153,7 @@ export const mockSessions = {
       message_count: 4,
       has_slide_deck: true,
       profile_id: 2,
-      profile_name: "Marketing Reports",
-      my_permission: "CAN_MANAGE"
+      profile_name: "Marketing Reports"
     }
   ],
   count: 2
@@ -203,7 +210,39 @@ export const mockVerificationResponse = {
 };
 
 // ============================================
-// Profile Operation Mocks
+// Agent Config & New Profile API Mocks
+// ============================================
+
+// Default agent config returned by GET /api/sessions/:id/agent-config
+export const mockDefaultAgentConfig = {
+  tools: [],
+  slide_style_id: 1,
+  deck_prompt_id: null,
+  system_prompt: null,
+  slide_editing_instructions: null,
+};
+
+// Alias for backward compatibility — mockProfiles now has the unified shape
+export const mockProfileSummaries = mockProfiles;
+
+// Available tools returned by GET /api/tools/available
+export const mockAvailableTools = [
+  {
+    type: "genie",
+    space_id: "01JGKX5N2PWQV8ABC123DEF456",
+    space_name: "Sales Data Space",
+    description: "Contains sales and revenue data",
+  },
+  {
+    type: "genie",
+    space_id: "01JGKX5N2PWQV8XYZ789GHI012",
+    space_name: "Marketing Analytics Space",
+    description: "Marketing campaign metrics",
+  },
+];
+
+// ============================================
+// Legacy Profile Operation Mocks (still used by /profiles page)
 // ============================================
 
 // Profile load/switch response
@@ -219,10 +258,9 @@ export const mockProfileCreateResponse = {
   description: "A test profile created via wizard",
   is_default: false,
   created_at: "2026-01-30T10:00:00.000000",
-  created_by: "dev@local.dev",
+  created_by: "test",
   updated_at: "2026-01-30T10:00:00.000000",
-  updated_by: null,
-  my_permission: "CAN_MANAGE"
+  updated_by: null
 };
 
 // Profile update response

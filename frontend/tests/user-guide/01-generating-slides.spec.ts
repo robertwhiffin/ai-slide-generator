@@ -5,11 +5,10 @@
  * Run with: npx playwright test user-guide/01-generating-slides.spec.ts
  * 
  * The workflow covers:
- * 1. Opening the app / logging in
- * 2. Navigating to the Generator page
- * 3. Selecting a profile
- * 4. Entering a prompt and generating slides
- * 5. Viewing and interacting with generated slides
+ * 1. Opening the app (landing page is the generator)
+ * 2. Navigating to an active session
+ * 3. Entering a prompt and generating slides
+ * 4. Viewing and interacting with generated slides
  */
 
 import { test, expect } from '@playwright/test';
@@ -44,75 +43,53 @@ test.describe('User Guide: Generating Slides', () => {
       highlightSelector: 'button:has-text("New Deck")',
     });
 
-    // Step 03: Profile Selector
-    await capture.capture({
-      step: '03',
-      name: 'profile-selector',
-      description: 'The current profile is shown in the header - click to change profiles',
-      highlightSelector: '[data-testid="chat-panel"]',
-    });
-
-    // Step 04: Open Profile Dropdown (new UI: profile button may show profile name)
-    await page.locator('header').getByRole('button', { name: /Profile|Sales Analytics/i }).click();
-    // Wait for dropdown to appear
-    await page.waitForTimeout(300);
-    await capture.capture({
-      step: '04',
-      name: 'profile-dropdown',
-      description: 'Select the profile that matches your data source and presentation style',
-    });
-
-    // Close dropdown by clicking elsewhere
-    await page.keyboard.press('Escape');
-    await page.waitForTimeout(200);
-
-    // Step 05: Chat Input
+    // Step 03: Chat Input
     const chatInput = page.getByRole('textbox');
     await chatInput.click();
     await capture.capture({
-      step: '05',
+      step: '03',
       name: 'chat-input-empty',
       description: 'The chat input is where you enter prompts to generate or modify slides',
       highlightSelector: 'textarea',
     });
 
-    // Step 06: Enter a Prompt
+    // Step 04: Enter a Prompt
     await chatInput.fill('Create a presentation about cloud computing benefits with 3 slides');
     await capture.capture({
-      step: '06',
+      step: '04',
       name: 'chat-input-with-prompt',
       description: 'Type your request - be specific about the topic and number of slides',
     });
 
-    // Step 07: Send Button Enabled
+    // Step 05: Send Button Enabled
     await capture.capture({
-      step: '07',
+      step: '05',
       name: 'send-button-enabled',
       description: 'Click Send or press Enter to start generating slides',
       highlightSelector: 'button:has-text("Send")',
     });
 
-    // Step 08: Simulate slide generation (click send, mocks will respond)
+    // Step 06: Simulate slide generation (click send, mocks will respond)
     await page.getByRole('button', { name: 'Send' }).click();
-    
+
     // Wait for slides to appear (mocked response)
     await page.waitForTimeout(1000);
-    
+
     // Check if slides appeared
     const slidePanel = page.locator('[class*="slide"]').first();
     if (await slidePanel.isVisible()) {
       await capture.capture({
-        step: '08',
+        step: '06',
         name: 'slides-generated',
         description: 'Slides appear in the right panel as they are generated',
       });
     }
 
-    // Step 09: Slide Actions (if slides are visible)
+    // Step 07: Slide Actions (if slides are visible)
     const slides = page.locator('.slide-tile, [data-testid*="slide"]');
     if (await slides.count() > 0) {
       await capture.capture({
-        step: '09',
+        step: '07',
         name: 'slide-actions',
         description: 'Each slide has actions for editing, verification, and more',
       });
@@ -133,7 +110,7 @@ test.describe('User Guide: Generating Slides', () => {
 
     // Capture empty state
     await capture.capture({
-      step: '10',
+      step: '08',
       name: 'empty-state',
       description: 'Before generating, you\'ll see an empty slide panel',
     });

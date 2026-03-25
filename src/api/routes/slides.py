@@ -24,7 +24,7 @@ from src.core.database import get_db
 from src.core.permission_context import get_permission_context
 from src.core.user_context import get_current_user
 from src.database.models.profile_contributor import PermissionLevel
-from src.services.permission_service import PermissionService, PERMISSION_PRIORITY
+from src.services.permission_service import get_permission_service, PERMISSION_PRIORITY
 
 logger = logging.getLogger(__name__)
 
@@ -35,53 +35,39 @@ def _get_session_permission(
     session_id: str,
     db: Session,
 ) -> Tuple[bool, Optional[PermissionLevel]]:
-    """Check if current user has access to a session's slides.
+    """Check if current user has access to a session's slides via deck_contributors.
 
-    For contributor sessions, permission is derived from the profile — not
-    from session creation. For root (owner) sessions, the creator gets
-    CAN_MANAGE.
-    
+    Resolves to the root session (parent for contributor sessions) and checks
+    the DeckContributor table for the current user's permission level.
+
     Args:
-        session_id: Session identifier
+        session_id: Session identifier (string)
         db: Database session
-        
+
     Returns:
         Tuple of (has_access, permission_level)
     """
     session_manager = get_session_manager()
-    current_user = get_current_user()
     ctx = get_permission_context()
-    
+
     try:
         session_info = session_manager.get_session(session_id)
     except SessionNotFoundError:
         return False, None
-    
-    is_contributor = session_info.get("is_contributor_session", False)
 
-    # For root sessions, creator gets full control
-    if not is_contributor and session_info.get("created_by") == current_user:
-        return True, PermissionLevel.CAN_MANAGE
-    
-    # For contributor sessions (or non-creator access), use profile permission
-    profile_id = session_info.get("profile_id")
-    if profile_id and ctx:
-        perm_service = PermissionService(db)
-        permission = perm_service.get_user_permission(
-            profile_id=profile_id,
-            user_id=ctx.user_id,
-            user_name=ctx.user_name,
-            group_ids=ctx.group_ids,
-        )
-        if permission:
-            return True, permission
-    
-    # Allow contributor session creator even without explicit profile permission
-    # (they were granted access when the contributor session was created)
-    if is_contributor and session_info.get("created_by") == current_user:
-        return True, PermissionLevel.CAN_VIEW
-    
-    return False, None
+    perm_service = get_permission_service()
+    parent_internal_id = session_info.get("parent_session_internal_id")
+    root_session_id = parent_internal_id if parent_internal_id is not None else session_info.get("id")
+
+    perm = perm_service.get_deck_permission(
+        db, root_session_id,
+        user_id=ctx.user_id if ctx else None,
+        user_name=ctx.user_name if ctx else None,
+        group_ids=ctx.group_ids if ctx else None,
+    )
+    if perm is None:
+        return False, None
+    return True, perm
 
 
 def _require_slide_permission(

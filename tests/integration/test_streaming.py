@@ -174,7 +174,6 @@ def mock_session_manager():
             manager.get_session.return_value = {
                 "session_id": "test-session-123",
                 "created_by": "test@local.dev",
-                "profile_id": None,
             }
             mock_get.return_value = manager
             yield manager
@@ -352,6 +351,7 @@ class TestEventSequence:
 
         events = collect_stream_events(client, standard_request_body)
 
+        # session_id is provided and mock get_session succeeds, so no session_created event
         assert len(events) == 5
         assert events[0]["type"] == "assistant"
         assert events[1]["type"] == "tool_call"
@@ -521,13 +521,19 @@ class TestRequestValidation:
         )
         assert response.status_code == 422
 
-    def test_missing_session_id_validation(self, client):
-        """Missing session_id is rejected with 422."""
+    def test_missing_session_id_creates_session(self, client, mock_session_manager, mock_chat_service):
+        """Missing session_id triggers auto-session creation (no longer 422)."""
+        mock_session_manager.create_session.return_value = {
+            "session_id": "auto-created-123",
+            "message_count": 0,
+        }
+        mock_chat_service.send_message_streaming.return_value = iter([])
         response = client.post(
             "/api/chat/stream",
             json={"message": "Hello"},
         )
-        assert response.status_code == 422
+        # Should not be 422 — session is created on the fly
+        assert response.status_code != 422
 
     def test_missing_message_validation(self, client):
         """Missing message is rejected with 422."""

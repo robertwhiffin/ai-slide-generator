@@ -4,7 +4,9 @@
  */
 import type { Page } from '@playwright/test';
 import {
-  mockProfiles,
+  mockProfileSummaries,
+  mockDefaultAgentConfig,
+  mockAvailableTools,
   mockDeckPrompts,
   mockSlideStyles,
   mockSessions,
@@ -27,12 +29,21 @@ export async function setupMocks(page: Page) {
     });
   });
 
-  // Mock profiles endpoint (match any origin for same-origin or proxy)
-  await page.route(/\/api\/settings\/profiles$/, (route) => {
+  // Mock profiles API (GET /api/profiles) — used by both AgentConfigContext and ProfileContext
+  await page.route(/\/api\/profiles$/, (route) => {
     route.fulfill({
       status: 200,
       contentType: 'application/json',
-      body: JSON.stringify(mockProfiles)
+      body: JSON.stringify(mockProfileSummaries),
+    });
+  });
+
+  // Mock available tools endpoint (GET /api/tools/available) — used by AgentConfigBar
+  await page.route('**/api/tools/available', (route) => {
+    route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify(mockAvailableTools),
     });
   });
 
@@ -72,6 +83,26 @@ export async function setupMocks(page: Page) {
     // Handle session deletion (DELETE /api/sessions/{id})
     if (method === 'DELETE') {
       route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ success: true }) });
+      return;
+    }
+
+    // Handle agent-config endpoint (GET /api/sessions/:id/agent-config)
+    if (url.includes('/agent-config')) {
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify(mockDefaultAgentConfig),
+      });
+      return;
+    }
+
+    // Handle load-profile endpoint (POST /api/sessions/:id/load-profile/:profileId)
+    if (url.includes('/load-profile/')) {
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ status: 'loaded', agent_config: mockDefaultAgentConfig }),
+      });
       return;
     }
 

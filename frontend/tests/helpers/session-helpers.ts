@@ -3,7 +3,7 @@
  * Provides deterministic session IDs and mock setup for session loading tests.
  */
 import type { Page } from '@playwright/test';
-import { mockSlides } from '../fixtures/mocks';
+import { mockSlides, mockDefaultAgentConfig } from '../fixtures/mocks';
 
 // Fixed session IDs for deterministic test URLs
 export const TEST_SESSION_ID = 'b1b4d8e3-6cf6-47cb-ad58-9fdc6ad205cc';
@@ -92,6 +92,15 @@ export async function mockSessionWithSlides(page: Page, sessionId: string = TEST
           { role: 'assistant', content: "I'll create slides about cloud computing benefits.", created_at: '2026-01-08T20:39:30' },
         ],
       }),
+    });
+  });
+
+  // Mock agent-config endpoint for this specific session
+  await page.route(`http://127.0.0.1:8000/api/sessions/${sessionId}/agent-config`, (route) => {
+    route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify(mockDefaultAgentConfig),
     });
   });
 }

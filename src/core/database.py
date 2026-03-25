@@ -497,6 +497,14 @@ def _run_migrations(engine, schema: str | None = None):
         # --- v0.2 breaking changes: image_guidelines, session truncation, created_by ---
         _migrate_to_v0_2(conn, inspector, schema, _qual, is_sqlite)
 
+        _migrate_slide_style_default(conn, inspector, schema, _qual, is_sqlite)
+
+        # --- permissions model: parent_session_id, locking, optimistic concurrency ---
+        _migrate_permissions_columns(conn, inspector, schema, _qual, is_sqlite)
+
+        # --- deck-centric permissions: drop profile_id, migrate CAN_VIEW → CAN_USE ---
+        _migrate_deck_permissions_model(conn, inspector, schema, _qual, is_sqlite)
+
 
 def _migrate_google_credentials_to_global(conn, inspector, schema, _qual, is_sqlite):
     """Copy first non-null google_credentials_encrypted to global table, then null out profiles."""
@@ -667,4 +675,194 @@ def _migrate_to_v0_2(conn, inspector, schema, _qual, is_sqlite):
             f"ALTER TABLE {q_us} ADD COLUMN google_slides_url VARCHAR(512) NULL"
         ))
 
+    # --- 5. agent_config on user_sessions ---
+    us_cols = _get_columns("user_sessions")
+    if us_cols and "agent_config" not in us_cols:
+        q_us = _qual("user_sessions")
+        logger.info("Migration: adding agent_config column to user_sessions")
+        conn.execute(text(
+            f"ALTER TABLE {q_us} ADD COLUMN agent_config JSON NULL"
+        ))
+
+    # --- 6. agent_config on config_profiles ---
+    cp_cols = _get_columns("config_profiles")
+    if cp_cols and "agent_config" not in cp_cols:
+        q_cp = _qual("config_profiles")
+        logger.info("Migration: adding agent_config column to config_profiles")
+        conn.execute(text(
+            f"ALTER TABLE {q_cp} ADD COLUMN agent_config JSON NULL"
+        ))
+
     logger.info("Migration: v0.2 schema migration complete")
+
+
+def _migrate_slide_style_default(conn, inspector, schema, _qual, is_sqlite):
+    """Add is_default column to slide_style_library and seed the system style as default."""
+    from sqlalchemy import text
+
+    table_name = "slide_style_library"
+    qualified_table = _qual(table_name)
+
+    try:
+        columns = {c["name"] for c in inspector.get_columns(table_name, schema=schema)}
+    except Exception:
+        return
+
+    if "is_default" not in columns:
+        logger.info(f"Migration: adding is_default column to {table_name}")
+        conn.execute(text(
+            f"ALTER TABLE {qualified_table} ADD COLUMN is_default BOOLEAN DEFAULT FALSE NOT NULL"
+        ))
+
+    # Only seed a default if none exists yet (first deploy only).
+    # LIMIT 1 ensures exactly one row even if multiple is_system rows exist.
+    if is_sqlite:
+        conn.execute(text(f"""
+            UPDATE {qualified_table} SET is_default = 1
+            WHERE id = (
+                SELECT id FROM {qualified_table}
+                WHERE is_system = 1 AND is_active = 1
+                LIMIT 1
+            )
+            AND NOT EXISTS (SELECT 1 FROM {qualified_table} WHERE is_default = 1)
+        """))
+    else:
+        conn.execute(text(f"""
+            UPDATE {qualified_table} SET is_default = TRUE
+            WHERE id = (
+                SELECT id FROM {qualified_table}
+                WHERE is_system = TRUE AND is_active = TRUE
+                LIMIT 1
+            )
+            AND NOT EXISTS (SELECT 1 FROM {qualified_table} WHERE is_default = TRUE)
+        """))
+
+    logger.info("Migration: slide_style_library is_default migration complete")
+
+
+def _migrate_permissions_columns(conn, inspector, schema, _qual, is_sqlite):
+    """Add columns for permissions model: parent sessions, editing locks, optimistic concurrency."""
+    from sqlalchemy import text
+
+    # --- user_sessions.parent_session_id ---
+    try:
+        sessions_cols = {c["name"] for c in inspector.get_columns("user_sessions", schema=schema)}
+    except Exception:
+        sessions_cols = set()
+
+    if sessions_cols and "parent_session_id" not in sessions_cols:
+        qualified = _qual("user_sessions")
+        logger.info("Migration: adding parent_session_id to user_sessions")
+        conn.execute(text(
+            f"ALTER TABLE {qualified} ADD COLUMN parent_session_id INTEGER NULL"
+        ))
+        # FK constraint (skip on SQLite — limited ALTER TABLE support)
+        if not is_sqlite:
+            conn.execute(text(
+                f"ALTER TABLE {qualified} ADD CONSTRAINT fk_user_sessions_parent "
+                f"FOREIGN KEY (parent_session_id) REFERENCES {qualified}(id)"
+            ))
+        # Composite index for contributor session lookups
+        try:
+            conn.execute(text(
+                f"CREATE INDEX ix_user_sessions_parent_created_by "
+                f"ON {qualified} (parent_session_id, created_by)"
+            ))
+        except Exception:
+            pass  # Index may already exist
+
+    # --- session_slide_decks: locked_by, locked_at, version ---
+    try:
+        decks_cols = {c["name"] for c in inspector.get_columns("session_slide_decks", schema=schema)}
+    except Exception:
+        decks_cols = set()
+
+    if decks_cols:
+        qualified = _qual("session_slide_decks")
+
+        if "locked_by" not in decks_cols:
+            logger.info("Migration: adding locked_by to session_slide_decks")
+            conn.execute(text(
+                f"ALTER TABLE {qualified} ADD COLUMN locked_by VARCHAR(255) NULL"
+            ))
+
+        if "locked_at" not in decks_cols:
+            logger.info("Migration: adding locked_at to session_slide_decks")
+            conn.execute(text(
+                f"ALTER TABLE {qualified} ADD COLUMN locked_at TIMESTAMP NULL"
+            ))
+
+        if "version" not in decks_cols:
+            logger.info("Migration: adding version to session_slide_decks")
+            conn.execute(text(
+                f"ALTER TABLE {qualified} ADD COLUMN version INTEGER DEFAULT 0 NOT NULL"
+            ))
+
+    logger.info("Migration: permissions columns migration complete")
+
+
+def _migrate_deck_permissions_model(conn, inspector, schema, _qual, is_sqlite):
+    """Decouple deck sharing from profiles.
+
+    - Drop profile_id and profile_name from user_sessions
+    - Migrate CAN_VIEW → CAN_USE in config_profile_contributors
+    - Migrate CAN_VIEW → CAN_USE in config_profiles.global_permission
+    All steps are idempotent.
+    """
+    from sqlalchemy import text
+
+    # --- Drop profile_id and profile_name from user_sessions ---
+    try:
+        sessions_cols = {c["name"] for c in inspector.get_columns("user_sessions", schema=schema)}
+    except Exception:
+        sessions_cols = set()
+
+    qualified_sessions = _qual("user_sessions")
+
+    if sessions_cols and "profile_id" in sessions_cols:
+        logger.info("Migration: dropping profile_id from user_sessions")
+        if is_sqlite:
+            try:
+                conn.execute(text(f"ALTER TABLE {qualified_sessions} DROP COLUMN profile_id"))
+            except Exception:
+                logger.warning("Migration: could not drop profile_id (SQLite version may not support DROP COLUMN)")
+        else:
+            conn.execute(text(f"ALTER TABLE {qualified_sessions} DROP COLUMN profile_id"))
+
+    if sessions_cols and "profile_name" in sessions_cols:
+        logger.info("Migration: dropping profile_name from user_sessions")
+        if is_sqlite:
+            try:
+                conn.execute(text(f"ALTER TABLE {qualified_sessions} DROP COLUMN profile_name"))
+            except Exception:
+                logger.warning("Migration: could not drop profile_name (SQLite version may not support DROP COLUMN)")
+        else:
+            conn.execute(text(f"ALTER TABLE {qualified_sessions} DROP COLUMN profile_name"))
+
+    # --- Migrate CAN_VIEW → CAN_USE in config_profile_contributors ---
+    try:
+        contrib_cols = {c["name"] for c in inspector.get_columns("config_profile_contributors", schema=schema)}
+    except Exception:
+        contrib_cols = set()
+
+    if contrib_cols and "permission_level" in contrib_cols:
+        qualified_contrib = _qual("config_profile_contributors")
+        conn.execute(text(
+            f"UPDATE {qualified_contrib} SET permission_level = 'CAN_USE' "
+            "WHERE permission_level = 'CAN_VIEW'"
+        ))
+
+    # --- Migrate CAN_VIEW → CAN_USE in config_profiles.global_permission ---
+    try:
+        profile_cols = {c["name"] for c in inspector.get_columns("config_profiles", schema=schema)}
+    except Exception:
+        profile_cols = set()
+
+    if profile_cols and "global_permission" in profile_cols:
+        qualified_profiles = _qual("config_profiles")
+        conn.execute(text(
+            f"UPDATE {qualified_profiles} SET global_permission = 'CAN_USE' "
+            "WHERE global_permission = 'CAN_VIEW'"
+        ))
+
+    logger.info("Migration: deck permissions model migration complete")

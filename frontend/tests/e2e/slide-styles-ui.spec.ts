@@ -1,6 +1,8 @@
 import { test, expect, Page } from '@playwright/test';
 import {
-  mockProfiles,
+  mockProfileSummaries,
+  mockDefaultAgentConfig,
+  mockAvailableTools,
   mockDeckPrompts,
   mockSlideStyles,
   mockSessions,
@@ -85,37 +87,14 @@ async function setupMocks(page: Page) {
     }
   });
 
-  // Mock profiles endpoint
-  await page.route('http://127.0.0.1:8000/api/settings/profiles', (route) => {
-    route.fulfill({
-      status: 200,
-      contentType: 'application/json',
-      body: JSON.stringify(mockProfiles),
-    });
+  // New profiles API (GET /api/profiles)
+  await page.route(/\/api\/profiles$/, (route) => {
+    route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(mockProfileSummaries) });
   });
 
-  // Mock individual profile endpoints
-  await page.route(/http:\/\/127.0.0.1:8000\/api\/settings\/profiles\/\d+$/, (route, request) => {
-    if (request.method() === 'GET') {
-      const id = parseInt(request.url().split('/').pop() || '1');
-      const profile = mockProfiles.find((p) => p.id === id) || mockProfiles[0];
-      route.fulfill({
-        status: 200,
-        contentType: 'application/json',
-        body: JSON.stringify(profile),
-      });
-    } else {
-      route.continue();
-    }
-  });
-
-  // Mock profile load endpoint
-  await page.route(/http:\/\/127.0.0.1:8000\/api\/settings\/profiles\/\d+\/load/, (route) => {
-    route.fulfill({
-      status: 200,
-      contentType: 'application/json',
-      body: JSON.stringify({ status: 'reloaded', profile_id: 1 }),
-    });
+  // Available tools
+  await page.route('**/api/tools/available', (route) => {
+    route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(mockAvailableTools) });
   });
 
   // Mock deck prompts
@@ -129,11 +108,18 @@ async function setupMocks(page: Page) {
 
   // Mock sessions
   await page.route('http://127.0.0.1:8000/api/sessions**', (route, request) => {
+    const url = request.url();
     const method = request.method();
 
     // Handle session creation/deletion
     if (method === 'POST' || method === 'DELETE') {
       route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ session_id: 'mock', title: 'New', user_id: null, created_at: '2026-01-01T00:00:00Z' }) });
+      return;
+    }
+
+    // Handle agent-config endpoint
+    if (url.includes('/agent-config')) {
+      route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(mockDefaultAgentConfig) });
       return;
     }
 
@@ -577,34 +563,6 @@ test.describe('Form Validation', () => {
 test.describe('Empty State', () => {
   test('shows empty message when no styles exist', async ({ page }) => {
     // Setup other mocks first (except slide-styles)
-    await page.route('http://127.0.0.1:8000/api/settings/profiles', (route) => {
-      route.fulfill({
-        status: 200,
-        contentType: 'application/json',
-        body: JSON.stringify(mockProfiles),
-      });
-    });
-
-    await page.route(/http:\/\/127.0.0.1:8000\/api\/settings\/profiles\/\d+$/, (route, request) => {
-      if (request.method() === 'GET') {
-        route.fulfill({
-          status: 200,
-          contentType: 'application/json',
-          body: JSON.stringify(mockProfiles[0]),
-        });
-      } else {
-        route.continue();
-      }
-    });
-
-    await page.route(/http:\/\/127.0.0.1:8000\/api\/settings\/profiles\/\d+\/load/, (route) => {
-      route.fulfill({
-        status: 200,
-        contentType: 'application/json',
-        body: JSON.stringify({ status: 'reloaded', profile_id: 1 }),
-      });
-    });
-
     await page.route('http://127.0.0.1:8000/api/settings/deck-prompts', (route) => {
       route.fulfill({
         status: 200,

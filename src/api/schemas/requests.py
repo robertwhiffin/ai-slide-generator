@@ -48,15 +48,15 @@ class ChatRequest(BaseModel):
     """Request model for chat endpoint.
 
     Attributes:
-        session_id: Session ID (required, create via POST /api/sessions)
+        session_id: Optional session ID. If not provided, a new session is created.
         message: User's natural language message
         slide_context: Optional context for slide editing
+        agent_config: Optional agent configuration for session creation
     """
 
-    session_id: str = Field(
-        ...,
-        description="Session ID (required, create via POST /api/sessions first)",
-        min_length=1,
+    session_id: Optional[str] = Field(
+        default=None,
+        description="Session ID. If not provided, a new session is created on the fly.",
     )
     message: str = Field(
         ...,
@@ -71,14 +71,18 @@ class ChatRequest(BaseModel):
         default=None,
         description="IDs of images attached to this message (from upload or paste)",
     )
-    profile_id: Optional[int] = Field(
+    agent_config: Optional[dict] = Field(
         default=None,
-        description="Active profile ID (passed by frontend for accurate session association)",
+        description="Agent configuration for session creation (tools, style, prompts)",
     )
-    profile_name: Optional[str] = Field(
-        default=None,
-        description="Active profile name (cached for display)",
-    )
+
+    @field_validator("session_id", mode="before")
+    @classmethod
+    def empty_session_id_to_none(cls, value):
+        """Treat empty string session_id as None (missing)."""
+        if isinstance(value, str) and value.strip() == "":
+            return None
+        return value
 
     @field_validator("message")
     @classmethod
@@ -121,14 +125,5 @@ class CreateSessionRequest(BaseModel):
     title: Optional[str] = Field(
         default=None,
         description="Optional session title",
-        max_length=255,
-    )
-    profile_id: Optional[int] = Field(
-        default=None,
-        description="Profile ID to associate with this session",
-    )
-    profile_name: Optional[str] = Field(
-        default=None,
-        description="Profile name (cached for display)",
         max_length=255,
     )
