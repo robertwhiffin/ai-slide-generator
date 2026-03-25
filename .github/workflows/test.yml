@@ -647,7 +647,7 @@ jobs:
               
               print(f'Sessions: {len(sessions)}')
               for s in sessions:
-                  print(f'  - {s.title} (session_id={s.session_id}, profile={s.profile_name})')
+                  print(f'  - {s.title} (session_id={s.session_id})')
               
               if len(profiles) == 0:
                   raise Exception('No profiles found - seeding failed!')
