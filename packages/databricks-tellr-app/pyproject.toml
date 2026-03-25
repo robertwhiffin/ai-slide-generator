@@ -20,7 +20,7 @@ dependencies = [
     "langchain-core==1.0.4",
     "langchain-community==0.4.1",
     "langchain-text-splitters==1.0.0",
-    "litellm>=1.50.0",
+    "litellm==1.80.11",
     "mlflow==3.6.0",
     "opentelemetry-api==1.38.0",
     "opentelemetry-sdk==1.38.0",
