@@ -32,7 +32,7 @@
 ┌──────────────────────────────────────────────────────────────┐
 │ Databricks Notebook                                          │
 │                                                               │
-│  %pip install databricks-tellr databricks-sdk==0.73.0        │
+│  %pip install databricks-tellr databricks-sdk==0.96.0        │
 │                                                               │
 │  tellr.create(                                                │
 │      lakebase_name="tellr-db",                               │
@@ -531,7 +531,7 @@ app = App(
 **Deployment requirements:**
 - Notebook must have workspace write access to `app_file_workspace_path`
 - User must have permission to create Apps and Lakebase instances
-- `databricks-sdk>=0.73.0` for Apps API compatibility
+- `databricks-sdk>=0.96.0` for Apps and Lakebase Autoscaling API compatibility
 
 **Runtime requirements:**
 - Databricks Apps platform provides `DATABRICKS_HOST` and `DATABRICKS_TOKEN`
