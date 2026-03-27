@@ -324,17 +324,17 @@ export const AgentConfigProvider: React.FC<{ children: React.ReactNode }> = ({ c
   // ------------------------------------------------------------------
 
   const saveAsProfile = useCallback(async (name: string, description?: string) => {
-    if (isPreSession || !urlSessionId) {
-      showToast('Save as profile requires an active session', 'error');
-      return;
-    }
-
     try {
-      await api.saveAsProfile(urlSessionId, name, description, agentConfig);
+      if (isPreSession || !urlSessionId) {
+        await api.createProfile(name, description, agentConfig);
+      } else {
+        await api.saveAsProfile(urlSessionId, name, description, agentConfig);
+      }
       showToast(`Profile "${name}" saved`, 'success');
     } catch (err) {
       console.error('Failed to save as profile:', err);
-      showToast('Failed to save profile', 'error');
+      const message = err instanceof Error ? err.message : 'Failed to save profile';
+      showToast(message, 'error');
     }
   }, [isPreSession, urlSessionId, showToast, agentConfig]);
 

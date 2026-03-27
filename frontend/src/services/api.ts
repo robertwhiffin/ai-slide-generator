@@ -1704,6 +1704,27 @@ export const api = {
   },
 
   /**
+   * Create a profile directly from config (no session required).
+   */
+  async createProfile(name: string, description?: string, agentConfig?: AgentConfig): Promise<ProfileSummary> {
+    const response = await fetch(
+      `${API_BASE_URL}/api/profiles`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name, description, agent_config: agentConfig }),
+      }
+    );
+
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({}));
+      throw new ApiError(response.status, error.detail || 'Failed to create profile');
+    }
+
+    return response.json();
+  },
+
+  /**
    * Load a profile's agent config into a session.
    */
   async loadProfile(sessionId: string, profileId: number): Promise<{ status: string; agent_config: AgentConfig }> {

@@ -31,6 +31,12 @@ class SaveProfileRequest(BaseModel):
     agent_config: Optional[AgentConfig] = None  # Client-side config takes precedence over session
 
 
+class CreateProfileRequest(BaseModel):
+    name: str = Field(..., min_length=1, max_length=100)
+    description: Optional[str] = None
+    agent_config: AgentConfig
+
+
 class UpdateProfileRequest(BaseModel):
     name: Optional[str] = Field(None, min_length=1, max_length=100)
     description: Optional[str] = None
@@ -97,6 +103,50 @@ async def list_profiles():
         return [_profile_to_dict(p) for p in profiles]
 
 
+@router.post("", status_code=201)
+async def create_profile(body: CreateProfileRequest):
+    """Create a profile directly from a provided agent_config (no session required)."""
+    config = body.agent_config
+
+    # Strip session-specific conversation_ids before persisting
+    for tool in config.tools:
+        if isinstance(tool, GenieTool):
+            tool.conversation_id = None
+
+    config_dict = config.model_dump()
+
+    with get_db_session() as db:
+        # Check for duplicate agent_config among non-deleted profiles
+        existing_profiles = (
+            db.query(ConfigProfile)
+            .filter(ConfigProfile.is_deleted == False)  # noqa: E712
+            .all()
+        )
+        for existing in existing_profiles:
+            existing_config = resolve_agent_config(existing.agent_config)
+            for tool in existing_config.tools:
+                if isinstance(tool, GenieTool):
+                    tool.conversation_id = None
+            if existing_config.model_dump() == config_dict:
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"A profile with this configuration already exists: '{existing.name}'",
+                )
+
+        current_user = get_current_user()
+        profile = ConfigProfile(
+            name=body.name,
+            description=body.description,
+            agent_config=config_dict,
+            created_by=current_user,
+        )
+        db.add(profile)
+        db.flush()
+        result = _profile_to_dict(profile)
+
+    return result
+
+
 @router.post("/save-from-session/{session_id}", status_code=201)
 async def save_from_session(session_id: str, body: SaveProfileRequest):
     """Snapshot a session's agent_config into a new named profile."""
@@ -139,6 +189,24 @@ async def save_from_session(session_id: str, body: SaveProfileRequest):
     config_dict = config.model_dump()
 
     with get_db_session() as db:
+        # Check for duplicate agent_config among non-deleted profiles
+        existing_profiles = (
+            db.query(ConfigProfile)
+            .filter(ConfigProfile.is_deleted == False)  # noqa: E712
+            .all()
+        )
+        for existing in existing_profiles:
+            existing_config = resolve_agent_config(existing.agent_config)
+            # Strip conversation_ids from existing for fair comparison
+            for tool in existing_config.tools:
+                if isinstance(tool, GenieTool):
+                    tool.conversation_id = None
+            if existing_config.model_dump() == config_dict:
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"A profile with this configuration already exists: '{existing.name}'",
+                )
+
         current_user = get_current_user()
         profile = ConfigProfile(
             name=body.name,

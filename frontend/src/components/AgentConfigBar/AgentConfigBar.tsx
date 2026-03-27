@@ -234,7 +234,6 @@ export const AgentConfigBar: React.FC = () => {
     setDeckPrompt,
     saveAsProfile,
     loadProfile,
-    isPreSession,
   } = useAgentConfig();
   const { sessionId } = useSession();
 
@@ -449,9 +448,8 @@ export const AgentConfigBar: React.FC = () => {
           <div className="flex items-center gap-2 pt-1">
             <button
               onClick={() => setSaveDialogOpen(true)}
-              disabled={isPreSession}
-              className="inline-flex items-center gap-1 px-2 py-1 text-xs text-gray-600 hover:text-gray-800 border border-gray-300 rounded hover:bg-gray-100 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
-              title={isPreSession ? 'Save requires an active session' : 'Save current config as a profile'}
+              className="inline-flex items-center gap-1 px-2 py-1 text-xs text-gray-600 hover:text-gray-800 border border-gray-300 rounded hover:bg-gray-100 transition-colors"
+              title="Save current config as a profile"
               data-testid="save-profile-button"
             >
               <Save size={12} />
