@@ -9,7 +9,7 @@
  *  - "Save as Profile" / "Load Profile" actions
  */
 
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { Plus, X, Save, FolderOpen, Loader2, ChevronDown, ChevronUp, ExternalLink } from 'lucide-react';
 import { useAgentConfig } from '../../contexts/AgentConfigContext';
 import { useSession } from '../../contexts/SessionContext';
@@ -148,6 +148,10 @@ const LoadProfileDialog: React.FC<{
   const [profiles, setProfiles] = useState<ProfileSummary[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const userDefaultProfileId = useMemo(() => {
+    const stored = localStorage.getItem('userDefaultProfileId');
+    return stored ? Number(stored) : null;
+  }, [isOpen]);
 
   useEffect(() => {
     if (!isOpen) return;
@@ -200,8 +204,8 @@ const LoadProfileDialog: React.FC<{
               >
                 <div className="flex items-center gap-2">
                   <span className="font-medium text-gray-800">{p.name}</span>
-                  {p.is_default && (
-                    <span className="text-[10px] uppercase text-gray-400 border border-gray-200 rounded px-1">default</span>
+                  {(userDefaultProfileId != null ? p.id === userDefaultProfileId : p.is_default) && (
+                    <span className="text-[10px] uppercase text-amber-700 bg-amber-500/10 border border-amber-200 rounded px-1">default</span>
                   )}
                 </div>
                 {p.description && (
@@ -230,7 +234,6 @@ export const AgentConfigBar: React.FC = () => {
     setDeckPrompt,
     saveAsProfile,
     loadProfile,
-    isPreSession,
   } = useAgentConfig();
   const { sessionId } = useSession();
 
@@ -445,9 +448,8 @@ export const AgentConfigBar: React.FC = () => {
           <div className="flex items-center gap-2 pt-1">
             <button
               onClick={() => setSaveDialogOpen(true)}
-              disabled={isPreSession}
-              className="inline-flex items-center gap-1 px-2 py-1 text-xs text-gray-600 hover:text-gray-800 border border-gray-300 rounded hover:bg-gray-100 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
-              title={isPreSession ? 'Save requires an active session' : 'Save current config as a profile'}
+              className="inline-flex items-center gap-1 px-2 py-1 text-xs text-gray-600 hover:text-gray-800 border border-gray-300 rounded hover:bg-gray-100 transition-colors"
+              title="Save current config as a profile"
               data-testid="save-profile-button"
             >
               <Save size={12} />
