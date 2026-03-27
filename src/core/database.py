@@ -866,6 +866,13 @@ def _migrate_deck_permissions_model(conn, inspector, schema, _qual, is_sqlite):
         ))
 
     # --- Grant CAN_MANAGE to deck creators who don't have a DeckContributor row ---
+    try:
+        inspector.get_columns("deck_contributors", schema=schema)
+    except Exception:
+        logger.info("Migration: deck_contributors table does not exist yet, skipping creator backfill")
+        logger.info("Migration: deck permissions model migration complete")
+        return
+
     qualified_deck_contribs = _qual("deck_contributors")
     conn.execute(text(
         f"INSERT INTO {qualified_deck_contribs} "
