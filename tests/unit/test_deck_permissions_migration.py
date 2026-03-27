@@ -129,3 +129,64 @@ class TestDeckPermissionsMigration:
                 "SELECT permission_level FROM config_profile_contributors WHERE identity_id = 'user-2'"
             )).fetchone()
         assert result[0] == "CAN_EDIT"
+
+    def test_deck_creator_gets_can_manage(self, engine_with_legacy_columns):
+        """Existing decks should get a CAN_MANAGE DeckContributor row for their creator."""
+        with engine_with_legacy_columns.begin() as conn:
+            conn.execute(text(
+                "INSERT INTO user_sessions (session_id, created_by, is_processing, created_at, last_activity) "
+                "VALUES ('sess-1', 'alice@example.com', 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+            ))
+            conn.execute(text(
+                "INSERT INTO user_sessions (session_id, created_by, is_processing, created_at, last_activity) "
+                "VALUES ('sess-2', 'bob@example.com', 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+            ))
+        _run_migrations(engine_with_legacy_columns, schema=None)
+        with engine_with_legacy_columns.connect() as conn:
+            rows = conn.execute(text(
+                "SELECT dc.identity_id, dc.permission_level "
+                "FROM deck_contributors dc "
+                "WHERE dc.created_by = 'migration' "
+                "ORDER BY dc.identity_id"
+            )).fetchall()
+        assert len(rows) == 2
+        assert rows[0] == ("alice@example.com", "CAN_MANAGE")
+        assert rows[1] == ("bob@example.com", "CAN_MANAGE")
+
+    def test_deck_creator_manage_is_idempotent(self, engine_with_legacy_columns):
+        """Running migration twice should not duplicate CAN_MANAGE rows."""
+        with engine_with_legacy_columns.begin() as conn:
+            conn.execute(text(
+                "INSERT INTO user_sessions (session_id, created_by, is_processing, created_at, last_activity) "
+                "VALUES ('sess-idem', 'alice@example.com', 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+            ))
+        _run_migrations(engine_with_legacy_columns, schema=None)
+        _run_migrations(engine_with_legacy_columns, schema=None)
+        with engine_with_legacy_columns.connect() as conn:
+            count = conn.execute(text(
+                "SELECT COUNT(*) FROM deck_contributors WHERE identity_id = 'alice@example.com'"
+            )).scalar()
+        assert count == 1
+
+    def test_deck_creator_skipped_when_already_has_contributor(self, engine_with_legacy_columns):
+        """If a creator already has a DeckContributor row, migration should not add another."""
+        with engine_with_legacy_columns.begin() as conn:
+            conn.execute(text(
+                "INSERT INTO user_sessions (session_id, created_by, is_processing, created_at, last_activity) "
+                "VALUES ('sess-existing', 'alice@example.com', 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+            ))
+            # Manually add a CAN_EDIT contributor row (simulating pre-existing sharing)
+            session_id = conn.execute(text("SELECT id FROM user_sessions LIMIT 1")).scalar()
+            conn.execute(text(
+                "INSERT INTO deck_contributors "
+                "(user_session_id, identity_type, identity_id, identity_name, permission_level, created_at, updated_at) "
+                f"VALUES ({session_id}, 'USER', 'alice@example.com', 'alice@example.com', 'CAN_EDIT', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+            ))
+        _run_migrations(engine_with_legacy_columns, schema=None)
+        with engine_with_legacy_columns.connect() as conn:
+            rows = conn.execute(text(
+                "SELECT permission_level FROM deck_contributors WHERE identity_id = 'alice@example.com'"
+            )).fetchall()
+        # Should still be just the original row, not duplicated
+        assert len(rows) == 1
+        assert rows[0][0] == "CAN_EDIT"
