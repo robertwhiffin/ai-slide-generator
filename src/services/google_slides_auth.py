@@ -10,8 +10,11 @@ Supports two modes:
      from disk, same as the legacy behaviour.
 """
 
+import base64
+import hashlib
 import json
 import logging
+import secrets
 from pathlib import Path
 from typing import Optional
 
@@ -212,30 +215,62 @@ class GoogleSlidesAuth:
             )
         return creds
 
+    @staticmethod
+    def _generate_pkce() -> tuple[str, str]:
+        """Generate a PKCE code_verifier and code_challenge pair."""
+        verifier = secrets.token_urlsafe(64)
+        challenge = (
+            base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest())
+            .rstrip(b"=")
+            .decode()
+        )
+        return verifier, challenge
+
     def get_auth_url(self, redirect_uri: str, state: str | None = None) -> str:
-        """Generate the OAuth2 consent URL.
+        """Generate the OAuth2 consent URL with PKCE.
+
+        A PKCE ``code_verifier`` is generated and embedded in the OAuth
+        ``state`` parameter so it round-trips through the callback and can
+        be passed to :pymeth:`authorize`.
 
         Args:
             redirect_uri: The registered OAuth callback URI (no query params).
-            state: Optional opaque string that Google will return unchanged on
-                   the callback.  Used to carry profile_id / user context.
+            state: Optional JSON string carrying caller context (e.g. user
+                identity).  A ``code_verifier`` key will be injected into it.
         """
         flow = self._build_flow(redirect_uri)
-        kwargs: dict = {
-            "access_type": "offline",
-            "include_granted_scopes": "true",
-            "prompt": "consent",
-        }
-        if state:
-            kwargs["state"] = state
-        auth_url, _ = flow.authorization_url(**kwargs)
+        verifier, challenge = self._generate_pkce()
+
+        # Inject code_verifier into the state payload
+        state_data = json.loads(state) if state else {}
+        state_data["code_verifier"] = verifier
+
+        auth_url, _ = flow.authorization_url(
+            access_type="offline",
+            include_granted_scopes="true",
+            prompt="consent",
+            state=json.dumps(state_data),
+            code_challenge=challenge,
+            code_challenge_method="S256",
+        )
         logger.info("Generated Google OAuth consent URL")
         return auth_url
 
-    def authorize(self, code: str, redirect_uri: str) -> Credentials:
-        """Exchange an authorization code for tokens and persist them."""
+    def authorize(
+        self,
+        code: str,
+        redirect_uri: str,
+        code_verifier: str | None = None,
+    ) -> Credentials:
+        """Exchange an authorization code for tokens and persist them.
+
+        Args:
+            code: The authorization code from the OAuth callback.
+            redirect_uri: Must match the URI used for the consent URL.
+            code_verifier: The PKCE code verifier from the OAuth state.
+        """
         flow = self._build_flow(redirect_uri)
-        flow.fetch_token(code=code)
+        flow.fetch_token(code=code, code_verifier=code_verifier)
         creds = flow.credentials
         self._save_token(creds)
         logger.info("Google OAuth authorization successful, token saved")
