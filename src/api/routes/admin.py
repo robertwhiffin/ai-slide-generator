@@ -13,6 +13,7 @@ from src.core.database import get_db
 from src.core.encryption import decrypt_data, encrypt_data
 from src.core.user_context import get_current_user
 from src.database.models import GoogleGlobalCredentials
+from src.database.models.google_oauth_token import GoogleOAuthToken
 
 logger = logging.getLogger(__name__)
 
@@ -61,7 +62,13 @@ async def upload_google_credentials(
                 uploaded_by=uploaded_by,
             )
         )
+    # Invalidate all existing user tokens — they were authorized under the old
+    # client credentials and must re-authenticate with the new ones.
+    deleted = db.query(GoogleOAuthToken).delete()
     db.commit()
+
+    if deleted:
+        logger.info("Cleared %d user OAuth token(s) after credential upload", deleted)
 
     logger.info(
         "Google OAuth credentials uploaded (admin)",
