@@ -6,7 +6,7 @@
  * - Delete profile
  */
 
-import React, { useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 import { User, ChevronDown, Trash2, Pencil, Share2, MessageSquare, Palette, FileText, Wrench } from 'lucide-react';
 import { Button } from '@/ui/button';
 import { Badge } from '@/ui/badge';
@@ -159,6 +159,10 @@ export const ProfileList: React.FC = () => {
     const stored = localStorage.getItem('userDefaultProfileId');
     return stored ? Number(stored) : null;
   });
+  const isDefaultProfile = useCallback((profile: { id: number; is_my_default?: boolean }) =>
+    userDefaultProfileId != null ? profile.id === userDefaultProfileId : !!profile.is_my_default,
+    [userDefaultProfileId],
+  );
   const [nameLookups, setNameLookups] = useState<NameLookups>({
     slideStyles: new Map(),
     deckPrompts: new Map(),
@@ -330,7 +334,7 @@ export const ProfileList: React.FC = () => {
                         <h3 className="text-sm font-medium text-foreground">
                           {profile.name}
                         </h3>
-                        {(userDefaultProfileId != null ? profile.id === userDefaultProfileId : profile.is_my_default) && (
+                        {isDefaultProfile(profile) && (
                           <Badge className="text-xs bg-amber-500/10 text-amber-700 hover:bg-amber-500/20">
                             Default
                           </Badge>
@@ -343,7 +347,7 @@ export const ProfileList: React.FC = () => {
 
                     {/* Actions */}
                     <div className="flex shrink-0 items-center gap-1">
-                      {!(userDefaultProfileId != null ? profile.id === userDefaultProfileId : profile.is_my_default) && (
+                      {!isDefaultProfile(profile) && (
                         <Button
                           variant="ghost"
                           size="sm"

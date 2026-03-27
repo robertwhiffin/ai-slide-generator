@@ -89,8 +89,11 @@ async def get_agent_config(session_id: str):
     except SessionNotFoundError:
         raise HTTPException(status_code=404, detail=f"Session not found: {session_id}")
 
-    config = resolve_agent_config(session.get("agent_config"))
-    return config.model_dump()
+    raw = session.get("agent_config")
+    config = resolve_agent_config(raw)
+    result = config.model_dump()
+    result["is_configured"] = raw is not None
+    return result
 
 
 @router.put("")

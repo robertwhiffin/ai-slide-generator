@@ -197,14 +197,10 @@ export const AgentConfigProvider: React.FC<{ children: React.ReactNode }> = ({ c
       .then(async (config) => {
         if (cancelled) return;
 
-        // If the session has an empty/default config (new deck), load the default profile
-        const isEmpty = config.tools.length === 0
-          && config.slide_style_id == null
-          && config.deck_prompt_id == null
-          && config.system_prompt == null
-          && config.slide_editing_instructions == null;
+        // If the session has no explicitly-saved config, load the default profile
+        const isConfigured = (config as AgentConfig & { is_configured?: boolean }).is_configured ?? true;
 
-        if (isEmpty) {
+        if (!isConfigured) {
           try {
             const profiles = await api.listProfiles();
             const userProfileId = localStorage.getItem('userDefaultProfileId');

@@ -28,7 +28,7 @@ load_router = APIRouter(prefix="/api/sessions", tags=["profiles"])
 class SaveProfileRequest(BaseModel):
     name: str = Field(..., min_length=1, max_length=100)
     description: Optional[str] = None
-    agent_config: Optional[dict] = None  # Client-side config takes precedence over session
+    agent_config: Optional[AgentConfig] = None  # Client-side config takes precedence over session
 
 
 class UpdateProfileRequest(BaseModel):
@@ -129,8 +129,7 @@ async def save_from_session(session_id: str, body: SaveProfileRequest):
             )
 
     # Prefer client-side config (has resolved defaults) over session's stored config
-    raw_config = body.agent_config if body.agent_config else session.get("agent_config")
-    config = resolve_agent_config(raw_config)
+    config = body.agent_config if body.agent_config else resolve_agent_config(session.get("agent_config"))
 
     # Strip session-specific conversation_ids before persisting
     for tool in config.tools:
