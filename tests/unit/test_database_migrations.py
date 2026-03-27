@@ -98,7 +98,12 @@ def test_migration_creates_google_global_credentials_table(sqlite_engine):
 
 def test_migration_copies_first_credentials_to_global(sqlite_engine):
     """Migration copies first non-null google_credentials_encrypted from config_profiles to global table."""
+    Base.metadata.create_all(bind=sqlite_engine)
     with sqlite_engine.connect() as conn:
+        # Drop and recreate with legacy schema (includes google_credentials_encrypted)
+        conn.execute(text("DROP TABLE IF EXISTS config_profiles"))
+        conn.execute(text("DROP TABLE IF EXISTS google_global_credentials"))
+        conn.commit()
         _create_old_config_profiles(conn, "config_profiles")
         _create_google_global_credentials(conn, "google_global_credentials")
         conn.execute(text("""
@@ -122,7 +127,11 @@ def test_migration_copies_first_credentials_to_global(sqlite_engine):
 
 def test_migration_nulls_all_profile_credentials(sqlite_engine):
     """Migration nulls out google_credentials_encrypted on all profile rows after copy."""
+    Base.metadata.create_all(bind=sqlite_engine)
     with sqlite_engine.connect() as conn:
+        conn.execute(text("DROP TABLE IF EXISTS config_profiles"))
+        conn.execute(text("DROP TABLE IF EXISTS google_global_credentials"))
+        conn.commit()
         _create_old_config_profiles(conn, "config_profiles")
         _create_google_global_credentials(conn, "google_global_credentials")
         conn.execute(text("""
@@ -144,7 +153,11 @@ def test_migration_nulls_all_profile_credentials(sqlite_engine):
 
 def test_migration_is_idempotent(sqlite_engine):
     """Running migration twice is safe; no duplicate rows, no errors."""
+    Base.metadata.create_all(bind=sqlite_engine)
     with sqlite_engine.connect() as conn:
+        conn.execute(text("DROP TABLE IF EXISTS config_profiles"))
+        conn.execute(text("DROP TABLE IF EXISTS google_global_credentials"))
+        conn.commit()
         _create_old_config_profiles(conn, "config_profiles")
         _create_google_global_credentials(conn, "google_global_credentials")
         conn.execute(text("""
