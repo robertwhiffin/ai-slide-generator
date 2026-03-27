@@ -1685,13 +1685,13 @@ export const api = {
   /**
    * Save the current session's agent config as a named profile.
    */
-  async saveAsProfile(sessionId: string, name: string, description?: string): Promise<ProfileSummary> {
+  async saveAsProfile(sessionId: string, name: string, description?: string, agentConfig?: AgentConfig): Promise<ProfileSummary> {
     const response = await fetch(
       `${API_BASE_URL}/api/profiles/save-from-session/${sessionId}`,
       {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name, description }),
+        body: JSON.stringify({ name, description, agent_config: agentConfig }),
       }
     );
 

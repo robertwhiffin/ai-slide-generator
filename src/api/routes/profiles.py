@@ -28,6 +28,7 @@ load_router = APIRouter(prefix="/api/sessions", tags=["profiles"])
 class SaveProfileRequest(BaseModel):
     name: str = Field(..., min_length=1, max_length=100)
     description: Optional[str] = None
+    agent_config: Optional[dict] = None  # Client-side config takes precedence over session
 
 
 class UpdateProfileRequest(BaseModel):
@@ -127,7 +128,8 @@ async def save_from_session(session_id: str, body: SaveProfileRequest):
                 detail="You don't have permission to save a profile from this session",
             )
 
-    raw_config = session.get("agent_config")
+    # Prefer client-side config (has resolved defaults) over session's stored config
+    raw_config = body.agent_config if body.agent_config else session.get("agent_config")
     config = resolve_agent_config(raw_config)
 
     # Strip session-specific conversation_ids before persisting
@@ -138,24 +140,6 @@ async def save_from_session(session_id: str, body: SaveProfileRequest):
     config_dict = config.model_dump()
 
     with get_db_session() as db:
-        # Check for duplicate agent_config among non-deleted profiles
-        existing_profiles = (
-            db.query(ConfigProfile)
-            .filter(ConfigProfile.is_deleted == False)  # noqa: E712
-            .all()
-        )
-        for existing in existing_profiles:
-            existing_config = resolve_agent_config(existing.agent_config)
-            # Strip conversation_ids from existing for fair comparison
-            for tool in existing_config.tools:
-                if isinstance(tool, GenieTool):
-                    tool.conversation_id = None
-            if existing_config.model_dump() == config_dict:
-                raise HTTPException(
-                    status_code=409,
-                    detail=f"A profile with this configuration already exists: '{existing.name}'",
-                )
-
         current_user = get_current_user()
         profile = ConfigProfile(
             name=body.name,
