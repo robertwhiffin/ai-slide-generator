@@ -25,7 +25,11 @@ export const DeckPromptList: React.FC = () => {
   const [editingPrompt, setEditingPrompt] = useState<DeckPrompt | null>(null);
   const [actionLoading, setActionLoading] = useState<number | null>(null);
   const [expandedPromptId, setExpandedPromptId] = useState<number | null>(null);
-  
+  const [userDefaultDeckPromptId, setUserDefaultDeckPromptId] = useState<number | null>(() => {
+    const stored = localStorage.getItem('userDefaultDeckPromptId');
+    return stored ? Number(stored) : null;
+  });
+
   const [confirmDialog, setConfirmDialog] = useState<{
     isOpen: boolean;
     title: string;
@@ -55,6 +59,17 @@ export const DeckPromptList: React.FC = () => {
   useEffect(() => {
     loadPrompts();
   }, [loadPrompts]);
+
+  // Stale default cleanup: if stored default prompt no longer exists, clear it
+  useEffect(() => {
+    if (!loading && userDefaultDeckPromptId != null && prompts.length > 0) {
+      const exists = prompts.some(p => p.id === userDefaultDeckPromptId);
+      if (!exists) {
+        localStorage.removeItem('userDefaultDeckPromptId');
+        setUserDefaultDeckPromptId(null);
+      }
+    }
+  }, [prompts, loading, userDefaultDeckPromptId]);
 
   // Handle create
   const handleCreate = () => {
@@ -94,6 +109,11 @@ export const DeckPromptList: React.FC = () => {
         setActionLoading(prompt.id);
         try {
           await configApi.deleteDeckPrompt(prompt.id);
+          // Clear localStorage default if the deleted prompt was the default
+          if (userDefaultDeckPromptId === prompt.id) {
+            localStorage.removeItem('userDefaultDeckPromptId');
+            setUserDefaultDeckPromptId(null);
+          }
           await loadPrompts();
         } catch (err) {
           setError(err instanceof Error ? err.message : 'Failed to delete prompt');
@@ -185,6 +205,11 @@ export const DeckPromptList: React.FC = () => {
                             {prompt.category}
                           </Badge>
                         )}
+                        {prompt.id === userDefaultDeckPromptId && (
+                          <Badge className="text-xs bg-amber-500/10 text-amber-700 hover:bg-amber-500/20">
+                            Default
+                          </Badge>
+                        )}
                         {!prompt.is_active && (
                           <Badge variant="outline" className="text-xs">
                             Inactive
@@ -204,6 +229,20 @@ export const DeckPromptList: React.FC = () => {
 
                     {/* Actions */}
                     <div className="flex shrink-0 items-center gap-1">
+                      {prompt.id !== userDefaultDeckPromptId && prompt.is_active && (
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          className="h-8 px-2 text-xs text-muted-foreground"
+                          onClick={() => {
+                            localStorage.setItem('userDefaultDeckPromptId', String(prompt.id));
+                            setUserDefaultDeckPromptId(prompt.id);
+                          }}
+                          aria-label="Set as default"
+                        >
+                          Set as default
+                        </Button>
+                      )}
                       <Button
                         variant="ghost"
                         size="sm"
