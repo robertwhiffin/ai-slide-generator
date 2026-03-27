@@ -155,6 +155,10 @@ export const ProfileList: React.FC = () => {
   const [actionLoading, setActionLoading] = useState<number | null>(null);
   const [expandedId, setExpandedId] = useState<number | null>(null);
   const [sharingProfileId, setSharingProfileId] = useState<number | null>(null);
+  const [userDefaultProfileId, setUserDefaultProfileId] = useState<number | null>(() => {
+    const stored = localStorage.getItem('userDefaultProfileId');
+    return stored ? Number(stored) : null;
+  });
   const [nameLookups, setNameLookups] = useState<NameLookups>({
     slideStyles: new Map(),
     deckPrompts: new Map(),
@@ -180,6 +184,17 @@ export const ProfileList: React.FC = () => {
     fetchLookups();
     return () => { cancelled = true; };
   }, []);
+  // Stale default cleanup: if stored default profile no longer exists, clear it
+  useEffect(() => {
+    if (!loading && userDefaultProfileId != null) {
+      const exists = profiles.some(p => p.id === userDefaultProfileId);
+      if (!exists) {
+        localStorage.removeItem('userDefaultProfileId');
+        setUserDefaultProfileId(null);
+      }
+    }
+  }, [profiles, loading, userDefaultProfileId]);
+
   const [renamingId, setRenamingId] = useState<number | null>(null);
   const [renameValue, setRenameValue] = useState('');
   const [renameError, setRenameError] = useState<string | null>(null);
@@ -201,6 +216,11 @@ export const ProfileList: React.FC = () => {
         setActionLoading(profile.id);
         try {
           await deleteProfile(profile.id);
+          // Clear localStorage default if the deleted profile was the default
+          if (userDefaultProfileId === profile.id) {
+            localStorage.removeItem('userDefaultProfileId');
+            setUserDefaultProfileId(null);
+          }
           setConfirmDialog(prev => ({ ...prev, isOpen: false, loading: false }));
         } catch (err) {
           const message = err instanceof Error ? err.message : 'Failed to delete profile';
@@ -310,8 +330,8 @@ export const ProfileList: React.FC = () => {
                         <h3 className="text-sm font-medium text-foreground">
                           {profile.name}
                         </h3>
-                        {profile.is_my_default && (
-                          <Badge variant="secondary" className="text-xs">
+                        {(userDefaultProfileId != null ? profile.id === userDefaultProfileId : profile.is_my_default) && (
+                          <Badge className="text-xs bg-amber-500/10 text-amber-700 hover:bg-amber-500/20">
                             Default
                           </Badge>
                         )}
@@ -323,6 +343,20 @@ export const ProfileList: React.FC = () => {
 
                     {/* Actions */}
                     <div className="flex shrink-0 items-center gap-1">
+                      {!(userDefaultProfileId != null ? profile.id === userDefaultProfileId : profile.is_my_default) && (
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          className="h-8 px-2 text-xs text-muted-foreground"
+                          onClick={() => {
+                            localStorage.setItem('userDefaultProfileId', String(profile.id));
+                            setUserDefaultProfileId(profile.id);
+                          }}
+                          aria-label="Set as default"
+                        >
+                          Set as default
+                        </Button>
+                      )}
                       <Button
                         variant="ghost"
                         size="sm"

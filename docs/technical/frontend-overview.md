@@ -126,6 +126,16 @@ loadProfile(profileId)     // Load a profile's config into current session
 
 Used by: `AgentConfigBar`, `ChatPanel`.
 
+**Default resolution:** When no stored config exists (new session or first visit), the context resolves defaults for each config field using localStorage user preferences:
+
+| Config Field | localStorage Key | Priority |
+|---|---|---|
+| Profile | `userDefaultProfileId` | localStorage > server `is_my_default` > server `is_default` |
+| Slide Style | `userDefaultSlideStyleId` | localStorage > server `is_default` > server `is_system` |
+| Deck Prompt | `userDefaultDeckPromptId` | localStorage only (no server-side default) |
+
+Users set their defaults via the "Set as default" button on each settings page (`/profiles`, `/slide-styles`, `/deck-prompts`). The preference is per-browser, not synced to the backend.
+
 ### 4c. Profile Context (`src/contexts/ProfileContext.tsx`)
 
 Manages profile CRUD operations and the profile list. Wraps inside `AppLayout` (not app-level) because it's only needed by the profile management page.
@@ -201,6 +211,7 @@ interface DeckPrompt {
 2. Each session can select one prompt via `agent_config.deck_prompt_id`
 3. When generating slides, the selected prompt content is prepended to the system prompt
 4. User chat messages combine with the deck prompt for context-aware generation
+5. Users can set a personal default prompt via "Set as default" (stored in localStorage as `userDefaultDeckPromptId`); new sessions auto-select it
 
 ### 9. Save Points / Versioning (`src/components/SavePoints/`)
 
@@ -256,6 +267,7 @@ interface SlideStyle {
 2. Each session can select one style via `agent_config.slide_style_id`
 3. When generating slides, the selected style content is included in the system prompt
 4. Styles define typography (fonts, sizes), colors (brand palette, accents), and layout rules
+5. Users can set a personal default style via "Set as default" (stored in localStorage as `userDefaultSlideStyleId`); falls back to server `is_default` then `is_system`
 
 ---
 
