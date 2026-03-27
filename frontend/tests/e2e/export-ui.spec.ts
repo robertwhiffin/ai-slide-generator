@@ -717,3 +717,48 @@ test.describe('SlidePanelHeader', () => {
     await expect(page.getByText(mockSlideDeck.title)).toBeVisible();
   });
 });
+
+// ============================================
+// Google Slides OAuth Flow Tests
+// ============================================
+
+test.describe('GoogleSlidesOAuth', () => {
+  test('triggers OAuth flow when user is not authorized', async ({ page }) => {
+    await setupMocks(page);
+    await setupStreamMock(page);
+
+    // Mock auth status: user is NOT authorized
+    await page.route('**/api/export/google-slides/auth/status', (route) => {
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ authorized: false }),
+      });
+    });
+
+    // Mock auth URL endpoint
+    await page.route('**/api/export/google-slides/auth/url', (route) => {
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ url: 'https://accounts.google.com/o/oauth2/auth?fake=true' }),
+      });
+    });
+
+    // Stub window.open so the popup doesn't actually open
+    await page.addInitScript(() => {
+      window.open = () => null;
+    });
+
+    await goToGenerator(page);
+    await generateSlides(page);
+
+    // Click Export to Google Slides and wait for the auth URL request
+    const authUrlRequestPromise = page.waitForRequest('**/api/export/google-slides/auth/url');
+    await page.getByRole('button', { name: 'Export' }).click();
+    await page.getByText('Export to Google Slides').click();
+
+    // The app should have requested the auth URL to start the OAuth flow
+    await authUrlRequestPromise;
+  });
+});
