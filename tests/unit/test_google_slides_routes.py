@@ -172,6 +172,51 @@ class TestAuthUrl:
 # Export endpoint
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Auth callback endpoint
+# ---------------------------------------------------------------------------
+
+class TestAuthCallback:
+
+    def test_callback_no_credentials_returns_failure_html(self, test_client):
+        """No global credentials → returns HTML failure page (not 500)."""
+        state = json.dumps({"user": "local_dev"})
+        resp = test_client.get(
+            "/api/export/google-slides/auth/callback",
+            params={"code": "fake-code", "state": state},
+        )
+        assert resp.status_code == 200
+        assert "Authorization Failed" in resp.text
+
+    def test_callback_invalid_code_returns_failure_html(self, test_client, session_factory):
+        """Valid credentials but invalid auth code → returns HTML failure page (not 500).
+
+        Regression test: previously, OAuth library exceptions (e.g. InvalidGrantError)
+        were not caught, causing a raw 500 Internal Server Error.
+        """
+        _seed_global_credentials(session_factory)
+        state = json.dumps({"user": "local_dev"})
+        resp = test_client.get(
+            "/api/export/google-slides/auth/callback",
+            params={"code": "invalid-code", "state": state},
+        )
+        assert resp.status_code == 200
+        assert "Authorization Failed" in resp.text
+
+    def test_callback_missing_user_in_state(self, test_client):
+        """State without user key → returns HTML failure page."""
+        resp = test_client.get(
+            "/api/export/google-slides/auth/callback",
+            params={"code": "fake-code", "state": "{}"},
+        )
+        assert resp.status_code == 200
+        assert "Authorization Failed" in resp.text
+
+
+# ---------------------------------------------------------------------------
+# Export endpoint
+# ---------------------------------------------------------------------------
+
 class TestExportEndpoint:
 
     def test_export_no_credentials_returns_400(self, test_client):
