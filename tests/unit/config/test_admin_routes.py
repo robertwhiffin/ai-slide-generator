@@ -10,6 +10,8 @@ from fastapi.testclient import TestClient
 
 from src.core.database import Base, get_db
 from src.database.models import GoogleGlobalCredentials
+from src.database.models.google_oauth_token import GoogleOAuthToken
+from src.core.encryption import encrypt_data
 
 VALID_CREDENTIALS = json.dumps({
     "installed": {
@@ -162,3 +164,28 @@ def test_upload_replaces_existing_credentials(test_client, session_factory):
     decrypted = decrypt_data(rows[0].credentials_encrypted)
     assert "v2" in decrypted
     assert "web" in decrypted
+
+
+def test_upload_credentials_clears_existing_user_tokens(test_client, session_factory):
+    """Uploading new credentials invalidates all existing user OAuth tokens."""
+    # Seed a user token
+    db = session_factory()
+    db.add(GoogleOAuthToken(
+        user_identity="user@example.com",
+        token_encrypted=encrypt_data('{"access_token": "old"}'),
+    ))
+    db.commit()
+    assert db.query(GoogleOAuthToken).count() == 1
+    db.close()
+
+    # Upload new credentials
+    resp = test_client.post(
+        "/api/admin/google-credentials",
+        files={"file": ("credentials.json", VALID_CREDENTIALS, "application/json")},
+    )
+    assert resp.status_code == 200
+
+    # All user tokens should be gone
+    db = session_factory()
+    assert db.query(GoogleOAuthToken).count() == 0
+    db.close()
