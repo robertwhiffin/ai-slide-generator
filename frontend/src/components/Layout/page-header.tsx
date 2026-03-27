@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, type ReactNode } from "react"
-import { Save, Download, Play, Share2, Link, ChevronDown, FileDown, FileText, Presentation } from "lucide-react"
+import { Save, Download, Play, Share2, Link, ChevronDown, FileDown, FileText, Presentation, Code } from "lucide-react"
 import { Button } from "@/ui/button"
 import { SidebarTrigger } from "@/ui/sidebar"
 import { Separator } from "@/ui/separator"
@@ -20,6 +20,7 @@ interface PageHeaderProps {
   onExport?: () => void
   onExportPPTX?: () => void
   onExportPDF?: () => void
+  onExportHTML?: () => void
   onExportGoogleSlides?: () => void
   onPresent?: () => void
   onTitleChange?: (newTitle: string) => void
@@ -40,6 +41,7 @@ export function PageHeader({
   onExport,
   onExportPPTX,
   onExportPDF,
+  onExportHTML,
   onExportGoogleSlides,
   onPresent,
   onTitleChange,
@@ -48,7 +50,7 @@ export function PageHeader({
   isGenerating = false,
   viewOnly = false,
 }: PageHeaderProps) {
-  const hasExportMenu = !viewOnly && (onExportPPTX ?? onExportPDF ?? onExportGoogleSlides)
+  const hasExportMenu = !viewOnly && (onExportPPTX ?? onExportPDF ?? onExportHTML ?? onExportGoogleSlides)
   const [isEditing, setIsEditing] = useState(false)
   const [editedTitle, setEditedTitle] = useState(title)
   const inputRef = useRef<HTMLInputElement>(null)
@@ -169,6 +171,12 @@ export function PageHeader({
                   <DropdownMenuItem onClick={onExportPDF} disabled={isGenerating}>
                     <FileText className="size-3.5 mr-2" />
                     Download PDF
+                  </DropdownMenuItem>
+                )}
+                {onExportHTML && (
+                  <DropdownMenuItem onClick={onExportHTML} disabled={isGenerating}>
+                    <Code className="size-3.5 mr-2" />
+                    Save as HTML
                   </DropdownMenuItem>
                 )}
                 {onExportGoogleSlides && (

@@ -463,6 +463,10 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
     slidePanelRef.current?.exportPDF();
   }, []);
 
+  const handleExportHTML = useCallback(() => {
+    slidePanelRef.current?.exportHTML();
+  }, []);
+
   const handleExportGoogleSlides = useCallback(async () => {
     if (!sessionId || !slideDeck) return;
     try {
@@ -530,6 +534,7 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
                 onCopyLink={!viewOnly && sessionId ? handleCopyLink : undefined}
                 onExportPPTX={slideDeck ? handleExportPPTX : undefined}
                 onExportPDF={slideDeck ? handleExportPDF : undefined}
+                onExportHTML={slideDeck ? handleExportHTML : undefined}
                 onExportGoogleSlides={slideDeck ? handleExportGoogleSlides : undefined}
                 onPresent={slideDeck ? handlePresent : undefined}
                 isGenerating={isGenerating}
