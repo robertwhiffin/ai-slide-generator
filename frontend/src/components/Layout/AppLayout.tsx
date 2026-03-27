@@ -25,6 +25,7 @@ import { useGeneration } from '../../contexts/GenerationContext';
 import { ProfileProvider } from '../../contexts/ProfileContext';
 import { useVersionCheck } from '../../hooks/useVersionCheck';
 import { useToast } from '../../contexts/ToastContext';
+import { useGoogleOAuthPopup } from '../../hooks/useGoogleOAuthPopup';
 import { api } from '../../services/api';
 import { SidebarProvider, SidebarInset } from '@/ui/sidebar';
 import { AppSidebar } from './app-sidebar';
@@ -69,6 +70,7 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
   sessionIdRef.current = sessionId;
   const { updateAvailable, latestVersion, updateType, dismissed, dismiss } = useVersionCheck();
   const { showToast } = useToast();
+  const { openOAuthPopup } = useGoogleOAuthPopup();
   const { showSurvey, closeSurvey, onGenerationComplete, onGenerationStart } = useSurveyTrigger();
 
   // Editing lock state (default false until acquire succeeds)
@@ -470,6 +472,19 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
   const handleExportGoogleSlides = useCallback(async () => {
     if (!sessionId || !slideDeck) return;
     try {
+      // Check auth first
+      const { authorized } = await api.checkGoogleSlidesAuth();
+
+      if (!authorized) {
+        setExportStatus('Waiting for Google authorization...');
+        const authResult = await openOAuthPopup();
+        if (!authResult) {
+          setExportStatus(null);
+          showToast('Google authorization was not completed. Please try again.', 'error');
+          return;
+        }
+      }
+
       setExportStatus('Exporting to Google Slides…');
       const { presentation_url } = await api.exportToGoogleSlides(
         sessionId,
@@ -486,7 +501,7 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
       setExportStatus(null);
       showToast('Export to Google Slides failed', 'error');
     }
-  }, [sessionId, slideDeck, showToast]);
+  }, [sessionId, slideDeck, showToast, openOAuthPopup]);
 
   const handlePresent = useCallback(() => {
     slidePanelRef.current?.openPresentationMode();
