@@ -9,7 +9,7 @@
  *  - "Save as Profile" / "Load Profile" actions
  */
 
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { Plus, X, Save, FolderOpen, Loader2, ChevronDown, ChevronUp, ExternalLink } from 'lucide-react';
 import { useAgentConfig } from '../../contexts/AgentConfigContext';
 import { useSession } from '../../contexts/SessionContext';
@@ -148,6 +148,10 @@ const LoadProfileDialog: React.FC<{
   const [profiles, setProfiles] = useState<ProfileSummary[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const userDefaultProfileId = useMemo(() => {
+    const stored = localStorage.getItem('userDefaultProfileId');
+    return stored ? Number(stored) : null;
+  }, [isOpen]);
 
   useEffect(() => {
     if (!isOpen) return;
@@ -200,13 +204,9 @@ const LoadProfileDialog: React.FC<{
               >
                 <div className="flex items-center gap-2">
                   <span className="font-medium text-gray-800">{p.name}</span>
-                  {(() => {
-                    const userDefaultId = localStorage.getItem('userDefaultProfileId');
-                    const isDefault = userDefaultId ? p.id === Number(userDefaultId) : p.is_default;
-                    return isDefault ? (
-                      <span className="text-[10px] uppercase text-amber-700 bg-amber-500/10 border border-amber-200 rounded px-1">default</span>
-                    ) : null;
-                  })()}
+                  {(userDefaultProfileId != null ? p.id === userDefaultProfileId : p.is_default) && (
+                    <span className="text-[10px] uppercase text-amber-700 bg-amber-500/10 border border-amber-200 rounded px-1">default</span>
+                  )}
                 </div>
                 {p.description && (
                   <p className="text-xs text-gray-500 mt-0.5 line-clamp-1">{p.description}</p>
