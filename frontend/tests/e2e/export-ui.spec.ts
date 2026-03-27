@@ -410,6 +410,7 @@ test.describe('ExportMenu', () => {
 
     await expect(page.getByText('Download PDF')).toBeVisible();
     await expect(page.getByText('Download PPTX')).toBeVisible();
+    await expect(page.getByText('Save as HTML')).toBeVisible();
   });
 
   test('clicking outside closes menu', async ({ page }) => {
@@ -537,8 +538,7 @@ test.describe('HTMLExport', () => {
     await setupStreamMock(page);
   });
 
-  test.skip('clicking HTML export triggers download', async ({ page }) => {
-    // New header dropdown has Download PDF / Download PPTX / Export to Google Slides only; no Save as HTML
+  test('clicking HTML export triggers download', async ({ page }) => {
     await goToGenerator(page);
     await generateSlides(page);
     const downloadPromise = page.waitForEvent('download', { timeout: 10000 });
@@ -548,8 +548,7 @@ test.describe('HTMLExport', () => {
     expect(download.suggestedFilename()).toMatch(/\.html$/);
   });
 
-  test.skip('HTML export closes menu after click', async ({ page }) => {
-    // New header dropdown does not include Save as HTML
+  test('HTML export closes menu after click', async ({ page }) => {
     await goToGenerator(page);
     await generateSlides(page);
     await page.getByRole('button', { name: 'Export' }).click();
