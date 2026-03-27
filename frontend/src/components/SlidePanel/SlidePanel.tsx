@@ -45,6 +45,7 @@ interface SlidePanelProps {
 export interface SlidePanelHandle {
   exportPDF: () => void;
   exportPPTX: () => void;
+  exportHTML: () => void;
   openPresentationMode: () => void;
 }
 
@@ -344,9 +345,139 @@ function SlidePanelComponent(props: SlidePanelProps, ref: React.Ref<SlidePanelHa
     }
   };
 
+  const handleSaveAsHTML = () => {
+    if (!slideDeck) return;
+
+    const slidesHtml = slideDeck.slides
+      .map((slide, index) => {
+        const slideScripts = slide.scripts || '';
+        return `
+    <div class="slide-wrapper" data-slide-index="${index}">
+      <div class="slide-container">
+        ${slide.html}
+      </div>
+      ${slideScripts ? `<script>
+        (function() {
+          ${slideScripts}
+        })();
+      </script>` : ''}
+    </div>`;
+      })
+      .join('\n');
+
+    const externalScriptsHtml = slideDeck.external_scripts
+      .map((src: string) => `<script src="${src}"></script>`)
+      .join('\n');
+
+    const html = `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>${slideDeck.title || 'Presentation'}</title>
+  ${externalScriptsHtml}
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+    html, body {
+      width: 100%;
+      height: 100%;
+      overflow: auto;
+      background: #f9fafb;
+    }
+    body {
+      padding: 40px 20px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 40px;
+    }
+    .slide-wrapper {
+      width: 100%;
+      max-width: 1280px;
+      margin: 0 auto;
+      display: flex;
+      justify-content: center;
+      align-items: flex-start;
+      page-break-after: always;
+    }
+    .slide-container {
+      width: 1280px;
+      height: 720px;
+      max-width: 100%;
+      max-height: calc(100vh - 80px);
+      position: relative;
+      background: #ffffff;
+      overflow: auto;
+      box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+      border-radius: 8px;
+    }
+    .slide-container > * {
+      width: 100%;
+      min-height: 100%;
+    }
+    canvas {
+      max-width: 100%;
+      height: auto;
+    }
+    ${slideDeck.css}
+  </style>
+</head>
+<body>
+  ${slidesHtml}
+  <script>
+    function waitForChartJs(callback, maxAttempts = 50) {
+      let attempts = 0;
+      const check = () => {
+        attempts++;
+        if (typeof Chart !== 'undefined') {
+          callback();
+        } else if (attempts < maxAttempts) {
+          setTimeout(check, 100);
+        } else {
+          console.error('Chart.js failed to load');
+        }
+      };
+      check();
+    }
+
+    function initializeCharts() {
+      try {
+        ${slideDeck.scripts || ''}
+      } catch (err) {
+        console.error('Chart initialization error:', err);
+      }
+    }
+
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', () => {
+        waitForChartJs(initializeCharts);
+      });
+    } else {
+      waitForChartJs(initializeCharts);
+    }
+  </script>
+</body>
+</html>`;
+
+    const blob = new Blob([html], { type: 'text/html' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `${(slideDeck.title || 'presentation').replace(/[^a-z0-9]/gi, '-').toLowerCase()}.html`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  };
+
   useImperativeHandle(ref, () => ({
     exportPDF: handleExportPDF,
     exportPPTX: handleExportPPTX,
+    exportHTML: handleSaveAsHTML,
     openPresentationMode: () => setIsPresentationMode(true),
   }));
 
