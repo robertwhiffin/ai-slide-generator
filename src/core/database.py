@@ -865,4 +865,19 @@ def _migrate_deck_permissions_model(conn, inspector, schema, _qual, is_sqlite):
             "WHERE global_permission = 'CAN_VIEW'"
         ))
 
+    # --- Grant CAN_MANAGE to deck creators who don't have a DeckContributor row ---
+    qualified_deck_contribs = _qual("deck_contributors")
+    conn.execute(text(
+        f"INSERT INTO {qualified_deck_contribs} "
+        "(user_session_id, identity_type, identity_id, identity_name, permission_level, created_by, created_at, updated_at) "
+        f"SELECT s.id, 'USER', s.created_by, s.created_by, 'CAN_MANAGE', 'migration', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP "
+        f"FROM {qualified_sessions} s "
+        f"WHERE s.created_by IS NOT NULL "
+        f"AND NOT EXISTS ("
+        f"  SELECT 1 FROM {qualified_deck_contribs} dc "
+        f"  WHERE dc.user_session_id = s.id AND dc.identity_id = s.created_by"
+        f")"
+    ))
+    logger.info("Migration: granted CAN_MANAGE to existing deck creators")
+
     logger.info("Migration: deck permissions model migration complete")
