@@ -141,24 +141,20 @@ def _convert_single_to_double_quoted(line: str) -> str:
 
 
 def _fix_apostrophe_strings(code: str) -> str:
-    """Iteratively fix ``SyntaxError: unterminated string literal`` from apostrophes.
+    """Fix single-quoted literals whose content contains apostrophes (contractions).
 
-    The LLM sometimes emits single-quoted Python string literals whose content
-    includes contractions such as "didn't", "we've", "it's".  Python sees the
-    apostrophe as a premature string delimiter and raises a ``SyntaxError``.
+    The LLM often emits ``'text': 'We don't ...'``.  The ``'`` in *don't* ends the
+    literal early; the parser may report ``unterminated string``, ``eol while
+    scanning``, or ``invalid character`` (e.g. em-dash) on the remainder.
 
-    This function repeatedly calls ``ast.parse`` and, when such an error is
-    detected, rewrites the offending line using
-    :func:`_convert_single_to_double_quoted`.
+    Repeatedly ``ast.parse`` and rewrite the error line with
+    :func:`_convert_single_to_double_quoted` whenever that changes the line.
     """
     for _ in range(20):  # guard against infinite loops
         try:
             ast.parse(code)
             return code
         except SyntaxError as exc:
-            msg = str(exc).lower()
-            if "unterminated string" not in msg and "eol while scanning" not in msg:
-                return code  # not an apostrophe issue — leave for caller
             if exc.lineno is None:
                 return code
 
@@ -170,7 +166,7 @@ def _fix_apostrophe_strings(code: str) -> str:
             original = lines[line_idx]
             fixed = _convert_single_to_double_quoted(original)
             if fixed == original:
-                return code  # heuristic couldn't improve it
+                return code  # heuristic cannot improve this error
 
             lines[line_idx] = fixed
             code = "\n".join(lines)
@@ -903,7 +899,7 @@ class HtmlToGoogleSlidesConverter:
                 i += 1
             code = '\n'.join(out)
 
-        # Fix apostrophes inside single-quoted strings (e.g. "didn't" → "didn't")
+        # Re-quote single-quoted literals that contain contractions (Don't, it's, etc.)
         code = _fix_apostrophe_strings(code)
 
         try:
