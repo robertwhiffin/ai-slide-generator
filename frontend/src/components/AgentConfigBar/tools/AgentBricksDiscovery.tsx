@@ -1,21 +1,26 @@
 /**
- * AgentBricksDiscovery — inline panel for searching and selecting
+ * AgentBricksDiscovery — inline dropdown panel for searching and selecting
  * agent-type serving endpoints (Agent Bricks).
+ *
+ * When the user selects an item, the dropdown closes and calls `onPreview`
+ * so that AgentConfigBar can open the full-width ToolDetailPanel.
  */
 
 import React, { useEffect, useState, useRef } from 'react';
-import { ChevronLeft, Loader2, RefreshCw, Search, X } from 'lucide-react';
+import { Loader2, RefreshCw, Search, X } from 'lucide-react';
 import { api } from '../../../services/api';
 import type { DiscoveryItem, AgentBricksTool, ToolEntry } from '../../../types/agentConfig';
+import type { AgentBricksPreview } from '../ToolDetailPanel';
 
 interface AgentBricksDiscoveryProps {
   onSelect: (tool: AgentBricksTool) => void;
+  onPreview: (preview: AgentBricksPreview) => void;
   onClose: () => void;
   existingTools: ToolEntry[];
 }
 
 export const AgentBricksDiscovery: React.FC<AgentBricksDiscoveryProps> = ({
-  onSelect,
+  onPreview,
   onClose,
   existingTools,
 }) => {
@@ -26,10 +31,6 @@ export const AgentBricksDiscovery: React.FC<AgentBricksDiscoveryProps> = ({
   const [query, setQuery] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-
-  // Detail panel state
-  const [selected, setSelected] = useState<DiscoveryItem | null>(null);
-  const [description, setDescription] = useState('');
 
   useEffect(() => {
     fetchAgents();
@@ -67,23 +68,12 @@ export const AgentBricksDiscovery: React.FC<AgentBricksDiscoveryProps> = ({
   };
 
   const handleSelect = (item: DiscoveryItem) => {
-    setSelected(item);
-    setDescription(item.description ?? '');
-  };
-
-  const handleBack = () => {
-    setSelected(null);
-    setDescription('');
-  };
-
-  const handleSave = () => {
-    if (!selected) return;
-    const tool: AgentBricksTool = {
-      type: 'agent_bricks',
-      endpoint_name: selected.id,
-      description: description || undefined,
-    };
-    onSelect(tool);
+    onPreview({
+      toolType: 'agent_bricks',
+      name: item.name,
+      endpointName: item.id,
+      description: item.description,
+    });
     onClose();
   };
 
@@ -102,20 +92,7 @@ export const AgentBricksDiscovery: React.FC<AgentBricksDiscoveryProps> = ({
       {/* Header */}
       <div className="px-3 pt-3 pb-2">
         <div className="flex items-center justify-between mb-2">
-          <div className="flex items-center gap-1.5">
-            {selected && (
-              <button
-                onClick={handleBack}
-                className="p-0.5 text-gray-400 hover:text-gray-600 rounded transition-colors"
-                aria-label="Back"
-              >
-                <ChevronLeft size={14} />
-              </button>
-            )}
-            <span className="text-sm font-medium text-gray-700">
-              {selected ? 'Configure Agent Brick' : 'Add Agent Brick'}
-            </span>
-          </div>
+          <span className="text-sm font-medium text-gray-700">Add Agent Brick</span>
           <button
             onClick={onClose}
             className="p-0.5 text-gray-400 hover:text-gray-600 rounded transition-colors"
@@ -125,20 +102,18 @@ export const AgentBricksDiscovery: React.FC<AgentBricksDiscoveryProps> = ({
           </button>
         </div>
 
-        {/* Search input (list view only) */}
-        {!selected && (
-          <div className="relative">
-            <Search size={14} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-gray-400" />
-            <input
-              ref={inputRef}
-              type="text"
-              placeholder="Search agent bricks..."
-              value={query}
-              onChange={e => setQuery(e.target.value)}
-              className="w-full pl-8 pr-3 py-1.5 border border-gray-300 rounded text-sm focus:outline-none focus:ring-1 focus:ring-blue-500 bg-white"
-            />
-          </div>
-        )}
+        {/* Search input */}
+        <div className="relative">
+          <Search size={14} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-gray-400" />
+          <input
+            ref={inputRef}
+            type="text"
+            placeholder="Search agent bricks..."
+            value={query}
+            onChange={e => setQuery(e.target.value)}
+            className="w-full pl-8 pr-3 py-1.5 border border-gray-300 rounded text-sm focus:outline-none focus:ring-1 focus:ring-blue-500 bg-white"
+          />
+        </div>
       </div>
 
       {/* Content */}
@@ -163,8 +138,7 @@ export const AgentBricksDiscovery: React.FC<AgentBricksDiscoveryProps> = ({
           </div>
         )}
 
-        {/* List view */}
-        {!loading && !error && !selected && (
+        {!loading && !error && (
           <>
             {filtered.length === 0 && (
               <p className="text-sm text-gray-500 py-4 text-center">
@@ -195,36 +169,6 @@ export const AgentBricksDiscovery: React.FC<AgentBricksDiscoveryProps> = ({
               );
             })}
           </>
-        )}
-
-        {/* Detail view */}
-        {!loading && !error && selected && (
-          <div className="px-2 pb-1">
-            <div className="mb-3">
-              <label className="block text-xs text-gray-500 mb-1">Endpoint</label>
-              <div className="text-sm text-gray-700 bg-gray-50 rounded px-2 py-1.5 border border-gray-200">
-                {selected.name}
-              </div>
-            </div>
-
-            <div className="mb-3">
-              <label className="block text-xs text-gray-500 mb-1">Description (optional)</label>
-              <textarea
-                value={description}
-                onChange={e => setDescription(e.target.value)}
-                placeholder="Describe what this agent does..."
-                className="w-full border border-gray-300 rounded text-sm p-2 focus:outline-none focus:ring-1 focus:ring-blue-500 resize-none"
-                rows={2}
-              />
-            </div>
-
-            <button
-              onClick={handleSave}
-              className="w-full px-3 py-1.5 rounded text-sm bg-blue-600 text-white hover:bg-blue-700 transition-colors"
-            >
-              Save & Add
-            </button>
-          </div>
         )}
       </div>
     </div>

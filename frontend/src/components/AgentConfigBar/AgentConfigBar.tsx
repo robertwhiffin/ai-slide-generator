@@ -20,6 +20,8 @@ import { TOOL_TYPE_BADGE_LABELS, TOOL_TYPE_COLORS } from '../../types/agentConfi
 import { api } from '../../services/api';
 import { ToolPicker } from './ToolPicker';
 import GenieDetailPanel from './GenieDetailPanel';
+import ToolDetailPanel from './ToolDetailPanel';
+import type { ToolPreviewData } from './ToolDetailPanel';
 
 // ---------------------------------------------------------------------------
 // Sub-components
@@ -367,6 +369,8 @@ export const AgentConfigBar: React.FC = () => {
   const [detailMode, setDetailMode] = useState<'add' | 'edit'>('add');
   // For non-Genie tool editing
   const [editingNonGenieTool, setEditingNonGenieTool] = useState<MCPTool | VectorIndexTool | ModelEndpointTool | AgentBricksTool | null>(null);
+  // For non-Genie tool add (full-width detail panel)
+  const [toolPreview, setToolPreview] = useState<ToolPreviewData | null>(null);
 
   // Save / Load dialogs
   const [saveDialogOpen, setSaveDialogOpen] = useState(false);
@@ -429,6 +433,13 @@ export const AgentConfigBar: React.FC = () => {
   const handlePreview = useCallback((tool: AvailableTool) => {
     setDetailTool(tool);
     setDetailMode('add');
+    setToolPreview(null);
+  }, []);
+
+  const handleToolPreview = useCallback((preview: ToolPreviewData) => {
+    setToolPreview(preview);
+    setDetailTool(null);
+    setEditingNonGenieTool(null);
   }, []);
 
   const handleEditChip = useCallback((tool: ToolEntry) => {
@@ -458,6 +469,7 @@ export const AgentConfigBar: React.FC = () => {
   const handleDetailCancel = useCallback(() => {
     setDetailTool(null);
     setEditingNonGenieTool(null);
+    setToolPreview(null);
   }, []);
 
   const handleNonGenieToolSave = useCallback(async (tool: MCPTool | VectorIndexTool | ModelEndpointTool | AgentBricksTool) => {
@@ -468,6 +480,15 @@ export const AgentConfigBar: React.FC = () => {
       // Panel stays open on failure; toast shown by context
     }
   }, [updateToolEntry]);
+
+  const handleToolPreviewSave = useCallback(async (tool: ToolEntry) => {
+    try {
+      await addTool(tool);
+      setToolPreview(null);
+    } catch {
+      // Panel stays open on failure; toast shown by context
+    }
+  }, [addTool]);
 
   // Summary line for collapsed state
   const toolCount = agentConfig.tools.length;
@@ -517,6 +538,14 @@ export const AgentConfigBar: React.FC = () => {
               onCancel={handleDetailCancel}
             />
           )}
+          {toolPreview && (
+            <ToolDetailPanel
+              preview={toolPreview}
+              mode="add"
+              onSave={handleToolPreviewSave}
+              onCancel={handleDetailCancel}
+            />
+          )}
 
           {/* Tools row */}
           <div>
@@ -534,6 +563,7 @@ export const AgentConfigBar: React.FC = () => {
               <ToolPicker
                 onSelect={addTool}
                 onPreview={handlePreview}
+                onToolPreview={handleToolPreview}
                 existingTools={agentConfig.tools}
               />
             </div>
