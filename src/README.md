@@ -50,7 +50,6 @@ src/
 │   ├── profile.py          # Configuration profiles
 │   ├── session.py          # Chat sessions
 │   ├── history.py          # Session history/snapshots
-│   ├── ai_infra.py         # LLM endpoint settings
 │   ├── genie_space.py      # Genie configuration
 │   ├── mlflow.py           # MLflow settings
 │   └── prompts.py          # System prompts

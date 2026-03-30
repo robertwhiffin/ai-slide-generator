@@ -34,10 +34,6 @@ profiles:
   - name: "Default"
     description: "Default configuration"
     is_default: true
-    ai_infra:
-      llm_endpoint: "databricks-llama-3-1-70b-instruct"
-      llm_temperature: 0.7
-      llm_max_tokens: 16000
     genie_space:
       space_id: "your-space-id"
       space_name: "Your Space"

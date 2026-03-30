@@ -243,11 +243,11 @@ When you first open the app at http://localhost:3000, a welcome screen will ask 
 The application needs access to an LLM endpoint:
 
 1. **Go to** Serving → Model Serving
-2. **Verify** you have access to an endpoint (e.g., `databricks-claude-sonnet-4-5`)
+2. **Verify** you have access to an endpoint (e.g., `databricks-claude-opus-4-6`)
 3. **Note** the endpoint name for configuration
 
 Default endpoints in Databricks:
-- `databricks-claude-sonnet-4-5`
+- `databricks-claude-opus-4-6`
 - `databricks-llama-3-1-70b-instruct`
 - `databricks-mixtral-8x7b-instruct`
 
