@@ -101,11 +101,11 @@ def _query_agent_bricks(endpoint_name: str, query: str) -> str:
         path = f"/serving-endpoints/{endpoint_name}/invocations"
         messages = [{"role": "user", "content": query}]
 
-        # Try formats in order of likelihood
+        # Try formats — input array first (most MAS/KA endpoints use this),
+        # then messages format (newer agent/v2/chat endpoints).
         formats = [
+            ("input", {"input": messages}),
             ("messages", {"messages": messages}),
-            ("input_messages", {"input": {"messages": messages}}),
-            ("input_array", {"input": messages}),
         ]
 
         last_error = None
@@ -130,8 +130,8 @@ def _query_agent_bricks(endpoint_name: str, query: str) -> str:
                     )
             except Exception as e:
                 last_error = e
-                logger.debug(
-                    "Agent bricks %s format failed for %s: %s",
+                logger.info(
+                    "Agent bricks %s format rejected for %s: %s",
                     label, endpoint_name, e,
                 )
                 continue
