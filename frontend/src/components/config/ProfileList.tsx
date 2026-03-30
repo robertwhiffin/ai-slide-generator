@@ -17,12 +17,14 @@ import { ConfirmDialog } from './ConfirmDialog';
 import { ContributorsManager } from './ContributorsManager';
 
 interface ToolEntry {
-  type: 'genie' | 'mcp';
+  type: 'genie' | 'mcp' | 'vector_index' | 'model_endpoint' | 'agent_bricks';
   space_id?: string;
   space_name?: string;
   description?: string;
-  server_uri?: string;
+  connection_name?: string;
   server_name?: string;
+  endpoint_name?: string;
+  index_name?: string;
 }
 
 interface AgentConfigShape {
@@ -79,7 +81,7 @@ const ConfigSummary: React.FC<{ config: Record<string, unknown> | null; names: N
                 </Badge>
               ))}
               {mcpTools.map(t => (
-                <Badge key={t.server_uri} variant="outline" className="text-xs font-normal gap-1">
+                <Badge key={t.connection_name} variant="outline" className="text-xs font-normal gap-1">
                   <Wrench className="size-3" />
                   {t.server_name}
                 </Badge>
