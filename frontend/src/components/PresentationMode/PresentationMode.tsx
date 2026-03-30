@@ -18,6 +18,8 @@ export const PresentationMode: React.FC<PresentationModeProps> = ({
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const wrapperRef = useRef<HTMLDivElement>(null);
+  const onExitRef = useRef(onExit);
+  onExitRef.current = onExit;
 
   // Generate HTML for current slide (no reveal.js)
   const currentSlideHTML = useMemo(() => {
@@ -219,7 +221,7 @@ export const PresentationMode: React.FC<PresentationModeProps> = ({
     return () => clearTimeout(timer);
   }, []);
 
-  // Handle fullscreen
+  // Handle fullscreen — runs once on mount only
   useEffect(() => {
     document.documentElement.requestFullscreen().catch(() => {
       // Fallback: still show presentation if fullscreen denied
@@ -227,7 +229,7 @@ export const PresentationMode: React.FC<PresentationModeProps> = ({
 
     const handleFullscreenChange = () => {
       if (!document.fullscreenElement) {
-        onExit();
+        onExitRef.current();
       } else {
         // Recalculate scale when entering fullscreen (viewport size may change)
         setTimeout(() => {
@@ -257,7 +259,7 @@ export const PresentationMode: React.FC<PresentationModeProps> = ({
         document.exitFullscreen();
       }
     };
-  }, [onExit]);
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Handle iframe load - refocus container to capture keyboard events
   const handleIframeLoad = () => {
