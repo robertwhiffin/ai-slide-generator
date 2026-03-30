@@ -8,13 +8,7 @@ profiles:
     description: "Claude 4.5 and kpmg uk consumption data"
     is_default: true
     created_by: "system"
-    
-    # AI Infrastructure Configuration
-    ai_infra:
-      llm_endpoint: "databricks-claude-sonnet-4-5"
-      llm_temperature: 0.70
-      llm_max_tokens: 60000
-    
+
     # Genie Space Configuration (one per profile)
     genie_space:
       space_id: "01effebcc2781b6bbb749077a55d31e3"
@@ -33,12 +27,7 @@ profiles:
     description: "Use case analysis and progression tracking"
     is_default: false
     created_by: "system"
-    
-    ai_infra:
-      llm_endpoint: "databricks-claude-sonnet-4-5"
-      llm_temperature: 0.70
-      llm_max_tokens: 60000
-    
+
     genie_space:
       space_id: "01f0ae91105818cf83eec00a66924416"
       space_name: "01f0ae91105818cf83eec00a66924416"

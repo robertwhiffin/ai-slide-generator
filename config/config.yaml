@@ -4,11 +4,11 @@
 
 # LLM Configuration
 llm:
-  endpoint: "databricks-claude-sonnet-4-5"  # Model serving endpoint name
+  endpoint: "databricks-claude-opus-4-6"  # Model serving endpoint name (documentation only — app reads from DEFAULT_CONFIG)
   temperature: 0.7
   max_tokens: 60000
   top_p: 0.95
-  timeout: 120  # seconds
+  timeout: 600  # seconds
 
 # Genie Configuration
 genie:
