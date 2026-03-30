@@ -194,7 +194,23 @@ def load_settings_from_database(profile_id: Optional[int] = None) -> AppSettings
                 # No profile specified and no active profile - use default
                 profile = db.query(ConfigProfile).filter_by(is_default=True).first()
                 if not profile:
-                    raise ValueError("No default profile found in database")
+                    # No default profile — return settings built from defaults
+                    logger.info("No default profile found in database, using built-in defaults")
+                    from src.core.defaults import DEFAULT_CONFIG
+                    llm_defaults = DEFAULT_CONFIG["llm"]
+                    return AppSettings(
+                        database_url=os.getenv("DATABASE_URL", ""),
+                        profile_id=0,
+                        profile_name="default",
+                        llm=LLMSettings(
+                            endpoint=llm_defaults["endpoint"],
+                            temperature=llm_defaults["temperature"],
+                            max_tokens=llm_defaults["max_tokens"],
+                        ),
+                        genie=None,
+                        prompts={},
+                        environment=os.getenv("ENVIRONMENT", "development"),
+                    )
             else:
                 # Specific profile requested
                 profile = db.query(ConfigProfile).filter_by(id=profile_id).first()
