@@ -1,7 +1,7 @@
 import React, { useMemo, useRef, useState, useEffect, useCallback } from 'react';
 import { useSortable } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
-import { GripVertical, Edit3, Trash2, MessageSquare, Database, Maximize2, Loader2, Bell, MessageCircle, User, Clock } from 'lucide-react';
+import { GripVertical, Edit3, Trash2, MessageSquare, Maximize2, Loader2, Bell, MessageCircle, User, Clock } from 'lucide-react';
 import { Button } from '@/ui/button';
 import { Tooltip } from '../common/Tooltip';
 import type { Slide, SlideDeck } from '../../types/slide';
@@ -84,28 +84,8 @@ export const SlideTile: React.FC<SlideTileProps> = ({
   );
   const [isManualVerifying, setIsManualVerifying] = useState(false);
   const [isStale, setIsStale] = useState(false);
-  const [isLoadingGenieLink, setIsLoadingGenieLink] = useState(false);
-  
-  const isVerifying = isManualVerifying || isAutoVerifying;
 
-  const handleOpenGenieLink = async () => {
-    if (isLoadingGenieLink) return;
-    
-    setIsLoadingGenieLink(true);
-    try {
-      const link = await api.getGenieLink(sessionId);
-      if (link.url) {
-        window.open(link.url, '_blank');
-      } else {
-        alert(link.message || 'No Genie conversation available');
-      }
-    } catch (error) {
-      console.error('Failed to get Genie link:', error);
-      alert('Failed to get Genie conversation link');
-    } finally {
-      setIsLoadingGenieLink(false);
-    }
-  };
+  const isVerifying = isManualVerifying || isAutoVerifying;
 
   // Close mentions dropdown on outside click
   useEffect(() => {
@@ -308,18 +288,6 @@ export const SlideTile: React.FC<SlideTileProps> = ({
               onVerify={handleVerify}
               isStale={isStale}
             />
-
-            <Tooltip text="View source data">
-              <Button
-                variant="ghost"
-                size="icon"
-                onClick={handleOpenGenieLink}
-                disabled={isLoadingGenieLink}
-                className="h-7 w-7"
-              >
-                <Database className="size-3.5" />
-              </Button>
-            </Tooltip>
 
             {/* Mentions notification bell */}
             <div className="relative" ref={mentionsRef}>
