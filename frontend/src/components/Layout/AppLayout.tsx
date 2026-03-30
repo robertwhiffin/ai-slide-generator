@@ -63,6 +63,18 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
   const slidePanelRef = useRef<SlidePanelHandle>(null);
   const slideDeckRef = useRef(slideDeck);
   slideDeckRef.current = slideDeck;
+  const deckVersionRef = useRef<number>(0);
+
+  const setSlideDeckGated = useCallback((newDeck: SlideDeck, serverVersion?: number, force = false) => {
+    if (!force && serverVersion != null && serverVersion < deckVersionRef.current) {
+      console.log(`[deckVersionGuard] Rejected stale deck: server v${serverVersion} < local v${deckVersionRef.current}`);
+      return;
+    }
+    if (serverVersion != null) {
+      deckVersionRef.current = serverVersion;
+    }
+    setSlideDeck(newDeck);
+  }, []);
   const { sessionTitle, sessionId, experimentUrl, createNewSession, switchSession, renameSession } = useSession();
   const { isGenerating } = useGeneration();
   /** Ref-tracked sessionId so the URL effect guard doesn't need sessionId as a dep (which would cause it to re-fire when switchSession internally calls setSessionId). */
@@ -177,7 +189,7 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
         if (cancelled) return;
 
         if (slideResult.slide_deck && !isSelf(status)) {
-          setSlideDeck(slideResult.slide_deck as SlideDeck);
+          setSlideDeckGated(slideResult.slide_deck as SlideDeck, (slideResult.slide_deck as SlideDeck).version);
         }
 
         applyStatus(status);
@@ -239,7 +251,7 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
           () => cancelled,
         );
         if (!cancelled) {
-          setSlideDeck(restoredDeck);
+          setSlideDeckGated(restoredDeck, (restoredDeck as SlideDeck)?.version, true);
           setRawHtml(restoredRawHtml);
           setLastSavedTime(new Date());
           setViewMode('main');
@@ -283,6 +295,7 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
     setPreviewVersion(null);
     setPreviewDeck(null);
     setPreviewDescription('');
+    deckVersionRef.current = 0;
   }, [sessionId]);
 
   const handleSlideNavigate = useCallback((index: number) => {
@@ -316,6 +329,7 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
   }, [renameSession, slideDeck]);
 
   const handleNewSession = useCallback(async () => {
+    deckVersionRef.current = 0;
     setSlideDeck(null);
     setRawHtml(null);
     setLastSavedTime(null);
@@ -387,7 +401,7 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
 
     try {
       const result = await api.restoreVersion(sessionId, revertTargetVersion);
-      setSlideDeck(result.deck);
+      setSlideDeckGated(result.deck, undefined, true);
       setPreviewVersion(null);
       setPreviewDeck(null);
       setPreviewDescription('');
@@ -602,7 +616,7 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
                     onGenerationStart={onGenerationStart}
                     onSlidesGenerated={async (deck, raw) => {
                       onGenerationComplete();
-                      setSlideDeck(deck);
+                      setSlideDeckGated(deck, deck.version);
                       setRawHtml(raw);
                       setLastSavedTime(new Date());
                       setSessionsRefreshKey((prev) => prev + 1);
@@ -629,7 +643,9 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
                     ref={slidePanelRef}
                     slideDeck={displayDeck}
                     rawHtml={rawHtml}
-                    onSlideChange={isReadOnly ? undefined : setSlideDeck}
+                    onSlideChange={isReadOnly ? undefined : (deck: SlideDeck) => {
+                      setSlideDeckGated(deck, deck.version);
+                    }}
                     scrollToSlide={scrollTarget}
                     onSendMessage={isReadOnly ? undefined : handleSendMessage}
                     onExportStatusChange={setExportStatus}
