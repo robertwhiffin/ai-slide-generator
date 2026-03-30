@@ -18,7 +18,7 @@ from langchain_community.chat_message_histories import ChatMessageHistory
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 from src.api.schemas.streaming import StreamEvent, StreamEventType
-from src.api.services.session_manager import SessionNotFoundError, get_session_manager
+from src.api.services.session_manager import SessionNotFoundError, VersionConflictError, get_session_manager
 from src.api.services.session_naming import generate_session_title
 from src.core.databricks_client import (
     get_current_username,
@@ -398,6 +398,9 @@ class ChatService:
                         },
                     )
 
+        # Capture deck version BEFORE LLM runs so we can detect concurrent edits.
+        _deck_version_before_llm = self._get_deck_version(session_id)
+
         try:
             # Replace frontend base64 HTML with lightweight backend cache versions
             if slide_context:
@@ -566,30 +569,43 @@ class ChatService:
                     # Regenerate dict so stamps are included
                     slide_deck_dict = current_deck.to_dict()
 
-                session_manager.save_slide_deck(
-                    session_id=session_id,
-                    title=current_deck.title,
-                    html_content=current_deck.knit(),
-                    scripts_content=current_deck.scripts,
-                    slide_count=len(current_deck.slides),
-                    deck_dict=slide_deck_dict,
-                    modified_by=_user,
-                )
+                try:
+                    session_manager.save_slide_deck(
+                        session_id=session_id,
+                        title=current_deck.title,
+                        html_content=current_deck.knit(),
+                        scripts_content=current_deck.scripts,
+                        slide_count=len(current_deck.slides),
+                        deck_dict=slide_deck_dict,
+                        modified_by=_user,
+                        expected_version=_deck_version_before_llm,
+                    )
+                except VersionConflictError:
+                    logger.warning(
+                        "Chat save rejected: deck was edited during LLM call, reloading",
+                        extra={"session_id": session_id},
+                    )
+                    self._invalidate_deck_cache(session_id)
+                    current_deck = self._get_or_load_deck(session_id)
+                    if current_deck:
+                        slide_deck_dict = current_deck.to_dict()
+                    _deck_version_before_llm = None  # sentinel to skip save_point
 
                 # Create save point immediately after persisting (sync path)
-                try:
-                    if slide_context:
-                        slide_nums = [i + 1 for i in slide_context.get("indices", [])]
-                        sp_desc = f"Edited slide {', '.join(map(str, slide_nums))}"
-                    else:
-                        sp_desc = f"Generated {len(current_deck.slides)} slide(s)"
-                    self.create_save_point(
-                        session_id=session_id,
-                        description=sp_desc,
-                        deck=current_deck,
-                    )
-                except Exception as e:
-                    logger.warning(f"Failed to create save point (sync): {e}")
+                if _deck_version_before_llm is not None:
+                    try:
+                        if slide_context:
+                            slide_nums = [i + 1 for i in slide_context.get("indices", [])]
+                            sp_desc = f"Edited slide {', '.join(map(str, slide_nums))}"
+                        else:
+                            sp_desc = f"Generated {len(current_deck.slides)} slide(s)"
+                        self.create_save_point(
+                            session_id=session_id,
+                            description=sp_desc,
+                            deck=current_deck,
+                        )
+                    except Exception as e:
+                        logger.warning(f"Failed to create save point (sync): {e}")
 
             # Update session activity
             session_manager.update_last_activity(session_id)
@@ -916,6 +932,9 @@ class ChatService:
                             "deck_size": len(existing_deck.slides),
                         },
                     )
+
+        # Capture deck version BEFORE LLM runs so we can detect concurrent edits.
+        _deck_version_before_llm = self._get_deck_version(session_id)
 
         # Replace frontend base64 HTML with lightweight backend cache versions
         if slide_context:
@@ -1281,30 +1300,43 @@ class ChatService:
                 # Regenerate dict so stamps are included
                 slide_deck_dict = current_deck.to_dict()
 
-            session_manager.save_slide_deck(
-                session_id=session_id,
-                title=current_deck.title,
-                html_content=current_deck.knit(),
-                scripts_content=current_deck.scripts,
-                slide_count=len(current_deck.slides),
-                deck_dict=slide_deck_dict,
-                modified_by=_user,
-            )
+            try:
+                session_manager.save_slide_deck(
+                    session_id=session_id,
+                    title=current_deck.title,
+                    html_content=current_deck.knit(),
+                    scripts_content=current_deck.scripts,
+                    slide_count=len(current_deck.slides),
+                    deck_dict=slide_deck_dict,
+                    modified_by=_user,
+                    expected_version=_deck_version_before_llm,
+                )
+            except VersionConflictError:
+                logger.warning(
+                    "Chat save rejected: deck was edited during LLM call, reloading",
+                    extra={"session_id": session_id},
+                )
+                self._invalidate_deck_cache(session_id)
+                current_deck = self._get_or_load_deck(session_id)
+                if current_deck:
+                    slide_deck_dict = current_deck.to_dict()
+                _deck_version_before_llm = None  # sentinel to skip save_point
 
             # Create save point immediately after persisting (streaming path)
-            try:
-                if slide_context:
-                    slide_nums = [i + 1 for i in slide_context.get("indices", [])]
-                    sp_desc = f"Edited slide {', '.join(map(str, slide_nums))}"
-                else:
-                    sp_desc = f"Generated {len(current_deck.slides)} slide(s)"
-                self.create_save_point(
-                    session_id=session_id,
-                    description=sp_desc,
-                    deck=current_deck,
-                )
-            except Exception as e:
-                logger.warning(f"Failed to create save point (streaming): {e}")
+            if _deck_version_before_llm is not None:
+                try:
+                    if slide_context:
+                        slide_nums = [i + 1 for i in slide_context.get("indices", [])]
+                        sp_desc = f"Edited slide {', '.join(map(str, slide_nums))}"
+                    else:
+                        sp_desc = f"Generated {len(current_deck.slides)} slide(s)"
+                    self.create_save_point(
+                        session_id=session_id,
+                        description=sp_desc,
+                        deck=current_deck,
+                    )
+                except Exception as e:
+                    logger.warning(f"Failed to create save point (streaming): {e}")
 
         # Update session activity
         session_manager.update_last_activity(session_id)
@@ -1840,6 +1872,32 @@ class ChatService:
             logger.warning(f"Failed to load deck from database: {e}")
 
         return None
+
+    def _get_deck_version(self, session_id: str) -> Optional[int]:
+        """Read the current deck version from the database.
+
+        Called once before the LLM runs to capture the version for
+        optimistic locking. Uses the existing get_slide_deck which
+        returns the full deck dict including the version column.
+
+        On Lakebase/PostgreSQL this is a single-row indexed lookup (~1-2ms).
+
+        Returns:
+            Current deck version number, or None if no deck exists.
+        """
+        session_manager = get_session_manager()
+        try:
+            deck_data = session_manager.get_slide_deck(session_id)
+            if deck_data:
+                return deck_data.get("version")
+        except Exception:
+            pass
+        return None
+
+    def _invalidate_deck_cache(self, session_id: str) -> None:
+        """Remove the cached deck for a session so the next read hits the DB."""
+        with self._cache_lock:
+            self._deck_cache.pop(session_id, None)
 
     def _replace_slide_htmls_from_cache(self, session_id: str, slide_context: Dict[str, Any]) -> Dict[str, Any]:
         """Replace frontend-supplied slide_htmls with backend cache versions.
