@@ -88,12 +88,35 @@ def _discover_vector_endpoints() -> dict:
 
 
 def _discover_vector_indexes(endpoint_name: str) -> dict:
-    """Discover vector search indexes for a given endpoint."""
+    """Discover vector search indexes for a given endpoint.
+
+    Only returns indexes that have embedding_source_columns configured,
+    since our vector_tool.py uses query_text= which requires an embedded
+    model. Indexes without embedding support only accept raw query_vector
+    input and are not usable for text-based LLM agent queries.
+    """
     try:
         client = get_user_client()
         items: list[dict] = []
 
         for idx in client.vector_search_indexes.list_indexes(endpoint_name=endpoint_name):
+            # Filter: only include indexes that support text queries
+            try:
+                index_detail = client.vector_search_indexes.get_index(index_name=idx.name)
+                has_embedding = False
+                if index_detail.delta_sync_index_spec:
+                    has_embedding = bool(
+                        index_detail.delta_sync_index_spec.embedding_source_columns
+                    )
+                elif index_detail.direct_access_index_spec:
+                    has_embedding = bool(
+                        index_detail.direct_access_index_spec.embedding_source_columns
+                    )
+                if not has_embedding:
+                    continue  # Skip indexes that don't support text search
+            except Exception:
+                pass  # If we can't check, include it anyway
+
             index_type = None
             if idx.index_type:
                 index_type = idx.index_type.value
