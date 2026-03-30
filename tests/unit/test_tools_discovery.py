@@ -495,6 +495,42 @@ class TestModelEndpointDiscovery:
         assert foundation_item["metadata"]["endpoint_type"] == "foundation"
         assert custom_item["metadata"]["endpoint_type"] == "custom"
 
+    @patch("src.api.routes.tools.get_user_client")
+    def test_discover_model_endpoints_excludes_embeddings(self, mock_client_fn):
+        from src.api.routes.tools import _discover_model_endpoints
+
+        mock_client = _make_client()
+        mock_client_fn.return_value = mock_client
+
+        mock_embedding = MagicMock()
+        mock_embedding.name = "embedding-model"
+        mock_embedding.task = "llm/v1/embeddings"
+        mock_embedding.description = "Embedding model"
+
+        mock_chat = MagicMock()
+        mock_chat.name = "claude-sonnet"
+        mock_chat.task = "llm/v1/chat"
+        mock_chat.description = "Chat model"
+
+        mock_completions = MagicMock()
+        mock_completions.name = "codegen"
+        mock_completions.task = "llm/v1/completions"
+        mock_completions.description = "Code gen"
+
+        mock_client.serving_endpoints.list.return_value = [
+            mock_embedding,
+            mock_chat,
+            mock_completions,
+        ]
+        result = _discover_model_endpoints()
+        names = [item["name"] for item in result["items"]]
+        assert "embedding-model" not in names  # Excluded
+        assert "claude-sonnet" in names  # Foundation
+        assert "codegen" in names  # Foundation
+        # Verify both are classified as foundation
+        for item in result["items"]:
+            assert item["metadata"]["endpoint_type"] == "foundation"
+
 
 class TestAgentBricksDiscovery:
     @patch("src.api.routes.tools.get_user_client")
