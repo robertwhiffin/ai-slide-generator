@@ -28,9 +28,11 @@ Chart Brand Colors:
 
 DEFAULT_CONFIG = {
     "llm": {
-        "endpoint": "databricks-claude-sonnet-4-5",
+        "endpoint": "databricks-claude-opus-4-6",
         "temperature": 0.7,
         "max_tokens": 60000,
+        "top_p": 0.95,
+        "timeout": 600,
     },
     # No default Genie space - must be explicitly configured per profile
     "prompts": {
