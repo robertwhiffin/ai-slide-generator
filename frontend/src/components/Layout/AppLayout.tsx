@@ -57,6 +57,7 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
   const [previewVersion, setPreviewVersion] = useState<number | null>(null);
   const [previewDeck, setPreviewDeck] = useState<SlideDeck | null>(null);
   const [previewDescription, setPreviewDescription] = useState<string>('');
+  const [previewMessages, setPreviewMessages] = useState<import('../../types/message').Message[] | null>(null);
   const [showRevertModal, setShowRevertModal] = useState(false);
   const [revertTargetVersion, setRevertTargetVersion] = useState<number | null>(null);
   const chatPanelRef = useRef<ChatPanelHandle>(null);
@@ -378,6 +379,17 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
       setPreviewVersion(result.version_number);
       setPreviewDeck(result.deck);
       setPreviewDescription(result.description || '');
+      // Map backend chat_history to Message[] for preview
+      const chatHistory = result.chat_history;
+      if (Array.isArray(chatHistory) && chatHistory.length > 0) {
+        setPreviewMessages(chatHistory.map((m: any) => ({
+          role: m.role || 'assistant',
+          content: m.content || '',
+          timestamp: m.created_at || new Date().toISOString(),
+        })));
+      } else {
+        setPreviewMessages(null);
+      }
     } catch (err) {
       console.error('Failed to preview version:', err);
       showToast('Failed to load version', 'error');
@@ -394,6 +406,7 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
     setPreviewVersion(null);
     setPreviewDeck(null);
     setPreviewDescription('');
+    setPreviewMessages(null);
   }, []);
 
   const handleRevertConfirm = useCallback(async () => {
@@ -405,6 +418,7 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
       setPreviewVersion(null);
       setPreviewDeck(null);
       setPreviewDescription('');
+      setPreviewMessages(null);
       setShowRevertModal(false);
       setRevertTargetVersion(null);
       setLastSavedTime(new Date());
@@ -614,6 +628,7 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
                     rawHtml={rawHtml}
                     disabled={isReadOnly}
                     onGenerationStart={onGenerationStart}
+                    previewMessages={previewVersion != null ? previewMessages : null}
                     onSlidesGenerated={async (deck, raw) => {
                       onGenerationComplete();
                       setSlideDeckGated(deck, deck.version);
