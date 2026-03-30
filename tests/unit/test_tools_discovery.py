@@ -104,7 +104,79 @@ class TestVectorDiscovery:
         assert result["items"][0]["name"] == "online-ep"
 
     @patch("src.api.routes.tools.get_user_client")
-    def test_discover_vector_indexes(self, mock_client_fn):
+    def test_discover_vector_indexes_with_embedding(self, mock_client_fn):
+        """Indexes with embedding_source_columns are included."""
+        from src.api.routes.tools import _discover_vector_indexes
+
+        mock_client = _make_client()
+        mock_client_fn.return_value = mock_client
+
+        mock_idx = MagicMock()
+        mock_idx.name = "my_catalog.my_schema.my_index"
+        mock_idx.index_type.value = "DELTA_SYNC"
+        mock_idx.primary_key = "id"
+
+        # get_index returns detail with embedding_source_columns set
+        mock_detail = MagicMock()
+        mock_detail.delta_sync_index_spec = MagicMock()
+        mock_detail.delta_sync_index_spec.embedding_source_columns = [MagicMock()]
+        mock_detail.direct_access_index_spec = None
+
+        mock_client.vector_search_indexes.list_indexes.return_value = [mock_idx]
+        mock_client.vector_search_indexes.get_index.return_value = mock_detail
+
+        result = _discover_vector_indexes("vs-endpoint-1")
+        assert len(result["items"]) == 1
+        assert result["items"][0]["name"] == "my_catalog.my_schema.my_index"
+        assert result["items"][0]["metadata"]["index_type"] == "DELTA_SYNC"
+        assert result["items"][0]["metadata"]["primary_key"] == "id"
+
+    @patch("src.api.routes.tools.get_user_client")
+    def test_discover_vector_indexes_filters_no_embedding(self, mock_client_fn):
+        """Indexes without embedding_source_columns are excluded."""
+        from src.api.routes.tools import _discover_vector_indexes
+
+        mock_client = _make_client()
+        mock_client_fn.return_value = mock_client
+
+        mock_idx_no_emb = MagicMock()
+        mock_idx_no_emb.name = "my_catalog.my_schema.raw_vector_index"
+        mock_idx_no_emb.index_type.value = "DELTA_SYNC"
+        mock_idx_no_emb.primary_key = "id"
+
+        mock_idx_with_emb = MagicMock()
+        mock_idx_with_emb.name = "my_catalog.my_schema.text_index"
+        mock_idx_with_emb.index_type.value = "DELTA_SYNC"
+        mock_idx_with_emb.primary_key = "id"
+
+        # First index: no embedding_source_columns
+        mock_detail_no_emb = MagicMock()
+        mock_detail_no_emb.delta_sync_index_spec = MagicMock()
+        mock_detail_no_emb.delta_sync_index_spec.embedding_source_columns = []
+        mock_detail_no_emb.direct_access_index_spec = None
+
+        # Second index: has embedding_source_columns
+        mock_detail_with_emb = MagicMock()
+        mock_detail_with_emb.delta_sync_index_spec = MagicMock()
+        mock_detail_with_emb.delta_sync_index_spec.embedding_source_columns = [MagicMock()]
+        mock_detail_with_emb.direct_access_index_spec = None
+
+        mock_client.vector_search_indexes.list_indexes.return_value = [
+            mock_idx_no_emb,
+            mock_idx_with_emb,
+        ]
+        mock_client.vector_search_indexes.get_index.side_effect = [
+            mock_detail_no_emb,
+            mock_detail_with_emb,
+        ]
+
+        result = _discover_vector_indexes("vs-endpoint-1")
+        assert len(result["items"]) == 1
+        assert result["items"][0]["name"] == "my_catalog.my_schema.text_index"
+
+    @patch("src.api.routes.tools.get_user_client")
+    def test_discover_vector_indexes_includes_on_get_index_error(self, mock_client_fn):
+        """If get_index raises, the index is included (fail-open)."""
         from src.api.routes.tools import _discover_vector_indexes
 
         mock_client = _make_client()
@@ -116,11 +188,11 @@ class TestVectorDiscovery:
         mock_idx.primary_key = "id"
 
         mock_client.vector_search_indexes.list_indexes.return_value = [mock_idx]
+        mock_client.vector_search_indexes.get_index.side_effect = Exception("Permission denied")
+
         result = _discover_vector_indexes("vs-endpoint-1")
         assert len(result["items"]) == 1
         assert result["items"][0]["name"] == "my_catalog.my_schema.my_index"
-        assert result["items"][0]["metadata"]["index_type"] == "DELTA_SYNC"
-        assert result["items"][0]["metadata"]["primary_key"] == "id"
 
     @patch("src.api.routes.tools.get_user_client")
     def test_discover_vector_columns_delta_sync(self, mock_client_fn):

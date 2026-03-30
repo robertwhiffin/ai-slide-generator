@@ -205,11 +205,11 @@ export default function ToolDetailPanel({ preview, mode, onSave, onCancel }: Too
     >
       {/* Header */}
       <div className="flex items-center justify-between mb-3">
-        <div className="flex items-center gap-2">
-          <span className={`uppercase text-[10px] font-bold px-1.5 py-0.5 rounded ${colorClasses}`}>
+        <div className="flex items-center gap-2 min-w-0 flex-1">
+          <span className={`uppercase text-[10px] font-bold px-1.5 py-0.5 rounded shrink-0 ${colorClasses}`}>
             {badgeLabel}
           </span>
-          <span className="font-semibold text-sm">{preview.name}</span>
+          <span className="font-semibold text-sm truncate">{preview.name}</span>
           {endpointTypeBadge && (
             <span className={`text-xs px-1.5 py-0.5 rounded ${endpointTypeBadge.className}`}>
               {endpointTypeBadge.label}
@@ -229,7 +229,7 @@ export default function ToolDetailPanel({ preview, mode, onSave, onCancel }: Too
       {infoRows.map(({ label, value }) => (
         <div key={label} className="mb-3">
           <label className="block text-sm text-gray-500 mb-1">{label}</label>
-          <div className="font-mono text-sm text-gray-700">{value}</div>
+          <div className="font-mono text-sm text-gray-700 break-all">{value}</div>
         </div>
       ))}
 
