@@ -66,15 +66,22 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
   slideDeckRef.current = slideDeck;
   const deckVersionRef = useRef<number>(0);
 
+  const loadVersionsRef = useRef<(() => Promise<void>) | null>(null);
+
   const setSlideDeckGated = useCallback((newDeck: SlideDeck, serverVersion?: number, force = false) => {
     if (!force && serverVersion != null && serverVersion < deckVersionRef.current) {
       console.log(`[deckVersionGuard] Rejected stale deck: server v${serverVersion} < local v${deckVersionRef.current}`);
       return;
     }
+    const versionBumped = serverVersion != null && serverVersion > deckVersionRef.current;
     if (serverVersion != null) {
       deckVersionRef.current = serverVersion;
     }
     setSlideDeck(newDeck);
+    // Refresh version list whenever deck version bumps (covers reorder, delete, duplicate)
+    if (versionBumped || force) {
+      loadVersionsRef.current?.();
+    }
   }, []);
   const { sessionTitle, sessionId, experimentUrl, createNewSession, switchSession, renameSession } = useSession();
   const { isGenerating } = useGeneration();
@@ -286,6 +293,7 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
       setCurrentVersion(null);
     }
   }, [sessionId]);
+  loadVersionsRef.current = loadVersions;
 
   useEffect(() => {
     loadVersions();
