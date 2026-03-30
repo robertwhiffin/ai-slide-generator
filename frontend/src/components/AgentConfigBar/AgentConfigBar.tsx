@@ -15,7 +15,8 @@ import { useAgentConfig } from '../../contexts/AgentConfigContext';
 import { useSession } from '../../contexts/SessionContext';
 import { configApi } from '../../api/config';
 import type { SlideStyle, DeckPrompt } from '../../api/config';
-import type { AvailableTool, GenieTool, ProfileSummary, ToolEntry } from '../../types/agentConfig';
+import type { AvailableTool, GenieTool, ProfileSummary, ToolEntry, MCPTool, VectorIndexTool, ModelEndpointTool, AgentBricksTool } from '../../types/agentConfig';
+import { TOOL_TYPE_BADGE_LABELS, TOOL_TYPE_COLORS } from '../../types/agentConfig';
 import { api } from '../../services/api';
 import { ToolPicker } from './ToolPicker';
 import GenieDetailPanel from './GenieDetailPanel';
@@ -24,7 +25,7 @@ import GenieDetailPanel from './GenieDetailPanel';
 // Sub-components
 // ---------------------------------------------------------------------------
 
-/** Removable chip for an active tool, with optional Genie deep-link. */
+/** Removable chip for an active tool, with type-specific color badge. */
 const ToolChip: React.FC<{
   tool: ToolEntry;
   onRemove: () => void;
@@ -40,6 +41,16 @@ const ToolChip: React.FC<{
   const conversationId = tool.type === 'genie' ? tool.conversation_id : undefined;
   const spaceId = tool.type === 'genie' ? tool.space_id : undefined;
 
+  const colorClasses = TOOL_TYPE_COLORS[tool.type];
+  const badgeLabel = TOOL_TYPE_BADGE_LABELS[tool.type];
+
+  // Derive a hover background class from the chip's color class
+  const hoverBgClass = tool.type === 'genie' ? 'hover:bg-blue-200'
+    : tool.type === 'mcp' ? 'hover:bg-green-200'
+    : tool.type === 'vector_index' ? 'hover:bg-indigo-200'
+    : tool.type === 'model_endpoint' ? 'hover:bg-amber-200'
+    : 'hover:bg-teal-200';
+
   const handleOpenGenieLink = async (e: React.MouseEvent) => {
     e.stopPropagation();
     if (!sessionId || !spaceId) return;
@@ -54,8 +65,8 @@ const ToolChip: React.FC<{
   };
 
   return (
-    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-blue-100 text-blue-800">
-      <span className="uppercase text-[10px] opacity-60 mr-0.5">{tool.type}</span>
+    <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium ${colorClasses}`}>
+      <span className="uppercase text-[10px] font-bold opacity-70 mr-0.5">{badgeLabel}</span>
       {onEdit ? (
         <button
           onClick={onEdit}
@@ -70,7 +81,7 @@ const ToolChip: React.FC<{
       {conversationId && (
         <button
           onClick={handleOpenGenieLink}
-          className="p-0.5 rounded-full hover:bg-blue-200 transition-colors"
+          className={`p-0.5 rounded-full ${hoverBgClass} transition-colors`}
           aria-label={`View source data for ${label}`}
           title="View source data in Genie"
         >
@@ -79,12 +90,120 @@ const ToolChip: React.FC<{
       )}
       <button
         onClick={(e) => { e.stopPropagation(); onRemove(); }}
-        className="ml-0.5 p-0.5 rounded-full hover:bg-blue-200 transition-colors"
+        className={`ml-0.5 p-0.5 rounded-full ${hoverBgClass} transition-colors`}
         aria-label={`Remove ${label}`}
       >
         <X size={12} />
       </button>
     </span>
+  );
+};
+
+/**
+ * Generic edit panel for non-Genie tool types.
+ * Shows read-only tool identity fields and an editable description.
+ */
+const ToolEditPanel: React.FC<{
+  tool: MCPTool | VectorIndexTool | ModelEndpointTool | AgentBricksTool;
+  onSave: (tool: MCPTool | VectorIndexTool | ModelEndpointTool | AgentBricksTool) => void;
+  onCancel: () => void;
+}> = ({ tool, onSave, onCancel }) => {
+  const [description, setDescription] = useState(tool.description ?? '');
+
+  const colorClasses = TOOL_TYPE_COLORS[tool.type];
+  const badgeLabel = TOOL_TYPE_BADGE_LABELS[tool.type];
+
+  const handleKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === 'Escape') {
+      e.stopPropagation();
+      onCancel();
+    }
+  };
+
+  const handleSave = () => {
+    onSave({ ...tool, description });
+  };
+
+  // Build read-only info rows based on tool type
+  const infoRows: { label: string; value: string }[] = [];
+  if (tool.type === 'mcp') {
+    infoRows.push({ label: 'Connection', value: tool.connection_name });
+  } else if (tool.type === 'vector_index') {
+    infoRows.push({ label: 'Endpoint', value: tool.endpoint_name });
+    infoRows.push({ label: 'Index', value: tool.index_name });
+  } else if (tool.type === 'model_endpoint') {
+    infoRows.push({ label: 'Endpoint', value: tool.endpoint_name });
+    if (tool.endpoint_type) infoRows.push({ label: 'Type', value: tool.endpoint_type });
+  } else if (tool.type === 'agent_bricks') {
+    infoRows.push({ label: 'Endpoint', value: tool.endpoint_name });
+  }
+
+  const toolName = tool.type === 'mcp' ? tool.server_name : tool.endpoint_name;
+
+  return (
+    <div
+      data-testid="tool-edit-panel"
+      className="border rounded bg-gray-50 p-4"
+      onKeyDown={handleKeyDown}
+    >
+      {/* Header */}
+      <div className="flex items-center justify-between mb-3">
+        <div className="flex items-center gap-2">
+          <span className={`uppercase text-[10px] font-bold px-1.5 py-0.5 rounded ${colorClasses}`}>
+            {badgeLabel}
+          </span>
+          <span className="font-semibold text-sm">{toolName}</span>
+        </div>
+        <button
+          onClick={onCancel}
+          className="text-gray-400 hover:text-gray-600"
+          aria-label="Close"
+        >
+          <X size={16} />
+        </button>
+      </div>
+
+      {/* Read-only identity fields */}
+      {infoRows.map(({ label, value }) => (
+        <div key={label} className="mb-3">
+          <label className="block text-sm text-gray-500 mb-1">{label}</label>
+          <div className="font-mono text-sm text-gray-700">{value}</div>
+        </div>
+      ))}
+
+      {/* Editable description */}
+      <div className="mb-4">
+        <div className="flex items-baseline justify-between mb-1">
+          <label className="text-sm text-gray-500">Description</label>
+          <span className="text-xs text-gray-400">
+            Used by the agent to decide when to use this tool
+          </span>
+        </div>
+        <textarea
+          autoFocus
+          value={description}
+          onChange={(e) => setDescription(e.target.value)}
+          placeholder="Describe when the agent should use this tool..."
+          className="w-full border rounded px-3 py-2 text-sm resize-y min-h-[80px] focus:outline-none focus:ring-2 focus:ring-blue-400"
+        />
+      </div>
+
+      {/* Buttons */}
+      <div className="flex items-center justify-end gap-2">
+        <button
+          onClick={onCancel}
+          className="px-3 py-1.5 text-sm text-gray-600 hover:text-gray-800"
+        >
+          Cancel
+        </button>
+        <button
+          onClick={handleSave}
+          className="px-3 py-1.5 text-sm bg-blue-500 text-white rounded hover:bg-blue-600"
+        >
+          Save
+        </button>
+      </div>
+    </div>
   );
 };
 
@@ -232,6 +351,7 @@ export const AgentConfigBar: React.FC = () => {
     addTool,
     removeTool,
     updateTool,
+    updateToolEntry,
     setStyle,
     setDeckPrompt,
     saveAsProfile,
@@ -245,6 +365,8 @@ export const AgentConfigBar: React.FC = () => {
   // Detail panel state
   const [detailTool, setDetailTool] = useState<GenieTool | AvailableTool | null>(null);
   const [detailMode, setDetailMode] = useState<'add' | 'edit'>('add');
+  // For non-Genie tool editing
+  const [editingNonGenieTool, setEditingNonGenieTool] = useState<MCPTool | VectorIndexTool | ModelEndpointTool | AgentBricksTool | null>(null);
 
   // Save / Load dialogs
   const [saveDialogOpen, setSaveDialogOpen] = useState(false);
@@ -313,6 +435,10 @@ export const AgentConfigBar: React.FC = () => {
     if (tool.type === 'genie') {
       setDetailTool(tool);
       setDetailMode('edit');
+      setEditingNonGenieTool(null);
+    } else {
+      setEditingNonGenieTool(tool as MCPTool | VectorIndexTool | ModelEndpointTool | AgentBricksTool);
+      setDetailTool(null);
     }
   }, []);
 
@@ -331,7 +457,17 @@ export const AgentConfigBar: React.FC = () => {
 
   const handleDetailCancel = useCallback(() => {
     setDetailTool(null);
+    setEditingNonGenieTool(null);
   }, []);
+
+  const handleNonGenieToolSave = useCallback(async (tool: MCPTool | VectorIndexTool | ModelEndpointTool | AgentBricksTool) => {
+    try {
+      await updateToolEntry(tool);
+      setEditingNonGenieTool(null);
+    } catch {
+      // Panel stays open on failure; toast shown by context
+    }
+  }, [updateToolEntry]);
 
   // Summary line for collapsed state
   const toolCount = agentConfig.tools.length;
@@ -374,6 +510,13 @@ export const AgentConfigBar: React.FC = () => {
               onCancel={handleDetailCancel}
             />
           )}
+          {editingNonGenieTool && (
+            <ToolEditPanel
+              tool={editingNonGenieTool}
+              onSave={handleNonGenieToolSave}
+              onCancel={handleDetailCancel}
+            />
+          )}
 
           {/* Tools row */}
           <div>
@@ -384,7 +527,7 @@ export const AgentConfigBar: React.FC = () => {
                   key={`${tool.type}-${'space_id' in tool ? tool.space_id : 'connection_name' in tool ? tool.connection_name : 'endpoint_name' in tool ? tool.endpoint_name : idx}-${idx}`}
                   tool={tool}
                   onRemove={() => removeTool(tool)}
-                  onEdit={tool.type === 'genie' ? () => handleEditChip(tool) : undefined}
+                  onEdit={() => handleEditChip(tool)}
                   sessionId={sessionId}
                 />
               ))}
