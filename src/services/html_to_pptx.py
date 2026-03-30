@@ -43,7 +43,7 @@ class HtmlToPptxConverterV3:
     """
     
     # Model configuration
-    DEFAULT_MODEL = "databricks-claude-sonnet-4-5"
+    DEFAULT_MODEL = "databricks-claude-opus-4-6"
     
 
     def __init__(
