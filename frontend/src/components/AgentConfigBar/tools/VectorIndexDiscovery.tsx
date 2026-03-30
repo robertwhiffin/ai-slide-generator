@@ -1,27 +1,32 @@
 /**
- * VectorIndexDiscovery — progressive 3-step inline panel for selecting a
- * Vector Search endpoint, index, and columns.
+ * VectorIndexDiscovery — progressive 2-step inline dropdown panel for
+ * selecting a Vector Search endpoint and index.
  *
  * Step 1: Pick endpoint
  * Step 2: Pick index
- * Step 3: Configure columns & description, then Save & Add
+ *
+ * When the user selects an index, the dropdown fetches columns and then
+ * closes, calling `onPreview` so that AgentConfigBar can open the
+ * full-width ToolDetailPanel for column selection, description, and save.
  */
 
 import React, { useEffect, useState, useRef } from 'react';
 import { ChevronLeft, Loader2, RefreshCw, Search, X } from 'lucide-react';
 import { api } from '../../../services/api';
-import type { DiscoveryItem, ColumnInfo, VectorIndexTool, ToolEntry } from '../../../types/agentConfig';
+import type { DiscoveryItem, VectorIndexTool, ToolEntry } from '../../../types/agentConfig';
+import type { VectorIndexPreview } from '../ToolDetailPanel';
 
 interface VectorIndexDiscoveryProps {
   onSelect: (tool: VectorIndexTool) => void;
+  onPreview: (preview: VectorIndexPreview) => void;
   onClose: () => void;
   existingTools: ToolEntry[];
 }
 
-type Step = 'endpoint' | 'index' | 'columns';
+type Step = 'endpoint' | 'index';
 
 export const VectorIndexDiscovery: React.FC<VectorIndexDiscoveryProps> = ({
-  onSelect,
+  onPreview,
   onClose,
   existingTools,
 }) => {
@@ -39,12 +44,6 @@ export const VectorIndexDiscovery: React.FC<VectorIndexDiscoveryProps> = ({
   // Index step
   const [indexes, setIndexes] = useState<DiscoveryItem[]>([]);
   const [indexQuery, setIndexQuery] = useState('');
-  const [selectedIndex, setSelectedIndex] = useState<DiscoveryItem | null>(null);
-
-  // Columns step
-  const [columns, setColumns] = useState<ColumnInfo[]>([]);
-  const [selectedColumns, setSelectedColumns] = useState<Set<string>>(new Set());
-  const [description, setDescription] = useState('');
 
   // Shared state
   const [loading, setLoading] = useState(false);
@@ -97,20 +96,6 @@ export const VectorIndexDiscovery: React.FC<VectorIndexDiscoveryProps> = ({
     }
   };
 
-  const fetchColumns = async (endpointName: string, indexName: string) => {
-    setLoading(true);
-    setError(null);
-    try {
-      const result = await api.discoverVectorColumns(endpointName, indexName);
-      setColumns(result.columns);
-      setSelectedColumns(new Set(result.columns.map(c => c.name)));
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to load columns');
-    } finally {
-      setLoading(false);
-    }
-  };
-
   const handleEndpointSelect = (ep: DiscoveryItem) => {
     setSelectedEndpoint(ep);
     setStep('index');
@@ -118,59 +103,40 @@ export const VectorIndexDiscovery: React.FC<VectorIndexDiscoveryProps> = ({
     fetchIndexes(ep.name);
   };
 
-  const handleIndexSelect = (idx: DiscoveryItem) => {
-    setSelectedIndex(idx);
-    setStep('columns');
-    if (selectedEndpoint) {
-      fetchColumns(selectedEndpoint.name, idx.name);
+  const handleIndexSelect = async (idx: DiscoveryItem) => {
+    if (!selectedEndpoint) return;
+    // Fetch columns, then open the full-width detail panel
+    setLoading(true);
+    setError(null);
+    try {
+      const result = await api.discoverVectorColumns(selectedEndpoint.name, idx.name);
+      onPreview({
+        toolType: 'vector_index',
+        name: idx.name,
+        endpointName: selectedEndpoint.name,
+        indexName: idx.name,
+        columns: result.columns,
+        description: idx.description,
+      });
+      onClose();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to load columns');
+      setLoading(false);
     }
   };
 
   const handleBack = () => {
-    if (step === 'columns') {
-      setStep('index');
-      setSelectedIndex(null);
-      setColumns([]);
-      setSelectedColumns(new Set());
-      setDescription('');
-    } else if (step === 'index') {
+    if (step === 'index') {
       setStep('endpoint');
       setSelectedEndpoint(null);
       setIndexes([]);
     }
   };
 
-  const toggleColumn = (colName: string) => {
-    setSelectedColumns(prev => {
-      const next = new Set(prev);
-      if (next.has(colName)) {
-        next.delete(colName);
-      } else {
-        next.add(colName);
-      }
-      return next;
-    });
-  };
-
   const isAlreadyAdded = (endpointName: string, indexName: string): boolean => {
     return existingTools.some(
       t => t.type === 'vector_index' && t.endpoint_name === endpointName && t.index_name === indexName,
     );
-  };
-
-  const handleSave = () => {
-    if (!selectedEndpoint || !selectedIndex) return;
-
-    const allSelected = selectedColumns.size === columns.length;
-    const tool: VectorIndexTool = {
-      type: 'vector_index',
-      endpoint_name: selectedEndpoint.name,
-      index_name: selectedIndex.name,
-      columns: allSelected ? undefined : Array.from(selectedColumns),
-      description: description || undefined,
-    };
-    onSelect(tool);
-    onClose();
   };
 
   // Filter helpers
@@ -187,9 +153,7 @@ export const VectorIndexDiscovery: React.FC<VectorIndexDiscoveryProps> = ({
   const stepTitle =
     step === 'endpoint'
       ? 'Select Endpoint'
-      : step === 'index'
-        ? 'Select Index'
-        : 'Configure Columns';
+      : 'Select Index';
 
   return (
     <div
@@ -226,28 +190,24 @@ export const VectorIndexDiscovery: React.FC<VectorIndexDiscoveryProps> = ({
           <span className={step === 'endpoint' ? 'text-gray-700 font-medium' : ''}>Endpoint</span>
           <span className="mx-1">&rsaquo;</span>
           <span className={step === 'index' ? 'text-gray-700 font-medium' : ''}>Index</span>
-          <span className="mx-1">&rsaquo;</span>
-          <span className={step === 'columns' ? 'text-gray-700 font-medium' : ''}>Columns</span>
         </div>
 
-        {/* Search input (endpoint & index steps) */}
-        {step !== 'columns' && (
-          <div className="relative">
-            <Search size={14} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-gray-400" />
-            <input
-              ref={inputRef}
-              type="text"
-              placeholder={step === 'endpoint' ? 'Search endpoints...' : 'Search indexes...'}
-              value={step === 'endpoint' ? endpointQuery : indexQuery}
-              onChange={e =>
-                step === 'endpoint'
-                  ? setEndpointQuery(e.target.value)
-                  : setIndexQuery(e.target.value)
-              }
-              className="w-full pl-8 pr-3 py-1.5 border border-gray-300 rounded text-sm focus:outline-none focus:ring-1 focus:ring-blue-500 bg-white"
-            />
-          </div>
-        )}
+        {/* Search input */}
+        <div className="relative">
+          <Search size={14} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-gray-400" />
+          <input
+            ref={inputRef}
+            type="text"
+            placeholder={step === 'endpoint' ? 'Search endpoints...' : 'Search indexes...'}
+            value={step === 'endpoint' ? endpointQuery : indexQuery}
+            onChange={e =>
+              step === 'endpoint'
+                ? setEndpointQuery(e.target.value)
+                : setIndexQuery(e.target.value)
+            }
+            className="w-full pl-8 pr-3 py-1.5 border border-gray-300 rounded text-sm focus:outline-none focus:ring-1 focus:ring-blue-500 bg-white"
+          />
+        </div>
       </div>
 
       {/* Content area */}
@@ -266,7 +226,6 @@ export const VectorIndexDiscovery: React.FC<VectorIndexDiscoveryProps> = ({
               onClick={() => {
                 if (step === 'endpoint') fetchEndpoints();
                 else if (step === 'index' && selectedEndpoint) fetchIndexes(selectedEndpoint.name);
-                else if (step === 'columns' && selectedEndpoint && selectedIndex) fetchColumns(selectedEndpoint.name, selectedIndex.name);
               }}
               className="inline-flex items-center gap-1 text-sm text-gray-600 hover:text-gray-800 transition-colors"
             >
@@ -331,53 +290,6 @@ export const VectorIndexDiscovery: React.FC<VectorIndexDiscoveryProps> = ({
               );
             })}
           </>
-        )}
-
-        {/* Step 3: Columns & Description */}
-        {!loading && !error && step === 'columns' && (
-          <div className="px-2 pb-1">
-            {columns.length > 0 && (
-              <>
-                <p className="text-xs text-gray-500 mb-1.5">Select columns to include:</p>
-                <div className="max-h-40 overflow-y-auto border border-gray-200 rounded p-2 mb-3">
-                  {columns.map(col => (
-                    <label
-                      key={col.name}
-                      className="flex items-center gap-2 py-0.5 text-sm text-gray-700 cursor-pointer hover:bg-gray-50 rounded px-1"
-                    >
-                      <input
-                        type="checkbox"
-                        checked={selectedColumns.has(col.name)}
-                        onChange={() => toggleColumn(col.name)}
-                        className="rounded border-gray-300 text-blue-600 focus:ring-blue-500"
-                      />
-                      <span>{col.name}</span>
-                      {col.type && (
-                        <span className="text-xs text-gray-400 ml-auto">{col.type}</span>
-                      )}
-                    </label>
-                  ))}
-                </div>
-              </>
-            )}
-
-            <label className="block text-xs text-gray-500 mb-1">Description (optional)</label>
-            <textarea
-              value={description}
-              onChange={e => setDescription(e.target.value)}
-              placeholder="Describe what this vector index provides..."
-              className="w-full border border-gray-300 rounded text-sm p-2 focus:outline-none focus:ring-1 focus:ring-blue-500 resize-none"
-              rows={2}
-            />
-
-            <button
-              onClick={handleSave}
-              disabled={selectedColumns.size === 0}
-              className="mt-2 w-full px-3 py-1.5 rounded text-sm bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-            >
-              Save & Add
-            </button>
-          </div>
         )}
       </div>
     </div>

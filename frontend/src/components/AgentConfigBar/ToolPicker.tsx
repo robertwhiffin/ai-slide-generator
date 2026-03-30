@@ -7,6 +7,7 @@
 
 import React, { useState } from 'react';
 import type { AvailableTool, GenieTool, VectorIndexTool, MCPTool, ModelEndpointTool, AgentBricksTool, ToolEntry, ToolType } from '../../types/agentConfig';
+import type { ToolPreviewData } from './ToolDetailPanel';
 import { GenieDiscovery } from './tools/GenieDiscovery';
 import { VectorIndexDiscovery } from './tools/VectorIndexDiscovery';
 import { MCPDiscovery } from './tools/MCPDiscovery';
@@ -32,6 +33,7 @@ const TOOL_CATEGORIES: { type: ToolType; label: string }[] = [
 interface ToolPickerProps {
   onSelect: (tool: ToolEntry) => void;
   onPreview: (tool: AvailableTool) => void;
+  onToolPreview: (preview: ToolPreviewData) => void;
   existingTools: ToolEntry[];
 }
 
@@ -42,6 +44,7 @@ interface ToolPickerProps {
 export const ToolPicker: React.FC<ToolPickerProps> = ({
   onSelect,
   onPreview,
+  onToolPreview,
   existingTools,
 }) => {
   const [activeCategory, setActiveCategory] = useState<ToolType | null>(null);
@@ -83,6 +86,7 @@ export const ToolPicker: React.FC<ToolPickerProps> = ({
       {activeCategory === 'vector_index' && (
         <VectorIndexDiscovery
           onSelect={onSelect as (tool: VectorIndexTool) => void}
+          onPreview={onToolPreview}
           onClose={handleClose}
           existingTools={existingTools}
         />
@@ -90,6 +94,7 @@ export const ToolPicker: React.FC<ToolPickerProps> = ({
       {activeCategory === 'mcp' && (
         <MCPDiscovery
           onSelect={onSelect as (tool: MCPTool) => void}
+          onPreview={onToolPreview}
           onClose={handleClose}
           existingTools={existingTools}
         />
@@ -97,6 +102,7 @@ export const ToolPicker: React.FC<ToolPickerProps> = ({
       {activeCategory === 'model_endpoint' && (
         <ModelEndpointDiscovery
           onSelect={onSelect as (tool: ModelEndpointTool) => void}
+          onPreview={onToolPreview}
           onClose={handleClose}
           existingTools={existingTools}
         />
@@ -104,6 +110,7 @@ export const ToolPicker: React.FC<ToolPickerProps> = ({
       {activeCategory === 'agent_bricks' && (
         <AgentBricksDiscovery
           onSelect={onSelect as (tool: AgentBricksTool) => void}
+          onPreview={onToolPreview}
           onClose={handleClose}
           existingTools={existingTools}
         />

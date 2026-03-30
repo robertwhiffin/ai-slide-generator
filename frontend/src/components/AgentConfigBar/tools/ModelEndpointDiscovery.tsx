@@ -1,21 +1,26 @@
 /**
- * ModelEndpointDiscovery — inline panel for searching and selecting
+ * ModelEndpointDiscovery — inline dropdown panel for searching and selecting
  * non-agent Model Serving endpoints.
+ *
+ * When the user selects an item, the dropdown closes and calls `onPreview`
+ * so that AgentConfigBar can open the full-width ToolDetailPanel.
  */
 
 import React, { useEffect, useState, useRef } from 'react';
-import { ChevronLeft, Loader2, RefreshCw, Search, X } from 'lucide-react';
+import { Loader2, RefreshCw, Search, X } from 'lucide-react';
 import { api } from '../../../services/api';
 import type { DiscoveryItem, ModelEndpointTool, ToolEntry } from '../../../types/agentConfig';
+import type { ModelEndpointPreview } from '../ToolDetailPanel';
 
 interface ModelEndpointDiscoveryProps {
   onSelect: (tool: ModelEndpointTool) => void;
+  onPreview: (preview: ModelEndpointPreview) => void;
   onClose: () => void;
   existingTools: ToolEntry[];
 }
 
 export const ModelEndpointDiscovery: React.FC<ModelEndpointDiscoveryProps> = ({
-  onSelect,
+  onPreview,
   onClose,
   existingTools,
 }) => {
@@ -26,10 +31,6 @@ export const ModelEndpointDiscovery: React.FC<ModelEndpointDiscoveryProps> = ({
   const [query, setQuery] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-
-  // Detail panel state
-  const [selected, setSelected] = useState<DiscoveryItem | null>(null);
-  const [description, setDescription] = useState('');
 
   useEffect(() => {
     fetchEndpoints();
@@ -67,24 +68,13 @@ export const ModelEndpointDiscovery: React.FC<ModelEndpointDiscoveryProps> = ({
   };
 
   const handleSelect = (item: DiscoveryItem) => {
-    setSelected(item);
-    setDescription(item.description ?? '');
-  };
-
-  const handleBack = () => {
-    setSelected(null);
-    setDescription('');
-  };
-
-  const handleSave = () => {
-    if (!selected) return;
-    const tool: ModelEndpointTool = {
-      type: 'model_endpoint',
-      endpoint_name: selected.id,
-      endpoint_type: (selected.metadata?.endpoint_type as string) ?? undefined,
-      description: description || undefined,
-    };
-    onSelect(tool);
+    onPreview({
+      toolType: 'model_endpoint',
+      name: item.name,
+      endpointName: item.id,
+      endpointType: (item.metadata?.endpoint_type as string) ?? undefined,
+      description: item.description,
+    });
     onClose();
   };
 
@@ -112,20 +102,7 @@ export const ModelEndpointDiscovery: React.FC<ModelEndpointDiscoveryProps> = ({
       {/* Header */}
       <div className="px-3 pt-3 pb-2">
         <div className="flex items-center justify-between mb-2">
-          <div className="flex items-center gap-1.5">
-            {selected && (
-              <button
-                onClick={handleBack}
-                className="p-0.5 text-gray-400 hover:text-gray-600 rounded transition-colors"
-                aria-label="Back"
-              >
-                <ChevronLeft size={14} />
-              </button>
-            )}
-            <span className="text-sm font-medium text-gray-700">
-              {selected ? 'Configure Model Endpoint' : 'Add Model Endpoint'}
-            </span>
-          </div>
+          <span className="text-sm font-medium text-gray-700">Add Model Endpoint</span>
           <button
             onClick={onClose}
             className="p-0.5 text-gray-400 hover:text-gray-600 rounded transition-colors"
@@ -135,20 +112,18 @@ export const ModelEndpointDiscovery: React.FC<ModelEndpointDiscoveryProps> = ({
           </button>
         </div>
 
-        {/* Search input (list view only) */}
-        {!selected && (
-          <div className="relative">
-            <Search size={14} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-gray-400" />
-            <input
-              ref={inputRef}
-              type="text"
-              placeholder="Search model endpoints..."
-              value={query}
-              onChange={e => setQuery(e.target.value)}
-              className="w-full pl-8 pr-3 py-1.5 border border-gray-300 rounded text-sm focus:outline-none focus:ring-1 focus:ring-blue-500 bg-white"
-            />
-          </div>
-        )}
+        {/* Search input */}
+        <div className="relative">
+          <Search size={14} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-gray-400" />
+          <input
+            ref={inputRef}
+            type="text"
+            placeholder="Search model endpoints..."
+            value={query}
+            onChange={e => setQuery(e.target.value)}
+            className="w-full pl-8 pr-3 py-1.5 border border-gray-300 rounded text-sm focus:outline-none focus:ring-1 focus:ring-blue-500 bg-white"
+          />
+        </div>
       </div>
 
       {/* Content */}
@@ -173,8 +148,7 @@ export const ModelEndpointDiscovery: React.FC<ModelEndpointDiscoveryProps> = ({
           </div>
         )}
 
-        {/* List view */}
-        {!loading && !error && !selected && (
+        {!loading && !error && (
           <>
             {filtered.length === 0 && (
               <p className="text-sm text-gray-500 py-4 text-center">
@@ -211,46 +185,6 @@ export const ModelEndpointDiscovery: React.FC<ModelEndpointDiscoveryProps> = ({
               );
             })}
           </>
-        )}
-
-        {/* Detail view */}
-        {!loading && !error && selected && (
-          <div className="px-2 pb-1">
-            <div className="mb-3">
-              <label className="block text-xs text-gray-500 mb-1">Endpoint</label>
-              <div className="flex items-center gap-2">
-                <span className="text-sm text-gray-700 bg-gray-50 rounded px-2 py-1.5 border border-gray-200 flex-1">
-                  {selected.name}
-                </span>
-                {(() => {
-                  const badge = getTypeBadge(selected);
-                  return badge ? (
-                    <span className={`text-xs px-1.5 py-0.5 rounded ${badge.className}`}>
-                      {badge.label}
-                    </span>
-                  ) : null;
-                })()}
-              </div>
-            </div>
-
-            <div className="mb-3">
-              <label className="block text-xs text-gray-500 mb-1">Description (optional)</label>
-              <textarea
-                value={description}
-                onChange={e => setDescription(e.target.value)}
-                placeholder="Describe what this model endpoint does..."
-                className="w-full border border-gray-300 rounded text-sm p-2 focus:outline-none focus:ring-1 focus:ring-blue-500 resize-none"
-                rows={2}
-              />
-            </div>
-
-            <button
-              onClick={handleSave}
-              className="w-full px-3 py-1.5 rounded text-sm bg-blue-600 text-white hover:bg-blue-700 transition-colors"
-            >
-              Save & Add
-            </button>
-          </div>
         )}
       </div>
     </div>
