@@ -15,12 +15,18 @@ from typing import Any, Optional
 
 from langchain_core.tools import StructuredTool
 
-from src.api.schemas.agent_config import AgentConfig, GenieTool, MCPTool
+from src.api.schemas.agent_config import (
+    AgentConfig, GenieTool, MCPTool, VectorIndexTool, ModelEndpointTool, AgentBricksTool,
+)
 from src.core.defaults import DEFAULT_CONFIG, DEFAULT_SLIDE_STYLE
 from src.services.image_tools import SearchImagesInput, search_images
 from src.services.tools import (
     GenieQueryInput,
     build_genie_tool,
+    build_vector_tool,
+    build_mcp_tools,
+    build_model_endpoint_tool,
+    build_agent_bricks_tool,
     initialize_genie_conversation,
     query_genie_space,
 )
@@ -159,8 +165,8 @@ def _build_tools(
 ) -> list[StructuredTool]:
     """Build the list of LangChain tools from AgentConfig.
 
-    Always includes search_images. Adds Genie tools for each GenieTool
-    entry. Logs a warning for MCPTool entries (not yet supported).
+    Always includes search_images. Handles all 5 tool types:
+    GenieTool, MCPTool, VectorIndexTool, ModelEndpointTool, AgentBricksTool.
 
     Args:
         config: AgentConfig with tool definitions
@@ -186,6 +192,10 @@ def _build_tools(
     tools.append(image_search_tool)
 
     genie_index = 0
+    vector_index = 0
+    model_index = 0
+    agent_index = 0
+
     for tool_entry in config.tools:
         if isinstance(tool_entry, GenieTool):
             genie_index += 1
@@ -199,12 +209,48 @@ def _build_tools(
                     "tool_name": genie_tool.name,
                 },
             )
+        elif isinstance(tool_entry, VectorIndexTool):
+            vector_index += 1
+            vector_tool = build_vector_tool(tool_entry, vector_index)
+            tools.append(vector_tool)
+            logger.info(
+                "Added Vector Index tool",
+                extra={
+                    "index_name": tool_entry.index_name,
+                    "tool_name": vector_tool.name,
+                },
+            )
         elif isinstance(tool_entry, MCPTool):
-            logger.warning(
-                "MCP tools not yet supported, skipping",
+            mcp_tools = build_mcp_tools(tool_entry)
+            tools.extend(mcp_tools)
+            logger.info(
+                "Added MCP tools",
                 extra={
                     "connection_name": tool_entry.connection_name,
                     "server_name": tool_entry.server_name,
+                    "tool_count": len(mcp_tools),
+                },
+            )
+        elif isinstance(tool_entry, ModelEndpointTool):
+            model_index += 1
+            model_tool = build_model_endpoint_tool(tool_entry, model_index)
+            tools.append(model_tool)
+            logger.info(
+                "Added Model Endpoint tool",
+                extra={
+                    "endpoint_name": tool_entry.endpoint_name,
+                    "tool_name": model_tool.name,
+                },
+            )
+        elif isinstance(tool_entry, AgentBricksTool):
+            agent_index += 1
+            agent_tool = build_agent_bricks_tool(tool_entry, agent_index)
+            tools.append(agent_tool)
+            logger.info(
+                "Added Agent Bricks tool",
+                extra={
+                    "endpoint_name": tool_entry.endpoint_name,
+                    "tool_name": agent_tool.name,
                 },
             )
 
