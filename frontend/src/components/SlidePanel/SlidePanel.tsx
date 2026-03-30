@@ -52,7 +52,7 @@ export interface SlidePanelHandle {
 type ViewMode = 'tiles' | 'rawhtml' | 'rawtext';
 
 function SlidePanelComponent(props: SlidePanelProps, ref: React.Ref<SlidePanelHandle>) {
-  const { slideDeck, rawHtml: _rawHtml, onSlideChange, scrollToSlide, onSendMessage, onExportStatusChange, versionKey, readOnly = false, canManage = false, lockedBy = null, onVerificationComplete } = props;
+  const { slideDeck, rawHtml: _rawHtml, onSlideChange, scrollToSlide, onSendMessage, onExportStatusChange, versionKey: _versionKey, readOnly = false, canManage = false, lockedBy = null, onVerificationComplete } = props;
   const [_isReordering, setIsReordering] = useState(false);
   const [viewMode, _setViewMode] = useState<ViewMode>('tiles');
   const [isExportingPDF, setIsExportingPDF] = useState(false);
