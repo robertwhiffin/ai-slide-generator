@@ -53,6 +53,9 @@ const ConfigSummary: React.FC<{ config: Record<string, unknown> | null; names: N
   const tools = cfg.tools ?? [];
   const genieTools = tools.filter(t => t.type === 'genie');
   const mcpTools = tools.filter(t => t.type === 'mcp');
+  const vectorTools = tools.filter(t => t.type === 'vector_index');
+  const modelTools = tools.filter(t => t.type === 'model_endpoint');
+  const agentTools = tools.filter(t => t.type === 'agent_bricks');
   const hasCustomSystemPrompt = !!cfg.system_prompt;
   const hasCustomSlideInstructions = !!cfg.slide_editing_instructions;
 
@@ -75,15 +78,33 @@ const ConfigSummary: React.FC<{ config: Record<string, unknown> | null; names: N
           ) : (
             <div className="mt-1 flex flex-wrap gap-1.5">
               {genieTools.map(t => (
-                <Badge key={t.space_id} variant="outline" className="text-xs font-normal gap-1">
+                <Badge key={t.space_id} variant="outline" className="text-xs font-normal gap-1 bg-blue-50 text-blue-800 border-blue-200">
                   <MessageSquare className="size-3" />
                   {t.space_name}
                 </Badge>
               ))}
               {mcpTools.map(t => (
-                <Badge key={t.connection_name} variant="outline" className="text-xs font-normal gap-1">
+                <Badge key={t.connection_name} variant="outline" className="text-xs font-normal gap-1 bg-green-50 text-green-800 border-green-200">
                   <Wrench className="size-3" />
                   {t.server_name}
+                </Badge>
+              ))}
+              {vectorTools.map(t => (
+                <Badge key={`${t.endpoint_name}-${t.index_name}`} variant="outline" className="text-xs font-normal gap-1 bg-indigo-50 text-indigo-800 border-indigo-200">
+                  <FileText className="size-3" />
+                  {t.index_name}
+                </Badge>
+              ))}
+              {modelTools.map(t => (
+                <Badge key={t.endpoint_name} variant="outline" className="text-xs font-normal gap-1 bg-amber-50 text-amber-800 border-amber-200">
+                  <Wrench className="size-3" />
+                  {t.endpoint_name}
+                </Badge>
+              ))}
+              {agentTools.map(t => (
+                <Badge key={t.endpoint_name} variant="outline" className="text-xs font-normal gap-1 bg-teal-50 text-teal-800 border-teal-200">
+                  <MessageSquare className="size-3" />
+                  {t.endpoint_name}
                 </Badge>
               ))}
             </div>
