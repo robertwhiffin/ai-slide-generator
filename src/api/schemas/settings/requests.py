@@ -27,14 +27,6 @@ class GenieSpaceCreateInline(BaseModel):
     description: Optional[str] = Field(None, description="Space description")
 
 
-class AIInfraCreateInline(BaseModel):
-    """Inline AI infrastructure configuration for profile creation wizard."""
-
-    llm_endpoint: Optional[str] = Field(None, description="LLM endpoint name")
-    llm_temperature: Optional[float] = Field(None, ge=0.0, le=1.0, description="LLM temperature")
-    llm_max_tokens: Optional[int] = Field(None, gt=0, description="Max tokens")
-
-
 class PromptsCreateInline(BaseModel):
     """Inline prompts configuration for profile creation wizard."""
 
@@ -58,7 +50,6 @@ class ProfileCreateWithConfig(BaseModel):
         None, 
         description="Genie space (optional - enables data queries)"
     )
-    ai_infra: Optional[AIInfraCreateInline] = Field(None, description="AI infrastructure")
     prompts: Optional[PromptsCreateInline] = Field(None, description="Prompts configuration")
 
     @field_validator("name")
@@ -97,14 +88,6 @@ class ProfileDuplicate(BaseModel):
         if not v.strip():
             raise ValueError("Profile name cannot be empty")
         return v.strip()
-
-
-class AIInfraConfigUpdate(BaseModel):
-    """Request to update AI infrastructure configuration."""
-
-    llm_endpoint: Optional[str] = Field(None, description="LLM endpoint name")
-    llm_temperature: Optional[float] = Field(None, ge=0.0, le=1.0, description="LLM temperature (0-1)")
-    llm_max_tokens: Optional[int] = Field(None, gt=0, description="Max tokens (must be positive)")
 
 
 class GenieSpaceCreate(BaseModel):
