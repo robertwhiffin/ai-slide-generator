@@ -663,6 +663,7 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
 
                 <div className="flex-1 bg-background">
                   <SlidePanel
+                    key={versionKey}
                     ref={slidePanelRef}
                     slideDeck={displayDeck}
                     rawHtml={rawHtml}
