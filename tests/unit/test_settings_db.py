@@ -136,7 +136,7 @@ def test_load_settings_specific_profile(test_db, test_profile, monkeypatch):
 
 
 def test_load_settings_no_default_profile(test_db, monkeypatch):
-    """Test error when no default profile exists."""
+    """Test fallback to built-in defaults when no default profile exists."""
     # Mock get_db_session
     def mock_get_db_session():
         class MockContextManager:
@@ -145,12 +145,15 @@ def test_load_settings_no_default_profile(test_db, monkeypatch):
             def __exit__(self, *args):
                 pass
         return MockContextManager()
-    
+
     monkeypatch.setattr("src.core.settings_db.get_db_session", mock_get_db_session)
-    
-    # Should raise ValueError
-    with pytest.raises(ValueError, match="No default profile found"):
-        load_settings_from_database()
+
+    # Should return default settings instead of raising
+    settings = load_settings_from_database()
+    assert settings.profile_id == 0
+    assert settings.profile_name == "default"
+    assert settings.genie is None
+    assert settings.prompts == {}
 
 
 def test_load_settings_profile_not_found(test_db, monkeypatch):
