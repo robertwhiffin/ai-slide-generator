@@ -16,7 +16,6 @@ from unittest.mock import MagicMock, patch, AsyncMock
 from src.api.main import app
 from src.core.database import Base, get_db
 from src.database.models import (  # noqa: F401
-    ConfigAIInfra,
     ConfigGenieSpace,
     ConfigProfile,
     ConfigPrompts,
