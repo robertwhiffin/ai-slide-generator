@@ -42,6 +42,50 @@ class AgentBricksInput(BaseModel):
     query: str = Field(description="Question or request to send to the agent")
 
 
+def _extract_text(response) -> str:
+    """Extract text from SDK response (object or raw dict).
+
+    The SDK's ``serving_endpoints.query()`` may return a
+    ``QueryEndpointResponse`` dataclass or a plain ``dict`` depending on
+    the endpoint's response shape.
+    """
+    # Convert to dict for uniform handling
+    if isinstance(response, dict):
+        result = response
+    elif hasattr(response, "as_dict"):
+        result = response.as_dict()
+    else:
+        result = {}
+
+    # Try choices format (standard for agent/v2/chat and foundation models)
+    choices = result.get("choices", [])
+    if isinstance(choices, list):
+        for choice in choices:
+            if isinstance(choice, dict):
+                msg = choice.get("message") or choice.get("delta") or {}
+                if isinstance(msg, dict) and msg.get("content"):
+                    return msg["content"]
+
+    # Try output format (agent/v1/responses)
+    output = result.get("output", [])
+    if isinstance(output, str) and output:
+        return output
+    if isinstance(output, list):
+        texts = []
+        for item in output:
+            if isinstance(item, dict) and item.get("type") == "message":
+                for content in item.get("content", []):
+                    if isinstance(content, dict) and content.get("text"):
+                        texts.append(content["text"])
+        if texts:
+            return "\n\n".join(texts)
+
+    # Last resort: return raw JSON if any content
+    if result:
+        return json.dumps(result)
+    return "Agent returned no content."
+
+
 def _query_agent_bricks(endpoint_name: str, query: str) -> str:
     """
     Query a Databricks Agent Bricks endpoint using the SDK.
@@ -73,50 +117,9 @@ def _query_agent_bricks(endpoint_name: str, query: str) -> str:
             messages=[{"role": "user", "content": query}],
         )
 
-        # Extract text from response
-        text = None
-
-        # Standard response: response.choices[0].message.content
-        if hasattr(response, "choices") and response.choices:
-            for choice in response.choices:
-                msg = getattr(choice, "message", None)
-                if msg and getattr(msg, "content", None):
-                    text = msg.content
-                    break
-
-        # If choices didn't work, try as_dict() fallback
-        if not text and hasattr(response, "as_dict"):
-            result = response.as_dict()
-            choices = result.get("choices", [])
-            if choices:
-                for choice in choices:
-                    if isinstance(choice, dict):
-                        msg = choice.get("message", {})
-                        if isinstance(msg, dict) and msg.get("content"):
-                            text = msg["content"]
-                            break
-
-            # Try output field (legacy format)
-            if not text:
-                output = result.get("output", [])
-                if isinstance(output, str) and output:
-                    text = output
-                elif isinstance(output, list):
-                    texts = []
-                    for item in output:
-                        if isinstance(item, dict) and item.get("type") == "message":
-                            for content in item.get("content", []):
-                                if isinstance(content, dict) and content.get("text"):
-                                    texts.append(content["text"])
-                    if texts:
-                        text = "\n\n".join(texts)
-
-            # Last resort: raw JSON
-            if not text and result:
-                text = json.dumps(result)
-
-        if not text:
-            text = "Agent returned no content."
+        # The SDK may return a QueryEndpointResponse object or a raw dict
+        # depending on the endpoint's response format. Handle both.
+        text = _extract_text(response)
 
         logger.info(
             "Agent bricks query completed",
