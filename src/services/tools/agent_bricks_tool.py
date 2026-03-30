@@ -5,15 +5,18 @@ Creates LangChain tools for querying Databricks Agent Bricks endpoints
 (knowledge assistants and supervisor agents) using the user's OAuth
 token (OBO authentication).
 
-Uses ``api_client.do()`` for direct HTTP calls to serving endpoints,
-matching the proven pattern from the original tools implementation.
-Tries multiple input formats to handle different agent endpoint versions.
+Uses the SDK's ``api_client.do()`` for direct HTTP calls to serving
+endpoints. Agent endpoints use the ``input`` format::
+
+    {"input": [{"role": "user", "content": "..."}]}
+
+Response parsing handles both ``output`` (agent/v1/responses) and
+``choices`` (agent/v2/chat) formats.
 """
 
 import json
 import logging
 
-import requests
 from langchain_core.tools import StructuredTool
 from pydantic import BaseModel, Field
 
@@ -38,21 +41,12 @@ class AgentBricksInput(BaseModel):
 def _extract_text_from_response(result: dict) -> str:
     """Extract text from an agent endpoint response dict.
 
-    Tries multiple response formats:
-    - choices format: {"choices": [{"message": {"content": "..."}}]}
-    - output list format: {"output": [{"type": "message", "content": [{"text": "..."}]}]}
-    - output string format: {"output": "plain text"}
+    Handles multiple response formats:
+    - output list: {"output": [{"type": "message", "content": [{"text": "..."}]}]}
+    - choices: {"choices": [{"message": {"content": "..."}}]}
+    - output string: {"output": "plain text"}
     """
-    # choices format (standard for chat/agent endpoints)
-    choices = result.get("choices", [])
-    if isinstance(choices, list):
-        for choice in choices:
-            if isinstance(choice, dict):
-                msg = choice.get("message") or choice.get("delta") or {}
-                if isinstance(msg, dict) and msg.get("content"):
-                    return msg["content"]
-
-    # output list format (agent/v1/responses)
+    # output list format (agent/v1/responses — most common for KA/MAS)
     output = result.get("output", [])
     if isinstance(output, list):
         texts = []
@@ -63,6 +57,15 @@ def _extract_text_from_response(result: dict) -> str:
                         texts.append(content["text"])
         if texts:
             return "\n\n".join(texts)
+
+    # choices format (agent/v2/chat)
+    choices = result.get("choices", [])
+    if isinstance(choices, list):
+        for choice in choices:
+            if isinstance(choice, dict):
+                msg = choice.get("message") or choice.get("delta") or {}
+                if isinstance(msg, dict) and msg.get("content"):
+                    return msg["content"]
 
     # output string format
     if isinstance(output, str) and output:
@@ -75,12 +78,8 @@ def _query_agent_bricks(endpoint_name: str, query: str) -> str:
     """
     Query a Databricks Agent Bricks endpoint.
 
-    Tries multiple input formats since agent endpoints vary by version:
-    - {"messages": [...]} — agent/v2/chat and standard chat format
-    - {"input": {"messages": [...]}} — agent/v1/responses format
-
-    Uses api_client.do() for direct HTTP (returns plain dict, no
-    deserialization issues).
+    Uses the ``input`` format which is required by agent endpoints.
+    Extracts text from the response using format-aware parsing.
 
     Args:
         endpoint_name: Name of the serving endpoint
@@ -90,7 +89,7 @@ def _query_agent_bricks(endpoint_name: str, query: str) -> str:
         Text string with agent response
 
     Raises:
-        AgentBricksError: If all formats fail
+        AgentBricksError: If query fails
     """
     logger.info(
         "Querying agent bricks endpoint",
@@ -99,49 +98,28 @@ def _query_agent_bricks(endpoint_name: str, query: str) -> str:
 
     try:
         client = get_user_client()
-        host = client.config.host.rstrip("/")
-        token = client.config.token
-        url = f"{host}/serving-endpoints/{endpoint_name}/invocations"
+        path = f"/serving-endpoints/{endpoint_name}/invocations"
         messages = [{"role": "user", "content": query}]
-        body = {"input": messages}
 
-        logger.info(
-            "Sending agent bricks request",
-            extra={"endpoint": endpoint_name, "format": "input"},
-        )
+        result = client.api_client.do("POST", path, body={"input": messages})
 
-        # Use requests directly — the SDK's api_client.do() returns empty
-        # for agent endpoints that use chunked/streaming transfer encoding.
-        resp = requests.post(
-            url,
-            json=body,
-            headers={"Authorization": f"Bearer {token}"},
-            timeout=120,
-        )
-        resp.raise_for_status()
-
-        # Handle empty responses — some agent endpoints return 200 with no body
-        if not resp.text or not resp.text.strip():
+        # Handle empty responses — some endpoints return 200 with empty body
+        if not result or result == {}:
             logger.warning(
                 "Agent endpoint returned empty response",
-                extra={"endpoint": endpoint_name, "status": resp.status_code},
+                extra={"endpoint": endpoint_name},
             )
-            return "Agent endpoint returned an empty response. The agent may not be configured correctly or may not have data to answer this query."
-
-        result = resp.json()
-
-        logger.info(
-            "Agent bricks raw response",
-            extra={
-                "endpoint": endpoint_name,
-                "response_keys": list(result.keys()) if isinstance(result, dict) else str(type(result)),
-            },
-        )
+            return (
+                "Agent endpoint returned an empty response. "
+                "The agent may not be configured correctly or may not "
+                "have data to answer this query."
+            )
 
         text = _extract_text_from_response(result)
 
         if not text:
-            return json.dumps(result) if isinstance(result, dict) else str(result)
+            # Return raw JSON so the LLM can still use whatever came back
+            return json.dumps(result)
 
         logger.info(
             "Agent bricks query completed",
@@ -153,8 +131,6 @@ def _query_agent_bricks(endpoint_name: str, query: str) -> str:
 
         return text
 
-    except AgentBricksError:
-        raise
     except Exception as e:
         logger.error("Agent bricks query failed: %s", e, exc_info=True)
         raise AgentBricksError(
