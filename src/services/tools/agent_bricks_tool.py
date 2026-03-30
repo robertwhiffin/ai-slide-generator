@@ -119,6 +119,15 @@ def _query_agent_bricks(endpoint_name: str, query: str) -> str:
             timeout=120,
         )
         resp.raise_for_status()
+
+        # Handle empty responses — some agent endpoints return 200 with no body
+        if not resp.text or not resp.text.strip():
+            logger.warning(
+                "Agent endpoint returned empty response",
+                extra={"endpoint": endpoint_name, "status": resp.status_code},
+            )
+            return "Agent endpoint returned an empty response. The agent may not be configured correctly or may not have data to answer this query."
+
         result = resp.json()
 
         logger.info(
