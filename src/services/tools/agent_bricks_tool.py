@@ -5,18 +5,21 @@ Creates LangChain tools for querying Databricks Agent Bricks endpoints
 (knowledge assistants and supervisor agents) using the user's OAuth
 token (OBO authentication).
 
-Always uses the agent input format::
+Uses the Databricks SDK's ``serving_endpoints.query()`` method which
+handles the correct request/response format for all agent endpoint
+versions (agent/v1/responses, agent/v2/chat).
 
-    {"input": [{"role": "user", "content": "..."}]}
+Request format::
 
-Response parsing expects::
+    messages=[{"role": "user", "content": "..."}]
 
-    {"output": [{"type": "message", "content": [{"text": "..."}]}]}
+Response format::
+
+    {"choices": [{"message": {"content": "..."}}]}
 """
 
 import json
 import logging
-from typing import Any
 
 from langchain_core.tools import StructuredTool
 from pydantic import BaseModel, Field
@@ -39,38 +42,12 @@ class AgentBricksInput(BaseModel):
     query: str = Field(description="Question or request to send to the agent")
 
 
-def _extract_agent_response(result: dict) -> str:
-    """Extract text from an Agent Bricks endpoint response.
-
-    Expected structure::
-
-        {"output": [{"type": "message",
-                      "content": [{"type": "output_text", "text": "..."}]}]}
-    """
-    output = result.get("output", [])
-
-    if isinstance(output, list):
-        texts = []
-        for item in output:
-            if isinstance(item, dict) and item.get("type") == "message":
-                for content in item.get("content", []):
-                    if isinstance(content, dict) and content.get("text"):
-                        texts.append(content["text"])
-        if texts:
-            return "\n\n".join(texts)
-
-    if isinstance(output, str):
-        return output
-
-    # Fallback: return the raw JSON
-    return json.dumps(result)
-
-
 def _query_agent_bricks(endpoint_name: str, query: str) -> str:
     """
-    Query a Databricks Agent Bricks endpoint.
+    Query a Databricks Agent Bricks endpoint using the SDK.
 
-    Uses the agent input format and extracts text from the response.
+    Uses ``client.serving_endpoints.query()`` which handles the correct
+    format for all agent endpoint versions.
 
     Args:
         endpoint_name: Name of the serving endpoint
@@ -89,11 +66,57 @@ def _query_agent_bricks(endpoint_name: str, query: str) -> str:
 
     try:
         client = get_user_client()
-        path = f"/serving-endpoints/{endpoint_name}/invocations"
-        message = [{"role": "user", "content": query}]
 
-        result = client.api_client.do("POST", path, body={"input": message})
-        text = _extract_agent_response(result)
+        # Use the SDK's query method — handles all agent formats correctly
+        response = client.serving_endpoints.query(
+            name=endpoint_name,
+            messages=[{"role": "user", "content": query}],
+        )
+
+        # Extract text from response
+        text = None
+
+        # Standard response: response.choices[0].message.content
+        if hasattr(response, "choices") and response.choices:
+            for choice in response.choices:
+                msg = getattr(choice, "message", None)
+                if msg and getattr(msg, "content", None):
+                    text = msg.content
+                    break
+
+        # If choices didn't work, try as_dict() fallback
+        if not text and hasattr(response, "as_dict"):
+            result = response.as_dict()
+            choices = result.get("choices", [])
+            if choices:
+                for choice in choices:
+                    if isinstance(choice, dict):
+                        msg = choice.get("message", {})
+                        if isinstance(msg, dict) and msg.get("content"):
+                            text = msg["content"]
+                            break
+
+            # Try output field (legacy format)
+            if not text:
+                output = result.get("output", [])
+                if isinstance(output, str) and output:
+                    text = output
+                elif isinstance(output, list):
+                    texts = []
+                    for item in output:
+                        if isinstance(item, dict) and item.get("type") == "message":
+                            for content in item.get("content", []):
+                                if isinstance(content, dict) and content.get("text"):
+                                    texts.append(content["text"])
+                    if texts:
+                        text = "\n\n".join(texts)
+
+            # Last resort: raw JSON
+            if not text and result:
+                text = json.dumps(result)
+
+        if not text:
+            text = "Agent returned no content."
 
         logger.info(
             "Agent bricks query completed",
