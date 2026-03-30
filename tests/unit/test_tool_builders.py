@@ -260,25 +260,32 @@ class TestModelEndpointResponseExtractors:
 class TestAgentBricksQuery:
     """Tests for agent bricks SDK-based querying."""
 
+    @patch("src.services.tools.agent_bricks_tool.requests")
     @patch("src.services.tools.agent_bricks_tool.get_user_client")
-    def test_query_uses_api_client_do(self, mock_client_fn):
+    def test_query_uses_requests_directly(self, mock_client_fn, mock_requests):
         from src.services.tools.agent_bricks_tool import _query_agent_bricks
 
         mock_client = MagicMock()
+        mock_client.config.host = "https://workspace.databricks.com"
+        mock_client.config.token = "test-token"
         mock_client_fn.return_value = mock_client
 
-        # api_client.do() returns a plain dict
-        mock_client.api_client.do.return_value = {
-            "choices": [
-                {"message": {"role": "assistant", "content": "Agent response text"}}
+        # Mock requests.post response
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {
+            "output": [
+                {"type": "message", "content": [{"type": "output_text", "text": "Agent response text"}]}
             ]
         }
+        mock_resp.raise_for_status = MagicMock()
+        mock_requests.post.return_value = mock_resp
 
         result = _query_agent_bricks("my-agent-endpoint", "test query")
 
         assert result == "Agent response text"
-        # Should call api_client.do with messages format first
-        mock_client.api_client.do.assert_called()
+        mock_requests.post.assert_called_once()
+        call_kwargs = mock_requests.post.call_args
+        assert "input" in call_kwargs.kwargs.get("json", {}) or "input" in call_kwargs[1].get("json", {})
 
 
 class TestEndpointTypeDetection:

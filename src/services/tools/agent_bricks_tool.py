@@ -13,6 +13,7 @@ Tries multiple input formats to handle different agent endpoint versions.
 import json
 import logging
 
+import requests
 from langchain_core.tools import StructuredTool
 from pydantic import BaseModel, Field
 
@@ -98,12 +99,10 @@ def _query_agent_bricks(endpoint_name: str, query: str) -> str:
 
     try:
         client = get_user_client()
-        path = f"/serving-endpoints/{endpoint_name}/invocations"
+        host = client.config.host.rstrip("/")
+        token = client.config.token
+        url = f"{host}/serving-endpoints/{endpoint_name}/invocations"
         messages = [{"role": "user", "content": query}]
-
-        # Agent endpoints use {"input": [...]} format.
-        # This is confirmed by the Databricks API error message:
-        # "Please use 'input' field instead."
         body = {"input": messages}
 
         logger.info(
@@ -111,21 +110,28 @@ def _query_agent_bricks(endpoint_name: str, query: str) -> str:
             extra={"endpoint": endpoint_name, "format": "input"},
         )
 
-        result = client.api_client.do("POST", path, body=body)
+        # Use requests directly — the SDK's api_client.do() returns empty
+        # for agent endpoints that use chunked/streaming transfer encoding.
+        resp = requests.post(
+            url,
+            json=body,
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=120,
+        )
+        resp.raise_for_status()
+        result = resp.json()
 
         logger.info(
             "Agent bricks raw response",
             extra={
                 "endpoint": endpoint_name,
                 "response_keys": list(result.keys()) if isinstance(result, dict) else str(type(result)),
-                "response_preview": str(result)[:500],
             },
         )
 
         text = _extract_text_from_response(result)
 
         if not text:
-            # Return raw response so we can see what came back
             return json.dumps(result) if isinstance(result, dict) else str(result)
 
         logger.info(
