@@ -1447,13 +1447,20 @@ class SessionManager:
             True if lock acquired (or session doesn't exist yet), False if session is already locked
         """
         with get_db_session() as db:
-            session = (
-                db.query(UserSession)
-                .filter(UserSession.session_id == session_id)
-                .first()
-            )
+            try:
+                session = (
+                    db.query(UserSession)
+                    .filter(UserSession.session_id == session_id)
+                    .with_for_update(nowait=False)
+                    .first()
+                )
+            except Exception:
+                session = (
+                    db.query(UserSession)
+                    .filter(UserSession.session_id == session_id)
+                    .first()
+                )
 
-            # If session doesn't exist yet, allow proceeding (will be auto-created)
             if not session:
                 logger.info(
                     "Session not found for locking, allowing auto-creation",
@@ -1462,11 +1469,10 @@ class SessionManager:
                 return True
 
             if session.is_processing:
-                # Check if lock is stale (held too long)
                 if session.processing_started_at:
                     age = (datetime.utcnow() - session.processing_started_at).total_seconds()
                     if age < timeout_seconds:
-                        return False  # Legitimately locked
+                        return False
                 # Stale lock - proceed to acquire
 
             session.is_processing = True

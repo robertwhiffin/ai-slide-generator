@@ -57,12 +57,32 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
   const [previewVersion, setPreviewVersion] = useState<number | null>(null);
   const [previewDeck, setPreviewDeck] = useState<SlideDeck | null>(null);
   const [previewDescription, setPreviewDescription] = useState<string>('');
+  const [previewMessages, setPreviewMessages] = useState<import('../../types/message').Message[] | null>(null);
   const [showRevertModal, setShowRevertModal] = useState(false);
   const [revertTargetVersion, setRevertTargetVersion] = useState<number | null>(null);
   const chatPanelRef = useRef<ChatPanelHandle>(null);
   const slidePanelRef = useRef<SlidePanelHandle>(null);
   const slideDeckRef = useRef(slideDeck);
   slideDeckRef.current = slideDeck;
+  const deckVersionRef = useRef<number>(0);
+
+  const loadVersionsRef = useRef<(() => Promise<void>) | null>(null);
+
+  const setSlideDeckGated = useCallback((newDeck: SlideDeck, serverVersion?: number, force = false) => {
+    if (!force && serverVersion != null && serverVersion < deckVersionRef.current) {
+      console.log(`[deckVersionGuard] Rejected stale deck: server v${serverVersion} < local v${deckVersionRef.current}`);
+      return;
+    }
+    const versionBumped = serverVersion != null && serverVersion > deckVersionRef.current;
+    if (serverVersion != null) {
+      deckVersionRef.current = serverVersion;
+    }
+    setSlideDeck(newDeck);
+    // Refresh version list whenever deck version bumps (covers reorder, delete, duplicate)
+    if (versionBumped || force) {
+      loadVersionsRef.current?.();
+    }
+  }, []);
   const { sessionTitle, sessionId, experimentUrl, createNewSession, switchSession, renameSession } = useSession();
   const { isGenerating } = useGeneration();
   /** Ref-tracked sessionId so the URL effect guard doesn't need sessionId as a dep (which would cause it to re-fire when switchSession internally calls setSessionId). */
@@ -177,7 +197,7 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
         if (cancelled) return;
 
         if (slideResult.slide_deck && !isSelf(status)) {
-          setSlideDeck(slideResult.slide_deck as SlideDeck);
+          setSlideDeckGated(slideResult.slide_deck as SlideDeck, (slideResult.slide_deck as SlideDeck).version);
         }
 
         applyStatus(status);
@@ -239,7 +259,11 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
           () => cancelled,
         );
         if (!cancelled) {
-          setSlideDeck(restoredDeck);
+          if (restoredDeck) {
+            setSlideDeckGated(restoredDeck, (restoredDeck as SlideDeck)?.version, true);
+          } else {
+            setSlideDeck(null);
+          }
           setRawHtml(restoredRawHtml);
           setLastSavedTime(new Date());
           setViewMode('main');
@@ -273,6 +297,7 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
       setCurrentVersion(null);
     }
   }, [sessionId]);
+  loadVersionsRef.current = loadVersions;
 
   useEffect(() => {
     loadVersions();
@@ -283,6 +308,7 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
     setPreviewVersion(null);
     setPreviewDeck(null);
     setPreviewDescription('');
+    deckVersionRef.current = 0;
   }, [sessionId]);
 
   const handleSlideNavigate = useCallback((index: number) => {
@@ -316,6 +342,7 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
   }, [renameSession, slideDeck]);
 
   const handleNewSession = useCallback(async () => {
+    deckVersionRef.current = 0;
     setSlideDeck(null);
     setRawHtml(null);
     setLastSavedTime(null);
@@ -364,6 +391,17 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
       setPreviewVersion(result.version_number);
       setPreviewDeck(result.deck);
       setPreviewDescription(result.description || '');
+      // Map backend chat_history to Message[] for preview
+      const chatHistory = result.chat_history;
+      if (Array.isArray(chatHistory) && chatHistory.length > 0) {
+        setPreviewMessages(chatHistory.map((m: any) => ({
+          role: m.role || 'assistant',
+          content: m.content || '',
+          timestamp: m.created_at || new Date().toISOString(),
+        })));
+      } else {
+        setPreviewMessages(null);
+      }
     } catch (err) {
       console.error('Failed to preview version:', err);
       showToast('Failed to load version', 'error');
@@ -380,6 +418,7 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
     setPreviewVersion(null);
     setPreviewDeck(null);
     setPreviewDescription('');
+    setPreviewMessages(null);
   }, []);
 
   const handleRevertConfirm = useCallback(async () => {
@@ -387,10 +426,11 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
 
     try {
       const result = await api.restoreVersion(sessionId, revertTargetVersion);
-      setSlideDeck(result.deck);
+      setSlideDeckGated(result.deck, undefined, true);
       setPreviewVersion(null);
       setPreviewDeck(null);
       setPreviewDescription('');
+      setPreviewMessages(null);
       setShowRevertModal(false);
       setRevertTargetVersion(null);
       setLastSavedTime(new Date());
@@ -600,9 +640,10 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
                     rawHtml={rawHtml}
                     disabled={isReadOnly}
                     onGenerationStart={onGenerationStart}
+                    previewMessages={previewVersion != null ? previewMessages : null}
                     onSlidesGenerated={async (deck, raw) => {
                       onGenerationComplete();
-                      setSlideDeck(deck);
+                      setSlideDeckGated(deck, deck.version);
                       setRawHtml(raw);
                       setLastSavedTime(new Date());
                       setSessionsRefreshKey((prev) => prev + 1);
@@ -619,6 +660,7 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
                 </div>
 
                 <SelectionRibbon
+                  key={versionKey}
                   slideDeck={displayDeck}
                   onSlideNavigate={handleSlideNavigate}
                   versionKey={versionKey}
@@ -626,10 +668,13 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
 
                 <div className="flex-1 bg-background">
                   <SlidePanel
+                    key={versionKey}
                     ref={slidePanelRef}
                     slideDeck={displayDeck}
                     rawHtml={rawHtml}
-                    onSlideChange={isReadOnly ? undefined : setSlideDeck}
+                    onSlideChange={isReadOnly ? undefined : (deck: SlideDeck) => {
+                      setSlideDeckGated(deck, deck.version);
+                    }}
                     scrollToSlide={scrollTarget}
                     onSendMessage={isReadOnly ? undefined : handleSendMessage}
                     onExportStatusChange={setExportStatus}

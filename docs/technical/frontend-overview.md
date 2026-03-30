@@ -240,9 +240,11 @@ const versionKey = previewVersion
 - Save points created on the **backend** immediately after deck persistence (not driven by frontend)
 - After auto-verification completes, frontend calls `api.syncVersionVerification()` to backfill scores onto the latest save point
 - Maximum 40 save points per session; oldest deleted on overflow
-- Preview mode disables chat input and slide editing
+- Preview mode disables chat input and slide editing; chat history from that version is shown
 - Restoring deletes all newer versions permanently
-- `versionKey` passed to slide components prevents stale state during version switches
+- `setSlideDeckGated` in AppLayout rejects stale `getSlides` responses using server deck version (`deckVersionRef`), preventing race conditions from overwriting edits
+- Version dropdown auto-refreshes after any operation that bumps the deck version
+- `SelectionRibbon` and `SlidePanel` use `key={versionKey}` to force remount on version preview switches
 
 See [Save Points / Versioning](save-points-versioning.md) for full architecture.
 

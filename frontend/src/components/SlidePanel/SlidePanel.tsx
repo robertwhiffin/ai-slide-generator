@@ -52,7 +52,7 @@ export interface SlidePanelHandle {
 type ViewMode = 'tiles' | 'rawhtml' | 'rawtext';
 
 function SlidePanelComponent(props: SlidePanelProps, ref: React.Ref<SlidePanelHandle>) {
-  const { slideDeck, rawHtml: _rawHtml, onSlideChange, scrollToSlide, onSendMessage, onExportStatusChange, versionKey, readOnly = false, canManage = false, lockedBy = null, onVerificationComplete } = props;
+  const { slideDeck, rawHtml: _rawHtml, onSlideChange, scrollToSlide, onSendMessage, onExportStatusChange, versionKey: _versionKey, readOnly = false, canManage = false, lockedBy = null, onVerificationComplete } = props;
   const [_isReordering, setIsReordering] = useState(false);
   const [viewMode, _setViewMode] = useState<ViewMode>('tiles');
   const [isExportingPDF, setIsExportingPDF] = useState(false);
@@ -632,7 +632,7 @@ function SlidePanelComponent(props: SlidePanelProps, ref: React.Ref<SlidePanelHa
         </div>
       )}
       <div className="h-full overflow-y-auto">
-        <div className="p-4 space-y-4" key={versionKey}>
+        <div className="p-4 space-y-4">
               <DndContext
                 sensors={sensors}
                 collisionDetection={closestCenter}
@@ -644,7 +644,7 @@ function SlidePanelComponent(props: SlidePanelProps, ref: React.Ref<SlidePanelHa
                 >
         {slideDeck.slides.map((slide, index) => (
           <div
-            key={versionKey ? `${versionKey}-${slide.slide_id}` : slide.slide_id}
+            key={slide.slide_id}
             ref={(el) => {
               if (el) {
                 slideRefs.current.set(index, el);
