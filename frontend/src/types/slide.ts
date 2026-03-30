@@ -25,7 +25,7 @@ export interface SlideDeck {
   created_at?: string;
   modified_by?: string;
   modified_at?: string;
-  version?: number;
+  version?: number;  // Server-side optimistic lock version from SessionSlideDeck
 }
 
 export interface SlideContext {
