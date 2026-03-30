@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """HTML to Google Slides converter using LLM code-gen approach."""
 
+import ast
 import base64
 import importlib.util
 import logging
@@ -9,7 +10,7 @@ import shutil
 import tempfile
 import uuid
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Dict, List, Optional
 
 from databricks.sdk import WorkspaceClient
 
@@ -21,6 +22,336 @@ from src.services.google_slides_prompts_defaults import (
 
 logger = logging.getLogger(__name__)
 
+# Max HTML length passed to the LLM on first generation and on retry (must match).
+GSLIDES_HTML_PROMPT_MAX = 25000
+
+
+def _truncate_html_for_prompt(html_str: str) -> str:
+    """Truncate slide HTML for LLM prompts with a consistent marker."""
+    if len(html_str) <= GSLIDES_HTML_PROMPT_MAX:
+        return html_str
+    return html_str[:GSLIDES_HTML_PROMPT_MAX] + "\n<!-- truncated -->"
+
+
+def _looks_like_slides_api_error(error_msg: str) -> bool:
+    """True if *error_msg* is from googleapiclient HttpError / Slides API."""
+    msg = error_msg.lower()
+    if "httperror" in msg or "httpexception" in msg:
+        return True
+    # e.g. <HttpError 400 when requesting https://slides.googleapis.com/...
+    return bool(re.search(r"http(s)?error\s+\d{3}\s+when\s+requesting", msg))
+
+
+# ---------------------------------------------------------------------------
+# Request pre-sanitization helpers
+# ---------------------------------------------------------------------------
+
+def _req_cell_key(inner: dict) -> tuple:
+    """Return a hashable key for (objectId, [rowIndex, columnIndex])."""
+    obj_id = inner.get("objectId", "")
+    cell = inner.get("cellLocation")
+    if cell:
+        return (obj_id, cell.get("rowIndex", 0), cell.get("columnIndex", 0))
+    return (obj_id,)
+
+
+_STYLE_KEYS = {"updateTextStyle", "updateTableCellProperties", "updateParagraphStyle"}
+
+
+def _filter_requests(requests: list) -> list:
+    """Remove empty insertText and any style update for the same (objectId, cell).
+
+    Order-independent: style requests before or after the empty insertText are
+    dropped.  Prevents API errors like "The object has no text" on
+    ``updateTextStyle`` for empty table cells.
+    """
+    empty_cells: set = set()
+    for req in requests:
+        if "insertText" in req and req["insertText"].get("text", "") == "":
+            empty_cells.add(_req_cell_key(req["insertText"]))
+
+    filtered: list = []
+    for req in requests:
+        if "insertText" in req and req["insertText"].get("text", "") == "":
+            continue
+        if any(k in req for k in _STYLE_KEYS):
+            key = next(k for k in req if k in _STYLE_KEYS)
+            if _req_cell_key(req[key]) in empty_cells:
+                continue
+        filtered.append(req)
+
+    return filtered
+
+
+# ---------------------------------------------------------------------------
+# Apostrophe-in-string syntax fixer
+# ---------------------------------------------------------------------------
+
+def _convert_single_to_double_quoted(line: str) -> str:
+    """Re-quote single-quoted strings that contain apostrophes as double-quoted.
+
+    Scans each single-quote-delimited token on *line*.  When an apostrophe is
+    surrounded by word characters (``\\w'\\w``) it is treated as part of the
+    content (not a closing delimiter), so the scanner continues until it finds a
+    genuine closing quote.  Those strings are then re-emitted with double-quote
+    delimiters so Python can parse them correctly.
+
+    Example::
+
+        'We didn't do it'  →  "We didn't do it"
+    """
+    result: list = []
+    i = 0
+    n = len(line)
+
+    while i < n:
+        if line[i] != "'":
+            result.append(line[i])
+            i += 1
+            continue
+
+        # Scan for the "real" closing quote, treating word-apostrophe-word as content.
+        j = i + 1
+        while j < n:
+            if line[j] == "'":
+                before_word = j > 0 and line[j - 1].isalnum()
+                after_word = (j + 1) < n and line[j + 1].isalnum()
+                if before_word and after_word:
+                    j += 1  # it's a contraction apostrophe — keep scanning
+                    continue
+                break  # genuine closing quote
+            j += 1
+
+        if j >= n:
+            # Never found a real closing quote — rest of line is broken content.
+            content = line[i + 1:]
+            result.append('"' + content.replace('"', '\\"') + '"')
+            break
+
+        content = line[i + 1: j]
+        if re.search(r"\w'\w", content):
+            # Content has an apostrophe → rewrite as double-quoted string.
+            result.append('"' + content.replace('"', '\\"') + '"')
+        else:
+            result.append(line[i: j + 1])
+
+        i = j + 1
+
+    return "".join(result)
+
+
+def _fix_apostrophe_strings(code: str) -> str:
+    """Fix single-quoted literals whose content contains apostrophes (contractions).
+
+    The LLM often emits ``'text': 'We don't ...'``.  The ``'`` in *don't* ends the
+    literal early; the parser may report ``unterminated string``, ``eol while
+    scanning``, or ``invalid character`` (e.g. em-dash) on the remainder.
+
+    Repeatedly ``ast.parse`` and rewrite the error line with
+    :func:`_convert_single_to_double_quoted` whenever that changes the line.
+    """
+    for _ in range(20):  # guard against infinite loops
+        try:
+            ast.parse(code)
+            return code
+        except SyntaxError as exc:
+            if exc.lineno is None:
+                return code
+
+            lines = code.splitlines()
+            line_idx = exc.lineno - 1
+            if line_idx >= len(lines):
+                return code
+
+            original = lines[line_idx]
+            fixed = _convert_single_to_double_quoted(original)
+            if fixed == original:
+                return code  # heuristic cannot improve this error
+
+            lines[line_idx] = fixed
+            code = "\n".join(lines)
+
+    return code
+
+
+# ---------------------------------------------------------------------------
+# Cascading-failure tracker
+# ---------------------------------------------------------------------------
+
+class _SkipTracker:
+    """Track objectIds whose creation failed so downstream ops can be skipped.
+
+    When a ``createShape`` / ``createTable`` / ``createImage`` request fails,
+    all subsequent requests that reference the same ``objectId`` would produce
+    noisy "object not found" errors.  This tracker records the failed IDs and
+    allows callers to skip those dependent requests silently.
+    """
+
+    _CREATE_KEYS = {
+        "createShape", "createTable", "createImage",
+        "createLine", "createSheetsChart",
+    }
+
+    def __init__(self) -> None:
+        self._failed_ids: set = set()
+
+    def mark_failed(self, requests: list) -> None:
+        """Record objectIds of any create-* requests in *requests* as failed."""
+        for req in requests:
+            for key in self._CREATE_KEYS:
+                if key in req:
+                    obj_id = req[key].get("objectId")
+                    if obj_id:
+                        self._failed_ids.add(obj_id)
+
+    def should_skip(self, req: dict) -> bool:
+        """Return True if *req* targets an objectId whose creation failed."""
+        for inner in req.values():
+            if isinstance(inner, dict):
+                if inner.get("objectId") in self._failed_ids:
+                    return True
+        return False
+
+
+# ---------------------------------------------------------------------------
+# Chunked batchUpdate proxy
+# ---------------------------------------------------------------------------
+
+class _ChunkedBatchUpdateRequest:
+    """Deferred batchUpdate call that executes in chunks with per-request retry.
+
+    On a chunk failure the wrapper:
+    1. Logs the chunk index and error for easy debugging.
+    2. Marks any ``create*`` requests in the failed chunk via ``_SkipTracker``.
+    3. Retries each request in the chunk individually.
+    4. On individual failure → logs + skips; continues to the next request.
+
+    This ensures a single bad request drops only itself, not everything that
+    follows in the same batchUpdate call or subsequent calls.
+    """
+
+    def __init__(
+        self,
+        resource,
+        presentation_id: str,
+        requests: list,
+        chunk_size: int,
+        slide_num,
+        tracker: _SkipTracker,
+    ) -> None:
+        self._resource = resource
+        self._presentation_id = presentation_id
+        self._requests = _filter_requests(requests)
+        self._chunk_size = chunk_size
+        self._slide_num = slide_num
+        self._tracker = tracker
+
+    def _do_batch(self, reqs: list):
+        return self._resource.batchUpdate(
+            presentationId=self._presentation_id,
+            body={"requests": reqs},
+        ).execute()
+
+    def execute(self):
+        requests = [r for r in self._requests if not self._tracker.should_skip(r)]
+        if not requests:
+            return None
+
+        total_chunks = max(1, (len(requests) + self._chunk_size - 1) // self._chunk_size)
+        last_result = None
+
+        for chunk_idx, i in enumerate(range(0, len(requests), self._chunk_size)):
+            chunk = [r for r in requests[i:i + self._chunk_size]
+                     if not self._tracker.should_skip(r)]
+            if not chunk:
+                continue
+
+            chunk_num = chunk_idx + 1
+            req_range = f"{i + 1}–{i + len(chunk)}"
+            logger.info(
+                "Slide %s batchUpdate: chunk %d/%d (requests %s)",
+                self._slide_num, chunk_num, total_chunks, req_range,
+            )
+
+            try:
+                last_result = self._do_batch(chunk)
+            except Exception as exc:
+                logger.warning(
+                    "Slide %s chunk %d/%d failed — retrying individually. Error: %s",
+                    self._slide_num, chunk_num, total_chunks, exc,
+                )
+                self._tracker.mark_failed(chunk)
+
+                for req_idx, req in enumerate(chunk):
+                    if self._tracker.should_skip(req):
+                        continue
+                    req_type = next(iter(req.keys()), "unknown")
+                    try:
+                        last_result = self._do_batch([req])
+                        logger.debug(
+                            "Slide %s chunk %d req %d (%s) succeeded individually",
+                            self._slide_num, chunk_num, req_idx + 1, req_type,
+                        )
+                    except Exception as req_exc:
+                        logger.warning(
+                            "Slide %s chunk %d req %d (%s) failed — skipping: %s",
+                            self._slide_num, chunk_num, req_idx + 1, req_type, req_exc,
+                        )
+                        self._tracker.mark_failed([req])
+
+        return last_result
+
+
+class _ChunkedPresentations:
+    """Proxy for the presentations resource that returns chunked batchUpdate objects."""
+
+    def __init__(self, resource, chunk_size: int, slide_num, tracker: _SkipTracker) -> None:
+        self._resource = resource
+        self._chunk_size = chunk_size
+        self._slide_num = slide_num
+        self._tracker = tracker
+
+    def batchUpdate(self, presentationId: str, body: dict):  # noqa: N802
+        return _ChunkedBatchUpdateRequest(
+            self._resource,
+            presentationId,
+            body.get("requests", []),
+            self._chunk_size,
+            self._slide_num,
+            self._tracker,
+        )
+
+    def __getattr__(self, name):
+        return getattr(self._resource, name)
+
+
+class _ChunkedSlidesService:
+    """Transparent proxy over a Google Slides service object.
+
+    Intercepts ``presentations().batchUpdate(...)`` calls and routes them
+    through ``_ChunkedBatchUpdateRequest`` so that large request lists are
+    executed in small, fault-isolated chunks.
+    """
+
+    def __init__(self, service, chunk_size: int = 4, slide_num=None) -> None:
+        self._service = service
+        self._chunk_size = chunk_size
+        self._slide_num = slide_num
+        self._tracker = _SkipTracker()
+
+    def presentations(self):
+        return _ChunkedPresentations(
+            self._service.presentations(),
+            self._chunk_size,
+            self._slide_num,
+            self._tracker,
+        )
+
+    def __getattr__(self, name):
+        return getattr(self._service, name)
+
+
+# ---------------------------------------------------------------------------
 
 class GoogleSlidesConversionError(Exception):
     """Raised when Google Slides conversion fails."""
@@ -187,8 +518,6 @@ class HtmlToGoogleSlidesConverter:
             current_title = pres.get("title", "")
             if current_title != title:
                 try:
-                    from googleapiclient.discovery import build
-                    # Use the Drive API to rename the file
                     drive_service = self.auth.build_drive_service()
                     drive_service.files().update(
                         fileId=presentation_id,
@@ -260,9 +589,7 @@ class HtmlToGoogleSlidesConverter:
     async def _generate_code(self, html_str, chart_images, content_images=None):
         """Generate Google Slides API code from HTML."""
         content_images = content_images or []
-        # Pass raw HTML — the LLM needs full CSS context for faithful styling.
-        # Only truncate if excessively large.
-        html_content = html_str if len(html_str) <= 25000 else html_str[:25000] + "\n<!-- truncated -->"
+        html_content = _truncate_html_for_prompt(html_str)
         screenshot_note = self._build_chart_note(chart_images)
         if content_images:
             screenshot_note += self._build_content_image_note(content_images)
@@ -304,7 +631,7 @@ class HtmlToGoogleSlidesConverter:
             f"For logos/icons typically in the header area, use small sizes (e.g. width=0.6\"-1.0\", height=0.3\"-0.5\").\n"
         )
 
-    async def _call_llm(self, system_prompt, user_prompt):
+    async def _call_llm(self, system_prompt, user_prompt, thinking_budget: int = 10240):
         """Call Databricks LLM and return code string."""
         try:
             resp = self.llm_client.chat.completions.create(
@@ -315,7 +642,7 @@ class HtmlToGoogleSlidesConverter:
                 ],
                 temperature=0.2,
                 max_tokens=16384,
-                extra_body={"thinking": {"type": "enabled", "budget_tokens": 10240}},
+                extra_body={"thinking": {"type": "enabled", "budget_tokens": thinking_budget}},
             )
             code = self._extract_text(resp.choices[0].message.content)
             return self._strip_fences(code) if code else None
@@ -323,12 +650,124 @@ class HtmlToGoogleSlidesConverter:
             logger.error("LLM call failed", exc_info=True)
             return None
 
-    async def _retry_with_error(self, original_code, error_msg, html_str=None, chart_images=None, content_images=None):
-        """Re-prompt LLM with error + original HTML context so it doesn't hallucinate."""
+    @staticmethod
+    def _classify_error(error_msg: str, original_code: str) -> dict:
+        """Classify the error and extract structured context for the retry prompt.
+
+        Returns a dict with keys:
+          - ``kind``: "syntax_truncated" | "syntax_other" | "api" | "other"
+          - ``code_section_label``: human-readable label for the code excerpt
+          - ``code_excerpt``: the code lines most relevant to the error
+          - ``guidance``: tailored regeneration instruction for the LLM
+          - ``concise_retry``: True if the retry LLM call should use a lower
+            thinking budget (e.g. truncation — we want a shorter output)
+        """
+        msg = error_msg.lower()
+
+        line_num = None
+        m = re.search(r"line (\d+)", error_msg)
+        if m:
+            line_num = int(m.group(1))
+
+        code_lines = original_code.splitlines()
+        total_lines = len(code_lines)
+
+        # ---- SyntaxError -------------------------------------------------------
+        if "syntaxerror" in msg or (line_num and "syntax" in msg):
+            is_truncation = any(t in msg for t in (
+                "was never closed", "unexpected eof", "unexpected end",
+                "eof while scanning",
+            )) or (line_num and line_num >= total_lines - 5)
+
+            if is_truncation:
+                tail_start = max(0, total_lines - 40)
+                code_excerpt = "\n".join(
+                    f"{tail_start + i + 1:4d} | {l}"
+                    for i, l in enumerate(code_lines[tail_start:])
+                )
+                return {
+                    "kind": "syntax_truncated",
+                    "code_section_label": "Tail of truncated code (where generation was cut off):",
+                    "code_excerpt": code_excerpt,
+                    "guidance": (
+                        "Your previous generation was TRUNCATED — the token limit was reached "
+                        "before the function was complete (shown by the unclosed bracket/brace "
+                        "at the end above). Using the HTML source below as your complete "
+                        "reference, write the COMPLETE add_slide_to_presentation function from "
+                        "scratch. Keep the implementation concise: combine related requests into "
+                        "fewer batchUpdate calls to stay within the token limit."
+                    ),
+                    "concise_retry": True,
+                }
+            else:
+                if line_num:
+                    start = max(0, line_num - 25)
+                    end = min(total_lines, line_num + 5)
+                    code_excerpt = "\n".join(
+                        f"{'>>>' if start + i + 1 == line_num else '   '} "
+                        f"{start + i + 1:4d} | {l}"
+                        for i, l in enumerate(code_lines[start:end])
+                    )
+                    label = f"Code around line {line_num} where the SyntaxError occurred ('>>>' marks the failing line):"
+                else:
+                    code_excerpt = "\n".join(code_lines[:80])
+                    label = "Beginning of code with SyntaxError:"
+                return {
+                    "kind": "syntax_other",
+                    "code_section_label": label,
+                    "code_excerpt": code_excerpt,
+                    "guidance": (
+                        "Your generated code had a syntax error (shown above). "
+                        "Use the HTML source below as your complete reference and write the "
+                        "COMPLETE add_slide_to_presentation function from scratch — do not try "
+                        "to patch only the lines shown above; the HTML is the source of truth "
+                        "for all slide content and layout."
+                    ),
+                    "concise_retry": False,
+                }
+
+        # ---- Google Slides API error -------------------------------------------
+        if _looks_like_slides_api_error(error_msg):
+            # Include as much of the original code as fits so the LLM can locate
+            # the bad request and understand the surrounding context.
+            code_excerpt = original_code[:8000]
+            return {
+                "kind": "api",
+                "code_section_label": "Original generated code (the failing API request is somewhere in here):",
+                "code_excerpt": code_excerpt,
+                "guidance": (
+                    "Fix the Google Slides API error shown above. "
+                    "Using the HTML source below as your reference for slide content, "
+                    "return the COMPLETE corrected add_slide_to_presentation function."
+                ),
+                "concise_retry": False,
+            }
+
+        # ---- Generic fallback --------------------------------------------------
+        return {
+            "kind": "other",
+            "code_section_label": "Original generated code:",
+            "code_excerpt": original_code[:6000],
+            "guidance": (
+                "Fix the error shown above. Using the HTML source below as your reference, "
+                "return the COMPLETE add_slide_to_presentation function."
+            ),
+            "concise_retry": False,
+        }
+
+    async def _retry_with_error(
+        self, original_code, error_msg, html_str=None, chart_images=None, content_images=None,
+    ):
+        """Re-prompt LLM with targeted, error-type-aware context."""
+        ctx = self._classify_error(error_msg, original_code)
+
+        # Always include the source HTML — it is the sole authoritative source
+        # of slide content.  Without it the LLM has nothing to work from and
+        # will hallucinate content.
         html_content = ""
         if html_str:
-            truncated = html_str if len(html_str) <= 15000 else html_str[:15000] + "\n<!-- truncated -->"
-            html_content = f"\n\nOriginal HTML to convert:\n{truncated}\n"
+            truncated = _truncate_html_for_prompt(html_str)
+            html_content = f"\n\nHTML source to convert (authoritative — use this for all slide content):\n{truncated}\n"
 
         chart_note = ""
         if chart_images:
@@ -338,14 +777,19 @@ class HtmlToGoogleSlidesConverter:
 
         fix_prompt = (
             f"Your previously generated code produced this error:\n\n"
-            f"```\n{error_msg[:1500]}\n```\n\n"
-            f"The failing code was:\n\n"
-            f"```python\n{original_code[:4000]}\n```\n"
+            f"```\n{error_msg[:2000]}\n```\n\n"
+            f"{ctx['guidance']}\n\n"
+            f"{ctx['code_section_label']}\n\n"
+            f"```python\n{ctx['code_excerpt']}\n```\n"
             f"{html_content}{chart_note}\n"
-            f"Fix the error and return the complete corrected "
-            f"add_slide_to_presentation function. Return ONLY Python code."
+            f"Return ONLY the Python code for the complete add_slide_to_presentation function."
         )
-        return await self._call_llm(self.SYSTEM_PROMPT, fix_prompt)
+        return await self._call_llm(
+            self.SYSTEM_PROMPT, fix_prompt,
+            # For truncation retries, reduce the thinking budget so the LLM
+            # focuses on writing concise, complete code rather than over-thinking.
+            thinking_budget=5120 if ctx["concise_retry"] else 10240,
+        )
 
     @staticmethod
     def _extract_text(content):
@@ -455,6 +899,18 @@ class HtmlToGoogleSlidesConverter:
                 i += 1
             code = '\n'.join(out)
 
+        # Re-quote single-quoted literals that contain contractions (Don't, it's, etc.)
+        code = _fix_apostrophe_strings(code)
+
+        try:
+            ast.parse(code)
+        except SyntaxError as prep_exc:
+            logger.debug(
+                "Prepared GSlides code still not parseable: %s (line %s)",
+                prep_exc.msg,
+                prep_exc.lineno,
+            )
+
         return code
 
     # -- Code execution ----------------------------------------------------
@@ -470,8 +926,11 @@ class HtmlToGoogleSlidesConverter:
             spec = importlib.util.spec_from_file_location("temp_gslides_adder", str(tmp))
             module = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(module)
+            wrapped_service = _ChunkedSlidesService(
+                slides_service, chunk_size=4, slide_num=slide_num,
+            )
             module.add_slide_to_presentation(
-                slides_service, drive_service, pres_id, page_id, html_str, assets_dir,
+                wrapped_service, drive_service, pres_id, page_id, html_str, assets_dir,
             )
             return None
         except Exception as exc:
