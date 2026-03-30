@@ -400,6 +400,7 @@ class ChatService:
 
         # Capture deck version BEFORE LLM runs so we can detect concurrent edits.
         _deck_version_before_llm = self._get_deck_version(session_id)
+        _skip_save_point = False  # Set True only on VersionConflictError
 
         try:
             # Replace frontend base64 HTML with lightweight backend cache versions
@@ -589,10 +590,10 @@ class ChatService:
                     current_deck = self._get_or_load_deck(session_id)
                     if current_deck:
                         slide_deck_dict = current_deck.to_dict()
-                    _deck_version_before_llm = None  # sentinel to skip save_point
+                    _skip_save_point = True  # manual edit already has its own save point
 
                 # Create save point immediately after persisting (sync path)
-                if _deck_version_before_llm is not None:
+                if not _skip_save_point:
                     try:
                         if slide_context:
                             slide_nums = [i + 1 for i in slide_context.get("indices", [])]
@@ -935,6 +936,7 @@ class ChatService:
 
         # Capture deck version BEFORE LLM runs so we can detect concurrent edits.
         _deck_version_before_llm = self._get_deck_version(session_id)
+        _skip_save_point = False  # Set True only on VersionConflictError
 
         # Replace frontend base64 HTML with lightweight backend cache versions
         if slide_context:
@@ -1320,10 +1322,10 @@ class ChatService:
                 current_deck = self._get_or_load_deck(session_id)
                 if current_deck:
                     slide_deck_dict = current_deck.to_dict()
-                _deck_version_before_llm = None  # sentinel to skip save_point
+                _skip_save_point = True  # manual edit already has its own save point
 
             # Create save point immediately after persisting (streaming path)
-            if _deck_version_before_llm is not None:
+            if not _skip_save_point:
                 try:
                     if slide_context:
                         slide_nums = [i + 1 for i in slide_context.get("indices", [])]
