@@ -1,7 +1,8 @@
 """
-Tools for the slide generator agent.
+Genie tool for the slide generator agent.
 
-This module implements tools that the agent can use to gather data and perform tasks.
+This module implements tools for querying Databricks Genie spaces.
+Includes the low-level query functions and the LangChain tool builder.
 """
 
 import logging
@@ -9,7 +10,10 @@ import time
 from typing import Any, Optional
 
 import pandas as pd
+from langchain_core.tools import StructuredTool
+from pydantic import BaseModel, Field
 
+from src.api.schemas.agent_config import GenieTool
 from src.core.databricks_client import get_user_client
 from src.core.settings_db import get_settings
 
@@ -20,6 +24,12 @@ class GenieToolError(Exception):
     """Raised when Genie tool execution fails."""
 
     pass
+
+
+class GenieQueryInput(BaseModel):
+    """Input schema for Genie query tool."""
+
+    query: str = Field(description="Natural language question")
 
 
 def initialize_genie_conversation(space_id: Optional[str] = None) -> str:
@@ -57,9 +67,9 @@ def initialize_genie_conversation(space_id: Optional[str] = None) -> str:
     logger.info("Initializing Genie conversation", extra={"space_id": space_id})
 
     conversation_start_message: str = """
-    You are a data analyst agent for an AI slide generation system. 
-    Unless explicitly instructed otherwise, convert datetimes to dates and always round numeric columns to the nearest whole number. 
-    Provide an informative explanation of your query results. 
+    You are a data analyst agent for an AI slide generation system.
+    Unless explicitly instructed otherwise, convert datetimes to dates and always round numeric columns to the nearest whole number.
+    Provide an informative explanation of your query results.
     """
 
     try:
@@ -155,8 +165,8 @@ def query_genie_space(
                 )
 
             message_id = response.message_id
-            
-            
+
+
             # Extract attachments (data results)
             attachments = response.attachments
             data = ''
@@ -221,3 +231,92 @@ def query_genie_space(
                 raise GenieToolError(
                     f"Failed to query Genie space after {max_retries + 1} attempts: {e}"
                 ) from last_error
+
+
+def build_genie_tool(
+    genie_config: GenieTool,
+    session_data: dict[str, Any],
+    index: int = 1,
+) -> StructuredTool:
+    """Build a LangChain StructuredTool for a Genie space.
+
+    The tool wraps query_genie_space with automatic conversation_id
+    management via closure over session_data. Each Genie space gets
+    its own conversation_id tracked under a per-space key.
+
+    Args:
+        genie_config: GenieTool config with space_id and space_name
+        session_data: Mutable session dict (conversation_ids updated in place)
+        index: 1-based index for unique tool naming when multiple Genie spaces
+
+    Returns:
+        StructuredTool for querying Genie
+    """
+    # Per-space conversation ID key
+    conv_key = f"genie_conversation_id:{genie_config.space_id}"
+
+    # Seed from the persisted conversation_id on the GenieTool config first
+    if genie_config.conversation_id:
+        session_data[conv_key] = genie_config.conversation_id
+    # Fall back to the legacy single key if this is the first/only Genie space
+    elif conv_key not in session_data and index == 1:
+        legacy_id = session_data.get("genie_conversation_id")
+        if legacy_id:
+            session_data[conv_key] = legacy_id
+
+    def _query_genie_wrapper(query: str) -> str:
+        """Query Genie with auto-injected conversation_id from session."""
+        conversation_id = session_data.get(conv_key)
+
+        if conversation_id is None:
+            logger.info(
+                "Initializing Genie conversation for factory-built agent",
+                extra={"space_id": genie_config.space_id},
+            )
+            try:
+                new_conv_id = initialize_genie_conversation(space_id=genie_config.space_id)
+                session_data[conv_key] = new_conv_id
+                # Also update the legacy key for backward compat
+                session_data["genie_conversation_id"] = new_conv_id
+                conversation_id = new_conv_id
+            except Exception as e:
+                logger.error(f"Failed to initialize Genie conversation: {e}")
+                raise
+
+        result = query_genie_space(query, conversation_id, space_id=genie_config.space_id)
+
+        response_parts = []
+        if result.get("message"):
+            response_parts.append(f"Genie response: {result['message']}")
+        if result.get("data"):
+            response_parts.append(f"Data retrieved:\n\n{result['data']}")
+        if not response_parts:
+            return "Query completed but no data or message was returned."
+        return "\n\n".join(response_parts)
+
+    description = (
+        "Query Databricks Genie for data using natural language questions. "
+        "Genie understands natural language and converts it to SQL - do not write SQL yourself.\n\n"
+        "USAGE GUIDELINES:\n"
+        "- Make multiple queries to gather comprehensive data (typically 5-8 strategic queries)\n"
+        "- Use follow-up queries to drill deeper into interesting findings\n"
+        "- Conversation context is automatically maintained across queries\n"
+        "- If initial data is insufficient, query for more specific information\n\n"
+        "WHEN TO STOP:\n"
+        "- Once you have sufficient data, STOP calling this tool\n"
+        "- Transition immediately to generating the HTML presentation\n"
+        "- Do NOT make additional queries once you have enough information\n\n"
+    )
+    if genie_config.description:
+        description += f"DATA AVAILABLE:\n{genie_config.description}"
+    else:
+        description += f"DATA AVAILABLE:\nGenie space '{genie_config.space_name}'"
+
+    tool_name = "query_genie_space" if index == 1 else f"query_genie_space_{index}"
+
+    return StructuredTool.from_function(
+        func=_query_genie_wrapper,
+        name=tool_name,
+        description=description,
+        args_schema=GenieQueryInput,
+    )
