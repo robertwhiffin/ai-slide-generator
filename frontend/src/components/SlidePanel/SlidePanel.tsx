@@ -632,9 +632,8 @@ function SlidePanelComponent(props: SlidePanelProps, ref: React.Ref<SlidePanelHa
         </div>
       )}
       <div className="h-full overflow-y-auto">
-        <div className="p-4 space-y-4" key={versionKey}>
+        <div className="p-4 space-y-4">
               <DndContext
-                key={versionKey}
                 sensors={sensors}
                 collisionDetection={closestCenter}
                 onDragEnd={handleDragEnd}
@@ -645,7 +644,7 @@ function SlidePanelComponent(props: SlidePanelProps, ref: React.Ref<SlidePanelHa
                 >
         {slideDeck.slides.map((slide, index) => (
           <div
-            key={`${versionKey || 'live'}-${index}`}
+            key={slide.slide_id}
             ref={(el) => {
               if (el) {
                 slideRefs.current.set(index, el);
