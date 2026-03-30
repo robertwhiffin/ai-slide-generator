@@ -33,7 +33,9 @@ const ToolChip: React.FC<{
 }> = ({ tool, onRemove, onEdit, sessionId }) => {
   const label = tool.type === 'genie'
     ? tool.space_name
-    : tool.server_name;
+    : tool.type === 'mcp'
+    ? tool.server_name
+    : tool.endpoint_name;
 
   const conversationId = tool.type === 'genie' ? tool.conversation_id : undefined;
   const spaceId = tool.type === 'genie' ? tool.space_id : undefined;
