@@ -14,20 +14,18 @@ import logging
 from typing import Any, Optional
 
 from langchain_core.tools import StructuredTool
-from pydantic import BaseModel, Field
 
 from src.api.schemas.agent_config import AgentConfig, GenieTool, MCPTool
 from src.core.defaults import DEFAULT_CONFIG, DEFAULT_SLIDE_STYLE
 from src.services.image_tools import SearchImagesInput, search_images
-from src.services.tools import initialize_genie_conversation, query_genie_space
+from src.services.tools import (
+    GenieQueryInput,
+    build_genie_tool,
+    initialize_genie_conversation,
+    query_genie_space,
+)
 
 logger = logging.getLogger(__name__)
-
-
-class GenieQueryInput(BaseModel):
-    """Input schema for Genie query tool."""
-
-    query: str = Field(description="Natural language question")
 
 
 def _create_model():
@@ -155,95 +153,6 @@ def _get_prompt_content(
     }
 
 
-def _build_genie_tool(
-    genie_config: GenieTool,
-    session_data: dict[str, Any],
-    index: int = 1,
-) -> StructuredTool:
-    """Build a LangChain StructuredTool for a Genie space.
-
-    The tool wraps query_genie_space with automatic conversation_id
-    management via closure over session_data. Each Genie space gets
-    its own conversation_id tracked under a per-space key.
-
-    Args:
-        genie_config: GenieTool config with space_id and space_name
-        session_data: Mutable session dict (conversation_ids updated in place)
-        index: 1-based index for unique tool naming when multiple Genie spaces
-
-    Returns:
-        StructuredTool for querying Genie
-    """
-    # Per-space conversation ID key
-    conv_key = f"genie_conversation_id:{genie_config.space_id}"
-
-    # Seed from the persisted conversation_id on the GenieTool config first
-    if genie_config.conversation_id:
-        session_data[conv_key] = genie_config.conversation_id
-    # Fall back to the legacy single key if this is the first/only Genie space
-    elif conv_key not in session_data and index == 1:
-        legacy_id = session_data.get("genie_conversation_id")
-        if legacy_id:
-            session_data[conv_key] = legacy_id
-
-    def _query_genie_wrapper(query: str) -> str:
-        """Query Genie with auto-injected conversation_id from session."""
-        conversation_id = session_data.get(conv_key)
-
-        if conversation_id is None:
-            logger.info(
-                "Initializing Genie conversation for factory-built agent",
-                extra={"space_id": genie_config.space_id},
-            )
-            try:
-                new_conv_id = initialize_genie_conversation(space_id=genie_config.space_id)
-                session_data[conv_key] = new_conv_id
-                # Also update the legacy key for backward compat
-                session_data["genie_conversation_id"] = new_conv_id
-                conversation_id = new_conv_id
-            except Exception as e:
-                logger.error(f"Failed to initialize Genie conversation: {e}")
-                raise
-
-        result = query_genie_space(query, conversation_id, space_id=genie_config.space_id)
-
-        response_parts = []
-        if result.get("message"):
-            response_parts.append(f"Genie response: {result['message']}")
-        if result.get("data"):
-            response_parts.append(f"Data retrieved:\n\n{result['data']}")
-        if not response_parts:
-            return "Query completed but no data or message was returned."
-        return "\n\n".join(response_parts)
-
-    description = (
-        "Query Databricks Genie for data using natural language questions. "
-        "Genie understands natural language and converts it to SQL - do not write SQL yourself.\n\n"
-        "USAGE GUIDELINES:\n"
-        "- Make multiple queries to gather comprehensive data (typically 5-8 strategic queries)\n"
-        "- Use follow-up queries to drill deeper into interesting findings\n"
-        "- Conversation context is automatically maintained across queries\n"
-        "- If initial data is insufficient, query for more specific information\n\n"
-        "WHEN TO STOP:\n"
-        "- Once you have sufficient data, STOP calling this tool\n"
-        "- Transition immediately to generating the HTML presentation\n"
-        "- Do NOT make additional queries once you have enough information\n\n"
-    )
-    if genie_config.description:
-        description += f"DATA AVAILABLE:\n{genie_config.description}"
-    else:
-        description += f"DATA AVAILABLE:\nGenie space '{genie_config.space_name}'"
-
-    tool_name = "query_genie_space" if index == 1 else f"query_genie_space_{index}"
-
-    return StructuredTool.from_function(
-        func=_query_genie_wrapper,
-        name=tool_name,
-        description=description,
-        args_schema=GenieQueryInput,
-    )
-
-
 def _build_tools(
     config: AgentConfig,
     session_data: dict[str, Any],
@@ -280,7 +189,7 @@ def _build_tools(
     for tool_entry in config.tools:
         if isinstance(tool_entry, GenieTool):
             genie_index += 1
-            genie_tool = _build_genie_tool(tool_entry, session_data, genie_index)
+            genie_tool = build_genie_tool(tool_entry, session_data, genie_index)
             tools.append(genie_tool)
             logger.info(
                 "Added Genie tool",

@@ -57,13 +57,13 @@ class TestGenieToolConversationIdSchema:
 class TestAgentFactorySeedsConversationId:
     """Agent factory should seed session_data from GenieTool.conversation_id."""
 
-    @patch("src.services.agent_factory.initialize_genie_conversation")
-    @patch("src.services.agent_factory.query_genie_space")
+    @patch("src.services.tools.genie_tool.initialize_genie_conversation")
+    @patch("src.services.tools.genie_tool.query_genie_space")
     def test_seeds_session_data_from_config_conversation_id(
         self, mock_query, mock_init
     ):
         from src.api.schemas.agent_config import GenieTool
-        from src.services.agent_factory import _build_genie_tool
+        from src.services.tools import build_genie_tool
 
         genie_config = GenieTool(
             type="genie", space_id="space-1", space_name="Sales",
@@ -71,18 +71,18 @@ class TestAgentFactorySeedsConversationId:
         )
         session_data = {"session_id": "test"}
 
-        _build_genie_tool(genie_config, session_data, index=1)
+        build_genie_tool(genie_config, session_data, index=1)
 
         # Should have seeded the per-space key from the config
         assert session_data["genie_conversation_id:space-1"] == "conv-from-config"
 
-    @patch("src.services.agent_factory.initialize_genie_conversation")
-    @patch("src.services.agent_factory.query_genie_space")
+    @patch("src.services.tools.genie_tool.initialize_genie_conversation")
+    @patch("src.services.tools.genie_tool.query_genie_space")
     def test_config_conversation_id_takes_precedence_over_legacy(
         self, mock_query, mock_init
     ):
         from src.api.schemas.agent_config import GenieTool
-        from src.services.agent_factory import _build_genie_tool
+        from src.services.tools import build_genie_tool
 
         genie_config = GenieTool(
             type="genie", space_id="space-1", space_name="Sales",
@@ -93,18 +93,18 @@ class TestAgentFactorySeedsConversationId:
             "genie_conversation_id": "legacy-conv",
         }
 
-        _build_genie_tool(genie_config, session_data, index=1)
+        build_genie_tool(genie_config, session_data, index=1)
 
         # Config value should win
         assert session_data["genie_conversation_id:space-1"] == "conv-from-config"
 
-    @patch("src.services.agent_factory.initialize_genie_conversation")
-    @patch("src.services.agent_factory.query_genie_space")
+    @patch("src.services.tools.genie_tool.initialize_genie_conversation")
+    @patch("src.services.tools.genie_tool.query_genie_space")
     def test_falls_back_to_legacy_when_no_config_conversation_id(
         self, mock_query, mock_init
     ):
         from src.api.schemas.agent_config import GenieTool
-        from src.services.agent_factory import _build_genie_tool
+        from src.services.tools import build_genie_tool
 
         genie_config = GenieTool(
             type="genie", space_id="space-1", space_name="Sales",
@@ -114,7 +114,7 @@ class TestAgentFactorySeedsConversationId:
             "genie_conversation_id": "legacy-conv",
         }
 
-        _build_genie_tool(genie_config, session_data, index=1)
+        build_genie_tool(genie_config, session_data, index=1)
 
         # Should fall back to legacy
         assert session_data["genie_conversation_id:space-1"] == "legacy-conv"
