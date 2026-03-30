@@ -625,6 +625,45 @@ class TestAgentBricksDiscovery:
         result = _discover_agent_bricks()
         assert len(result["items"]) == 1
         assert result["items"][0]["name"] == "hr-bot"
+
+
+class TestDiscoveryErrorHandling:
+    """Verify all discovery endpoints return empty items on SDK failure."""
+
+    @patch("src.api.routes.tools.get_user_client")
+    def test_genie_discovery_returns_empty_on_error(self, mock_client_fn):
+        from src.api.routes.tools import _discover_genie_spaces
+        mock_client_fn.return_value.genie.list_spaces.side_effect = Exception("Auth failed")
+        result = _discover_genie_spaces()
+        assert result["items"] == []
+
+    @patch("src.api.routes.tools.get_user_client")
+    def test_vector_discovery_returns_empty_on_error(self, mock_client_fn):
+        from src.api.routes.tools import _discover_vector_endpoints
+        mock_client_fn.return_value.vector_search_endpoints.list_endpoints.side_effect = Exception("No access")
+        result = _discover_vector_endpoints()
+        assert result["items"] == []
+
+    @patch("src.api.routes.tools.get_user_client")
+    def test_mcp_discovery_returns_empty_on_error(self, mock_client_fn):
+        from src.api.routes.tools import _discover_mcp_connections
+        mock_client_fn.return_value.connections.list.side_effect = Exception("Not configured")
+        result = _discover_mcp_connections()
+        assert result["items"] == []
+
+    @patch("src.api.routes.tools.get_user_client")
+    def test_model_endpoint_discovery_returns_empty_on_error(self, mock_client_fn):
+        from src.api.routes.tools import _discover_model_endpoints
+        mock_client_fn.return_value.serving_endpoints.list.side_effect = Exception("Timeout")
+        result = _discover_model_endpoints()
+        assert result["items"] == []
+
+    @patch("src.api.routes.tools.get_user_client")
+    def test_agent_bricks_discovery_returns_empty_on_error(self, mock_client_fn):
+        from src.api.routes.tools import _discover_agent_bricks
+        mock_client_fn.return_value.serving_endpoints.list.side_effect = Exception("Timeout")
+        result = _discover_agent_bricks()
+        assert result["items"] == []
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
