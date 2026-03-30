@@ -5,17 +5,9 @@ Creates LangChain tools for querying Databricks Agent Bricks endpoints
 (knowledge assistants and supervisor agents) using the user's OAuth
 token (OBO authentication).
 
-Uses the Databricks SDK's ``serving_endpoints.query()`` method which
-handles the correct request/response format for all agent endpoint
-versions (agent/v1/responses, agent/v2/chat).
-
-Request format::
-
-    messages=[{"role": "user", "content": "..."}]
-
-Response format::
-
-    {"choices": [{"message": {"content": "..."}}]}
+Uses ``api_client.do()`` for direct HTTP calls to serving endpoints,
+matching the proven pattern from the original tools implementation.
+Tries multiple input formats to handle different agent endpoint versions.
 """
 
 import json
@@ -42,22 +34,15 @@ class AgentBricksInput(BaseModel):
     query: str = Field(description="Question or request to send to the agent")
 
 
-def _extract_text(response) -> str:
-    """Extract text from SDK response (object or raw dict).
+def _extract_text_from_response(result: dict) -> str:
+    """Extract text from an agent endpoint response dict.
 
-    The SDK's ``serving_endpoints.query()`` may return a
-    ``QueryEndpointResponse`` dataclass or a plain ``dict`` depending on
-    the endpoint's response shape.
+    Tries multiple response formats:
+    - choices format: {"choices": [{"message": {"content": "..."}}]}
+    - output list format: {"output": [{"type": "message", "content": [{"text": "..."}]}]}
+    - output string format: {"output": "plain text"}
     """
-    # Convert to dict for uniform handling
-    if isinstance(response, dict):
-        result = response
-    elif hasattr(response, "as_dict"):
-        result = response.as_dict()
-    else:
-        result = {}
-
-    # Try choices format (standard for agent/v2/chat and foundation models)
+    # choices format (standard for chat/agent endpoints)
     choices = result.get("choices", [])
     if isinstance(choices, list):
         for choice in choices:
@@ -66,10 +51,8 @@ def _extract_text(response) -> str:
                 if isinstance(msg, dict) and msg.get("content"):
                     return msg["content"]
 
-    # Try output format (agent/v1/responses)
+    # output list format (agent/v1/responses)
     output = result.get("output", [])
-    if isinstance(output, str) and output:
-        return output
     if isinstance(output, list):
         texts = []
         for item in output:
@@ -80,18 +63,23 @@ def _extract_text(response) -> str:
         if texts:
             return "\n\n".join(texts)
 
-    # Last resort: return raw JSON if any content
-    if result:
-        return json.dumps(result)
-    return "Agent returned no content."
+    # output string format
+    if isinstance(output, str) and output:
+        return output
+
+    return ""
 
 
 def _query_agent_bricks(endpoint_name: str, query: str) -> str:
     """
-    Query a Databricks Agent Bricks endpoint using the SDK.
+    Query a Databricks Agent Bricks endpoint.
 
-    Uses ``client.serving_endpoints.query()`` which handles the correct
-    format for all agent endpoint versions.
+    Tries multiple input formats since agent endpoints vary by version:
+    - {"messages": [...]} — agent/v2/chat and standard chat format
+    - {"input": {"messages": [...]}} — agent/v1/responses format
+
+    Uses api_client.do() for direct HTTP (returns plain dict, no
+    deserialization issues).
 
     Args:
         endpoint_name: Name of the serving endpoint
@@ -101,7 +89,7 @@ def _query_agent_bricks(endpoint_name: str, query: str) -> str:
         Text string with agent response
 
     Raises:
-        AgentBricksError: If query fails
+        AgentBricksError: If all formats fail
     """
     logger.info(
         "Querying agent bricks endpoint",
@@ -110,27 +98,51 @@ def _query_agent_bricks(endpoint_name: str, query: str) -> str:
 
     try:
         client = get_user_client()
+        path = f"/serving-endpoints/{endpoint_name}/invocations"
+        messages = [{"role": "user", "content": query}]
 
-        # Use the SDK's query method — handles all agent formats correctly
-        response = client.serving_endpoints.query(
-            name=endpoint_name,
-            messages=[{"role": "user", "content": query}],
-        )
+        # Try formats in order of likelihood
+        formats = [
+            ("messages", {"messages": messages}),
+            ("input_messages", {"input": {"messages": messages}}),
+            ("input_array", {"input": messages}),
+        ]
 
-        # The SDK may return a QueryEndpointResponse object or a raw dict
-        # depending on the endpoint's response format. Handle both.
-        text = _extract_text(response)
+        last_error = None
+        for label, body in formats:
+            try:
+                result = client.api_client.do("POST", path, body=body)
+                text = _extract_text_from_response(result)
+                if text:
+                    logger.info(
+                        "Agent bricks query completed (%s format)",
+                        label,
+                        extra={
+                            "endpoint": endpoint_name,
+                            "response_length": len(text),
+                        },
+                    )
+                    return text
+                else:
+                    logger.debug(
+                        "Agent bricks %s format returned empty for %s",
+                        label, endpoint_name,
+                    )
+            except Exception as e:
+                last_error = e
+                logger.debug(
+                    "Agent bricks %s format failed for %s: %s",
+                    label, endpoint_name, e,
+                )
+                continue
 
-        logger.info(
-            "Agent bricks query completed",
-            extra={
-                "endpoint": endpoint_name,
-                "response_length": len(text),
-            },
-        )
+        # All formats returned empty or failed
+        if last_error:
+            raise last_error
+        return "Agent returned no content."
 
-        return text
-
+    except AgentBricksError:
+        raise
     except Exception as e:
         logger.error("Agent bricks query failed: %s", e, exc_info=True)
         raise AgentBricksError(

@@ -149,40 +149,19 @@ def _extract_foundation_response(result: dict) -> str:
 # Query dispatchers -- one per endpoint type
 # ---------------------------------------------------------------------------
 
-def _query_chat(client, endpoint_name: str, message: list[dict]) -> str:
-    """Query agent or foundation model endpoint using the SDK.
-
-    Both agent and foundation endpoints accept the same format via
-    ``serving_endpoints.query(messages=[...])``.
-
-    The SDK may return a QueryEndpointResponse dataclass or a raw dict.
-    """
-    response = client.serving_endpoints.query(
-        name=endpoint_name,
-        messages=message,
-    )
-    # Convert to dict for uniform handling
-    if isinstance(response, dict):
-        result = response
-    elif hasattr(response, "as_dict"):
-        result = response.as_dict()
-    else:
-        result = {}
-
-    # Try choices format first (standard for chat/agent)
+def _query_agent(client, path: str, message: list[dict]) -> str:
+    """Send agent format (messages) and extract response."""
+    result = client.api_client.do("POST", path, body={"messages": message})
     text = _extract_foundation_response(result)
     if text:
         return text
+    return _extract_agent_response(result)
 
-    # Try agent output format
-    text = _extract_agent_response(result)
-    if text:
-        return text
 
-    # Return raw if anything present
-    if result:
-        return json.dumps(result)
-    return ""
+def _query_foundation(client, path: str, message: list[dict]) -> str:
+    """Send foundation model format and extract response."""
+    result = client.api_client.do("POST", path, body={"messages": message})
+    return _extract_foundation_response(result)
 
 
 def _query_custom_ml(client, path: str, input_data: dict) -> str:
@@ -200,7 +179,8 @@ def _query_with_fallback(
     from databricks.sdk.errors import BadRequest, InvalidParameterValue
 
     for label, fn, args in [
-        ("chat", _query_chat, (client, endpoint_name, message)),
+        ("agent", _query_agent, (client, path, message)),
+        ("foundation", _query_foundation, (client, path, message)),
         ("custom_ml", _query_custom_ml, (client, path, input_data)),
     ]:
         try:
@@ -254,10 +234,16 @@ def _query_model_endpoint(
 
         ep_type = _detect_endpoint_type(client, endpoint_name)
 
-        if ep_type in (ENDPOINT_TYPE_AGENT, ENDPOINT_TYPE_FOUNDATION):
-            text = _query_chat(client, endpoint_name, message)
+        if ep_type == ENDPOINT_TYPE_AGENT:
+            text = _query_agent(client, path, message)
             if text:
-                logger.info("Query successful (%s)", ep_type, extra={"endpoint": endpoint_name})
+                logger.info("Query successful (agent)", extra={"endpoint": endpoint_name})
+                return text
+
+        elif ep_type == ENDPOINT_TYPE_FOUNDATION:
+            text = _query_foundation(client, path, message)
+            if text:
+                logger.info("Query successful (foundation)", extra={"endpoint": endpoint_name})
                 return text
 
         elif ep_type == ENDPOINT_TYPE_CUSTOM_ML:
