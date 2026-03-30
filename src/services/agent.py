@@ -23,6 +23,7 @@ from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.tools import StructuredTool
 from pydantic import BaseModel, Field
 
+from src.core.defaults import DEFAULT_CONFIG
 from src.core.databricks_client import (
     get_current_username,
     get_databricks_client,
@@ -124,17 +125,10 @@ class SlideGeneratorAgent:
             try:
                 self.settings = get_settings()
             except Exception:
-                from src.core.defaults import DEFAULT_CONFIG
-                from src.core.settings_db import LLMSettings, AppSettings
-                llm_defaults = DEFAULT_CONFIG["llm"]
+                from src.core.settings_db import AppSettings
                 self.settings = AppSettings(
                     profile_id=0,
                     profile_name="default",
-                    llm=LLMSettings(
-                        endpoint=llm_defaults["endpoint"],
-                        temperature=llm_defaults["temperature"],
-                        max_tokens=llm_defaults["max_tokens"],
-                    ),
                     genie=None,
                     prompts={},
                 )
@@ -330,23 +324,24 @@ class SlideGeneratorAgent:
         with the authenticated user's permissions.
         """
         try:
-            # Get user-scoped client (falls back to system client in local dev)
+            from src.core.defaults import DEFAULT_CONFIG
             user_client = get_user_client()
+            llm_config = DEFAULT_CONFIG["llm"]
 
             model = ChatDatabricks(
-                endpoint=self.settings.llm.endpoint,
-                temperature=self.settings.llm.temperature,
-                max_tokens=self.settings.llm.max_tokens,
-                top_p=self.settings.llm.top_p,
+                endpoint=llm_config["endpoint"],
+                temperature=llm_config["temperature"],
+                max_tokens=llm_config["max_tokens"],
+                top_p=llm_config["top_p"],
                 workspace_client=user_client,
             )
 
             logger.info(
                 "ChatDatabricks model created with user context",
                 extra={
-                    "endpoint": self.settings.llm.endpoint,
-                    "temperature": self.settings.llm.temperature,
-                    "max_tokens": self.settings.llm.max_tokens,
+                    "endpoint": llm_config["endpoint"],
+                    "temperature": llm_config["temperature"],
+                    "max_tokens": llm_config["max_tokens"],
                 },
             )
 
@@ -595,7 +590,7 @@ class SlideGeneratorAgent:
                 return_intermediate_steps=True,
                 verbose=True,
                 max_iterations=1000,
-                max_execution_time=self.settings.llm.timeout,
+                max_execution_time=DEFAULT_CONFIG["llm"]["timeout"],
             )
 
             logger.info("Agent executor created")
@@ -1254,7 +1249,7 @@ class SlideGeneratorAgent:
                 span.set_attribute("session_id", session_id)
                 span.set_attribute("profile_name", session.get("profile_name", "unknown"))
                 span.set_attribute("session_timestamp", session.get("created_at", ""))
-                span.set_attribute("model_endpoint", self.settings.llm.endpoint)
+                span.set_attribute("model_endpoint", DEFAULT_CONFIG["llm"]["endpoint"])
                 span.set_attribute("message_count", session["message_count"])
                 span.set_attribute("mode", "edit" if editing_mode else "generate")
 
@@ -1478,7 +1473,7 @@ class SlideGeneratorAgent:
                 span.set_attribute("session_id", session_id)
                 span.set_attribute("profile_name", session.get("profile_name", "unknown"))
                 span.set_attribute("session_timestamp", session.get("created_at", ""))
-                span.set_attribute("model_endpoint", self.settings.llm.endpoint)
+                span.set_attribute("model_endpoint", DEFAULT_CONFIG["llm"]["endpoint"])
                 span.set_attribute("message_count", session["message_count"])
                 span.set_attribute("mode", "edit" if editing_mode else "generate")
                 span.set_attribute("streaming", True)
@@ -1642,7 +1637,7 @@ class SlideGeneratorAgent:
                 return_intermediate_steps=True,
                 verbose=True,
                 max_iterations=1000,
-                max_execution_time=self.settings.llm.timeout,
+                max_execution_time=DEFAULT_CONFIG["llm"]["timeout"],
             )
 
             logger.info("Agent executor created with streaming callbacks")
