@@ -102,7 +102,7 @@ Provide your rating and explain your reasoning in 2-3 sentences."""
 async def evaluate_with_judge(
     genie_data: str,
     slide_content: str,
-    model: str = "databricks-claude-opus-4-6",
+    model: str = "databricks-claude-sonnet-4-5",
     trace_id: Optional[str] = None,
     experiment_id: Optional[str] = None,
 ) -> LLMJudgeResult:
