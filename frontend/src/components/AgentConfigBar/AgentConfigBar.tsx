@@ -382,7 +382,7 @@ export const AgentConfigBar: React.FC = () => {
             <div className="flex flex-wrap items-center gap-1.5 relative">
               {agentConfig.tools.map((tool, idx) => (
                 <ToolChip
-                  key={`${tool.type}-${tool.type === 'genie' ? tool.space_id : tool.server_uri}-${idx}`}
+                  key={`${tool.type}-${'space_id' in tool ? tool.space_id : 'connection_name' in tool ? tool.connection_name : 'endpoint_name' in tool ? tool.endpoint_name : idx}-${idx}`}
                   tool={tool}
                   onRemove={() => removeTool(tool)}
                   onEdit={tool.type === 'genie' ? () => handleEditChip(tool) : undefined}

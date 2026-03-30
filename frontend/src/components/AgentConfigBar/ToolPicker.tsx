@@ -26,7 +26,16 @@ function isAlreadyAdded(candidate: AvailableTool, existing: ToolEntry[]): boolea
       return t.space_id === candidate.space_id;
     }
     if (t.type === 'mcp' && candidate.type === 'mcp') {
-      return t.server_uri === candidate.server_uri;
+      return t.connection_name === candidate.connection_name;
+    }
+    if (t.type === 'vector_index' && candidate.type === 'vector_index') {
+      return t.endpoint_name === candidate.endpoint_name && t.index_name === candidate.index_name;
+    }
+    if (t.type === 'model_endpoint' && candidate.type === 'model_endpoint') {
+      return t.endpoint_name === candidate.endpoint_name;
+    }
+    if (t.type === 'agent_bricks' && candidate.type === 'agent_bricks') {
+      return t.endpoint_name === candidate.endpoint_name;
     }
     return false;
   });
@@ -85,7 +94,7 @@ export const ToolPicker: React.FC<ToolPickerProps> = ({
 
   const displayName = (tool: AvailableTool): string => {
     if (tool.type === 'genie') return tool.space_name ?? tool.space_id ?? 'Genie Space';
-    return tool.server_name ?? tool.server_uri ?? 'MCP Server';
+    return tool.server_name ?? tool.connection_name ?? 'MCP Server';
   };
 
   // Client-side filter
@@ -159,7 +168,7 @@ export const ToolPicker: React.FC<ToolPickerProps> = ({
           const added = isAlreadyAdded(tool, existingTools);
           return (
             <button
-              key={`${tool.type}-${tool.space_id ?? tool.server_uri ?? idx}`}
+              key={`${tool.type}-${tool.space_id ?? tool.connection_name ?? idx}`}
               disabled={added}
               onClick={() => {
                 if (tool.type === 'genie') {

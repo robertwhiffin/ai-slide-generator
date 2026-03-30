@@ -290,7 +290,16 @@ export const AgentConfigProvider: React.FC<{ children: React.ReactNode }> = ({ c
           return t.space_id !== tool.space_id;
         }
         if (t.type === 'mcp' && tool.type === 'mcp') {
-          return t.server_uri !== tool.server_uri;
+          return t.connection_name !== tool.connection_name;
+        }
+        if (t.type === 'vector_index' && tool.type === 'vector_index') {
+          return t.endpoint_name !== tool.endpoint_name || t.index_name !== tool.index_name;
+        }
+        if (t.type === 'model_endpoint' && tool.type === 'model_endpoint') {
+          return t.endpoint_name !== tool.endpoint_name;
+        }
+        if (t.type === 'agent_bricks' && tool.type === 'agent_bricks') {
+          return t.endpoint_name !== tool.endpoint_name;
         }
         return true;
       }),
