@@ -1,11 +1,7 @@
 """Configuration service for managing settings within profiles."""
-from typing import List
-
 from sqlalchemy.orm import Session
 
-from src.core.databricks_client import get_databricks_client
 from src.database.models import (
-    ConfigAIInfra,
     ConfigPrompts,
 )
 
@@ -15,65 +11,6 @@ class ConfigService:
 
     def __init__(self, db: Session):
         self.db = db
-
-    # AI Infrastructure
-
-    def get_ai_infra_config(self, profile_id: int) -> ConfigAIInfra:
-        """Get AI db_app_deployment settings for specific profile."""
-        config = self.db.query(ConfigAIInfra).filter_by(profile_id=profile_id).first()
-        if not config:
-            raise ValueError(f"AI db_app_deployment settings not found for profile {profile_id}")
-        return config
-
-    def update_ai_infra_config(
-        self,
-        profile_id: int,
-        llm_endpoint: str = None,
-        llm_temperature: float = None,
-        llm_max_tokens: int = None,
-        user: str = None,
-    ) -> ConfigAIInfra:
-        """Update AI infrastructure configuration."""
-        config = self.get_ai_infra_config(profile_id)
-
-        changes = {}
-
-        if llm_endpoint is not None and llm_endpoint != config.llm_endpoint:
-            changes["llm_endpoint"] = {"old": config.llm_endpoint, "new": llm_endpoint}
-            config.llm_endpoint = llm_endpoint
-
-        if llm_temperature is not None and llm_temperature != config.llm_temperature:
-            changes["llm_temperature"] = {"old": float(config.llm_temperature), "new": llm_temperature}
-            config.llm_temperature = llm_temperature
-
-        if llm_max_tokens is not None and llm_max_tokens != config.llm_max_tokens:
-            changes["llm_max_tokens"] = {"old": config.llm_max_tokens, "new": llm_max_tokens}
-            config.llm_max_tokens = llm_max_tokens
-
-        self.db.commit()
-        self.db.refresh(config)
-
-        return config
-
-    def get_available_endpoints(self) -> List[str]:
-        """
-        Get list of available Databricks serving endpoints.
-        Returns endpoints sorted with databricks- prefixed first.
-        """
-        try:
-            client = get_databricks_client()
-            endpoints = client.serving_endpoints.list()
-            names = [endpoint.name for endpoint in endpoints]
-
-            # Sort: databricks- prefixed first, then others
-            databricks_endpoints = sorted([n for n in names if n.startswith("databricks-")])
-            other_endpoints = sorted([n for n in names if not n.startswith("databricks-")])
-
-            return databricks_endpoints + other_endpoints
-        except Exception as e:
-            # Log error but don't fail
-            print(f"Warning: Could not list endpoints: {e}")
-            return []
 
     # Prompts
 

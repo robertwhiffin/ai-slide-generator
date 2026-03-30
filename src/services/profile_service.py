@@ -7,7 +7,6 @@ from sqlalchemy.orm import Session, joinedload
 from src.core.defaults import DEFAULT_CONFIG
 from src.core.permission_context import get_permission_context
 from src.database.models import (
-    ConfigAIInfra,
     ConfigGenieSpace,
     ConfigProfile,
     ConfigProfileContributor,
@@ -199,14 +198,7 @@ class ProfileService:
         )
         self.db.add(contributor)
 
-        # Use defaults for AI infrastructure
-        ai_infra = ConfigAIInfra(
-            profile_id=profile.id,
-            llm_endpoint=DEFAULT_CONFIG["llm"]["endpoint"],
-            llm_temperature=DEFAULT_CONFIG["llm"]["temperature"],
-            llm_max_tokens=DEFAULT_CONFIG["llm"]["max_tokens"],
-        )
-        self.db.add(ai_infra)
+        # LLM config now comes from DEFAULT_CONFIG, no per-profile AI infra needed
 
         # NO default Genie space - user must explicitly configure one
 
@@ -409,15 +401,7 @@ class ProfileService:
         )
         self.db.add(contributor)
 
-        # Create AI infrastructure (use provided or defaults)
-        ai_config = ai_infra or {}
-        ai_infra_record = ConfigAIInfra(
-            profile_id=profile.id,
-            llm_endpoint=ai_config.get("llm_endpoint") or DEFAULT_CONFIG["llm"]["endpoint"],
-            llm_temperature=ai_config.get("llm_temperature") if ai_config.get("llm_temperature") is not None else DEFAULT_CONFIG["llm"]["temperature"],
-            llm_max_tokens=ai_config.get("llm_max_tokens") or DEFAULT_CONFIG["llm"]["max_tokens"],
-        )
-        self.db.add(ai_infra_record)
+        # LLM config now comes from DEFAULT_CONFIG, no per-profile AI infra needed
 
         # Create Genie space (optional - profiles without Genie run in prompt-only mode)
         if genie_space:
@@ -500,14 +484,7 @@ class ProfileService:
         self.db.add(profile)
         self.db.flush()
 
-        # Copy AI infrastructure
-        ai_infra = ConfigAIInfra(
-            profile_id=profile.id,
-            llm_endpoint=source_profile.ai_infra.llm_endpoint,
-            llm_temperature=source_profile.ai_infra.llm_temperature,
-            llm_max_tokens=source_profile.ai_infra.llm_max_tokens,
-        )
-        self.db.add(ai_infra)
+        # LLM config now comes from DEFAULT_CONFIG, no per-profile AI infra needed
 
         # Copy Genie space if exists
         if source_profile.genie_spaces:
