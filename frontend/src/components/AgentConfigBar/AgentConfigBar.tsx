@@ -10,7 +10,7 @@
  */
 
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
-import { Plus, X, Save, FolderOpen, Loader2, ChevronDown, ChevronUp, ExternalLink } from 'lucide-react';
+import { X, Save, FolderOpen, Loader2, ChevronDown, ChevronUp, ExternalLink } from 'lucide-react';
 import { useAgentConfig } from '../../contexts/AgentConfigContext';
 import { useSession } from '../../contexts/SessionContext';
 import { configApi } from '../../api/config';
@@ -242,9 +242,6 @@ export const AgentConfigBar: React.FC = () => {
   // Expanded / collapsed state
   const [expanded, setExpanded] = useState(false);
 
-  // ToolPicker visibility
-  const [toolPickerOpen, setToolPickerOpen] = useState(false);
-
   // Detail panel state
   const [detailTool, setDetailTool] = useState<GenieTool | AvailableTool | null>(null);
   const [detailMode, setDetailMode] = useState<'add' | 'edit'>('add');
@@ -391,17 +388,7 @@ export const AgentConfigBar: React.FC = () => {
                   sessionId={sessionId}
                 />
               ))}
-              <button
-                onClick={() => setToolPickerOpen(true)}
-                className="inline-flex items-center gap-0.5 px-2 py-0.5 rounded-full text-xs text-gray-500 border border-dashed border-gray-300 hover:border-gray-400 hover:text-gray-700 transition-colors"
-                data-testid="add-tool-button"
-              >
-                <Plus size={12} />
-                Add Genie
-              </button>
               <ToolPicker
-                isOpen={toolPickerOpen}
-                onClose={() => setToolPickerOpen(false)}
                 onSelect={addTool}
                 onPreview={handlePreview}
                 existingTools={agentConfig.tools}
