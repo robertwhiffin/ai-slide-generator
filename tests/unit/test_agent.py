@@ -20,13 +20,6 @@ from src.services.agent import (
 def mock_settings():
     """Mock settings for testing."""
     settings = Mock()
-    settings.llm.endpoint = "test-endpoint"
-    settings.llm.temperature = 0.7
-    settings.llm.max_tokens = 4096
-    settings.llm.top_p = 0.95
-    settings.llm.timeout = 120
-    settings.mlflow.tracking_uri = "databricks"
-    settings.mlflow.experiment_name = "/test/experiment"
     settings.profile_name = "test-profile"
     settings.prompts = {
         "system_prompt": "You are a test assistant.",

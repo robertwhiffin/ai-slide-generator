@@ -33,14 +33,6 @@ from src.services.tools import GenieToolError
 def mock_settings():
     """Mock settings for testing."""
     settings = Mock()
-    settings.llm.endpoint = "test-endpoint"
-    settings.llm.temperature = 0.7
-    settings.llm.max_tokens = 4096
-    settings.llm.top_p = 0.95
-    settings.llm.timeout = 120
-    settings.mlflow = Mock()
-    settings.mlflow.tracking_uri = "databricks"
-    settings.mlflow.experiment_name = "/test/experiment"
     settings.profile_name = "test-profile"
     settings.profile_id = 1
     settings.prompts = {
@@ -58,14 +50,6 @@ def mock_settings():
 def mock_settings_no_genie():
     """Mock settings without Genie for prompt-only mode."""
     settings = Mock()
-    settings.llm.endpoint = "test-endpoint"
-    settings.llm.temperature = 0.7
-    settings.llm.max_tokens = 4096
-    settings.llm.top_p = 0.95
-    settings.llm.timeout = 120
-    settings.mlflow = Mock()
-    settings.mlflow.tracking_uri = "databricks"
-    settings.mlflow.experiment_name = "/test/experiment"
     settings.profile_name = "test-profile"
     settings.profile_id = 1
     settings.prompts = {

@@ -6,7 +6,6 @@ from sqlalchemy.orm import sessionmaker
 
 from src.core.database import Base
 from src.database.models import (
-    ConfigAIInfra,
     ConfigGenieSpace,
     ConfigProfile,
     ConfigPrompts,
@@ -57,54 +56,6 @@ def test_unique_profile_name(db_session):
     
     with pytest.raises(IntegrityError):
         db_session.commit()
-
-
-def test_cascade_delete(db_session):
-    """Test that profile has proper foreign key relationships.
-    
-    Note: Cascade delete behavior is tested in PostgreSQL integration tests.
-    SQLite doesn't enforce foreign key cascades the same way.
-    """
-    profile = ConfigProfile(name="test", created_by="test")
-    db_session.add(profile)
-    db_session.flush()
-    
-    profile_id = profile.id
-    
-    ai_infra = ConfigAIInfra(
-        profile_id=profile_id,
-        llm_endpoint="test-endpoint",
-        llm_temperature=0.7,
-        llm_max_tokens=1000,
-    )
-    db_session.add(ai_infra)
-    db_session.commit()
-    
-    # Verify AI db_app_deployment exists and is linked to profile
-    saved_infra = db_session.query(ConfigAIInfra).filter_by(profile_id=profile_id).first()
-    assert saved_infra is not None
-    assert saved_infra.profile_id == profile_id
-    assert saved_infra.llm_endpoint == "test-endpoint"
-
-
-def test_ai_infra_relationships(db_session):
-    """Test AI infrastructure relationships."""
-    profile = ConfigProfile(name="test", created_by="test")
-    db_session.add(profile)
-    db_session.flush()
-    
-    ai_infra = ConfigAIInfra(
-        profile_id=profile.id,
-        llm_endpoint="test-endpoint",
-        llm_temperature=0.7,
-        llm_max_tokens=1000,
-    )
-    db_session.add(ai_infra)
-    db_session.commit()
-    
-    # Test relationship
-    assert profile.ai_infra.llm_endpoint == "test-endpoint"
-    assert ai_infra.profile.name == "test"
 
 
 def test_genie_space_creation(db_session):
@@ -161,25 +112,6 @@ def test_profile_repr(db_session):
     assert "is_default=True" in repr_str
 
 
-def test_ai_infra_repr(db_session):
-    """Test AI infrastructure string representation."""
-    profile = ConfigProfile(name="test", created_by="test")
-    db_session.add(profile)
-    db_session.flush()
-    
-    ai_infra = ConfigAIInfra(
-        profile_id=profile.id,
-        llm_endpoint="test-endpoint",
-        llm_temperature=0.7,
-        llm_max_tokens=1000,
-    )
-    db_session.add(ai_infra)
-    db_session.commit()
-    
-    repr_str = repr(ai_infra)
-    assert "test-endpoint" in repr_str
-
-
 def test_complete_profile_with_all_configs(db_session):
     """Test creating a complete profile with all configurations."""
     # Create profile
@@ -191,15 +123,6 @@ def test_complete_profile_with_all_configs(db_session):
     )
     db_session.add(profile)
     db_session.flush()
-    
-    # Add AI infrastructure
-    ai_infra = ConfigAIInfra(
-        profile_id=profile.id,
-        llm_endpoint="databricks-claude",
-        llm_temperature=0.7,
-        llm_max_tokens=60000,
-    )
-    db_session.add(ai_infra)
     
     # Add Genie space (one per profile)
     genie_space = ConfigGenieSpace(
@@ -221,12 +144,10 @@ def test_complete_profile_with_all_configs(db_session):
     db_session.commit()
     
     # Verify all relationships
-    assert profile.ai_infra is not None
     assert len(profile.genie_spaces) == 1
     assert profile.prompts is not None
-    
+
     # Verify data
-    assert profile.ai_infra.llm_endpoint == "databricks-claude"
     assert profile.genie_spaces[0].space_name == "Test Space"
     assert profile.prompts.system_prompt == "Test system prompt"
 
