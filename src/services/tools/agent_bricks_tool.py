@@ -101,45 +101,42 @@ def _query_agent_bricks(endpoint_name: str, query: str) -> str:
         path = f"/serving-endpoints/{endpoint_name}/invocations"
         messages = [{"role": "user", "content": query}]
 
-        # Try formats — input array first (most MAS/KA endpoints use this),
-        # then messages format (newer agent/v2/chat endpoints).
-        formats = [
-            ("input", {"input": messages}),
-            ("messages", {"messages": messages}),
-        ]
+        # Agent endpoints use {"input": [...]} format.
+        # This is confirmed by the Databricks API error message:
+        # "Please use 'input' field instead."
+        body = {"input": messages}
 
-        last_error = None
-        for label, body in formats:
-            try:
-                result = client.api_client.do("POST", path, body=body)
-                text = _extract_text_from_response(result)
-                if text:
-                    logger.info(
-                        "Agent bricks query completed (%s format)",
-                        label,
-                        extra={
-                            "endpoint": endpoint_name,
-                            "response_length": len(text),
-                        },
-                    )
-                    return text
-                else:
-                    logger.debug(
-                        "Agent bricks %s format returned empty for %s",
-                        label, endpoint_name,
-                    )
-            except Exception as e:
-                last_error = e
-                logger.info(
-                    "Agent bricks %s format rejected for %s: %s",
-                    label, endpoint_name, e,
-                )
-                continue
+        logger.info(
+            "Sending agent bricks request",
+            extra={"endpoint": endpoint_name, "format": "input"},
+        )
 
-        # All formats returned empty or failed
-        if last_error:
-            raise last_error
-        return "Agent returned no content."
+        result = client.api_client.do("POST", path, body=body)
+
+        logger.info(
+            "Agent bricks raw response",
+            extra={
+                "endpoint": endpoint_name,
+                "response_keys": list(result.keys()) if isinstance(result, dict) else str(type(result)),
+                "response_preview": str(result)[:500],
+            },
+        )
+
+        text = _extract_text_from_response(result)
+
+        if not text:
+            # Return raw response so we can see what came back
+            return json.dumps(result) if isinstance(result, dict) else str(result)
+
+        logger.info(
+            "Agent bricks query completed",
+            extra={
+                "endpoint": endpoint_name,
+                "response_length": len(text),
+            },
+        )
+
+        return text
 
     except AgentBricksError:
         raise
