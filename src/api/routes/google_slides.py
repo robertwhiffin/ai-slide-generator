@@ -180,12 +180,13 @@ async def auth_callback(
 
         auth = _get_auth(db)
         redirect_uri = _build_redirect_uri(request)
-        auth.authorize(code=code, redirect_uri=redirect_uri)
+        code_verifier = state_data.get("code_verifier")
+        auth.authorize(code=code, redirect_uri=redirect_uri, code_verifier=code_verifier)
         logger.info(
             "Google Slides OAuth callback successful",
             extra={"user": _get_user_identity()},
         )
-    except (GoogleSlidesAuthError, ValueError, json.JSONDecodeError) as exc:
+    except Exception as exc:
         logger.error("OAuth callback failed", exc_info=True)
         return HTMLResponse(
             content=f"""
