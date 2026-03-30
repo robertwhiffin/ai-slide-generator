@@ -2,14 +2,16 @@
  * ToolPicker — category buttons for adding tools to the agent config.
  *
  * Renders a button per tool type. Clicking a button opens the corresponding
- * discovery panel inline (currently only Genie is implemented; the rest show
- * a "Coming soon" placeholder until Task 7).
+ * discovery panel inline.
  */
 
-import React, { useState, useRef, useEffect } from 'react';
-import { X } from 'lucide-react';
-import type { AvailableTool, GenieTool, ToolEntry, ToolType } from '../../types/agentConfig';
+import React, { useState } from 'react';
+import type { AvailableTool, GenieTool, VectorIndexTool, MCPTool, ModelEndpointTool, AgentBricksTool, ToolEntry, ToolType } from '../../types/agentConfig';
 import { GenieDiscovery } from './tools/GenieDiscovery';
+import { VectorIndexDiscovery } from './tools/VectorIndexDiscovery';
+import { MCPDiscovery } from './tools/MCPDiscovery';
+import { ModelEndpointDiscovery } from './tools/ModelEndpointDiscovery';
+import { AgentBricksDiscovery } from './tools/AgentBricksDiscovery';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -32,44 +34,6 @@ interface ToolPickerProps {
   onPreview: (tool: AvailableTool) => void;
   existingTools: ToolEntry[];
 }
-
-// ---------------------------------------------------------------------------
-// Placeholder panel for types not yet implemented
-// ---------------------------------------------------------------------------
-
-const ComingSoonPanel: React.FC<{ label: string; onClose: () => void }> = ({ label, onClose }) => {
-  const panelRef = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    const handler = (e: MouseEvent) => {
-      if (panelRef.current && !panelRef.current.contains(e.target as Node)) {
-        onClose();
-      }
-    };
-    document.addEventListener('mousedown', handler);
-    return () => document.removeEventListener('mousedown', handler);
-  }, [onClose]);
-
-  return (
-    <div
-      ref={panelRef}
-      className="absolute top-full left-0 mt-1 w-64 bg-white border border-gray-200 rounded-lg shadow-lg z-20 p-4"
-      data-testid="coming-soon-panel"
-    >
-      <div className="flex items-center justify-between mb-2">
-        <span className="text-sm font-medium text-gray-700">{label}</span>
-        <button
-          onClick={onClose}
-          className="p-0.5 text-gray-400 hover:text-gray-600 rounded transition-colors"
-          aria-label="Close"
-        >
-          <X size={14} />
-        </button>
-      </div>
-      <p className="text-sm text-gray-500">Coming soon.</p>
-    </div>
-  );
-};
 
 // ---------------------------------------------------------------------------
 // Main component
@@ -116,11 +80,32 @@ export const ToolPicker: React.FC<ToolPickerProps> = ({
           existingTools={existingTools}
         />
       )}
-
-      {activeCategory && activeCategory !== 'genie' && (
-        <ComingSoonPanel
-          label={TOOL_CATEGORIES.find(c => c.type === activeCategory)?.label ?? ''}
+      {activeCategory === 'vector_index' && (
+        <VectorIndexDiscovery
+          onSelect={onSelect as (tool: VectorIndexTool) => void}
           onClose={handleClose}
+          existingTools={existingTools}
+        />
+      )}
+      {activeCategory === 'mcp' && (
+        <MCPDiscovery
+          onSelect={onSelect as (tool: MCPTool) => void}
+          onClose={handleClose}
+          existingTools={existingTools}
+        />
+      )}
+      {activeCategory === 'model_endpoint' && (
+        <ModelEndpointDiscovery
+          onSelect={onSelect as (tool: ModelEndpointTool) => void}
+          onClose={handleClose}
+          existingTools={existingTools}
+        />
+      )}
+      {activeCategory === 'agent_bricks' && (
+        <AgentBricksDiscovery
+          onSelect={onSelect as (tool: AgentBricksTool) => void}
+          onClose={handleClose}
+          existingTools={existingTools}
         />
       )}
     </div>
