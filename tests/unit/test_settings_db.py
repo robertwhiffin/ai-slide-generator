@@ -8,7 +8,6 @@ from src.core.database import Base
 from src.core.defaults import DEFAULT_CONFIG
 from src.core.settings_db import get_settings, load_settings_from_database, reload_settings
 from src.database.models import (
-    ConfigAIInfra,
     ConfigGenieSpace,
     ConfigProfile,
     ConfigPrompts,
@@ -57,15 +56,6 @@ def test_profile(test_db):
     test_db.add(profile)
     test_db.flush()
     
-    # Add AI db_app_deployment settings
-    ai_infra = ConfigAIInfra(
-        profile_id=profile.id,
-        llm_endpoint="databricks-meta-llama-3-1-70b-instruct",
-        llm_temperature=0.7,
-        llm_max_tokens=4096,
-    )
-    test_db.add(ai_infra)
-    
     # Add Genie space (one per profile)
     genie_space = ConfigGenieSpace(
         profile_id=profile.id,
@@ -108,9 +98,6 @@ def test_load_settings_from_database(test_db, test_profile, monkeypatch):
     # Verify settings loaded correctly
     assert settings.profile_id == test_profile.id
     assert settings.profile_name == "test-profile"
-    assert settings.llm.endpoint == "databricks-meta-llama-3-1-70b-instruct"
-    assert settings.llm.temperature == 0.7
-    assert settings.llm.max_tokens == 4096
     assert settings.genie.space_id == "test-space-id"
     assert "system_prompt" in settings.prompts
 
@@ -184,12 +171,29 @@ def test_settings_validation(test_db, test_profile, monkeypatch):
             def __exit__(self, *args):
                 pass
         return MockContextManager()
-    
+
     monkeypatch.setattr("src.core.settings_db.get_db_session", mock_get_db_session)
-    
+
     settings = load_settings_from_database()
-    
-    # Verify Pydantic validation worked
-    assert 0.0 <= settings.llm.temperature <= 2.0
-    assert settings.llm.max_tokens > 0
+
+    # Verify settings loaded (LLM config now comes from DEFAULT_CONFIG, not settings)
+    assert settings.profile_id == test_profile.id
+    assert settings.profile_name == "test-profile"
+
+
+def test_app_settings_has_no_llm_field():
+    """Verify AppSettings no longer carries an llm field."""
+    from src.core.settings_db import AppSettings
+    assert "llm" not in AppSettings.model_fields
+
+
+def test_default_config_has_llm_settings():
+    """Verify DEFAULT_CONFIG contains the expected LLM settings."""
+    llm = DEFAULT_CONFIG["llm"]
+    assert "endpoint" in llm
+    assert "temperature" in llm
+    assert "max_tokens" in llm
+    assert "top_p" in llm
+    assert "timeout" in llm
+    assert llm["endpoint"] == "databricks-claude-opus-4-6"
 
