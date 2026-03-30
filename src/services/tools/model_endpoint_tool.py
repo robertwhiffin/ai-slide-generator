@@ -154,23 +154,34 @@ def _query_chat(client, endpoint_name: str, message: list[dict]) -> str:
 
     Both agent and foundation endpoints accept the same format via
     ``serving_endpoints.query(messages=[...])``.
+
+    The SDK may return a QueryEndpointResponse dataclass or a raw dict.
     """
     response = client.serving_endpoints.query(
         name=endpoint_name,
         messages=message,
     )
-    # Extract from SDK response object
-    if hasattr(response, "choices") and response.choices:
-        for choice in response.choices:
-            msg = getattr(choice, "message", None)
-            if msg and getattr(msg, "content", None):
-                return msg.content
-
-    # Fallback to dict parsing
-    if hasattr(response, "as_dict"):
+    # Convert to dict for uniform handling
+    if isinstance(response, dict):
+        result = response
+    elif hasattr(response, "as_dict"):
         result = response.as_dict()
-        return _extract_foundation_response(result) or _extract_agent_response(result)
+    else:
+        result = {}
 
+    # Try choices format first (standard for chat/agent)
+    text = _extract_foundation_response(result)
+    if text:
+        return text
+
+    # Try agent output format
+    text = _extract_agent_response(result)
+    if text:
+        return text
+
+    # Return raw if anything present
+    if result:
+        return json.dumps(result)
     return ""
 
 

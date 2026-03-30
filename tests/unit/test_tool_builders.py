@@ -267,11 +267,12 @@ class TestAgentBricksQuery:
         mock_client = MagicMock()
         mock_client_fn.return_value = mock_client
 
-        # Mock SDK response (choices format)
-        mock_response = MagicMock()
-        mock_choice = MagicMock()
-        mock_choice.message.content = "Agent response text"
-        mock_response.choices = [mock_choice]
+        # Mock SDK response as a dict (what the SDK actually returns for agents)
+        mock_response = {
+            "choices": [
+                {"message": {"role": "assistant", "content": "Agent response text"}}
+            ]
+        }
         mock_client.serving_endpoints.query.return_value = mock_response
 
         result = _query_agent_bricks("my-agent-endpoint", "test query")
