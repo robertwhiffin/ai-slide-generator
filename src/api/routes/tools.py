@@ -61,13 +61,11 @@ def _discover_genie_spaces() -> dict:
 
 
 def _discover_vector_endpoints() -> dict:
-    """Discover ONLINE vector search endpoints that have at least one embedding-supported index.
+    """Discover ONLINE vector search endpoints.
 
-    Endpoints with zero indexes that have ``embedding_source_columns`` are
-    excluded — they would only show "No indexes found" in the UI and are not
-    usable for text-based queries.  If any per-endpoint API call fails we
-    include the endpoint (fail-open) so we never hide a working endpoint just
-    because we couldn't verify it.
+    Returns all ONLINE endpoints quickly (single API call). Filtering for
+    embedding-compatible indexes happens at the index selection step instead,
+    keeping this endpoint fast.
     """
     try:
         client = get_user_client()
@@ -78,43 +76,6 @@ def _discover_vector_endpoints() -> dict:
             if ep.endpoint_status and ep.endpoint_status.state:
                 state = ep.endpoint_status.state.value
             if state != "ONLINE":
-                continue
-
-            # Check whether this endpoint has at least one embedding-supported index.
-            has_compatible_index = False
-            try:
-                for idx in client.vector_search_indexes.list_indexes(
-                    endpoint_name=ep.name
-                ):
-                    try:
-                        index_detail = client.vector_search_indexes.get_index(
-                            index_name=idx.name
-                        )
-                        has_embedding = False
-                        if index_detail.delta_sync_index_spec:
-                            has_embedding = bool(
-                                index_detail.delta_sync_index_spec.embedding_source_columns
-                            )
-                        elif index_detail.direct_access_index_spec:
-                            has_embedding = bool(
-                                index_detail.direct_access_index_spec.embedding_source_columns
-                            )
-                        if has_embedding:
-                            has_compatible_index = True
-                            break  # No need to check further indexes
-                    except Exception:
-                        # Can't inspect this index — treat it as compatible (fail-open)
-                        has_compatible_index = True
-                        break
-            except Exception:
-                # Can't list indexes — include the endpoint (fail-open)
-                has_compatible_index = True
-
-            if not has_compatible_index:
-                logger.debug(
-                    "Skipping vector endpoint %s — no embedding-supported indexes found",
-                    ep.name,
-                )
                 continue
 
             items.append(
