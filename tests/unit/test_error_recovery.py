@@ -165,7 +165,7 @@ def mock_db_session():
 @pytest.fixture
 def mock_genie_client():
     """Mock Genie client."""
-    with patch("src.services.tools.get_user_client") as mock_get_client:
+    with patch("src.services.tools.genie_tool.get_user_client") as mock_get_client:
         client = MagicMock()
         mock_get_client.return_value = client
         yield client
@@ -438,7 +438,7 @@ class TestGenieErrorHandling:
         from src.services.tools import query_genie_space
 
         # Mock settings
-        with patch("src.services.tools.get_settings") as mock_get_settings:
+        with patch("src.services.tools.genie_tool.get_settings") as mock_get_settings:
             settings = Mock()
             settings.genie = Mock()
             settings.genie.space_id = "invalid-space-id"
@@ -459,7 +459,7 @@ class TestGenieErrorHandling:
         from src.services.tools import query_genie_space
 
         # Mock settings
-        with patch("src.services.tools.get_settings") as mock_get_settings:
+        with patch("src.services.tools.genie_tool.get_settings") as mock_get_settings:
             settings = Mock()
             settings.genie = Mock()
             settings.genie.space_id = "space-123"
@@ -480,7 +480,7 @@ class TestGenieErrorHandling:
         from src.services.tools import query_genie_space
 
         # Mock settings
-        with patch("src.services.tools.get_settings") as mock_get_settings:
+        with patch("src.services.tools.genie_tool.get_settings") as mock_get_settings:
             settings = Mock()
             settings.genie = Mock()
             settings.genie.space_id = "space-123"
@@ -502,7 +502,7 @@ class TestGenieErrorHandling:
         from src.services.tools import query_genie_space
 
         # Mock settings
-        with patch("src.services.tools.get_settings") as mock_get_settings:
+        with patch("src.services.tools.genie_tool.get_settings") as mock_get_settings:
             settings = Mock()
             settings.genie = Mock()
             settings.genie.space_id = "space-123"
@@ -527,8 +527,8 @@ class TestGenieErrorHandling:
         """Genie not configured raises helpful error."""
         from src.services.tools import query_genie_space
 
-        with patch("src.services.tools.get_user_client") as mock_get_client, patch(
-            "src.services.tools.get_settings"
+        with patch("src.services.tools.genie_tool.get_user_client") as mock_get_client, patch(
+            "src.services.tools.genie_tool.get_settings"
         ) as mock_get_settings:
             client = MagicMock()
             mock_get_client.return_value = client
@@ -547,7 +547,7 @@ class TestGenieErrorHandling:
         from src.services.tools import initialize_genie_conversation
 
         # Mock settings
-        with patch("src.services.tools.get_settings") as mock_get_settings:
+        with patch("src.services.tools.genie_tool.get_settings") as mock_get_settings:
             settings = Mock()
             settings.genie = Mock()
             settings.genie.space_id = "space-123"
@@ -568,7 +568,7 @@ class TestGenieErrorHandling:
         from src.services.tools import query_genie_space
 
         # Mock settings
-        with patch("src.services.tools.get_settings") as mock_get_settings:
+        with patch("src.services.tools.genie_tool.get_settings") as mock_get_settings:
             settings = Mock()
             settings.genie = Mock()
             settings.genie.space_id = "space-123"
