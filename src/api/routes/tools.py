@@ -280,9 +280,17 @@ def _discover_model_endpoints() -> dict:
 
         for ep in client.serving_endpoints.list():
             task = getattr(ep, "task", None) or ""
+            # Exclude agent endpoints (handled by Agent Bricks discovery)
             if task.startswith("agent/"):
                 continue
-            endpoint_type = "foundation" if task.startswith("llm/v1/") else "custom"
+            # Exclude embedding endpoints (return vectors, not usable by LLM agent)
+            if task.startswith("llm/v1/embeddings"):
+                continue
+            endpoint_type = (
+                "foundation"
+                if task.startswith(("llm/v1/chat", "llm/v1/completions"))
+                else "custom"
+            )
             items.append(
                 {
                     "id": ep.name,
