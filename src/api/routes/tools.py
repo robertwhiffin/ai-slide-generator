@@ -60,24 +60,26 @@ def _discover_genie_spaces() -> dict:
         return {"items": []}
 
 
-import concurrent.futures
 import time as _time
 
-# Cache for vector endpoint discovery (parallel checking is expensive)
+# Cache for vector endpoint discovery results
 _vector_endpoints_cache: dict | None = None
 _vector_endpoints_cache_time: float = 0
 _VECTOR_ENDPOINTS_CACHE_TTL = 300  # 5 minutes
 
 
-def _check_endpoint_has_embedding_index(client, endpoint_name: str) -> bool:
+def _endpoint_has_embedding_index(client, endpoint_name: str) -> bool:
     """Check if a vector endpoint has at least one embedding-supported index.
 
-    Returns True (include) if any index has embedding_source_columns, or if
-    we can't verify (fail-open). Returns False (exclude) only when we can
-    confirm all indexes lack embedding support.
+    Returns True on first index found with embedding_source_columns.
+    Returns True on any error (fail-open). Returns False only when all
+    indexes are confirmed to lack embedding support.
     """
     try:
-        for idx in client.vector_search_indexes.list_indexes(endpoint_name=endpoint_name):
+        indexes = list(client.vector_search_indexes.list_indexes(endpoint_name=endpoint_name))
+        if not indexes:
+            return False  # No indexes at all
+        for idx in indexes:
             try:
                 detail = client.vector_search_indexes.get_index(index_name=idx.name)
                 if detail.delta_sync_index_spec and detail.delta_sync_index_spec.embedding_source_columns:
@@ -86,7 +88,7 @@ def _check_endpoint_has_embedding_index(client, endpoint_name: str) -> bool:
                     return True
             except Exception:
                 return True  # Can't inspect — fail-open
-        return False  # No indexes or none with embeddings
+        return False  # All indexes checked, none have embeddings
     except Exception:
         return True  # Can't list — fail-open
 
@@ -94,9 +96,9 @@ def _check_endpoint_has_embedding_index(client, endpoint_name: str) -> bool:
 def _discover_vector_endpoints() -> dict:
     """Discover ONLINE vector search endpoints with embedding-compatible indexes.
 
-    Only returns endpoints that have at least one index supporting text search
-    (query_text). Uses parallel checking (max 5 threads) to keep latency low,
-    and caches results for 5 minutes so subsequent opens are instant.
+    Filters out endpoints without text-searchable indexes. Results are cached
+    for 5 minutes — first call may be slow (sequential SDK checks per endpoint),
+    subsequent calls are instant.
     """
     global _vector_endpoints_cache, _vector_endpoints_cache_time
 
@@ -122,33 +124,47 @@ def _discover_vector_endpoints() -> dict:
             _vector_endpoints_cache_time = now
             return result
 
-        # Step 2: Check all endpoints in parallel (max 5 threads)
+        # Step 2: Check each endpoint sequentially with a time budget.
+        # The SDK client is not thread-safe so we can't parallelize.
+        # We cap total checking time to avoid hanging if the workspace
+        # is slow or rate-limiting.
         items: list[dict] = []
-        with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
-            future_to_ep = {
-                executor.submit(_check_endpoint_has_embedding_index, client, ep.name): ep
-                for ep in online_endpoints
-            }
-            for future in concurrent.futures.as_completed(future_to_ep):
-                ep = future_to_ep[future]
-                try:
-                    has_valid = future.result(timeout=30)
-                except Exception:
-                    has_valid = True  # fail-open on thread error
-                if has_valid:
+        check_deadline = _time.monotonic() + 30  # 30s max for all checks
+        for ep in online_endpoints:
+            if _time.monotonic() > check_deadline:
+                # Time budget exceeded — include remaining endpoints (fail-open)
+                logger.warning(
+                    "Vector endpoint check timed out, including remaining %d endpoints unchecked",
+                    len(online_endpoints) - len(items),
+                )
+                for remaining_ep in online_endpoints[online_endpoints.index(ep):]:
                     items.append(
                         {
-                            "id": ep.name,
-                            "name": ep.name,
+                            "id": remaining_ep.name,
+                            "name": remaining_ep.name,
                             "description": None,
                             "metadata": {"state": "ONLINE"},
                         }
                     )
-                else:
-                    logger.debug(
-                        "Skipping vector endpoint %s — no embedding-supported indexes",
-                        ep.name,
-                    )
+                break
+            try:
+                has_valid = _endpoint_has_embedding_index(client, ep.name)
+            except Exception:
+                has_valid = True  # fail-open
+            if has_valid:
+                items.append(
+                    {
+                        "id": ep.name,
+                        "name": ep.name,
+                        "description": None,
+                        "metadata": {"state": "ONLINE"},
+                    }
+                )
+            else:
+                logger.debug(
+                    "Skipping vector endpoint %s — no embedding-supported indexes",
+                    ep.name,
+                )
 
         result = {"items": items}
         _vector_endpoints_cache = result
