@@ -125,14 +125,22 @@ async def patch_tools(session_id: str, body: PatchToolRequest):
     if body.action == "add":
         config.tools.append(body.tool)
     elif body.action == "remove":
-        # Match by discriminator key (genie:space_id or mcp:server_uri)
-        from src.api.schemas.agent_config import GenieTool, MCPTool
+        # Match by discriminator key (e.g. genie:space_id, mcp:connection_name)
+        from src.api.schemas.agent_config import (
+            GenieTool, MCPTool, VectorIndexTool, ModelEndpointTool, AgentBricksTool,
+        )
 
         def _key(t):
             if isinstance(t, GenieTool):
                 return f"genie:{t.space_id}"
             elif isinstance(t, MCPTool):
-                return f"mcp:{t.server_uri}"
+                return f"mcp:{t.connection_name}"
+            elif isinstance(t, VectorIndexTool):
+                return f"vector_index:{t.endpoint_name}:{t.index_name}"
+            elif isinstance(t, ModelEndpointTool):
+                return f"model_endpoint:{t.endpoint_name}"
+            elif isinstance(t, AgentBricksTool):
+                return f"agent_bricks:{t.endpoint_name}"
             return None
 
         remove_key = _key(body.tool)
