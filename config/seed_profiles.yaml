@@ -11,7 +11,7 @@ profiles:
     
     # AI Infrastructure Configuration
     ai_infra:
-      llm_endpoint: "databricks-claude-sonnet-4-5"
+      llm_endpoint: "databricks-claude-opus-4-6"
       llm_temperature: 0.70
       llm_max_tokens: 60000
     
@@ -35,7 +35,7 @@ profiles:
     created_by: "system"
     
     ai_infra:
-      llm_endpoint: "databricks-claude-sonnet-4-5"
+      llm_endpoint: "databricks-claude-opus-4-6"
       llm_temperature: 0.70
       llm_max_tokens: 60000
     

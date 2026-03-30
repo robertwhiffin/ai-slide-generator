@@ -29,7 +29,7 @@ class GoogleSlidesConversionError(Exception):
 class HtmlToGoogleSlidesConverter:
     """LLM-powered converter: HTML → Google Slides API code → execution."""
 
-    DEFAULT_MODEL = "databricks-claude-sonnet-4-5"
+    DEFAULT_MODEL = "databricks-claude-opus-4-6"
 
     def __init__(
         self,

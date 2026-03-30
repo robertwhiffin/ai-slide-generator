@@ -4,7 +4,7 @@
 
 # LLM Configuration
 llm:
-  endpoint: "databricks-claude-sonnet-4-5"  # Model serving endpoint name
+  endpoint: "databricks-claude-opus-4-6"  # Model serving endpoint name
   temperature: 0.7
   max_tokens: 60000
   top_p: 0.95
