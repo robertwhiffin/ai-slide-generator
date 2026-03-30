@@ -3,7 +3,7 @@ import type { ImageAsset, ImageListResponse, ImageDataResponse } from '../types/
 import type { SlideDeck, Slide, SlideContext, ReplacementInfo } from '../types/slide';
 import type { VerificationResult } from '../types/verification';
 import type { SlideComment } from '../types/comment';
-import type { AgentConfig, ToolEntry, AvailableTool, ProfileSummary } from '../types/agentConfig';
+import type { AgentConfig, ToolEntry, AvailableTool, ProfileSummary, DiscoveryResponse, ColumnDiscoveryResponse } from '../types/agentConfig';
 
 // Use relative URLs in production, explicit IPv4 in development
 // Note: Using 127.0.0.1 instead of localhost to avoid IPv6 resolution issues in CI
@@ -1661,6 +1661,69 @@ export const api = {
       throw new ApiError(response.status, error.detail || 'Failed to fetch available tools');
     }
 
+    return response.json();
+  },
+
+  /**
+   * Discover Genie spaces available in the workspace.
+   */
+  async discoverGenieSpaces(): Promise<DiscoveryResponse> {
+    const response = await fetch(`${API_BASE_URL}/api/tools/discover/genie`);
+    if (!response.ok) return { items: [] };
+    return response.json();
+  },
+
+  /**
+   * Discover Vector Search endpoints.
+   */
+  async discoverVectorEndpoints(): Promise<DiscoveryResponse> {
+    const response = await fetch(`${API_BASE_URL}/api/tools/discover/vector`);
+    if (!response.ok) return { items: [] };
+    return response.json();
+  },
+
+  /**
+   * Discover indexes for a given Vector Search endpoint.
+   */
+  async discoverVectorIndexes(endpointName: string): Promise<DiscoveryResponse> {
+    const response = await fetch(`${API_BASE_URL}/api/tools/discover/vector/${encodeURIComponent(endpointName)}/indexes`);
+    if (!response.ok) return { items: [] };
+    return response.json();
+  },
+
+  /**
+   * Discover columns for a given Vector Search index.
+   */
+  async discoverVectorColumns(endpointName: string, indexName: string): Promise<ColumnDiscoveryResponse> {
+    const response = await fetch(`${API_BASE_URL}/api/tools/discover/vector/${encodeURIComponent(endpointName)}/${encodeURIComponent(indexName)}/columns`);
+    if (!response.ok) return { columns: [] };
+    return response.json();
+  },
+
+  /**
+   * Discover MCP (Unity Catalog HTTP) connections.
+   */
+  async discoverMCPConnections(): Promise<DiscoveryResponse> {
+    const response = await fetch(`${API_BASE_URL}/api/tools/discover/mcp`);
+    if (!response.ok) return { items: [] };
+    return response.json();
+  },
+
+  /**
+   * Discover Model Serving endpoints (non-agent).
+   */
+  async discoverModelEndpoints(): Promise<DiscoveryResponse> {
+    const response = await fetch(`${API_BASE_URL}/api/tools/discover/model-endpoints`);
+    if (!response.ok) return { items: [] };
+    return response.json();
+  },
+
+  /**
+   * Discover Agent Bricks (agent-type serving endpoints).
+   */
+  async discoverAgentBricks(): Promise<DiscoveryResponse> {
+    const response = await fetch(`${API_BASE_URL}/api/tools/discover/agent-bricks`);
+    if (!response.ok) return { items: [] };
     return response.json();
   },
 
