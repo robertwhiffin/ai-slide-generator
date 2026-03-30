@@ -277,15 +277,14 @@ This ensures both slides and chat history stay in sync when previewing or revert
 
 ### Slide ID Consistency
 
-When adding slides in the middle of a deck, all slide IDs must be updated to prevent duplicate React keys:
+All slide mutations (add, delete, reorder, duplicate, replace) call `ChatService._reindex_slide_ids(deck)` to ensure every slide has a unique sequential `slide_id` (`slide_0`, `slide_1`, ...). This is a centralized static method — no inline re-indexing loops.
 
 ```python
-# After inserting new slides
-for idx, slide in enumerate(current_deck.slides):
-    slide.slide_id = f"slide_{idx}"
+@staticmethod
+def _reindex_slide_ids(deck: SlideDeck) -> None:
+    for idx, slide in enumerate(deck.slides):
+        slide.slide_id = f"slide_{idx}"
 ```
-
-This ensures unique keys like `slide_0`, `slide_1`, etc., preventing React rendering issues.
 
 ### Cache Invalidation
 
@@ -293,11 +292,64 @@ On restore, the in-memory deck cache is invalidated:
 ```python
 def restore_version(self, session_id: str, version_number: int):
     # ... restore logic ...
-    # Clear cache to force reload
     with self._cache_lock:
         if session_id in self._deck_cache:
             del self._deck_cache[session_id]
 ```
+
+---
+
+## 10b. Race Condition Prevention
+
+### Problem
+
+Multiple async processes (chat streaming, manual edits, auto-verification, lock polling) can race to update deck state, causing earlier edits to be silently overwritten by stale responses.
+
+### Backend: Optimistic Locking on Chat Path
+
+The chat paths (`send_message`, `send_message_streaming`) capture the deck version before the LLM runs and pass it as `expected_version` when saving:
+
+```python
+# Before LLM call
+_deck_version_before_llm = self._get_deck_version(session_id)
+
+# After LLM call
+session_manager.save_slide_deck(..., expected_version=_deck_version_before_llm)
+```
+
+If a manual edit bumped the version during the LLM call, `VersionConflictError` is raised. The chat path catches this, reloads the current deck from DB (preserving the manual edit), and skips save point creation (the manual edit already has its own).
+
+### Backend: Atomic Session Lock
+
+`acquire_session_lock` uses `SELECT FOR UPDATE` on PostgreSQL/Lakebase to prevent two workers from acquiring the lock simultaneously (TOCTOU race). Falls back to plain query on SQLite (tests).
+
+### Frontend: Version-Gated State Updates
+
+All `setSlideDeck` calls in `AppLayout` go through `setSlideDeckGated`:
+
+```typescript
+const setSlideDeckGated = (newDeck, serverVersion?, force?) => {
+  if (!force && serverVersion != null && serverVersion < deckVersionRef.current) {
+    return; // Reject stale response
+  }
+  if (serverVersion != null) deckVersionRef.current = serverVersion;
+  setSlideDeck(newDeck);
+  if (versionBumped || force) loadVersionsRef.current?.(); // Refresh dropdown
+};
+```
+
+This prevents stale `getSlides` responses (from lock polling, chat completion, or auto-verification) from overwriting newer edits. The `deckVersionRef` is reset to 0 on session switch.
+
+**Gated call sites:**
+- Lock-poll interval (`setSlideDeck` for non-lock-holders)
+- `onSlidesGenerated` callback (after chat completion)
+- `onSlideChange` callback (after reorder/delete/duplicate/update)
+- `handleRevertConfirm` (force mode — user-initiated)
+- URL session restore (force mode — session switch)
+
+### Frontend: Component Remount on Version Preview
+
+`SelectionRibbon` and `SlidePanel` both receive `key={versionKey}` in AppLayout, forcing React to fully destroy and recreate them when switching between version previews. This prevents stale iframe content and thumbnail corruption.
 
 ---
 
