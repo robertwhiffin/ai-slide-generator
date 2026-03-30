@@ -507,13 +507,11 @@ class ChatService:
                                 slide.stamp_created(_add_user)
                             existing_deck.insert_slide(slide, insert_position + idx)
                         
-                        # Update ALL slide IDs to reflect new positions (prevents duplicate keys)
-                        for idx, slide in enumerate(existing_deck.slides):
-                            slide.slide_id = f"slide_{idx}"
-                        
+                        self._reindex_slide_ids(existing_deck)
+
                         if new_deck.css:
                             existing_deck.css = existing_deck.css + "\n" + new_deck.css
-                        
+
                         current_deck = existing_deck
                         # RC7: Log final script status
                         final_scripts_info = [
@@ -1105,6 +1103,7 @@ class ChatService:
                             for idx, slide_idx in enumerate(valid_refs):
                                 if idx < len(new_deck.slides):
                                     existing_deck.slides[slide_idx] = new_deck.slides[idx]
+                            self._reindex_slide_ids(existing_deck)
                             current_deck = existing_deck
                             with self._cache_lock:
                                 self._deck_cache[session_id] = current_deck
@@ -1175,9 +1174,7 @@ class ChatService:
                                 slide.stamp_created(_rc9_user)
                             existing_deck.insert_slide(slide, insert_position + idx)
                         
-                        # Update ALL slide IDs to reflect new positions (prevents duplicate keys)
-                        for idx, slide in enumerate(existing_deck.slides):
-                            slide.slide_id = f"slide_{idx}"
+                        self._reindex_slide_ids(existing_deck)
                         
                         if new_deck.css:
                             existing_deck.css = existing_deck.css + "\n" + new_deck.css
@@ -1229,9 +1226,7 @@ class ChatService:
                             slide.stamp_created(_stream_add_user)
                         existing_deck.insert_slide(slide, insert_position + idx)
                     
-                    # Update ALL slide IDs to reflect new positions (prevents duplicate keys)
-                    for idx, slide in enumerate(existing_deck.slides):
-                        slide.slide_id = f"slide_{idx}"
+                    self._reindex_slide_ids(existing_deck)
                     
                     # Merge CSS if new deck has any
                     if new_deck.css:
@@ -1896,6 +1891,17 @@ class ChatService:
             pass
         return None
 
+    @staticmethod
+    def _reindex_slide_ids(deck: "SlideDeck") -> None:
+        """Ensure every slide has a unique, sequential slide_id.
+
+        Must be called after ANY operation that changes the slide list
+        (add, delete, reorder, duplicate, replace). Prevents duplicate
+        React keys in the frontend thumbnail panel.
+        """
+        for idx, slide in enumerate(deck.slides):
+            slide.slide_id = f"slide_{idx}"
+
     def _invalidate_deck_cache(self, session_id: str) -> None:
         """Remove the cached deck for a session so the next read hits the DB."""
         with self._cache_lock:
@@ -2155,9 +2161,7 @@ class ChatService:
                     extra={"slide_index": insert_position + idx, "session_id": session_id},
                 )
             
-            # Update ALL slide IDs to reflect new positions (prevents duplicate keys)
-            for idx, slide in enumerate(current_deck.slides):
-                slide.slide_id = f"slide_{idx}"
+            self._reindex_slide_ids(current_deck)
             
             # Merge CSS if provided
             new_css = replacement_info.get("replacement_css", "")
@@ -2310,6 +2314,9 @@ class ChatService:
             
             current_deck.insert_slide(slide, start_idx + idx)
 
+        # Re-index ALL slide IDs after replacement (prevents duplicate React keys)
+        self._reindex_slide_ids(current_deck)
+
         logger.info(
             "Inserted replacement slides",
             extra={
@@ -2426,9 +2433,7 @@ class ChatService:
         new_slides = [current_deck.slides[i] for i in new_order]
         current_deck.slides = new_slides
 
-        # Update indices
-        for idx, slide in enumerate(current_deck.slides):
-            slide.slide_id = f"slide_{idx}"
+        self._reindex_slide_ids(current_deck)
 
         # Persist to database
         deck_dict = current_deck.to_dict()
@@ -2569,9 +2574,7 @@ class ChatService:
         # Insert after original
         current_deck.insert_slide(cloned, index + 1)
 
-        # Update slide IDs
-        for idx, slide in enumerate(current_deck.slides):
-            slide.slide_id = f"slide_{idx}"
+        self._reindex_slide_ids(current_deck)
 
         # Persist to database
         deck_dict = current_deck.to_dict()
@@ -2634,9 +2637,7 @@ class ChatService:
         # Remove slide
         current_deck.remove_slide(index)
 
-        # Update slide IDs
-        for idx, slide in enumerate(current_deck.slides):
-            slide.slide_id = f"slide_{idx}"
+        self._reindex_slide_ids(current_deck)
 
         # Persist to database
         deck_dict = current_deck.to_dict()
