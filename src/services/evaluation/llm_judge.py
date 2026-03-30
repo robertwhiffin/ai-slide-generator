@@ -17,6 +17,8 @@ from typing import Any, Dict, List, Literal, Optional
 
 import pandas as pd
 
+from src.core.defaults import DEFAULT_CONFIG
+
 logger = logging.getLogger(__name__)
 
 
@@ -102,7 +104,7 @@ Provide your rating and explain your reasoning in 2-3 sentences."""
 async def evaluate_with_judge(
     genie_data: str,
     slide_content: str,
-    model: str = "databricks-claude-sonnet-4-5",
+    model: str = DEFAULT_CONFIG["llm"]["endpoint"],
     trace_id: Optional[str] = None,
     experiment_id: Optional[str] = None,
 ) -> LLMJudgeResult:
