@@ -257,38 +257,30 @@ class TestModelEndpointResponseExtractors:
         assert _extract_foundation_response({"choices": []}) == ""
 
 
-class TestAgentBricksResponseExtractor:
-    """Tests for agent bricks response extraction."""
+class TestAgentBricksQuery:
+    """Tests for agent bricks SDK-based querying."""
 
-    def test_extract_agent_response(self):
-        from src.services.tools.agent_bricks_tool import _extract_agent_response
+    @patch("src.services.tools.agent_bricks_tool.get_user_client")
+    def test_query_uses_sdk_serving_endpoints_query(self, mock_client_fn):
+        from src.services.tools.agent_bricks_tool import _query_agent_bricks
 
-        result = {
-            "output": [
-                {
-                    "type": "message",
-                    "content": [
-                        {"type": "output_text", "text": "Answer from the agent"}
-                    ],
-                }
-            ]
-        }
-        assert _extract_agent_response(result) == "Answer from the agent"
+        mock_client = MagicMock()
+        mock_client_fn.return_value = mock_client
 
-    def test_extract_agent_response_string_output(self):
-        from src.services.tools.agent_bricks_tool import _extract_agent_response
+        # Mock SDK response (choices format)
+        mock_response = MagicMock()
+        mock_choice = MagicMock()
+        mock_choice.message.content = "Agent response text"
+        mock_response.choices = [mock_choice]
+        mock_client.serving_endpoints.query.return_value = mock_response
 
-        result = {"output": "Simple response"}
-        assert _extract_agent_response(result) == "Simple response"
+        result = _query_agent_bricks("my-agent-endpoint", "test query")
 
-    def test_extract_agent_response_fallback_to_json(self):
-        from src.services.tools.agent_bricks_tool import _extract_agent_response
-        import json
-
-        result = {"unexpected": "format"}
-        extracted = _extract_agent_response(result)
-        # Should fall back to JSON representation
-        assert "unexpected" in extracted
+        assert result == "Agent response text"
+        mock_client.serving_endpoints.query.assert_called_once_with(
+            name="my-agent-endpoint",
+            messages=[{"role": "user", "content": "test query"}],
+        )
 
 
 class TestEndpointTypeDetection:
