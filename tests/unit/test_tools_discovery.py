@@ -62,17 +62,60 @@ class TestGenieDiscovery:
 
 
 class TestVectorDiscovery:
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _make_index_with_embedding(name: str):
+        """Return a (list_indexes item, get_index detail) pair that has embedding support."""
+        idx = MagicMock()
+        idx.name = name
+        idx.index_type.value = "DELTA_SYNC"
+        idx.primary_key = "id"
+
+        detail = MagicMock()
+        detail.delta_sync_index_spec = MagicMock()
+        detail.delta_sync_index_spec.embedding_source_columns = [MagicMock()]
+        detail.direct_access_index_spec = None
+        return idx, detail
+
+    @staticmethod
+    def _make_index_without_embedding(name: str):
+        """Return a (list_indexes item, get_index detail) pair with NO embedding support."""
+        idx = MagicMock()
+        idx.name = name
+        idx.index_type.value = "DELTA_SYNC"
+        idx.primary_key = "id"
+
+        detail = MagicMock()
+        detail.delta_sync_index_spec = MagicMock()
+        detail.delta_sync_index_spec.embedding_source_columns = []
+        detail.direct_access_index_spec = None
+        return idx, detail
+
+    # ------------------------------------------------------------------
+    # Endpoint discovery tests
+    # ------------------------------------------------------------------
+
     @patch("src.api.routes.tools.get_user_client")
     def test_discover_vector_endpoints(self, mock_client_fn):
+        """ONLINE endpoint with an embedding index is included."""
         from src.api.routes.tools import _discover_vector_endpoints
 
         mock_client = _make_client()
         mock_client_fn.return_value = mock_client
+
         mock_ep = MagicMock()
         mock_ep.name = "vs-endpoint-1"
         mock_ep.endpoint_status = MagicMock()
         mock_ep.endpoint_status.state.value = "ONLINE"
         mock_client.vector_search_endpoints.list_endpoints.return_value = [mock_ep]
+
+        idx, detail = self._make_index_with_embedding("cat.schema.idx")
+        mock_client.vector_search_indexes.list_indexes.return_value = [idx]
+        mock_client.vector_search_indexes.get_index.return_value = detail
+
         result = _discover_vector_endpoints()
         assert len(result["items"]) == 1
         assert result["items"][0]["name"] == "vs-endpoint-1"
@@ -80,6 +123,7 @@ class TestVectorDiscovery:
 
     @patch("src.api.routes.tools.get_user_client")
     def test_discover_vector_endpoints_filters_offline(self, mock_client_fn):
+        """OFFLINE endpoints are excluded regardless of their indexes."""
         from src.api.routes.tools import _discover_vector_endpoints
 
         mock_client = _make_client()
@@ -99,9 +143,133 @@ class TestVectorDiscovery:
             mock_online,
             mock_offline,
         ]
+
+        # Only the online endpoint will have its indexes checked
+        idx, detail = self._make_index_with_embedding("cat.schema.idx")
+        mock_client.vector_search_indexes.list_indexes.return_value = [idx]
+        mock_client.vector_search_indexes.get_index.return_value = detail
+
         result = _discover_vector_endpoints()
         assert len(result["items"]) == 1
         assert result["items"][0]["name"] == "online-ep"
+
+    @patch("src.api.routes.tools.get_user_client")
+    def test_discover_vector_endpoints_excludes_no_embedding_indexes(self, mock_client_fn):
+        """Endpoints whose indexes all lack embedding support are excluded.
+
+        This covers the real-world case of endpoints like ``mas-4bd58fad-endpoint``
+        that are ONLINE but only hold raw-vector indexes — selecting them in the
+        UI would result in "No indexes found", so we hide them up front.
+        """
+        from src.api.routes.tools import _discover_vector_endpoints
+
+        mock_client = _make_client()
+        mock_client_fn.return_value = mock_client
+
+        # One endpoint with only raw-vector indexes (should be excluded)
+        ep_no_emb = MagicMock()
+        ep_no_emb.name = "mas-4bd58fad-endpoint"
+        ep_no_emb.endpoint_status = MagicMock()
+        ep_no_emb.endpoint_status.state.value = "ONLINE"
+
+        # One endpoint with an embedding-supported index (should be included)
+        ep_with_emb = MagicMock()
+        ep_with_emb.name = "good-endpoint"
+        ep_with_emb.endpoint_status = MagicMock()
+        ep_with_emb.endpoint_status.state.value = "ONLINE"
+
+        mock_client.vector_search_endpoints.list_endpoints.return_value = [
+            ep_no_emb,
+            ep_with_emb,
+        ]
+
+        raw_idx, raw_detail = self._make_index_without_embedding("cat.schema.raw_idx")
+        emb_idx, emb_detail = self._make_index_with_embedding("cat.schema.text_idx")
+
+        def list_indexes(endpoint_name):
+            if endpoint_name == "mas-4bd58fad-endpoint":
+                return [raw_idx]
+            return [emb_idx]
+
+        def get_index(index_name):
+            if index_name == "cat.schema.raw_idx":
+                return raw_detail
+            return emb_detail
+
+        mock_client.vector_search_indexes.list_indexes.side_effect = list_indexes
+        mock_client.vector_search_indexes.get_index.side_effect = get_index
+
+        result = _discover_vector_endpoints()
+        names = [item["name"] for item in result["items"]]
+        assert "good-endpoint" in names
+        assert "mas-4bd58fad-endpoint" not in names
+
+    @patch("src.api.routes.tools.get_user_client")
+    def test_discover_vector_endpoints_excludes_endpoint_with_zero_indexes(self, mock_client_fn):
+        """Endpoints with no indexes at all are excluded."""
+        from src.api.routes.tools import _discover_vector_endpoints
+
+        mock_client = _make_client()
+        mock_client_fn.return_value = mock_client
+
+        ep = MagicMock()
+        ep.name = "empty-endpoint"
+        ep.endpoint_status = MagicMock()
+        ep.endpoint_status.state.value = "ONLINE"
+
+        mock_client.vector_search_endpoints.list_endpoints.return_value = [ep]
+        mock_client.vector_search_indexes.list_indexes.return_value = []  # no indexes
+
+        result = _discover_vector_endpoints()
+        assert result["items"] == []
+
+    @patch("src.api.routes.tools.get_user_client")
+    def test_discover_vector_endpoints_fail_open_on_list_indexes_error(self, mock_client_fn):
+        """If list_indexes raises, the endpoint is included (fail-open)."""
+        from src.api.routes.tools import _discover_vector_endpoints
+
+        mock_client = _make_client()
+        mock_client_fn.return_value = mock_client
+
+        ep = MagicMock()
+        ep.name = "mystery-endpoint"
+        ep.endpoint_status = MagicMock()
+        ep.endpoint_status.state.value = "ONLINE"
+
+        mock_client.vector_search_endpoints.list_endpoints.return_value = [ep]
+        mock_client.vector_search_indexes.list_indexes.side_effect = Exception(
+            "Permission denied"
+        )
+
+        result = _discover_vector_endpoints()
+        assert len(result["items"]) == 1
+        assert result["items"][0]["name"] == "mystery-endpoint"
+
+    @patch("src.api.routes.tools.get_user_client")
+    def test_discover_vector_endpoints_fail_open_on_get_index_error(self, mock_client_fn):
+        """If get_index raises for an index, the endpoint is included (fail-open)."""
+        from src.api.routes.tools import _discover_vector_endpoints
+
+        mock_client = _make_client()
+        mock_client_fn.return_value = mock_client
+
+        ep = MagicMock()
+        ep.name = "mystery-endpoint"
+        ep.endpoint_status = MagicMock()
+        ep.endpoint_status.state.value = "ONLINE"
+
+        mock_client.vector_search_endpoints.list_endpoints.return_value = [ep]
+
+        idx = MagicMock()
+        idx.name = "cat.schema.idx"
+        mock_client.vector_search_indexes.list_indexes.return_value = [idx]
+        mock_client.vector_search_indexes.get_index.side_effect = Exception(
+            "Not found"
+        )
+
+        result = _discover_vector_endpoints()
+        assert len(result["items"]) == 1
+        assert result["items"][0]["name"] == "mystery-endpoint"
 
     @patch("src.api.routes.tools.get_user_client")
     def test_discover_vector_indexes_with_embedding(self, mock_client_fn):
