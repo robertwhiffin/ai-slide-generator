@@ -30,6 +30,7 @@ from src.core.databricks_client import (
     get_system_client,
     get_user_client,
 )
+from src.core.defaults import DEFAULT_CONFIG
 from src.core.settings_db import get_settings
 from src.domain.slide import Slide
 from src.services.image_tools import SearchImagesInput, search_images
@@ -1254,7 +1255,7 @@ class SlideGeneratorAgent:
                 span.set_attribute("session_id", session_id)
                 span.set_attribute("profile_name", session.get("profile_name", "unknown"))
                 span.set_attribute("session_timestamp", session.get("created_at", ""))
-                span.set_attribute("model_endpoint", self.settings.llm.endpoint)
+                span.set_attribute("model_endpoint", DEFAULT_CONFIG["llm"]["endpoint"])
                 span.set_attribute("message_count", session["message_count"])
                 span.set_attribute("mode", "edit" if editing_mode else "generate")
 
@@ -1478,7 +1479,7 @@ class SlideGeneratorAgent:
                 span.set_attribute("session_id", session_id)
                 span.set_attribute("profile_name", session.get("profile_name", "unknown"))
                 span.set_attribute("session_timestamp", session.get("created_at", ""))
-                span.set_attribute("model_endpoint", self.settings.llm.endpoint)
+                span.set_attribute("model_endpoint", DEFAULT_CONFIG["llm"]["endpoint"])
                 span.set_attribute("message_count", session["message_count"])
                 span.set_attribute("mode", "edit" if editing_mode else "generate")
                 span.set_attribute("streaming", True)
