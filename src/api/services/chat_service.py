@@ -2362,6 +2362,14 @@ class ChatService:
         if not deck:
             return None
         deck_dict = deck.to_dict()
+        # Include version from DB even in fallback path (needed for frontend version gating)
+        try:
+            sm = get_session_manager()
+            db_deck = sm.get_slide_deck(session_id)
+            if db_deck and "version" in db_deck:
+                deck_dict["version"] = db_deck["version"]
+        except Exception:
+            deck_dict.setdefault("version", 0)
         deck_dict, _ = self._substitute_images_for_response(deck_dict)
         return deck_dict
 
