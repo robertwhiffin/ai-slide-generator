@@ -656,6 +656,7 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
                 </div>
 
                 <SelectionRibbon
+                  key={versionKey}
                   slideDeck={displayDeck}
                   onSlideNavigate={handleSlideNavigate}
                   versionKey={versionKey}
