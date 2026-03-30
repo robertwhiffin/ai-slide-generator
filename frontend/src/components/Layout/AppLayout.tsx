@@ -259,7 +259,11 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
           () => cancelled,
         );
         if (!cancelled) {
-          setSlideDeckGated(restoredDeck, (restoredDeck as SlideDeck)?.version, true);
+          if (restoredDeck) {
+            setSlideDeckGated(restoredDeck, (restoredDeck as SlideDeck)?.version, true);
+          } else {
+            setSlideDeck(null);
+          }
           setRawHtml(restoredRawHtml);
           setLastSavedTime(new Date());
           setViewMode('main');
