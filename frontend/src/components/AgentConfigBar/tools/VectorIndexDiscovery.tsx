@@ -263,7 +263,9 @@ export const VectorIndexDiscovery: React.FC<VectorIndexDiscoveryProps> = ({
           <>
             {filteredIndexes.length === 0 && (
               <p className="text-sm text-gray-500 py-4 text-center">
-                {indexQuery ? 'No matching indexes.' : 'No indexes found on this endpoint.'}
+                {indexQuery
+                    ? 'No matching indexes.'
+                    : 'No compatible indexes on this endpoint. Indexes need an embedding model configured for text search.'}
               </p>
             )}
             {filteredIndexes.map((idx, i) => {

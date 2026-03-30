@@ -60,116 +60,35 @@ def _discover_genie_spaces() -> dict:
         return {"items": []}
 
 
-import time as _time
-
-# Cache for vector endpoint discovery results
-_vector_endpoints_cache: dict | None = None
-_vector_endpoints_cache_time: float = 0
-_VECTOR_ENDPOINTS_CACHE_TTL = 300  # 5 minutes
-
-
-def _endpoint_has_embedding_index(client, endpoint_name: str) -> bool:
-    """Check if a vector endpoint has at least one embedding-supported index.
-
-    Returns True on first index found with embedding_source_columns.
-    Returns True on any error (fail-open). Returns False only when all
-    indexes are confirmed to lack embedding support.
-    """
-    try:
-        indexes = list(client.vector_search_indexes.list_indexes(endpoint_name=endpoint_name))
-        if not indexes:
-            return False  # No indexes at all
-        for idx in indexes:
-            try:
-                detail = client.vector_search_indexes.get_index(index_name=idx.name)
-                if detail.delta_sync_index_spec and detail.delta_sync_index_spec.embedding_source_columns:
-                    return True
-                if detail.direct_access_index_spec and detail.direct_access_index_spec.embedding_source_columns:
-                    return True
-            except Exception:
-                return True  # Can't inspect — fail-open
-        return False  # All indexes checked, none have embeddings
-    except Exception:
-        return True  # Can't list — fail-open
-
-
 def _discover_vector_endpoints() -> dict:
-    """Discover ONLINE vector search endpoints with embedding-compatible indexes.
+    """Discover ONLINE vector search endpoints.
 
-    Filters out endpoints without text-searchable indexes. Results are cached
-    for 5 minutes — first call may be slow (sequential SDK checks per endpoint),
-    subsequent calls are instant.
+    Returns all ONLINE endpoints immediately (single fast API call).
+    Embedding-compatibility filtering happens at the index selection step
+    (_discover_vector_indexes) to keep this endpoint fast and reliable.
+    If an endpoint has no compatible indexes, the user sees a clear message
+    at the index step and can go back.
     """
-    global _vector_endpoints_cache, _vector_endpoints_cache_time
-
-    now = _time.monotonic()
-    if _vector_endpoints_cache is not None and (now - _vector_endpoints_cache_time) < _VECTOR_ENDPOINTS_CACHE_TTL:
-        return _vector_endpoints_cache
-
     try:
         client = get_user_client()
+        items: list[dict] = []
 
-        # Step 1: List all ONLINE endpoints (single fast API call)
-        online_endpoints = []
         for ep in client.vector_search_endpoints.list_endpoints():
             state = None
             if ep.endpoint_status and ep.endpoint_status.state:
                 state = ep.endpoint_status.state.value
-            if state == "ONLINE":
-                online_endpoints.append(ep)
+            if state != "ONLINE":
+                continue
+            items.append(
+                {
+                    "id": ep.name,
+                    "name": ep.name,
+                    "description": None,
+                    "metadata": {"state": state},
+                }
+            )
 
-        if not online_endpoints:
-            result = {"items": []}
-            _vector_endpoints_cache = result
-            _vector_endpoints_cache_time = now
-            return result
-
-        # Step 2: Check each endpoint sequentially with a time budget.
-        # The SDK client is not thread-safe so we can't parallelize.
-        # We cap total checking time to avoid hanging if the workspace
-        # is slow or rate-limiting.
-        items: list[dict] = []
-        check_deadline = _time.monotonic() + 30  # 30s max for all checks
-        for ep in online_endpoints:
-            if _time.monotonic() > check_deadline:
-                # Time budget exceeded — include remaining endpoints (fail-open)
-                logger.warning(
-                    "Vector endpoint check timed out, including remaining %d endpoints unchecked",
-                    len(online_endpoints) - len(items),
-                )
-                for remaining_ep in online_endpoints[online_endpoints.index(ep):]:
-                    items.append(
-                        {
-                            "id": remaining_ep.name,
-                            "name": remaining_ep.name,
-                            "description": None,
-                            "metadata": {"state": "ONLINE"},
-                        }
-                    )
-                break
-            try:
-                has_valid = _endpoint_has_embedding_index(client, ep.name)
-            except Exception:
-                has_valid = True  # fail-open
-            if has_valid:
-                items.append(
-                    {
-                        "id": ep.name,
-                        "name": ep.name,
-                        "description": None,
-                        "metadata": {"state": "ONLINE"},
-                    }
-                )
-            else:
-                logger.debug(
-                    "Skipping vector endpoint %s — no embedding-supported indexes",
-                    ep.name,
-                )
-
-        result = {"items": items}
-        _vector_endpoints_cache = result
-        _vector_endpoints_cache_time = now
-        return result
+        return {"items": items}
     except Exception as e:
         logger.warning(f"Failed to discover vector search endpoints: {e}")
         return {"items": []}

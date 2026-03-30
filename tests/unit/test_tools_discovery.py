@@ -129,44 +129,6 @@ class TestVectorDiscovery:
         assert result["items"][0]["metadata"]["state"] == "ONLINE"
 
     @patch("src.api.routes.tools.get_user_client")
-    def test_discover_vector_endpoints_excludes_no_embedding(self, mock_client_fn):
-        """Endpoints with no embedding-supported indexes are excluded."""
-        self._clear_endpoint_cache()
-        from src.api.routes.tools import _discover_vector_endpoints
-
-        mock_client = _make_client()
-        mock_client_fn.return_value = mock_client
-
-        ep_good = MagicMock()
-        ep_good.name = "good-endpoint"
-        ep_good.endpoint_status = MagicMock()
-        ep_good.endpoint_status.state.value = "ONLINE"
-
-        ep_bad = MagicMock()
-        ep_bad.name = "mas-endpoint"
-        ep_bad.endpoint_status = MagicMock()
-        ep_bad.endpoint_status.state.value = "ONLINE"
-
-        mock_client.vector_search_endpoints.list_endpoints.return_value = [ep_good, ep_bad]
-
-        good_idx, good_detail = self._make_index_with_embedding("cat.good_idx")
-        bad_idx, bad_detail = self._make_index_without_embedding("cat.bad_idx")
-
-        def list_indexes(endpoint_name):
-            return [good_idx] if endpoint_name == "good-endpoint" else [bad_idx]
-
-        def get_index(index_name):
-            return good_detail if index_name == "cat.good_idx" else bad_detail
-
-        mock_client.vector_search_indexes.list_indexes.side_effect = list_indexes
-        mock_client.vector_search_indexes.get_index.side_effect = get_index
-
-        result = _discover_vector_endpoints()
-        names = [item["name"] for item in result["items"]]
-        assert "good-endpoint" in names
-        assert "mas-endpoint" not in names
-
-    @patch("src.api.routes.tools.get_user_client")
     def test_discover_vector_endpoints_filters_offline(self, mock_client_fn):
         """OFFLINE endpoints are excluded regardless of their indexes."""
         self._clear_endpoint_cache()
