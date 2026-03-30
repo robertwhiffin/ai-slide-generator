@@ -327,6 +327,7 @@ def build_agent_for_request(
         "Building agent for request",
         extra={
             "session_id": session_data.get("session_id"),
+            "llm_endpoint": DEFAULT_CONFIG["llm"]["endpoint"],
             "tool_count": len(config.tools),
             "has_custom_system_prompt": config.system_prompt is not None,
             "has_custom_editing_instructions": config.slide_editing_instructions is not None,
