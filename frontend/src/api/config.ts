@@ -39,22 +39,6 @@ export interface ProfileUpdate {
   description?: string | null;
 }
 
-export interface AIInfraConfig {
-  id: number;
-  profile_id: number;
-  llm_endpoint: string;
-  llm_temperature: number;
-  llm_max_tokens: number;
-  created_at: string;
-  updated_at: string;
-}
-
-export interface AIInfraConfigUpdate {
-  llm_endpoint?: string;
-  llm_temperature?: number;
-  llm_max_tokens?: number;
-}
-
 /**
  * Genie space configuration.
  * Each profile has exactly one Genie space.
@@ -171,10 +155,6 @@ export interface SlideStyleListResponse {
   total: number;
 }
 
-export interface EndpointsList {
-  endpoints: string[];
-}
-
 export interface GenieSpaceDetail {
   title: string;
   description: string;
@@ -206,7 +186,6 @@ export interface ReloadResponse {
   status: string;
   profile_id: number;
   profile_name: string;
-  llm_endpoint: string;
   sessions_preserved: number;
 }
 
@@ -329,21 +308,6 @@ export const configApi = {
     return fetchJson(url, { method: 'POST' });
   },
 
-  // AI Infrastructure
-  
-  getAIInfraConfig: (profileId: number): Promise<AIInfraConfig> =>
-    fetchJson(`${API_BASE}/ai-infra/${profileId}`),
-  
-  updateAIInfraConfig: (profileId: number, data: AIInfraConfigUpdate): Promise<AIInfraConfig> =>
-    fetchJson(`${API_BASE}/ai-infra/${profileId}`, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(data),
-    }),
-  
-  getAvailableEndpoints: (): Promise<EndpointsList> =>
-    fetchJson(`${API_BASE}/ai-infra/endpoints/available`),
-  
   // Genie Spaces
   // Each profile has exactly one Genie space
   
@@ -485,11 +449,6 @@ export const configApi = {
   
   validateProfile: (profileId: number): Promise<ValidationResponse> =>
     fetchJson(`${API_BASE}/validate/${profileId}`, {
-      method: 'POST',
-    }),
-
-  validateLLM: (endpoint: string): Promise<{ success: boolean; message: string; details?: any }> =>
-    fetchJson(`${API_BASE}/ai-infra/validate?endpoint=${encodeURIComponent(endpoint)}`, {
       method: 'POST',
     }),
 
