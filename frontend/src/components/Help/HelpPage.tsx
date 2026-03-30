@@ -362,14 +362,13 @@ const ProfilesTab: React.FC = () => (
     <section>
       <h2 className="text-lg font-semibold text-gray-800 mb-3">What are Profiles?</h2>
       <p className="text-gray-600">
-        Profiles store your configuration for LLM settings, Genie space connections, and custom prompts.
+        Profiles store your configuration for Genie space connections and custom prompts.
       </p>
     </section>
 
     <section>
       <h2 className="text-lg font-semibold text-gray-800 mb-3">Profile Configuration Tabs</h2>
       <ul className="list-disc list-inside text-gray-600 space-y-2">
-        <li><span className="font-medium">AI Infrastructure:</span> LLM endpoint, temperature, and token limits</li>
         <li><span className="font-medium">Genie Spaces:</span> Connect to your Databricks Genie data source</li>
         <li><span className="font-medium">Deck Prompt:</span> Select a presentation template from the library</li>
         <li><span className="font-medium">Slide Style:</span> Select a visual style for your slides</li>
