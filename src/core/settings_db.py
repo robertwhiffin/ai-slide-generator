@@ -16,7 +16,6 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from src.core.database import get_db_session
 from src.database.models import (
-    ConfigAIInfra,
     ConfigGenieSpace,
     ConfigProfile,
     ConfigPrompts,
@@ -26,33 +25,6 @@ logger = logging.getLogger(__name__)
 
 # Global variable to track the currently active profile
 _active_profile_id: Optional[int] = None
-
-
-# Reuse existing Pydantic schemas for backward compatibility
-class LLMSettings(BaseSettings):
-    """LLM configuration settings."""
-
-    model_config = SettingsConfigDict(extra="allow")
-
-    endpoint: str
-    temperature: float = 0.7
-    max_tokens: int = 4096
-    top_p: float = 0.95
-    timeout: int = 600
-
-    @field_validator("temperature")
-    @classmethod
-    def validate_temperature(cls, v: float) -> float:
-        if not 0.0 <= v <= 2.0:
-            raise ValueError("Temperature must be between 0.0 and 2.0")
-        return v
-
-    @field_validator("max_tokens")
-    @classmethod
-    def validate_max_tokens(cls, v: int) -> int:
-        if v < 1 or v > 64000:
-            raise ValueError("max_tokens must be between 1 and 64000")
-        return v
 
 
 class GenieSettings(BaseSettings):
@@ -132,7 +104,6 @@ class AppSettings(BaseSettings):
     databricks_token: str = Field(default="", description="Databricks access token")
 
     # Configuration from database
-    llm: LLMSettings
     genie: Optional[GenieSettings] = None  # Optional - enables data queries when configured
 
     # Prompts (from database)
@@ -196,17 +167,10 @@ def load_settings_from_database(profile_id: Optional[int] = None) -> AppSettings
                 if not profile:
                     # No default profile — return settings built from defaults
                     logger.info("No default profile found in database, using built-in defaults")
-                    from src.core.defaults import DEFAULT_CONFIG
-                    llm_defaults = DEFAULT_CONFIG["llm"]
                     return AppSettings(
                         database_url=os.getenv("DATABASE_URL", ""),
                         profile_id=0,
                         profile_name="default",
-                        llm=LLMSettings(
-                            endpoint=llm_defaults["endpoint"],
-                            temperature=llm_defaults["temperature"],
-                            max_tokens=llm_defaults["max_tokens"],
-                        ),
                         genie=None,
                         prompts={},
                         environment=os.getenv("ENVIRONMENT", "development"),
@@ -221,11 +185,6 @@ def load_settings_from_database(profile_id: Optional[int] = None) -> AppSettings
                 "Loading configuration from database",
                 extra={"profile_id": profile.id, "profile_name": profile.name},
             )
-
-            # Load all configs
-            ai_infra = db.query(ConfigAIInfra).filter_by(profile_id=profile.id).first()
-            if not ai_infra:
-                raise ValueError(f"AI infra settings not found for profile {profile.id}")
 
             # Get the Genie space for this profile (optional - one per profile)
             genie_space = db.query(ConfigGenieSpace).filter_by(
@@ -269,15 +228,6 @@ def load_settings_from_database(profile_id: Optional[int] = None) -> AppSettings
                         extra={"slide_style_name": slide_style.name, "slide_style_id": slide_style.id}
                     )
 
-            # Create settings
-            llm_settings = LLMSettings(
-                endpoint=ai_infra.llm_endpoint,
-                temperature=float(ai_infra.llm_temperature),
-                max_tokens=ai_infra.llm_max_tokens,
-                top_p=0.95,  # Default value
-                timeout=600,  # Default value
-            )
-
             # Create Genie settings only if configured
             genie_settings = None
             if genie_space:
@@ -290,7 +240,6 @@ def load_settings_from_database(profile_id: Optional[int] = None) -> AppSettings
                 database_url=os.getenv("DATABASE_URL", ""),
                 profile_id=profile.id,
                 profile_name=profile.name,
-                llm=llm_settings,
                 genie=genie_settings,
                 prompts={
                     "deck_prompt": deck_prompt_content or "",
@@ -307,7 +256,6 @@ def load_settings_from_database(profile_id: Optional[int] = None) -> AppSettings
                 extra={
                     "profile_id": profile.id,
                     "profile_name": profile.name,
-                    "llm_endpoint": ai_infra.llm_endpoint,
                     "genie_space": genie_space.space_name if genie_space else None,
                     "prompt_only_mode": genie_space is None,
                 },
@@ -379,7 +327,6 @@ def reload_settings(profile_id: Optional[int] = None) -> AppSettings:
         extra={
             "profile_id": settings.profile_id,
             "profile_name": settings.profile_name,
-            "llm_endpoint": settings.llm.endpoint,
             "genie_space_id": settings.genie.space_id if settings.genie else None,
             "prompt_only_mode": settings.genie is None,
         },
