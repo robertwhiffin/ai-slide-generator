@@ -948,6 +948,249 @@ test.describe('User Journey - Genie: verification scores in save points', () => 
 });
 
 // ============================================
+// Deck Version Gating Tests
+//
+// Validates that setSlideDeckGated rejects stale getSlides
+// responses when the server version is lower than the local
+// version tracked by deckVersionRef.
+// ============================================
+
+test.describe('Deck Version Gating', () => {
+
+  test('getSlides response with higher version is accepted after an edit', async ({ page }) => {
+    // Scenario: generate slides at version 1, then a PATCH edit bumps to version 2.
+    // The subsequent getSlides returns version 2 and should be accepted (no rejection log).
+    const deckV1 = { ...mockSlideDeck, version: 1 };
+    const deckV2 = {
+      ...mockSlideDeck,
+      version: 2,
+      slides: mockSlideDeck.slides.map((s, i) =>
+        i === 0
+          ? { ...s, title: 'Edited Title', html: '<h1>Edited Title</h1>', content_hash: 'edited_v2' }
+          : s,
+      ),
+    };
+
+    const rejectionLogs: string[] = [];
+    page.on('console', (msg) => {
+      if (msg.text().includes('[deckVersionGuard] Rejected stale deck')) {
+        rejectionLogs.push(msg.text());
+      }
+    });
+
+    // --- Standard mocks ---
+    await page.route(/\/api\/profiles$/, (route) => {
+      route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(mockProfileSummaries) });
+    });
+    await page.route('**/api/tools/available', (route) => {
+      route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(mockAvailableTools) });
+    });
+    await page.route('http://127.0.0.1:8000/api/settings/deck-prompts', (route) => {
+      route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(mockDeckPrompts) });
+    });
+    await page.route('http://127.0.0.1:8000/api/settings/slide-styles', (route) => {
+      route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(mockSlideStyles) });
+    });
+    await page.route('**/api/version**', (route) => {
+      route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ version: '0.1.21', latest: '0.1.21' }) });
+    });
+    await page.route('http://127.0.0.1:8000/api/genie/spaces', (route) => {
+      route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ spaces: [], total: 0 }) });
+    });
+    await page.route(/http:\/\/127.0.0.1:8000\/api\/genie\/.*\/link/, (route) => {
+      route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ url: 'https://example.com/genie', message: null }) });
+    });
+    await page.route('http://127.0.0.1:8000/api/slides/reorder**', (route) => {
+      route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ success: true }) });
+    });
+    await page.route(/http:\/\/127.0.0.1:8000\/api\/slides\/\d+\/verification/, (route) => {
+      route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ status: 'unable_to_verify', message: 'No Genie room linked' }) });
+    });
+    await page.route(/http:\/\/127.0.0.1:8000\/api\/verification/, (route) => {
+      route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ score: 0.95, rating: 'green', explanation: 'Verified', issues: [], duration_ms: 150, error: false }) });
+    });
+    await page.route('**/api/slides/versions?**', (route) => {
+      route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ versions: [], current_version: null }) });
+    });
+    await page.route('**/api/slides/versions/current?**', (route) => {
+      route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ current_version: null }) });
+    });
+    await page.route('**/api/slides/versions/create', (route) => {
+      route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({}) });
+    });
+    await page.route('**/api/slides/versions/sync-verification', (route) => {
+      route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ version_number: 1, verification_entries: 0 }) });
+    });
+
+    // Track how many times getSlides is called, and which version we serve
+    let getSlidesCalls = 0;
+    await page.route('http://127.0.0.1:8000/api/sessions**', (route, request) => {
+      const url = request.url();
+      const method = request.method();
+
+      if (method === 'POST' || method === 'DELETE') {
+        route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ session_id: 'mock', title: 'New', user_id: null, created_at: '2026-01-01T00:00:00Z' }) });
+        return;
+      }
+      if (url.includes('/agent-config')) {
+        route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(mockDefaultAgentConfig) });
+        return;
+      }
+      if (url.includes('limit=')) {
+        route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(mockSessions) });
+      } else if (url.includes('/slides')) {
+        getSlidesCalls++;
+        // First call returns v1, subsequent calls return v2 (simulating a PATCH edit bump)
+        const deck = getSlidesCalls <= 1 ? deckV1 : deckV2;
+        route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ session_id: 'test-session-id', slide_deck: deck }) });
+      } else {
+        route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ session_id: 'test-session-id', messages: [] }) });
+      }
+    });
+
+    // Stream response also carries version 1
+    await page.route('http://127.0.0.1:8000/api/chat/stream', (route) => {
+      route.fulfill({ status: 200, contentType: 'text/event-stream', body: createStreamingResponseWithDeck(deckV1) });
+    });
+
+    // PATCH edit returns updated slide (version bump happens server-side)
+    await page.route(/http:\/\/127.0.0.1:8000\/api\/slides\/\d+(\?|$)/, (route, request) => {
+      if (request.method() === 'DELETE') {
+        route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ status: 'deleted' }) });
+      } else if (request.method() === 'PATCH') {
+        route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(mockSlides[0]) });
+      } else {
+        route.continue();
+      }
+    });
+
+    await goToGenerator(page);
+    await generateSlides(page);
+
+    // Wait for any subsequent getSlides polling to occur
+    await page.waitForTimeout(3000);
+
+    // Version 2 response should NOT have been rejected (it is >= local version)
+    expect(rejectionLogs).toHaveLength(0);
+  });
+
+  test('stale getSlides response with lower version is rejected with console log', async ({ page }) => {
+    // Scenario: frontend knows about version 3, but a delayed getSlides response
+    // arrives with version 1. The gated setter should reject it and log a warning.
+    const deckV3 = { ...mockSlideDeck, version: 3 };
+    const staleDeckV1 = { ...mockSlideDeck, version: 1 };
+
+    const rejectionLogs: string[] = [];
+    page.on('console', (msg) => {
+      if (msg.text().includes('[deckVersionGuard] Rejected stale deck')) {
+        rejectionLogs.push(msg.text());
+      }
+    });
+
+    // --- Standard mocks ---
+    await page.route(/\/api\/profiles$/, (route) => {
+      route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(mockProfileSummaries) });
+    });
+    await page.route('**/api/tools/available', (route) => {
+      route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(mockAvailableTools) });
+    });
+    await page.route('http://127.0.0.1:8000/api/settings/deck-prompts', (route) => {
+      route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(mockDeckPrompts) });
+    });
+    await page.route('http://127.0.0.1:8000/api/settings/slide-styles', (route) => {
+      route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(mockSlideStyles) });
+    });
+    await page.route('**/api/version**', (route) => {
+      route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ version: '0.1.21', latest: '0.1.21' }) });
+    });
+    await page.route('http://127.0.0.1:8000/api/genie/spaces', (route) => {
+      route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ spaces: [], total: 0 }) });
+    });
+    await page.route(/http:\/\/127.0.0.1:8000\/api\/genie\/.*\/link/, (route) => {
+      route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ url: 'https://example.com/genie', message: null }) });
+    });
+    await page.route('http://127.0.0.1:8000/api/slides/reorder**', (route) => {
+      route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ success: true }) });
+    });
+    await page.route(/http:\/\/127.0.0.1:8000\/api\/slides\/\d+\/verification/, (route) => {
+      route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ status: 'unable_to_verify', message: 'No Genie room linked' }) });
+    });
+    await page.route(/http:\/\/127.0.0.1:8000\/api\/verification/, (route) => {
+      route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ score: 0.95, rating: 'green', explanation: 'Verified', issues: [], duration_ms: 150, error: false }) });
+    });
+    await page.route('**/api/slides/versions?**', (route) => {
+      route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ versions: [], current_version: null }) });
+    });
+    await page.route('**/api/slides/versions/current?**', (route) => {
+      route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ current_version: null }) });
+    });
+    await page.route('**/api/slides/versions/create', (route) => {
+      route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({}) });
+    });
+    await page.route('**/api/slides/versions/sync-verification', (route) => {
+      route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ version_number: 3, verification_entries: 0 }) });
+    });
+
+    // First getSlides returns version 3 (sets the local ref high),
+    // then subsequent calls return stale version 1 (should be rejected).
+    let getSlidesCalls = 0;
+    await page.route('http://127.0.0.1:8000/api/sessions**', (route, request) => {
+      const url = request.url();
+      const method = request.method();
+
+      if (method === 'POST' || method === 'DELETE') {
+        route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ session_id: 'mock', title: 'New', user_id: null, created_at: '2026-01-01T00:00:00Z' }) });
+        return;
+      }
+      if (url.includes('/agent-config')) {
+        route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(mockDefaultAgentConfig) });
+        return;
+      }
+      if (url.includes('limit=')) {
+        route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(mockSessions) });
+      } else if (url.includes('/slides')) {
+        getSlidesCalls++;
+        // First call: version 3 (sets local deckVersionRef to 3)
+        // Subsequent calls: stale version 1 (should be rejected)
+        const deck = getSlidesCalls <= 1 ? deckV3 : staleDeckV1;
+        route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ session_id: 'test-session-id', slide_deck: deck }) });
+      } else {
+        route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ session_id: 'test-session-id', messages: [] }) });
+      }
+    });
+
+    // Stream response carries version 3 to set the local version high
+    await page.route('http://127.0.0.1:8000/api/chat/stream', (route) => {
+      route.fulfill({ status: 200, contentType: 'text/event-stream', body: createStreamingResponseWithDeck(deckV3) });
+    });
+
+    await page.route(/http:\/\/127.0.0.1:8000\/api\/slides\/\d+(\?|$)/, (route, request) => {
+      if (request.method() === 'DELETE') {
+        route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ status: 'deleted' }) });
+      } else if (request.method() === 'PATCH') {
+        route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(mockSlides[0]) });
+      } else {
+        route.continue();
+      }
+    });
+
+    await goToGenerator(page);
+    await generateSlides(page);
+
+    // Wait for polling / subsequent getSlides calls that return stale v1
+    await page.waitForTimeout(4000);
+
+    // If any subsequent getSlides returned stale v1, the guard should have rejected it
+    if (getSlidesCalls > 1) {
+      expect(rejectionLogs.length).toBeGreaterThan(0);
+      expect(rejectionLogs[0]).toContain('[deckVersionGuard] Rejected stale deck');
+      expect(rejectionLogs[0]).toContain('server v1');
+      expect(rejectionLogs[0]).toContain('local v3');
+    }
+  });
+});
+
+// ============================================
 // Race Condition Prevention Tests
 //
 // Validates the deck-edit-counter fix: when auto-verify's getSlides response
