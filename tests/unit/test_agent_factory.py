@@ -124,7 +124,7 @@ def test_mcp_tool_logs_warning_and_skipped(default_prompts):
     from src.services.agent_factory import build_agent_for_request
 
     config = AgentConfig(tools=[
-        MCPTool(type="mcp", server_uri="http://mcp.example.com", server_name="MyMCP")
+        MCPTool(type="mcp", connection_name="my-mcp-conn", server_name="MyMCP")
     ])
     session_data = {"session_id": "test-123", "genie_conversation_id": None}
 
@@ -149,7 +149,7 @@ def test_mcp_tool_logs_warning_and_skipped(default_prompts):
     mock_logger.warning.assert_any_call(
         "MCP tools not yet supported, skipping",
         extra={
-            "server_uri": "http://mcp.example.com",
+            "connection_name": "my-mcp-conn",
             "server_name": "MyMCP",
         },
     )

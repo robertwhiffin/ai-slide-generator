@@ -59,7 +59,7 @@ def _list_mcp_servers() -> list[dict]:
         return [
             {
                 "type": "mcp",
-                "server_uri": s["uri"],
+                "connection_name": s["uri"],
                 "server_name": s["name"],
                 "config": s.get("config", {}),
             }

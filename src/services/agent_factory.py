@@ -294,7 +294,7 @@ def _build_tools(
             logger.warning(
                 "MCP tools not yet supported, skipping",
                 extra={
-                    "server_uri": tool_entry.server_uri,
+                    "connection_name": tool_entry.connection_name,
                     "server_name": tool_entry.server_name,
                 },
             )
