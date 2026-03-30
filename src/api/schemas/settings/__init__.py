@@ -1,6 +1,5 @@
 """Configuration API schemas."""
 from src.api.schemas.settings.requests import (
-    AIInfraConfigUpdate,
     GenieSpaceCreate,
     GenieSpaceUpdate,
     ProfileCreate,
@@ -10,8 +9,6 @@ from src.api.schemas.settings.requests import (
     PromptsConfigUpdate,
 )
 from src.api.schemas.settings.responses import (
-    AIInfraConfig,
-    EndpointsList,
     ErrorResponse,
     GenieSpace,
     ProfileDetail,
@@ -26,17 +23,14 @@ __all__ = [
     "ProfileCreateWithConfig",
     "ProfileUpdate",
     "ProfileDuplicate",
-    "AIInfraConfigUpdate",
     "GenieSpaceCreate",
     "GenieSpaceUpdate",
     "PromptsConfigUpdate",
     # Responses
     "ProfileSummary",
     "ProfileDetail",
-    "AIInfraConfig",
     "GenieSpace",
     "PromptsConfig",
-    "EndpointsList",
     "ErrorResponse",
     "ValidationErrorResponse",
 ]
