@@ -137,12 +137,11 @@ export function PageHeader({
           {!viewOnly && savePointDropdown && (
             <div className="shrink-0 leading-tight">{savePointDropdown}</div>
           )}
+          {/* Genie Data button — next to savepoint, in the title area */}
+          {centerSlot && <div className="shrink-0">{centerSlot}</div>}
         </div>
         {subtitle && <p className="mt-px text-xs leading-none text-muted-foreground truncate">{subtitle}</p>}
       </div>
-
-      {/* Center slot: optional extra controls (e.g. GenieDataButton) */}
-      {centerSlot && <div className="shrink-0">{centerSlot}</div>}
 
       {/* Right: Export status, Export, Share, Present, Profile */}
       <div className="flex items-center gap-2">
