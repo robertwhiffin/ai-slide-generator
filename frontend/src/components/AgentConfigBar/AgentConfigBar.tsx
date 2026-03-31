@@ -112,6 +112,40 @@ const ToolEditPanel: React.FC<{
 }> = ({ tool, onSave, onCancel }) => {
   const [description, setDescription] = useState(tool.description ?? '');
 
+  // Vector Index column editing
+  const [availableColumns, setAvailableColumns] = useState<Array<{ name: string; type?: string }>>([]);
+  const [selectedColumns, setSelectedColumns] = useState<Set<string>>(
+    tool.type === 'vector_index' && tool.columns ? new Set(tool.columns) : new Set(),
+  );
+  const [loadingColumns, setLoadingColumns] = useState(false);
+
+  // Fetch columns for vector index tools on mount
+  useEffect(() => {
+    if (tool.type !== 'vector_index') return;
+    setLoadingColumns(true);
+    api.discoverVectorColumns(tool.endpoint_name, tool.index_name)
+      .then(result => {
+        if (result.columns && result.columns.length > 0) {
+          setAvailableColumns(result.columns);
+          // If no columns were previously selected (all), select all
+          if (!tool.columns || tool.columns.length === 0) {
+            setSelectedColumns(new Set(result.columns.map(c => c.name)));
+          }
+        }
+      })
+      .catch(() => {})
+      .finally(() => setLoadingColumns(false));
+  }, [tool]);
+
+  const toggleColumn = (colName: string) => {
+    setSelectedColumns(prev => {
+      const next = new Set(prev);
+      if (next.has(colName)) next.delete(colName);
+      else next.add(colName);
+      return next;
+    });
+  };
+
   const colorClasses = TOOL_TYPE_COLORS[tool.type];
   const badgeLabel = TOOL_TYPE_BADGE_LABELS[tool.type];
 
@@ -123,7 +157,16 @@ const ToolEditPanel: React.FC<{
   };
 
   const handleSave = () => {
-    onSave({ ...tool, description });
+    if (tool.type === 'vector_index') {
+      const allSelected = availableColumns.length > 0 && selectedColumns.size === availableColumns.length;
+      onSave({
+        ...tool,
+        description,
+        columns: allSelected ? undefined : Array.from(selectedColumns),
+      } as VectorIndexTool);
+    } else {
+      onSave({ ...tool, description });
+    }
   };
 
   // Build read-only info rows based on tool type
@@ -172,6 +215,42 @@ const ToolEditPanel: React.FC<{
           <div className="font-mono text-sm text-gray-700">{value}</div>
         </div>
       ))}
+
+      {/* Vector Index: column checkboxes */}
+      {tool.type === 'vector_index' && (
+        <div className="mb-3">
+          <p className="text-sm text-gray-500 mb-1.5">Select columns to include:</p>
+          {loadingColumns ? (
+            <div className="flex items-center gap-2 py-2 text-sm text-gray-400">
+              <Loader2 size={14} className="animate-spin" /> Loading columns...
+            </div>
+          ) : availableColumns.length > 0 ? (
+            <div className="max-h-40 overflow-y-auto border border-gray-200 rounded p-2">
+              {availableColumns.map(col => (
+                <label
+                  key={col.name}
+                  className="flex items-center gap-2 py-0.5 text-sm text-gray-700 cursor-pointer hover:bg-gray-50 rounded px-1"
+                >
+                  <input
+                    type="checkbox"
+                    checked={selectedColumns.has(col.name)}
+                    onChange={() => toggleColumn(col.name)}
+                    className="rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                  />
+                  <span>{col.name}</span>
+                  {col.type && <span className="text-xs text-gray-400 ml-auto">{col.type}</span>}
+                </label>
+              ))}
+            </div>
+          ) : (
+            <p className="text-xs text-gray-400 py-1">
+              {tool.columns && tool.columns.length > 0
+                ? `Selected: ${tool.columns.join(', ')}`
+                : 'All columns (default)'}
+            </p>
+          )}
+        </div>
+      )}
 
       {/* Editable description */}
       <div className="mb-4">
