@@ -252,7 +252,14 @@ export const VectorIndexDiscovery: React.FC<VectorIndexDiscoveryProps> = ({
                 onClick={() => handleEndpointSelect(ep)}
                 className="w-full text-left px-3 py-2 rounded text-sm transition-colors text-gray-700 hover:bg-gray-100"
               >
-                <span className="font-medium">{ep.name}</span>
+                <div className="flex items-center justify-between gap-2">
+                  <span className="font-medium">{ep.name}</span>
+                  {ep.metadata?.num_indexes != null && (
+                    <span className="text-xs text-gray-400 shrink-0">
+                      {ep.metadata.num_indexes} {ep.metadata.num_indexes === 1 ? 'index' : 'indexes'}
+                    </span>
+                  )}
+                </div>
                 {ep.description && (
                   <p className="text-xs text-gray-500 mt-0.5 line-clamp-2">{ep.description}</p>
                 )}

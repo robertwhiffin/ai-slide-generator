@@ -70,12 +70,15 @@ def _list_vector_endpoints_sync(client) -> list[dict]:
             state = ep.endpoint_status.state.value
         if state != "ONLINE":
             continue
+        num_indexes = getattr(ep, "num_indexes", None) or 0
+        if num_indexes == 0:
+            continue
         items.append(
             {
                 "id": ep.name,
                 "name": ep.name,
                 "description": None,
-                "metadata": {"state": state},
+                "metadata": {"state": state, "num_indexes": num_indexes},
             }
         )
     return items
