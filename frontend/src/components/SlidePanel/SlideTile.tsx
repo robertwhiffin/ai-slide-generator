@@ -99,18 +99,14 @@ export const SlideTile: React.FC<SlideTileProps> = ({
     return () => document.removeEventListener('mousedown', handleClickOutside);
   }, [showMentions]);
 
-  // Fetch comment count on mount and poll
+  // Fetch comment count on mount and when comments panel toggles
   useEffect(() => {
     if (!sessionId || !slide.slide_id) return;
     let cancelled = false;
-    const fetchCount = () => {
-      api.listComments(sessionId, slide.slide_id).then(({ count }) => {
-        if (!cancelled) setCommentCount(count);
-      }).catch(() => {});
-    };
-    fetchCount();
-    const timer = setInterval(fetchCount, 3_000);
-    return () => { cancelled = true; clearInterval(timer); };
+    api.listComments(sessionId, slide.slide_id).then(({ count }) => {
+      if (!cancelled) setCommentCount(count);
+    }).catch(() => {});
+    return () => { cancelled = true; };
   }, [sessionId, slide.slide_id, showComments]);
 
   const handleCommentChange = useCallback((count: number, hasMentions: boolean) => {
