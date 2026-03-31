@@ -170,10 +170,11 @@ def _discover_vector_indexes(endpoint_name: str) -> dict:
 
 
 def _discover_vector_columns(endpoint_name: str, index_name: str) -> dict:
-    """Discover columns/schema for a specific vector search index.
+    """Discover columns for a vector search index.
 
-    Uses ``get_index`` to retrieve the full index spec and extracts column
-    information from the delta-sync or direct-access spec.
+    First tries to read ALL columns from the source table (gives the full
+    picture of returnable columns). Falls back to embedding spec columns
+    if the source table is not accessible.
     """
     try:
         client = get_user_client()
@@ -183,42 +184,42 @@ def _discover_vector_columns(endpoint_name: str, index_name: str) -> dict:
         source_table: str | None = None
         primary_key = getattr(index, "primary_key", None)
 
-        # Extract columns from the appropriate spec
-        if index.delta_sync_index_spec:
-            spec = index.delta_sync_index_spec
+        # Get source table name from spec
+        spec = index.delta_sync_index_spec or index.direct_access_index_spec
+        if spec:
             source_table = getattr(spec, "source_table", None)
+
+        # Primary approach: read columns from the source table schema
+        # This gives ALL returnable columns (not just embedding columns)
+        if source_table:
+            try:
+                table_info = client.tables.get(source_table)
+                if table_info.columns:
+                    columns = [
+                        {
+                            "name": col.name,
+                            "type": str(col.type_name.value) if col.type_name else "unknown",
+                        }
+                        for col in table_info.columns
+                    ]
+                    logger.info(
+                        "Resolved %d columns from source table %s",
+                        len(columns), source_table,
+                    )
+            except Exception as e:
+                logger.warning(
+                    "Could not read source table %s, falling back to index spec: %s",
+                    source_table, e,
+                )
+
+        # Fallback: read from the index spec (embedding columns only)
+        if not columns and spec:
             if spec.embedding_source_columns:
                 for col in spec.embedding_source_columns:
                     columns.append({"name": col.name, "type": "embedding_source"})
             if spec.embedding_vector_columns:
                 for col in spec.embedding_vector_columns:
-                    columns.append(
-                        {
-                            "name": col.name,
-                            "type": "embedding_vector",
-                        }
-                    )
-        elif index.direct_access_index_spec:
-            spec = index.direct_access_index_spec
-            if spec.schema_json:
-                try:
-                    schema = json.loads(spec.schema_json)
-                    if isinstance(schema, dict):
-                        for col_name, col_type in schema.items():
-                            columns.append({"name": col_name, "type": str(col_type)})
-                except (json.JSONDecodeError, TypeError):
-                    pass
-            if spec.embedding_source_columns:
-                for col in spec.embedding_source_columns:
-                    columns.append({"name": col.name, "type": "embedding_source"})
-            if spec.embedding_vector_columns:
-                for col in spec.embedding_vector_columns:
-                    columns.append(
-                        {
-                            "name": col.name,
-                            "type": "embedding_vector",
-                        }
-                    )
+                    columns.append({"name": col.name, "type": "embedding_vector"})
 
         return {
             "columns": columns,
