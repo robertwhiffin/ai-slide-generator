@@ -46,7 +46,7 @@ export const SessionHistory: React.FC<SessionHistoryProps> = ({
 
   useEffect(() => {
     loadSessions();
-    const timer = setInterval(loadSessions, 15_000);
+    const timer = setInterval(loadSessions, 60_000);
     return () => clearInterval(timer);
   }, [refreshKey]);
 
