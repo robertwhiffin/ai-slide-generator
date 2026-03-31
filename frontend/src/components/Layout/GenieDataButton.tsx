@@ -66,7 +66,7 @@ export const GenieDataButton: React.FC = () => {
     <div className="relative shrink-0" ref={dropdownRef}>
       <button
         onClick={handleClick}
-        className="px-2.5 py-1 rounded text-xs font-medium transition-colors flex items-center gap-1.5 border border-purple-300 text-purple-700 bg-purple-50 hover:bg-purple-100"
+        className="px-2 py-1 rounded text-xs font-medium transition-colors flex items-center gap-1.5 text-gray-500 hover:text-gray-700 hover:bg-gray-100"
       >
         <Database size={14} />
         Genie Data
