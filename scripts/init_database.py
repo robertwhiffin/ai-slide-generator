@@ -29,7 +29,6 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 from src.core.database import get_db_session, init_db, Base, get_engine
 from src.core.defaults import DEFAULT_CONFIG
 from src.database.models import (
-    ConfigAIInfra,
     ConfigGenieSpace,
     ConfigProfile,
     ConfigPrompts,
@@ -135,7 +134,15 @@ def initialize_database(reset: bool = False):
         print("Ensuring database tables exist...")
         init_db()
         print("✓ Tables ready")
-    
+
+    # Drop legacy config_ai_infra table (idempotent)
+    from sqlalchemy import text
+    engine = get_engine()
+    with engine.connect() as conn:
+        conn.execute(text("DROP TABLE IF EXISTS config_ai_infra"))
+        conn.commit()
+    print("✓ Legacy config_ai_infra table dropped (if existed)")
+
     with get_db_session() as db:
         # Seed global libraries first (they check internally if already seeded)
         seed_deck_prompts(db)
@@ -183,18 +190,6 @@ def initialize_database(reset: bool = False):
             )
             db.add(profile)
             db.flush()  # Get profile ID
-            
-            # Create AI infrastructure
-            ai_config = seed.get('ai_infra', {})
-            if ai_config:
-                ai_infra = ConfigAIInfra(
-                    profile_id=profile.id,
-                    llm_endpoint=ai_config['llm_endpoint'],
-                    llm_temperature=ai_config['llm_temperature'],
-                    llm_max_tokens=ai_config['llm_max_tokens'],
-                )
-                db.add(ai_infra)
-                print(f"  ✓ AI settings: {ai_config['llm_endpoint']}")
             
             # Create Genie space
             genie_config = seed.get('genie_space', {})

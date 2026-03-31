@@ -18,7 +18,6 @@ from src.core.database import get_db_session
 from src.core.defaults import DEFAULT_CONFIG, DEFAULT_SLIDE_STYLE
 from src.core.config_loader import load_config
 from src.database.models import (
-    ConfigAIInfra,
     ConfigGenieSpace,
     ConfigProfile,
     ConfigPrompts,
@@ -341,7 +340,6 @@ def init_default_profile() -> None:
     Initialize database with default profile.
     
     Creates a profile named "default" with configuration from:
-    - config/config.yaml - LLM settings (optional)
     - src/core/defaults.py - prompts and fallback values
     - slide_style_library - visual styling (seeded separately)
     
@@ -386,15 +384,7 @@ def init_default_profile() -> None:
 
             logger.info("Created default profile", extra={"profile_id": profile.id})
 
-            # Create AI infrastructure settings
-            ai_infra = ConfigAIInfra(
-                profile_id=profile.id,
-                llm_endpoint=config["llm"]["endpoint"],
-                llm_temperature=config["llm"]["temperature"],
-                llm_max_tokens=config["llm"]["max_tokens"],
-            )
-            db.add(ai_infra)
-            logger.info("Created AI infrastructure settings")
+            # LLM config now comes from DEFAULT_CONFIG, no per-profile AI infra needed
 
             # Create Genie space settings (one per profile)
             genie_space = ConfigGenieSpace(
@@ -430,7 +420,6 @@ def init_default_profile() -> None:
                 "Default profile initialized successfully",
                 extra={
                     "profile_id": profile.id,
-                    "llm_endpoint": ai_infra.llm_endpoint,
                     "genie_space": genie_space.space_name,
                 },
             )
@@ -438,7 +427,6 @@ def init_default_profile() -> None:
             print("\n✓ Default profile initialized successfully")
             print(f"  Profile ID: {profile.id}")
             print(f"  Profile Name: {profile.name}")
-            print(f"  LLM Endpoint: {ai_infra.llm_endpoint}")
             print(f"  Genie Space: {genie_space.space_name}")
             print("\nYou can now start the application with database-backed configuration.")
 

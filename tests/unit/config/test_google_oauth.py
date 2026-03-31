@@ -72,7 +72,6 @@ def db_session(session_factory, db_engine):
         conn.execute(text("DELETE FROM google_global_credentials"))
         conn.execute(text("DELETE FROM config_genie_spaces"))
         conn.execute(text("DELETE FROM config_prompts"))
-        conn.execute(text("DELETE FROM config_ai_infra"))
         conn.execute(text("DELETE FROM config_profiles"))
         conn.commit()
 
@@ -115,7 +114,6 @@ def _clean_data_for_api_tests(db_engine):
         conn.execute(text("DELETE FROM google_global_credentials"))
         conn.execute(text("DELETE FROM config_genie_spaces"))
         conn.execute(text("DELETE FROM config_prompts"))
-        conn.execute(text("DELETE FROM config_ai_infra"))
         conn.execute(text("DELETE FROM config_profiles"))
         conn.commit()
 

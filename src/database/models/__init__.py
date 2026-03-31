@@ -1,6 +1,5 @@
 """Database models."""
 
-from src.database.models.ai_infra import ConfigAIInfra
 from src.database.models.deck_contributor import DeckContributor
 from src.database.models.feedback import FeedbackConversation, SurveyResponse
 from src.database.models.genie_space import ConfigGenieSpace
@@ -32,7 +31,6 @@ from src.database.models.user_preference import UserProfilePreference
 __all__ = [
     "AppIdentity",
     "ChatRequest",
-    "ConfigAIInfra",
     "ConfigGenieSpace",
     "DeckContributor",
     "ConfigProfile",

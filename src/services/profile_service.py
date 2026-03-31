@@ -7,7 +7,6 @@ from sqlalchemy.orm import Session, joinedload
 from src.core.defaults import DEFAULT_CONFIG
 from src.core.permission_context import get_permission_context
 from src.database.models import (
-    ConfigAIInfra,
     ConfigGenieSpace,
     ConfigProfile,
     ConfigProfileContributor,
@@ -73,7 +72,6 @@ class ProfileService:
         return (
             self.db.query(ConfigProfile)
             .options(
-                joinedload(ConfigProfile.ai_infra),
                 joinedload(ConfigProfile.genie_spaces),
                 joinedload(ConfigProfile.prompts),
             )
@@ -100,7 +98,6 @@ class ProfileService:
                 profile = (
                     self.db.query(ConfigProfile)
                     .options(
-                        joinedload(ConfigProfile.ai_infra),
                         joinedload(ConfigProfile.genie_spaces),
                         joinedload(ConfigProfile.prompts),
                     )
@@ -116,7 +113,6 @@ class ProfileService:
         return (
             self.db.query(ConfigProfile)
             .options(
-                joinedload(ConfigProfile.ai_infra),
                 joinedload(ConfigProfile.genie_spaces),
                 joinedload(ConfigProfile.prompts),
             )
@@ -198,15 +194,6 @@ class ProfileService:
             created_by=user,
         )
         self.db.add(contributor)
-
-        # Use defaults for AI infrastructure
-        ai_infra = ConfigAIInfra(
-            profile_id=profile.id,
-            llm_endpoint=DEFAULT_CONFIG["llm"]["endpoint"],
-            llm_temperature=DEFAULT_CONFIG["llm"]["temperature"],
-            llm_max_tokens=DEFAULT_CONFIG["llm"]["max_tokens"],
-        )
-        self.db.add(ai_infra)
 
         # NO default Genie space - user must explicitly configure one
 
@@ -344,29 +331,27 @@ class ProfileService:
         name: str,
         description: Optional[str],
         genie_space: Optional[dict],
-        ai_infra: Optional[dict],
         prompts: Optional[dict],
         user: str,
         user_databricks_id: Optional[str] = None,
     ) -> ConfigProfile:
         """
         Create profile with all configurations in one transaction.
-        
+
         Used by the creation wizard for complete profile setup.
         The creator is automatically added as a CAN_MANAGE contributor.
-        
+
         Args:
             name: Profile name
             description: Profile description
             genie_space: Genie space config (optional - enables data queries)
-            ai_infra: AI infrastructure config (optional, uses defaults)
             prompts: Prompts config (optional, uses defaults)
             user: User creating the profile (username/email)
             user_databricks_id: Optional Databricks user ID for contributor entry
-            
+
         Returns:
             Created profile with all configurations
-            
+
         Raises:
             ValueError: If profile name already exists
         """
@@ -409,16 +394,6 @@ class ProfileService:
         )
         self.db.add(contributor)
 
-        # Create AI infrastructure (use provided or defaults)
-        ai_config = ai_infra or {}
-        ai_infra_record = ConfigAIInfra(
-            profile_id=profile.id,
-            llm_endpoint=ai_config.get("llm_endpoint") or DEFAULT_CONFIG["llm"]["endpoint"],
-            llm_temperature=ai_config.get("llm_temperature") if ai_config.get("llm_temperature") is not None else DEFAULT_CONFIG["llm"]["temperature"],
-            llm_max_tokens=ai_config.get("llm_max_tokens") or DEFAULT_CONFIG["llm"]["max_tokens"],
-        )
-        self.db.add(ai_infra_record)
-
         # Create Genie space (optional - profiles without Genie run in prompt-only mode)
         if genie_space:
             genie_record = ConfigGenieSpace(
@@ -455,7 +430,7 @@ class ProfileService:
         Duplicate profile with new name.
         
         Copies all configuration from the source profile including
-        AI infrastructure, Genie space, MLflow, and prompts.
+        Genie space and prompts.
         
         Args:
             profile_id: Profile to duplicate
@@ -499,15 +474,6 @@ class ProfileService:
         )
         self.db.add(profile)
         self.db.flush()
-
-        # Copy AI infrastructure
-        ai_infra = ConfigAIInfra(
-            profile_id=profile.id,
-            llm_endpoint=source_profile.ai_infra.llm_endpoint,
-            llm_temperature=source_profile.ai_infra.llm_temperature,
-            llm_max_tokens=source_profile.ai_infra.llm_max_tokens,
-        )
-        self.db.add(ai_infra)
 
         # Copy Genie space if exists
         if source_profile.genie_spaces:
