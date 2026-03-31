@@ -102,6 +102,18 @@ def _call_mcp_in_clean_thread(
         else:
             return json.dumps({"result": result})
 
+    except ExceptionGroup as eg:
+        # DatabricksMCPClient wraps errors in ExceptionGroup (Python 3.11+)
+        sub = eg.exceptions[0] if eg.exceptions else eg
+        error_msg = str(sub)
+        if "403" in error_msg or "Forbidden" in error_msg:
+            raise MCPToolError(
+                "Permission denied for MCP connection. "
+                "Ensure you have USE CONNECTION permission on this UC HTTP connection."
+            ) from eg
+        logger.error("MCP tool call failed: %s", sub, exc_info=True)
+        raise MCPToolError(f"MCP tool call failed: {sub}") from eg
+
     except Exception as e:
         logger.error("MCP tool call failed: %s", e, exc_info=True)
         raise MCPToolError(f"MCP tool call failed: {e}") from e
