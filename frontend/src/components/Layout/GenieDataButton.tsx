@@ -12,7 +12,7 @@ export const GenieDataButton: React.FC = () => {
   const dropdownRef = useRef<HTMLDivElement>(null);
 
   const genieTools = agentConfig.tools.filter(
-    (t): t is GenieTool => t.tool_type === 'genie'
+    (t): t is GenieTool => t.type === 'genie'
   );
 
   // Close dropdown on outside click
