@@ -27,7 +27,9 @@ export const GenieDataButton: React.FC = () => {
     return () => document.removeEventListener('mousedown', handleClickOutside);
   }, [showDropdown]);
 
-  if (genieTools.length === 0) {
+  // Only show when at least one Genie tool has been queried
+  const hasConversations = genieTools.some(t => t.conversation_id);
+  if (genieTools.length === 0 || !hasConversations) {
     return null;
   }
 
@@ -64,7 +66,7 @@ export const GenieDataButton: React.FC = () => {
     <div className="relative shrink-0" ref={dropdownRef}>
       <button
         onClick={handleClick}
-        className="px-3 py-1.5 rounded text-sm transition-colors flex items-center gap-1.5 bg-purple-500 hover:bg-purple-700 text-white"
+        className="px-2.5 py-1 rounded text-xs font-medium transition-colors flex items-center gap-1.5 border border-purple-300 text-purple-700 bg-purple-50 hover:bg-purple-100"
       >
         <Database size={14} />
         Genie Data
