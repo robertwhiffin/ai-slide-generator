@@ -167,18 +167,18 @@ export async function setupIntegrationMocks(page: Page): Promise<void> {
 /** Expand the agent config bar by clicking its toggle. */
 export async function expandConfigBar(page: Page): Promise<void> {
   await page.locator('[data-testid="agent-config-toggle"]').click();
-  await page.locator('[data-testid="add-tool-button"]').waitFor({ state: 'visible', timeout: 10000 });
+  await page.locator('[data-testid="add-tool-genie"]').waitFor({ state: 'visible', timeout: 10000 });
 }
 
 /**
  * Add a Genie space via the tool picker flow:
- *   1. Click add-tool-button → tool-picker appears
+ *   1. Click "+ Genie Space" button → genie discovery dropdown appears
  *   2. Click the space name → genie-detail-panel appears
  *   3. Click "Save & Add" → panel hides
  */
 export async function addGenieSpace(page: Page, spaceName: string): Promise<void> {
-  await page.locator('[data-testid="add-tool-button"]').click();
-  await page.locator('[data-testid="tool-picker"]').waitFor({ state: 'visible', timeout: 10000 });
+  await page.locator('[data-testid="add-tool-genie"]').click();
+  await page.locator('[data-testid="genie-discovery"]').waitFor({ state: 'visible', timeout: 10000 });
   await page.getByText(spaceName).click();
   await page.locator('[data-testid="genie-detail-panel"]').waitFor({ state: 'visible', timeout: 10000 });
   await page.getByRole('button', { name: 'Save & Add' }).click();
