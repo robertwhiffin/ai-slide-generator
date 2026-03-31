@@ -27,6 +27,7 @@ import { useVersionCheck } from '../../hooks/useVersionCheck';
 import { useToast } from '../../contexts/ToastContext';
 import { useGoogleOAuthPopup } from '../../hooks/useGoogleOAuthPopup';
 import { api } from '../../services/api';
+import { configApi } from '../../api/config';
 import { SidebarProvider, SidebarInset } from '@/ui/sidebar';
 import { AppSidebar } from './app-sidebar';
 import { PageHeader } from './page-header';
@@ -122,12 +123,12 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
     };
   }, []);
 
-  // Main lock lifecycle: acquire on open, heartbeat, idle release, poll status
+  // Main lock lifecycle: acquire on open, heartbeat, idle release, poll status.
+  // Skipped entirely for unshared sessions (no contributors) to avoid idle API traffic.
   useEffect(() => {
     if (!sessionId || initialView !== 'main') return;
 
     // New session (no URL session ID) — not persisted to DB yet, so no lock needed.
-    // The user is the sole owner until the first message persists the session.
     if (!urlSessionId) {
       setIsLockHolder(true);
       setEditingLockHolder(null);
@@ -173,48 +174,101 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
       } catch { /* ignore */ }
     };
 
-    tryAcquire();
+    const timers: ReturnType<typeof setInterval>[] = [];
 
-    const pollTimer = setInterval(async () => {
+    // Check if session is shared before starting lock polling
+    configApi.listDeckContributors(sessionId).then(({ contributors }) => {
       if (cancelled) return;
 
-      if (!isViewer && lockSessionRef.current === sessionId) {
-        const idleMs = Date.now() - lastActivityRef.current;
-        if (idleMs >= IDLE_TIMEOUT_MS) {
-          try { await api.releaseEditingLock(sessionId); } catch { /* ignore */ }
-          lockSessionRef.current = null;
-          setIsLockHolder(true);
-          setEditingLockHolder(null);
-          return;
-        }
-        try { await api.heartbeatEditingLock(sessionId); } catch { /* ignore */ }
+      if (contributors.length === 0) {
+        // Unshared session — no contention possible, grant lock immediately
+        setIsLockHolder(true);
+        setEditingLockHolder(null);
+        return;
       }
 
-      try {
-        const [status, slideResult] = await Promise.all([
-          api.getEditingLockStatus(sessionId),
-          api.getSlides(sessionId),
-        ]);
+      // Shared session — full lock lifecycle
+      tryAcquire();
+
+      timers.push(setInterval(async () => {
         if (cancelled) return;
 
-        if (slideResult.slide_deck && !isSelf(status)) {
-          setSlideDeckGated(slideResult.slide_deck as SlideDeck, (slideResult.slide_deck as SlideDeck).version);
-        }
-
-        applyStatus(status);
-
-        if (!isViewer && !status.locked && lockSessionRef.current !== sessionId) {
+        if (!isViewer && lockSessionRef.current === sessionId) {
           const idleMs = Date.now() - lastActivityRef.current;
-          if (idleMs < IDLE_TIMEOUT_MS) {
-            await tryAcquire();
+          if (idleMs >= IDLE_TIMEOUT_MS) {
+            try { await api.releaseEditingLock(sessionId); } catch { /* ignore */ }
+            lockSessionRef.current = null;
+            setIsLockHolder(true);
+            setEditingLockHolder(null);
+            return;
           }
+          try { await api.heartbeatEditingLock(sessionId); } catch { /* ignore */ }
         }
-      } catch { /* ignore */ }
-    }, 10_000);
+
+        try {
+          const status = await api.getEditingLockStatus(sessionId);
+          if (cancelled) return;
+
+          applyStatus(status);
+
+          if (!isViewer && !status.locked && lockSessionRef.current !== sessionId) {
+            const idleMs = Date.now() - lastActivityRef.current;
+            if (idleMs < IDLE_TIMEOUT_MS) {
+              await tryAcquire();
+            }
+          }
+        } catch { /* ignore */ }
+      }, 10_000));
+
+      timers.push(setInterval(async () => {
+        if (cancelled) return;
+        try {
+          const slideResult = await api.getSlides(sessionId);
+          if (cancelled) return;
+          const lockStatus = await api.getEditingLockStatus(sessionId);
+          if (slideResult.slide_deck && !isSelf(lockStatus)) {
+            setSlideDeckGated(slideResult.slide_deck as SlideDeck, (slideResult.slide_deck as SlideDeck).version);
+          }
+        } catch { /* ignore */ }
+      }, 15_000));
+    }).catch(() => {
+      // If contributor check fails, fall back to full lock lifecycle for safety
+      if (cancelled) return;
+      tryAcquire();
+
+      timers.push(setInterval(async () => {
+        if (cancelled) return;
+
+        if (!isViewer && lockSessionRef.current === sessionId) {
+          const idleMs = Date.now() - lastActivityRef.current;
+          if (idleMs >= IDLE_TIMEOUT_MS) {
+            try { await api.releaseEditingLock(sessionId); } catch { /* ignore */ }
+            lockSessionRef.current = null;
+            setIsLockHolder(true);
+            setEditingLockHolder(null);
+            return;
+          }
+          try { await api.heartbeatEditingLock(sessionId); } catch { /* ignore */ }
+        }
+
+        try {
+          const status = await api.getEditingLockStatus(sessionId);
+          if (cancelled) return;
+          applyStatus(status);
+
+          if (!isViewer && !status.locked && lockSessionRef.current !== sessionId) {
+            const idleMs = Date.now() - lastActivityRef.current;
+            if (idleMs < IDLE_TIMEOUT_MS) {
+              await tryAcquire();
+            }
+          }
+        } catch { /* ignore */ }
+      }, 10_000));
+    });
 
     return () => {
       cancelled = true;
-      clearInterval(pollTimer);
+      timers.forEach(t => clearInterval(t));
       if (lockSessionRef.current === sessionId) {
         api.releaseEditingLock(sessionId);
         lockSessionRef.current = null;
