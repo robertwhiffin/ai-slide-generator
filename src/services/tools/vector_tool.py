@@ -128,8 +128,28 @@ def build_vector_tool(config: VectorIndexTool, index: int = 1) -> StructuredTool
         LangChain StructuredTool instance
     """
     index_name = config.index_name
-    columns = config.columns or []
+    columns = config.columns
     default_num_results = config.num_results
+
+    # If no columns specified (user selected "all"), resolve from index metadata
+    if not columns:
+        try:
+            client = get_user_client()
+            idx_detail = client.vector_search_indexes.get_index(index_name=index_name)
+            resolved: list[str] = []
+            spec = idx_detail.delta_sync_index_spec or idx_detail.direct_access_index_spec
+            if spec:
+                if spec.embedding_source_columns:
+                    for col in spec.embedding_source_columns:
+                        resolved.append(col.name)
+                if spec.embedding_vector_columns:
+                    for col in spec.embedding_vector_columns:
+                        resolved.append(col.name)
+            columns = resolved or ["content"]  # fallback to common column name
+            logger.info("Resolved vector index columns", extra={"index": index_name, "columns": columns})
+        except Exception as e:
+            logger.warning("Failed to resolve columns for %s, using fallback: %s", index_name, e)
+            columns = ["content"]
 
     # Build a custom input schema that uses the config's default num_results
     input_schema = type(
