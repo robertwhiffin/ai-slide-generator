@@ -118,41 +118,38 @@ def test_custom_editing_instructions_override(default_prompts):
     assert agent._pre_built_prompts["slide_editing_instructions"] == "Custom editing rules"
 
 
-def test_mcp_tool_logs_warning_and_skipped(default_prompts):
-    """MCPTool entries are skipped with a warning (not yet supported)."""
+def test_mcp_tool_builds_tools(default_prompts):
+    """MCPTool entries now call build_mcp_tools and add tools to the agent."""
     from src.api.schemas.agent_config import AgentConfig, MCPTool
     from src.services.agent_factory import build_agent_for_request
 
     config = AgentConfig(tools=[
-        MCPTool(type="mcp", server_uri="http://mcp.example.com", server_name="MyMCP")
+        MCPTool(type="mcp", connection_name="my-mcp-conn", server_name="MyMCP")
     ])
     session_data = {"session_id": "test-123", "genie_conversation_id": None}
 
+    mock_mcp_tool = MagicMock()
+    mock_mcp_tool.name = "mcp_my_mcp_conn_search"
+
     with patch("src.services.agent_factory._create_model") as mock_model, \
          patch("src.services.agent_factory._get_prompt_content") as mock_prompts, \
+         patch("src.services.agent_factory.build_mcp_tools") as mock_build_mcp, \
          patch("src.services.agent.get_settings") as mock_settings, \
-         patch("src.services.agent.get_databricks_client") as mock_client, \
-         patch("src.services.agent_factory.logger") as mock_logger:
+         patch("src.services.agent.get_databricks_client") as mock_client:
         mock_model.return_value = MagicMock()
         mock_prompts.return_value = default_prompts
+        mock_build_mcp.return_value = [mock_mcp_tool]
         mock_settings.return_value = MagicMock()
         mock_client.return_value = MagicMock()
 
         agent = build_agent_for_request(config, session_data)
 
-    # Only search_images, no MCP tool
+    # search_images + 1 MCP tool
     tool_names = [t.name for t in agent.tools]
     assert "search_images" in tool_names
-    assert len(tool_names) == 1
-
-    # Verify warning was logged
-    mock_logger.warning.assert_any_call(
-        "MCP tools not yet supported, skipping",
-        extra={
-            "server_uri": "http://mcp.example.com",
-            "server_name": "MyMCP",
-        },
-    )
+    assert "mcp_my_mcp_conn_search" in tool_names
+    assert len(tool_names) == 2
+    mock_build_mcp.assert_called_once()
 
 
 def test_get_prompt_content_uses_config_overrides():
@@ -282,3 +279,89 @@ def test_backward_compatible_init():
     assert agent._pre_built_prompts is None
     assert agent.tools == []
     assert agent.system_prompt is None
+
+
+class TestBuildToolsNewTypes:
+    @patch("src.services.agent_factory.build_vector_tool")
+    def test_build_tools_includes_vector(self, mock_build):
+        from src.api.schemas.agent_config import AgentConfig, VectorIndexTool
+        from src.services.agent_factory import _build_tools
+        mock_tool = MagicMock()
+        mock_tool.name = "search_vector_index"
+        mock_build.return_value = mock_tool
+        config = AgentConfig(tools=[
+            VectorIndexTool(type="vector_index", endpoint_name="ep", index_name="idx"),
+        ])
+        tools = _build_tools(config, {})
+        assert any(t.name == "search_vector_index" for t in tools)
+        mock_build.assert_called_once()
+
+    @patch("src.services.agent_factory.build_model_endpoint_tool")
+    def test_build_tools_includes_model_endpoint(self, mock_build):
+        from src.api.schemas.agent_config import AgentConfig, ModelEndpointTool
+        from src.services.agent_factory import _build_tools
+        mock_tool = MagicMock()
+        mock_tool.name = "query_model_endpoint"
+        mock_build.return_value = mock_tool
+        config = AgentConfig(tools=[
+            ModelEndpointTool(type="model_endpoint", endpoint_name="llm"),
+        ])
+        tools = _build_tools(config, {})
+        assert any(t.name == "query_model_endpoint" for t in tools)
+        mock_build.assert_called_once()
+
+    @patch("src.services.agent_factory.build_agent_bricks_tool")
+    def test_build_tools_includes_agent_bricks(self, mock_build):
+        from src.api.schemas.agent_config import AgentConfig, AgentBricksTool
+        from src.services.agent_factory import _build_tools
+        mock_tool = MagicMock()
+        mock_tool.name = "query_agent"
+        mock_build.return_value = mock_tool
+        config = AgentConfig(tools=[
+            AgentBricksTool(type="agent_bricks", endpoint_name="hr-bot"),
+        ])
+        tools = _build_tools(config, {})
+        assert any(t.name == "query_agent" for t in tools)
+        mock_build.assert_called_once()
+
+    @patch("src.services.agent_factory.build_mcp_tools")
+    def test_build_tools_includes_mcp(self, mock_build):
+        from src.api.schemas.agent_config import AgentConfig, MCPTool
+        from src.services.agent_factory import _build_tools
+        mock_tool = MagicMock()
+        mock_tool.name = "mcp_jira_search"
+        mock_build.return_value = [mock_tool]  # MCP returns a list
+        config = AgentConfig(tools=[
+            MCPTool(type="mcp", connection_name="jira", server_name="Jira"),
+        ])
+        tools = _build_tools(config, {})
+        assert any(t.name == "mcp_jira_search" for t in tools)
+        mock_build.assert_called_once()
+
+    @patch("src.services.agent_factory.build_agent_bricks_tool")
+    @patch("src.services.agent_factory.build_model_endpoint_tool")
+    @patch("src.services.agent_factory.build_vector_tool")
+    @patch("src.services.agent_factory.build_mcp_tools")
+    @patch("src.services.agent_factory.build_genie_tool")
+    def test_build_tools_all_types_together(self, mock_genie, mock_mcp, mock_vector, mock_model, mock_agent):
+        from src.api.schemas.agent_config import (
+            AgentConfig, GenieTool, MCPTool, VectorIndexTool, ModelEndpointTool, AgentBricksTool,
+        )
+        from src.services.agent_factory import _build_tools
+
+        mock_genie.return_value = MagicMock(name="query_genie_space")
+        mock_mcp.return_value = [MagicMock(name="mcp_jira_search")]
+        mock_vector.return_value = MagicMock(name="search_vector_index")
+        mock_model.return_value = MagicMock(name="query_model_endpoint")
+        mock_agent.return_value = MagicMock(name="query_agent")
+
+        config = AgentConfig(tools=[
+            GenieTool(type="genie", space_id="s1", space_name="Sales"),
+            MCPTool(type="mcp", connection_name="jira", server_name="Jira"),
+            VectorIndexTool(type="vector_index", endpoint_name="ep", index_name="idx"),
+            ModelEndpointTool(type="model_endpoint", endpoint_name="llm"),
+            AgentBricksTool(type="agent_bricks", endpoint_name="hr-bot"),
+        ])
+        tools = _build_tools(config, {})
+        # 1 image search + 5 tool types = 6
+        assert len(tools) == 6

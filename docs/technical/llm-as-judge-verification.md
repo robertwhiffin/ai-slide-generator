@@ -151,7 +151,7 @@ See `src/services/evaluation/llm_judge.py::_build_judge_prompt()` for full promp
 |------|----------------|---------------------|
 | `frontend/src/components/SlidePanel/SlidePanel.tsx` | Auto-verification trigger, parallel verify calls, state management | `api.verifySlide`, `api.getSlides` |
 | `frontend/src/components/SlidePanel/VerificationBadge.tsx` | Renders rating badge, details popup, feedback UI | `api.submitVerificationFeedback` |
-| `frontend/src/components/SlidePanel/SlideTile.tsx` | Hosts badge, Genie source data button, edit detection | `api.getGenieLink` |
+| `frontend/src/components/SlidePanel/SlideTile.tsx` | Hosts badge, edit detection | — |
 | `frontend/src/services/api.ts` | API client methods for verification flow | `/api/verification/*` endpoints |
 | `frontend/src/types/verification.ts` | TypeScript types and utility functions (badge colors, icons) | None (types only) |
 | `frontend/src/components/Help/HelpPage.tsx` | Verification tab with user documentation | None (UI only) |

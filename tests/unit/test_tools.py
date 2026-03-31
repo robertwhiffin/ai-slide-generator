@@ -16,7 +16,7 @@ from src.services.tools import (
 @pytest.fixture
 def mock_databricks_client():
     """Mock Databricks client for testing (user client for Genie operations)."""
-    with patch("src.services.tools.get_user_client") as mock_client:
+    with patch("src.services.tools.genie_tool.get_user_client") as mock_client:
         client = Mock()
         mock_client.return_value = client
         yield client
@@ -25,7 +25,7 @@ def mock_databricks_client():
 @pytest.fixture
 def mock_settings():
     """Mock settings for testing."""
-    with patch("src.services.tools.get_settings") as mock_settings_fn:
+    with patch("src.services.tools.genie_tool.get_settings") as mock_settings_fn:
         settings = Mock()
         settings.genie.space_id = "test-space-id"
         settings.genie.timeout = 60

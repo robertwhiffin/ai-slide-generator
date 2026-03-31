@@ -21,7 +21,7 @@ async function openAgentConfig(page: import('@playwright/test').Page) {
   // Expand the config bar
   await page.getByTestId('agent-config-toggle').click();
   // Wait for expanded content
-  await expect(page.getByTestId('add-tool-button')).toBeVisible();
+  await expect(page.getByTestId('add-tool-genie')).toBeVisible();
 }
 
 // Helper: mock agent-config with an existing Genie tool
@@ -70,7 +70,7 @@ test.describe('Genie Detail Panel', () => {
       await openAgentConfig(page);
 
       // Open tool picker
-      await page.getByTestId('add-tool-button').click();
+      await page.getByTestId('add-tool-genie').click();
       await expect(page.getByTestId('tool-picker')).toBeVisible();
 
       // Click a Genie space — should open detail panel, not add immediately
@@ -85,7 +85,7 @@ test.describe('Genie Detail Panel', () => {
     test('detail panel shows full description and space ID', async ({ page }) => {
       await openAgentConfig(page);
 
-      await page.getByTestId('add-tool-button').click();
+      await page.getByTestId('add-tool-genie').click();
       await page.getByText('Sales Data Space').click();
 
       const panel = page.getByTestId('genie-detail-panel');
@@ -115,7 +115,7 @@ test.describe('Genie Detail Panel', () => {
       });
 
       await openAgentConfig(page);
-      await page.getByTestId('add-tool-button').click();
+      await page.getByTestId('add-tool-genie').click();
       await page.getByText('Sales Data Space').click();
 
       const panel = page.getByTestId('genie-detail-panel');
@@ -142,7 +142,7 @@ test.describe('Genie Detail Panel', () => {
 
     test('Cancel does not add the tool', async ({ page }) => {
       await openAgentConfig(page);
-      await page.getByTestId('add-tool-button').click();
+      await page.getByTestId('add-tool-genie').click();
       await page.getByText('Sales Data Space').click();
 
       const panel = page.getByTestId('genie-detail-panel');
@@ -156,7 +156,7 @@ test.describe('Genie Detail Panel', () => {
 
     test('Escape key closes the detail panel without adding', async ({ page }) => {
       await openAgentConfig(page);
-      await page.getByTestId('add-tool-button').click();
+      await page.getByTestId('add-tool-genie').click();
       await page.getByText('Sales Data Space').click();
 
       await expect(page.getByTestId('genie-detail-panel')).toBeVisible();
@@ -279,7 +279,7 @@ test.describe('Genie Detail Panel', () => {
       });
 
       await openAgentConfig(page);
-      await page.getByTestId('add-tool-button').click();
+      await page.getByTestId('add-tool-genie').click();
       await page.getByText('No Description Space').click();
 
       const panel = page.getByTestId('genie-detail-panel');
@@ -290,7 +290,7 @@ test.describe('Genie Detail Panel', () => {
 
     test('textarea auto-focuses on panel open', async ({ page }) => {
       await openAgentConfig(page);
-      await page.getByTestId('add-tool-button').click();
+      await page.getByTestId('add-tool-genie').click();
       await page.getByText('Sales Data Space').click();
 
       const textarea = page.getByTestId('genie-detail-panel').getByRole('textbox');

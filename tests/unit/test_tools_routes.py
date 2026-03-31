@@ -48,7 +48,7 @@ class TestGetAvailableTools:
         """GET /api/tools/available returns MCP servers from config."""
         mock_genie.return_value = []
         mock_mcp.return_value = [
-            {"type": "mcp", "server_uri": "http://localhost:8080", "server_name": "my-mcp", "config": {"key": "val"}},
+            {"type": "mcp", "connection_name": "http://localhost:8080", "server_name": "my-mcp", "config": {"key": "val"}},
         ]
 
         response = client.get("/api/tools/available")
@@ -56,7 +56,7 @@ class TestGetAvailableTools:
         data = response.json()
         assert len(data) == 1
         assert data[0]["type"] == "mcp"
-        assert data[0]["server_uri"] == "http://localhost:8080"
+        assert data[0]["connection_name"] == "http://localhost:8080"
         assert data[0]["server_name"] == "my-mcp"
         assert data[0]["config"] == {"key": "val"}
 
@@ -68,7 +68,7 @@ class TestGetAvailableTools:
             {"type": "genie", "space_id": "sp-1", "space_name": "Sales", "description": None},
         ]
         mock_mcp.return_value = [
-            {"type": "mcp", "server_uri": "http://localhost:8080", "server_name": "my-mcp", "config": {}},
+            {"type": "mcp", "connection_name": "http://localhost:8080", "server_name": "my-mcp", "config": {}},
         ]
 
         response = client.get("/api/tools/available")
@@ -84,7 +84,7 @@ class TestGetAvailableTools:
         """Genie SDK failure doesn't break the endpoint."""
         mock_genie.return_value = []  # graceful degradation already handled inside _list_genie_spaces
         mock_mcp.return_value = [
-            {"type": "mcp", "server_uri": "http://localhost:8080", "server_name": "my-mcp", "config": {}},
+            {"type": "mcp", "connection_name": "http://localhost:8080", "server_name": "my-mcp", "config": {}},
         ]
 
         response = client.get("/api/tools/available")
@@ -194,8 +194,8 @@ class TestListMcpServersInternal:
 
         result = _list_mcp_servers()
         assert len(result) == 2
-        assert result[0] == {"type": "mcp", "server_uri": "http://localhost:8080", "server_name": "my-mcp", "config": {"key": "val"}}
-        assert result[1] == {"type": "mcp", "server_uri": "http://localhost:9090", "server_name": "other-mcp", "config": {}}
+        assert result[0] == {"type": "mcp", "connection_name": "http://localhost:8080", "server_name": "my-mcp", "config": {"key": "val"}}
+        assert result[1] == {"type": "mcp", "connection_name": "http://localhost:9090", "server_name": "other-mcp", "config": {}}
 
     @patch("src.api.routes.tools.load_config")
     def test_list_mcp_servers_no_key(self, mock_load):

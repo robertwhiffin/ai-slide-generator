@@ -22,6 +22,7 @@ dependencies = [
     "opentelemetry-sdk>=1.20.0",
     "pandas>=2.0.0",
     "databricks-langchain>=0.1.0",
+    "databricks-mcp>=0.1.0",
     "langchain>=0.3.0",
     "langchain-core>=0.3.0",
     "sqlalchemy>=2.0.0",

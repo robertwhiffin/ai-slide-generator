@@ -111,29 +111,25 @@ async def verify_slide(slide_index: int, request: VerifySlideRequest):
             session_manager.get_messages, request.session_id
         )
 
-        # Collect all tool results (Genie query outputs)
-        genie_data_parts = []
+        # Collect all tool results (data from any tool: Genie, Vector Index,
+        # Agent Bricks, Model Endpoint, MCP, etc.)
+        source_data_parts = []
         for msg in messages:
             if msg.get("role") == "tool" and msg.get("message_type") == "tool_result":
                 content = msg.get("content", "")
-                metadata = msg.get("metadata", {})
-                tool_name = metadata.get("tool_name", "")
+                if content and content.strip():
+                    source_data_parts.append(content)
 
-                # Include Genie query results
-                if "genie" in tool_name.lower() or "query" in tool_name.lower():
-                    genie_data_parts.append(content)
-
-        # Combine all Genie data
-        genie_data = "\n---\n".join(genie_data_parts) if genie_data_parts else ""
+        # Combine all source data from tools
+        genie_data = "\n---\n".join(source_data_parts) if source_data_parts else ""
 
         if not genie_data:
-            # No Genie data found - verification cannot be performed
-            # Return "unknown" rating instead of misleading "excellent"
+            # No tool data found - verification cannot be performed
             unknown_result = {
                 "score": 0,
                 "rating": "unknown",
                 "explanation": "No source data available for verification. This may be a title slide or slides generated without data queries.",
-                "issues": [{"type": "no_data", "detail": "No Genie query results found in session"}],
+                "issues": [{"type": "no_data", "detail": "No tool query results found in session"}],
                 "duration_ms": 0,
                 "genie_conversation_id": genie_conversation_id,
                 "error": False,

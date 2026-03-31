@@ -31,6 +31,7 @@ import { SidebarProvider, SidebarInset } from '@/ui/sidebar';
 import { AppSidebar } from './app-sidebar';
 import { PageHeader } from './page-header';
 import { SimplePageHeader } from './simple-page-header';
+import { GenieDataButton } from './GenieDataButton';
 
 type ViewMode = 'main' | 'profiles' | 'deck_prompts' | 'slide_styles' | 'images' | 'history' | 'notifications' | 'help';
 
@@ -595,6 +596,7 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
                 isGenerating={isGenerating}
                 viewOnly={viewOnly}
                 exportStatus={exportStatus}
+                centerSlot={<GenieDataButton />}
                 savePointDropdown={
                   sessionId && slideDeck && versions.length > 0 ? (
                     <SavePointDropdown

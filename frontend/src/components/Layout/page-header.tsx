@@ -25,6 +25,8 @@ interface PageHeaderProps {
   onPresent?: () => void
   onTitleChange?: (newTitle: string) => void
   savePointDropdown?: React.ReactNode
+  /** Optional node rendered between the title area and the right-side action buttons */
+  centerSlot?: React.ReactNode
   /** Shown next to Export button (e.g. "Capturing charts...", "Exporting to Google Slides…") */
   exportStatus?: string | null
   isGenerating?: boolean
@@ -46,6 +48,7 @@ export function PageHeader({
   onPresent,
   onTitleChange,
   savePointDropdown,
+  centerSlot,
   exportStatus,
   isGenerating = false,
   viewOnly = false,
@@ -134,6 +137,8 @@ export function PageHeader({
           {!viewOnly && savePointDropdown && (
             <div className="shrink-0 leading-tight">{savePointDropdown}</div>
           )}
+          {/* Genie Data button — next to savepoint, in the title area */}
+          {centerSlot && <div className="shrink-0">{centerSlot}</div>}
         </div>
         {subtitle && <p className="mt-px text-xs leading-none text-muted-foreground truncate">{subtitle}</p>}
       </div>
