@@ -29,7 +29,6 @@ from src.core.databricks_client import (
     get_databricks_client,
     get_service_principal_folder,
     get_system_client,
-    get_user_client,
 )
 from src.core.settings_db import get_settings
 from src.domain.slide import Slide
@@ -317,15 +316,15 @@ class SlideGeneratorAgent:
             )
 
     def _create_model(self) -> ChatDatabricks:
-        """Create LangChain Databricks model with user context.
+        """Create LangChain Databricks model with system client.
 
         Creates a new ChatDatabricks instance per request using the
-        user-scoped WorkspaceClient. This ensures LLM calls are made
-        with the authenticated user's permissions.
+        system WorkspaceClient (service principal). This ensures users
+        do not need workspace-level permissions on the serving endpoint.
         """
         try:
             from src.core.defaults import DEFAULT_CONFIG
-            user_client = get_user_client()
+            system_client = get_system_client()
             llm_config = DEFAULT_CONFIG["llm"]
 
             model = ChatDatabricks(
@@ -333,11 +332,11 @@ class SlideGeneratorAgent:
                 temperature=llm_config["temperature"],
                 max_tokens=llm_config["max_tokens"],
                 top_p=llm_config["top_p"],
-                workspace_client=user_client,
+                workspace_client=system_client,
             )
 
             logger.info(
-                "ChatDatabricks model created with user context",
+                "ChatDatabricks model created with system client",
                 extra={
                     "endpoint": llm_config["endpoint"],
                     "temperature": llm_config["temperature"],

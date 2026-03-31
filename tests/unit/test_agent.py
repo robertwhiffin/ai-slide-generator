@@ -136,8 +136,8 @@ class TestSlideGeneratorAgent:
     def test_create_model_valid(self, agent_with_mocks):
         """Test model creation with valid settings."""
         # Model is now created per-request via _create_model()
-        with patch("src.services.agent.get_user_client") as mock_user_client:
-            mock_user_client.return_value = MagicMock()
+        with patch("src.services.agent.get_system_client") as mock_system_client:
+            mock_system_client.return_value = MagicMock()
             model = agent_with_mocks._create_model()
             assert model is not None
 
