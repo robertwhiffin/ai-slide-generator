@@ -16,21 +16,47 @@ class GenieTool(BaseModel):
 
 
 class MCPTool(BaseModel):
-    """MCP server tool — tools discovered via MCP protocol."""
+    """MCP server tool — tools discovered via UC HTTP connections."""
     type: Literal["mcp"]
-    server_uri: str = Field(..., min_length=1)
+    connection_name: str = Field(..., min_length=1)
     server_name: str = Field(..., min_length=1)
+    description: Optional[str] = None
     config: dict = Field(default_factory=dict)
 
 
-ToolEntry = Annotated[Union[GenieTool, MCPTool], Field(discriminator="type")]
+class VectorIndexTool(BaseModel):
+    """Vector search index tool — similarity search over embeddings."""
+    type: Literal["vector_index"]
+    endpoint_name: str = Field(..., min_length=1)
+    index_name: str = Field(..., min_length=1)
+    description: Optional[str] = None
+    columns: Optional[list[str]] = None
+    num_results: int = Field(default=5, ge=1, le=50)
+
+
+class ModelEndpointTool(BaseModel):
+    """Model serving endpoint tool — foundation models and custom ML."""
+    type: Literal["model_endpoint"]
+    endpoint_name: str = Field(..., min_length=1)
+    endpoint_type: Optional[str] = None
+    description: Optional[str] = None
+
+
+class AgentBricksTool(BaseModel):
+    """Agent Bricks tool — knowledge assistants and supervisor agents."""
+    type: Literal["agent_bricks"]
+    endpoint_name: str = Field(..., min_length=1)
+    description: Optional[str] = None
+
+
+ToolEntry = Annotated[
+    Union[GenieTool, MCPTool, VectorIndexTool, ModelEndpointTool, AgentBricksTool],
+    Field(discriminator="type"),
+]
 
 
 class AgentConfig(BaseModel):
-    """Agent configuration stored as JSON on sessions and profiles.
-
-    When all fields are None/empty, the system uses backend defaults.
-    """
+    """Agent configuration stored as JSON on sessions and profiles."""
     tools: list[ToolEntry] = Field(default_factory=list)
     slide_style_id: Optional[int] = None
     deck_prompt_id: Optional[int] = None
@@ -51,7 +77,13 @@ class AgentConfig(BaseModel):
             if isinstance(tool, GenieTool):
                 key = f"genie:{tool.space_id}"
             elif isinstance(tool, MCPTool):
-                key = f"mcp:{tool.server_uri}"
+                key = f"mcp:{tool.connection_name}"
+            elif isinstance(tool, VectorIndexTool):
+                key = f"vector_index:{tool.endpoint_name}:{tool.index_name}"
+            elif isinstance(tool, ModelEndpointTool):
+                key = f"model_endpoint:{tool.endpoint_name}"
+            elif isinstance(tool, AgentBricksTool):
+                key = f"agent_bricks:{tool.endpoint_name}"
             else:
                 continue
             if key in seen:

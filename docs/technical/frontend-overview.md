@@ -281,7 +281,7 @@ interface SlideStyle {
 | `src/components/ChatPanel/ChatInput.tsx` | Textarea with selection badge when context exists | None (props only) |
 | `src/components/ChatPanel/MessageList.tsx` & `Message.tsx` | Renders conversation, collapses HTML/tool outputs | None |
 | `src/components/SlidePanel/SlidePanel.tsx` | Hosts drag/drop, tabs, per-slide CRUD, auto-verification trigger for unverified slides | `api.getSlides`, `api.reorderSlides`, `api.updateSlide`, `api.deleteSlide`, `api.verifySlide` |
-| `src/components/SlidePanel/SlideTile.tsx` | Slide preview, selection button, editor modal, Genie source data button, displays verification badge | Prop callbacks to `SlidePanel`, `api.getGenieLink` |
+| `src/components/SlidePanel/SlideTile.tsx` | Slide preview, selection button, editor modal, displays verification badge | Prop callbacks to `SlidePanel` |
 | `src/components/SlidePanel/VerificationBadge.tsx` | Rating badge, details popup, feedback UI (thumbs up/down), manual re-verify option | `api.verifySlide`, `api.submitVerificationFeedback` |
 | `src/components/SlidePanel/SlidePanel.tsx` | Hosts drag/drop, tabs, per-slide CRUD, optimize layout handler | `api.getSlides`, `api.reorderSlides`, `api.updateSlide`, `api.deleteSlide`, `api.sendChatMessage` |
 | `src/components/SlidePanel/SlideTile.tsx` | Slide preview, selection button, editor modal trigger, optimize layout button | Prop callbacks to `SlidePanel` |
@@ -457,7 +457,7 @@ Errors bubble up as `ApiError` (status + message). Common statuses:
 5. **Review verification** – Click verification badge for details, provide feedback (👍/👎)
 6. **Refine slides** – Use checkbox in ribbon to select contiguous slides for chat context, provide instructions
 7. **Manual adjustments** – Edit HTML via modal, delete/reorder (edited slides auto-re-verify)
-8. **View source data** – Click database icon on slide to open Genie conversation
+8. **View source data** – Click "Genie Data" button in header to open Genie conversation (supports multi-Genie dropdown)
 9. **QA raw output** – Compare raw HTML render vs parsed slides
 
 ---

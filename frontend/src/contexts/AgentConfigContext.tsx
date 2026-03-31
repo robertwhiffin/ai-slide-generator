@@ -33,6 +33,7 @@ interface AgentConfigContextValue {
   addTool: (tool: ToolEntry) => Promise<void>;
   removeTool: (tool: ToolEntry) => Promise<void>;
   updateTool: (spaceId: string, updates: { description?: string }) => Promise<void>;
+  updateToolEntry: (tool: ToolEntry) => Promise<void>;
   setStyle: (styleId: number | null) => Promise<void>;
   setDeckPrompt: (promptId: number | null) => Promise<void>;
   saveAsProfile: (name: string, description?: string) => Promise<void>;
@@ -290,7 +291,16 @@ export const AgentConfigProvider: React.FC<{ children: React.ReactNode }> = ({ c
           return t.space_id !== tool.space_id;
         }
         if (t.type === 'mcp' && tool.type === 'mcp') {
-          return t.server_uri !== tool.server_uri;
+          return t.connection_name !== tool.connection_name;
+        }
+        if (t.type === 'vector_index' && tool.type === 'vector_index') {
+          return t.endpoint_name !== tool.endpoint_name || t.index_name !== tool.index_name;
+        }
+        if (t.type === 'model_endpoint' && tool.type === 'model_endpoint') {
+          return t.endpoint_name !== tool.endpoint_name;
+        }
+        if (t.type === 'agent_bricks' && tool.type === 'agent_bricks') {
+          return t.endpoint_name !== tool.endpoint_name;
         }
         return true;
       }),
@@ -306,6 +316,31 @@ export const AgentConfigProvider: React.FC<{ children: React.ReactNode }> = ({ c
           return { ...t, ...updates };
         }
         return t;
+      }),
+    };
+    await updateConfig(updated);
+  }, [agentConfig, updateConfig]);
+
+  /** Replace a tool entry in-place, matched by type + primary key. */
+  const updateToolEntry = useCallback(async (tool: ToolEntry) => {
+    const updated: AgentConfig = {
+      ...agentConfig,
+      tools: agentConfig.tools.map(t => {
+        if (t.type !== tool.type) return t;
+        switch (tool.type) {
+          case 'genie':
+            return t.type === 'genie' && t.space_id === tool.space_id ? tool : t;
+          case 'mcp':
+            return t.type === 'mcp' && t.connection_name === tool.connection_name ? tool : t;
+          case 'vector_index':
+            return t.type === 'vector_index' && t.endpoint_name === tool.endpoint_name && t.index_name === tool.index_name ? tool : t;
+          case 'model_endpoint':
+            return t.type === 'model_endpoint' && t.endpoint_name === tool.endpoint_name ? tool : t;
+          case 'agent_bricks':
+            return t.type === 'agent_bricks' && t.endpoint_name === tool.endpoint_name ? tool : t;
+          default:
+            return t;
+        }
       }),
     };
     await updateConfig(updated);
@@ -401,6 +436,7 @@ export const AgentConfigProvider: React.FC<{ children: React.ReactNode }> = ({ c
     addTool,
     removeTool,
     updateTool,
+    updateToolEntry,
     setStyle,
     setDeckPrompt,
     saveAsProfile,

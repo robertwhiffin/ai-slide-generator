@@ -267,7 +267,7 @@ const VerificationTab: React.FC = () => (
           You can view the original Genie queries and data that were used to generate your slides:
         </p>
         <ul className="list-disc list-inside text-gray-700 space-y-2">
-          <li><strong>Database icon</strong> on each slide tile — opens the Genie conversation in a new tab</li>
+          <li><strong>Genie Data button</strong> in the header — opens the Genie conversation in a new tab. If multiple Genie spaces are configured, a dropdown lets you choose which one to open.</li>
           <li><strong>"View Source Data in Genie" link</strong> — available in the verification details popup</li>
         </ul>
         <p className="text-sm text-gray-500 mt-2">
