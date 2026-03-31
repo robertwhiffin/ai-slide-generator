@@ -187,6 +187,9 @@ export const VectorIndexDiscovery: React.FC<VectorIndexDiscoveryProps> = ({
             <X size={14} />
           </button>
         </div>
+        {step === 'endpoint' && (
+          <p className="text-[11px] text-gray-400 mb-1.5">Endpoints with embedding-enabled indexes for text search</p>
+        )}
 
         {/* Breadcrumb */}
         <div className="text-xs text-gray-400 mb-2">
