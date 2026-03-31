@@ -199,6 +199,26 @@ No additional code was needed for profile support.
 
 ---
 
+## Slide Verification
+
+The LLM-as-judge verification system works with **all tool types**, not just Genie. The verification endpoint (`src/api/routes/verification.py`) collects source data from all tool results in the session's chat history — regardless of which tool produced them (Genie, Vector Index, Agent Bricks, Model Endpoint, MCP). The judge compares slide content against this source data and rates accuracy (green/amber/red).
+
+Sessions with no tool results (prompt-only mode) show "Unable to verify" — this is expected.
+
+---
+
+## Column Editing (Vector Index)
+
+When a user clicks a VECTOR chip to edit, the edit panel:
+1. Fetches available columns from `GET /api/tools/discover/vector/{ep}/{idx}/columns`
+2. Shows checkboxes with currently selected columns checked
+3. If no columns were previously selected (all), all checkboxes are checked
+4. User can change selection and save
+
+Column discovery reads from the **source table schema** (`client.tables.get(source_table)`) which returns ALL table columns — not just embedding columns. This gives users the full picture of returnable fields.
+
+---
+
 ## Known Limitations
 
 ### Vector Index
