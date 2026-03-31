@@ -104,52 +104,46 @@ class TestVectorDiscovery:
         tools_mod._vector_endpoints_cache = None
         tools_mod._vector_endpoints_cache_time = 0
 
-    @patch("src.api.routes.tools._requests")
     @patch("src.api.routes.tools.get_user_client")
-    def test_discover_vector_endpoints(self, mock_client_fn, mock_requests):
+    def test_discover_vector_endpoints(self, mock_client_fn):
         """ONLINE endpoints are returned."""
         from src.api.routes.tools import _discover_vector_endpoints
 
         mock_client = _make_client()
-        mock_client.config.host = "https://workspace.databricks.com"
-        mock_client.config.token = "test-token"
         mock_client_fn.return_value = mock_client
 
-        mock_resp = MagicMock()
-        mock_resp.status_code = 200
-        mock_resp.text = '{"endpoints": []}'
-        mock_resp.json.return_value = {
-            "endpoints": [
-                {"name": "vs-endpoint-1", "endpoint_status": {"state": "ONLINE"}},
-            ]
-        }
-        mock_requests.get.return_value = mock_resp
+        mock_ep = MagicMock()
+        mock_ep.name = "vs-endpoint-1"
+        mock_ep.endpoint_status = MagicMock()
+        mock_ep.endpoint_status.state.value = "ONLINE"
+        mock_client.vector_search_endpoints.list_endpoints.return_value = [mock_ep]
 
         result = _discover_vector_endpoints()
         assert len(result["items"]) == 1
         assert result["items"][0]["name"] == "vs-endpoint-1"
+        assert result["items"][0]["metadata"]["state"] == "ONLINE"
 
-    @patch("src.api.routes.tools._requests")
     @patch("src.api.routes.tools.get_user_client")
-    def test_discover_vector_endpoints_filters_offline(self, mock_client_fn, mock_requests):
+    def test_discover_vector_endpoints_filters_offline(self, mock_client_fn):
         """OFFLINE endpoints are excluded."""
         from src.api.routes.tools import _discover_vector_endpoints
 
         mock_client = _make_client()
-        mock_client.config.host = "https://workspace.databricks.com"
-        mock_client.config.token = "test-token"
         mock_client_fn.return_value = mock_client
 
-        mock_resp = MagicMock()
-        mock_resp.status_code = 200
-        mock_resp.text = '{"endpoints": []}'
-        mock_resp.json.return_value = {
-            "endpoints": [
-                {"name": "online-ep", "endpoint_status": {"state": "ONLINE"}},
-                {"name": "offline-ep", "endpoint_status": {"state": "OFFLINE"}},
-            ]
-        }
-        mock_requests.get.return_value = mock_resp
+        mock_online = MagicMock()
+        mock_online.name = "online-ep"
+        mock_online.endpoint_status = MagicMock()
+        mock_online.endpoint_status.state.value = "ONLINE"
+
+        mock_offline = MagicMock()
+        mock_offline.name = "offline-ep"
+        mock_offline.endpoint_status = MagicMock()
+        mock_offline.endpoint_status.state.value = "OFFLINE"
+
+        mock_client.vector_search_endpoints.list_endpoints.return_value = [
+            mock_online, mock_offline,
+        ]
 
         result = _discover_vector_endpoints()
         assert len(result["items"]) == 1
