@@ -259,7 +259,7 @@ export const VectorIndexDiscovery: React.FC<VectorIndexDiscoveryProps> = ({
                   <span className="font-medium">{ep.name}</span>
                   {ep.metadata?.num_indexes != null && (
                     <span className="text-xs text-gray-400 shrink-0">
-                      {ep.metadata.num_indexes} {ep.metadata.num_indexes === 1 ? 'index' : 'indexes'}
+                      {String(ep.metadata.num_indexes)} {Number(ep.metadata.num_indexes) === 1 ? 'index' : 'indexes'}
                     </span>
                   )}
                 </div>
