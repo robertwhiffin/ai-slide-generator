@@ -62,10 +62,7 @@ def _discover_genie_spaces() -> dict:
 
 
 def _list_vector_endpoints_sync(client) -> list[dict]:
-    """Run the SDK list_endpoints call and return parsed items.
-
-    Separated so it can be executed in a thread with a timeout.
-    """
+    """Run the SDK list_endpoints call. Separated for thread execution."""
     items: list[dict] = []
     for ep in client.vector_search_endpoints.list_endpoints():
         state = None
@@ -87,9 +84,9 @@ def _list_vector_endpoints_sync(client) -> list[dict]:
 def _discover_vector_endpoints() -> dict:
     """Discover ONLINE vector search endpoints via the SDK.
 
-    Runs the SDK call in a thread with a 15-second timeout to prevent
-    the UI from hanging if the workspace is rate-limiting (the SDK
-    retries internally with no timeout control).
+    Uses the SDK's ``vector_search_endpoints.list_endpoints()`` wrapped
+    in a thread with a 15-second timeout. The timeout prevents the UI
+    from hanging forever if the SDK retries on rate limits.
     """
     try:
         client = get_user_client()
@@ -99,7 +96,7 @@ def _discover_vector_endpoints() -> dict:
             try:
                 items = future.result(timeout=15)
             except FuturesTimeoutError:
-                logger.warning("Vector search endpoint discovery timed out after 15s")
+                logger.warning("Vector endpoint discovery timed out after 15s")
                 return {
                     "items": [],
                     "error": "Request timed out — the workspace may be busy. Please try again.",
@@ -108,13 +105,13 @@ def _discover_vector_endpoints() -> dict:
         return {"items": items}
     except Exception as e:
         error_msg = str(e)
-        if "REQUEST_LIMIT_EXCEEDED" in error_msg or "rate limit" in error_msg.lower():
-            logger.warning("Vector search endpoint discovery rate limited")
+        if "429" in error_msg or "rate limit" in error_msg.lower() or "REQUEST_LIMIT_EXCEEDED" in error_msg:
+            logger.warning("Vector endpoint discovery rate limited")
             return {
                 "items": [],
                 "error": "Rate limited — please try again in a minute.",
             }
-        logger.warning(f"Failed to discover vector search endpoints: {e}")
+        logger.warning(f"Failed to discover vector endpoints: {e}")
         return {"items": []}
 
 
