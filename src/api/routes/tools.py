@@ -7,8 +7,8 @@ available Genie spaces, vector search endpoints/indexes, UC HTTP connections
 
 import json
 import logging
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 
-import requests as _requests
 from fastapi import APIRouter
 
 from src.core.config_loader import load_config
@@ -61,50 +61,59 @@ def _discover_genie_spaces() -> dict:
         return {"items": []}
 
 
-def _discover_vector_endpoints() -> dict:
-    """Discover ONLINE vector search endpoints.
+def _list_vector_endpoints_sync(client) -> list[dict]:
+    """Run the SDK list_endpoints call and return parsed items.
 
-    Uses a direct REST call with a 10-second timeout instead of the SDK's
-    list_endpoints() which retries indefinitely on rate limits. This ensures
-    the frontend never hangs on "Loading..." forever.
+    Separated so it can be executed in a thread with a timeout.
+    """
+    items: list[dict] = []
+    for ep in client.vector_search_endpoints.list_endpoints():
+        state = None
+        if ep.endpoint_status and ep.endpoint_status.state:
+            state = ep.endpoint_status.state.value
+        if state != "ONLINE":
+            continue
+        items.append(
+            {
+                "id": ep.name,
+                "name": ep.name,
+                "description": None,
+                "metadata": {"state": state},
+            }
+        )
+    return items
+
+
+def _discover_vector_endpoints() -> dict:
+    """Discover ONLINE vector search endpoints via the SDK.
+
+    Runs the SDK call in a thread with a 15-second timeout to prevent
+    the UI from hanging if the workspace is rate-limiting (the SDK
+    retries internally with no timeout control).
     """
     try:
         client = get_user_client()
-        host = client.config.host.rstrip("/")
-        token = client.config.token
 
-        resp = _requests.get(
-            f"{host}/api/2.0/vector-search/endpoints",
-            headers={"Authorization": f"Bearer {token}"},
-            timeout=10,
-        )
-
-        if resp.status_code == 429 or "REQUEST_LIMIT_EXCEEDED" in resp.text:
-            logger.warning("Vector search endpoint discovery rate limited")
-            return {"items": [], "error": "Rate limited — please try again in a minute."}
-
-        resp.raise_for_status()
-        data = resp.json()
-
-        items: list[dict] = []
-        for ep in data.get("endpoints", []):
-            state = ep.get("endpoint_status", {}).get("state", "UNKNOWN")
-            if state != "ONLINE":
-                continue
-            items.append(
-                {
-                    "id": ep.get("name"),
-                    "name": ep.get("name"),
-                    "description": None,
-                    "metadata": {"state": state},
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(_list_vector_endpoints_sync, client)
+            try:
+                items = future.result(timeout=15)
+            except FuturesTimeoutError:
+                logger.warning("Vector search endpoint discovery timed out after 15s")
+                return {
+                    "items": [],
+                    "error": "Request timed out — the workspace may be busy. Please try again.",
                 }
-            )
 
         return {"items": items}
-    except _requests.Timeout:
-        logger.warning("Vector search endpoint discovery timed out")
-        return {"items": [], "error": "Request timed out — please try again."}
     except Exception as e:
+        error_msg = str(e)
+        if "REQUEST_LIMIT_EXCEEDED" in error_msg or "rate limit" in error_msg.lower():
+            logger.warning("Vector search endpoint discovery rate limited")
+            return {
+                "items": [],
+                "error": "Rate limited — please try again in a minute.",
+            }
         logger.warning(f"Failed to discover vector search endpoints: {e}")
         return {"items": []}
 
