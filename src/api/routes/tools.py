@@ -94,9 +94,9 @@ def _discover_vector_endpoints() -> dict:
         with ThreadPoolExecutor(max_workers=1) as executor:
             future = executor.submit(_list_vector_endpoints_sync, client)
             try:
-                items = future.result(timeout=15)
+                items = future.result(timeout=40)
             except FuturesTimeoutError:
-                logger.warning("Vector endpoint discovery timed out after 15s")
+                logger.warning("Vector endpoint discovery timed out after 40s")
                 return {
                     "items": [],
                     "error": "Request timed out — the workspace may be busy. Please try again.",
