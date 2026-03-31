@@ -220,17 +220,6 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
         } catch { /* ignore */ }
       }, 10_000));
 
-      timers.push(setInterval(async () => {
-        if (cancelled) return;
-        try {
-          const slideResult = await api.getSlides(sessionId);
-          if (cancelled) return;
-          const lockStatus = await api.getEditingLockStatus(sessionId);
-          if (slideResult.slide_deck && !isSelf(lockStatus)) {
-            setSlideDeckGated(slideResult.slide_deck as SlideDeck, (slideResult.slide_deck as SlideDeck).version);
-          }
-        } catch { /* ignore */ }
-      }, 15_000));
     }).catch(() => {
       // If contributor check fails, fall back to full lock lifecycle for safety
       if (cancelled) return;
