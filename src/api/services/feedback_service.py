@@ -47,7 +47,7 @@ FEEDBACK_DEFAULT_ENDPOINT = "databricks-gemma-3-12b"
 def get_feedback_endpoint() -> str:
     """Get the LLM endpoint for feedback.
 
-    Priority: FEEDBACK_LLM_ENDPOINT env var > default (databricks-gpt-oss-20b).
+    Priority: FEEDBACK_LLM_ENDPOINT env var > default (databricks-gemma-3-12b).
     """
     return os.environ.get("FEEDBACK_LLM_ENDPOINT", FEEDBACK_DEFAULT_ENDPOINT)
 

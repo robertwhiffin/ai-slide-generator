@@ -426,9 +426,8 @@ psql -d ai_slide_generator
 SELECT * FROM config_profiles WHERE is_default = true;
 
 # Check all configuration
-SELECT p.name, ai.llm_endpoint, g.space_name
+SELECT p.name, g.space_name
 FROM config_profiles p
-JOIN config_ai_infra ai ON p.id = ai.profile_id
 JOIN config_genie_spaces g ON p.id = g.profile_id;
 
 # View recent settings changes

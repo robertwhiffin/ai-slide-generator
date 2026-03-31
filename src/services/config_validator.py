@@ -99,15 +99,17 @@ class ConfigurationValidator:
 
     def _validate_llm(self) -> None:
         """Test LLM endpoint with a simple message."""
+        from src.core.defaults import DEFAULT_CONFIG
+        llm_config = DEFAULT_CONFIG["llm"]
         logger.info("Validating LLM endpoint")
 
         try:
             # Create ChatDatabricks instance
             model = ChatDatabricks(
-                endpoint=self.settings.llm.endpoint,
-                temperature=self.settings.llm.temperature,
+                endpoint=llm_config["endpoint"],
+                temperature=llm_config["temperature"],
                 max_tokens=100,  # Small for test
-                top_p=self.settings.llm.top_p,
+                top_p=llm_config["top_p"],
             )
 
             # Send test message
@@ -119,7 +121,7 @@ class ConfigurationValidator:
                 self.results.append(ValidationResult(
                     component="LLM",
                     success=True,
-                    message=f"Successfully connected to LLM endpoint: {self.settings.llm.endpoint}",
+                    message=f"Successfully connected to LLM endpoint: {llm_config['endpoint']}",
                     details=f"Response received: {response.content[:100]}..."
                 ))
                 logger.info("LLM validation successful")
@@ -128,7 +130,7 @@ class ConfigurationValidator:
                     component="LLM",
                     success=False,
                     message="Failed to call LLM: Empty response received",
-                    details=f"Endpoint: {self.settings.llm.endpoint}"
+                    details=f"Endpoint: {llm_config['endpoint']}"
                 ))
                 logger.warning("LLM validation failed: empty response")
 
@@ -138,7 +140,7 @@ class ConfigurationValidator:
                 component="LLM",
                 success=False,
                 message=f"Failed to call LLM: {error_msg}",
-                details=f"Endpoint: {self.settings.llm.endpoint}"
+                details=f"Endpoint: {llm_config['endpoint']}"
             ))
             logger.error(f"LLM validation failed: {e}", exc_info=True)
 
@@ -219,58 +221,6 @@ class ConfigurationValidator:
                     logger.info(f"Cleaned up test conversation: {conversation_id}")
                 except Exception as e:
                     logger.warning(f"Failed to clean up test conversation: {e}")
-
-    def validate_llm_endpoint(self, endpoint: str) -> ValidationResult:
-        """
-        Validate a specific LLM endpoint.
-        
-        Args:
-            endpoint: LLM endpoint name to test
-            
-        Returns:
-            ValidationResult with success status and details
-        """
-        logger.info(f"Validating LLM endpoint: {endpoint}")
-
-        try:
-            # Create ChatDatabricks instance
-            model = ChatDatabricks(
-                endpoint=endpoint,
-                temperature=0.1,
-                max_tokens=100,  # Small for test
-            )
-
-            # Send test message
-            message = HumanMessage(content="hello")
-            response = model.invoke([message])
-
-            # Check response
-            if response and response.content:
-                logger.info(f"LLM endpoint {endpoint} validation successful")
-                return ValidationResult(
-                    component="LLM",
-                    success=True,
-                    message=f"Successfully connected to LLM endpoint: {endpoint}",
-                    details=f"Response received: {response.content[:100]}..."
-                )
-            else:
-                logger.warning(f"LLM endpoint {endpoint} validation failed: empty response")
-                return ValidationResult(
-                    component="LLM",
-                    success=False,
-                    message="Failed to call LLM: Empty response received",
-                    details=f"Endpoint: {endpoint}"
-                )
-
-        except Exception as e:
-            error_msg = str(e)
-            logger.error(f"LLM endpoint {endpoint} validation failed: {e}", exc_info=True)
-            return ValidationResult(
-                component="LLM",
-                success=False,
-                message=f"Failed to call LLM: {error_msg}",
-                details=f"Endpoint: {endpoint}"
-            )
 
     def validate_genie_space(self, space_id: str) -> ValidationResult:
         """

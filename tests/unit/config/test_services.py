@@ -43,7 +43,6 @@ def test_create_profile_with_defaults(db_session):
 
     assert profile.id is not None
     assert profile.name == "test-profile"
-    assert profile.ai_infra is not None
     assert profile.prompts is not None
 
 
@@ -58,7 +57,7 @@ def test_create_profile_copy(db_session):
     copy = service.duplicate_profile(source.id, "copy", "test")
 
     assert copy.id != source.id
-    assert copy.ai_infra.llm_endpoint == source.ai_infra.llm_endpoint
+    assert copy.name == "copy"
 
 
 def test_set_default_profile(db_session):
@@ -147,7 +146,6 @@ def test_duplicate_profile(db_session):
 
     assert duplicate.id != original.id
     assert duplicate.name == "duplicate"
-    assert duplicate.ai_infra.llm_endpoint == original.ai_infra.llm_endpoint
 
 
 def test_list_profiles(db_session):
@@ -161,22 +159,6 @@ def test_list_profiles(db_session):
     profiles = service.list_profiles()
     assert len(profiles) == 3
     assert profiles[0].name == "profile1"  # Should be sorted by name
-
-
-def test_update_ai_infra(db_session):
-    """Test updating AI db_app_deployment settings."""
-    profile_service = ProfileService(db_session)
-    config_service = ConfigService(db_session)
-
-    profile = profile_service.create_profile("test", None, "test")
-
-    updated = config_service.update_ai_infra_config(
-        profile_id=profile.id,
-        llm_temperature=0.8,
-        user="test",
-    )
-
-    assert float(updated.llm_temperature) == 0.8
 
 
 def test_update_prompts_config(db_session):
@@ -281,41 +263,6 @@ def test_delete_genie_space(db_session):
     # No space left
     space = genie_service.get_genie_space(profile.id)
     assert space is None
-
-
-def test_validator_ai_infra_valid(db_session, monkeypatch):
-    """Test AI db_app_deployment validation with valid values."""
-    # Mock the endpoint check to avoid Databricks connection
-    def mock_validate_ai_infra(self, endpoint, temp, tokens):
-        if not (0.0 <= temp <= 1.0):
-            return ValidationResult(valid=False, error=f"Temperature must be between 0 and 1, got {temp}")
-        if tokens <= 0:
-            return ValidationResult(valid=False, error=f"Max tokens must be positive, got {tokens}")
-        return ValidationResult(valid=True)
-    
-    monkeypatch.setattr(ConfigValidator, "validate_ai_infra", mock_validate_ai_infra)
-    
-    validator = ConfigValidator()
-    result = validator.validate_ai_infra("test-endpoint", 0.7, 1000)
-    assert result.valid
-
-
-def test_validator_ai_infra_invalid_temperature(db_session):
-    """Test AI db_app_deployment validation with invalid temperature."""
-    validator = ConfigValidator()
-    
-    result = validator.validate_ai_infra("test-endpoint", 1.5, 1000)
-    assert not result.valid
-    assert "Temperature" in result.error
-
-
-def test_validator_ai_infra_invalid_max_tokens(db_session):
-    """Test AI db_app_deployment validation with invalid max tokens."""
-    validator = ConfigValidator()
-    
-    result = validator.validate_ai_infra("test-endpoint", 0.7, -100)
-    assert not result.valid
-    assert "Max tokens" in result.error
 
 
 def test_validator_genie_space_valid(db_session):

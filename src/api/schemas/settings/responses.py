@@ -23,20 +23,6 @@ class ProfileSummary(BaseModel):
     is_my_default: bool = False
 
 
-class AIInfraConfig(BaseModel):
-    """AI infrastructure configuration."""
-
-    model_config = ConfigDict(from_attributes=True)
-
-    id: int
-    profile_id: int
-    llm_endpoint: str
-    llm_temperature: float
-    llm_max_tokens: int
-    created_at: datetime
-    updated_at: datetime
-
-
 class GenieSpace(BaseModel):
     """
     Genie space configuration.
@@ -84,17 +70,10 @@ class ProfileDetail(BaseModel):
     created_by: Optional[str]
     updated_at: datetime
     updated_by: Optional[str]
-    ai_infra: AIInfraConfig
     genie_spaces: List[GenieSpace]
     prompts: PromptsConfig
     my_permission: Optional[str] = None
     is_my_default: bool = False
-
-
-class EndpointsList(BaseModel):
-    """List of available serving endpoints."""
-
-    endpoints: List[str]
 
 
 class ErrorResponse(BaseModel):

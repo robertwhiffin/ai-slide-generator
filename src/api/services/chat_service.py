@@ -980,8 +980,9 @@ class ChatService:
                 from databricks_langchain import ChatDatabricks
                 from src.core.databricks_client import get_user_client
 
+                from src.core.defaults import DEFAULT_CONFIG
                 naming_model = ChatDatabricks(
-                    endpoint=settings.llm.endpoint,
+                    endpoint=DEFAULT_CONFIG["llm"]["endpoint"],
                     max_tokens=50,
                     temperature=0.3,
                     workspace_client=get_user_client(),

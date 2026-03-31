@@ -207,7 +207,6 @@ class TestSessionNamingInStreaming:
             mock_settings.return_value = MagicMock(
                 profile_id=None,
                 profile_name=None,
-                llm=MagicMock(endpoint="test-endpoint"),
             )
             mock_chat_cls.return_value = MagicMock()
             mock_get_client.return_value = MagicMock()

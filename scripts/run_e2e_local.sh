@@ -129,7 +129,7 @@ if [[ "$NO_RESET" == false ]]; then
     python -c "
 from src.core.database import init_db, get_db_session
 from src.core.init_default_profile import seed_defaults
-from src.database.models import ConfigProfile, ConfigAIInfra, ConfigPrompts, SlideStyleLibrary
+from src.database.models import ConfigProfile, ConfigPrompts, SlideStyleLibrary
 
 # Create tables
 init_db()
@@ -155,15 +155,6 @@ with get_db_session() as db:
         )
         db.add(profile)
         db.flush()
-        
-        # Create AI infra config
-        ai_infra = ConfigAIInfra(
-            profile_id=profile.id,
-            llm_endpoint='databricks-claude-sonnet',
-            llm_temperature=0.7,
-            llm_max_tokens=4096
-        )
-        db.add(ai_infra)
         
         # Create prompts config
         prompts = ConfigPrompts(
