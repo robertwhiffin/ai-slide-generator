@@ -71,11 +71,14 @@ export const VectorIndexDiscovery: React.FC<VectorIndexDiscoveryProps> = ({
     setError(null);
     try {
       const result = await api.discoverVectorEndpoints();
-      // Only show ONLINE endpoints (metadata.status === 'ONLINE' if provided)
-      const online = result.items.filter(
-        ep => !ep.metadata?.status || ep.metadata.status === 'ONLINE',
-      );
-      setEndpoints(online);
+      if ((result as any).error) {
+        setError((result as any).error);
+      } else {
+        const online = result.items.filter(
+          ep => !ep.metadata?.status || ep.metadata.status === 'ONLINE',
+        );
+        setEndpoints(online);
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load endpoints');
     } finally {

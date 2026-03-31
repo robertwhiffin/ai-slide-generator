@@ -8,6 +8,7 @@ available Genie spaces, vector search endpoints/indexes, UC HTTP connections
 import json
 import logging
 
+import requests as _requests
 from fastapi import APIRouter
 
 from src.core.config_loader import load_config
@@ -63,32 +64,46 @@ def _discover_genie_spaces() -> dict:
 def _discover_vector_endpoints() -> dict:
     """Discover ONLINE vector search endpoints.
 
-    Returns all ONLINE endpoints immediately (single fast API call).
-    Embedding-compatibility filtering happens at the index selection step
-    (_discover_vector_indexes) to keep this endpoint fast and reliable.
-    If an endpoint has no compatible indexes, the user sees a clear message
-    at the index step and can go back.
+    Uses a direct REST call with a 10-second timeout instead of the SDK's
+    list_endpoints() which retries indefinitely on rate limits. This ensures
+    the frontend never hangs on "Loading..." forever.
     """
     try:
         client = get_user_client()
-        items: list[dict] = []
+        host = client.config.host.rstrip("/")
+        token = client.config.token
 
-        for ep in client.vector_search_endpoints.list_endpoints():
-            state = None
-            if ep.endpoint_status and ep.endpoint_status.state:
-                state = ep.endpoint_status.state.value
+        resp = _requests.get(
+            f"{host}/api/2.0/vector-search/endpoints",
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=10,
+        )
+
+        if resp.status_code == 429 or "REQUEST_LIMIT_EXCEEDED" in resp.text:
+            logger.warning("Vector search endpoint discovery rate limited")
+            return {"items": [], "error": "Rate limited — please try again in a minute."}
+
+        resp.raise_for_status()
+        data = resp.json()
+
+        items: list[dict] = []
+        for ep in data.get("endpoints", []):
+            state = ep.get("endpoint_status", {}).get("state", "UNKNOWN")
             if state != "ONLINE":
                 continue
             items.append(
                 {
-                    "id": ep.name,
-                    "name": ep.name,
+                    "id": ep.get("name"),
+                    "name": ep.get("name"),
                     "description": None,
                     "metadata": {"state": state},
                 }
             )
 
         return {"items": items}
+    except _requests.Timeout:
+        logger.warning("Vector search endpoint discovery timed out")
+        return {"items": [], "error": "Request timed out — please try again."}
     except Exception as e:
         logger.warning(f"Failed to discover vector search endpoints: {e}")
         return {"items": []}
