@@ -3,7 +3,7 @@ Databricks client management with dual-client architecture.
 
 This module provides two types of WorkspaceClient:
 1. System Client (singleton): Uses service principal credentials for system operations
-2. User Client (request-scoped): Uses forwarded user token for Genie/LLM/MLflow
+2. User Client (request-scoped): Uses forwarded user token for Genie queries and tools
 
 The user client is set per-request via middleware and stored in a ContextVar.
 
@@ -310,7 +310,7 @@ def get_databricks_client(force_new: bool = False) -> WorkspaceClient:
     """
     Alias for get_system_client() - maintains backward compatibility.
 
-    For user-scoped operations (Genie, LLM, MLflow), use get_user_client() instead.
+    For user-scoped operations (Genie queries and tools), use get_user_client() instead.
     """
     return get_system_client(force_new)
 
@@ -491,7 +491,7 @@ def set_user_client(client: Optional[WorkspaceClient]) -> None:
 
 def get_user_client() -> WorkspaceClient:
     """
-    Get the user-scoped WorkspaceClient for Genie/LLM/MLflow operations.
+    Get the user-scoped WorkspaceClient for Genie queries and tool operations.
 
     Returns the request-scoped user client if available (set by middleware),
     otherwise falls back to the system client (for local development).
