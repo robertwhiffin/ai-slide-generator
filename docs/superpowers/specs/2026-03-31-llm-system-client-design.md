@@ -15,6 +15,7 @@ Switch `ChatDatabricks` model creation to use the app's system client (service p
 
 **Changes:**
 - `src/services/agent_factory.py` — `_create_model()`: replace `get_user_client()` with `get_system_client()`
+- `src/services/agent.py` — `SlideGeneratorAgent._create_model()`: same change, remove now-unused `get_user_client` import
 - `src/core/databricks_client.py` — update docstrings for `get_user_client()` and module-level docstring to remove LLM from user-client responsibilities
 
 **No changes to:**
@@ -48,5 +49,6 @@ model = ChatDatabricks(..., workspace_client=system_client)
 
 ## Testing
 
-- Existing unit tests mock `_create_model` at the factory level, so they never see which client is used internally — no test updates needed
+- `test_agent_factory.py` tests mock `_create_model` at the factory level — no updates needed
+- `test_agent.py` and `test_default_config_integration.py` mock `get_user_client` inside `SlideGeneratorAgent._create_model()` — update mocks to `get_system_client`
 - E2E tests should pass without change since the serving endpoint is accessible to the service principal
