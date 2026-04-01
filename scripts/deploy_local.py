@@ -33,6 +33,7 @@ from databricks_tellr.deploy import (
     DeploymentError,
     _get_workspace_client,
     _get_or_create_lakebase,
+    _read_existing_encryption_key,
     _write_requirements,
     _write_app_yaml,
     _upload_files,
@@ -346,6 +347,9 @@ def update_local(
         print(f"   Uploaded: {local_wheel_ref}")
         print()
 
+        # Preserve the existing encryption key so we don't invalidate encrypted data
+        encryption_key = _read_existing_encryption_key(ws, workspace_path)
+
         # Generate and upload deployment files
         print("Preparing deployment files...")
         staging_dir = Path(tempfile.mkdtemp(prefix="tellr_local_staging_"))
@@ -358,6 +362,7 @@ def update_local(
                 lakebase_name,
                 schema_name,
                 seed_databricks_defaults=seed_databricks_defaults,
+                encryption_key=encryption_key,
                 lakebase_result=lakebase_result,
             )
             print("   Generated app.yaml")
