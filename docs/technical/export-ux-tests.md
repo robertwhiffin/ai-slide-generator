@@ -146,7 +146,7 @@ Covers: PPTX parallelization, Google Slides prompt enrichment, code sanitization
 
 - [x] **TC-1.1** — Basic PPTX export still works
 - [x] **TC-1.2** — Progress messages show two phases
-- [ ] **TC-1.3** — PPTX export is faster than before (skipped) - see TC-P3 test in [prompt-decoupling-tests.md](/docs/technical/prompt-decoupling-tests.md)
+- [ ] **TC-1.3** — PPTX export is faster than before (skipped) - see TC-P3 test in [prompt-decoupling-tests.md](./prompt-decoupling-tests.md)
 - [x] **TC-1.4** — Slide with apostrophe in content exports correctly
 - [x] **TC-1.5** — Slide with special characters (em-dash, curly quotes)
 - [x] **TC-1.6** — Failed code generation produces fallback slide
