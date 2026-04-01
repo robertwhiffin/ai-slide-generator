@@ -34,6 +34,8 @@ A new `RequestLog` SQLAlchemy model with `__tablename__ = "request_logs"`, auto-
 
 **Indexes:** B-tree index on `timestamp` — required for the cleanup DELETE and all time-range queries.
 
+**Table creation:** Handled automatically on app startup — the model inherits from the existing `Base` and is imported in `src/database/models/__init__.py`, so `Base.metadata.create_all()` picks it up with no additional migration code.
+
 Excluded: request/response bodies, query strings, headers, user identity.
 
 ### 2. Middleware
