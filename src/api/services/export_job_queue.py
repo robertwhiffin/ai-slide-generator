@@ -81,6 +81,7 @@ def get_export_job_status(job_id: str) -> Optional[Dict[str, Any]]:
             "title": row.title,
             "output_path": row.output_path,
             "error": row.error_message,
+            "status_message": getattr(row, "status_message", None),
             "queued_at": row.created_at,
             "completed_at": row.completed_at,
         }
@@ -111,10 +112,12 @@ def build_export_job_response(job_id: str) -> Dict[str, Any]:
         "progress": job.get("progress", 0),
         "total_slides": job.get("total_slides", 0),
         "error": job.get("error"),
+        "status_message": job.get("status_message"),
     }
 
-    # Google Slides jobs store the result as JSON in output_path
-    if job["status"] == "completed" and job.get("output_path"):
+    # Google Slides jobs store the result as JSON in output_path.
+    # Extract early so the frontend can open the URL while still running.
+    if job.get("output_path"):
         try:
             data = _json.loads(job["output_path"])
             if "presentation_id" in data:
@@ -126,19 +129,24 @@ def build_export_job_response(job_id: str) -> Dict[str, Any]:
     return result
 
 
-def update_export_progress(job_id: str, current: int, total: int) -> None:
+def update_export_progress(
+    job_id: str, current: int, total: int, status_message: Optional[str] = None,
+) -> None:
     """Update export progress for a job.
 
     Args:
         job_id: Job identifier
         current: Current slide being processed (1-indexed)
         total: Total number of slides
+        status_message: Human-readable status text shown to the user
     """
     with get_db_session() as db:
         row = db.query(ExportJob).filter(ExportJob.job_id == job_id).first()
         if row:
             row.progress = current
             row.total_slides = total
+            if status_message is not None:
+                row.status_message = status_message
             logger.debug(
                 f"Export progress: {current}/{total}",
                 extra={"job_id": job_id, "progress": current, "total": total},
@@ -288,7 +296,9 @@ async def convert_slides_with_progress(
 ) -> None:
     """Convert slides to PPTX with progress updates.
 
-    This wraps the converter to update progress after each slide.
+    Uses a two-phase approach:
+      Phase 1 — Prepare assets + parallel LLM code generation
+      Phase 2 — Sequential execution against a single Presentation object
 
     Args:
         converter: HtmlToPptxConverterV3 instance
@@ -300,38 +310,52 @@ async def convert_slides_with_progress(
     from pptx import Presentation
     from pptx.util import Inches
 
-    # Create presentation
+    total_slides = len(slides_html)
+
+    # -- Phase 1: Prepare assets + parallel LLM code generation ---------------
+    update_export_progress(
+        job_id, 0, total_slides,
+        status_message=f"Generating code for {total_slides} slides...",
+    )
+
+    slide_inputs = []
+    for i, html_str in enumerate(slides_html, 1):
+        chart_imgs = None
+        if chart_images_per_slide and i - 1 < len(chart_images_per_slide):
+            chart_imgs = chart_images_per_slide[i - 1]
+        prepared = converter._prepare_slide(html_str, chart_imgs, i)
+        slide_inputs.append(prepared)
+
+    def _on_codegen_progress(completed: int, codegen_total: int) -> None:
+        update_export_progress(
+            job_id, completed, codegen_total,
+            status_message=f"Generating code: {completed}/{codegen_total} slides ready…",
+        )
+
+    codes = await converter._generate_all_codes(
+        slide_inputs, on_codegen_progress=_on_codegen_progress,
+    )
+
+    # -- Phase 2: Sequential execution ----------------------------------------
     prs = Presentation()
     prs.slide_width = Inches(10)
     prs.slide_height = Inches(7.5)
 
-    total_slides = len(slides_html)
-
-    # Process each slide
-    for i, html_str in enumerate(slides_html, 1):
-        update_export_progress(job_id, i, total_slides)
-
-        # Get chart images for this slide
-        slide_chart_images = None
-        if chart_images_per_slide and i - 1 < len(chart_images_per_slide):
-            slide_chart_images = chart_images_per_slide[i - 1]
-
-        # Add slide to presentation
-        await converter._add_slide_to_presentation(
-            prs=prs,
-            html_str=html_str,
-            use_screenshot=True,
-            html_source_path=None,
-            slide_number=i,
-            client_chart_images=slide_chart_images,
+    for i, (code, (html_str, _chart_files, _content_files, assets_dir)) in enumerate(
+        zip(codes, slide_inputs), 1,
+    ):
+        update_export_progress(
+            job_id, i, total_slides,
+            status_message=f"Building slide {i}/{total_slides}…",
         )
+
+        converter._execute_slide(code, prs, html_str, assets_dir, i)
 
         logger.debug(
             f"Processed slide {i}/{total_slides}",
             extra={"job_id": job_id, "slide": i, "total": total_slides},
         )
 
-    # Save presentation
     prs.save(output_path)
 
 
@@ -404,7 +428,16 @@ async def process_google_slides_job(job_id: str, payload: dict) -> None:
 
         # Run conversion with progress callback
         def on_progress(current: int, total: int, status: str) -> None:
-            update_export_progress(job_id, current, total)
+            update_export_progress(job_id, current, total, status_message=status)
+
+        def on_pres_created(pres_id: str, pres_url: str) -> None:
+            _update_job_field(
+                job_id,
+                output_path=_json.dumps({
+                    "presentation_id": pres_id,
+                    "presentation_url": pres_url,
+                }),
+            )
 
         converter = HtmlToGoogleSlidesConverter(google_auth=auth)
         result = await converter.convert_slide_deck(
@@ -413,6 +446,7 @@ async def process_google_slides_job(job_id: str, payload: dict) -> None:
             chart_images_per_slide=chart_images_per_slide,
             progress_callback=on_progress,
             existing_presentation_id=existing_presentation_id,
+            on_presentation_created=on_pres_created,
         )
 
         # Persist presentation info on the session for future re-exports
