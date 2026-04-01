@@ -42,26 +42,14 @@ def _get_route_template(request: Request) -> str:
     return request.url.path
 
 
-# Lazy-loaded references (populated on first call to _enqueue_log).
-# Declared at module level so they can be patched in tests.
-get_session_local = None
-RequestLog = None
-
-
 def _enqueue_log(log_entry: dict) -> None:
     """Write a log entry to the database.
 
     Called via run_in_executor so it never blocks the event loop or the response.
     Imports are lazy to avoid circular imports at module load time.
     """
-    global get_session_local, RequestLog
-
-    if get_session_local is None:
-        from src.core.database import get_session_local as _gsl
-        from src.database.models.request_log import RequestLog as _RL
-
-        get_session_local = _gsl
-        RequestLog = _RL
+    from src.core.database import get_session_local
+    from src.database.models.request_log import RequestLog
 
     session_factory = get_session_local()
     session = session_factory()
@@ -103,7 +91,7 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
                     "request_id": request_id,
                 }
                 loop = asyncio.get_running_loop()
-                asyncio.create_task(loop.run_in_executor(None, _enqueue_log, log_entry))
+                loop.run_in_executor(None, _enqueue_log, log_entry)
             except Exception:
                 pass
             raise
