@@ -103,7 +103,7 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
                     "request_id": request_id,
                 }
                 loop = asyncio.get_running_loop()
-                loop.run_in_executor(None, _enqueue_log, log_entry)
+                asyncio.create_task(loop.run_in_executor(None, _enqueue_log, log_entry))
             except Exception:
                 pass
             raise
@@ -127,3 +127,46 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
             logger.debug("Failed to enqueue request log", exc_info=True)
 
         return response
+
+
+async def request_log_cleanup_loop():
+    """Background task that deletes request logs older than 30 days.
+
+    Checks every hour, executes cleanup if 24+ hours since last run.
+    """
+    last_cleanup = time.time()
+
+    while True:
+        try:
+            await asyncio.sleep(3600)  # Check every hour
+
+            if time.time() - last_cleanup < 86400:  # 24 hours
+                continue
+
+            def _do_cleanup():
+                from src.core.database import get_session_local
+                from sqlalchemy import text
+
+                session_factory = get_session_local()
+                session = session_factory()
+                try:
+                    result = session.execute(
+                        text("DELETE FROM request_logs WHERE timestamp < NOW() - INTERVAL '30 days'")
+                    )
+                    session.commit()
+                    return result.rowcount
+                except Exception:
+                    session.rollback()
+                    raise
+                finally:
+                    session.close()
+
+            loop = asyncio.get_running_loop()
+            deleted = await loop.run_in_executor(None, _do_cleanup)
+            last_cleanup = time.time()
+            logger.info(f"Request log cleanup: deleted {deleted} rows older than 30 days")
+
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.debug("Request log cleanup failed, will retry next cycle", exc_info=True)
