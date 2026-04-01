@@ -24,7 +24,6 @@ from src.database.models.session import (
     SlideDeckVersion,
     UserSession,
 )
-from src.database.models.slide_comment import SlideComment
 from src.database.models.slide_deck_prompt import SlideDeckPromptLibrary
 from src.database.models.slide_style_library import SlideStyleLibrary
 from src.database.models.user_preference import UserProfilePreference
@@ -48,7 +47,6 @@ __all__ = [
     "RequestLog",
     "SessionMessage",
     "SessionSlideDeck",
-    "SlideComment",
     "SlideDeckPromptLibrary",
     "SlideDeckVersion",
     "SlideStyleLibrary",
