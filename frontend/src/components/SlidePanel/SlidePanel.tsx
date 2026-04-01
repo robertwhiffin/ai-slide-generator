@@ -44,7 +44,6 @@ interface SlidePanelProps {
 
 export interface SlidePanelHandle {
   exportPDF: () => void;
-  exportPPTXFast: () => void;
   exportPPTX: () => void;
   exportHTML: () => void;
   openPresentationMode: () => void;
@@ -301,37 +300,6 @@ function SlidePanelComponent(props: SlidePanelProps, ref: React.Ref<SlidePanelHa
     }
   };
 
-  const handleExportPPTXFast = async () => {
-    if (!slideDeck || isExportingPPTX) return;
-
-    setIsExportingPPTX(true);
-    setShowExportMenu(false);
-    setExportProgress({ current: 0, total: slideDeck.slides.length, status: 'Capturing slides...' });
-    onExportStatusChange?.('Capturing slides...');
-
-    try {
-      const { exportSlideDeckToPPTXImage } = await import('../../services/pptx_image_client');
-      const timestamp = new Date().toISOString().slice(0, 10);
-      await exportSlideDeckToPPTXImage(
-        slideDeck,
-        `${slideDeck.title || 'slides'}_${timestamp}.pptx`,
-        (current, total) => {
-          setExportProgress({ current, total, status: `Capturing slide ${current}/${total}...` });
-          onExportStatusChange?.(`Capturing slide ${current}/${total}...`);
-        }
-      );
-      onExportStatusChange?.(null);
-      showToast('PPTX downloaded', 'success');
-    } catch (error) {
-      console.error('Fast PPTX export failed:', error);
-      alert(error instanceof Error ? error.message : 'Failed to export PPTX.');
-    } finally {
-      setIsExportingPPTX(false);
-      setExportProgress(null);
-      onExportStatusChange?.(null);
-    }
-  };
-
   const handleExportPPTX = async () => {
     if (!slideDeck || !sessionId || isExportingPPTX) return;
 
@@ -342,15 +310,15 @@ function SlidePanelComponent(props: SlidePanelProps, ref: React.Ref<SlidePanelHa
 
     try {
       const blob = await api.exportToPPTX(
-        sessionId,
-        true,
+        sessionId, 
+        true, 
         slideDeck,
         (progress, total, status) => {
           setExportProgress({ current: progress, total, status });
           onExportStatusChange?.(status);
         }
       );
-
+      
       const url = window.URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
@@ -364,8 +332,8 @@ function SlidePanelComponent(props: SlidePanelProps, ref: React.Ref<SlidePanelHa
       showToast('PPTX downloaded', 'success');
     } catch (error) {
       console.error('PPTX export failed:', error);
-      const message = error instanceof Error
-        ? error.message
+      const message = error instanceof Error 
+        ? error.message 
         : 'Failed to export PPTX. Please try again.';
       alert(message);
     } finally {
@@ -506,7 +474,6 @@ function SlidePanelComponent(props: SlidePanelProps, ref: React.Ref<SlidePanelHa
 
   useImperativeHandle(ref, () => ({
     exportPDF: handleExportPDF,
-    exportPPTXFast: handleExportPPTXFast,
     exportPPTX: handleExportPPTX,
     exportHTML: handleSaveAsHTML,
     openPresentationMode: () => setIsPresentationMode(true),

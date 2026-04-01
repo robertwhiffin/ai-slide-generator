@@ -18,7 +18,6 @@ interface PageHeaderProps {
   onCopyLink?: () => void
   /** Single export action (legacy); ignored if export menu items are provided */
   onExport?: () => void
-  onExportPPTXFast?: () => void
   onExportPPTX?: () => void
   onExportPDF?: () => void
   onExportHTML?: () => void
@@ -42,7 +41,6 @@ export function PageHeader({
   onShare,
   onCopyLink,
   onExport,
-  onExportPPTXFast,
   onExportPPTX,
   onExportPDF,
   onExportHTML,
@@ -55,7 +53,7 @@ export function PageHeader({
   isGenerating = false,
   viewOnly = false,
 }: PageHeaderProps) {
-  const hasExportMenu = !viewOnly && (onExportPPTXFast ?? onExportPPTX ?? onExportPDF ?? onExportHTML ?? onExportGoogleSlides)
+  const hasExportMenu = !viewOnly && (onExportPPTX ?? onExportPDF ?? onExportHTML ?? onExportGoogleSlides)
   const [isEditing, setIsEditing] = useState(false)
   const [editedTitle, setEditedTitle] = useState(title)
   const inputRef = useRef<HTMLInputElement>(null)
@@ -168,16 +166,10 @@ export function PageHeader({
                 </Button>
               </DropdownMenuTrigger>
               <DropdownMenuContent align="end">
-                {onExportPPTXFast && (
-                  <DropdownMenuItem onClick={onExportPPTXFast} disabled={isGenerating}>
-                    <FileDown className="size-3.5 mr-2" />
-                    Download PPTX
-                  </DropdownMenuItem>
-                )}
                 {onExportPPTX && (
                   <DropdownMenuItem onClick={onExportPPTX} disabled={isGenerating}>
                     <FileDown className="size-3.5 mr-2" />
-                    Download PPTX (editable)
+                    Download PPTX
                   </DropdownMenuItem>
                 )}
                 {onExportPDF && (

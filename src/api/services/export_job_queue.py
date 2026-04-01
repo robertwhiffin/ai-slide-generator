@@ -288,19 +288,51 @@ async def convert_slides_with_progress(
 ) -> None:
     """Convert slides to PPTX with progress updates.
 
-    Delegates to converter.convert_slide_deck which parallelises LLM calls,
-    then reports progress on completion.
+    This wraps the converter to update progress after each slide.
+
+    Args:
+        converter: HtmlToPptxConverterV3 instance
+        job_id: Job ID for progress updates
+        slides_html: List of HTML strings for each slide
+        output_path: Path to save PPTX
+        chart_images_per_slide: Chart images per slide
     """
+    from pptx import Presentation
+    from pptx.util import Inches
+
+    # Create presentation
+    prs = Presentation()
+    prs.slide_width = Inches(10)
+    prs.slide_height = Inches(7.5)
+
     total_slides = len(slides_html)
-    update_export_progress(job_id, 1, total_slides)
 
-    await converter.convert_slide_deck(
-        slides=slides_html,
-        output_path=output_path,
-        chart_images_per_slide=chart_images_per_slide,
-    )
+    # Process each slide
+    for i, html_str in enumerate(slides_html, 1):
+        update_export_progress(job_id, i, total_slides)
 
-    update_export_progress(job_id, total_slides, total_slides)
+        # Get chart images for this slide
+        slide_chart_images = None
+        if chart_images_per_slide and i - 1 < len(chart_images_per_slide):
+            slide_chart_images = chart_images_per_slide[i - 1]
+
+        # Add slide to presentation
+        await converter._add_slide_to_presentation(
+            prs=prs,
+            html_str=html_str,
+            use_screenshot=True,
+            html_source_path=None,
+            slide_number=i,
+            client_chart_images=slide_chart_images,
+        )
+
+        logger.debug(
+            f"Processed slide {i}/{total_slides}",
+            extra={"job_id": job_id, "slide": i, "total": total_slides},
+        )
+
+    # Save presentation
+    prs.save(output_path)
 
 
 async def export_worker() -> None:
@@ -347,11 +379,10 @@ async def process_google_slides_job(job_id: str, payload: dict) -> None:
     """
     import json as _json
     from src.services.google_slides_auth import GoogleSlidesAuth, GoogleSlidesAuthError
-    from src.services.pptx_to_google_slides import (
-        convert_html_to_google_slides,
-        PptxToGoogleSlidesError,
+    from src.services.html_to_google_slides import (
+        HtmlToGoogleSlidesConverter,
+        GoogleSlidesConversionError,
     )
-    from src.services.html_to_pptx import PPTXConversionError
     from src.core.database import get_db_session
 
     slides_html: List[str] = payload["slides_html"]
@@ -375,10 +406,10 @@ async def process_google_slides_job(job_id: str, payload: dict) -> None:
         def on_progress(current: int, total: int, status: str) -> None:
             update_export_progress(job_id, current, total)
 
-        result = await convert_html_to_google_slides(
-            slides_html=slides_html,
+        converter = HtmlToGoogleSlidesConverter(google_auth=auth)
+        result = await converter.convert_slide_deck(
+            slides=slides_html,
             title=title,
-            google_auth=auth,
             chart_images_per_slide=chart_images_per_slide,
             progress_callback=on_progress,
             existing_presentation_id=existing_presentation_id,
@@ -412,7 +443,7 @@ async def process_google_slides_job(job_id: str, payload: dict) -> None:
             extra={"job_id": job_id, "presentation_id": result["presentation_id"]},
         )
 
-    except (PPTXConversionError, PptxToGoogleSlidesError, GoogleSlidesAuthError) as e:
+    except (GoogleSlidesConversionError, GoogleSlidesAuthError) as e:
         logger.error(f"Google Slides conversion failed: {e}", extra={"job_id": job_id})
         _update_job_field(job_id, status="error", error_message=str(e))
     except Exception as e:
