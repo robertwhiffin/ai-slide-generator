@@ -20,35 +20,38 @@ Capture request-level metrics (endpoint, duration, status) in Lakebase so develo
 
 ### 1. Data Model
 
-A new `request_log` SQLAlchemy model and corresponding Lakebase table, auto-created via the existing migration-on-startup pattern.
+A new `RequestLog` SQLAlchemy model with `__tablename__ = "request_logs"`, auto-created via the existing migration-on-startup pattern.
 
 | Column | Type | Purpose |
 |--------|------|---------|
-| `id` | UUID, PK | Row identifier |
-| `timestamp` | DateTime (UTC) | When the request started |
+| `id` | Integer, PK, autoincrement | Row identifier (consistent with existing models) |
+| `timestamp` | DateTime (UTC), **indexed** | When the request started |
 | `method` | String(10) | HTTP method |
 | `path` | String(500) | URL path |
 | `status_code` | Integer | HTTP response status |
 | `duration_ms` | Float | Total request wall-clock time in milliseconds |
-| `request_id` | UUID | For correlating with stdout log output |
+| `request_id` | String(36) | UUID string for correlating with stdout log output |
+
+**Indexes:** B-tree index on `timestamp` — required for the cleanup DELETE and all time-range queries.
 
 Excluded: request/response bodies, query strings, headers, user identity.
 
 ### 2. Middleware
 
-A new ASGI middleware registered in `main.py`, placed before the auth middleware to capture full request time including auth overhead.
+A class-based Starlette `BaseHTTPMiddleware` registered in `main.py`. Registered **after** the auth middleware in source order so it wraps outermost (Starlette `@app.middleware("http")` decorators execute in reverse registration order).
 
 **Behavior:**
 - Generates a `request_id` UUID per request
 - Records wall-clock time around `call_next(request)` — this captures the entire handler lifecycle including all DB queries, external calls, and I/O
-- Skips `/api/health` to avoid noise
-- Writes a `RequestLog` row using a dedicated async DB session (not the request's session) so logging failures cannot affect the request
+- **Only logs `/api/*` paths** — excludes static assets (`/assets/*`), SPA catch-all routes, `/favicon.svg`, and `/api/health`
+- Writes the `RequestLog` row via fire-and-forget: `asyncio.create_task` wrapping `run_in_executor(None, _write_log)` — the synchronous SQLAlchemy session runs in a thread pool, never blocking the event loop, and the response is not held waiting for the write to complete
+- Uses a dedicated DB session (not the request's session) so logging failures cannot affect the request
 - All DB writes wrapped in try/except — monitoring never takes down the app
 - Attaches `X-Request-ID` response header for correlation with stdout logs
 
 ### 3. TTL Cleanup
 
-A background task started via FastAPI's `lifespan` event (same pattern as Lakebase token refresh).
+A background task started via FastAPI's `lifespan` event (same pattern as Lakebase token refresh). Defined in `src/api/middleware/request_logging.py` alongside the middleware to keep request logging self-contained.
 
 **Behavior:**
 - Checks every hour, executes cleanup if 24+ hours since last run
@@ -62,11 +65,10 @@ A background task started via FastAPI's `lifespan` event (same pattern as Lakeba
 
 | File | Change |
 |------|--------|
-| `src/database/models/request_log.py` | New model |
+| `src/database/models/request_log.py` | New `RequestLog` model |
 | `src/database/models/__init__.py` | Export new model |
-| `src/api/middleware/request_logging.py` | New middleware |
-| `src/api/main.py` | Register middleware, start cleanup task |
-| `src/core/database.py` | Add cleanup task function |
+| `src/api/middleware/request_logging.py` | New middleware + cleanup task |
+| `src/api/main.py` | Register middleware, start cleanup task in lifespan |
 
 ## Example Queries
 
