@@ -51,6 +51,9 @@ export interface SlidePanelHandle {
 
 type ViewMode = 'tiles' | 'rawhtml' | 'rawtext';
 
+const EMPTY_MENTIONS: Array<{ id: number; user_name: string; content: string; created_at: string }> = [];
+const EPOCH_ISO = new Date(0).toISOString();
+
 function SlidePanelComponent(props: SlidePanelProps, ref: React.Ref<SlidePanelHandle>) {
   const { slideDeck, rawHtml: _rawHtml, onSlideChange, scrollToSlide, onSendMessage, onExportStatusChange, versionKey: _versionKey, readOnly = false, canManage = false, lockedBy = null, onVerificationComplete } = props;
   const [_isReordering, setIsReordering] = useState(false);
@@ -66,6 +69,24 @@ function SlidePanelComponent(props: SlidePanelProps, ref: React.Ref<SlidePanelHa
   const { sessionId } = useSession();
   const { showToast } = useToast();
   const slideRefs = useRef<Map<number, HTMLDivElement>>(new Map());
+
+  // Batch comment counts per slide (single request instead of N+1)
+  const [commentCountsBySlide, setCommentCountsBySlide] = useState<Record<string, number>>({});
+
+  const refreshCommentCounts = useCallback(() => {
+    if (!sessionId) return;
+    api.listComments(sessionId).then(({ comments }) => {
+      const counts: Record<string, number> = {};
+      for (const c of comments) {
+        counts[c.slide_id] = (counts[c.slide_id] || 0) + 1;
+      }
+      setCommentCountsBySlide(counts);
+    }).catch(() => {});
+  }, [sessionId]);
+
+  useEffect(() => {
+    refreshCommentCounts();
+  }, [refreshCommentCounts]);
 
   // Mentions per slide (for notification badges)
   const [mentionsBySlide, setMentionsBySlide] = useState<Record<string, Array<{ id: number; user_name: string; content: string; created_at: string }>>>({});
@@ -663,8 +684,10 @@ function SlidePanelComponent(props: SlidePanelProps, ref: React.Ref<SlidePanelHa
               onOptimize={() => handleOptimizeLayout(index)}
               isOptimizing={optimizingSlideIndex === index}
               readOnly={readOnly}
-              mentions={mentionsBySlide[slide.slide_id] || []}
-              mentionsLastSeen={mentionsLastSeenMap[slide.slide_id] || new Date(0).toISOString()}
+              commentCount={commentCountsBySlide[slide.slide_id] ?? 0}
+              onCommentCountRefresh={refreshCommentCounts}
+              mentions={mentionsBySlide[slide.slide_id] ?? EMPTY_MENTIONS}
+              mentionsLastSeen={mentionsLastSeenMap[slide.slide_id] ?? EPOCH_ISO}
               onMarkMentionsSeen={() => handleMarkMentionsSeen(slide.slide_id)}
               onMentionsRefresh={fetchMentions}
               canManage={canManage}

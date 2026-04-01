@@ -42,6 +42,8 @@ interface SlideTileProps {
   mentionsLastSeen?: string;
   onMarkMentionsSeen?: () => void;
   onMentionsRefresh?: () => void;
+  commentCount: number;
+  onCommentCountRefresh?: () => void;
   canManage?: boolean;
 }
 
@@ -49,7 +51,7 @@ const SLIDE_WIDTH = 1280;
 const SLIDE_HEIGHT = 720;
 const MAX_SCALE = 1.0;
 
-export const SlideTile: React.FC<SlideTileProps> = ({
+export const SlideTile: React.FC<SlideTileProps> = React.memo(({
   slide,
   slideDeck,
   index,
@@ -65,6 +67,8 @@ export const SlideTile: React.FC<SlideTileProps> = ({
   mentionsLastSeen = new Date(0).toISOString(),
   onMarkMentionsSeen,
   onMentionsRefresh,
+  commentCount,
+  onCommentCountRefresh,
   canManage = false,
 }) => {
   const [isEditing, setIsEditing] = useState(false);
@@ -72,7 +76,6 @@ export const SlideTile: React.FC<SlideTileProps> = ({
   const [showMentions, setShowMentions] = useState(false);
   const [scrollToCommentId, setScrollToCommentId] = useState<number | null>(null);
   const mentionsRef = useRef<HTMLDivElement>(null);
-  const [commentCount, setCommentCount] = useState<number | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const [scale, setScale] = useState(1);
@@ -99,20 +102,10 @@ export const SlideTile: React.FC<SlideTileProps> = ({
     return () => document.removeEventListener('mousedown', handleClickOutside);
   }, [showMentions]);
 
-  // Fetch comment count on mount and when comments panel toggles
-  useEffect(() => {
-    if (!sessionId || !slide.slide_id) return;
-    let cancelled = false;
-    api.listComments(sessionId, slide.slide_id).then(({ count }) => {
-      if (!cancelled) setCommentCount(count);
-    }).catch(() => {});
-    return () => { cancelled = true; };
-  }, [sessionId, slide.slide_id, showComments]);
-
-  const handleCommentChange = useCallback((count: number, hasMentions: boolean) => {
-    setCommentCount(count);
+  const handleCommentChange = useCallback((_count: number, hasMentions: boolean) => {
+    onCommentCountRefresh?.();
     if (hasMentions) onMentionsRefresh?.();
-  }, [onMentionsRefresh]);
+  }, [onCommentCountRefresh, onMentionsRefresh]);
 
   useEffect(() => {
     setVerificationResult(slide.verification);
@@ -362,7 +355,7 @@ export const SlideTile: React.FC<SlideTileProps> = ({
                 }`}
               >
                 <MessageCircle className="size-3.5" />
-                {commentCount != null && commentCount > 0 && (
+                {commentCount > 0 && (
                   <span className="absolute -top-1 -right-1 bg-orange-500 text-white text-[10px] leading-none font-bold rounded-full min-w-[16px] h-4 flex items-center justify-center px-0.5">
                     {commentCount}
                   </span>
@@ -502,7 +495,7 @@ export const SlideTile: React.FC<SlideTileProps> = ({
           slide={slide}
           onSave={async (newHtml) => {
             await onUpdate(newHtml);
-            
+
             if (verificationResult) {
               setVerificationResult(undefined);
               setIsStale(false);
@@ -515,4 +508,4 @@ export const SlideTile: React.FC<SlideTileProps> = ({
       )}
     </>
   );
-};
+});
