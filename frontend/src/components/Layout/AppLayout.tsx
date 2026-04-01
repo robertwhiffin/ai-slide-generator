@@ -541,10 +541,6 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
 
   const displayDeck = previewVersion != null && previewDeck ? previewDeck : slideDeck;
 
-  const handleExportPPTXFast = useCallback(() => {
-    slidePanelRef.current?.exportPPTXFast();
-  }, []);
-
   const handleExportPPTX = useCallback(() => {
     slidePanelRef.current?.exportPPTX();
   }, []);
@@ -635,7 +631,6 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
                 onSave={() => setShowSaveDialog(true)}
                 onShare={!viewOnly && sessionId ? handleShare : undefined}
                 onCopyLink={!viewOnly && sessionId ? handleCopyLink : undefined}
-                onExportPPTXFast={slideDeck ? handleExportPPTXFast : undefined}
                 onExportPPTX={slideDeck ? handleExportPPTX : undefined}
                 onExportPDF={slideDeck ? handleExportPDF : undefined}
                 onExportHTML={slideDeck ? handleExportHTML : undefined}
