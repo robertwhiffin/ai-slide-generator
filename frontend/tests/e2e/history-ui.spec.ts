@@ -44,6 +44,10 @@ async function setupMocks(page: Page) {
   await page.route('**/api/comments/mentionable-users**', (route) => {
     route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ users: [], is_global: false }) });
   });
+  // Mock batch comment counts (session-level fetch without slide_id)
+  await page.route(/\/api\/comments\?session_id=/, (route) => {
+    route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ comments: [], count: 0, current_user: '' }) });
+  });
   // New profiles API (GET /api/profiles)
   await page.route(/\/api\/profiles$/, (route) => {
     route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(mockProfileSummaries) });

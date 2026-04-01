@@ -200,6 +200,11 @@ async function setupMocks(page: Page) {
     route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ users: [] }) });
   });
 
+  // Mock batch comment counts (session-level fetch without slide_id)
+  await page.route(/\/api\/comments\?session_id=/, (route) => {
+    route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ comments: [], count: 0, current_user: '' }) });
+  });
+
   // Mock version check
   await page.route('**/api/version**', (route) => {
     route.fulfill({

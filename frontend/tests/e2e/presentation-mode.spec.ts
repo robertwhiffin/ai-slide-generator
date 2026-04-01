@@ -45,6 +45,10 @@ async function setupPresentationMocks(page: Page) {
       body: JSON.stringify({ users: [], is_global: false }),
     });
   });
+  // Mock batch comment counts (session-level fetch without slide_id)
+  await page.route(/\/api\/comments\?session_id=/, (route) => {
+    route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ comments: [], count: 0, current_user: '' }) });
+  });
 }
 
 /** Locator for the presentation overlay (portal rendered at document.body). */

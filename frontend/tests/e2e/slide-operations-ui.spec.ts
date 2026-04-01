@@ -104,6 +104,11 @@ async function setupWithSlides(page: Page) {
     route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ users: [], is_global: false }) });
   });
 
+  // Mock batch comment counts (session-level fetch without slide_id)
+  await page.route(/\/api\/comments\?session_id=/, (route) => {
+    route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ comments: [], count: 0, current_user: '' }) });
+  });
+
   // Mock sessions endpoints
   await page.route('http://127.0.0.1:8000/api/sessions**', (route, request) => {
     const url = request.url();
