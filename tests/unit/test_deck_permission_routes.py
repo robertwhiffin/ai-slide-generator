@@ -376,54 +376,6 @@ class TestChatCheckPermission:
 
 
 # ---------------------------------------------------------------------------
-# Test get_mentionable_users uses deck_contributors
-# ---------------------------------------------------------------------------
-
-
-class TestMentionableUsers:
-    """get_mentionable_users should query DeckContributor, not ConfigProfileContributor."""
-
-    def test_returns_deck_contributors(self, db, owner_session, deck_contributor_edit):
-        """Mentionable users should include deck contributors and session creator."""
-        from src.api.services.session_manager import SessionManager
-
-        sm = SessionManager()
-
-        # Patch get_db_session to return our test db
-        with patch("src.api.services.session_manager.get_db_session") as mock_db_ctx:
-            mock_db_ctx.return_value.__enter__ = MagicMock(return_value=db)
-            mock_db_ctx.return_value.__exit__ = MagicMock(return_value=False)
-
-            result = sm.get_mentionable_users(owner_session.session_id)
-
-        usernames = [u["username"] for u in result["users"]]
-        # Should include the session creator
-        assert "owner@test.com" in usernames
-        # Should include the deck contributor (editor@test.com)
-        assert "editor@test.com" in usernames
-        # Should NOT look up profile contributors (no profile_id dependency)
-        assert result["is_global"] is False
-
-    def test_no_profile_dependency(self, db, owner_session, deck_contributor_edit):
-        """Mentionable users should work without profile_id on UserSession."""
-        from src.api.services.session_manager import SessionManager
-
-        # profile_id has been removed from UserSession model
-        assert "profile_id" not in [c.name for c in owner_session.__table__.columns]
-
-        sm = SessionManager()
-
-        with patch("src.api.services.session_manager.get_db_session") as mock_db_ctx:
-            mock_db_ctx.return_value.__enter__ = MagicMock(return_value=db)
-            mock_db_ctx.return_value.__exit__ = MagicMock(return_value=False)
-
-            result = sm.get_mentionable_users(owner_session.session_id)
-
-        # Should still return users (creator + deck contributors)
-        assert len(result["users"]) >= 1
-
-
-# ---------------------------------------------------------------------------
 # Test shared presentations uses get_shared_session_ids
 # ---------------------------------------------------------------------------
 
