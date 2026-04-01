@@ -646,7 +646,22 @@ class HtmlToGoogleSlidesConverter:
             label="Create presentation",
         )
         pres_id = pres["presentationId"]
-        default_page_id = pres["slides"][0]["objectId"]
+        default_slide = pres["slides"][0]
+        default_page_id = default_slide["objectId"]
+
+        # Remove default "Click to add title/subtitle" placeholders.
+        delete_requests = [
+            {"deleteObject": {"objectId": el["objectId"]}}
+            for el in default_slide.get("pageElements", [])
+        ]
+        if delete_requests:
+            _retry_api_call(
+                lambda: slides_service.presentations().batchUpdate(
+                    presentationId=pres_id,
+                    body={"requests": delete_requests},
+                ).execute(),
+                label="Clear default placeholders",
+            )
 
         emu = lambda inches: int(inches * 914400)  # noqa: E731
         def _rgb(hex_str):
