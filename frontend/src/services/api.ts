@@ -2,7 +2,6 @@ import type { ChatResponse } from '../types/message';
 import type { ImageAsset, ImageListResponse, ImageDataResponse } from '../types/image';
 import type { SlideDeck, Slide, SlideContext, ReplacementInfo } from '../types/slide';
 import type { VerificationResult } from '../types/verification';
-import type { SlideComment } from '../types/comment';
 import type { AgentConfig, ToolEntry, AvailableTool, ProfileSummary, DiscoveryResponse, ColumnDiscoveryResponse } from '../types/agentConfig';
 
 // Use relative URLs in production, explicit IPv4 in development
@@ -1350,99 +1349,6 @@ export const api = {
       const error = await response.json().catch(() => ({ detail: 'Failed to sync verification' }));
       throw new ApiError(response.status, error.detail || 'Failed to sync verification');
     }
-  },
-
-  // ============ Comments API ============
-
-  async getMentionableUsers(sessionId: string, query?: string): Promise<{ users: { username: string; display_name: string }[]; is_global: boolean }> {
-    let url = `${API_BASE_URL}/api/comments/mentionable-users?session_id=${sessionId}`;
-    if (query) url += `&query=${encodeURIComponent(query)}`;
-    const response = await fetch(url);
-    if (!response.ok) throw new ApiError(response.status, 'Failed to list mentionable users');
-    return response.json();
-  },
-
-  async listMentions(sessionId?: string): Promise<{ mentions: SlideComment[]; count: number }> {
-    const params = sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : '';
-    const response = await fetch(`${API_BASE_URL}/api/comments/mentions${params}`);
-    if (!response.ok) throw new ApiError(response.status, 'Failed to list mentions');
-    return response.json();
-  },
-
-  async listComments(
-    sessionId: string,
-    slideId?: string,
-    includeResolved = false,
-  ): Promise<{ comments: SlideComment[]; count: number; current_user?: string }> {
-    const params = new URLSearchParams({ session_id: sessionId });
-    if (slideId) params.set('slide_id', slideId);
-    if (includeResolved) params.set('include_resolved', 'true');
-
-    const response = await fetch(`${API_BASE_URL}/api/comments?${params}`);
-    if (!response.ok) throw new ApiError(response.status, 'Failed to list comments');
-    return response.json();
-  },
-
-  async addComment(
-    sessionId: string,
-    slideId: string,
-    content: string,
-    parentCommentId?: number,
-  ): Promise<SlideComment> {
-    const response = await fetch(`${API_BASE_URL}/api/comments`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        session_id: sessionId,
-        slide_id: slideId,
-        content,
-        parent_comment_id: parentCommentId ?? null,
-      }),
-    });
-    if (!response.ok) {
-      const error = await response.json().catch(() => ({}));
-      throw new ApiError(response.status, error.detail || 'Failed to add comment');
-    }
-    return response.json();
-  },
-
-  async updateComment(commentId: number, content: string): Promise<SlideComment> {
-    const response = await fetch(`${API_BASE_URL}/api/comments/${commentId}`, {
-      method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ content }),
-    });
-    if (!response.ok) {
-      const error = await response.json().catch(() => ({}));
-      throw new ApiError(response.status, error.detail || 'Failed to update comment');
-    }
-    return response.json();
-  },
-
-  async deleteComment(commentId: number): Promise<void> {
-    const response = await fetch(`${API_BASE_URL}/api/comments/${commentId}`, {
-      method: 'DELETE',
-    });
-    if (!response.ok) {
-      const error = await response.json().catch(() => ({}));
-      throw new ApiError(response.status, error.detail || 'Failed to delete comment');
-    }
-  },
-
-  async resolveComment(commentId: number): Promise<SlideComment> {
-    const response = await fetch(`${API_BASE_URL}/api/comments/${commentId}/resolve`, {
-      method: 'POST',
-    });
-    if (!response.ok) throw new ApiError(response.status, 'Failed to resolve comment');
-    return response.json();
-  },
-
-  async unresolveComment(commentId: number): Promise<SlideComment> {
-    const response = await fetch(`${API_BASE_URL}/api/comments/${commentId}/unresolve`, {
-      method: 'POST',
-    });
-    if (!response.ok) throw new ApiError(response.status, 'Failed to unresolve comment');
-    return response.json();
   },
 
   // --- Feedback ---
