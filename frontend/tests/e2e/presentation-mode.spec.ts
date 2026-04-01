@@ -7,7 +7,7 @@ import { mockSessionWithSlides, TEST_SESSION_ID } from '../helpers/session-helpe
  *
  * Tests that presentation mode stays open despite parent component re-renders.
  * Regression test for: inline onExit callback + [onExit] useEffect dependency
- * caused fullscreen to exit whenever SlidePanel re-rendered (e.g. from mentions polling).
+ * caused fullscreen to exit whenever SlidePanel re-rendered.
  *
  * Run: cd frontend && npx playwright test tests/e2e/presentation-mode.spec.ts
  */
@@ -16,7 +16,7 @@ async function setupPresentationMocks(page: Page) {
   await setupMocks(page);
   await mockSessionWithSlides(page, TEST_SESSION_ID);
 
-  // Mock lock/user/mentions endpoints (SlidePanel polls mentions every 3s)
+  // Mock lock/user endpoints
   await page.route('**/api/user/current', (route) => {
     route.fulfill({
       status: 200,
@@ -29,20 +29,6 @@ async function setupPresentationMocks(page: Page) {
       status: 200,
       contentType: 'application/json',
       body: JSON.stringify({ locked_by: 'test@test.com', locked_at: new Date().toISOString() }),
-    });
-  });
-  await page.route('**/api/comments/mentions**', (route) => {
-    route.fulfill({
-      status: 200,
-      contentType: 'application/json',
-      body: JSON.stringify({ mentions: [], count: 0 }),
-    });
-  });
-  await page.route('**/api/comments/mentionable-users**', (route) => {
-    route.fulfill({
-      status: 200,
-      contentType: 'application/json',
-      body: JSON.stringify({ users: [], is_global: false }),
     });
   });
 }

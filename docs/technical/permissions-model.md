@@ -42,18 +42,11 @@ CAN_USE and CAN_VIEW are at the same priority tier — they are context-specific
 | View slides | ✅ | ✅ | ✅ | ✅ |
 | View slide metadata | ✅ | ✅ | ✅ | ✅ |
 | Export (PPTX / Google Slides) | ✅ | ✅ | ✅ | ✅ |
-| Add comments / @mentions | ✅ | ✅ | ✅ | ✅ |
-| Edit own comments | ✅ | ✅ | ✅ | ✅ |
-| Delete own comments | ✅ | ✅ | ✅ | ✅ |
 | Edit slides (direct + chat) | ✅ | ❌ | ✅ | ✅ |
 | Reorder / duplicate slides | ✅ | ❌ | ✅ | ✅ |
 | Delete slides | ✅ | ❌ | ❌ | ✅ |
-| Delete any comment | ❌ | ❌ | ❌ | ✅ |
-| Resolve / unresolve comments | ✅ | ❌ | ✅ | ✅ |
 | Manage deck contributors | ✅ | ❌ | ❌ | ✅ |
 | Delete deck | ✅ | ❌ | ❌ | ✅ |
-
-> **Note:** "Delete any comment" is CAN_MANAGE only — the session creator does NOT automatically get this unless they have CAN_MANAGE (which they do, since creators resolve to CAN_MANAGE).
 
 ### Profile Permissions
 
@@ -181,8 +174,6 @@ All slide mutation endpoints enforce `require_editing_lock()`.
 
 **What locked-out users CAN still do:**
 - View slides
-- Add comments and replies
-- @mention other users
 - Export presentations
 
 ---
@@ -278,29 +269,6 @@ class UserProfilePreference(Base):
 
     user_name: str                   # Email (PK component)
     profile_id: int                  # FK to config_profiles
-```
-
-### SlideComment
-
-Per-slide threaded comments shared across all contributors:
-
-```python
-class SlideComment(Base):
-    __tablename__ = "slide_comments"
-
-    id: int                          # PK
-    session_id: int                  # FK to user_sessions (deck owner)
-    slide_id: str                    # e.g. "slide_0"
-    user_name: str                   # Display name
-    user_email: str                  # Email (used for identity matching)
-    content: str                     # Comment body (may contain @email mentions)
-    mentions: list[str] | None       # JSON array of mentioned emails, lowercase
-    resolved: bool                   # Whether comment is resolved
-    resolved_by: str | None
-    resolved_at: datetime | None
-    parent_comment_id: int | None    # FK to self — for threaded replies
-    created_at: datetime
-    updated_at: datetime
 ```
 
 ### AppIdentity (Local Mode Only)
@@ -446,21 +414,6 @@ GET    /api/sessions/{id}/lock                 # Get current lock status
 PUT    /api/sessions/{id}/lock/heartbeat       # Renew lock (keep alive)
 ```
 
-### Comments & Mentions
-
-```
-GET    /api/comments/{session_id}/{slide_id}           # List comments for a slide
-POST   /api/comments/{session_id}/{slide_id}           # Add a comment (extracts @mentions)
-PUT    /api/comments/{session_id}/{slide_id}/{id}      # Edit a comment
-DELETE /api/comments/{session_id}/{slide_id}/{id}      # Delete a comment
-POST   /api/comments/{session_id}/{slide_id}/{id}/resolve    # Resolve a comment
-POST   /api/comments/{session_id}/{slide_id}/{id}/unresolve  # Unresolve a comment
-GET    /api/comments/mentions?session_id={id}          # List mentions for current user
-GET    /api/comments/mentionable-users?session_id={id}&query={q}  # Search mentionable users
-```
-
-Mentionable users for a deck are resolved from `deck_contributors` on the root session, not from profile contributors.
-
 ### Identity Search
 
 ```
@@ -515,7 +468,6 @@ When a user's permission is checked:
 
 | Resource | Interval | Notes |
 |----------|----------|-------|
-| Mentions (per-slide bell) | 3 seconds | Scoped to current deck via `session_id` |
 | Lock status (locked-out users) | 10 seconds | Stops when lock is acquired |
 | Profile list | 15 seconds | Silent background poll |
 | Shared decks list | 15 seconds | Silent background poll |
