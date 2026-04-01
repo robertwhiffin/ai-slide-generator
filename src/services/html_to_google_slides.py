@@ -653,9 +653,9 @@ class HtmlToGoogleSlidesConverter:
             h = hex_str.lstrip("#")
             return {"red": int(h[0:2], 16) / 255, "green": int(h[2:4], 16) / 255, "blue": int(h[4:6], 16) / 255}
 
-        dark_bg = _rgb("102025")
+        black = _rgb("000000")
         white = _rgb("FFFFFF")
-        light_gray = _rgb("C0C0C0")
+        dark_gray = _rgb("333333")
 
         title_id = f"info_title_{uuid.uuid4().hex[:8]}"
         subtitle_id = f"info_sub_{uuid.uuid4().hex[:8]}"
@@ -664,7 +664,7 @@ class HtmlToGoogleSlidesConverter:
         requests = [
             {"updatePageProperties": {
                 "objectId": default_page_id,
-                "pageProperties": {"pageBackgroundFill": {"solidFill": {"color": {"rgbColor": dark_bg}}}},
+                "pageProperties": {"pageBackgroundFill": {"solidFill": {"color": {"rgbColor": white}}}},
                 "fields": "pageBackgroundFill.solidFill.color",
             }},
             {"createShape": {
@@ -677,7 +677,7 @@ class HtmlToGoogleSlidesConverter:
             }},
             {"insertText": {"objectId": title_id, "text": "tellr instructions: Read me & delete me!", "insertionIndex": 0}},
             {"updateTextStyle": {"objectId": title_id, "textRange": {"type": "ALL"},
-                "style": {"fontSize": {"magnitude": 31, "unit": "PT"}, "foregroundColor": {"opaqueColor": {"rgbColor": white}}},
+                "style": {"fontSize": {"magnitude": 31, "unit": "PT"}, "foregroundColor": {"opaqueColor": {"rgbColor": black}}},
                 "fields": "fontSize,foregroundColor"}},
             {"createShape": {
                 "objectId": subtitle_id, "shapeType": "TEXT_BOX",
@@ -689,7 +689,7 @@ class HtmlToGoogleSlidesConverter:
             }},
             {"insertText": {"objectId": subtitle_id, "text": "Questions? Please reach out to your Databricks Account team.", "insertionIndex": 0}},
             {"updateTextStyle": {"objectId": subtitle_id, "textRange": {"type": "ALL"},
-                "style": {"fontSize": {"magnitude": 15, "unit": "PT"}, "foregroundColor": {"opaqueColor": {"rgbColor": light_gray}}},
+                "style": {"fontSize": {"magnitude": 15, "unit": "PT"}, "foregroundColor": {"opaqueColor": {"rgbColor": dark_gray}}},
                 "fields": "fontSize,foregroundColor"}},
             {"createShape": {
                 "objectId": body_id, "shapeType": "TEXT_BOX",
@@ -705,7 +705,7 @@ class HtmlToGoogleSlidesConverter:
                 "Please wait while your deck is populating below"
             ), "insertionIndex": 0}},
             {"updateTextStyle": {"objectId": body_id, "textRange": {"type": "ALL"},
-                "style": {"fontSize": {"magnitude": 13, "unit": "PT"}, "foregroundColor": {"opaqueColor": {"rgbColor": _rgb("15252B")}}},
+                "style": {"fontSize": {"magnitude": 13, "unit": "PT"}, "foregroundColor": {"opaqueColor": {"rgbColor": dark_gray}}},
                 "fields": "fontSize,foregroundColor"}},
         ]
 

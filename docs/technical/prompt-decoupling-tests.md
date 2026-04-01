@@ -236,7 +236,7 @@ Run with `-s` to see printed metrics:
 | `build_generation_system_prompt` | 1.7 us |
 | `build_editing_system_prompt` | 2.1 us |
 
-**Key takeaway:** Prompt assembly overhead is negligible (<3 us). The overall LLM request takes 5-30 seconds, so the assembly cost is ~0.00001% of total latency.
+**Key takeaway:** Prompt assembly overhead is negligible (&lt;3 us). The overall LLM request takes 5-30 seconds, so the assembly cost is ~0.00001% of total latency.
 
 **Automated assertion:** Average assembly latency < 1,000 us (1ms).
 
