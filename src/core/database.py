@@ -295,7 +295,7 @@ def _create_engine():
     engine = create_engine(
         database_url,
         pool_pre_ping=True,
-        pool_size=10,
+        pool_size=80,
         max_overflow=20,
         echo=sql_echo,
     )
