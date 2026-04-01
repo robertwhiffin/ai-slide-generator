@@ -1,13 +1,12 @@
-import React, { useMemo, useRef, useState, useEffect, useCallback } from 'react';
+import React, { useMemo, useRef, useState, useEffect } from 'react';
 import { useSortable } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
-import { GripVertical, Edit3, Trash2, MessageSquare, Maximize2, Loader2, Bell, MessageCircle, User, Clock } from 'lucide-react';
+import { GripVertical, Edit3, Trash2, MessageSquare, Maximize2, Loader2, User, Clock } from 'lucide-react';
 import { Button } from '@/ui/button';
 import { Tooltip } from '../common/Tooltip';
 import type { Slide, SlideDeck } from '../../types/slide';
 import type { VerificationResult } from '../../types/verification';
 import { HTMLEditorModal } from './HTMLEditorModal';
-import { CommentThread } from './CommentThread';
 import { useSelection } from '../../contexts/SelectionContext';
 import { VerificationBadge } from './VerificationBadge';
 import { api } from '../../services/api';
@@ -38,11 +37,6 @@ interface SlideTileProps {
   onOptimize?: () => void;
   isOptimizing?: boolean;
   readOnly?: boolean;
-  mentions?: Array<{ id: number; user_name: string; content: string; created_at: string }>;
-  mentionsLastSeen?: string;
-  onMarkMentionsSeen?: () => void;
-  onMentionsRefresh?: () => void;
-  canManage?: boolean;
 }
 
 const SLIDE_WIDTH = 1280;
@@ -61,18 +55,8 @@ export const SlideTile: React.FC<SlideTileProps> = ({
   onOptimize,
   isOptimizing = false,
   readOnly = false,
-  mentions = [],
-  mentionsLastSeen = new Date(0).toISOString(),
-  onMarkMentionsSeen,
-  onMentionsRefresh,
-  canManage = false,
 }) => {
   const [isEditing, setIsEditing] = useState(false);
-  const [showComments, setShowComments] = useState(false);
-  const [showMentions, setShowMentions] = useState(false);
-  const [scrollToCommentId, setScrollToCommentId] = useState<number | null>(null);
-  const mentionsRef = useRef<HTMLDivElement>(null);
-  const [commentCount, setCommentCount] = useState<number | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const [scale, setScale] = useState(1);
@@ -86,33 +70,6 @@ export const SlideTile: React.FC<SlideTileProps> = ({
   const [isStale, setIsStale] = useState(false);
 
   const isVerifying = isManualVerifying || isAutoVerifying;
-
-  // Close mentions dropdown on outside click
-  useEffect(() => {
-    if (!showMentions) return;
-    function handleClickOutside(e: MouseEvent) {
-      if (mentionsRef.current && !mentionsRef.current.contains(e.target as Node)) {
-        setShowMentions(false);
-      }
-    }
-    document.addEventListener('mousedown', handleClickOutside);
-    return () => document.removeEventListener('mousedown', handleClickOutside);
-  }, [showMentions]);
-
-  // Fetch comment count on mount and when comments panel toggles
-  useEffect(() => {
-    if (!sessionId || !slide.slide_id) return;
-    let cancelled = false;
-    api.listComments(sessionId, slide.slide_id).then(({ count }) => {
-      if (!cancelled) setCommentCount(count);
-    }).catch(() => {});
-    return () => { cancelled = true; };
-  }, [sessionId, slide.slide_id, showComments]);
-
-  const handleCommentChange = useCallback((count: number, hasMentions: boolean) => {
-    setCommentCount(count);
-    if (hasMentions) onMentionsRefresh?.();
-  }, [onMentionsRefresh]);
 
   useEffect(() => {
     setVerificationResult(slide.verification);
@@ -243,10 +200,6 @@ export const SlideTile: React.FC<SlideTileProps> = ({
     isSelected ? 'ring-2 ring-blue-500' : ''
   }`;
 
-  const unreadCount = mentions.filter(m => m.created_at > mentionsLastSeen).length;
-  const hasUnread = unreadCount > 0;
-  const hasMentions = mentions.length > 0;
-
   return (
     <>
       <div
@@ -284,91 +237,6 @@ export const SlideTile: React.FC<SlideTileProps> = ({
               onVerify={handleVerify}
               isStale={isStale}
             />
-
-            {/* Mentions notification bell */}
-            <div className="relative" ref={mentionsRef}>
-              <Tooltip text={hasUnread ? `${unreadCount} new mention${unreadCount > 1 ? 's' : ''}` : 'Mentions'}>
-                <Button
-                  variant="ghost"
-                  size="icon"
-                  onClick={() => {
-                    if (hasMentions) {
-                      setShowMentions(v => {
-                        if (!v && hasUnread) onMarkMentionsSeen?.();
-                        return !v;
-                      });
-                    }
-                  }}
-                  className={`h-7 w-7 relative ${
-                    showMentions ? 'text-red-700 bg-red-50'
-                    : hasUnread ? 'text-red-500 hover:bg-red-50'
-                    : hasMentions ? 'text-muted-foreground hover:bg-muted'
-                    : 'text-muted-foreground/40 cursor-default'
-                  }`}
-                >
-                  <Bell className={`size-3.5 ${hasUnread ? 'animate-[bell-ring_1s_ease-in-out_infinite]' : ''}`} />
-                  {hasUnread && (
-                    <span className="absolute -top-1 -right-1 bg-red-500 text-white text-[10px] leading-none font-bold rounded-full min-w-[16px] h-4 flex items-center justify-center px-0.5">
-                      {unreadCount}
-                    </span>
-                  )}
-                </Button>
-              </Tooltip>
-              {showMentions && hasMentions && (
-                <div className="absolute right-0 top-full mt-1 w-72 bg-white rounded-lg shadow-xl border border-gray-200 z-50 overflow-hidden">
-                  <div className="px-3 py-2 border-b border-gray-100 bg-gray-50">
-                    <span className="text-xs font-semibold text-gray-600">Mentions</span>
-                  </div>
-                  <div className="max-h-56 overflow-y-auto">
-                    {mentions.map(m => {
-                      const isNew = m.created_at > mentionsLastSeen;
-                      return (
-                        <button
-                          key={m.id}
-                          onClick={() => {
-                            setScrollToCommentId(m.id);
-                            setShowMentions(false);
-                            setShowComments(true);
-                          }}
-                          className={`w-full text-left px-3 py-2.5 border-b border-gray-50 last:border-0 transition-colors ${
-                            isNew ? 'bg-blue-50 hover:bg-blue-100' : 'bg-white hover:bg-gray-50'
-                          }`}
-                        >
-                          <p className={`text-xs ${isNew ? 'text-gray-800' : 'text-gray-500'}`}>
-                            <span className={isNew ? 'font-semibold' : 'font-medium'}>{m.user_name}</span>
-                            {' mentioned you'}
-                            {isNew && <span className="ml-1.5 inline-block w-2 h-2 rounded-full bg-blue-500" />}
-                          </p>
-                          <p className={`text-[11px] mt-0.5 line-clamp-1 ${isNew ? 'text-gray-600' : 'text-gray-400'}`}>{m.content}</p>
-                          <p className="text-[10px] text-gray-400 mt-0.5">{formatRelativeTime(m.created_at)}</p>
-                        </button>
-                      );
-                    })}
-                  </div>
-                </div>
-              )}
-            </div>
-
-            {/* Comments toggle */}
-            <Tooltip text={showComments ? 'Hide comments' : 'Comments'}>
-              <Button
-                variant="ghost"
-                size="icon"
-                onClick={() => setShowComments((v) => !v)}
-                className={`h-7 w-7 relative ${
-                  showComments
-                    ? 'text-orange-700 bg-orange-50'
-                    : 'text-orange-600 hover:bg-orange-50'
-                }`}
-              >
-                <MessageCircle className="size-3.5" />
-                {commentCount != null && commentCount > 0 && (
-                  <span className="absolute -top-1 -right-1 bg-orange-500 text-white text-[10px] leading-none font-bold rounded-full min-w-[16px] h-4 flex items-center justify-center px-0.5">
-                    {commentCount}
-                  </span>
-                )}
-              </Button>
-            </Tooltip>
 
             {!readOnly && (
               <Tooltip text={isSelected ? 'Selected for editing' : 'Add to chat context'}>
@@ -482,16 +350,6 @@ export const SlideTile: React.FC<SlideTileProps> = ({
         </span>
       </div>
 
-      {/* Comments Panel */}
-      {showComments && (
-        <CommentThread
-          sessionId={sessionId}
-          slideId={slide.slide_id}
-          onCommentChange={handleCommentChange}
-          highlightCommentId={scrollToCommentId}
-          canManage={canManage}
-        />
-      )}
     </div>
 
       {/* HTML Editor Modal */}

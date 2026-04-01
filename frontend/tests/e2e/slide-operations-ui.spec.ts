@@ -93,17 +93,10 @@ async function setupWithSlides(page: Page) {
     });
   });
 
-  // Permission / mention mocks required by the permissions system
+  // Permission mocks required by the permissions system
   await page.route('**/api/user/current', (route) => {
     route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ username: 'test@test.com', display_name: 'Test User' }) });
   });
-  await page.route('**/api/comments/mentions**', (route) => {
-    route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ mentions: [], count: 0 }) });
-  });
-  await page.route('**/api/comments/mentionable-users**', (route) => {
-    route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ users: [], is_global: false }) });
-  });
-
   // Mock sessions endpoints
   await page.route('http://127.0.0.1:8000/api/sessions**', (route, request) => {
     const url = request.url();

@@ -462,19 +462,6 @@ def _run_migrations(engine, schema: str | None = None):
                 f"ALTER TABLE {_qual(decks_table)} ADD COLUMN modified_by VARCHAR(255) NULL"
             ))
 
-        # --- slide_comments: add mentions column ---
-        comments_table = "slide_comments"
-        try:
-            comment_cols = {c["name"] for c in inspector.get_columns(comments_table, schema=schema)}
-        except Exception:
-            comment_cols = set()
-        if comment_cols and "mentions" not in comment_cols:
-            logger.info(f"Migration: adding mentions column to {comments_table}")
-            col_type = "TEXT" if is_sqlite else "JSON"
-            conn.execute(text(
-                f"ALTER TABLE {_qual(comments_table)} ADD COLUMN mentions {col_type} NULL"
-            ))
-
         # --- config_profiles: add global_permission ---
         if "global_permission" not in columns:
             logger.info(f"Migration: adding global_permission column to {table_name}")

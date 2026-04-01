@@ -37,7 +37,6 @@ interface SlidePanelProps {
   onExportStatusChange?: (status: string | null) => void;
   versionKey?: string;
   readOnly?: boolean;
-  canManage?: boolean;
   lockedBy?: string | null;
   onVerificationComplete?: () => void;
 }
@@ -52,7 +51,7 @@ export interface SlidePanelHandle {
 type ViewMode = 'tiles' | 'rawhtml' | 'rawtext';
 
 function SlidePanelComponent(props: SlidePanelProps, ref: React.Ref<SlidePanelHandle>) {
-  const { slideDeck, rawHtml: _rawHtml, onSlideChange, scrollToSlide, onSendMessage, onExportStatusChange, versionKey: _versionKey, readOnly = false, canManage = false, lockedBy = null, onVerificationComplete } = props;
+  const { slideDeck, rawHtml: _rawHtml, onSlideChange, scrollToSlide, onSendMessage, onExportStatusChange, versionKey: _versionKey, readOnly = false, lockedBy = null, onVerificationComplete } = props;
   const [_isReordering, setIsReordering] = useState(false);
   const [viewMode, _setViewMode] = useState<ViewMode>('tiles');
   const [isExportingPDF, setIsExportingPDF] = useState(false);
@@ -66,40 +65,6 @@ function SlidePanelComponent(props: SlidePanelProps, ref: React.Ref<SlidePanelHa
   const { sessionId } = useSession();
   const { showToast } = useToast();
   const slideRefs = useRef<Map<number, HTMLDivElement>>(new Map());
-
-  // Mentions per slide (for notification badges)
-  const [mentionsBySlide, setMentionsBySlide] = useState<Record<string, Array<{ id: number; user_name: string; content: string; created_at: string }>>>({});
-  const [mentionsLastSeenMap, setMentionsLastSeenMap] = useState<Record<string, string>>(() => {
-    try {
-      const stored = localStorage.getItem('tellr_mentions_last_seen_map');
-      return stored ? JSON.parse(stored) : {};
-    } catch { return {}; }
-  });
-
-  const fetchMentions = useCallback(() => {
-    if (!sessionId) return;
-    api.listMentions(sessionId).then(({ mentions }) => {
-      const bySlide: Record<string, Array<{ id: number; user_name: string; content: string; created_at: string }>> = {};
-      for (const m of mentions) {
-        if (!bySlide[m.slide_id]) bySlide[m.slide_id] = [];
-        bySlide[m.slide_id].push({ id: m.id, user_name: m.user_name, content: m.content, created_at: m.created_at });
-      }
-      setMentionsBySlide(bySlide);
-    }).catch(() => {});
-  }, [sessionId]);
-
-  useEffect(() => {
-    fetchMentions();
-  }, [fetchMentions]);
-
-  const handleMarkMentionsSeen = useCallback((slideId: string) => {
-    const now = new Date().toISOString();
-    setMentionsLastSeenMap(prev => {
-      const next = { ...prev, [slideId]: now };
-      localStorage.setItem('tellr_mentions_last_seen_map', JSON.stringify(next));
-      return next;
-    });
-  }, []);
 
   // Auto-verification state
   const [isAutoVerifying, setIsAutoVerifying] = useState(false);
@@ -625,7 +590,7 @@ function SlidePanelComponent(props: SlidePanelProps, ref: React.Ref<SlidePanelHa
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
           </svg>
           <span className="text-sm text-amber-800">
-            <span className="font-semibold">{lockedBy}</span> is currently editing this session. You can view slides, add comments, and mention users but cannot edit slides.
+            <span className="font-semibold">{lockedBy}</span> is currently editing this session. You can view slides but cannot edit them.
           </span>
         </div>
       )}
@@ -663,11 +628,6 @@ function SlidePanelComponent(props: SlidePanelProps, ref: React.Ref<SlidePanelHa
               onOptimize={() => handleOptimizeLayout(index)}
               isOptimizing={optimizingSlideIndex === index}
               readOnly={readOnly}
-              mentions={mentionsBySlide[slide.slide_id] || []}
-              mentionsLastSeen={mentionsLastSeenMap[slide.slide_id] || new Date(0).toISOString()}
-              onMarkMentionsSeen={() => handleMarkMentionsSeen(slide.slide_id)}
-              onMentionsRefresh={fetchMentions}
-              canManage={canManage}
             />
           </div>
         ))}
