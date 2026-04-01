@@ -172,16 +172,6 @@ async function setupMocks(page: Page) {
     }
   });
 
-  // Mock mentions endpoint (notification bell)
-  await page.route('**/api/comments/mentions**', (route) => {
-    route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ mentions: [], count: 0 }) });
-  });
-
-  // Mock mentionable users
-  await page.route('**/api/comments/mentionable-users**', (route) => {
-    route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ users: [] }) });
-  });
-
   // Mock verification endpoint
   await page.route('http://127.0.0.1:8000/api/verification/**', (route) => {
     route.fulfill({
