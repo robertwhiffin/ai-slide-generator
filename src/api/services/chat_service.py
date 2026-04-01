@@ -105,7 +105,7 @@ class ChatService:
         return deck_dict, raw_html
 
     def _build_agent_for_session(
-        self, session_id: str, db_session: Dict[str, Any]
+        self, session_id: str, db_session: Dict[str, Any], mode: str = "generate"
     ) -> tuple:
         """Build a per-request agent from session's agent_config.
 
@@ -114,6 +114,9 @@ class ChatService:
         Args:
             session_id: Session identifier
             db_session: Session dict from session_manager.get_session()
+            mode: ``"generate"`` or ``"edit"`` — forwarded to the agent
+                factory so the system prompt includes only mode-relevant
+                instructions.
 
         Returns:
             Tuple of (agent, session_data, experiment_url)
@@ -144,8 +147,8 @@ class ChatService:
             "experiment_id": experiment_id or db_session.get("experiment_id"),
         }
 
-        # Build agent
-        agent = build_agent_for_request(agent_config, session_data)
+        # Build agent with mode-specific prompt
+        agent = build_agent_for_request(agent_config, session_data, mode=mode)
 
         # Hydrate chat history from DB into the agent's session
         chat_history = ChatMessageHistory()
@@ -306,12 +309,6 @@ class ChatService:
                 extra={"session_id": session_id},
             )
 
-        # Build per-request agent from session's agent_config
-        original_genie_id = db_session.get("genie_conversation_id")
-        agent, session_data, experiment_url = self._build_agent_for_session(
-            session_id, db_session
-        )
-
         # Issue 2 FIX: Detect intent ONCE and store for reuse (sync path)
         _is_edit = self._detect_edit_intent(message)
         _is_generation = self._detect_generation_intent(message)
@@ -379,6 +376,7 @@ class ChatService:
                     }
 
         # RC13: Auto-create slide_context from text reference (sync path)
+        # Runs before agent build so mode can be determined accurately.
         if _is_edit and _slide_refs and not slide_context:
             existing_deck = self._get_or_load_deck(session_id)
             if existing_deck and len(existing_deck.slides) > 0:
@@ -397,6 +395,13 @@ class ChatService:
                             "valid_refs": valid_refs,
                         },
                     )
+
+        # Build per-request agent with mode-specific prompt
+        _mode = "edit" if slide_context else "generate"
+        original_genie_id = db_session.get("genie_conversation_id")
+        agent, session_data, experiment_url = self._build_agent_for_session(
+            session_id, db_session, mode=_mode
+        )
 
         # Capture deck version BEFORE LLM runs so we can detect concurrent edits.
         _deck_version_before_llm = self._get_deck_version(session_id)
@@ -752,14 +757,7 @@ class ChatService:
                 extra={"session_id": session_id, "message_id": user_msg.get("id")},
             )
 
-        # Build per-request agent from session's agent_config
-        original_genie_id = db_session.get("genie_conversation_id")
-        agent, session_data, experiment_url = self._build_agent_for_session(
-            session_id, db_session
-        )
-
         # Issue 2 FIX: Detect intent ONCE and store for reuse throughout the function
-        # This avoids running regex patterns twice on every request
         _is_edit = self._detect_edit_intent(message)
         _is_generation = self._detect_generation_intent(message)
         _is_add = self._detect_add_intent(message)
@@ -767,12 +765,10 @@ class ChatService:
         _is_explicit_replace = self._detect_explicit_replace_intent(message)
 
         # RC10: Early clarification check BEFORE calling LLM
-        # If user seems to want to edit but didn't specify which slide, ask for clarification
         if not slide_context:
             existing_deck = self._get_or_load_deck(session_id)
             if existing_deck and len(existing_deck.slides) > 0:
                 # Generation intent with existing deck - ask add or replace
-                # Skip if user explicitly said "add" or "replace"
                 if _is_generation and not _is_add and not _is_explicit_replace:
                     logger.info(
                         "RC12: Clarification - generation intent with existing deck",
@@ -789,14 +785,13 @@ class ChatService:
                         "- Replace the entire deck with a new presentation?\n\n"
                         "Please reply with your full request, e.g., 'add 3 slides about X' or 'replace with new slides about X'."
                     )
-                    # Persist clarification as assistant message
                     session_manager.add_message(
                         session_id=session_id,
                         role="assistant",
                         content=clarification_msg,
                         message_type="clarification",
+                        request_id=request_id,
                     )
-                    # Return clarification without calling LLM
                     yield StreamEvent(
                         type=StreamEventType.ASSISTANT,
                         content=clarification_msg,
@@ -805,6 +800,7 @@ class ChatService:
                     yield StreamEvent(
                         type=StreamEventType.COMPLETE,
                         slides=early_deck_dict,
+                        metadata={"clarification_needed": True},
                     )
                     return
 
@@ -820,14 +816,13 @@ class ChatService:
                         "- Say the slide number (e.g., 'change slide 3 background to blue')\n"
                         "- Or select the slide from the panel on the left"
                     )
-                    # Persist clarification as assistant message
                     session_manager.add_message(
                         session_id=session_id,
                         role="assistant",
                         content=clarification_msg,
                         message_type="clarification",
+                        request_id=request_id,
                     )
-                    # Return clarification without calling LLM
                     yield StreamEvent(
                         type=StreamEventType.ASSISTANT,
                         content=clarification_msg,
@@ -836,18 +831,46 @@ class ChatService:
                     yield StreamEvent(
                         type=StreamEventType.COMPLETE,
                         slides=early_deck_dict,
+                        metadata={"clarification_needed": True},
                     )
                     return
 
+        # RC13: Auto-create slide_context from text reference (e.g., "edit slide 7")
+        # Runs before agent build so mode can be determined accurately.
+        if _is_edit and _slide_refs and not slide_context:
+            existing_deck = self._get_or_load_deck(session_id)
+            if existing_deck and len(existing_deck.slides) > 0:
+                valid_refs = [i for i in _slide_refs if 0 <= i < len(existing_deck.slides)]
+                if valid_refs:
+                    slide_htmls = [existing_deck.slides[i].html for i in valid_refs]
+                    slide_context = {
+                        "indices": valid_refs,
+                        "slide_htmls": slide_htmls
+                    }
+                    logger.info(
+                        "RC13: Auto-created slide_context from text reference",
+                        extra={
+                            "session_id": session_id,
+                            "parsed_refs": _slide_refs,
+                            "valid_refs": valid_refs,
+                            "deck_size": len(existing_deck.slides),
+                        },
+                    )
+
+        # Build per-request agent with mode-specific prompt
+        _mode = "edit" if slide_context else "generate"
+        original_genie_id = db_session.get("genie_conversation_id")
+        agent, session_data, experiment_url = self._build_agent_for_session(
+            session_id, db_session, mode=_mode
+        )
+
         # RC14: Validate slide_context indices against current backend deck state
-        # This catches state mismatches where frontend and backend are out of sync
         if slide_context:
             selected_indices = slide_context.get("indices", [])
             existing_deck = self._get_or_load_deck(session_id)
             if existing_deck and selected_indices:
                 max_index = max(selected_indices)
                 if max_index >= len(existing_deck.slides):
-                    # State mismatch detected - frontend shows more slides than backend has
                     logger.error(
                         "RC14: Frontend/backend deck state mismatch detected",
                         extra={
@@ -857,7 +880,6 @@ class ChatService:
                             "max_selected_index": max_index,
                         },
                     )
-                    # Return error to user with instructions to refresh
                     error_msg = (
                         f"⚠️ Deck sync error: You selected slide {max_index + 1}, but only "
                         f"{len(existing_deck.slides)} slide(s) exist in the saved deck. "
@@ -886,12 +908,9 @@ class ChatService:
         # RC11: Detect conflict between selection and text reference
         conflict_note = None
         if slide_context:
-            # Reuse _slide_refs from early detection (Issue 2 optimization)
             if _slide_refs:
                 selected_indices = slide_context.get("indices", [])
-                # Check if text references differ from selection
                 if set(_slide_refs) != set(selected_indices):
-                    # Convert to 1-based for user display
                     selected_display = [i + 1 for i in selected_indices]
                     text_display = [i + 1 for i in _slide_refs]
                     conflict_note = (
@@ -904,31 +923,6 @@ class ChatService:
                             "session_id": session_id,
                             "selected_indices": selected_indices,
                             "text_refs": _slide_refs,
-                        },
-                    )
-
-        # RC13: Auto-create slide_context from text reference (e.g., "edit slide 7")
-        # If user mentioned a slide number but didn't select in panel, look up the slide
-        if _is_edit and _slide_refs and not slide_context:
-            existing_deck = self._get_or_load_deck(session_id)
-            if existing_deck and len(existing_deck.slides) > 0:
-                # Validate indices are in range
-                valid_refs = [i for i in _slide_refs if 0 <= i < len(existing_deck.slides)]
-                if valid_refs:
-                    # Look up the actual slide HTML(s)
-                    slide_htmls = [existing_deck.slides[i].html for i in valid_refs]
-                    # Create context in same format as frontend selection
-                    slide_context = {
-                        "indices": valid_refs,
-                        "slide_htmls": slide_htmls
-                    }
-                    logger.info(
-                        "RC13: Auto-created slide_context from text reference",
-                        extra={
-                            "session_id": session_id,
-                            "parsed_refs": _slide_refs,
-                            "valid_refs": valid_refs,
-                            "deck_size": len(existing_deck.slides),
                         },
                     )
 
@@ -1667,11 +1661,10 @@ class ChatService:
         generation_patterns = [
             r"\bgenerate\b.*\bslides?\b",
             r"\bcreate\b.*\b(presentation|deck)\b",
+            r"\bcreate\b.*\bslides?\b",  # "create slides about X"
             r"\bmake\s+me\b.*\bslides?\b",
             r"\b\d+\s+slides?\s+(about|on|for)\b",  # "5 slides about X"
             r"\bcreate\b.*\b\d+\s+slides?\b",  # "create 3 slides"
-            # Removed overly broad pattern r"\b\d+\s+slides?\b" to prevent false positives
-            # e.g., "edit slide 5 slides look broken" would incorrectly match
             r"\bnew\s+(presentation|deck)\b",
             r"\bbuild\b.*\b(presentation|deck|slides)\b",
             r"\bprepare\b.*\bslides?\b",

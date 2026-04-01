@@ -6,13 +6,19 @@ from unittest.mock import MagicMock, patch
 
 @pytest.fixture
 def default_prompts():
-    """Standard prompt dict returned by mocked _get_prompt_content."""
+    """Standard prompt dict returned by mocked _get_prompt_content.
+
+    Uses pre_assembled=True to exercise the new modular path in
+    _create_prompt.  Tests that need the legacy concatenation path
+    should override pre_assembled to False and supply slide_style.
+    """
     return {
         "system_prompt": "default prompt",
-        "slide_editing_instructions": "default editing",
+        "slide_editing_instructions": None,
         "deck_prompt": None,
-        "slide_style": "default style",
+        "slide_style": None,
         "image_guidelines": None,
+        "pre_assembled": True,
     }
 
 
@@ -153,7 +159,7 @@ def test_mcp_tool_builds_tools(default_prompts):
 
 
 def test_get_prompt_content_uses_config_overrides():
-    """_get_prompt_content prioritizes config values over defaults."""
+    """Custom system_prompt in config triggers legacy path with pre_assembled=False."""
     from src.api.schemas.agent_config import AgentConfig
     from src.services.agent_factory import _get_prompt_content
 
@@ -166,29 +172,60 @@ def test_get_prompt_content_uses_config_overrides():
 
     assert result["system_prompt"] == "Custom system prompt"
     assert result["slide_editing_instructions"] == "Custom editing"
-    # Defaults should still be used for non-overridden fields
-    assert result["slide_style"] is not None  # DEFAULT_SLIDE_STYLE
-    assert result["deck_prompt"] is None  # No deck_prompt_id set
-
-
-def test_get_prompt_content_uses_defaults_when_no_overrides():
-    """_get_prompt_content returns backend defaults when config has no overrides."""
-    from src.api.schemas.agent_config import AgentConfig
-    from src.core.defaults import DEFAULT_CONFIG, DEFAULT_SLIDE_STYLE
-    from src.services.agent_factory import _get_prompt_content
-
-    config = AgentConfig()
-
-    result = _get_prompt_content(config)
-
-    assert result["system_prompt"] == DEFAULT_CONFIG["prompts"]["system_prompt"]
-    assert result["slide_editing_instructions"] == DEFAULT_CONFIG["prompts"]["slide_editing_instructions"]
-    assert result["slide_style"] == DEFAULT_SLIDE_STYLE
+    assert result["pre_assembled"] is False
+    assert result["slide_style"] is not None
     assert result["deck_prompt"] is None
 
 
+def test_get_prompt_content_generate_mode_uses_modules():
+    """Without custom overrides, generate mode produces a pre-assembled prompt
+    that includes generation rules and excludes editing rules."""
+    from src.api.schemas.agent_config import AgentConfig
+    from src.services.agent_factory import _get_prompt_content
+
+    config = AgentConfig()
+    result = _get_prompt_content(config, mode="generate")
+
+    assert result["pre_assembled"] is True
+    assert "<!DOCTYPE html>" in result["system_prompt"]
+    assert "SLIDE EDITING MODE" not in result["system_prompt"]
+    # Other keys are None because everything is baked in
+    assert result["slide_editing_instructions"] is None
+    assert result["slide_style"] is None
+
+
+def test_get_prompt_content_edit_mode_uses_modules():
+    """Without custom overrides, edit mode produces a pre-assembled prompt
+    that includes editing rules and excludes generation-only rules."""
+    from src.api.schemas.agent_config import AgentConfig
+    from src.services.agent_factory import _get_prompt_content
+
+    config = AgentConfig()
+    result = _get_prompt_content(config, mode="edit")
+
+    assert result["pre_assembled"] is True
+    assert "SLIDE EDITING MODE" in result["system_prompt"]
+    # Generation-only output format should be absent
+    assert "Start directly with: <!DOCTYPE html>" not in result["system_prompt"]
+    assert "PRESENTATION_GUIDELINES" not in result["system_prompt"]
+    assert result["slide_editing_instructions"] is None
+
+
+def test_get_prompt_content_defaults_backward_compat():
+    """Default generate mode still produces a usable prompt dict."""
+    from src.api.schemas.agent_config import AgentConfig
+    from src.services.agent_factory import _get_prompt_content
+
+    config = AgentConfig()
+    result = _get_prompt_content(config)
+
+    assert result["pre_assembled"] is True
+    assert len(result["system_prompt"]) > 100
+
+
 def test_get_prompt_content_resolves_slide_style_id():
-    """_get_prompt_content fetches slide style from DB when slide_style_id is set."""
+    """_get_prompt_content fetches slide style from DB and bakes it into
+    the pre-assembled system prompt."""
     from src.api.schemas.agent_config import AgentConfig
     from src.services.agent_factory import _get_prompt_content
 
@@ -207,12 +244,14 @@ def test_get_prompt_content_resolves_slide_style_id():
 
         result = _get_prompt_content(config)
 
-    assert result["slide_style"] == "Custom DB style"
-    assert result["image_guidelines"] == "Use logo.png"
+    assert result["pre_assembled"] is True
+    assert "Custom DB style" in result["system_prompt"]
+    assert "Use logo.png" in result["system_prompt"]
 
 
 def test_get_prompt_content_resolves_deck_prompt_id():
-    """_get_prompt_content fetches deck prompt from DB when deck_prompt_id is set."""
+    """_get_prompt_content fetches deck prompt from DB and bakes it into
+    the pre-assembled system prompt."""
     from src.api.schemas.agent_config import AgentConfig
     from src.services.agent_factory import _get_prompt_content
 
@@ -230,7 +269,8 @@ def test_get_prompt_content_resolves_deck_prompt_id():
 
         result = _get_prompt_content(config)
 
-    assert result["deck_prompt"] == "Quarterly review deck template"
+    assert result["pre_assembled"] is True
+    assert "Quarterly review deck template" in result["system_prompt"]
 
 
 def test_multiple_genie_tools(default_prompts):

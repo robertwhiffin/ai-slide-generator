@@ -145,6 +145,7 @@ interface PollResponse {
     replacement_info?: ReplacementInfo;
     experiment_url?: string;
     session_title?: string;
+    metadata?: Record<string, any>;
   };
   error?: string;
 }
@@ -165,6 +166,7 @@ interface ExportJobStatus {
   progress: number;
   total_slides: number;
   error?: string;
+  status_message?: string;
   // Google Slides specific
   presentation_id?: string;
   presentation_url?: string;
@@ -210,9 +212,11 @@ async function pollExportJob(
   pollUrl: string,
   label: string,
   onProgress?: ProgressCallback,
+  onEarlyUrl?: (url: string) => void,
 ): Promise<ExportJobStatus> {
   const pollIntervalMs = 2000;
-  const maxAttempts = 300; // 10 minutes max
+  const maxAttempts = 600; // 20 minutes safety net
+  let earlyUrlOpened = false;
 
   for (let i = 0; i < maxAttempts; i++) {
     await new Promise((resolve) => setTimeout(resolve, pollIntervalMs));
@@ -225,11 +229,17 @@ async function pollExportJob(
     const status: ExportJobStatus = await response.json();
     console.log(`[${label}] Poll ${i + 1}: ${status.status} (${status.progress}/${status.total_slides})`);
 
-    onProgress?.(
-      status.progress,
-      status.total_slides,
-      `Processing slide ${status.progress} of ${status.total_slides}...`,
-    );
+    // Surface the Google Slides URL as soon as it appears (even while still running)
+    if (!earlyUrlOpened && status.presentation_url && onEarlyUrl) {
+      earlyUrlOpened = true;
+      onEarlyUrl(status.presentation_url);
+    }
+
+    const progressText = status.status_message
+      || (earlyUrlOpened
+        ? `Building slide ${status.progress} of ${status.total_slides}…`
+        : `Processing slide ${status.progress} of ${status.total_slides}…`);
+    onProgress?.(status.progress, status.total_slides, progressText);
 
     if (status.status === 'completed') {
       return status;
@@ -801,6 +811,7 @@ export const api = {
                   raw_html: response.result.raw_html,
                   replacement_info: response.result.replacement_info,
                   experiment_url: response.result.experiment_url,
+                  metadata: response.result.metadata,
                 });
               }
             }
@@ -1162,7 +1173,7 @@ export const api = {
     sessionId: string,
     slideDeck?: import('../types/slide').SlideDeck,
     onProgress?: (progress: number, total: number, status: string) => void,
-  ): Promise<{ presentation_id: string; presentation_url: string }> {
+  ): Promise<{ presentation_id: string; presentation_url: string; alreadyOpened: boolean }> {
     // Step 1: Capture chart images client-side
     const chartImages = slideDeck
       ? await captureChartImages(slideDeck, onProgress)
@@ -1188,17 +1199,23 @@ export const api = {
     const { job_id } = await startResponse.json();
     console.log(`[GSLIDES_EXPORT] Job started: ${job_id}`);
 
-    // Step 3: Poll until complete
+    // Step 3: Poll until complete — open deck as soon as URL is available
+    let earlyOpened = false;
     const status = await pollExportJob(
       `${API_BASE_URL}/api/export/google-slides/poll/${job_id}`,
       'GSLIDES_EXPORT',
       onProgress,
+      (url) => {
+        earlyOpened = true;
+        window.open(url, '_blank');
+      },
     );
 
     onProgress?.(status.total_slides, status.total_slides, 'Done!');
     return {
       presentation_id: status.presentation_id!,
       presentation_url: status.presentation_url!,
+      alreadyOpened: earlyOpened,
     };
   },
 
