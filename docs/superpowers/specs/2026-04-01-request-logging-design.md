@@ -45,7 +45,8 @@ A class-based Starlette `BaseHTTPMiddleware` registered in `main.py`. Registered
 **Behavior:**
 - Generates a `request_id` UUID per request
 - Records wall-clock time around `call_next(request)` — this captures the entire handler lifecycle including all DB queries, external calls, and I/O
-- **Only logs `/api/*` paths** — excludes static assets (`/assets/*`), SPA catch-all routes, `/favicon.svg`, and `/api/health`
+- **Logs the route template** (e.g., `/api/sessions/{session_id}/slides`) via `request.scope["route"].path` when a matched route exists, falling back to the raw path. This ensures `GROUP BY path` queries aggregate by endpoint pattern rather than producing one row per unique session/slide ID
+- **Only logs `/api/*` paths** — excludes static assets (`/assets/*`), SPA catch-all routes, `/favicon.svg`, `/api/health`, and `/api/chat/stream`. The chat/stream endpoint returns an SSE `StreamingResponse` for LLM slide generation, which is incompatible with `BaseHTTPMiddleware`'s response buffering. It is also intentionally out of scope — LLM generation latency is outside our control and not the performance problem being investigated. No other current `/api/*` route uses `StreamingResponse`, so `BaseHTTPMiddleware` is safe for everything else.
 - Writes the `RequestLog` row via fire-and-forget: `asyncio.create_task` wrapping `run_in_executor(None, _write_log)` — the synchronous SQLAlchemy session runs in a thread pool, never blocking the event loop, and the response is not held waiting for the write to complete
 - Uses a dedicated DB session (not the request's session) so logging failures cannot affect the request
 - All DB writes wrapped in try/except — monitoring never takes down the app
@@ -60,6 +61,7 @@ A background task started via FastAPI's `lifespan` event (same pattern as Lakeba
 - Runs `DELETE FROM request_logs WHERE timestamp < NOW() - INTERVAL '30 days'`
 - Logs number of deleted rows to stdout
 - Silently handles failures, retries on next cycle
+- **Shutdown:** Task reference stored and cancelled in the lifespan shutdown block, following the same pattern as `_worker_task` and `_export_worker_task` in `main.py` (lines 132-149). Prevents `CancelledError` warnings on exit.
 
 30-day retention hardcoded initially.
 
@@ -70,7 +72,10 @@ A background task started via FastAPI's `lifespan` event (same pattern as Lakeba
 | `src/database/models/request_log.py` | New `RequestLog` model |
 | `src/database/models/__init__.py` | Export new model |
 | `src/api/middleware/request_logging.py` | New middleware + cleanup task |
-| `src/api/main.py` | Register middleware, start cleanup task in lifespan |
+| `src/api/main.py` | Register middleware, start cleanup task in lifespan, cancel on shutdown |
+| `tests/unit/test_request_log_model.py` | Unit test for `RequestLog` model |
+| `tests/unit/test_request_logging_middleware.py` | Unit test for middleware: path filtering, route template extraction, fire-and-forget behavior, error isolation |
+| `tests/integration/test_request_logging.py` | Integration test verifying rows are written to the database |
 
 ## Example Queries
 
