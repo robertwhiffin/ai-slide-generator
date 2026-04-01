@@ -118,7 +118,7 @@ class TestErrorIsolation:
     def test_middleware_survives_db_write_failure(self, client):
         """If the DB write inside _enqueue_log fails, the request should still succeed."""
         with patch(
-            "src.api.middleware.request_logging.get_session_local",
+            "src.core.database.get_session_local",
             side_effect=Exception("DB down"),
         ):
             response = client.get("/api/sessions/123")
