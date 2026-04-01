@@ -15,6 +15,7 @@ from src.database.models.profile_contributor import (
     ProfileContributor,  # Backward compatibility alias
 )
 from src.database.models.prompts import ConfigPrompts
+from src.database.models.request_log import RequestLog
 from src.database.models.session import (
     ChatRequest,
     ExportJob,
@@ -44,6 +45,7 @@ __all__ = [
     "ImageAsset",
     "PermissionLevel",
     "ProfileContributor",  # Backward compatibility alias
+    "RequestLog",
     "SessionMessage",
     "SessionSlideDeck",
     "SlideComment",

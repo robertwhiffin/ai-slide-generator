@@ -51,13 +51,14 @@ IS_TESTING = ENVIRONMENT == "test"
 # Worker task references for cleanup
 _worker_task = None
 _export_worker_task = None
+_cleanup_task = None
 _frontend_assets_stack: ExitStack | None = None
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Lifespan context manager for startup/shutdown events."""
-    global _worker_task, _export_worker_task, _frontend_assets_stack
+    global _worker_task, _export_worker_task, _cleanup_task, _frontend_assets_stack
 
     # Startup
     logger.info(f"Starting AI Slide Generator API (environment: {ENVIRONMENT})")
@@ -110,6 +111,11 @@ async def lifespan(app: FastAPI):
         _export_worker_task = await start_export_worker()
         logger.info("Export job queue worker started")
 
+        # Start the request log cleanup task
+        from src.api.middleware.request_logging import request_log_cleanup_loop
+        _cleanup_task = asyncio.create_task(request_log_cleanup_loop())
+        logger.info("Request log cleanup task started")
+
         # Recover any stuck requests from previous crashes
         try:
             recovered = await recover_stuck_requests()
@@ -144,6 +150,14 @@ async def lifespan(app: FastAPI):
         except asyncio.CancelledError:
             pass
         logger.info("Export job queue worker stopped")
+
+    if _cleanup_task:
+        _cleanup_task.cancel()
+        try:
+            await _cleanup_task
+        except asyncio.CancelledError:
+            pass
+        logger.info("Request log cleanup task stopped")
 
     if _frontend_assets_stack:
         _frontend_assets_stack.close()
@@ -315,6 +329,11 @@ async def user_auth_middleware(request: Request, call_next):
         set_current_user(None)
         set_permission_context(None)
 
+
+# Request logging middleware - registered after auth middleware so it wraps outermost
+from src.api.middleware.request_logging import RequestLoggingMiddleware
+
+app.add_middleware(RequestLoggingMiddleware)
 
 # Include API routers
 app.include_router(admin.router)
