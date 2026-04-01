@@ -446,9 +446,11 @@ class HtmlToGoogleSlidesConverter:
                 except Exception:
                     logger.warning("Failed to delete default slide", exc_info=True)
 
-        # Process each slide
+        # Create all blank slides upfront (must be sequential for ordering)
+        import asyncio
+
+        slide_entries = []  # list of (index, page_id, html_str, chart_imgs)
         for i, html_str in enumerate(slides, 1):
-            print(f"[GSLIDES_CONVERTER] Processing slide {i}/{total} – HTML length: {len(html_str)}")
             page_id = f"slide_{uuid.uuid4().hex[:12]}"
             try:
                 slides_service.presentations().batchUpdate(
@@ -466,17 +468,28 @@ class HtmlToGoogleSlidesConverter:
             chart_imgs = None
             if chart_images_per_slide and i - 1 < len(chart_images_per_slide):
                 chart_imgs = chart_images_per_slide[i - 1]
+            slide_entries.append((i, page_id, html_str, chart_imgs))
 
-            await self._add_slide_content(
-                slides_service, drive_service, pres_id, page_id,
-                html_str, i, chart_imgs,
-            )
+        # Process slide content in parallel (up to 4 concurrent LLM calls)
+        sem = asyncio.Semaphore(4)
 
-            if progress_callback:
-                try:
-                    progress_callback(i, total, f"Processed slide {i}/{total}")
-                except Exception:
-                    pass  # Don't let callback errors break conversion
+        async def _process_slide(idx, pg_id, html, charts):
+            async with sem:
+                print(f"[GSLIDES_CONVERTER] Processing slide {idx}/{total} – HTML length: {len(html)}")
+                await self._add_slide_content(
+                    slides_service, drive_service, pres_id, pg_id,
+                    html, idx, charts,
+                )
+                if progress_callback:
+                    try:
+                        progress_callback(idx, total, f"Processed slide {idx}/{total}")
+                    except Exception:
+                        pass
+
+        await asyncio.gather(*[
+            _process_slide(idx, pg_id, html, charts)
+            for idx, pg_id, html, charts in slide_entries
+        ])
 
         url = f"https://docs.google.com/presentation/d/{pres_id}/edit"
         print(f"[GSLIDES_CONVERTER] Done: {url}")
@@ -641,7 +654,7 @@ class HtmlToGoogleSlidesConverter:
                     {"role": "user", "content": user_prompt},
                 ],
                 temperature=0.2,
-                max_tokens=16384,
+                max_tokens=32768,
                 extra_body={"thinking": {"type": "enabled", "budget_tokens": thinking_budget}},
             )
             code = self._extract_text(resp.choices[0].message.content)
@@ -919,6 +932,17 @@ class HtmlToGoogleSlidesConverter:
                       html_str, assets_dir, slide_num):
         """Execute generated code. Returns None on success, error string on failure."""
         code = self._prepare_code(code)
+
+        # Pre-validate syntax before attempting execution
+        try:
+            ast.parse(code)
+        except SyntaxError as syn_exc:
+            logger.warning(
+                "Skipping execution for slide %d — code has syntax error: %s (line %s)",
+                slide_num, syn_exc.msg, syn_exc.lineno,
+            )
+            return f"SyntaxError: {syn_exc.msg} (line {syn_exc.lineno})"
+
         tmp = Path(tempfile.mktemp(suffix=".py", prefix="gslides_adder_"))
         tmp.write_text(code, encoding="utf-8")
 
