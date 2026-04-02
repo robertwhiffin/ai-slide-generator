@@ -461,85 +461,92 @@ class SlideGeneratorAgent:
 
     def _create_prompt(self, prompts: dict) -> ChatPromptTemplate:
         """Create prompt template with system prompt from settings and chat history.
-        
-        Prompt structure (when all components present):
-        1. Deck prompt (from library) - defines presentation type/content (WHAT to create)
-        2. Slide style (from library) - defines visual appearance (HOW it should look)
-        3. System prompt - defines technical generation rules (HOW to generate valid HTML/charts)
-        4. Slide editing instructions - defines editing behavior
-        
-        The system prompt is tool-agnostic - the LLM discovers available tools
-        through the tool binding mechanism, not the prompt.
+
+        Two paths:
+
+        1. **Pre-assembled** (``prompts["pre_assembled"] is True``):
+           ``system_prompt`` already contains the complete, mode-specific
+           system message built by ``prompt_modules``.  Only curly-brace
+           escaping is needed.
+
+        2. **Legacy / custom-override** (``pre_assembled`` is False or
+           absent): the old concatenation logic runs so that custom
+           ``system_prompt`` overrides, DB-stored prompts, and the
+           backward-compatible ``defaults.py`` path keep working.
+
+        The system prompt is tool-agnostic — the LLM discovers available
+        tools through the tool binding mechanism, not the prompt.
         """
-        deck_prompt = prompts.get("deck_prompt") or ""
-        slide_style = prompts.get("slide_style") or ""
-        system_prompt = prompts.get("system_prompt") or ""
-        editing_prompt = prompts.get("slide_editing_instructions") or ""
+        pre_assembled = prompts.get("pre_assembled", False)
 
-        if not system_prompt:
-            raise AgentError("System prompt not found in configuration")
-        if not slide_style:
-            raise AgentError("Slide style not found in configuration")
+        if pre_assembled:
+            full_system_prompt = prompts.get("system_prompt") or ""
+            if not full_system_prompt:
+                raise AgentError("System prompt not found in configuration")
+        else:
+            # Legacy concatenation path (custom overrides / old settings_db)
+            deck_prompt = prompts.get("deck_prompt") or ""
+            slide_style = prompts.get("slide_style") or ""
+            system_prompt = prompts.get("system_prompt") or ""
+            editing_prompt = prompts.get("slide_editing_instructions") or ""
 
-        # Build the complete system prompt
-        prompt_parts = []
-        
-        # Deck prompt comes first - sets context for what type of presentation to create
-        if deck_prompt:
-            prompt_parts.append(f"PRESENTATION CONTEXT:\n{deck_prompt.strip()}")
-        
-        # Slide style defines visual appearance (user-controllable)
-        if slide_style:
-            prompt_parts.append(slide_style.strip())
-        
-        # Core system prompt for technical slide generation (hidden from regular users)
-        prompt_parts.append(system_prompt.rstrip())
-        
-        # Editing instructions appended at the end
-        if editing_prompt:
-            prompt_parts.append(editing_prompt.strip())
+            if not system_prompt:
+                raise AgentError("System prompt not found in configuration")
+            if not slide_style:
+                raise AgentError("Slide style not found in configuration")
 
-        image_guidelines = prompts.get("image_guidelines") or ""
+            prompt_parts = []
 
-        image_section = (
-            "IMAGE SUPPORT:\n"
-            "You have access to user-uploaded images via the search_images tool.\n\n"
-            "WHEN TO USE search_images:\n"
-            "- Use search_images ONLY when the user explicitly requests images in their message\n"
-            "- When the user attaches images to their message (image context will be provided)\n"
-            "- Do NOT call search_images on every request — only when images are relevant\n\n"
-            "HOW TO USE IMAGES:\n"
-            '1. Call search_images to find matching images (try broad search first, then filter)\n'
-            '2. Embed them using: <img src="{{image:ID}}" alt="description" />\n'
-            '3. For CSS backgrounds: background-image: url(\'{{image:ID}}\');\n'
-            '4. The system will replace {{image:ID}} with the actual image data\n\n'
-            "IMPORTANT RULES:\n"
-            "- NEVER guess or fabricate image IDs — only use IDs returned by search_images or image guidelines\n"
-            "- DO NOT attempt to generate or guess base64 image data\n"
-            "- If no images are found, generate slides without images rather than using fake IDs"
-        )
+            if deck_prompt:
+                prompt_parts.append(f"PRESENTATION CONTEXT:\n{deck_prompt.strip()}")
 
-        if image_guidelines.strip():
-            image_section += (
-                "\n\n"
-                "IMAGE GUIDELINES (from slide style):\n"
-                "Follow these instructions for which images to use. "
-                "The image IDs listed here are pre-validated — use them directly without calling search_images.\n\n"
-                f"{image_guidelines.strip()}"
+            if slide_style:
+                prompt_parts.append(slide_style.strip())
+
+            prompt_parts.append(system_prompt.rstrip())
+
+            if editing_prompt:
+                prompt_parts.append(editing_prompt.strip())
+
+            image_guidelines = prompts.get("image_guidelines") or ""
+
+            image_section = (
+                "IMAGE SUPPORT:\n"
+                "You have access to user-uploaded images via the search_images tool.\n\n"
+                "WHEN TO USE search_images:\n"
+                "- Use search_images ONLY when the user explicitly requests images in their message\n"
+                "- When the user attaches images to their message (image context will be provided)\n"
+                "- Do NOT call search_images on every request — only when images are relevant\n\n"
+                "HOW TO USE IMAGES:\n"
+                '1. Call search_images to find matching images (try broad search first, then filter)\n'
+                '2. Embed them using: <img src="{{image:ID}}" alt="description" />\n'
+                '3. For CSS backgrounds: background-image: url(\'{{image:ID}}\');\n'
+                '4. The system will replace {{image:ID}} with the actual image data\n\n'
+                "IMPORTANT RULES:\n"
+                "- NEVER guess or fabricate image IDs — only use IDs returned by search_images or image guidelines\n"
+                "- DO NOT attempt to generate or guess base64 image data\n"
+                "- If no images are found, generate slides without images rather than using fake IDs"
             )
 
-        prompt_parts.append(image_section)
+            if image_guidelines.strip():
+                image_section += (
+                    "\n\n"
+                    "IMAGE GUIDELINES (from slide style):\n"
+                    "Follow these instructions for which images to use. "
+                    "The image IDs listed here are pre-validated — use them directly without calling search_images.\n\n"
+                    f"{image_guidelines.strip()}"
+                )
 
-        full_system_prompt = "\n\n".join(prompt_parts)
+            prompt_parts.append(image_section)
+            full_system_prompt = "\n\n".join(prompt_parts)
 
-        # Escape curly braces to allow user prompts with HTML/JS/JSON content
-        # LangChain's f-string template format interprets {var} as variables
+        # Escape curly braces — LangChain's f-string template interprets {var}
         full_system_prompt = full_system_prompt.replace("{", "{{").replace("}", "}}")
 
         prompt = ChatPromptTemplate.from_messages(
             [
                 ("system", full_system_prompt),
-                ("placeholder", "{chat_history}"),  # Conversation history for multi-turn
+                ("placeholder", "{chat_history}"),
                 ("human", "{input}"),
                 ("placeholder", "{agent_scratchpad}"),
             ]
@@ -548,9 +555,8 @@ class SlideGeneratorAgent:
         logger.info(
             "Prompt template created",
             extra={
-                "has_deck_prompt": bool(deck_prompt),
-                "has_slide_style": bool(slide_style),
-                "has_editing_prompt": bool(editing_prompt),
+                "pre_assembled": pre_assembled,
+                "prompt_length": len(full_system_prompt),
             }
         )
         return prompt

@@ -74,6 +74,7 @@ class ExportJob(Base):
     title = Column(String(512), nullable=True)
     output_path = Column(Text, nullable=True)
     error_message = Column(Text, nullable=True)
+    status_message = Column(Text, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     completed_at = Column(DateTime, nullable=True)
 

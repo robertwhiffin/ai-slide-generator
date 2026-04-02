@@ -278,7 +278,7 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(({
             setExperimentUrl(event.experiment_url);
           }
 
-          if (event.slides) {
+          if (event.slides && !event.metadata?.clarification_needed) {
             // Fetch slides from API to get content_hash for auto-verification
             // The API returns slides with content_hash computed and verification merged
             // Save point is now created by the backend during chat processing
