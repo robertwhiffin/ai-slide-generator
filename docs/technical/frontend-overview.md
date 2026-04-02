@@ -7,8 +7,8 @@ How the React/Vite frontend is structured, how it communicates with backend APIs
 ## Stack & Entry Points
 
 - **Tooling:** Vite + React + TypeScript, Tailwind utility classes, `@dnd-kit` for drag/drop, `@monaco-editor/react` for HTML editing, standard Fetch for API calls.
-- **Entrypoint:** `src/main.tsx` wraps `<App />` in `<BrowserRouter>` and injects into `#root`. `src/App.tsx` wraps the tree in `AgentConfigProvider`, `SessionProvider`, `GenerationProvider`, `SelectionProvider`, `ToastProvider` and defines routes via React Router v7 — each route renders `AppLayout` (which adds `ProfileProvider`) with `initialView` and optional `viewOnly` props.
-- **Env configuration:** `src/services/api.ts` reads `import.meta.env.VITE_API_URL` (defaults to `http://localhost:8000` in dev, relative URLs in production).
+- **Entrypoint:** `src/main.tsx` wraps `<App />` in `<BrowserRouter>` and injects into `#root`. `src/App.tsx` checks setup status via `/api/setup/status` and shows `WelcomeSetup` if not configured; otherwise wraps the tree in `SessionProvider`, `GenerationProvider`, `SelectionProvider`, `ToastProvider`, `AgentConfigProvider` and defines routes via React Router v7 — each route renders `AppLayout` (which adds `ProfileProvider`) with `initialView` and optional `viewOnly` props.
+- **Env configuration:** `src/services/api.ts` reads `import.meta.env.VITE_API_URL` (defaults to `http://127.0.0.1:8000` in dev, relative URLs in production).
 
 ---
 
@@ -37,6 +37,8 @@ Each page has a dedicated URL. Navigation buttons use `useNavigate()` to change 
 - **Slide Styles** (`/slide-styles`): Visual style library management (typography, colors, layout)
 - **Images** (`/images`): Image library management
 - **Help** (`/help`): Documentation and usage guide
+- **Admin** (`/admin`): Admin page with feedback dashboard and Google Slides OAuth configuration
+- **Feedback redirect** (`/feedback`): Redirects to `/admin`
 
 The landing page (`/`) now shows the generator directly in pre-session mode.
 
@@ -80,6 +82,12 @@ interface SlideDeck {
   external_scripts: string[];
   scripts: string;
   slides: Slide[];
+  html_content?: string;
+  version?: number;       // Server-side optimistic lock version from SessionSlideDeck
+  created_by?: string;
+  created_at?: string;
+  modified_by?: string;
+  modified_at?: string;
 }
 
 interface Slide {
@@ -89,6 +97,10 @@ interface Slide {
   scripts: string;
   content_hash?: string;              // SHA256 hash of normalized HTML (for verification persistence)
   verification?: VerificationResult;  // LLM as Judge verification (auto-verified, persisted by content hash)
+  created_by?: string;
+  created_at?: string;   // ISO 8601 timestamp
+  modified_by?: string;
+  modified_at?: string;  // ISO 8601 timestamp
 }
 ```
 
@@ -162,7 +174,7 @@ Checks for app updates on load and displays a banner if a newer version is avail
 const { updateAvailable, latestVersion, updateType, dismiss } = useVersionCheck();
 ```
 
-- **Checks once on app load** - calls `/api/version/check` (backend caches PyPI responses for 1 hour)
+- **Checks once on app load** - calls `/api/version/check` via direct `fetch` (backend caches PyPI responses for 1 hour)
 - **Classifies update type:**
   - `patch`: Only patch version changed (e.g., 0.1.19 → 0.1.20) - redeploy the app
   - `major`: Minor or major version changed (e.g., 0.1.x → 0.2.x) - run `tellr.update()`
@@ -171,16 +183,16 @@ const { updateAvailable, latestVersion, updateType, dismiss } = useVersionCheck(
 
 The `UpdateBanner` component displays at the top of the app with different messaging based on update type.
 
-### 5. Chat Responses (`src/types/message.ts`)
+### 6. Chat Responses (`src/types/message.ts`)
 
 - `ChatResponse` includes messages, `slide_deck`, `raw_html`, and optional `replacement_info`
 - `ReplacementInfo` rendered via `ReplacementFeedback` to show slide changes
 
-### 6. View Modes
+### 7. View Modes
 
 Parsed tiles, rendered raw HTML (`iframe`), and raw HTML text (`<pre>`). Users can compare parser output vs. model output.
 
-### 7. AgentConfigBar (`src/components/config/AgentConfigBar.tsx`)
+### 8. AgentConfigBar (`src/components/AgentConfigBar/AgentConfigBar.tsx`)
 
 The AgentConfigBar replaces the old ProfileSelector and ProfileCreationWizard. It displays the session's current tool configuration as chips and provides controls to:
 - **Add/remove tools** (Genie spaces, MCP servers) via the tool discovery endpoint
@@ -190,7 +202,7 @@ The AgentConfigBar replaces the old ProfileSelector and ProfileCreationWizard. I
 
 Configuration is session-bound: changes update the session's `agent_config` JSON column via `PUT/PATCH /api/sessions/{id}/agent-config`.
 
-### 8. Deck Prompt Library (`src/components/config/DeckPromptList.tsx`)
+### 9. Deck Prompt Library (`src/components/config/DeckPromptList.tsx`)
 
 Deck Prompts are reusable presentation templates that guide AI slide generation:
 
@@ -213,7 +225,7 @@ interface DeckPrompt {
 4. User chat messages combine with the deck prompt for context-aware generation
 5. Users can set a personal default prompt via "Set as default" (stored in localStorage as `userDefaultDeckPromptId`); new sessions auto-select it
 
-### 9. Save Points / Versioning (`src/components/SavePoints/`)
+### 10. Save Points / Versioning (`src/components/SavePoints/`)
 
 Save points allow users to preview and restore previous deck states:
 
@@ -248,7 +260,7 @@ const versionKey = previewVersion
 
 See [Save Points / Versioning](save-points-versioning.md) for full architecture.
 
-### 10. Slide Style Library (`src/components/config/SlideStyleList.tsx`)
+### 11. Slide Style Library (`src/components/config/SlideStyleList.tsx`)
 
 Slide Styles control the visual appearance of generated slides:
 
@@ -294,19 +306,28 @@ interface SlideStyle {
 | `src/hooks/useKeyboardShortcuts.ts` | `Esc` clears selection globally | None |
 | `src/utils/loadingMessages.ts` | Rotating messages during LLM calls | None |
 | `src/components/common/Tooltip.tsx` | Lightweight hover tooltip wrapper using Tailwind; appears instantly on hover | None |
-| `src/components/config/AgentConfigBar.tsx` | Session tool configuration bar; add/remove Genie spaces, select style/prompt, save/load profiles | `api.getAgentConfig`, `api.updateAgentConfig`, `api.updateAgentConfigTools` |
+| `src/components/AgentConfigBar/AgentConfigBar.tsx` | Session tool configuration bar; add/remove Genie spaces, select style/prompt, save/load profiles | `api.getAgentConfig`, `api.updateAgentConfig`, `api.patchTools` |
 | `src/components/AgentConfigBar/GenieDetailPanel.tsx` | Inline panel for viewing and editing a Genie space description before adding or after selecting a tool; supports add and edit modes | None (callback props via `AgentConfigBar`) |
 | `src/components/config/DeckPromptList.tsx` | Deck prompt library management: list, create, edit, delete prompts | `configApi.listDeckPrompts`, `configApi.createDeckPrompt`, `configApi.updateDeckPrompt`, `configApi.deleteDeckPrompt` |
 | `src/components/config/DeckPromptForm.tsx` | Modal form for creating/editing deck prompts with Monaco editor | None (callback props) |
-| `src/components/config/DeckPromptSelector.tsx` | Session configuration for selecting a deck prompt from the library | `configApi.listDeckPrompts`, `api.updateAgentConfig` |
 | `src/components/config/SlideStyleList.tsx` | Slide style library management: list, create, edit, delete styles | `configApi.listSlideStyles`, `configApi.createSlideStyle`, `configApi.updateSlideStyle`, `configApi.deleteSlideStyle` |
 | `src/components/config/SlideStyleForm.tsx` | Modal form for creating/editing slide styles with Monaco editor | None (callback props) |
-| `src/components/config/SlideStyleSelector.tsx` | Session configuration for selecting a slide style from the library | `configApi.listSlideStyles`, `api.updateAgentConfig` |
 | `src/components/UpdateBanner/UpdateBanner.tsx` | Displays update notification when new version available; different messaging for patch vs major updates | None (props only) |
-| `src/hooks/useVersionCheck.ts` | Checks PyPI for new versions on app load; returns update availability and type | `GET /api/version/check` |
+| `src/hooks/useVersionCheck.ts` | Checks PyPI for new versions on app load via direct `fetch`; returns update availability and type | `GET /api/version/check` (direct fetch, not via `api` object) |
 | `src/components/SavePoints/SavePointDropdown.tsx` | Version selection dropdown, triggers preview on selection | `api.listVersions`, `api.previewVersion` |
 | `src/components/SavePoints/PreviewBanner.tsx` | Indigo banner during preview with revert/cancel actions | None (props only) |
 | `src/components/SavePoints/RevertConfirmModal.tsx` | Confirmation dialog before restore (warns about version deletion) | `api.restoreVersion` |
+| `src/components/Setup/WelcomeSetup.tsx` | Initial setup screen; collects workspace URL, triggers authentication, verifies configuration | `POST /api/setup/status` |
+| `src/components/Admin/AdminPage.tsx` | Admin page with tabs for feedback dashboard and Google Slides OAuth configuration | None (delegates to child components) |
+| `src/components/ChatPanel/PromptEditorModal.tsx` | Expanded modal editor for composing longer prompts with save and send actions | None (callback props) |
+| `src/components/ChatPanel/ErrorDisplay.tsx` | Inline error banner with dismiss button, shown below chat input on API errors | None (props only) |
+| `src/components/ChatPanel/LoadingIndicator.tsx` | Animated loading indicator with rotating message, shown during slide edits | None (props only) |
+| `src/components/ChatPanel/SelectionBadge.tsx` | Badge in ChatInput showing the current slide selection range with a clear button | None (props only) |
+| `src/components/config/GoogleSlidesAuthForm.tsx` | Google OAuth credentials upload and user authorization flow for Google Slides export | `configApi.uploadGoogleCredentials`, `configApi.getGoogleCredentialsStatus`, `configApi.deleteGoogleCredentials`, `api.getGoogleSlidesAuthUrl` |
+| `src/components/config/ConfirmDialog.tsx` | Reusable confirmation dialog for destructive actions (deleting profiles, changing defaults) | None (props only) |
+| `src/components/config/ContributorsManager.tsx` | Profile sharing UI; add/update/remove contributors (users/groups) with permission levels | `configApi.listContributors`, `configApi.addContributor`, `configApi.updateContributor`, `configApi.removeContributor`, `configApi.searchIdentities` |
+| `src/components/DeckContributorsManager.tsx` | Deck (session) sharing UI; add/update/remove contributors with CAN_VIEW/CAN_EDIT/CAN_MANAGE permissions | `configApi.listDeckContributors`, `configApi.addDeckContributor`, `configApi.updateDeckContributor`, `configApi.removeDeckContributor` |
+| `src/components/PresentationMode/PresentationMode.tsx` | Fullscreen slide presentation with keyboard navigation; wraps scripts in try/catch for graceful chart failures | None (renders slide HTML in iframe) |
 
 ---
 
@@ -424,13 +445,41 @@ The optimization prompt explicitly instructs the agent to:
 | `submitVerificationFeedback` | POST | `/api/verification/{index}/feedback` | `{ session_id, is_positive, rationale?, trace_id? }` | `{ status, message, linked_to_trace }` |
 | `getGenieLink` | GET | `/api/verification/genie-link` | query: `session_id` | `{ has_genie_conversation, url?, ... }` |
 
-### Version Check Endpoint
+### Version Check
+
+| Hook | HTTP | Path | Request | Returns |
+|--------|------|------|---------|---------|
+| `useVersionCheck` | GET | `/api/version/check` | – | `{ installed_version, latest_version, update_available, update_type }` |
+
+The version check is performed via a direct `fetch` call inside the `useVersionCheck` hook (not on the `api` object). It compares the installed `databricks-tellr-app` version against PyPI. The `update_type` is either `"patch"` (redeploy the app) or `"major"` (run `tellr.update()`). Backend caches PyPI responses for 1 hour.
+
+### Export Endpoints
 
 | Method | HTTP | Path | Request | Returns |
 |--------|------|------|---------|---------|
-| `checkVersion` | GET | `/api/version/check` | – | `{ installed_version, latest_version, update_available, update_type }` |
+| `exportPPTXAsync` | POST | `/api/export/pptx/async` | `{ session_id, slide_deck, chart_images? }` | `{ job_id, status, total_slides }` |
+| `pollPPTXExport` | GET | `/api/export/pptx/poll/{id}` | – | `{ status, progress?, error? }` |
+| `downloadPPTX` | GET | `/api/export/pptx/download/{id}` | – | `Blob` |
+| `exportToGoogleSlides` | POST | `/api/export/google-slides/async` | `{ session_id, slide_deck, chart_images? }` | `{ job_id, status }` |
 
-The version check endpoint compares the installed `databricks-tellr-app` version against PyPI. The `update_type` is either `"patch"` (redeploy the app) or `"major"` (run `tellr.update()`). Backend caches PyPI responses for 1 hour.
+Both PPTX and Google Slides exports use the same async job pattern: submit, poll until complete, then download. Chart images are captured client-side before submission to preserve Chart.js visualizations in the export.
+
+### Configuration API (`src/api/config.ts`)
+
+The `configApi` module provides a separate API client for profile and settings management, distinct from the main `api.ts` module. It communicates with `/api/settings/*`, `/api/profiles/*`, and `/api/sessions/*/contributors` endpoints.
+
+**Key areas:**
+- **Profiles** – list, update, delete, set default, load, set global permission
+- **Genie Spaces** – discover available spaces, lookup, add/update/delete per profile
+- **Prompts Config** – get/update per-profile prompt settings
+- **Deck Prompts Library** – CRUD for reusable presentation templates
+- **Slide Styles Library** – CRUD for visual style definitions
+- **Google OAuth Credentials** – upload/check/delete app-wide Google credentials (admin)
+- **Identities** – search Databricks workspace users and groups
+- **Profile Contributors** – manage sharing permissions for profiles
+- **Deck Contributors** – manage sharing permissions for decks (sessions)
+
+Errors are thrown as `ConfigApiError` (status + message), separate from the main `ApiError` class.
 
 ### Error Handling
 
@@ -466,7 +515,7 @@ Errors bubble up as `ApiError` (status + message). Common statuses:
 
 - **Single source of truth:** Backend responses are canonical. Refetch after mutations.
 - **Selection integrity:** Always preserve contiguity when setting selections programmatically.
-- **Script safety:** `SlideTile` wraps scripts in try/catch for graceful chart failures.
+- **Script safety:** `PresentationMode` wraps scripts in try/catch for graceful chart failures.
 - **Script preservation:** Backend automatically preserves chart scripts when canvas IDs match during slide replacement (e.g., optimize layout).
 - **Visual editing:** `HTMLEditorModal` provides tree-based text editing without HTML knowledge. Charts (canvas elements) are read-only to preserve Chart.js functionality.
 - **Session scope:** All operations require valid session ID. Handle 409 with retry/wait UX.

@@ -12,10 +12,10 @@ The deck operations test suite validates that slide deck manipulations maintain 
 
 | File | Test Count | Purpose |
 |------|------------|---------|
-| `tests/unit/test_deck_integrity.py` | 22 | Deck parsing, CRUD operations, CSS, knit output |
-| `tests/unit/test_deck_persistence.py` | 18 | CRUD persistence to database |
+| `tests/unit/test_deck_integrity.py` | 29 | Deck parsing, CRUD operations, CSS, knit output |
+| `tests/unit/test_deck_persistence.py` | 20 | CRUD persistence to database, save failure handling |
 | `tests/unit/test_chat_persistence.py` | 12 | Chat-based operation persistence |
-| `tests/unit/test_add_position_bug.py` | 12 | Add position validation, state mismatch detection |
+| `tests/unit/test_add_position_bug.py` | 12 | Add position validation, state mismatch detection, persistence |
 
 ---
 
@@ -35,7 +35,9 @@ tests/unit/test_deck_integrity.py::TestDeckParsing
 | `test_parse_deck_various_sizes[6]` | 6-slide deck | Correct slide count |
 | `test_parse_deck_various_sizes[9]` | 9-slide deck | Correct slide count |
 | `test_parse_deck_various_sizes[12]` | 12-slide deck | Correct slide count |
-| `test_parse_deck_various_themes` | Different CSS themes | CSS preserved |
+| `test_parse_deck_various_themes[databricks]` | Databricks CSS theme | CSS preserved |
+| `test_parse_deck_various_themes[minimal]` | Minimal CSS theme | CSS preserved |
+| `test_parse_deck_various_themes[no_css]` | No CSS | Parses without CSS |
 | `test_parse_deck_with_charts_extracts_canvas_ids` | Deck with charts | Canvas IDs extracted |
 
 **Parsing Method:** `SlideDeck.from_html_string(html)`
@@ -122,7 +124,10 @@ tests/unit/test_deck_integrity.py::TestKnitOutput
 |------|----------|------------|
 | `test_update_css_preserves_validity` | Update deck CSS | Valid CSS syntax |
 | `test_css_merge_preserves_existing_rules` | Merge new CSS | Original rules kept |
-| `test_knit_produces_valid_html` | Knit deck to HTML | Valid HTML document |
+| `test_knit_produces_valid_html[3]` | Knit 3-slide deck to HTML | Valid HTML document |
+| `test_knit_produces_valid_html[6]` | Knit 6-slide deck to HTML | Valid HTML document |
+| `test_knit_produces_valid_html[9]` | Knit 9-slide deck to HTML | Valid HTML document |
+| `test_knit_produces_valid_html[12]` | Knit 12-slide deck to HTML | Valid HTML document |
 | `test_knit_aggregates_scripts_correctly` | Knit with scripts | Scripts properly wrapped |
 | `test_render_single_slide_valid` | Render one slide | Valid standalone HTML |
 
@@ -194,6 +199,8 @@ tests/unit/test_deck_persistence.py::TestCSSPersistence
 |------|----------|------------|
 | `test_scripts_preserved_on_reorder` | Reorder chart slide | Scripts stay attached |
 | `test_scripts_preserved_on_duplicate` | Duplicate chart slide | Both have scripts |
+| `test_chart_scripts_survive_html_edit` | Edit non-chart slide | Chart scripts unaffected |
+| `test_reconstruct_from_dict_preserves_scripts` | Save to dict and reconstruct | Scripts survive round-trip |
 | `test_css_preserved_on_operations` | Operations with custom CSS | CSS unchanged |
 
 ---
@@ -212,6 +219,20 @@ tests/unit/test_deck_persistence.py::TestEdgeCases
 | `test_special_characters_in_content_save` | HTML entities, quotes | Correctly escaped |
 | `test_unicode_content_saves` | Unicode characters | Preserved correctly |
 | `test_large_deck_saves` | 50+ slides | No size issues |
+
+---
+
+### 3.6 Save Failure Handling
+
+**Goal:** Verify behavior when save operations fail.
+
+```
+tests/unit/test_deck_persistence.py::TestSaveFailureHandling
+```
+
+| Test | Scenario | Validation |
+|------|----------|------------|
+| `test_save_exception_propagates` | Database write fails | Exception propagated to caller |
 
 ---
 
@@ -255,7 +276,22 @@ if current_deck and slide_deck_dict:
 
 ---
 
-### 4.3 Deck Dict Completeness
+### 4.3 Slide Replacements Persistence
+
+**Goal:** Verify that `_apply_slide_replacements` correctly updates cache and handles add operations.
+
+```
+tests/unit/test_chat_persistence.py::TestApplySlideReplacementsPersistence
+```
+
+| Test | Scenario | Validation |
+|------|----------|------------|
+| `test_replacement_updates_cache` | Replace slide via replacement info | Cache updated with new HTML |
+| `test_add_operation_increases_count` | Add operation via replacement info | Slide count increases |
+
+---
+
+### 4.4 Deck Dict Completeness
 
 **Goal:** Verify deck dict contains all required data.
 
@@ -333,6 +369,34 @@ if slide_context:
 
 ---
 
+### 5.4 Add Position Validation
+
+**Goal:** Detect when backend deck state differs from frontend selection.
+
+```
+tests/unit/test_add_position_bug.py::TestAddPositionValidation
+```
+
+| Test | Scenario | Validation |
+|------|----------|------------|
+| `test_detect_deck_state_mismatch` | Backend 1 slide, frontend selects index 2 | Mismatch detected |
+
+---
+
+### 5.5 Add Position Persistence
+
+**Goal:** Verify that add operations persist correctly to the database.
+
+```
+tests/unit/test_add_position_bug.py::TestAddPositionPersistence
+```
+
+| Test | Scenario | Validation |
+|------|----------|------------|
+| `test_add_operation_saves_to_database` | Add via `_apply_slide_replacements` | Returns valid dict with 4 slides |
+
+---
+
 ## 6. Running the Tests
 
 ```bash
@@ -353,20 +417,17 @@ pytest tests/unit/test_add_position_bug.py -v
 
 ## 7. CI/CD Integration
 
-These tests run in the GitHub Actions workflow:
+These tests run as part of the `unit-tests` job in the GitHub Actions workflow. There are no separate named jobs for persistence or validation; all unit tests execute together:
 
 ```yaml
 # .github/workflows/test.yml
-persistence-tests:
-  name: Deck Persistence Validation
+unit-tests:
+  name: Unit Tests
   steps:
-    - run: pytest tests/unit/test_deck_persistence.py tests/unit/test_chat_persistence.py -v
-
-validation-tests:
-  name: Deck Integrity Validation
-  steps:
-    - run: pytest tests/unit/test_deck_integrity.py tests/unit/test_llm_edit_responses.py -v
+    - run: pytest tests/unit -v --tb=short -n auto
 ```
+
+The `unit-tests` job runs when backend-related files change (anything under `src/`, `tests/`, or `pyproject.toml`) and gates all downstream integration and E2E jobs.
 
 ---
 
