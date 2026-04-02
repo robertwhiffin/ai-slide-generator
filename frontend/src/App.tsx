@@ -9,6 +9,8 @@ import { AgentConfigProvider } from './contexts/AgentConfigContext';
 import { SessionProvider } from './contexts/SessionContext';
 import { GenerationProvider } from './contexts/GenerationContext';
 import { ToastProvider } from './contexts/ToastContext';
+import { TourProvider } from './contexts/TourContext';
+import { AppTour } from './components/Tour/AppTour';
 
 function AppRoutes() {
   // Single stable key so AppLayout (and sidebar / Recent Decks) stays mounted when
@@ -95,7 +97,10 @@ function App() {
         <SelectionProvider>
           <ToastProvider>
             <AgentConfigProvider>
-              <AppRoutes />
+              <TourProvider>
+                <AppRoutes />
+                <AppTour />
+              </TourProvider>
             </AgentConfigProvider>
           </ToastProvider>
         </SelectionProvider>

@@ -673,8 +673,8 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
 
             <div className="relative flex-1 overflow-hidden">
               <div className="absolute inset-0 flex">
-                <div className="w-[32%] min-w-[260px] border-r border-border bg-card flex flex-col">
-                  <div className="shrink-0 relative z-10 overflow-visible">
+                <div className="w-[32%] min-w-[260px] border-r border-border bg-card flex flex-col" data-tour="chat-panel">
+                  <div className="shrink-0 relative z-10 overflow-visible" data-tour="agent-config">
                     <AgentConfigBar />
                   </div>
                   <ChatPanel
@@ -702,14 +702,16 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
                   />
                 </div>
 
-                <SelectionRibbon
-                  key={versionKey}
-                  slideDeck={displayDeck}
-                  onSlideNavigate={handleSlideNavigate}
-                  versionKey={versionKey}
-                />
+                <div data-tour="selection-ribbon">
+                  <SelectionRibbon
+                    key={versionKey}
+                    slideDeck={displayDeck}
+                    onSlideNavigate={handleSlideNavigate}
+                    versionKey={versionKey}
+                  />
+                </div>
 
-                <div className="flex-1 bg-background">
+                <div className="flex-1 bg-background" data-tour="slide-panel">
                   <SlidePanel
                     key={versionKey}
                     ref={slidePanelRef}
