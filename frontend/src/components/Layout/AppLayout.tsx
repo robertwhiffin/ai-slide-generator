@@ -281,6 +281,16 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
     setViewMode(initialView);
   }, [initialView]);
 
+  // Allow the app tour to navigate back to the main view via a custom DOM event
+  useEffect(() => {
+    const handler = () => {
+      setViewMode('main');
+      navigate('/');
+    };
+    window.addEventListener('tour:navigate-main', handler);
+    return () => window.removeEventListener('tour:navigate-main', handler);
+  }, [navigate]);
+
   // When URL has sessionId, restore that session (load deck if we don't have it yet).
   // sessionId is intentionally NOT in deps — we use sessionIdRef.current in the guard instead.
   // This prevents the effect from re-firing when switchSession internally calls setSessionId,
@@ -752,7 +762,7 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
         )}
 
         {viewMode === 'profiles' && (
-          <div className="flex h-full flex-col">
+          <div className="flex h-full flex-col" data-tour="page-profiles">
             <div className="shrink-0">
               <SimplePageHeader title="Agent Profiles" />
             </div>
@@ -767,7 +777,7 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
         )}
 
         {viewMode === 'deck_prompts' && (
-          <div className="flex h-full flex-col">
+          <div className="flex h-full flex-col" data-tour="page-deck-prompts">
             <div className="shrink-0">
               <SimplePageHeader title="Deck Prompts" />
             </div>
@@ -780,7 +790,7 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
         )}
 
         {viewMode === 'slide_styles' && (
-          <div className="flex h-full flex-col">
+          <div className="flex h-full flex-col" data-tour="page-slide-styles">
             <div className="shrink-0">
               <SimplePageHeader title="Slide Styles" />
             </div>
@@ -793,7 +803,7 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
         )}
 
         {viewMode === 'images' && (
-          <div className="flex h-full flex-col">
+          <div className="flex h-full flex-col" data-tour="page-images">
             <div className="shrink-0">
               <SimplePageHeader title="Image library" />
             </div>
@@ -806,7 +816,7 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
         )}
 
         {viewMode === 'help' && (
-          <div className="flex h-full flex-col">
+          <div className="flex h-full flex-col" data-tour="page-help">
             <div className="shrink-0">
               <SimplePageHeader title="Help" />
             </div>
