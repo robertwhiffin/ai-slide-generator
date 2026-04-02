@@ -104,12 +104,49 @@ const TOUR_STEPS: Step[] = [
     skipBeacon: true,
   },
 
-  // ── Main workspace: Granular components ──────────────────────────
+  // ── Agent Config: Overview then granular breakdown ────────────────
   {
     target: '[data-tour="agent-config"]',
     title: 'Agent Config Bar',
     content:
-      'Before you start chatting, configure the AI here. Add tools (like Genie for data queries or vector search for documents), select a slide style, and choose a deck prompt. You can also save this setup as a profile for reuse.',
+      'Before you start chatting, configure the AI here. This bar controls what tools the agent can use, how slides look, and what instructions guide the generation. Click it to expand — let\'s walk through each section.',
+    placement: 'bottom',
+    skipBeacon: true,
+    before: async () => {
+      const toggle = document.querySelector<HTMLElement>('[data-tour="agent-config-toggle"]');
+      if (toggle) toggle.click();
+      await new Promise(r => setTimeout(r, 300));
+    },
+  },
+  {
+    target: '[data-tour="agent-tools"]',
+    title: 'Tools',
+    content:
+      'Tools give the AI extra capabilities beyond text generation. Add Genie spaces to query your data, vector search indexes to reference documents, MCP connections, or model endpoints. Each tool appears as a chip — click it to edit, or click the X to remove.',
+    placement: 'bottom',
+    skipBeacon: true,
+  },
+  {
+    target: '[data-tour="agent-style-selector"]',
+    title: 'Slide Style',
+    content:
+      'Choose a visual style for your slides. Styles define colors, fonts, and layout templates. Select one from the dropdown, or leave it as "None" to use the default styling. You can create custom styles from the Slide Styles page in the sidebar.',
+    placement: 'bottom',
+    skipBeacon: true,
+  },
+  {
+    target: '[data-tour="agent-prompt-selector"]',
+    title: 'Deck Prompt',
+    content:
+      'Deck prompts are system-level instructions that shape how the AI structures your deck — for example, enforcing a narrative arc, a specific number of slides, or a particular content format. Create and manage prompts from the Deck Prompts page.',
+    placement: 'bottom',
+    skipBeacon: true,
+  },
+  {
+    target: '[data-tour="agent-profile-actions"]',
+    title: 'Save & Load Profiles',
+    content:
+      'Once you\'ve configured the perfect combination of tools, style, and prompt, save it as a profile. Next time, just load the profile to instantly restore your setup. Great for switching between different presentation types.',
     placement: 'bottom',
     skipBeacon: true,
   },

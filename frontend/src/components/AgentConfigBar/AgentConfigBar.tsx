@@ -584,6 +584,7 @@ export const AgentConfigBar: React.FC = () => {
         onClick={() => setExpanded(prev => !prev)}
         className="w-full flex items-center justify-between px-3 py-2 text-gray-600 hover:text-gray-800 transition-colors"
         data-testid="agent-config-toggle"
+        data-tour="agent-config-toggle"
       >
         <span className="font-medium text-xs text-gray-500 uppercase tracking-wide">
           Agent Config
@@ -627,7 +628,7 @@ export const AgentConfigBar: React.FC = () => {
           )}
 
           {/* Tools row */}
-          <div>
+          <div data-tour="agent-tools">
             <label className="block text-xs font-medium text-gray-500 mb-1">Tools</label>
             <div className="flex flex-wrap items-center gap-1.5 relative">
               {agentConfig.tools.map((tool, idx) => (
@@ -649,9 +650,9 @@ export const AgentConfigBar: React.FC = () => {
           </div>
 
           {/* Selectors row */}
-          <div className="flex flex-wrap gap-3">
+          <div className="flex flex-wrap gap-3" data-tour="agent-selectors">
             {/* Style selector */}
-            <div className="flex-1 min-w-[140px]">
+            <div className="flex-1 min-w-[140px]" data-tour="agent-style-selector">
               <label className="block text-xs font-medium text-gray-500 mb-1">Slide Style</label>
               <select
                 value={agentConfig.slide_style_id ?? ''}
@@ -668,7 +669,7 @@ export const AgentConfigBar: React.FC = () => {
             </div>
 
             {/* Deck prompt selector */}
-            <div className="flex-1 min-w-[140px]">
+            <div className="flex-1 min-w-[140px]" data-tour="agent-prompt-selector">
               <label className="block text-xs font-medium text-gray-500 mb-1">Deck Prompt</label>
               <select
                 value={agentConfig.deck_prompt_id ?? ''}
@@ -686,7 +687,7 @@ export const AgentConfigBar: React.FC = () => {
           </div>
 
           {/* Profile actions row */}
-          <div className="flex items-center gap-2 pt-1">
+          <div className="flex items-center gap-2 pt-1" data-tour="agent-profile-actions">
             <button
               onClick={() => setSaveDialogOpen(true)}
               className="inline-flex items-center gap-1 px-2 py-1 text-xs text-gray-600 hover:text-gray-800 border border-gray-300 rounded hover:bg-gray-100 transition-colors"
