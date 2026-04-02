@@ -4,8 +4,10 @@ const TOUR_STORAGE_KEY = 'tellr-app-tour-completed';
 
 interface TourContextValue {
   isTourActive: boolean;
+  showWelcome: boolean;
   hasCompletedTour: boolean;
   startTour: () => void;
+  dismissWelcome: () => void;
   endTour: () => void;
   resetTour: () => void;
 }
@@ -14,18 +16,28 @@ const TourContext = createContext<TourContextValue | null>(null);
 
 export function TourProvider({ children }: { children: React.ReactNode }) {
   const [isTourActive, setIsTourActive] = useState(false);
+  const [showWelcome, setShowWelcome] = useState(false);
   const [hasCompletedTour, setHasCompletedTour] = useState(() => {
     return localStorage.getItem(TOUR_STORAGE_KEY) === 'true';
   });
 
   useEffect(() => {
     if (!hasCompletedTour) {
-      const timer = setTimeout(() => setIsTourActive(true), 1000);
+      const timer = setTimeout(() => setShowWelcome(true), 800);
       return () => clearTimeout(timer);
     }
   }, [hasCompletedTour]);
 
-  const startTour = useCallback(() => setIsTourActive(true), []);
+  const startTour = useCallback(() => {
+    setShowWelcome(false);
+    setIsTourActive(true);
+  }, []);
+
+  const dismissWelcome = useCallback(() => {
+    setShowWelcome(false);
+    setHasCompletedTour(true);
+    localStorage.setItem(TOUR_STORAGE_KEY, 'true');
+  }, []);
 
   const endTour = useCallback(() => {
     setIsTourActive(false);
@@ -39,7 +51,7 @@ export function TourProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   return (
-    <TourContext.Provider value={{ isTourActive, hasCompletedTour, startTour, endTour, resetTour }}>
+    <TourContext.Provider value={{ isTourActive, showWelcome, hasCompletedTour, startTour, dismissWelcome, endTour, resetTour }}>
       {children}
     </TourContext.Provider>
   );

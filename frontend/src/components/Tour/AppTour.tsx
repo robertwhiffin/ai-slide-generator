@@ -28,18 +28,6 @@ function expandAgentConfig(): Promise<void> {
 }
 
 const TOUR_STEPS: Step[] = [
-  // ── Welcome ──────────────────────────────────────────────────────
-  {
-    target: 'body',
-    title: 'Welcome to Tellr!',
-    content:
-      'Tellr is an AI-powered slide generator that turns your ideas into polished presentations through a simple chat interface. ' +
-      'Describe what you need, and the AI builds your deck — complete with layout, content, and styling.\n\n' +
-      'This quick tour will walk you through the main areas: navigation, the AI workspace, and how to export and share your work.',
-    placement: 'center',
-    skipBeacon: true,
-  },
-
   // ── Big picture: Layout ──────────────────────────────────────────
   {
     target: '[data-tour="sidebar"]',
@@ -86,7 +74,7 @@ const TOUR_STEPS: Step[] = [
     title: 'Agent Profiles',
     content:
       'Profiles are saved AI configurations — a combination of tools, style, and prompt. Create profiles for different use cases (e.g. "Sales Deck", "Technical Review") and switch between them instantly.',
-    placement: 'left',
+    placement: 'center',
     skipBeacon: true,
     before: clickNav('nav-profiles'),
   },
@@ -95,7 +83,7 @@ const TOUR_STEPS: Step[] = [
     title: 'Deck Prompts',
     content:
       'Deck prompts are reusable system instructions that tell the AI how to structure your deck. For example, a prompt might enforce a specific narrative arc or slide ordering convention.',
-    placement: 'left',
+    placement: 'center',
     skipBeacon: true,
     before: clickNav('nav-deck_prompts'),
   },
@@ -104,7 +92,7 @@ const TOUR_STEPS: Step[] = [
     title: 'Slide Styles',
     content:
       'Slide styles control the visual design — colors, fonts, layout templates. Pick from existing styles or create your own to match your brand.',
-    placement: 'left',
+    placement: 'center',
     skipBeacon: true,
     before: clickNav('nav-slide_styles'),
   },
@@ -113,7 +101,7 @@ const TOUR_STEPS: Step[] = [
     title: 'Image Library',
     content:
       'Upload and manage images that the AI can reference when building slides. Logos, diagrams, photos — anything you want available during generation.',
-    placement: 'left',
+    placement: 'center',
     skipBeacon: true,
     before: clickNav('nav-images'),
   },
@@ -122,7 +110,7 @@ const TOUR_STEPS: Step[] = [
     title: 'Help & Documentation',
     content:
       'Detailed guides and documentation live here. If you ever need a refresher on how a feature works, this is the place to look.',
-    placement: 'left',
+    placement: 'center',
     skipBeacon: true,
     before: clickNav('nav-help'),
   },
