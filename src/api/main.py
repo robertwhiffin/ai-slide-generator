@@ -297,13 +297,12 @@ async def user_auth_middleware(request: Request, call_next):
         set_current_user(dev_user)
         logger.debug("OBO auth: no token header — using dev identity %s", dev_user)
 
-    # Build and set permission context (includes group memberships)
-    # Skip group fetching in dev/test to avoid API calls
-    fetch_groups = ENVIRONMENT not in ("development", "test")
+    # Build and set permission context
+    # Group fetching disabled — deck sharing uses user identities only, not groups
     permission_ctx = build_permission_context(
         user_id=user_id,
         user_name=user_name,
-        fetch_groups=fetch_groups,
+        fetch_groups=False,
     )
     set_permission_context(permission_ctx)
 
