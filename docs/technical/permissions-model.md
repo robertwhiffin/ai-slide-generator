@@ -1,7 +1,7 @@
 # Permissions Model Architecture
 
 **Status:** Complete
-**Last Updated:** March 2026
+**Last Updated:** April 2026
 
 ## Overview
 
@@ -89,7 +89,7 @@ Decks are shared directly via the `DeckContributor` table. There is no global/wo
 
 ### Permission Resolution
 
-`PermissionService.get_deck_permission(session_id, user_id, user_name, group_ids)`:
+`PermissionService.get_deck_permission(db, session_id, user_id, user_name, group_ids)`:
 
 1. Is user the session creator (`user_sessions.created_by`)? → CAN_MANAGE
 2. Direct user entry in `deck_contributors` (match by `identity_id`, fallback by `identity_name`)? → Use that level
@@ -116,7 +116,7 @@ Profiles can be shared with all workspace users via the `global_permission` colu
 
 ### Permission Resolution
 
-`PermissionService.get_profile_permission(profile_id, user_id, user_name, group_ids)`:
+`PermissionService.get_profile_permission(db, profile_id, user_id, user_name, group_ids)`:
 
 1. Is user the profile creator? → CAN_MANAGE
 2. Direct user entry in `config_profile_contributors`? → Use that level
@@ -215,8 +215,9 @@ class ConfigProfileContributor(Base):
     identity_id: str                 # Databricks user/group ID
     identity_name: str               # Email for users, name for groups
     permission_level: str            # CAN_USE, CAN_EDIT, CAN_MANAGE
-    added_by: str | None
-    added_at: datetime
+    created_by: str | None           # Who added this contributor
+    created_at: datetime
+    updated_at: datetime
 
     # Unique constraint: (profile_id, identity_id)
 ```
@@ -267,8 +268,10 @@ Per-user default profile selection:
 class UserProfilePreference(Base):
     __tablename__ = "user_profile_preferences"
 
-    user_name: str                   # Email (PK component)
-    profile_id: int                  # FK to config_profiles
+    id: int                          # PK (auto-increment)
+    user_name: str                   # Email (unique, indexed)
+    default_profile_id: int | None   # FK to config_profiles (SET NULL on delete)
+    updated_at: datetime
 ```
 
 ### AppIdentity (Local Mode Only)
@@ -277,7 +280,8 @@ class UserProfilePreference(Base):
 class AppIdentity(Base):
     __tablename__ = "app_identities"
 
-    identity_id: str                 # Databricks user ID (PK)
+    id: int                          # PK (auto-increment)
+    identity_id: str                 # Databricks user ID (unique, indexed)
     identity_type: str               # "USER" or "GROUP"
     identity_name: str               # Email/username
     display_name: str | None
@@ -310,30 +314,34 @@ Centralized permission checking split into deck and profile paths:
 
 ```python
 class PermissionService:
-    def get_deck_permission(db, session_id, perm_ctx) -> PermissionLevel | None
-    def can_view_deck(db, session_id, perm_ctx) -> bool
-    def can_edit_deck(db, session_id, perm_ctx) -> bool
-    def can_manage_deck(db, session_id, perm_ctx) -> bool
-    def require_view_deck(db, session_id, perm_ctx) -> None    # Raises 403
-    def require_edit_deck(db, session_id, perm_ctx) -> None
-    def require_manage_deck(db, session_id, perm_ctx) -> None
-    def get_shared_session_ids(db, perm_ctx) -> List[int]
+    def get_deck_permission(self, db, session_id, user_id, user_name, group_ids) -> PermissionLevel | None
+    def can_view_deck(self, db, session_id, user_id, user_name, group_ids) -> bool
+    def can_edit_deck(self, db, session_id, user_id, user_name, group_ids) -> bool
+    def can_manage_deck(self, db, session_id, user_id, user_name, group_ids) -> bool
+    def require_view_deck(self, db, session_id, user_id, user_name, group_ids) -> None    # Raises 403
+    def require_edit_deck(self, db, session_id, user_id, user_name, group_ids) -> None
+    def require_manage_deck(self, db, session_id, user_id, user_name, group_ids) -> None
+    def get_shared_session_ids(self, db, user_id, user_name, group_ids) -> Set[int]
 ```
 
 **Profile methods:**
 
 ```python
 class PermissionService:
-    def get_profile_permission(db, profile_id, perm_ctx) -> PermissionLevel | None
-    def can_use_profile(db, profile_id, perm_ctx) -> bool
-    def can_edit_profile(db, profile_id, perm_ctx) -> bool
-    def can_manage_profile(db, profile_id, perm_ctx) -> bool
-    def require_use_profile(db, profile_id, perm_ctx) -> None  # Raises 403
-    def require_edit_profile(db, profile_id, perm_ctx) -> None
-    def require_manage_profile(db, profile_id, perm_ctx) -> None
-    def get_accessible_profile_ids(db, perm_ctx) -> List[int]
-    def get_profiles_with_permissions(db, perm_ctx) -> List[dict]
+    def get_profile_permission(self, db, profile_id, user_id, user_name, group_ids) -> PermissionLevel | None
+    def get_current_user_profile_permission(self, db, profile_id) -> PermissionLevel | None
+    def can_use_profile(self, db, profile_id) -> bool        # Uses current request context
+    def can_edit_profile(self, db, profile_id) -> bool
+    def can_manage_profile(self, db, profile_id) -> bool
+    def require_use_profile(self, db, profile_id) -> None    # Raises 403
+    def require_edit_profile(self, db, profile_id) -> None
+    def require_manage_profile(self, db, profile_id) -> None
+    def get_accessible_profile_ids(self, db, user_id, user_name, group_ids) -> List[int]
+    def get_current_user_accessible_profile_ids(self, db) -> List[int]
+    def get_profiles_with_permissions(self, db, user_id, user_name, group_ids) -> List[Tuple[ConfigProfile, PermissionLevel]]
 ```
+
+Note: Deck methods take explicit identity params (`user_id`, `user_name`, `group_ids`). Profile convenience methods (`can_use_profile`, `can_edit_profile`, etc.) resolve identity from the current request's `PermissionContext` automatically. `get_current_user_profile_permission()` and `get_current_user_accessible_profile_ids()` are convenience wrappers that also use the request context.
 
 ### IdentityProvider
 
@@ -343,11 +351,24 @@ Unified interface backed by the app's service principal:
 class IdentityProvider:
     mode: IdentityProviderMode       # WORKSPACE or LOCAL
 
-    def list_users(filter_query, max_results) -> List[dict]
-    def list_groups(filter_query, max_results) -> List[dict]
-    def search_identities(query, include_users, include_groups) -> List[dict]
-    def get_user_groups(user_id) -> List[str]
-    def record_user_login(user_id, user_name) -> None  # Local cache
+    def list_users(self, filter_query, max_results) -> List[dict]
+    def list_groups(self, filter_query, max_results) -> List[dict]
+    def search_identities(self, query, include_users, include_groups, max_results) -> List[dict]
+    def get_user_groups(self, user_id) -> List[str]
+    def get_user_by_id(self, user_id) -> dict | None
+    def get_group_by_id(self, group_id) -> dict | None
+    def record_user_login(self, user_id, user_name, display_name=None) -> None  # Local cache
+```
+
+**Utility functions** (module-level in `identity_provider.py`):
+
+```python
+def resolve_display_name(email: str) -> str
+    # Returns SCIM displayName for an email, falling back to the email itself.
+    # Uses an LRU cache (256 entries) for repeated lookups.
+
+def resolve_display_names(emails: List[str]) -> Dict[str, str]
+    # Batch-resolve a list of emails to display names.
 ```
 
 ---

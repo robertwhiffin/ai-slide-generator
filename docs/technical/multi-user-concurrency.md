@@ -74,19 +74,33 @@ Mutation endpoints (chat, reorder, update, duplicate, delete) acquire a session 
 ```python
 # src/api/services/session_manager.py
 def acquire_session_lock(self, session_id: str, timeout_seconds: int = 300) -> bool:
-    # If session doesn't exist yet, allow proceeding (auto-creation)
-    if not session:
+    with get_db_session() as db:
+        # SELECT ... FOR UPDATE — blocks concurrent callers until this
+        # transaction commits, providing row-level locking in PostgreSQL.
+        session = (
+            db.query(UserSession)
+            .filter(UserSession.session_id == session_id)
+            .with_for_update(nowait=False)
+            .first()
+        )
+
+        if not session:
+            return True  # Auto-creation path
+
+        if session.is_processing:
+            if session.processing_started_at:
+                age = (datetime.utcnow() - session.processing_started_at).total_seconds()
+                if age < timeout_seconds:
+                    return False  # Busy
+            # Stale lock — proceed to acquire
+
+        session.is_processing = True
+        session.processing_started_at = datetime.utcnow()
+        db.commit()
         return True
-    
-    if session.is_processing:
-        # Check for stale lock (held > timeout)
-        if age < timeout_seconds:
-            return False  # Busy
-    
-    session.is_processing = True
-    session.processing_started_at = datetime.utcnow()
-    return True
 ```
+
+> **Note:** The `.with_for_update(nowait=False)` call issues a PostgreSQL `SELECT ... FOR UPDATE`, which takes a row-level lock for the duration of the transaction. This prevents two workers from reading the same row simultaneously and both concluding the session is free. If the database does not support `FOR UPDATE` (e.g., during tests), the code falls back to a plain query.
 
 **Lock lifecycle:**
 1. `acquire_session_lock()` called at endpoint start
@@ -99,6 +113,23 @@ def acquire_session_lock(self, session_id: str, timeout_seconds: int = 300) -> b
 |--------|------|---------|
 | `is_processing` | `BOOLEAN NOT NULL DEFAULT FALSE` | Lock flag |
 | `processing_started_at` | `TIMESTAMP` | Stale lock detection (>5 min) |
+
+### Optimistic Locking (Version Conflict Detection)
+
+In addition to the pessimistic session lock above, `ChatService` uses **optimistic locking** when saving slide decks. Before invoking the LLM, the service snapshots the current deck version. After the LLM completes, it passes `expected_version` to the session manager's save method. If another request modified the deck in the meantime, `VersionConflictError` is raised and the chat result is discarded rather than silently overwriting the concurrent edit:
+
+```python
+# src/api/services/chat_service.py  (simplified)
+_deck_version_before_llm = self._get_deck_version(session_id)
+
+try:
+    session_manager.save_slide_deck(..., expected_version=_deck_version_before_llm)
+except VersionConflictError:
+    logger.warning("Chat save rejected: deck was edited during LLM call, reloading")
+    self._invalidate_deck_cache(session_id)
+```
+
+`VersionConflictError` is defined in `src/api/services/session_manager.py` and carries `current_version` and `expected_version` for diagnostics.
 
 ### 5. Async Chat Requests (Polling Mode)
 
@@ -184,21 +215,19 @@ Frontend should handle 409 by showing a "please wait" message or retrying after 
 
 ### Multiple Workers
 
-`app.yaml` configures uvicorn with 4 workers:
+`run.py` starts uvicorn with a configurable worker count (default 4):
 
-```yaml
-command:
-  - "sh"
-  - "-c"
-  - |
-    uvicorn src.api.main:app --host 0.0.0.0 --port ${PORT:-8000} --workers 4
+```python
+# packages/databricks-tellr-app/databricks_tellr_app/run.py
+workers = int(os.getenv("UVICORN_WORKERS", "4"))
+uvicorn.run("src.api.main:app", host=host, port=port, workers=workers)
 ```
 
-Each worker has its own `ChatService` singleton and deck cache. The database-based session locking ensures correctness across workers.
+Set the `UVICORN_WORKERS` environment variable to override the default. Each worker has its own `ChatService` singleton and deck cache. The database-based session locking ensures correctness across workers.
 
 ### Scaling Considerations
 
-- **Worker count:** 4 workers is a reasonable default. Increase for higher concurrency; each worker can handle multiple async requests.
+- **Worker count:** Defaults to 4 (configurable via `UVICORN_WORKERS` env var). Increase for higher concurrency; each worker can handle multiple async requests.
 - **Lock timeout:** 5 minutes covers long LLM generations. Stale locks are automatically overridden.
 - **Cache coherence:** Each worker maintains its own cache. Decks are loaded from database on cache miss, ensuring consistency after cross-worker updates.
 
@@ -243,5 +272,5 @@ Fresh deployments create these tables automatically via SQLAlchemy model definit
 - [Real-Time Streaming](real-time-streaming.md) – SSE events and message persistence
 - [Database Configuration](database-configuration.md) – session schema details
 - [Frontend Overview](frontend-overview.md) – how the UI passes session IDs
-- [Permissions Model](permissions-model.md) – exclusive editing lock, contributor sessions, and @mentions
+- [Permissions Model](permissions-model.md) – exclusive editing lock and contributor sessions
 

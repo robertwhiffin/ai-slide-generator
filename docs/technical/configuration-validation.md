@@ -2,34 +2,31 @@
 
 ## Overview
 
-The configuration validation feature tests components of a session's agent configuration to ensure they are working correctly before use. Validation is performed against the session's `agent_config` (validated with Pydantic models on every write).
+The configuration validation feature tests components of a profile's configuration to ensure they are working correctly before use. Validation is performed against settings loaded from the database for a given `profile_id`.
+
+> **Note:** This validator is currently unused. It is exported from `src/services/__init__.py` but has no API route, no frontend caller, and no backend caller. It may be orphaned/legacy code.
 
 ## Components Tested
 
 ### 1. LLM Endpoint
-- **Test**: Sends a simple "hello" message to the backend's fixed LLM endpoint
+- **Test**: Sends a simple "hello" message to the backend's fixed LLM endpoint (from `DEFAULT_CONFIG`)
 - **Validates**:
   - Endpoint is accessible
   - Authentication is working
   - Model responds correctly
 - **Error Example**: "Failed to call LLM: Endpoint not found"
 
-### 2. Genie Spaces (Optional)
-- **Test**: Executes query "Return a table of how many rows you have per table" against each configured Genie space
+### 2. Genie Space (Optional)
+- **Test**: Starts a conversation and executes query "Return a table of how many rows you have per table" against the profile's configured Genie space
 - **Validates**:
-  - Each Genie space exists and is accessible
+  - The Genie space exists and is accessible
   - User has permissions to query the space
   - Space contains data
 - **Error Example**: "Failed to query Genie: Permission denied"
-- **Prompt-only mode**: When no Genie tools are in the agent config, validation is skipped with success message "No Genie tools configured (prompt-only mode)"
+- **Prompt-only mode**: When `self.settings.genie` is not configured, validation is skipped with success message "Genie not configured (prompt-only mode)"
 
 ### 3. MLflow Experiment
-- **Test**: Creates or accesses the MLflow experiment
-- **Validates**:
-  - Experiment path is valid
-  - User has write permissions
-  - Tracking URI is configured correctly
-- **Error Example**: "Failed to create MLflow experiment: Directory does not exist"
+- **Not currently validated.** The `validate_all()` method does not call an MLflow validation step. Only LLM and Genie are tested.
 
 ## Agent Config Validation (Pydantic)
 
@@ -37,36 +34,34 @@ The `agent_config` JSON is validated by Pydantic models on every write (`PUT /ap
 
 ## API Endpoint
 
-### POST `/api/config/validate/{session_id}`
+There is no API endpoint for this validator. The previously documented `POST /api/config/validate/{session_id}` route does not exist in the codebase. The file `src/api/routes/config/validation.py` does not exist either.
 
-**Request:**
-```http
-POST /api/config/validate/abc123
+The validator can only be invoked programmatically via the convenience function:
+
+```python
+from src.services.config_validator import validate_profile_configuration
+
+results = validate_profile_configuration(profile_id=42)
 ```
 
-**Response:**
+**Response shape:**
 ```json
 {
   "success": true,
-  "session_id": "abc123",
+  "profile_id": 42,
+  "profile_name": "My Profile",
   "results": [
     {
       "component": "LLM",
       "success": true,
-      "message": "Successfully connected to LLM endpoint",
+      "message": "Successfully connected to LLM endpoint: ...",
       "details": "Response received: Hello! How can I help you today?..."
     },
     {
-      "component": "Genie: Sales Data",
+      "component": "Genie",
       "success": true,
       "message": "Successfully connected to Genie space: 01abc123...",
-      "details": "Query executed and returned data"
-    },
-    {
-      "component": "MLflow",
-      "success": true,
-      "message": "Successfully accessed MLflow experiment: /Workspace/Users/...",
-      "details": "Experiment ID: 12345"
+      "details": "Query executed and returned message, data"
     }
   ]
 }
@@ -74,73 +69,68 @@ POST /api/config/validate/abc123
 
 ## Frontend Integration
 
-The validation is available from the AgentConfigBar for the current session.
-
-### UI Flow
-1. User triggers configuration validation
-2. Loading spinner shown during testing
-3. Backend runs validation tests (LLM, each Genie space, MLflow)
-4. Results displayed with:
-   - Overall status
-   - Individual component results with pass/fail indicators
-   - Detailed messages and error information
+There is currently no frontend integration. No frontend code calls a validation endpoint or invokes the validator.
 
 ## Backend Implementation
 
 ### Service Layer
-**File**: `src/services/config/config_validator.py`
+**File**: `src/services/config_validator.py`
+
+The validator is profile-based. It takes a `profile_id`, loads settings from the database via `load_settings_from_database(profile_id)`, and validates components using those settings.
 
 ```python
 class ConfigurationValidator:
     """Validates configuration by testing each component."""
 
+    def __init__(self, profile_id: int):
+        self.profile_id = profile_id
+        self.settings = None
+        self.results: List[ValidationResult] = []
+
     def validate_all(self) -> Dict[str, Any]:
         """Run all validation tests."""
+        self.settings = load_settings_from_database(self.profile_id)
         self._validate_llm()      # Test LLM endpoint
-        # Genie validation for each configured tool
-        for tool in self.agent_config.get("tools", []):
-            if tool["type"] == "genie":
-                self._validate_genie(tool)
-        self._validate_mlflow()   # Test MLflow experiment
+        if self.settings.genie:
+            self._validate_genie() # Test Genie space
         return results
 ```
 
-### API Layer
-**File**: `src/api/routes/config/validation.py`
+The class is exported from `src/services/__init__.py` alongside a convenience function `validate_profile_configuration(profile_id)`.
 
-Provides REST endpoint for triggering validation against a session's agent config.
+### API Layer
+
+No route exists. There is no API layer for this feature.
 
 ## Use Cases
 
-### 1. Session Setup
-After configuring tools via the AgentConfigBar, validate to ensure all components are working.
+### 1. Profile Setup
+After configuring a profile's tools, validate to ensure all components are working.
 
 ### 2. Troubleshooting
 When experiencing issues, run validation to identify which component is failing.
 
 ### 3. Permission Verification
-Verify that user has necessary permissions to use LLM endpoints, Genie spaces, and MLflow experiments.
-
-### 4. Pre-Deployment Testing
-Before deploying to production, validate that all configurations work in the target environment.
+Verify that user has necessary permissions to use LLM endpoints and Genie spaces.
 
 ## Error Handling
 
 Each component validation is independent:
-- If LLM fails, Genie and MLflow tests still run
+- If LLM fails, Genie test still runs
 - Specific error messages help identify the exact issue
-- Details field provides additional context (endpoint names, IDs, etc.)
+- Details field provides additional context (endpoint names, space IDs, etc.)
 
 ## Cleanup
 
 The Genie validation automatically cleans up:
 - Test conversation is deleted after validation
 - No permanent data is created during testing
-- MLflow experiment is created if it doesn't exist (intentional - needed for actual use)
 
 ## Future Enhancements
 
 Potential improvements:
+- Wire up an API route so the frontend can trigger validation
+- Add MLflow experiment validation
 - Add validation for individual configuration components (not just full profile)
 - Add performance metrics (response time, latency)
 - Add validation history/logs

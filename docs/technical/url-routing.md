@@ -20,15 +20,18 @@ No backend changes were required — the existing FastAPI catch-all route alread
 
 | Path | Component | View Mode | Description |
 |------|-----------|-----------|-------------|
-| `/` | `AppLayout` | `help` | Landing page (same as `/help`, no redirect) |
+| `/` | `AppLayout` | `main` | Landing page (generator view) |
 | `/help` | `AppLayout` | `help` | Documentation and usage guide |
 | `/history` | `AppLayout` | `history` | Session list and restore |
 | `/profiles` | `AppLayout` | `profiles` | Profile management |
 | `/deck-prompts` | `AppLayout` | `deck_prompts` | Deck prompt library |
 | `/slide-styles` | `AppLayout` | `slide_styles` | Slide style library |
 | `/images` | `AppLayout` | `images` | Image library |
+| `/admin` | `AdminPage` | — | Admin dashboard (separate component, not `AppLayout`) |
+| `/feedback` | redirect | — | Redirects to `/admin` |
 | `/sessions/:sessionId/edit` | `AppLayout` | `main` | Full editing: chat + slides |
 | `/sessions/:sessionId/view` | `AppLayout` | `main` + `viewOnly` | Read-only viewer |
+| `*` | redirect | — | Catch-all, redirects to `/` |
 
 ---
 
@@ -36,41 +39,52 @@ No backend changes were required — the existing FastAPI catch-all route alread
 
 ### Routing Strategy
 
-Rather than splitting `AppLayout` into separate page components, the implementation passes `initialView` and `viewOnly` props to `AppLayout` via route configuration. Each route renders the same component with different props. React's `key` prop forces full remounts when switching between routes:
+Rather than splitting `AppLayout` into separate page components, the implementation passes `initialView` and `viewOnly` props to `AppLayout` via route configuration. Each route renders the same component with different props. All routes share a single stable key (`"app-layout"`) so that `AppLayout` stays mounted across navigations — only the main content area updates via `initialView` sync. This avoids refetching sidebar data (e.g., Recent Decks) on every navigation and preserves partial rendering state:
 
 ```tsx
 // src/App.tsx
 function AppRoutes() {
-  const location = useLocation();
+  const layoutKey = "app-layout";
+
   return (
     <Routes>
-      <Route path="/" element={<AppLayout key="help" initialView="help" />} />
-      <Route path="/profiles" element={<AppLayout key="profiles" initialView="profiles" />} />
-      <Route path="/sessions/:sessionId/edit"
-        element={<AppLayout key={`edit-${location.pathname}`} initialView="main" />} />
-      <Route path="/sessions/:sessionId/view"
-        element={<AppLayout key={`view-${location.pathname}`} initialView="main" viewOnly={true} />} />
-      {/* ... other config page routes follow the same pattern */}
+      <Route path="/" element={<AppLayout key={layoutKey} initialView="main" />} />
+      <Route path="/help" element={<AppLayout key={layoutKey} initialView="help" />} />
+      <Route path="/profiles" element={<AppLayout key={layoutKey} initialView="profiles" />} />
+      <Route path="/deck-prompts" element={<AppLayout key={layoutKey} initialView="deck_prompts" />} />
+      <Route path="/slide-styles" element={<AppLayout key={layoutKey} initialView="slide_styles" />} />
+      <Route path="/images" element={<AppLayout key={layoutKey} initialView="images" />} />
+      <Route path="/history" element={<AppLayout key={layoutKey} initialView="history" />} />
+      <Route path="/admin" element={<AdminPage />} />
+      <Route path="/feedback" element={<Navigate to="/admin" replace />} />
+      <Route path="/sessions/:sessionId/edit" element={<AppLayout key={layoutKey} initialView="main" />} />
+      <Route path="/sessions/:sessionId/view" element={<AppLayout key={layoutKey} initialView="main" viewOnly={true} />} />
+      <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>
   );
 }
 ```
 
-Session routes use `location.pathname` in the key so that navigating between different sessions (e.g., `/sessions/abc/edit` → `/sessions/def/edit`) triggers a full remount and reload.
+The `/admin` route renders a dedicated `AdminPage` component instead of `AppLayout`. The `/feedback` route redirects to `/admin`, and the catch-all `*` route redirects unknown paths to `/`.
+
+### Setup Check
+
+Before rendering the provider tree, the `App` component checks `/api/setup/status` to determine whether the application has been configured. While the check is in flight, a minimal loading screen is displayed. If the backend reports `configured: false`, the `WelcomeSetup` component is rendered instead of the main application. Once setup completes (or if the endpoint is unavailable, which is treated as "configured"), the full provider tree mounts.
 
 ### Provider Tree
 
 ```
 BrowserRouter          (main.tsx)
-└── ProfileProvider
+└── App                (setup check)
     └── SessionProvider
         └── GenerationProvider
             └── SelectionProvider
                 └── ToastProvider
-                    └── AppRoutes    (route definitions)
+                    └── AgentConfigProvider
+                        └── AppRoutes    (route definitions)
 ```
 
-`BrowserRouter` wraps the entire provider tree so that `useNavigate()` and `useLocation()` are available everywhere, including inside context providers.
+`BrowserRouter` wraps the entire provider tree so that `useNavigate()` and `useLocation()` are available everywhere, including inside context providers. `AgentConfigProvider` supplies session-bound agent configuration to all route components.
 
 ### Navigation
 
@@ -237,7 +251,10 @@ Toasts auto-dismiss after 5 seconds. Rendered at `fixed bottom-4 right-4` with `
 | `src/App.tsx` | Defines all `<Route>` elements with `AppLayout` + props |
 | `src/components/Layout/AppLayout.tsx` | Reads `useParams()`, loads sessions from URL, handles `viewOnly` mode, uses `useNavigate()` for all navigation |
 | `src/contexts/SessionContext.tsx` | Provides `createNewSession()` (returns local UUID string), `switchSession()` for restoring existing sessions |
-| `src/contexts/ToastContext.tsx` | New context for toast notifications (`showToast(message, type)`) |
+| `src/contexts/ToastContext.tsx` | Context for toast notifications (`showToast(message, type)`) |
+| `src/contexts/AgentConfigContext.tsx` | Provides session-bound agent configuration to all route components |
+| `src/components/Admin/AdminPage.tsx` | Standalone admin dashboard, rendered outside `AppLayout` |
+| `src/components/Setup/WelcomeSetup.tsx` | First-run setup wizard, shown when `/api/setup/status` returns `configured: false` |
 | `src/components/ChatPanel/ChatInput.tsx` | Added `data-testid="chat-input"` for test targeting |
 | `src/components/ImageLibrary/ImageLibrary.tsx` | Added `data-testid="image-library"` for test targeting |
 | `src/components/History/SessionHistory.tsx` | `onSessionSelect` callback navigates to `/sessions/{id}/edit` (no "Back" button — users navigate via nav bar) |
