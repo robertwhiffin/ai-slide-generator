@@ -1,6 +1,32 @@
 import { Joyride, type EventData, type Step, STATUS, ACTIONS } from 'react-joyride';
 import { useTour } from '../../contexts/TourContext';
 
+function clickNav(tourId: string): () => Promise<void> {
+  return async () => {
+    const item = document.querySelector(`[data-tour="${tourId}"]`);
+    const btn = item?.querySelector('button') ?? (item as HTMLElement | null);
+    if (btn) (btn as HTMLElement).click();
+    await new Promise(r => setTimeout(r, 400));
+  };
+}
+
+function navigateToMain(): Promise<void> {
+  return new Promise(resolve => {
+    window.dispatchEvent(new Event('tour:navigate-main'));
+    setTimeout(resolve, 400);
+  });
+}
+
+function expandAgentConfig(): Promise<void> {
+  return new Promise(resolve => {
+    const toggle = document.querySelector<HTMLElement>('[data-tour="agent-config-toggle"]');
+    const expanded = toggle?.closest('[data-testid="agent-config-bar"]')
+      ?.querySelector('.border-t.border-gray-200');
+    if (toggle && !expanded) toggle.click();
+    setTimeout(resolve, 300);
+  });
+}
+
 const TOUR_STEPS: Step[] = [
   // ── Welcome ──────────────────────────────────────────────────────
   {
@@ -44,57 +70,64 @@ const TOUR_STEPS: Step[] = [
     skipBeacon: true,
   },
 
-  // ── Sidebar: Configure section (overview then individual items) ──
+  // ── Sidebar: Configure section (overview) ────────────────────────
   {
     target: '[data-tour="configure-section"]',
     title: 'Configuration',
     content:
-      'This section lets you fine-tune how the AI generates slides. It contains five areas — let\'s look at each one.',
-    placement: 'right',
-    skipBeacon: true,
-  },
-  {
-    target: '[data-tour="nav-profiles"]',
-    title: 'Agent Profiles',
-    content:
-      'Profiles are saved AI configurations — a combination of tools, style, and prompt. Create profiles for different use cases (e.g. "Sales Deck", "Technical Review") and switch between them instantly.',
-    placement: 'right',
-    skipBeacon: true,
-  },
-  {
-    target: '[data-tour="nav-deck_prompts"]',
-    title: 'Deck Prompts',
-    content:
-      'Deck prompts are reusable system instructions that tell the AI how to structure your deck. For example, a prompt might enforce a specific narrative arc or slide ordering convention.',
-    placement: 'right',
-    skipBeacon: true,
-  },
-  {
-    target: '[data-tour="nav-slide_styles"]',
-    title: 'Slide Styles',
-    content:
-      'Slide styles control the visual design — colors, fonts, layout templates. Pick from existing styles or create your own to match your brand.',
-    placement: 'right',
-    skipBeacon: true,
-  },
-  {
-    target: '[data-tour="nav-images"]',
-    title: 'Image Library',
-    content:
-      'Upload and manage images that the AI can reference when building slides. Logos, diagrams, photos — anything you want available during generation.',
-    placement: 'right',
-    skipBeacon: true,
-  },
-  {
-    target: '[data-tour="nav-help"]',
-    title: 'Help & Documentation',
-    content:
-      'Detailed guides and documentation live here. If you ever need a refresher on how a feature works, this is the place to look.',
+      'This section lets you fine-tune how the AI generates slides. Let\'s visit each page to see what\'s there.',
     placement: 'right',
     skipBeacon: true,
   },
 
-  // ── Main workspace: Overview ─────────────────────────────────────
+  // ── Config pages: navigate to each one ───────────────────────────
+  {
+    target: '[data-tour="page-profiles"]',
+    title: 'Agent Profiles',
+    content:
+      'Profiles are saved AI configurations — a combination of tools, style, and prompt. Create profiles for different use cases (e.g. "Sales Deck", "Technical Review") and switch between them instantly.',
+    placement: 'left',
+    skipBeacon: true,
+    before: clickNav('nav-profiles'),
+  },
+  {
+    target: '[data-tour="page-deck-prompts"]',
+    title: 'Deck Prompts',
+    content:
+      'Deck prompts are reusable system instructions that tell the AI how to structure your deck. For example, a prompt might enforce a specific narrative arc or slide ordering convention.',
+    placement: 'left',
+    skipBeacon: true,
+    before: clickNav('nav-deck_prompts'),
+  },
+  {
+    target: '[data-tour="page-slide-styles"]',
+    title: 'Slide Styles',
+    content:
+      'Slide styles control the visual design — colors, fonts, layout templates. Pick from existing styles or create your own to match your brand.',
+    placement: 'left',
+    skipBeacon: true,
+    before: clickNav('nav-slide_styles'),
+  },
+  {
+    target: '[data-tour="page-images"]',
+    title: 'Image Library',
+    content:
+      'Upload and manage images that the AI can reference when building slides. Logos, diagrams, photos — anything you want available during generation.',
+    placement: 'left',
+    skipBeacon: true,
+    before: clickNav('nav-images'),
+  },
+  {
+    target: '[data-tour="page-help"]',
+    title: 'Help & Documentation',
+    content:
+      'Detailed guides and documentation live here. If you ever need a refresher on how a feature works, this is the place to look.',
+    placement: 'left',
+    skipBeacon: true,
+    before: clickNav('nav-help'),
+  },
+
+  // ── Main workspace: Overview (navigate back) ─────────────────────
   {
     target: '[data-tour="chat-panel"]',
     title: 'The AI Workspace',
@@ -102,21 +135,18 @@ const TOUR_STEPS: Step[] = [
       'This is where you create slides. The workspace has three parts: the agent config bar at the top, the chat panel where you talk to the AI, and the slide panel on the right where results appear. Let\'s break each one down.',
     placement: 'right',
     skipBeacon: true,
+    before: async () => { await navigateToMain(); },
   },
 
-  // ── Agent Config: Overview then granular breakdown ────────────────
+  // ── Agent Config: click to open, then walk through ───────────────
   {
     target: '[data-tour="agent-config"]',
     title: 'Agent Config Bar',
     content:
-      'Before you start chatting, configure the AI here. This bar controls what tools the agent can use, how slides look, and what instructions guide the generation. Click it to expand — let\'s walk through each section.',
+      'This bar controls what tools the agent can use, how slides look, and what instructions guide the generation. Let\'s open it and explore each section.',
     placement: 'bottom',
     skipBeacon: true,
-    before: async () => {
-      const toggle = document.querySelector<HTMLElement>('[data-tour="agent-config-toggle"]');
-      if (toggle) toggle.click();
-      await new Promise(r => setTimeout(r, 300));
-    },
+    before: expandAgentConfig,
   },
   {
     target: '[data-tour="agent-tools"]',
@@ -130,7 +160,7 @@ const TOUR_STEPS: Step[] = [
     target: '[data-tour="agent-style-selector"]',
     title: 'Slide Style',
     content:
-      'Choose a visual style for your slides. Styles define colors, fonts, and layout templates. Select one from the dropdown, or leave it as "None" to use the default styling. You can create custom styles from the Slide Styles page in the sidebar.',
+      'Choose a visual style for your slides. Styles define colors, fonts, and layout templates. Select one from the dropdown, or leave it as "None" to use the default styling.',
     placement: 'bottom',
     skipBeacon: true,
   },
@@ -138,7 +168,7 @@ const TOUR_STEPS: Step[] = [
     target: '[data-tour="agent-prompt-selector"]',
     title: 'Deck Prompt',
     content:
-      'Deck prompts are system-level instructions that shape how the AI structures your deck — for example, enforcing a narrative arc, a specific number of slides, or a particular content format. Create and manage prompts from the Deck Prompts page.',
+      'Deck prompts are system-level instructions that shape how the AI structures your deck — for example, enforcing a narrative arc, a specific number of slides, or a particular content format.',
     placement: 'bottom',
     skipBeacon: true,
   },
@@ -146,10 +176,12 @@ const TOUR_STEPS: Step[] = [
     target: '[data-tour="agent-profile-actions"]',
     title: 'Save & Load Profiles',
     content:
-      'Once you\'ve configured the perfect combination of tools, style, and prompt, save it as a profile. Next time, just load the profile to instantly restore your setup. Great for switching between different presentation types.',
+      'Once you\'ve configured the perfect combination of tools, style, and prompt, save it as a profile. Next time, just load the profile to instantly restore your setup.',
     placement: 'bottom',
     skipBeacon: true,
   },
+
+  // ── Chat, Ribbon, Slides ─────────────────────────────────────────
   {
     target: '[data-tour="chat-panel"]',
     title: 'Chat Panel',
