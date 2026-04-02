@@ -188,7 +188,7 @@ export const DeckContributorsManager: React.FC<DeckContributorsManagerProps> = (
       <div>
         <h3 className="text-lg font-medium text-gray-900">Share Deck</h3>
         <p className="text-sm text-gray-500 mt-1">
-          Add users or groups from your Databricks workspace who can access this deck.
+          Add users from your Databricks workspace who can access this deck.
         </p>
       </div>
 
@@ -220,7 +220,7 @@ export const DeckContributorsManager: React.FC<DeckContributorsManagerProps> = (
                 type="text"
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
-                placeholder="Search users or groups..."
+                placeholder="Search users..."
                 className="w-full pl-10 pr-3 py-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
                 disabled={addingContributor}
               />
@@ -274,7 +274,7 @@ export const DeckContributorsManager: React.FC<DeckContributorsManagerProps> = (
           {/* No results */}
           {searchQuery.length >= 2 && !searching && searchResults.length === 0 && (
             <p className="mt-2 text-sm text-gray-500 text-center py-2">
-              No users or groups found matching "{searchQuery}"
+              No users found matching "{searchQuery}"
             </p>
           )}
         </div>
@@ -293,7 +293,7 @@ export const DeckContributorsManager: React.FC<DeckContributorsManagerProps> = (
               No contributors yet. This deck is private to you.
             </p>
             <p className="text-xs text-blue-600 mt-1">
-              Search above to add users or groups.
+              Search above to add users.
             </p>
           </div>
         ) : (
