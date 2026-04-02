@@ -172,7 +172,7 @@ tests/integration/test_streaming.py::TestRequestValidation
 | Test | Scenario | Expected |
 |------|----------|----------|
 | `test_empty_message_validation` | Empty message | 422 |
-| `test_missing_session_id_validation` | No session_id | 422 |
+| `test_missing_session_id_creates_session` | No session_id | Auto-creates session (not 422) |
 | `test_missing_message_validation` | No message | 422 |
 | `test_whitespace_only_message_validation` | Whitespace message | 422 |
 | `test_valid_request_accepted` | Valid request | 200 |

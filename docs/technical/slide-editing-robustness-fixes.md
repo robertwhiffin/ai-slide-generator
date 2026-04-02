@@ -527,13 +527,40 @@ def try_fix_common_js_errors(script: str) -> str:
     if open_parens > close_parens:
         fixed += ')' * (open_parens - close_parens)
     
+    # Fix unclosed brackets
+    open_brackets = fixed.count('[')
+    close_brackets = fixed.count(']')
+    if open_brackets > close_brackets:
+        fixed += ']' * (open_brackets - close_brackets)
+    
     return fixed
+
+
+def validate_and_fix_javascript(script: str) -> Tuple[str, bool, str]:
+    """Validate JavaScript and attempt to fix if invalid.
+    
+    Returns:
+        (fixed_script, was_fixed, error_message)
+    """
+    if not script or not script.strip():
+        return script, False, ""
+    
+    is_valid, error = validate_javascript(script)
+    if is_valid:
+        return script, False, ""
+    
+    fixed_script = try_fix_common_js_errors(script)
+    is_valid_after_fix, _ = validate_javascript(fixed_script)
+    if is_valid_after_fix:
+        return fixed_script, True, ""
+    
+    return script, False, error
 ```
 
 3. **`src/services/agent.py`** - Use in `_parse_slide_replacements`:
 
 ```python
-from src.utils.js_validator import validate_javascript, try_fix_common_js_errors
+from src.utils.js_validator import validate_javascript, try_fix_common_js_errors, validate_and_fix_javascript
 
 # After extracting scripts for each slide
 for slide in replacement_slides:
@@ -1020,474 +1047,32 @@ message_count = db.query(func.count(SessionMessage.id)).filter(
 
 ### Test File: `tests/unit/test_slide_editing_robustness.py`
 
+The test file imports only domain models and validator functions (not `SlideGeneratorAgent` or `ChatService` directly, except where needed for specific integration tests like RC6 cache restoration). The `validate_and_fix_javascript` combined function is also tested.
+
+Full test file: [`tests/unit/test_slide_editing_robustness.py`](../../tests/unit/test_slide_editing_robustness.py)
+
+**Imports:**
+
 ```python
-"""Comprehensive tests for slide editing robustness fixes.
-
-Tests cover:
-- RC1: LLM response validation and retry
-- RC2: Add vs edit intent detection
-- RC3: Deck preservation on failure
-- RC4: Canvas ID deduplication
-- RC5: JavaScript syntax validation
-- RC6: Cache restoration from database
-"""
-
-import pytest
-from unittest.mock import Mock, patch, MagicMock
-from bs4 import BeautifulSoup
-
-from src.services.agent import SlideGeneratorAgent
-from src.api.services.chat_service import ChatService
 from src.domain.slide_deck import SlideDeck
 from src.domain.slide import Slide
-from src.utils.js_validator import validate_javascript, try_fix_common_js_errors
-
-
-# =============================================================================
-# RC3: Deck Preservation Tests
-# =============================================================================
-
-class TestDeckPreservation:
-    """Tests for RC3: Deck should never be destroyed on editing failures."""
-
-    @pytest.fixture
-    def chat_service_with_deck(self):
-        """Create a chat service with a pre-populated deck."""
-        service = ChatService()
-        # Create a mock deck with 3 slides
-        deck = SlideDeck(
-            title="Test Deck",
-            slides=[
-                Slide(html='<div class="slide"><h1>Slide 1</h1></div>', slide_id="slide_0"),
-                Slide(html='<div class="slide"><h1>Slide 2</h1></div>', slide_id="slide_1"),
-                Slide(html='<div class="slide"><h1>Slide 3</h1></div>', slide_id="slide_2"),
-            ]
-        )
-        service._deck_cache["test_session"] = deck
-        return service, deck
-
-    def test_rc3_t1_text_response_preserves_deck(self, chat_service_with_deck):
-        """RC3-T1: LLM returns text with slides selected → deck preserved."""
-        service, original_deck = chat_service_with_deck
-        
-        # Simulate replacement_info being None (parsing failed)
-        replacement_info = None
-        slide_context = {"indices": [0, 1], "slide_htmls": ["...", "..."]}
-        
-        # The guard should prevent deck destruction
-        # This test verifies the logic we're adding
-        with pytest.raises(ValueError, match="Failed to parse"):
-            service._handle_editing_failure(
-                slide_context=slide_context,
-                replacement_info=replacement_info,
-                session_id="test_session"
-            )
-        
-        # Deck should still exist
-        assert "test_session" in service._deck_cache
-        assert len(service._deck_cache["test_session"].slides) == 3
-
-    def test_rc3_t2_empty_response_preserves_deck(self, chat_service_with_deck):
-        """RC3-T2: LLM returns empty string with slides selected → deck preserved."""
-        service, original_deck = chat_service_with_deck
-        
-        html_output = ""
-        slide_context = {"indices": [0], "slide_htmls": ["..."]}
-        
-        # Should not destroy deck
-        cached_deck = service._deck_cache.get("test_session")
-        assert cached_deck is not None
-        assert len(cached_deck.slides) == 3
-
-    def test_rc3_t3_malformed_html_preserves_deck(self, chat_service_with_deck):
-        """RC3-T3: Malformed HTML with slides selected → deck preserved."""
-        service, original_deck = chat_service_with_deck
-        
-        malformed_html = "<div><span>Not a slide</div></span>"
-        slide_context = {"indices": [0], "slide_htmls": ["..."]}
-        
-        # Parsing should fail but deck should be preserved
-        cached_deck = service._deck_cache.get("test_session")
-        assert cached_deck is not None
-
-    def test_rc3_t4_valid_edit_updates_deck(self, chat_service_with_deck):
-        """RC3-T4: Valid HTML edit updates deck correctly."""
-        service, original_deck = chat_service_with_deck
-        
-        replacement_info = {
-            "replacement_slides": [
-                Slide(html='<div class="slide"><h1>Updated Slide</h1></div>', slide_id="slide_0")
-            ],
-            "start_index": 0,
-            "original_count": 1,
-            "replacement_count": 1,
-            "replacement_css": "",
-        }
-        
-        result = service._apply_slide_replacements(replacement_info, "test_session")
-        
-        assert result is not None
-        # First slide should be updated
-        cached_deck = service._deck_cache["test_session"]
-        assert "Updated Slide" in cached_deck.slides[0].html
-
-    def test_rc3_t5_new_generation_creates_deck(self):
-        """RC3-T5: New generation (no slides selected) creates new deck."""
-        service = ChatService()
-        
-        html_output = '''
-        <!DOCTYPE html>
-        <html>
-        <body>
-        <div class="slide"><h1>New Slide</h1></div>
-        </body>
-        </html>
-        '''
-        
-        # No slide_context means new generation
-        deck = SlideDeck.from_html_string(html_output)
-        service._deck_cache["new_session"] = deck
-        
-        assert "new_session" in service._deck_cache
-        assert len(service._deck_cache["new_session"].slides) == 1
-
-
-# =============================================================================
-# RC1: LLM Response Validation Tests
-# =============================================================================
-
-class TestLLMResponseValidation:
-    """Tests for RC1: Validate LLM response before processing."""
-
-    @pytest.fixture
-    def agent(self):
-        """Create agent with mocked settings."""
-        with patch('src.services.agent.get_settings') as mock_settings:
-            mock_settings.return_value = MagicMock(
-                llm=MagicMock(endpoint="test", temperature=0.7, max_tokens=1000, timeout=60),
-                genie=None,
-                prompts={"system_prompt": "test", "slide_style": "test"},
-                mlflow=MagicMock(experiment_name="/test")
-            )
-            with patch('src.services.agent.get_databricks_client'):
-                agent = SlideGeneratorAgent()
-        return agent
-
-    def test_rc1_t1_detects_delete_text(self, agent):
-        """RC1-T1: Detect 'I understand you want to delete' text."""
-        response = "I understand you want to delete both slides. There are no slides remaining."
-        
-        is_valid, error = agent._validate_editing_response(response)
-        
-        assert is_valid is False
-        assert "conversational text" in error.lower()
-
-    def test_rc1_t2_detects_cannot_modify(self, agent):
-        """RC1-T2: Detect 'I cannot modify' text."""
-        response = "I cannot modify these slides as requested."
-        
-        is_valid, error = agent._validate_editing_response(response)
-        
-        assert is_valid is False
-
-    def test_rc1_t3_accepts_valid_html(self, agent):
-        """RC1-T3: Accept valid HTML with slide divs."""
-        response = '<div class="slide"><h1>Valid Slide</h1></div>'
-        
-        is_valid, error = agent._validate_editing_response(response)
-        
-        assert is_valid is True
-        assert error == ""
-
-    def test_rc1_t4_retry_on_invalid_returns_valid(self, agent):
-        """RC1-T4: Retry mechanism produces valid result."""
-        # This would be an integration test with mocked LLM
-        pass
-
-    def test_rc1_t5_double_failure_raises_error(self, agent):
-        """RC1-T5: Two failures in a row raises AgentError."""
-        # This would be an integration test with mocked LLM
-        pass
-
-    def test_rc1_t6_html_without_slide_divs(self, agent):
-        """RC1-T6: HTML without slide divs triggers retry."""
-        response = '<div class="container"><p>No slide here</p></div>'
-        
-        is_valid, error = agent._validate_editing_response(response)
-        
-        assert is_valid is False
-        assert "No <div class='slide'>" in error
-
-
-# =============================================================================
-# RC2: Add vs Edit Intent Detection Tests
-# =============================================================================
-
-class TestAddIntentDetection:
-    """Tests for RC2: Detect add slide vs edit slide intent."""
-
-    @pytest.fixture
-    def agent(self):
-        """Create agent with mocked settings."""
-        with patch('src.services.agent.get_settings') as mock_settings:
-            mock_settings.return_value = MagicMock(
-                llm=MagicMock(endpoint="test", temperature=0.7, max_tokens=1000, timeout=60),
-                genie=None,
-                prompts={"system_prompt": "test", "slide_style": "test"},
-                mlflow=MagicMock(experiment_name="/test")
-            )
-            with patch('src.services.agent.get_databricks_client'):
-                agent = SlideGeneratorAgent()
-        return agent
-
-    def test_rc2_t1_add_at_bottom_detected(self, agent):
-        """RC2-T1: 'add a slide at the bottom for summary' → add intent."""
-        message = "add a slide at the bottom for summary"
-        
-        is_add = agent._detect_add_intent(message)
-        
-        assert is_add is True
-
-    def test_rc2_t2_insert_new_slide_detected(self, agent):
-        """RC2-T2: 'insert a new slide after this one' → add intent."""
-        message = "insert a new slide after this one"
-        
-        is_add = agent._detect_add_intent(message)
-        
-        assert is_add is True
-
-    def test_rc2_t3_change_color_is_edit(self, agent):
-        """RC2-T3: 'change the color to red' → NOT add intent."""
-        message = "change the color to red"
-        
-        is_add = agent._detect_add_intent(message)
-        
-        assert is_add is False
-
-    def test_rc2_t4_make_blue_is_edit(self, agent):
-        """RC2-T4: 'make this slide blue' → NOT add intent."""
-        message = "make this slide blue"
-        
-        is_add = agent._detect_add_intent(message)
-        
-        assert is_add is False
-
-    def test_rc2_t5_create_new_summary(self, agent):
-        """RC2-T5: 'create a new summary slide' → add intent."""
-        message = "create a new summary slide"
-        
-        is_add = agent._detect_add_intent(message)
-        
-        assert is_add is True
-
-    def test_rc2_t6_append_slide(self, agent):
-        """RC2-T6: 'append a slide' → add intent."""
-        message = "append a conclusions slide"
-        
-        is_add = agent._detect_add_intent(message)
-        
-        assert is_add is True
-
-    def test_rc2_t7_add_at_end(self, agent):
-        """RC2-T7: 'add at the end' → add intent."""
-        message = "add a chart at the end"
-        
-        is_add = agent._detect_add_intent(message)
-        
-        assert is_add is True
-
-
-# =============================================================================
-# RC4: Canvas ID Deduplication Tests
-# =============================================================================
-
-class TestCanvasIdDeduplication:
-    """Tests for RC4: Generate unique canvas IDs to prevent collisions."""
-
-    @pytest.fixture
-    def agent(self):
-        """Create agent with mocked settings."""
-        with patch('src.services.agent.get_settings') as mock_settings:
-            mock_settings.return_value = MagicMock(
-                llm=MagicMock(endpoint="test", temperature=0.7, max_tokens=1000, timeout=60),
-                genie=None,
-                prompts={"system_prompt": "test", "slide_style": "test"},
-                mlflow=MagicMock(experiment_name="/test")
-            )
-            with patch('src.services.agent.get_databricks_client'):
-                agent = SlideGeneratorAgent()
-        return agent
-
-    def test_rc4_t1_single_canvas_deduplicated(self, agent):
-        """RC4-T1: Single canvas ID gets unique suffix."""
-        html = '<div class="slide"><canvas id="chart1"></canvas></div>'
-        scripts = 'const ctx = document.getElementById("chart1");'
-        
-        new_html, new_scripts = agent._deduplicate_canvas_ids(html, scripts)
-        
-        # Original ID should not exist
-        assert 'id="chart1"' not in new_html
-        # New ID should have suffix
-        assert 'id="chart1_' in new_html
-        # Scripts should be updated
-        assert 'getElementById("chart1_' in new_scripts
-
-    def test_rc4_t2_multiple_canvases_same_suffix(self, agent):
-        """RC4-T2: Multiple canvases in one slide get same suffix."""
-        html = '''<div class="slide">
-            <canvas id="chart1"></canvas>
-            <canvas id="chart2"></canvas>
-        </div>'''
-        scripts = '''
-            document.getElementById("chart1");
-            document.getElementById("chart2");
-        '''
-        
-        new_html, new_scripts = agent._deduplicate_canvas_ids(html, scripts)
-        
-        soup = BeautifulSoup(new_html, "html.parser")
-        canvas_ids = [c.get("id") for c in soup.find_all("canvas")]
-        
-        # Both should have same suffix
-        suffix1 = canvas_ids[0].split("_")[1]
-        suffix2 = canvas_ids[1].split("_")[1]
-        assert suffix1 == suffix2
-
-    def test_rc4_t3_scripts_references_updated(self, agent):
-        """RC4-T3: All script references to canvas IDs are updated."""
-        html = '<canvas id="myChart"></canvas>'
-        scripts = '''
-            // Canvas: myChart
-            const canvas = document.getElementById("myChart");
-            const ctx = canvas.getContext("2d");
-        '''
-        
-        new_html, new_scripts = agent._deduplicate_canvas_ids(html, scripts)
-        
-        assert 'getElementById("myChart")' not in new_scripts
-        assert '// Canvas: myChart_' in new_scripts or 'getElementById("myChart_' in new_scripts
-
-    def test_rc4_t4_no_canvas_unchanged(self, agent):
-        """RC4-T4: Slide without canvas is unchanged."""
-        html = '<div class="slide"><h1>No chart here</h1></div>'
-        scripts = 'console.log("no canvas");'
-        
-        new_html, new_scripts = agent._deduplicate_canvas_ids(html, scripts)
-        
-        assert new_html == html
-        assert new_scripts == scripts
-
-    def test_rc4_t5_consecutive_edits_unique_suffixes(self, agent):
-        """RC4-T5: Two consecutive edits get different suffixes."""
-        html = '<canvas id="chart"></canvas>'
-        scripts = 'document.getElementById("chart");'
-        
-        _, scripts1 = agent._deduplicate_canvas_ids(html, scripts)
-        _, scripts2 = agent._deduplicate_canvas_ids(html, scripts)
-        
-        # Extract suffixes (they should be different)
-        import re
-        suffix1 = re.search(r'chart_(\w+)', scripts1).group(1)
-        suffix2 = re.search(r'chart_(\w+)', scripts2).group(1)
-        
-        assert suffix1 != suffix2
-
-
-# =============================================================================
-# RC5: JavaScript Syntax Validation Tests
-# =============================================================================
-
-class TestJavaScriptValidation:
-    """Tests for RC5: Validate and fix JavaScript syntax."""
-
-    def test_rc5_t1_valid_js_passes(self):
-        """RC5-T1: Valid JavaScript passes validation."""
-        script = '''
-            const canvas = document.getElementById("chart");
-            if (canvas) {
-                const ctx = canvas.getContext("2d");
-                new Chart(ctx, { type: "bar", data: {} });
-            }
-        '''
-        
-        is_valid, error = validate_javascript(script)
-        
-        assert is_valid is True
-        assert error == ""
-
-    def test_rc5_t2_missing_brace_fixed(self):
-        """RC5-T2: Missing closing brace is fixed."""
-        script = '''
-            if (true) {
-                console.log("test");
-        '''  # Missing closing brace
-        
-        fixed = try_fix_common_js_errors(script)
-        is_valid, _ = validate_javascript(fixed)
-        
-        assert fixed.count('{') == fixed.count('}')
-
-    def test_rc5_t3_missing_paren_fixed(self):
-        """RC5-T3: Missing closing parenthesis is fixed."""
-        script = 'console.log("test"'  # Missing closing paren
-        
-        fixed = try_fix_common_js_errors(script)
-        
-        assert fixed.count('(') == fixed.count(')')
-
-    def test_rc5_t4_malformed_js_detected(self):
-        """RC5-T4: Completely malformed JS is detected."""
-        script = 'function { this is not valid javascript }'
-        
-        is_valid, error = validate_javascript(script)
-        
-        assert is_valid is False
-        assert "syntax error" in error.lower()
-
-    def test_rc5_t5_empty_script_valid(self):
-        """RC5-T5: Empty script passes validation."""
-        script = ""
-        
-        is_valid, error = validate_javascript(script)
-        
-        assert is_valid is True
-
-    def test_rc5_t6_try_without_catch_detected(self):
-        """RC5-T6: try without catch is detected as invalid."""
-        script = '''
-            try {
-                riskyOperation();
-            }
-        '''  # Missing catch or finally
-        
-        is_valid, error = validate_javascript(script)
-        
-        assert is_valid is False
-
-
-# =============================================================================
-# Integration Tests
-# =============================================================================
-
-class TestSlideEditingIntegration:
-    """Integration tests for the complete slide editing flow."""
-
-    def test_edit_with_valid_response_succeeds(self):
-        """Full edit flow with valid LLM response."""
-        pass  # Implement with mocked LLM
-
-    def test_edit_with_invalid_response_preserves_deck(self):
-        """Full edit flow with invalid LLM response preserves deck."""
-        pass  # Implement with mocked LLM
-
-    def test_add_slide_creates_additional_slide(self):
-        """Add slide operation increases slide count."""
-        pass  # Implement with mocked LLM
-
-    def test_canvas_collision_prevented(self):
-        """Editing chart slide doesn't cause canvas collision."""
-        pass  # Implement with mocked deck
+from src.utils.js_validator import (
+    validate_javascript,
+    try_fix_common_js_errors,
+    validate_and_fix_javascript,
+)
 ```
+
+**Test classes and key tests:**
+
+- **`TestDeckPreservation`** (RC3) - Uses `SlideDeck` and `Slide` directly to verify deck structure preservation, valid replacement updates, and new generation from HTML.
+- **`TestLLMResponseValidation`** (RC1) - Creates a `SlideGeneratorAgent` via mocked settings to test `_validate_editing_response()`. Covers conversational text detection, valid HTML acceptance, empty/whitespace responses, multiple slides, and conversational text with slide divs.
+- **`TestAddIntentDetection`** (RC2) - Creates a `SlideGeneratorAgent` to test `_detect_add_intent()`. Covers add/insert/append/create patterns and verifies edit-like messages are not detected as add intent.
+- **`TestCanvasIdDeduplication`** (RC4) - Creates a `SlideGeneratorAgent` to test `_deduplicate_canvas_ids()`. Covers single/multiple canvas deduplication, script reference updates (including `querySelector`), no-canvas passthrough, and consecutive edit uniqueness.
+- **`TestJavaScriptValidation`** (RC5) - Tests `validate_javascript`, `try_fix_common_js_errors`, and `validate_and_fix_javascript` directly. Covers valid JS, missing braces/parens/brackets, empty/whitespace scripts, and the combined validate-and-fix flow (with esprima fallback handling).
+- **`TestSlideEditingIntegration`** - Tests deck creation from HTML, slide manipulation (add/remove), slides with scripts, `knit()` output, and `_format_slide_context` with add operation flag.
+- **`TestCacheRestoration`** (RC6) - Tests `ChatService._get_or_load_deck()` for cache hits, database fallback, and empty database handling.
+- **`TestEdgeCases`** - Tests special characters, unicode, empty decks, slide cloning, and deeply nested HTML.
 
 ---
 
@@ -1497,7 +1082,7 @@ class TestSlideEditingIntegration:
 |------|-------------|-------------|
 | `src/services/agent.py` | Modify | RC1: validation & retry, RC2: add intent detection + `is_add_operation` flag, RC4: canvas deduplication, RC5: JS validation integration |
 | `src/api/services/chat_service.py` | Modify | RC3: deck preservation guard, RC6: cache restoration, RC8-RC13: intent detection & guards, RC13: auto-create slide_context from text reference |
-| `src/utils/js_validator.py` | New | RC5: JavaScript syntax validation utilities |
+| `src/utils/js_validator.py` | New | RC5: JavaScript syntax validation utilities (`validate_javascript`, `try_fix_common_js_errors`, `validate_and_fix_javascript`) |
 | `src/core/defaults.py` | Modify | RC2: Clear EDIT/ADD/EXPAND operation instructions aligned with backend |
 | `tests/unit/test_slide_editing_robustness.py` | New | Comprehensive test suite (45 tests) |
 | `requirements.txt` | Modify | Add `esprima` dependency |
@@ -1700,7 +1285,4 @@ pytest tests/unit/test_slide_editing_robustness.py::TestDeckPreservation -v
 
 # Run with coverage
 pytest tests/unit/test_slide_editing_robustness.py --cov=src --cov-report=html
-
-# Run integration tests
-pytest tests/integration/test_slide_editing_robustness.py -v
 ```

@@ -12,9 +12,9 @@ The edit operations test suite validates the robustness of slide editing workflo
 
 | File | Test Count | Purpose |
 |------|------------|---------|
-| `tests/unit/test_slide_editing_robustness.py` | 45+ | Core robustness fixes (RC1-RC15) |
-| `tests/unit/test_llm_edit_responses.py` | 15+ | LLM response handling for various edit types |
-| `tests/unit/test_slide_replacements.py` | 10+ | Slide replacement operations |
+| `tests/unit/test_slide_editing_robustness.py` | 48 | Core robustness fixes (RC1-RC15), integration, and edge cases |
+| `tests/unit/test_llm_edit_responses.py` | 17 | LLM response handling for various edit types |
+| `tests/unit/test_slide_replacements.py` | 11 | Slide replacement parsing, context validation, and sample HTML fixtures |
 
 ---
 
@@ -88,8 +88,9 @@ tests/unit/test_slide_editing_robustness.py::TestAddIntentDetection
 | `test_rc2_t5_create_new_summary` | "create a new summary slide" | Add |
 | `test_rc2_t6_append_slide` | "append a conclusions slide" | Add |
 | `test_rc2_t7_add_at_end` | "add a chart at the end" | Add |
-| `test_rc2_add_summary` | "add a summary" | Add |
-| `test_rc2_update_existing_is_not_add` | "update existing content" | Edit (not add) |
+| `test_rc2_add_summary` | "add a summary slide" | Add |
+| `test_rc2_add_key_takeaway` | "add a key takeaway slide at the end" | Add |
+| `test_rc2_update_existing_is_not_add` | "update the chart colors" | Edit (not add) |
 
 **Detection Method:** `agent._detect_add_intent(message)`
 
@@ -142,6 +143,7 @@ tests/unit/test_slide_editing_robustness.py::TestJavaScriptValidation
 | `test_rc5_t5_empty_script_valid` | Empty script | Passes |
 | `test_rc5_whitespace_only_valid` | Whitespace-only | Passes |
 | `test_rc5_validate_and_fix_returns_fixed` | Fixable syntax error | Returns fixed script |
+| `test_rc5_validate_and_fix_empty_script` | Empty script via `validate_and_fix_javascript` | Returns empty, no error |
 | `test_rc5_missing_bracket_fixed` | Missing closing `]` | Auto-fixed |
 
 **Validation Utilities:** `src/utils/js_validator.py`
@@ -152,7 +154,43 @@ from src.utils.js_validator import validate_javascript, try_fix_common_js_errors
 
 ---
 
-### 2.6 Cache Restoration (RC6)
+### 2.6 Slide Editing Integration
+
+**Goal:** Verify the complete slide editing flow end-to-end in unit tests.
+
+```
+tests/unit/test_slide_editing_robustness.py::TestSlideEditingIntegration
+```
+
+| Test | Scenario | Expected Outcome |
+|------|----------|------------------|
+| `test_deck_from_html_string` | Create deck from HTML string | Deck with 2 slides, title parsed |
+| `test_deck_slide_manipulation` | Add, remove, reorder slides | Correct slide count and content |
+| `test_slide_with_scripts` | Slide with associated JavaScript | Scripts stored on slide object |
+| `test_deck_knit_includes_scripts` | `knit()` output includes scripts | `<script>` tags present in output |
+| `test_format_slide_context_add_operation` | `_format_slide_context` with add flag | Add instructions included in context |
+
+---
+
+### 2.7 Edge Cases
+
+**Goal:** Ensure robustness with unusual or boundary inputs.
+
+```
+tests/unit/test_slide_editing_robustness.py::TestEdgeCases
+```
+
+| Test | Scenario | Expected Outcome |
+|------|----------|------------------|
+| `test_slide_with_special_characters` | HTML entities (`>`, `&`, `<`) | Content preserved correctly |
+| `test_slide_with_unicode` | Unicode and emoji characters | Characters preserved |
+| `test_empty_slide_deck` | Deck with zero slides | `knit()` still produces valid HTML |
+| `test_slide_clone` | Clone a slide with scripts | Clone preserves HTML, scripts, and ID |
+| `test_deeply_nested_html` | Deeply nested div structure | Content accessible in slide |
+
+---
+
+### 2.8 Cache Restoration (RC6)
 
 **Goal:** Restore deck from database when in-memory cache is empty.
 
@@ -170,7 +208,7 @@ tests/unit/test_slide_editing_robustness.py::TestCacheRestoration
 
 ---
 
-### 2.7 LLM Edit Response Types
+### 2.9 LLM Edit Response Types
 
 **Goal:** Validate that various edit operations produce correct output.
 
@@ -178,20 +216,20 @@ tests/unit/test_slide_editing_robustness.py::TestCacheRestoration
 tests/unit/test_llm_edit_responses.py
 ```
 
-| Test Class | Operation | Key Validations |
-|------------|-----------|-----------------|
-| `TestRecolorChartResponse` | Change chart colors | Canvas ID preserved, valid JS |
-| `TestRewordContentResponse` | Modify text content | Valid HTML, no spurious scripts |
-| `TestAddSlideResponse` | Add new slide | Deck integrity, chart scripts |
-| `TestConsolidateResponse` | Merge slides | Slide count reduced, valid HTML |
-| `TestExpandResponse` | Split into multiple | Slide count increased, unique canvas IDs |
-| `TestMalformedResponses` | Invalid LLM output | Duplicate IDs detected, JS errors caught |
-| `TestCSSInEditResponses` | CSS modifications | CSS extracted, valid syntax |
-| `TestEdgeCase` | Empty/no slides | Handled gracefully |
+| Test Class | Tests | Operation | Key Validations |
+|------------|-------|-----------|-----------------|
+| `TestRecolorChartResponse` | 2 | Change chart colors | Canvas ID preserved, valid JS |
+| `TestRewordContentResponse` | 2 | Modify text content | Valid HTML, no spurious scripts |
+| `TestAddSlideResponse` | 2 | Add new slide | Deck integrity, chart scripts |
+| `TestConsolidateResponse` | 2 | Merge slides | Slide count reduced, valid HTML |
+| `TestExpandResponse` | 2 | Split into multiple | Slide count increased, unique canvas IDs |
+| `TestMalformedResponses` | 2 | Invalid LLM output | Duplicate IDs detected, JS errors caught |
+| `TestCSSInEditResponses` | 2 | CSS modifications | CSS extracted, valid syntax |
+| `TestEdgeCase` | 3 | Empty/no slides/orphan scripts | Handled gracefully, `AgentError` raised |
 
 ---
 
-### 2.8 Slide Replacement Operations
+### 2.10 Slide Replacement Operations
 
 **Goal:** Validate the core slide replacement mechanism.
 
@@ -199,12 +237,31 @@ tests/unit/test_llm_edit_responses.py
 tests/unit/test_slide_replacements.py
 ```
 
-Tests cover:
-- Single slide replacement
-- Multiple slide replacement
-- Replacement with different counts (expand/consolidate)
-- Script preservation during replacement
-- CSS merging
+#### TestSlideReplacementParsing (5 tests)
+
+| Test | Scenario | Expected Outcome |
+|------|----------|------------------|
+| `test_parse_replacements_varied_counts` | Parametrized: 1:1, expansion, condensation (3 cases) | Correct counts, valid `Slide` objects |
+| `test_parse_replacements_no_slides_error` | No slide divs in response | `AgentError` raised |
+| `test_parse_extracts_scripts_and_canvas_ids` | Response with canvas and scripts | Canvas IDs extracted, scripts attached |
+| `test_validate_canvas_scripts_full_html_success` | Full HTML with matching script | Passes validation |
+| `test_validate_canvas_scripts_full_html_failure` | Canvas without matching script | `AgentError` raised |
+
+#### TestSlideContextValidation (2 tests)
+
+| Test | Scenario | Expected Outcome |
+|------|----------|------------------|
+| `test_contiguous_validation_passes` | Contiguous indices with matching HTMLs | `SlideContext` created |
+| `test_non_contiguous_or_mismatched_lengths_fail` | Non-contiguous indices or length mismatch | `ValueError` raised |
+
+#### TestSampleHTMLReplacements (4 tests)
+
+| Test | Scenario | Expected Outcome |
+|------|----------|------------------|
+| `test_parse_single_slide_replacement_scenarios` | `update1.html` and `update2.html` fixtures | Single-slide replacements with correct scripts |
+| `test_parse_consolidation_replacement` | `update3.html` (3-to-1 consolidation) | `net_change` of -2, no scripts |
+| `test_replacement_css_extraction` | CSS in replacement HTML | CSS extracted with expected selectors |
+| `test_original_indices_preserved` | Original indices passed through | Indices and `start_index` preserved |
 
 ---
 
@@ -236,15 +293,23 @@ These invariants must NEVER be violated:
 
 ## 5. CI/CD Integration
 
-Edit operation tests run in the GitHub Actions workflow:
+Edit operation tests run as part of the `unit-tests` job in the GitHub Actions workflow:
 
 ```yaml
 # .github/workflows/test.yml
-validation-tests:
-  name: Deck Integrity Validation
+unit-tests:
+  name: Unit Tests
+  runs-on: ubuntu-latest
+  needs: changes
+  if: needs.changes.outputs.backend == 'true'
   steps:
-    - run: pytest tests/unit/test_deck_integrity.py tests/unit/test_llm_edit_responses.py -v
+    - run: |
+        pytest tests/unit -v --tb=short -n auto \
+          --junitxml=test-results/unit-results.xml \
+          --cov=src --cov-report=xml --cov-report=term-missing
 ```
+
+All three edit operations test files live under `tests/unit/` and are collected automatically by this job whenever backend files change.
 
 ---
 

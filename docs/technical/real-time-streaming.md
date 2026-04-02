@@ -80,7 +80,9 @@ Defined in `src/api/schemas/streaming.py`:
 | `tool_call` | Tool invocation started | `tool_name`, `tool_input`, `message_id` |
 | `tool_result` | Tool returned result | `tool_name`, `tool_output`, `message_id` |
 | `error` | Error occurred | `error`, `tool_name?` |
-| `complete` | Generation finished | `slides`, `raw_html`, `replacement_info`, `metadata` |
+| `complete` | Generation finished | `slides`, `raw_html`, `replacement_info`, `metadata`, `experiment_url` |
+| `session_title` | Auto-generated session title | `session_title` |
+| `session_created` | New session created on first message | `session_id` |
 
 ```python
 class StreamEvent(BaseModel):
@@ -92,6 +94,12 @@ class StreamEvent(BaseModel):
     slides: Optional[Dict[str, Any]] = None
     error: Optional[str] = None
     message_id: Optional[int] = None
+    raw_html: Optional[str] = None
+    replacement_info: Optional[Dict[str, Any]] = None
+    metadata: Optional[Dict[str, Any]] = None
+    experiment_url: Optional[str] = None        # MLflow experiment URL
+    session_title: Optional[str] = None         # Auto-generated session title
+    session_id: Optional[str] = None            # Session ID (for session_created events)
     
     def to_sse(self) -> str:
         return f"event: {self.type.value}\ndata: {self.model_dump_json()}\n\n"
@@ -160,12 +168,36 @@ def generate_slides_streaming(self, question, session_id, callback_handler, slid
 4. Processes final result and yields `complete` event
 
 ```python
-def send_message_streaming(self, session_id, message, slide_context=None):
-    # Persist user message FIRST
-    session_manager.add_message(session_id, role="user", content=message)
+def send_message_streaming(
+    self,
+    session_id,
+    message,
+    slide_context=None,
+    request_id=None,
+    image_ids=None,
+    is_first_message_override=None,
+):
+    # Get or create session in database (inline — no separate method)
+    try:
+        db_session = session_manager.get_session(session_id)
+    except SessionNotFoundError:
+        db_session = session_manager.create_session(session_id=session_id)
     
-    # Ensure agent has hydrated chat history
-    self._ensure_agent_session(session_id, ...)
+    # Detect first message (async path uses is_first_message_override
+    # because the user message is already persisted before the job runs)
+    if is_first_message_override is not None:
+        is_first_message = is_first_message_override
+    else:
+        is_first_message = db_session.get("message_count", 0) == 0
+    
+    # Persist user message FIRST (skip if async path already did it)
+    if not request_id:
+        session_manager.add_message(session_id, role="user", content=message)
+    
+    # Build agent and hydrate chat history from DB
+    agent, session_data, experiment_url = self._build_agent_for_session(
+        session_id, db_session
+    )
     
     # Create callback handler with queue
     event_queue = queue.Queue()
@@ -188,6 +220,11 @@ def send_message_streaming(self, session_id, message, slide_context=None):
     # Yield final complete event with slides
     yield StreamEvent(type=COMPLETE, slides=slide_deck_dict, ...)
 ```
+
+**Key parameters:**
+- `request_id` – Links messages to an async chat request. When set, user message persistence is skipped (already done by the async endpoint).
+- `is_first_message_override` – Overrides DB-based first-message detection. The async path pre-persists the user message before the job runs, so the DB count is already incremented; the override preserves the correct value.
+- `image_ids` – Optional list of image IDs; when present, image context is injected into the message before agent execution.
 
 ### Chat History Hydration
 
@@ -465,9 +502,9 @@ if (message.tool_call) {
 |--------|------|---------|
 | `id` | INTEGER | Primary key |
 | `session_id` | INTEGER | FK to user_sessions |
-| `role` | VARCHAR | `user`, `assistant`, `tool` |
+| `role` | VARCHAR | `user`, `assistant`, `system` |
 | `content` | TEXT | Message content |
-| `message_type` | VARCHAR | `user_input`, `reasoning`, `tool_call`, `tool_result`, `llm_response` |
+| `message_type` | VARCHAR | `user_input`, `user_query`, `reasoning`, `tool_call`, `tool_result`, `llm_response`, `clarification`, `info`, `error` |
 | `metadata_json` | TEXT | JSON with `tool_name`, `tool_input` |
 | `request_id` | VARCHAR(64) | Links to async chat request (for polling) |
 | `created_at` | TIMESTAMP | Message timestamp |

@@ -194,18 +194,21 @@ All export options are accessible through a unified dropdown menu in the slide p
 - LLM (Databricks Claude Sonnet 4.5): Generates Python code that calls the Slides API
 
 **Process:**
-1. Admin uploads `credentials.json` for the profile (one-time setup per profile)
-2. User authorizes via Google OAuth popup (one-time per user per profile)
+1. Admin uploads `credentials.json` globally (one-time setup)
+2. User authorizes via Google OAuth popup (one-time per user)
 3. User clicks "Export to Google Slides"
-4. Backend builds authenticated API clients from encrypted DB records
-5. Creates a blank presentation via Slides API
-6. For each slide, LLM generates Python code to populate the slide via `batchUpdate`
-7. Code is sanitized and executed server-side
-8. Returns the presentation URL to the frontend
+4. Frontend calls `POST /api/export/google-slides` to initiate export
+5. Backend validates auth, fetches slides, builds HTML, and enqueues a background job; returns `job_id` immediately
+6. Background worker builds authenticated API clients from encrypted DB records
+7. Creates a blank presentation via Slides API
+8. For each slide, LLM generates Python code to populate the slide via `batchUpdate`; progress is updated after each slide
+9. Code is sanitized and executed server-side
+10. Frontend polls `GET /api/export/google-slides/poll/{job_id}` for status and progress
+11. When `status` is `completed`, the response includes `presentation_id` and `presentation_url`
 
 **Features:**
 - Produces editable Google Slides (not static images)
-- Per-profile credential storage (encrypted)
+- Global credential storage (encrypted)
 - Per-user OAuth tokens (multi-user safe)
 - LLM-powered layout with retry and fallback
 - Chart images uploaded to Google Drive and embedded
@@ -351,7 +354,7 @@ Potential improvements for export features:
 - [ ] Export quality presets (high/medium/low)
 - [x] Persistent job storage (survive server restarts) - **Implemented** (DB-backed ExportJob model)
 - [x] Google Slides export - **Implemented** (OAuth2, encrypted credential storage, LLM code-gen)
-- [ ] Google Slides async export with progress polling
+- [x] Google Slides async export with progress polling - **Implemented** (`POST` returns job_id, `GET .../poll/{job_id}` for status)
 
 ## Related Documentation
 

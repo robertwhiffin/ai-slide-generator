@@ -91,6 +91,7 @@ All endpoints use `get_user_client()` for OBO authentication.
 | `GET /api/tools/discover/mcp` | `client.connections.list()` | UC HTTP connections |
 | `GET /api/tools/discover/model-endpoints` | `client.serving_endpoints.list()` | Non-agent endpoints (excludes `agent/*` and `llm/v1/embeddings`) |
 | `GET /api/tools/discover/agent-bricks` | `client.serving_endpoints.list()` | Agent endpoints only (`task` starts with `agent/`) |
+| `GET /api/tools/available` *(deprecated)* | Combines Genie + MCP discovery | Legacy combined listing — returns deprecation warning |
 
 ### Response Format
 
@@ -244,7 +245,7 @@ Column discovery reads from the **source table schema** (`client.tables.get(sour
 
 ## Testing
 
-- **944 unit tests** covering schemas, discovery, tool builders, agent factory, and existing functionality
+- **979 unit tests** covering schemas, discovery, tool builders, agent factory, and existing functionality
 - **Schema tests**: Serialization/deserialization round-trip for all 5 types
 - **Discovery tests**: Mock SDK calls, verify filtering, error handling for all endpoints
 - **Builder tests**: Verify LangChain tool creation, naming, description handling

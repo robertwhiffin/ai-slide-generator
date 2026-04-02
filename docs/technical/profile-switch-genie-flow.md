@@ -4,7 +4,7 @@ This document traces how session-bound agent configuration controls Genie space 
 
 ## Overview
 
-Configuration is now session-bound rather than profile-based. Each session carries an `agent_config` JSON column that determines which tools (Genie spaces, MCP servers) and settings the agent uses. Key behaviours:
+Configuration is now session-bound rather than profile-based. Each session carries an `agent_config` JSON column that determines which tools and settings the agent uses. Five tool types are supported: Genie Space, Agent Bricks, Vector Index, MCP Server, and Model Endpoint (see also [tools-expansion.md](tools-expansion.md)). Key behaviours:
 
 1. **Agent built per-request** from the session's `agent_config` via `build_agent_for_request()` in `src/services/agent_factory.py`
 2. **Multiple Genie spaces** supported per session, each with a unique tool name and its own `conversation_id`
@@ -12,6 +12,8 @@ Configuration is now session-bound rather than profile-based. Each session carri
 4. **Profiles are optional snapshots** -- save a session's config as a profile, or load a profile into a session
 
 ### Agent Config Schema
+
+Defined in `src/api/schemas/agent_config.py` as `AgentConfig`:
 
 ```json
 {
@@ -27,9 +29,23 @@ Configuration is now session-bound rather than profile-based. Each session carri
   "slide_style_id": 3,
   "deck_prompt_id": 7,
   "system_prompt": null,
-  "slide_editing_instructions": null
+  "slide_editing_instructions": "Always use bullet points..."
 }
 ```
+
+`AgentConfig.tools` is a discriminated union (`ToolEntry`) keyed on the `type` field. The five tool type schemas:
+
+| Type | Discriminator | Key Fields | Description |
+|------|--------------|------------|-------------|
+| `genie` | `GenieTool` | `space_id`, `space_name`, `description?`, `conversation_id?` | Native Genie space tool |
+| `mcp` | `MCPTool` | `connection_name`, `server_name`, `description?`, `config?` | MCP server via UC HTTP connections |
+| `vector_index` | `VectorIndexTool` | `endpoint_name`, `index_name`, `description?`, `columns?`, `num_results` | Vector search index for similarity search |
+| `model_endpoint` | `ModelEndpointTool` | `endpoint_name`, `endpoint_type?`, `description?` | Foundation models and custom ML endpoints |
+| `agent_bricks` | `AgentBricksTool` | `endpoint_name`, `description?` | Knowledge assistants and supervisor agents |
+
+A model validator on `AgentConfig` prevents duplicate tools (keyed by type + primary identifier).
+
+The `slide_editing_instructions` field provides custom instructions that guide the agent when editing slides (e.g. formatting preferences, style rules).
 
 ---
 
@@ -40,7 +56,7 @@ Configuration is now session-bound rather than profile-based. Each session carri
 **Component:** `AgentConfigBar`
 
 The AgentConfigBar displays the session's current tool list as chips. Users can:
-- Add Genie spaces or MCP servers from the tool discovery endpoint
+- Add tools (Genie spaces, Agent Bricks, Vector Indexes, MCP servers, Model Endpoints) from the tool discovery endpoint
 - Remove tools from the session
 - View Genie conversation links directly from tool chips
 
@@ -54,16 +70,23 @@ Changes call the agent config API endpoints to update the session.
 
 Replaces the old `ProfileContext`. Provides:
 - `agentConfig` -- current session's agent configuration
-- `updateTools()` -- add/remove tools via `PATCH /api/sessions/:id/agent-config/tools`
-- `updateConfig()` -- full config update via `PUT /api/sessions/:id/agent-config`
-- `loadProfile()` -- load a saved profile via `POST /api/sessions/:id/load-profile/:profile_id`
-- `saveAsProfile()` -- snapshot config via `POST /api/profiles/save-from-session/:session_id`
+- `updateConfig(config)` -- full config update via `PUT /api/sessions/:id/agent-config` (optimistic update with revert on failure)
+- `addTool(tool)` / `removeTool(tool)` -- convenience mutators that build an updated config and call `updateConfig()`
+- `updateTool(spaceId, updates)` -- update fields on a Genie tool by space ID
+- `updateToolEntry(tool)` -- replace a tool entry in-place, matched by type + primary key
+- `setStyle(styleId)` / `setDeckPrompt(promptId)` -- update style and prompt selections
+- `loadProfile(profileId)` -- load a saved profile via `POST /api/sessions/:id/load-profile/:profile_id`
+- `saveAsProfile(name, description?)` -- snapshot config via `POST /api/profiles/save-from-session/:session_id`
+- `refreshConfig()` -- re-fetch config from backend
+- `isPreSession` -- whether the context is operating in pre-session (localStorage) mode
+
+All tool mutations flow through `updateConfig()`. There is no separate `updateTools()` export.
 
 ---
 
 ### 3. Backend: Agent Config Endpoints
 
-**Routes:** `src/api/routes/sessions.py` (agent-config sub-routes)
+**Routes:** `src/api/routes/agent_config.py`
 
 | Method | Path | Purpose |
 |--------|------|---------|
