@@ -112,7 +112,7 @@ fi
 
 # Note: Environment names must match keys in config/deployment.yaml
 # Add new environments to the regex below when adding to deployment.yaml
-if [[ ! "$ENV" =~ ^(development|staging|production|test|kholoud-dev)$ ]]; then
+if [[ ! "$ENV" =~ ^(development|staging|production|test)$ ]]; then
     echo -e "${RED}Invalid environment: $ENV${NC}"
     echo "   Check config/deployment.yaml for valid environment names"
     exit 1
