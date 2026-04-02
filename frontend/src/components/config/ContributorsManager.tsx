@@ -185,7 +185,7 @@ export const ContributorsManager: React.FC<ContributorsManagerProps> = ({
       <div>
         <h3 className="text-lg font-medium text-gray-900">Share Profile</h3>
         <p className="text-sm text-gray-500 mt-1">
-          Add users or groups from your Databricks workspace who can access this profile.
+          Add users from your Databricks workspace who can access this profile.
         </p>
       </div>
 
@@ -216,7 +216,7 @@ export const ContributorsManager: React.FC<ContributorsManagerProps> = ({
               type="text"
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
-              placeholder="Search users or groups..."
+              placeholder="Search users..."
               className="w-full pl-10 pr-3 py-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
               disabled={addingContributor}
             />
@@ -285,7 +285,7 @@ export const ContributorsManager: React.FC<ContributorsManagerProps> = ({
         {/* No results */}
         {searchQuery.length >= 2 && !searching && searchResults.length === 0 && (
           <p className="mt-2 text-sm text-gray-500 text-center py-2">
-            No users or groups found matching "{searchQuery}"
+            No users found matching "{searchQuery}"
           </p>
         )}
       </div>
