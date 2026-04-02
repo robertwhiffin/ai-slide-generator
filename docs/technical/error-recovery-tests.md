@@ -12,7 +12,7 @@ The error recovery test suite validates that the system handles failures gracefu
 
 | File | Test Count | Purpose |
 |------|------------|---------|
-| `tests/unit/test_error_recovery.py` | ~28 | LLM, Genie, DB errors, state recovery |
+| `tests/unit/test_error_recovery.py` | 30 | LLM, Genie, DB errors, state recovery, save points |
 
 ---
 
@@ -148,16 +148,17 @@ tests/unit/test_error_recovery.py::TestGracefulDegradation
 
 | Test | Scenario | Validation |
 |------|----------|------------|
-| `test_agent_works_without_genie` | `genie = None` | Session created, tools empty |
+| `test_agent_works_without_genie` | `genie = None` | Session created, only `search_images` tool |
 | `test_mlflow_failure_doesnt_break_agent` | MLflow unavailable | Agent initializes normally |
 | `test_genie_failure_in_tool_propagates_error` | Genie tool fails | `GenieToolError` propagated |
 
 **Prompt-Only Mode:**
 ```python
-# Without Genie, agent works but has no tools
+# Without Genie, agent works but only has image search tool
 agent = SlideGeneratorAgent()  # genie = None
 tools = agent._create_tools_for_session(session_id)
-assert len(tools) == 0  # No Genie tool available
+assert len(tools) == 1  # Only search_images tool available
+assert tools[0].name == "search_images"
 ```
 
 ---
@@ -186,6 +187,32 @@ from src.services.tools import GenieToolError
 
 ---
 
+### 3.7 Save Point Error Recovery Tests
+
+**Goal:** Validate that save point failures do not corrupt or lose the current deck state.
+
+```
+tests/unit/test_error_recovery.py::TestSavePointErrorRecovery
+```
+
+| Test | Scenario | Validation |
+|------|----------|------------|
+| `test_save_point_failure_does_not_lose_deck` | Version creation fails during save | Deck remains intact in cache |
+| `test_restore_failure_preserves_current_state` | DB read fails during reload | Cache cleared, error propagated (caller handles) |
+
+**Key Behavior:**
+```python
+# Save point failure: deck stays in cache even if version creation throws
+service.create_save_point(session_id, "Test save point")  # Raises
+assert session_id in service._deck_cache  # Deck still there
+
+# Restore failure: cache is cleared, error propagated to caller
+service.reload_deck_from_database(session_id)  # Raises
+assert session_id not in service._deck_cache  # Cache cleared
+```
+
+---
+
 ## 4. Test Infrastructure
 
 ### Mock Settings Fixtures
@@ -195,19 +222,41 @@ from src.services.tools import GenieToolError
 def mock_settings():
     """Mock settings for testing."""
     settings = Mock()
-    settings.llm.endpoint = "test-endpoint"
-    settings.llm.timeout = 120
+    settings.profile_name = "test-profile"
+    settings.profile_id = 1
+    settings.prompts = {
+        "system_prompt": "You are a test assistant.",
+        "slide_style": "/* Test slide style */",
+    }
     settings.genie = Mock()
     settings.genie.space_id = "test-space-id"
+    settings.genie.description = "Test Genie space"
     return settings
 
 @pytest.fixture
 def mock_settings_no_genie():
     """Mock settings without Genie for prompt-only mode."""
     settings = Mock()
-    # ... same as above ...
+    settings.profile_name = "test-profile"
+    settings.profile_id = 1
+    settings.prompts = {
+        "system_prompt": "You are a test assistant.",
+        "slide_style": "/* Test slide style */",
+    }
     settings.genie = None  # No Genie
     return settings
+```
+
+### Mock Genie Client
+
+```python
+@pytest.fixture
+def mock_genie_client():
+    """Mock Genie client."""
+    with patch("src.services.tools.genie_tool.get_user_client") as mock_get_client:
+        client = MagicMock()
+        mock_get_client.return_value = client
+        yield client
 ```
 
 ### Agent with All Mocks
@@ -216,8 +265,27 @@ def mock_settings_no_genie():
 @pytest.fixture
 def agent_with_mocks(mock_settings, mock_client, mock_mlflow, mock_langchain_components):
     """Create agent with all dependencies mocked."""
-    with patch("src.services.agent.get_settings") as mock_get_settings:
-        # ... many patches ...
+    with patch("src.services.agent.get_settings") as mock_get_settings, patch(
+        "src.services.agent.get_databricks_client"
+    ) as mock_get_client, patch(
+        "src.services.agent.initialize_genie_conversation"
+    ) as mock_init_genie, patch(
+        "src.services.agent.get_current_username"
+    ) as mock_get_username, patch(
+        "src.services.agent.get_service_principal_folder"
+    ) as mock_get_sp_folder, patch(
+        "src.services.agent.get_system_client"
+    ) as mock_get_system, patch(
+        "src.services.agent.get_user_client"
+    ) as mock_get_user:
+        mock_get_settings.return_value = mock_settings
+        mock_get_client.return_value = mock_client
+        mock_init_genie.return_value = "test-genie-conv-id"
+        mock_get_username.return_value = "test-user@example.com"
+        mock_get_sp_folder.return_value = None  # Local dev mode
+        mock_get_system.return_value = mock_client
+        mock_get_user.return_value = mock_client
+
         agent = SlideGeneratorAgent()
         return agent
 ```

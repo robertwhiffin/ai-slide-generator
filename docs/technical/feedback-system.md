@@ -8,7 +8,7 @@ AI-powered feedback collection widget and periodic satisfaction survey with repo
 
 - **Backend:** FastAPI router (`src/api/routes/feedback.py`), feedback service (`src/api/services/feedback_service.py`), SQLAlchemy models (`src/database/models/feedback.py`)
 - **Frontend:** React components in `frontend/src/components/Feedback/`, survey trigger hook (`frontend/src/hooks/useSurveyTrigger.ts`)
-- **LLM:** `ChatDatabricks` via `databricks_langchain` — defaults to `databricks-gpt-oss-20b`, overridable with `FEEDBACK_LLM_ENDPOINT` env var
+- **LLM:** `ChatDatabricks` via `databricks_langchain` — defaults to `databricks-gemma-3-12b`, overridable with `FEEDBACK_LLM_ENDPOINT` env var
 - **Storage:** PostgreSQL tables `feedback_conversations` and `survey_responses`
 - **Schemas:** `src/api/schemas/feedback.py` (Pydantic request/response validation)
 
@@ -129,7 +129,7 @@ The frontend sends the full conversation history each call (stateless on the ser
 1. User clicks the floating feedback button (bottom-right corner).
 2. `FeedbackPopover` opens with a greeting message.
 3. User types feedback. Frontend sends full conversation to `POST /api/feedback/chat`.
-4. Backend prepends the system prompt and calls `ChatDatabricks` (default: `databricks-gpt-oss-20b`).
+4. Backend prepends the system prompt and calls `ChatDatabricks` (default: `databricks-gemma-3-12b`).
 5. AI asks up to 2 clarifying questions, then produces a structured `**Summary**` block.
 6. Frontend detects `summary_ready: true` and displays a "Submit Feedback" button with an optional correction text box.
 7. User clicks Submit → `POST /api/feedback/submit` stores the summary + raw conversation in `feedback_conversations`.
@@ -206,7 +206,7 @@ The feedback chat uses a separate LLM endpoint from slide generation to keep res
 
 | Setting | Value |
 |---------|-------|
-| Default endpoint | `databricks-gpt-oss-20b` |
+| Default endpoint | `databricks-gemma-3-12b` |
 | Override | `FEEDBACK_LLM_ENDPOINT` env var |
 | Temperature | 0.3 (chat), 0.2 (report summary) |
 | Max tokens | 500 (chat), 800 (report summary) |

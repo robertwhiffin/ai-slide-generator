@@ -12,7 +12,7 @@ The API routes test suite validates the HTTP layer of the FastAPI backend. These
 
 | File | Test Count | Purpose |
 |------|------------|---------|
-| `tests/integration/test_api_routes.py` | ~70 | HTTP layer validation for all API endpoints |
+| `tests/integration/test_api_routes.py` | 73 | HTTP layer validation for all API endpoints |
 
 ---
 
@@ -65,16 +65,20 @@ tests/integration/test_api_routes.py::TestChatEndpoints
 
 | Test | Endpoint | Scenario | Expected |
 |------|----------|----------|----------|
-| `test_chat_requires_session_id` | POST `/api/chat` | Missing session_id | 422 |
+| `test_chat_without_session_id_creates_session` | POST `/api/chat` | Missing session_id | 200 (session auto-created) |
 | `test_chat_requires_message` | POST `/api/chat` | Missing message | 422 |
 | `test_chat_empty_message_rejected` | POST `/api/chat` | Empty message | 422 |
+| `test_chat_empty_session_id_creates_session` | POST `/api/chat` | Empty string session_id | 200 (session auto-created) |
 | `test_chat_session_not_found` | POST `/api/chat` | Invalid session_id | 404 |
 | `test_chat_session_busy` | POST `/api/chat` | Session locked | 409 |
 | `test_chat_success` | POST `/api/chat` | Valid request | 200 |
 | `test_chat_with_slide_context` | POST `/api/chat` | With slide selection | 200 |
 | `test_chat_invalid_slide_context_non_contiguous` | POST `/api/chat` | Non-contiguous indices | 422 |
+| `test_chat_invalid_slide_context_mismatch_length` | POST `/api/chat` | Indices/htmls length mismatch | 422 |
 | `test_chat_internal_error` | POST `/api/chat` | Service throws | 500 |
+| `test_health_check` | GET `/api/health` | Health check | 200 (`{"status": "healthy"}`) |
 | `test_chat_async_submit` | POST `/api/chat/async` | Async job creation | 200 + request_id |
+| `test_chat_async_session_busy` | POST `/api/chat/async` | Session locked | 409 |
 | `test_chat_poll_not_found` | GET `/api/chat/poll/{id}` | Unknown request | 404 |
 | `test_chat_poll_success` | GET `/api/chat/poll/{id}` | Valid request | 200 + status |
 
@@ -96,15 +100,24 @@ tests/integration/test_api_routes.py::TestSlideEndpoints
 | `test_get_slides_not_found` | GET `/api/slides` | No slides exist | 404 |
 | `test_get_slides_success` | GET `/api/slides` | Valid session | 200 |
 | `test_reorder_slides_invalid_order_type` | PUT `/api/slides/reorder` | new_order not array | 422 |
+| `test_reorder_slides_missing_new_order` | PUT `/api/slides/reorder` | Missing new_order field | 422 |
 | `test_reorder_slides_session_busy` | PUT `/api/slides/reorder` | Session locked | 409 |
 | `test_reorder_slides_success` | PUT `/api/slides/reorder` | Valid reorder | 200 |
+| `test_reorder_slides_validation_error` | PUT `/api/slides/reorder` | Invalid slide indices | 400 |
 | `test_update_slide_success` | PATCH `/api/slides/{index}` | Valid update | 200 |
 | `test_update_slide_session_busy` | PATCH `/api/slides/{index}` | Session locked | 409 |
+| `test_update_slide_validation_error` | PATCH `/api/slides/{index}` | Index out of range | 400 |
 | `test_delete_slide_success` | DELETE `/api/slides/{index}` | Valid delete | 200 |
+| `test_delete_slide_session_busy` | DELETE `/api/slides/{index}` | Session locked | 409 |
+| `test_delete_slide_validation_error` | DELETE `/api/slides/{index}` | Invalid index | 400 |
 | `test_duplicate_slide_success` | POST `/api/slides/{index}/duplicate` | Valid duplicate | 200 |
+| `test_duplicate_slide_session_busy` | POST `/api/slides/{index}/duplicate` | Session locked | 409 |
+| `test_duplicate_slide_validation_error` | POST `/api/slides/{index}/duplicate` | Invalid index | 400 |
 | `test_update_slide_verification_success` | PATCH `/api/slides/{index}/verification` | Valid verification | 200 |
+| `test_update_slide_verification_no_deck` | PATCH `/api/slides/{index}/verification` | No deck exists | 404 |
+| `test_update_slide_verification_index_out_of_range` | PATCH `/api/slides/{index}/verification` | Invalid index | 400 |
 
-**Key Invariant:** All mutating operations require session lock acquisition.
+**Key Invariant:** All mutating operations require session lock acquisition. Validation errors from the service layer return 400 (distinct from 422 request validation).
 
 ---
 
@@ -119,20 +132,27 @@ tests/integration/test_api_routes.py::TestSessionEndpoints
 | Test | Endpoint | Scenario | Expected |
 |------|----------|----------|----------|
 | `test_list_sessions_success` | GET `/api/sessions` | List all | 200 |
-| `test_list_sessions_with_user_filter` | GET `/api/sessions?user_id=` | With filter | 200 |
-| `test_list_sessions_limit_validation` | GET `/api/sessions?limit=` | Invalid limit | 422 |
-| `test_create_session_success` | POST `/api/sessions` | Create new | 200 |
-| `test_create_session_with_title` | POST `/api/sessions` | With title | 200 |
+| `test_list_sessions_with_limit` | GET `/api/sessions?limit=` | With valid limit | 200 |
+| `test_list_sessions_limit_validation` | GET `/api/sessions?limit=` | Invalid limit (0 or 101) | 422 |
+| `test_create_session_sets_created_by` | POST `/api/sessions` | Injects created_by from user context | 200 |
+| `test_create_session_with_title` | POST `/api/sessions` | With optional title | 200 |
+| `test_create_session_internal_error` | POST `/api/sessions` | Service throws | 500 |
+| `test_list_sessions_filters_by_current_user` | GET `/api/sessions` | Only returns authenticated user's sessions | 200 |
 | `test_get_session_success` | GET `/api/sessions/{id}` | Valid session | 200 |
 | `test_get_session_not_found` | GET `/api/sessions/{id}` | Invalid id | 404 |
 | `test_update_session_success` | PATCH `/api/sessions/{id}` | Rename | 200 |
+| `test_update_session_not_found` | PATCH `/api/sessions/{id}` | Invalid id | 404 |
 | `test_delete_session_success` | DELETE `/api/sessions/{id}` | Delete | 200 |
+| `test_delete_session_not_found` | DELETE `/api/sessions/{id}` | Invalid id | 404 |
 | `test_get_session_messages_success` | GET `/api/sessions/{id}/messages` | Get messages | 200 |
+| `test_get_session_messages_not_found` | GET `/api/sessions/{id}/messages` | Invalid id | 404 |
 | `test_get_session_slides_success` | GET `/api/sessions/{id}/slides` | Get slides | 200 |
+| `test_get_session_slides_not_found` | GET `/api/sessions/{id}/slides` | Invalid id | 404 |
 | `test_cleanup_expired_sessions` | POST `/api/sessions/cleanup` | Cleanup | 200 |
 | `test_export_session_success` | POST `/api/sessions/{id}/export` | Export | 200 |
+| `test_export_session_not_found` | POST `/api/sessions/{id}/export` | Invalid id | 404 |
 
-**Limit Validation:** `limit` parameter must be between 1 and 100.
+**Limit Validation:** `limit` parameter must be between 1 and 100. Session listing filters by authenticated user via `created_by`.
 
 ---
 
@@ -152,8 +172,12 @@ tests/integration/test_api_routes.py::TestVerificationEndpoints
 | `test_verify_slide_index_out_of_range` | POST `/api/verification/{index}` | Invalid index | 404 |
 | `test_verify_slide_no_genie_data` | POST `/api/verification/{index}` | No source data | 200 (unknown) |
 | `test_submit_feedback_success` | POST `/api/verification/{index}/feedback` | Submit feedback | 200 |
+| `test_submit_feedback_without_trace_id` | POST `/api/verification/{index}/feedback` | Missing trace_id (skipped) | 200 (`linked_to_trace: false`) |
 | `test_get_genie_link_success` | GET `/api/verification/genie-link` | Has conversation | 200 |
 | `test_get_genie_link_no_conversation` | GET `/api/verification/genie-link` | No conversation | 200 (false) |
+| `test_get_genie_link_session_not_found` | GET `/api/verification/genie-link` | Invalid session | 404 |
+
+**Note:** `test_submit_feedback_without_trace_id` is currently skipped (`@pytest.mark.skip`) due to MLflow mocking complexity.
 
 **Verification Result:** Returns `rating: "unknown"` when no Genie data available.
 
@@ -216,7 +240,9 @@ These invariants must NEVER be violated:
 | Code | Meaning | When Used |
 |------|---------|-----------|
 | 200 | Success | Successful operation |
+| 400 | Bad Request | Service-layer validation errors (invalid indices, out-of-range) |
 | 404 | Not Found | Session, slide, or request not found |
+| 405 | Method Not Allowed | Unsupported HTTP method on endpoint |
 | 409 | Conflict | Session is busy (locked by another request) |
 | 422 | Validation Error | Missing/invalid fields, constraint violations |
 | 500 | Internal Error | Unexpected service failures |

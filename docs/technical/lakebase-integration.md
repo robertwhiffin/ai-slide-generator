@@ -12,7 +12,7 @@ This document describes how the AI Slide Generator integrates with Databricks La
 | Database Module | `src/core/database.py` | SQLAlchemy engine, session management, auto-detection |
 | Deployment Library | `packages/databricks-tellr/databricks_tellr/deploy.py` | Orchestrates instance + app + schema creation |
 | Local Deploy Script | `scripts/deploy_local.py` | Local development deployment using locally-built wheels |
-| App Entrypoint | `packages/databricks-tellr-app/databricks_tellr_app/run.py` | `init_database()`, `run_migrations()`, `main()` |
+| App Entrypoint | `packages/databricks-tellr-app/databricks_tellr_app/run.py` | `init_db()` (via `database.py`), `main()` |
 | App Config Template | `packages/databricks-tellr/databricks_tellr/_templates/app.yaml.template` | Generated `app.yaml` with env var substitution |
 | Environment Config | `config/deployment.yaml` | Per-environment Lakebase settings |
 
@@ -78,16 +78,28 @@ Lakebase Instance (e.g., "ai-slide-generator-dev-db")
 ### Authentication Flow
 
 When a database resource is attached to a Databricks App:
-1. Databricks auto-injects `PGHOST` and `PGUSER` environment variables
+1. Databricks auto-injects `PGHOST` and `PGUSER` environment variables (provisioned), or the deployment sets `LAKEBASE_TYPE`, `LAKEBASE_PG_HOST`, and `LAKEBASE_ENDPOINT_NAME` (autoscaling)
 2. A Postgres role is created for the app's service principal
-3. The app generates short-lived OAuth tokens via `generate_database_credential()`
+3. The app generates short-lived OAuth tokens via `_generate_lakebase_token()`
+
+Token generation routes to the correct SDK API based on `LAKEBASE_TYPE`:
 
 ```python
-# Token generation (database.py)
-cred = ws.database.generate_database_credential(
-    request_id=str(uuid.uuid4()),
-    instance_names=[instance_name],
-)
+# Token generation (database.py – _generate_lakebase_token)
+lakebase_type = _get_lakebase_type()   # reads LAKEBASE_TYPE env var
+
+if lakebase_type == "autoscaling":
+    # Autoscaling Lakebase – uses ws.postgres API
+    endpoint_name = os.getenv("LAKEBASE_ENDPOINT_NAME")
+    cred = ws.postgres.generate_database_credential(endpoint=endpoint_name)
+else:
+    # Provisioned Lakebase – uses ws.database API
+    instance_name = os.getenv("LAKEBASE_INSTANCE")
+    cred = ws.database.generate_database_credential(
+        request_id=str(uuid.uuid4()),
+        instance_names=[instance_name],
+    )
+
 password = cred.token  # Use as PostgreSQL password
 ```
 
@@ -132,10 +144,25 @@ OAuth tokens expire after 1 hour. To maintain continuous database connectivity, 
 **Key Functions** (in `src/core/database.py`):
 - `start_token_refresh()` - Start background refresh task (called in lifespan startup)
 - `stop_token_refresh()` - Stop background task (called in lifespan shutdown)
-- `is_lakebase_environment()` - Check if running in Lakebase environment
+- `is_lakebase_environment()` - Check if running in Lakebase environment (checks `LAKEBASE_TYPE` first, falls back to `PGHOST` and `PGUSER`)
 - `_refresh_token_background()` - Async task that refreshes every 50 minutes
 
 **Reference**: [Databricks Apps Cookbook - Lakebase Connection](https://apps-cookbook.dev/docs/fastapi/getting_started/lakebase_connection/)
+
+### Provisioned vs. Autoscaling Lakebase
+
+The codebase supports two Lakebase deployment modes controlled by the `LAKEBASE_TYPE` environment variable:
+
+| Aspect | Provisioned | Autoscaling |
+|--------|-------------|-------------|
+| `LAKEBASE_TYPE` | _(empty or `provisioned`)_ | `autoscaling` |
+| Host source | `PGHOST` (auto-injected) | `LAKEBASE_PG_HOST` (set in app.yaml) |
+| User source | `PGUSER` (auto-injected) | `PGUSER` or resolved via SDK |
+| Token API | `ws.database.generate_database_credential(instance_names=[...])` | `ws.postgres.generate_database_credential(endpoint=...)` |
+| Required env vars | `PGHOST`, `PGUSER`, `LAKEBASE_INSTANCE` | `LAKEBASE_TYPE`, `LAKEBASE_PG_HOST`, `LAKEBASE_ENDPOINT_NAME` |
+| SDK import | `databricks.sdk.service.database` | `databricks.sdk.service.postgres` (optional; guarded by try/except) |
+
+All `lakebase.py` helper functions — `generate_lakebase_credential()`, `get_lakebase_connection_info()`, `get_lakebase_connection_url()`, `setup_lakebase_schema()`, and `initialize_lakebase_tables()` — accept `endpoint_name`, `host`, and `lakebase_type` parameters so callers can route to the autoscaling path.
 
 ---
 
@@ -144,15 +171,16 @@ OAuth tokens expire after 1 hour. To maintain continuous database connectivity, 
 | Module | Responsibility | SDK/API Used |
 |--------|---------------|--------------|
 | `get_or_create_lakebase_instance()` | Create/get OLTP instance | `ws.database.create_database_instance_and_wait()` |
-| `generate_lakebase_credential()` | Generate OAuth token | `ws.database.generate_database_credential()` |
-| `get_lakebase_connection_info()` | Build connection params | `ws.database.get_database_instance()` |
+| `generate_lakebase_credential()` | Generate OAuth token | `ws.database` (provisioned) or `ws.postgres` (autoscaling) |
+| `get_lakebase_connection_info()` | Build connection params | `ws.database.get_database_instance()` or pre-resolved host |
 | `get_lakebase_connection_url()` | Build SQLAlchemy URL | Combines above functions |
 | `setup_lakebase_schema()` | Create schema + grant perms | Direct SQL via psycopg2 |
 | `initialize_lakebase_tables()` | Create SQLAlchemy tables | `Base.metadata.create_all()` |
-| `_get_database_url()` (database.py) | Auto-detect environment | Checks `PGHOST` env var |
+| `_get_database_url()` (database.py) | Auto-detect environment | Checks `LAKEBASE_TYPE`, `PGHOST` env vars |
+| `_generate_lakebase_token()` (database.py) | Generate fresh OAuth token | Routes between `ws.postgres` and `ws.database` |
 | `start_token_refresh()` (database.py) | Start background token refresh | asyncio task |
 | `stop_token_refresh()` (database.py) | Stop background token refresh | asyncio task cancellation |
-| `is_lakebase_environment()` (database.py) | Check for Lakebase env | Environment variables |
+| `is_lakebase_environment()` (database.py) | Check for Lakebase env | `LAKEBASE_TYPE` first, then `PGHOST` + `PGUSER` |
 
 ---
 
@@ -196,22 +224,31 @@ When deploying with `scripts/deploy_local.sh create --env development --profile 
 
 ## Runtime Connection Detection
 
-`database.py` auto-detects the environment:
+`database.py` auto-detects the environment. The URL is built **without** a password;
+the password is injected dynamically via SQLAlchemy's `do_connect` event so that
+expired tokens are replaced transparently (see _Automatic Token Refresh_ above).
 
 ```python
 def _get_database_url() -> str:
     # Priority 1: Explicit DATABASE_URL
     if os.getenv("DATABASE_URL"):
         return os.getenv("DATABASE_URL")
-    
-    # Priority 2: Lakebase (PGHOST auto-set by Databricks)
+
+    # Priority 2a: Autoscaling Lakebase (LAKEBASE_TYPE=autoscaling)
+    if _get_lakebase_type() == "autoscaling":
+        pg_host = os.getenv("LAKEBASE_PG_HOST")       # required
+        pg_user = os.getenv("PGUSER") or ws.current_user.me().user_name
+        return f"postgresql://{pg_user}@{pg_host}:5432/databricks_postgres?sslmode=require"
+
+    # Priority 2b: Provisioned Lakebase (PGHOST auto-set by Databricks)
     if os.getenv("PGHOST") and os.getenv("PGUSER"):
-        token = _get_lakebase_token()
-        return f"postgresql://{user}:{token}@{host}:5432/databricks_postgres"
-    
+        return f"postgresql://{pg_user}@{pg_host}:5432/databricks_postgres?sslmode=require"
+
     # Priority 3: Local development
     return "postgresql://localhost/ai_slide_generator"
 ```
+
+Note: both Lakebase branches also append `&options=-csearch_path%3D{schema}` when `LAKEBASE_SCHEMA` is set.
 
 ---
 
@@ -232,9 +269,12 @@ environments:
 
 | Variable | Source | Description |
 |----------|--------|-------------|
-| `PGHOST` | Auto-injected | Lakebase DNS hostname |
-| `PGUSER` | Auto-injected | Service principal as Postgres role |
-| `LAKEBASE_INSTANCE` | Injected by deploy.py | Instance name for credential generation |
+| `LAKEBASE_TYPE` | app.yaml / deploy.py | `autoscaling` or `provisioned` (empty = auto-detect via `PGHOST`) |
+| `PGHOST` | Auto-injected (provisioned) | Lakebase DNS hostname |
+| `PGUSER` | Auto-injected (provisioned) | Service principal as Postgres role |
+| `LAKEBASE_INSTANCE` | app.yaml / deploy.py | Instance name for credential generation (provisioned) |
+| `LAKEBASE_PG_HOST` | app.yaml / deploy.py | PostgreSQL host (autoscaling only) |
+| `LAKEBASE_ENDPOINT_NAME` | app.yaml / deploy.py | Full endpoint resource name (autoscaling only) |
 | `LAKEBASE_SCHEMA` | app.yaml | Schema name (default: `app_data`) |
 
 ---
@@ -295,7 +335,7 @@ python scripts/init_database.py
 ## Extension Guidance
 
 - **Adding new tables**: Define in `src/database/models/`, they'll be created on next deployment via `init_db()` → `Base.metadata.create_all()`
-- **Adding columns to existing tables**: `create_all()` does **not** alter existing tables. Add an idempotent `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` statement to `run_migrations()` in `packages/databricks-tellr-app/databricks_tellr_app/run.py`. This runs on every app startup.
+- **Adding columns to existing tables**: `create_all()` does **not** alter existing tables. Add an idempotent `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` statement to `_run_migrations()` in `src/core/database.py`. This is called by `init_db()` on every app startup (via `run.py`).
 - **Changing schema name**: Update `deployment.yaml` and redeploy (creates new schema)
 - **Scaling capacity**: Update `capacity` in deployment.yaml (CU_1 → CU_8)
 - **Multiple environments**: Each env gets its own instance (dev, staging, prod)
