@@ -115,6 +115,7 @@ async def process_chat_request(request_id: str, payload: dict) -> None:
                         "raw_html": event.raw_html,
                         "replacement_info": event.replacement_info,
                         "experiment_url": event.experiment_url,
+                        "metadata": event.metadata,
                     }
                 elif event.type == StreamEventType.SESSION_TITLE:
                     session_title = event.session_title
@@ -136,6 +137,7 @@ async def process_chat_request(request_id: str, payload: dict) -> None:
                         "raw_html": event.raw_html,
                         "replacement_info": event.replacement_info,
                         "experiment_url": event.experiment_url,
+                        "metadata": event.metadata,
                     }
                 elif event.type == StreamEventType.SESSION_TITLE:
                     session_title = event.session_title
