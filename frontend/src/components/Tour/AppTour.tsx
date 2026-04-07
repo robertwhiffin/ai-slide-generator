@@ -17,6 +17,23 @@ function navigateToMain(): Promise<void> {
   });
 }
 
+const EXAMPLE_PROMPT = 'Create 3 slides about the benefits of AI in modern healthcare, with a title slide, key advantages, and future outlook.';
+
+function fillChatInput(): Promise<void> {
+  return new Promise(resolve => {
+    const textarea = document.querySelector<HTMLTextAreaElement>('[data-testid="chat-input"]');
+    if (textarea) {
+      const nativeInputValueSetter = Object.getOwnPropertyDescriptor(
+        window.HTMLTextAreaElement.prototype, 'value'
+      )?.set;
+      nativeInputValueSetter?.call(textarea, EXAMPLE_PROMPT);
+      textarea.dispatchEvent(new Event('input', { bubbles: true }));
+      textarea.focus();
+    }
+    setTimeout(resolve, 100);
+  });
+}
+
 function expandAgentConfig(): Promise<void> {
   return new Promise(resolve => {
     const toggle = document.querySelector<HTMLElement>('[data-tour="agent-config-toggle"]');
@@ -174,10 +191,11 @@ const TOUR_STEPS: Step[] = [
     target: '[data-tour="chat-panel"]',
     title: 'Chat Panel',
     content:
-      'Type your request here — for example, "Create a 5-slide deck about Q3 results with a revenue chart." ' +
-      'The AI generates a full deck in response. Continue the conversation to refine individual slides, add new ones, or change the style.',
+      'Type your request here and the AI generates a full deck in response. Continue the conversation to refine individual slides, add new ones, or change the style.\n\n' +
+      'We\'ve pre-filled an example prompt for you — just hit Enter after the tour to try it out!',
     placement: 'right',
     skipBeacon: true,
+    after: fillChatInput,
   },
   {
     target: '[data-tour="selection-ribbon"]',
@@ -233,7 +251,7 @@ const TOUR_STEPS: Step[] = [
     target: 'body',
     title: 'You\'re All Set!',
     content:
-      'That\'s the full tour. Start by typing a message in the chat panel to generate your first deck. ' +
+      'That\'s the full tour. We\'ve loaded an example prompt in the chat — just hit Enter to generate your first deck! ' +
       'You can replay this tour anytime from the "App Tour" button at the bottom of the sidebar.',
     placement: 'center',
     skipBeacon: true,
