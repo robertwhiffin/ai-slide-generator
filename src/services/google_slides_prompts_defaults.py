@@ -6,11 +6,19 @@ PRIMARY DIRECTIVE — HTML/CSS is your source of truth:
 - Extract ALL colors, font sizes, font weights, text colors, border colors from CSS/inline styles.
 - Faithfully reproduce the visual design. Fall back to defaults below only when CSS is silent.
 
+COLOR EXTRACTION:
+- Convert hex colors with hex_to_rgb: '#102025' → hex_to_rgb('#102025')
+- rgbColor accepts ONLY 'red', 'green', 'blue' (float 0-1). NEVER include 'alpha' — the API rejects it.
+- Gradients: use the first color stop only.
+- Preserve ALL badge, border, and highlight colors from CSS.
+
 OVERFLOW PREVENTION (CRITICAL — every element must obey):
 - NEVER place any element so that left + width > 9.6" or top + height > 5.4"
 - Before creating any element, calculate right_edge and bottom_edge. Reduce if out of bounds.
 - Text that would overflow: use SMALLER font, not a larger box.
+- When in doubt, use a SMALLER font size. Tight, compact slides look professional; overflowing text looks broken.
 - No overlapping — each element's top must be >= previous element's (top + height).
+- Always use the emu() helper for ALL position/size values — do not pass raw floats.
 
 FONT SIZE GUIDE (CRITICAL — maximums for 16:9):
 - Slide title:  22pt max (regular), 26pt (title slides), bold
@@ -24,6 +32,7 @@ FONT SIZE GUIDE (CRITICAL — maximums for 16:9):
 - Bullet items: 9pt
 - Captions:     7pt
 NEVER exceed these. When content is dense, go SMALLER.
+Always set font size explicitly on every text element you create.
 
 METRIC CARDS (.metric-card):
 - Create ROUND_RECTANGLE bg: card_id = 'card_' + str(uuid.uuid4())[:8]
@@ -65,7 +74,25 @@ TABLES (<table>):
 - updateTableCellProperties requires: 'tableRange': {'location': {'rowIndex': r, 'columnIndex': c}, 'rowSpan': 1, 'columnSpan': 1}
 - Headers: background from CSS (typically dark), text white, font 8pt bold
 - Cells: font 7-8pt, preserve colors, left-align text, right-align numbers
+- Badges: extract text and color from <span class="lob-badge"> or similar badge spans — preserve inline styling.
+- Row height: minimum 0.25" per row. Distribute column widths evenly or based on content.
+- Borders / striping: apply alternating row fills via updateTableCellProperties if the HTML has striped rows.
 - Position: within usable area, width ≤ 9.0"
+- CRITICAL: NEVER insertText with an empty string into a table cell — skip cells with no content.
+  Empty insertText causes "The object has no text" errors on subsequent updateTextStyle calls.
+- Example — fill one cell then style it:
+  requests.append({'insertText': {'objectId': table_id, 'cellLocation': {'rowIndex': r, 'columnIndex': c}, 'text': cell_text, 'insertionIndex': 0}})
+  requests.append({'updateTextStyle': {'objectId': table_id, 'cellLocation': {'rowIndex': r, 'columnIndex': c},
+    'textRange': {'type': 'ALL'}, 'style': {'fontSize': {'magnitude': 8, 'unit': 'PT'}}, 'fields': 'fontSize'}})
+
+BULLET / LIST ITEMS (<ul>, <ol>):
+- For each <li>, insertText the item text, then use createParagraphBullets (NOT updateParagraphStyle):
+  {'createParagraphBullets': {'objectId': id,
+    'textRange': {'type': 'FIXED_RANGE', 'startIndex': start, 'endIndex': end},
+    'bulletPreset': 'BULLET_DISC_CIRCLE_SQUARE'}}
+- CRITICAL: bulletPreset is ONLY valid inside createParagraphBullets. Do NOT put it inside updateParagraphStyle.
+- Ordered lists: use bulletPreset 'NUMBERED_DIGIT_ALPHA_ROMAN'.
+- To adjust indentation after bullets, use a separate updateParagraphStyle with indentStart/indentFirstLine.
 
 TITLE SLIDES (.title-slide class):
 - Title: left=1.0", top=1.6", width=8.0", height=0.9", CENTER aligned, font 26pt bold, white
@@ -103,6 +130,16 @@ HYPERLINKS (<a href="...">):
     'style': {'link': {'url': 'https://...'}}, 'fields': 'link'}}
 - CRITICAL: when using startIndex/endIndex, you MUST set 'type': 'FIXED_RANGE'. Without it the API returns a 400 error.
 - Track character offsets: after each insertText, the next text starts at the previous end index.
+- Example — two segments (normal text + linked text):
+  offset = 0
+  requests.append({'insertText': {'objectId': box_id, 'text': 'See details at ', 'insertionIndex': offset}})
+  offset += len('See details at ')
+  requests.append({'insertText': {'objectId': box_id, 'text': 'this link', 'insertionIndex': offset}})
+  requests.append({'updateTextStyle': {'objectId': box_id,
+    'textRange': {'type': 'FIXED_RANGE', 'startIndex': offset, 'endIndex': offset + len('this link')},
+    'style': {'link': {'url': 'https://...'}, 'underline': True,
+      'foregroundColor': {'opaqueColor': {'rgbColor': hex_to_rgb('#3B71AF')}}},
+    'fields': 'link,underline,foregroundColor'}})
 - Also style link text with underline and a blue/brand color to make links visible.
 
 API PATTERNS (CRITICAL — wrong nesting causes 400 errors):
@@ -111,11 +148,24 @@ API PATTERNS (CRITICAL — wrong nesting causes 400 errors):
       'shapeBackgroundFill': {'solidFill': {'color': {'rgbColor': hex_to_rgb(...)}}},
       'outline': {'propertyState': 'NOT_RENDERED'}
   }, 'fields': 'shapeBackgroundFill.solidFill.color,outline.propertyState'}}
+- updateParagraphStyle MUST nest inside 'style' (NOT 'paragraphStyle'):
+  {'updateParagraphStyle': {'objectId': id, 'textRange': {...},
+    'style': {'alignment': 'START'}, 'fields': 'alignment'}}
+- updateTextStyle MUST nest inside 'style' (NOT 'textStyle'):
+  {'updateTextStyle': {'objectId': id, 'textRange': {...},
+    'style': {'fontSize': {'magnitude': 10, 'unit': 'PT'}}, 'fields': 'fontSize'}}
 - textRange for full element styling: use {'type': 'ALL'} — no startIndex/endIndex.
 - textRange for partial styling (bold spans, hyperlinks): use {'type': 'FIXED_RANGE', 'startIndex': N, 'endIndex': M}.
 - Foreground color: {'opaqueColor': {'rgbColor': hex_to_rgb('#XXXXXX')}}
 - Page background: updatePageProperties, objectId=page_id,
   fields: 'pageBackgroundFill.solidFill.color'
+- NEVER reference an objectId before the request that creates it.
+- Batch request order MUST match dependency order: create shape before styling it.
+- NEVER insertText with an empty string — it causes downstream errors.
+
+ALLOWED IMPORTS:
+import os, json, uuid, re
+from googleapiclient.http import MediaFileUpload  # ONLY when uploading images
 
 EXECUTION:
 - ALL code MUST be inside the function body. Nothing at module level except imports and helpers.
