@@ -470,11 +470,37 @@ export const api = {
    */
   async getSlides(sessionId: string): Promise<{ session_id: string; slide_deck: SlideDeck | null }> {
     const response = await fetch(`${API_BASE_URL}/api/sessions/${sessionId}/slides`);
-    
+
     if (!response.ok) {
       throw new ApiError(response.status, 'Failed to fetch slides');
     }
-    
+
+    return response.json();
+  },
+
+  async createTourDemoDeck(): Promise<{ session_id: string; title: string }> {
+    const response = await fetch(`${API_BASE_URL}/api/tour/demo-deck`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+    });
+
+    if (!response.ok) {
+      throw new ApiError(response.status, 'Failed to create tour demo deck');
+    }
+
+    return response.json();
+  },
+
+  async addTourDemoSlides(sessionId: string): Promise<{ session_id: string; slide_count: number }> {
+    const response = await fetch(`${API_BASE_URL}/api/tour/demo-deck/${sessionId}/slides`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+    });
+
+    if (!response.ok) {
+      throw new ApiError(response.status, 'Failed to add tour demo slides');
+    }
+
     return response.json();
   },
 
