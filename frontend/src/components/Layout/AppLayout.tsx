@@ -291,6 +291,31 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
     return () => window.removeEventListener('tour:navigate-main', handler);
   }, [navigate]);
 
+  // Allow the app tour to load a pre-built demo deck via a custom DOM event
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const { sessionId } = (e as CustomEvent).detail;
+      if (sessionId) {
+        setViewMode('main');
+        navigate(`/sessions/${sessionId}/edit`);
+      }
+    };
+    window.addEventListener('tour:load-demo-deck', handler);
+    return () => window.removeEventListener('tour:load-demo-deck', handler);
+  }, [navigate]);
+
+  // After tour phase 2 adds slides+messages, re-navigate to reload everything
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const { sessionId: sid } = (e as CustomEvent).detail;
+      if (!sid) return;
+      navigate('/', { replace: true });
+      setTimeout(() => navigate(`/sessions/${sid}/edit`, { replace: true }), 50);
+    };
+    window.addEventListener('tour:refresh-session', handler);
+    return () => window.removeEventListener('tour:refresh-session', handler);
+  }, [navigate]);
+
   // When URL has sessionId, restore that session (load deck if we don't have it yet).
   // sessionId is intentionally NOT in deps — we use sessionIdRef.current in the guard instead.
   // This prevents the effect from re-firing when switchSession internally calls setSessionId,

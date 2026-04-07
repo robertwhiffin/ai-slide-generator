@@ -1,5 +1,6 @@
 import { Joyride, type EventData, type Step, STATUS, ACTIONS } from 'react-joyride';
 import { useTour } from '../../contexts/TourContext';
+import { api } from '../../services/api';
 
 function clickNav(tourId: string): () => Promise<void> {
   return async () => {
@@ -17,21 +18,34 @@ function navigateToMain(): Promise<void> {
   });
 }
 
-const EXAMPLE_PROMPT = 'Create 3 slides about the benefits of AI in modern healthcare, with a title slide, key advantages, and future outlook.';
+let _demoSessionId: string | null = null;
 
-function fillChatInput(): Promise<void> {
-  return new Promise(resolve => {
-    const textarea = document.querySelector<HTMLTextAreaElement>('[data-testid="chat-input"]');
-    if (textarea) {
-      const nativeInputValueSetter = Object.getOwnPropertyDescriptor(
-        window.HTMLTextAreaElement.prototype, 'value'
-      )?.set;
-      nativeInputValueSetter?.call(textarea, EXAMPLE_PROMPT);
-      textarea.dispatchEvent(new Event('input', { bubbles: true }));
-      textarea.focus();
-    }
-    setTimeout(resolve, 100);
-  });
+async function loadDemoPrompt(): Promise<void> {
+  try {
+    const result = await api.createTourDemoDeck();
+    _demoSessionId = result.session_id;
+    window.dispatchEvent(
+      new CustomEvent('tour:load-demo-deck', { detail: { sessionId: result.session_id } })
+    );
+    await new Promise(r => setTimeout(r, 1500));
+  } catch (err) {
+    console.error('Failed to create tour demo deck:', err);
+    await navigateToMain();
+  }
+}
+
+async function loadDemoSlides(): Promise<void> {
+  if (!_demoSessionId) return;
+  try {
+    await api.addTourDemoSlides(_demoSessionId);
+    await new Promise(r => setTimeout(r, 2000));
+    window.dispatchEvent(
+      new CustomEvent('tour:refresh-session', { detail: { sessionId: _demoSessionId } })
+    );
+    await new Promise(r => setTimeout(r, 1200));
+  } catch (err) {
+    console.error('Failed to load tour demo slides:', err);
+  }
 }
 
 function expandAgentConfig(): Promise<void> {
@@ -122,16 +136,6 @@ const TOUR_STEPS: Step[] = [
     skipBeacon: true,
     before: clickNav('nav-images'),
   },
-  {
-    target: '[data-tour="page-help"]',
-    title: 'Help & Documentation',
-    content:
-      'Detailed guides and documentation live here. If you ever need a refresher on how a feature works, this is the place to look.',
-    placement: 'center',
-    skipBeacon: true,
-    before: clickNav('nav-help'),
-  },
-
   // ── Main workspace: Overview (navigate back) ─────────────────────
   {
     target: '[data-tour="chat-panel"]',
@@ -191,17 +195,15 @@ const TOUR_STEPS: Step[] = [
     target: '[data-tour="chat-panel"]',
     title: 'Chat Panel',
     content:
-      'Type your request here and the AI generates a full deck in response. Continue the conversation to refine individual slides, add new ones, or change the style.\n\n' +
-      'We\'ve pre-filled an example prompt for you — just hit Enter after the tour to try it out!',
+      'Type your request here and the AI generates a full deck in response. Continue the conversation to refine individual slides, add new ones, or change the style.',
     placement: 'right',
     skipBeacon: true,
-    after: fillChatInput,
   },
   {
     target: '[data-tour="selection-ribbon"]',
     title: 'Slide Thumbnails',
     content:
-      'This ribbon shows miniature thumbnails of every slide in your deck. Click a thumbnail to scroll to that slide. You can also select multiple slides here to give the AI context when asking for targeted edits.',
+      'This ribbon shows miniature thumbnails of every slide in your deck. Click a thumbnail to scroll to that slide.',
     placement: 'left',
     skipBeacon: true,
   },
@@ -209,34 +211,86 @@ const TOUR_STEPS: Step[] = [
     target: '[data-tour="slide-panel"]',
     title: 'Slide Panel',
     content:
-      'Your generated slides render here in full detail. Click any slide to edit its HTML directly. Drag slides to reorder them. Use the slide toolbar to duplicate, delete, or move individual slides.',
+      'Your generated slides render here in full detail. Click any slide to edit its HTML directly. Drag slides to reorder them.',
     placement: 'left',
     skipBeacon: true,
   },
 
-  // ── Page header: title & actions ─────────────────────────────────
+  // ── Page header ──────────────────────────────────────────────────
   {
     target: '[data-tour="header-title"]',
     title: 'Deck Title & Save Points',
     content:
-      'Click the title to rename your deck. The save point dropdown (when available) lets you browse previous versions of your deck and revert to any point in your editing history.',
-    placement: 'bottom',
-    skipBeacon: true,
-  },
-  {
-    target: '[data-tour="header-actions"]',
-    title: 'Export, Share & Present',
-    content:
-      'When your deck is ready:\n' +
-      '• Export — download as PPTX, PDF, HTML, or export to Google Slides\n' +
-      '• Copy Link — share a read-only view link with anyone\n' +
-      '• Share — add collaborators from your workspace with viewer or editor permissions\n' +
-      '• Present — enter full-screen presentation mode right from the browser',
+      'Click the title to rename your deck. The save point dropdown lets you browse previous versions and revert to any point in your editing history.',
     placement: 'bottom',
     skipBeacon: true,
   },
 
-  // ── Feedback ─────────────────────────────────────────────────────
+  // ── Demo: intro (appears instantly) ─────────────────────────────
+  {
+    target: '[data-tour="chat-panel"]',
+    title: "Let's Try It!",
+    content:
+      "Let's see how easy it is to create slides. We'll send an example prompt and watch the AI build a deck for you.",
+    placement: 'right',
+    skipBeacon: true,
+  },
+
+  // ── Demo: Phase 1 — prompt appears in chat ─────────────────────
+  {
+    target: '[data-tour="chat-panel"]',
+    title: 'Prompt Sent',
+    content:
+      'We sent: "Create 3 slides about the benefits of AI in modern healthcare, with a title slide, key advantages, and future outlook."\n\n' +
+      "The AI is generating your slides...",
+    placement: 'right',
+    skipBeacon: true,
+    before: loadDemoPrompt,
+  },
+
+  // ── Demo: Phase 2 — slides + response appear ──────────────────
+  {
+    target: '[data-tour="slide-panel"]',
+    title: 'Slides Generated!',
+    content:
+      'The AI created 3 fully styled slides in seconds! A title slide, key advantages, and future outlook. ' +
+      "This is exactly what happens every time you send a prompt.",
+    placement: 'left',
+    skipBeacon: true,
+    before: loadDemoSlides,
+  },
+  {
+    target: '[data-tour="selection-ribbon"]',
+    title: 'Browse Your Slides',
+    content:
+      'Each slide appears as a thumbnail here. Click any thumbnail to jump to that slide. ' +
+      'Select multiple slides to give the AI context when asking for targeted edits.',
+    placement: 'left',
+    skipBeacon: true,
+  },
+  {
+    target: '[data-tour="slide-panel"]',
+    title: 'Edit Any Slide',
+    content:
+      'Click directly on any slide to edit its HTML. You can change text, restyle elements, or completely rewrite a slide. ' +
+      'You can also ask the AI in the chat to refine specific slides.',
+    placement: 'left',
+    skipBeacon: true,
+  },
+  {
+    target: '[data-tour="header-actions"]',
+    title: 'Export & Share',
+    content:
+      'When your deck is ready:\n' +
+      '• Export — download as PPTX, PDF, HTML, or Google Slides\n' +
+      '• Copy Link — share a read-only view link\n' +
+      '• Share — add collaborators with viewer or editor permissions\n' +
+      '• Present — full-screen presentation mode right from the browser',
+    placement: 'bottom',
+    skipBeacon: true,
+  },
+
+  // ── Feedback then Help (last two) ──────────────────────────────
   {
     target: '[data-tour="feedback-button"]',
     title: 'Feedback',
@@ -245,16 +299,27 @@ const TOUR_STEPS: Step[] = [
     placement: 'top',
     skipBeacon: true,
   },
+  {
+    target: '[data-tour="page-help"]',
+    title: 'Help & Documentation',
+    content:
+      'Detailed guides and documentation live here. If you ever need a refresher on how a feature works, this is the place to look.',
+    placement: 'center',
+    skipBeacon: true,
+    before: clickNav('nav-help'),
+  },
 
   // ── Closing ──────────────────────────────────────────────────────
   {
     target: 'body',
-    title: 'You\'re All Set!',
+    title: "You're All Set!",
     content:
-      'That\'s the full tour. We\'ve loaded an example prompt in the chat — just hit Enter to generate your first deck! ' +
+      "That's the full tour! The example deck is yours to keep — edit it, export it, or delete it anytime.\n\n" +
+      'To create your own deck, click "+New Deck" and type a prompt in the chat.\n\n' +
       'You can replay this tour anytime from the "App Tour" button at the bottom of the sidebar.',
     placement: 'center',
     skipBeacon: true,
+    before: async () => { await navigateToMain(); },
   },
 ];
 
