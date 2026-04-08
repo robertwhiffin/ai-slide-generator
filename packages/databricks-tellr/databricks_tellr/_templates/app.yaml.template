@@ -29,11 +29,3 @@ env:
     valueFrom: "system.databricks_host"
   - name: DATABRICKS_TOKEN
     valueFrom: "system.databricks_token"
-
-resources:
-  - name: "databricks-claude-opus-4-6"
-    type: "serving_endpoint"
-    permission: "CAN_QUERY"
-  - name: "databricks-claude-sonnet-4-5"
-    type: "serving_endpoint"
-    permission: "CAN_QUERY"
