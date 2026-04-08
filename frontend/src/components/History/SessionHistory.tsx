@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { api } from '../../services/api';
 import type { Session, SharedPresentation } from '../../services/api';
+import { ConfirmDialog } from '../ConfirmDialog';
 
 interface SessionHistoryProps {
   onSessionSelect: (sessionId: string) => void;
@@ -22,6 +23,7 @@ export const SessionHistory: React.FC<SessionHistoryProps> = ({
   const [editTitle, setEditTitle] = useState('');
   const [activeTab, setActiveTab] = useState<TabType>('my');
   const [contributorLoading, setContributorLoading] = useState<string | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<string | null>(null);
 
   const isFirstLoad = useRef(true);
 
@@ -76,11 +78,16 @@ export const SessionHistory: React.FC<SessionHistoryProps> = ({
     }
   };
 
-  const handleDelete = async (sessionId: string) => {
-    if (!confirm('Delete this session? This cannot be undone.')) return;
+  const handleDeleteClick = (sessionId: string) => {
+    setDeleteTarget(sessionId);
+  };
 
+  const handleDeleteConfirm = async () => {
+    if (!deleteTarget) return;
+    const id = deleteTarget;
+    setDeleteTarget(null);
     try {
-      await api.deleteSession(sessionId);
+      await api.deleteSession(id);
       loadSessions();
     } catch (err) {
       console.error('Failed to delete session:', err);
@@ -115,6 +122,13 @@ export const SessionHistory: React.FC<SessionHistoryProps> = ({
 
   return (
     <div className="max-w-6xl mx-auto">
+      <ConfirmDialog
+        open={!!deleteTarget}
+        title="Delete Session"
+        message="Delete this session? This cannot be undone."
+        onConfirm={handleDeleteConfirm}
+        onCancel={() => setDeleteTarget(null)}
+      />
       <div className="mb-6">
         <h2 className="text-2xl font-bold text-gray-900">Sessions</h2>
         
@@ -214,7 +228,7 @@ export const SessionHistory: React.FC<SessionHistoryProps> = ({
                           onClick={() => { setEditingId(session.session_id); setEditTitle(session.title); }}
                           className="text-gray-600 hover:text-gray-900 text-xs"
                         >Rename</button>
-                        <button onClick={() => handleDelete(session.session_id)} className="text-red-600 hover:text-red-900 text-xs">Delete</button>
+                        <button onClick={() => handleDeleteClick(session.session_id)} className="text-red-600 hover:text-red-900 text-xs">Delete</button>
                       </div>
                     </td>
                   </tr>
