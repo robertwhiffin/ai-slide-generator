@@ -19,6 +19,7 @@ from src.api.schemas.agent_config import (
     AgentConfig, GenieTool, MCPTool, VectorIndexTool, ModelEndpointTool, AgentBricksTool,
 )
 from src.core.defaults import DEFAULT_CONFIG, DEFAULT_SLIDE_STYLE
+from src.core.prompt_modules import build_editing_system_prompt, build_generation_system_prompt
 from src.services.image_tools import SearchImagesInput, search_images
 from src.services.tools import (
     GenieQueryInput,
@@ -72,38 +73,34 @@ def _create_model():
 
 def _get_prompt_content(
     config: AgentConfig,
+    mode: str = "generate",
 ) -> dict[str, Optional[str]]:
     """Resolve prompt content from AgentConfig, falling back to library lookups
     and then to backend defaults.
 
+    When a custom ``system_prompt`` override is present in the config the
+    caller takes full control and the modular assembly is skipped (same
+    behaviour as before).  Otherwise prompt_modules builds a mode-specific
+    system prompt so generation and editing each receive only the
+    instructions they need.
+
     Resolution order for each prompt field:
     1. Explicit value in config (system_prompt, slide_editing_instructions)
     2. Library lookup by ID (slide_style_id, deck_prompt_id)
-    3. Backend defaults from DEFAULT_CONFIG / DEFAULT_SLIDE_STYLE
+    3. Modular assembly via prompt_modules (mode-aware)
+    4. Backend defaults from DEFAULT_CONFIG / DEFAULT_SLIDE_STYLE (legacy)
 
     Args:
         config: The AgentConfig for this request
+        mode: ``"generate"`` or ``"edit"``
 
     Returns:
         Dict with keys: system_prompt, slide_editing_instructions,
-        deck_prompt, slide_style, image_guidelines
+        deck_prompt, slide_style, image_guidelines, pre_assembled
     """
-    defaults = DEFAULT_CONFIG["prompts"]
-
-    # Start with backend defaults
-    system_prompt = defaults["system_prompt"]
-    slide_editing_instructions = defaults["slide_editing_instructions"]
     slide_style = DEFAULT_SLIDE_STYLE
-    deck_prompt = None
-    image_guidelines = None
-
-    # Override system_prompt if config provides one
-    if config.system_prompt is not None:
-        system_prompt = config.system_prompt
-
-    # Override slide_editing_instructions if config provides one
-    if config.slide_editing_instructions is not None:
-        slide_editing_instructions = config.slide_editing_instructions
+    deck_prompt: Optional[str] = None
+    image_guidelines: Optional[str] = None
 
     # Resolve slide_style_id from library
     if config.slide_style_id is not None:
@@ -150,12 +147,49 @@ def _get_prompt_content(
         except Exception as e:
             logger.error(f"Failed to resolve deck_prompt_id: {e}")
 
+    # --- Decide between modular assembly and legacy/override path ---
+
+    has_custom_system_prompt = config.system_prompt is not None
+
+    if has_custom_system_prompt:
+        # User provided a full custom system_prompt — use legacy concatenation
+        # path so _create_prompt in agent.py assembles it the old way.
+        defaults = DEFAULT_CONFIG["prompts"]
+        slide_editing_instructions = (
+            config.slide_editing_instructions
+            if config.slide_editing_instructions is not None
+            else defaults["slide_editing_instructions"]
+        )
+        return {
+            "system_prompt": config.system_prompt,
+            "slide_editing_instructions": slide_editing_instructions,
+            "deck_prompt": deck_prompt,
+            "slide_style": slide_style,
+            "image_guidelines": image_guidelines,
+            "pre_assembled": False,
+        }
+
+    # No custom override — use modular prompt_modules assembly
+    if mode == "edit":
+        assembled = build_editing_system_prompt(
+            slide_style=slide_style,
+            deck_prompt=deck_prompt,
+            image_guidelines=image_guidelines,
+        )
+    else:
+        assembled = build_generation_system_prompt(
+            slide_style=slide_style,
+            deck_prompt=deck_prompt,
+            image_guidelines=image_guidelines,
+        )
+
     return {
-        "system_prompt": system_prompt,
-        "slide_editing_instructions": slide_editing_instructions,
-        "deck_prompt": deck_prompt,
-        "slide_style": slide_style,
-        "image_guidelines": image_guidelines,
+        "system_prompt": assembled,
+        "slide_editing_instructions": None,
+        "deck_prompt": None,
+        "slide_style": None,
+        "image_guidelines": None,
+        "pre_assembled": True,
     }
 
 
@@ -260,6 +294,7 @@ def _build_tools(
 def build_agent_for_request(
     config: AgentConfig,
     session_data: dict[str, Any],
+    mode: str = "generate",
 ) -> "SlideGeneratorAgent":
     """Build a complete SlideGeneratorAgent for a single chat request.
 
@@ -272,6 +307,8 @@ def build_agent_for_request(
         session_data: Dict with at minimum:
             - session_id: str
             - genie_conversation_id: Optional[str]
+        mode: ``"generate"`` or ``"edit"`` — controls which prompt
+            modules are included in the system message.
 
     Returns:
         SlideGeneratorAgent configured for this request
@@ -287,6 +324,7 @@ def build_agent_for_request(
             "has_custom_editing_instructions": config.slide_editing_instructions is not None,
             "slide_style_id": config.slide_style_id,
             "deck_prompt_id": config.deck_prompt_id,
+            "mode": mode,
         },
     )
 
@@ -296,8 +334,8 @@ def build_agent_for_request(
     # 2. Build tools from config
     tools = _build_tools(config, session_data)
 
-    # 3. Resolve prompts
-    prompts = _get_prompt_content(config)
+    # 3. Resolve prompts (mode-aware)
+    prompts = _get_prompt_content(config, mode=mode)
 
     # 4. Build agent with pre-built components
     agent = SlideGeneratorAgent(
@@ -311,6 +349,7 @@ def build_agent_for_request(
         extra={
             "session_id": session_data.get("session_id"),
             "tool_names": [t.name for t in tools],
+            "mode": mode,
         },
     )
 

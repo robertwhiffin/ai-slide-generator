@@ -604,14 +604,14 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
       }
 
       setExportStatus('Exporting to Google Slides…');
-      const { presentation_url } = await api.exportToGoogleSlides(
+      const { presentation_url, alreadyOpened } = await api.exportToGoogleSlides(
         sessionId,
         slideDeck,
         (_progress, _total, status) => setExportStatus(status || 'Exporting…')
       );
       setExportStatus(null);
       showToast('Export complete', 'success');
-      if (presentation_url) {
+      if (presentation_url && !alreadyOpened) {
         window.open(presentation_url, '_blank');
       }
     } catch (err) {

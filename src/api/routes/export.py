@@ -613,6 +613,7 @@ class ExportJobResponse(BaseModel):
     progress: int = 0
     total_slides: int = 0
     error: Optional[str] = None
+    status_message: Optional[str] = None
     # Google Slides specific (only populated for GSlides jobs)
     presentation_id: Optional[str] = None
     presentation_url: Optional[str] = None
