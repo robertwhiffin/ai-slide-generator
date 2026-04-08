@@ -239,12 +239,20 @@ def _discover_mcp_connections() -> dict:
         client = get_user_client()
         items: list[dict] = []
 
+        all_count = 0
+        http_count = 0
         for conn in client.connections.list():
+            all_count += 1
             conn_type = None
             if conn.connection_type:
                 conn_type = conn.connection_type.value
+            logger.info(
+                "Found connection: %s type=%s",
+                conn.name, conn_type,
+            )
             if conn_type != "HTTP":
                 continue
+            http_count += 1
             items.append(
                 {
                     "id": conn.name,
@@ -253,6 +261,10 @@ def _discover_mcp_connections() -> dict:
                 }
             )
 
+        logger.info(
+            "MCP connection discovery: %d total, %d HTTP",
+            all_count, http_count,
+        )
         return {"items": items}
     except Exception as e:
         logger.warning(f"Failed to discover MCP connections: {e}")
