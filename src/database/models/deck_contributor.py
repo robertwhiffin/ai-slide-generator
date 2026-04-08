@@ -42,7 +42,7 @@ class DeckContributor(Base):
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
 
     # Relationships
-    user_session = relationship("UserSession", backref="deck_contributors")
+    user_session = relationship("UserSession", back_populates="deck_contributors")
 
     # Constraints
     __table_args__ = (
