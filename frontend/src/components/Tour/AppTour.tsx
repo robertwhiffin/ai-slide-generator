@@ -144,7 +144,7 @@ const TOUR_STEPS: Step[] = [
       'This is where you create slides. The workspace has three parts: the agent config bar at the top, the chat panel where you talk to the AI, and the slide panel on the right where results appear. Let\'s break each one down.',
     placement: 'right',
     skipBeacon: true,
-    before: async () => { await navigateToMain(); },
+    before: navigateToMain,
   },
 
   // ── Agent Config: click to open, then walk through ───────────────
