@@ -390,13 +390,11 @@ test.describe('DeleteSlide', () => {
     await goToGenerator(page);
     await generateSlides(page);
 
-    page.on('dialog', async dialog => {
-      expect(dialog.message()).toContain('Delete slide 1?');
-      await dialog.dismiss();
-    });
-
     const deleteButton = page.locator('[data-testid="slide-tile-header"]').first().getByRole('button', { name: 'Delete' });
     await deleteButton.click();
+
+    await expect(page.getByText('Delete slide 1?')).toBeVisible();
+    await page.getByRole('button', { name: 'Cancel' }).click();
   });
 
   test('confirming delete removes the slide', async ({ page }) => {
@@ -450,12 +448,12 @@ test.describe('DeleteSlide', () => {
       }
     });
 
-    page.on('dialog', async dialog => {
-      await dialog.accept();
-    });
-
     const deleteButton = page.locator('[data-testid="slide-tile-header"]').first().getByRole('button', { name: 'Delete' });
     await deleteButton.click();
+
+    // Confirm deletion in the custom dialog
+    const confirmButton = page.locator('.fixed').getByRole('button', { name: 'Delete' });
+    await confirmButton.click();
 
     await expect(page.getByText('2 slides').first()).toBeVisible({ timeout: 5000 });
   });
@@ -464,13 +462,11 @@ test.describe('DeleteSlide', () => {
     await goToGenerator(page);
     await generateSlides(page);
 
-    // Handle the confirmation dialog - dismiss it
-    page.on('dialog', async dialog => {
-      await dialog.dismiss();
-    });
-
     const deleteButton = page.locator('[data-testid="slide-tile-header"]').first().getByRole('button', { name: 'Delete' });
     await deleteButton.click();
+
+    // Dismiss the custom confirmation dialog
+    await page.getByRole('button', { name: 'Cancel' }).click();
 
     // Slide count should remain 3 - use specific selector
     await expect(page.getByText('3 slides').first()).toBeVisible();
