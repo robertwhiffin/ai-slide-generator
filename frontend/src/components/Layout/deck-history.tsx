@@ -26,12 +26,14 @@ import {
 
 interface DeckHistoryProps {
   onSessionSelect: (sessionId: string) => void
+  onNewSession?: () => void
   currentSessionId?: string | null
   refreshKey?: number
 }
 
 export function DeckHistory({
   onSessionSelect,
+  onNewSession,
   currentSessionId,
   refreshKey,
 }: DeckHistoryProps) {
@@ -53,11 +55,13 @@ export function DeckHistory({
   const handleDeleteConfirm = async () => {
     if (!deleteTarget) return
     const id = deleteTarget
+    const wasActive = id === currentSessionId
     setDeleteTarget(null)
     try {
       await api.deleteSession(id)
       const result = await api.listSessions(5)
       setSessions(result.sessions)
+      if (wasActive) onNewSession?.()
     } catch (err) {
       console.error('Failed to delete session:', err)
     }
