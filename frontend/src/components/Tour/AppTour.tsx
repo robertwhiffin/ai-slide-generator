@@ -259,6 +259,7 @@ const TOUR_STEPS: Step[] = [
     skipBeacon: true,
     before: loadDemoSlides,
   },
+  // ── Post-demo: walkthrough of generated content ────────────────
   {
     target: '[data-tour="selection-ribbon"]',
     title: 'Browse Your Slides',
@@ -290,7 +291,7 @@ const TOUR_STEPS: Step[] = [
     skipBeacon: true,
   },
 
-  // ── Feedback then Help (last two) ──────────────────────────────
+  // ── Feedback then Help ────────────────────────────────────────
   {
     target: '[data-tour="feedback-button"]',
     title: 'Feedback',
@@ -309,9 +310,9 @@ const TOUR_STEPS: Step[] = [
     before: clickNav('nav-help'),
   },
 
-  // ── Closing ──────────────────────────────────────────────────────
+  // ── Closing (stays on Help page) ──────────────────────────────
   {
-    target: 'body',
+    target: '[data-tour="page-help"]',
     title: "You're All Set!",
     content:
       "That's the full tour! The example deck is yours to keep — edit it, export it, or delete it anytime.\n\n" +
@@ -319,7 +320,6 @@ const TOUR_STEPS: Step[] = [
       'You can replay this tour anytime from the "App Tour" button at the bottom of the sidebar.',
     placement: 'center',
     skipBeacon: true,
-    before: async () => { await navigateToMain(); },
   },
 ];
 
