@@ -6,8 +6,6 @@ from io import BytesIO
 from typing import List, Optional
 
 from PIL import Image as PILImage
-from sqlalchemy import cast, type_coerce
-from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Session
 
 from src.database.models.image import ImageAsset
@@ -133,9 +131,10 @@ def search_images(
             (ImageAsset.original_filename.ilike(search))
             | (ImageAsset.description.ilike(search))
         )
+    # Tag filtering: PostgreSQL JSON containment: tags @> '["branding"]'
     if tags:
         for tag in tags:
-            q = q.filter(cast(ImageAsset.tags, JSONB).contains([tag]))
+            q = q.filter(ImageAsset.tags.contains([tag]))
 
     return q.order_by(ImageAsset.created_at.desc()).all()
 
