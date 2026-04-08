@@ -291,3 +291,54 @@ class TestGSlidesExtractContentImages:
 
         assert cleaned == html
         assert filenames == []
+
+
+# -----------------------------------------------------------------------
+# Parallel code generation (_generate_all_codes)
+# -----------------------------------------------------------------------
+
+class TestParallelCodegen:
+    """Verify that _generate_all_codes dispatches calls concurrently."""
+
+    def test_parallel_dispatch(self, tmp_path):
+        """All LLM calls should start before any completes (true parallelism)."""
+        import asyncio
+        import threading
+        import time
+
+        converter = _make_gslides_converter()
+        converter.SYSTEM_PROMPT = "sys"
+        converter.USER_PROMPT = "{html_content}{screenshot_note}"
+
+        call_start_times = []
+        call_end_times = []
+        lock = threading.Lock()
+
+        def fake_llm_sync(self_ignored, html, charts, content_imgs=None):
+            with lock:
+                call_start_times.append(time.monotonic())
+            time.sleep(0.15)
+            with lock:
+                call_end_times.append(time.monotonic())
+            return "def add_slide_to_presentation(*a): pass"
+
+        converter._generate_code_sync = lambda *a, **kw: fake_llm_sync(None, *a, **kw)
+
+        slide_inputs = [
+            ("<div>slide</div>", [], [], str(tmp_path))
+            for _ in range(4)
+        ]
+
+        codes = asyncio.get_event_loop().run_until_complete(
+            converter._generate_all_codes(slide_inputs)
+        )
+
+        assert len(codes) == 4
+        assert all(c is not None for c in codes)
+
+        # All calls should have started before the first one finished
+        latest_start = max(call_start_times)
+        earliest_end = min(call_end_times)
+        assert latest_start < earliest_end, (
+            "Expected parallel dispatch: all calls should start before any finishes"
+        )

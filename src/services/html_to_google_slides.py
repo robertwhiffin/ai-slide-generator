@@ -2,15 +2,17 @@
 """HTML to Google Slides converter using LLM code-gen approach."""
 
 import ast
+import asyncio
 import base64
 import importlib.util
 import logging
 import re
 import shutil
 import tempfile
+import time
 import uuid
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Callable, Dict, List, Optional, Tuple
 
 from databricks.sdk import WorkspaceClient
 
@@ -24,6 +26,41 @@ logger = logging.getLogger(__name__)
 
 # Max HTML length passed to the LLM on first generation and on retry (must match).
 GSLIDES_HTML_PROMPT_MAX = 25000
+
+# Cap on concurrent LLM code-generation calls during parallel phase.
+MAX_CONCURRENT_LLM = 5
+
+# Retry settings for Google Slides API 429 (rate limit) errors.
+_RETRY_MAX_ATTEMPTS = 5
+_RETRY_BASE_DELAY = 5  # seconds
+
+
+def _is_rate_limit_error(exc: Exception) -> bool:
+    """True if the exception is a 429 rate-limit error from the Google API."""
+    msg = str(exc)
+    return "429" in msg and ("quota" in msg.lower() or "rate" in msg.lower())
+
+
+def _retry_api_call(fn, *, label: str = "API call"):
+    """Execute *fn()* with exponential backoff on 429 rate-limit errors.
+
+    Non-429 errors are raised immediately.  After ``_RETRY_MAX_ATTEMPTS``
+    consecutive 429 failures the last exception is re-raised.
+    """
+    for attempt in range(_RETRY_MAX_ATTEMPTS):
+        try:
+            return fn()
+        except Exception as exc:
+            if not _is_rate_limit_error(exc):
+                raise
+            delay = _RETRY_BASE_DELAY * (2 ** attempt)
+            logger.warning(
+                "%s hit rate limit (attempt %d/%d) — retrying in %ds: %s",
+                label, attempt + 1, _RETRY_MAX_ATTEMPTS, delay, exc,
+            )
+            time.sleep(delay)
+    # Final attempt — let any exception propagate.
+    return fn()
 
 
 def _truncate_html_for_prompt(html_str: str) -> str:
@@ -78,6 +115,29 @@ def _filter_requests(requests: list) -> list:
             key = next(k for k in req if k in _STYLE_KEYS)
             if _req_cell_key(req[key]) in empty_cells:
                 continue
+
+        # Strip bulletPreset from updateParagraphStyle — it only belongs
+        # in createParagraphBullets and will cause a 400 error here.
+        if "updateParagraphStyle" in req:
+            ups = req["updateParagraphStyle"]
+            style = ups.get("style", {})
+            if "bulletPreset" in style:
+                logger.info("Filter: removing bulletPreset from updateParagraphStyle request")
+                style.pop("bulletPreset")
+                # Also clean the fields mask
+                fields = ups.get("fields", "")
+                fields = ",".join(
+                    f.strip() for f in fields.split(",")
+                    if f.strip() != "bulletPreset"
+                )
+                if fields:
+                    ups["fields"] = fields
+                else:
+                    ups.pop("fields", None)
+                # If style is now empty, drop the request entirely
+                if not style:
+                    continue
+
         filtered.append(req)
 
     return filtered
@@ -247,10 +307,14 @@ class _ChunkedBatchUpdateRequest:
         self._tracker = tracker
 
     def _do_batch(self, reqs: list):
-        return self._resource.batchUpdate(
-            presentationId=self._presentation_id,
-            body={"requests": reqs},
-        ).execute()
+        label = f"Slide {self._slide_num} batchUpdate ({len(reqs)} reqs)"
+        return _retry_api_call(
+            lambda: self._resource.batchUpdate(
+                presentationId=self._presentation_id,
+                body={"requests": reqs},
+            ).execute(),
+            label=label,
+        )
 
     def execute(self):
         requests = [r for r in self._requests if not self._tracker.should_skip(r)]
@@ -389,24 +453,26 @@ class HtmlToGoogleSlidesConverter:
         slides: List[str],
         title: str = "Presentation",
         chart_images_per_slide: Optional[List[Dict[str, str]]] = None,
-        progress_callback: Optional[callable] = None,
+        progress_callback: Optional[Callable] = None,
         existing_presentation_id: Optional[str] = None,
+        on_presentation_created: Optional[Callable[[str, str], None]] = None,
     ) -> Dict[str, str]:
         """Convert HTML slides to a Google Slides presentation.
 
-        If ``existing_presentation_id`` is provided, the converter tries to
-        reuse that presentation (clearing all existing slides first).  If the
-        existing presentation is inaccessible (deleted, revoked, etc.) it
-        falls back to creating a new one.
+        Uses a two-phase approach:
+          Phase 1 — Prepare assets + parallel LLM code generation
+          Phase 2 — Sequential Google Slides API execution
 
         Args:
             slides: HTML strings for each slide.
             title: Presentation title.
             chart_images_per_slide: Chart images keyed by canvas ID, per slide.
-            progress_callback: Optional ``(current, total, status)`` callback
-                invoked after each slide is processed.
+            progress_callback: Optional ``(current, total, status)`` callback.
             existing_presentation_id: Optional ID of an existing presentation
                 to overwrite instead of creating a new one.
+            on_presentation_created: Optional callback ``(pres_id, url)``
+                fired as soon as the presentation exists in Drive, before
+                any slides are processed.
         """
         total = len(slides)
         print(f"[GSLIDES_CONVERTER] Converting {total} slides to Google Slides "
@@ -418,67 +484,94 @@ class HtmlToGoogleSlidesConverter:
         except GoogleSlidesAuthError as exc:
             raise GoogleSlidesConversionError(f"Auth failed: {exc}") from exc
 
-        pres_id = None
-
-        # Try to reuse existing presentation
         if existing_presentation_id:
-            pres_id = self._try_reuse_presentation(
-                slides_service, existing_presentation_id, title,
+            logger.info(
+                "Ignoring existing presentation %s — creating fresh",
+                existing_presentation_id,
             )
 
-        # Create new if reuse failed or not requested
-        if not pres_id:
-            try:
-                pres = slides_service.presentations().create(body={"title": title}).execute()
-                pres_id = pres["presentationId"]
-                print(f"[GSLIDES_CONVERTER] Created presentation: {pres_id}")
-            except Exception as exc:
-                raise GoogleSlidesConversionError(f"Failed to create presentation: {exc}") from exc
+        try:
+            pres_id = self._create_presentation(slides_service, title)
+        except Exception as exc:
+            raise GoogleSlidesConversionError(
+                f"Failed to create presentation: {exc}"
+            ) from exc
 
-            # Delete default blank slide
-            default_slides = pres.get("slides", [])
-            if default_slides:
-                try:
-                    slides_service.presentations().batchUpdate(
-                        presentationId=pres_id,
-                        body={"requests": [{"deleteObject": {"objectId": default_slides[0]["objectId"]}}]},
-                    ).execute()
-                except Exception:
-                    logger.warning("Failed to delete default slide", exc_info=True)
-
-        # Process each slide
-        for i, html_str in enumerate(slides, 1):
-            print(f"[GSLIDES_CONVERTER] Processing slide {i}/{total} – HTML length: {len(html_str)}")
-            page_id = f"slide_{uuid.uuid4().hex[:12]}"
+        # Fire early URL callback so the user can open the deck immediately
+        url = f"https://docs.google.com/presentation/d/{pres_id}/edit"
+        if on_presentation_created:
             try:
-                slides_service.presentations().batchUpdate(
-                    presentationId=pres_id,
-                    body={"requests": [{"createSlide": {
-                        "objectId": page_id,
-                        "insertionIndex": i - 1,
-                        "slideLayoutReference": {"predefinedLayout": "BLANK"},
-                    }}]},
-                ).execute()
+                on_presentation_created(pres_id, url)
             except Exception:
-                logger.error("Failed to create slide %d", i, exc_info=True)
-                continue
+                logger.warning("on_presentation_created callback failed", exc_info=True)
 
+        # ── Phase 1: Prepare assets + parallel LLM code generation ────────
+        if progress_callback:
+            try:
+                progress_callback(0, total, f"Generating code for {total} slides...")
+            except Exception:
+                pass
+
+        slide_inputs: List[Tuple[str, List[str], List[str], str]] = []
+        for i, html_str in enumerate(slides, 1):
             chart_imgs = None
             if chart_images_per_slide and i - 1 < len(chart_images_per_slide):
                 chart_imgs = chart_images_per_slide[i - 1]
+            prepared = self._prepare_slide(html_str, chart_imgs, i)
+            slide_inputs.append(prepared)
 
-            await self._add_slide_content(
-                slides_service, drive_service, pres_id, page_id,
-                html_str, i, chart_imgs,
+        def _on_codegen_progress(completed: int, codegen_total: int) -> None:
+            if progress_callback:
+                try:
+                    progress_callback(
+                        completed, codegen_total,
+                        f"Generating code: {completed}/{codegen_total} slides ready…",
+                    )
+                except Exception:
+                    pass
+
+        t0 = time.time()
+        codes = await self._generate_all_codes(slide_inputs, on_codegen_progress=_on_codegen_progress)
+        logger.info(
+            "Parallel codegen complete",
+            extra={"total_slides": total, "duration_s": f"{time.time() - t0:.1f}"},
+        )
+
+        # ── Phase 2: Sequential Google Slides API execution ───────────────
+        for i, (code, (html_str, chart_files, content_files, assets_dir)) in enumerate(
+            zip(codes, slide_inputs), 1,
+        ):
+            print(f"[GSLIDES_CONVERTER] Executing slide {i}/{total}")
+            page_id = f"slide_{uuid.uuid4().hex[:12]}"
+            try:
+                create_body: dict = {
+                    "objectId": page_id,
+                    "slideLayoutReference": {"predefinedLayout": "BLANK"},
+                }
+                _retry_api_call(
+                    lambda _pid=pres_id, _body=create_body: (
+                        slides_service.presentations().batchUpdate(
+                            presentationId=_pid,
+                            body={"requests": [{"createSlide": _body}]},
+                        ).execute()
+                    ),
+                    label=f"createSlide {i}/{total}",
+                )
+            except Exception:
+                logger.error("Failed to create slide %d after retries", i, exc_info=True)
+                continue
+
+            await self._execute_slide(
+                code, slides_service, drive_service, pres_id, page_id,
+                html_str, assets_dir, i, chart_files, content_files,
             )
 
             if progress_callback:
                 try:
-                    progress_callback(i, total, f"Processed slide {i}/{total}")
+                    progress_callback(i, total, f"Building slide {i}/{total}…")
                 except Exception:
-                    pass  # Don't let callback errors break conversion
+                    pass
 
-        url = f"https://docs.google.com/presentation/d/{pres_id}/edit"
         print(f"[GSLIDES_CONVERTER] Done: {url}")
         return {"presentation_id": pres_id, "presentation_url": url}
 
@@ -535,48 +628,211 @@ class HtmlToGoogleSlidesConverter:
             )
             return None
 
+    # -- Presentation creation via native API --------------------------------
+
+    def _create_presentation(
+        self, slides_service, title: str,
+    ) -> str:
+        """Create a new Google Slides presentation with a title/instructions slide.
+
+        Uses the native Slides API (no PPTX upload), so the presentation
+        always has Google's standard 10" × 5.625" dimensions — matching the
+        LLM prompt exactly.
+        """
+        pres = _retry_api_call(
+            lambda: slides_service.presentations().create(
+                body={"title": title},
+            ).execute(),
+            label="Create presentation",
+        )
+        pres_id = pres["presentationId"]
+        default_slide = pres["slides"][0]
+        default_page_id = default_slide["objectId"]
+
+        # Remove default "Click to add title/subtitle" placeholders.
+        delete_requests = [
+            {"deleteObject": {"objectId": el["objectId"]}}
+            for el in default_slide.get("pageElements", [])
+        ]
+        if delete_requests:
+            _retry_api_call(
+                lambda: slides_service.presentations().batchUpdate(
+                    presentationId=pres_id,
+                    body={"requests": delete_requests},
+                ).execute(),
+                label="Clear default placeholders",
+            )
+
+        emu = lambda inches: int(inches * 914400)  # noqa: E731
+        def _rgb(hex_str):
+            h = hex_str.lstrip("#")
+            return {"red": int(h[0:2], 16) / 255, "green": int(h[2:4], 16) / 255, "blue": int(h[4:6], 16) / 255}
+
+        black = _rgb("000000")
+        white = _rgb("FFFFFF")
+        dark_gray = _rgb("333333")
+
+        title_id = f"info_title_{uuid.uuid4().hex[:8]}"
+        subtitle_id = f"info_sub_{uuid.uuid4().hex[:8]}"
+        body_id = f"info_body_{uuid.uuid4().hex[:8]}"
+
+        requests = [
+            {"updatePageProperties": {
+                "objectId": default_page_id,
+                "pageProperties": {"pageBackgroundFill": {"solidFill": {"color": {"rgbColor": white}}}},
+                "fields": "pageBackgroundFill.solidFill.color",
+            }},
+            {"createShape": {
+                "objectId": title_id, "shapeType": "TEXT_BOX",
+                "elementProperties": {
+                    "pageObjectId": default_page_id,
+                    "size": {"width": {"magnitude": emu(8.75), "unit": "EMU"}, "height": {"magnitude": emu(0.5), "unit": "EMU"}},
+                    "transform": {"scaleX": 1, "scaleY": 1, "translateX": emu(0.6), "translateY": emu(0.44), "unit": "EMU"},
+                },
+            }},
+            {"insertText": {"objectId": title_id, "text": "tellr instructions: Read me & delete me!", "insertionIndex": 0}},
+            {"updateTextStyle": {"objectId": title_id, "textRange": {"type": "ALL"},
+                "style": {"fontSize": {"magnitude": 31, "unit": "PT"}, "foregroundColor": {"opaqueColor": {"rgbColor": black}}},
+                "fields": "fontSize,foregroundColor"}},
+            {"createShape": {
+                "objectId": subtitle_id, "shapeType": "TEXT_BOX",
+                "elementProperties": {
+                    "pageObjectId": default_page_id,
+                    "size": {"width": {"magnitude": emu(8.75), "unit": "EMU"}, "height": {"magnitude": emu(0.5), "unit": "EMU"}},
+                    "transform": {"scaleX": 1, "scaleY": 1, "translateX": emu(0.6), "translateY": emu(0.96), "unit": "EMU"},
+                },
+            }},
+            {"insertText": {"objectId": subtitle_id, "text": "Questions? Please reach out to your Databricks Account team.", "insertionIndex": 0}},
+            {"updateTextStyle": {"objectId": subtitle_id, "textRange": {"type": "ALL"},
+                "style": {"fontSize": {"magnitude": 15, "unit": "PT"}, "foregroundColor": {"opaqueColor": {"rgbColor": dark_gray}}},
+                "fields": "fontSize,foregroundColor"}},
+            {"createShape": {
+                "objectId": body_id, "shapeType": "TEXT_BOX",
+                "elementProperties": {
+                    "pageObjectId": default_page_id,
+                    "size": {"width": {"magnitude": emu(8.75), "unit": "EMU"}, "height": {"magnitude": emu(3.15), "unit": "EMU"}},
+                    "transform": {"scaleX": 1, "scaleY": 1, "translateX": emu(0.6), "translateY": emu(1.63), "unit": "EMU"},
+                },
+            }},
+            {"insertText": {"objectId": body_id, "text": (
+                "tellr is open source and in early-stage development (equivalent to private preview).\n"
+                "We're actively developing new features and welcome feedback.\n"
+                "Please wait while your deck is populating below"
+            ), "insertionIndex": 0}},
+            {"updateTextStyle": {"objectId": body_id, "textRange": {"type": "ALL"},
+                "style": {"fontSize": {"magnitude": 13, "unit": "PT"}, "foregroundColor": {"opaqueColor": {"rgbColor": dark_gray}}},
+                "fields": "fontSize,foregroundColor"}},
+        ]
+
+        _retry_api_call(
+            lambda: slides_service.presentations().batchUpdate(
+                presentationId=pres_id,
+                body={"requests": requests},
+            ).execute(),
+            label="Build title slide",
+        )
+
+        print(f"[GSLIDES_CONVERTER] Created presentation: {pres_id}")
+        logger.info("Created presentation via Slides API", extra={"pres_id": pres_id})
+        return pres_id
+
     # -- Per-slide pipeline ------------------------------------------------
 
-    async def _add_slide_content(
-        self, slides_service, drive_service, pres_id, page_id,
-        html_str, slide_num, client_chart_images=None,
-    ):
-        """Generate code → execute → retry once on failure → fallback."""
+    # -- Slide prep / parallel codegen / execution helpers --------------------
+
+    def _prepare_slide(
+        self, html_str: str, client_chart_images: Optional[Dict[str, str]], slide_num: int,
+    ) -> Tuple[str, List[str], List[str], str]:
+        """Save images to disk and clean HTML. Returns (html, chart_files, content_files, assets_dir)."""
         work_dir = Path(tempfile.mkdtemp(prefix=f"gslides_slide_{slide_num}_"))
         assets_dir = work_dir / "assets"
         assets_dir.mkdir()
 
-        chart_images = []
+        chart_images: List[str] = []
         if client_chart_images:
             chart_images = self._save_chart_images(client_chart_images, str(assets_dir))
             if chart_images:
                 print(f"[GSLIDES_CONVERTER] Slide {slide_num}: saved {len(chart_images)} chart images")
 
-        # Extract base64 content images (logos, icons, etc.) from HTML
         html_str, content_images = self._extract_and_save_content_images(html_str, str(assets_dir))
         if content_images:
             print(f"[GSLIDES_CONVERTER] Slide {slide_num}: extracted {len(content_images)} content images: {content_images}")
         print(f"[GSLIDES_CONVERTER] Slide {slide_num}: HTML length after image extraction: {len(html_str)}")
 
-        code = await self._generate_code(html_str, chart_images, content_images)
+        return html_str, chart_images, content_images, str(assets_dir)
+
+    def _generate_code_sync(self, html_str: str, chart_images: List[str], content_images: Optional[List[str]] = None) -> Optional[str]:
+        """Synchronous code generation for use with asyncio.to_thread."""
+        content_images = content_images or []
+        html_content = _truncate_html_for_prompt(html_str)
+        screenshot_note = self._build_chart_note(chart_images)
+        if content_images:
+            screenshot_note += self._build_content_image_note(content_images)
+        prompt = self.USER_PROMPT.format(
+            html_content=html_content, screenshot_note=screenshot_note,
+        )
+        return self._call_llm_sync(self.SYSTEM_PROMPT, prompt)
+
+    async def _generate_all_codes(
+        self,
+        slide_inputs: List[Tuple[str, List[str], List[str], str]],
+        on_codegen_progress: Optional[Callable[[int, int], None]] = None,
+    ) -> List[Optional[str]]:
+        """Generate code for all slides in parallel, capped at MAX_CONCURRENT_LLM.
+
+        Args:
+            slide_inputs: List of (html, chart_files, content_files, assets_dir).
+            on_codegen_progress: Optional ``(completed, total)`` callback fired
+                after each slide's code is generated.
+        """
+        sem = asyncio.Semaphore(MAX_CONCURRENT_LLM)
+        total = len(slide_inputs)
+        completed = 0
+        lock = asyncio.Lock()
+
+        async def gen_one(html_str: str, chart_images: List[str], content_images: List[str]) -> Optional[str]:
+            nonlocal completed
+            async with sem:
+                code = await asyncio.to_thread(
+                    self._generate_code_sync, html_str, chart_images, content_images,
+                )
+            async with lock:
+                completed += 1
+                if on_codegen_progress:
+                    try:
+                        on_codegen_progress(completed, total)
+                    except Exception:
+                        pass
+            return code
+
+        return list(await asyncio.gather(
+            *(gen_one(h, c, ci) for h, c, ci, _ad in slide_inputs)
+        ))
+
+    async def _execute_slide(
+        self, code: Optional[str], slides_service, drive_service,
+        pres_id: str, page_id: str, html_str: str, assets_dir: str,
+        slide_num: int, chart_images: List[str], content_images: List[str],
+    ) -> None:
+        """Execute generated code, retry once on failure, fallback on second failure."""
         if not code:
-            logger.warning("LLM returned no code for slide %d", slide_num)
+            logger.warning("No code for slide %d, adding fallback", slide_num)
+            self._add_fallback(slides_service, pres_id, page_id, slide_num)
             return
 
         error = self._execute_code(
             code, slides_service, drive_service, pres_id, page_id, html_str,
-            str(assets_dir), slide_num,
+            assets_dir, slide_num,
         )
         if error is None:
             return
 
-        # Retry with error context + original HTML so LLM doesn't hallucinate
         logger.info("Retrying slide %d with error context", slide_num)
         fixed = await self._retry_with_error(code, error, html_str, chart_images, content_images)
         if fixed:
             retry_err = self._execute_code(
                 fixed, slides_service, drive_service, pres_id, page_id,
-                html_str, str(assets_dir), slide_num,
+                html_str, assets_dir, slide_num,
             )
             if retry_err is None:
                 return
@@ -631,8 +887,9 @@ class HtmlToGoogleSlidesConverter:
             f"For logos/icons typically in the header area, use small sizes (e.g. width=0.6\"-1.0\", height=0.3\"-0.5\").\n"
         )
 
-    async def _call_llm(self, system_prompt, user_prompt, thinking_budget: int = 10240):
-        """Call Databricks LLM and return code string."""
+    def _call_llm_sync(self, system_prompt, user_prompt, thinking_budget: int = 10240):
+        """Synchronous LLM call — core implementation used by both async and threaded paths."""
+        start = time.time()
         try:
             resp = self.llm_client.chat.completions.create(
                 model=self.model_endpoint,
@@ -642,13 +899,21 @@ class HtmlToGoogleSlidesConverter:
                 ],
                 temperature=0.2,
                 max_tokens=16384,
+                timeout=300,
                 extra_body={"thinking": {"type": "enabled", "budget_tokens": thinking_budget}},
             )
+            duration = time.time() - start
+            logger.info("LLM call completed", extra={"duration_s": f"{duration:.1f}"})
             code = self._extract_text(resp.choices[0].message.content)
             return self._strip_fences(code) if code else None
         except Exception:
-            logger.error("LLM call failed", exc_info=True)
+            duration = time.time() - start
+            logger.error("LLM call failed", extra={"duration_s": f"{duration:.1f}"}, exc_info=True)
             return None
+
+    async def _call_llm(self, system_prompt, user_prompt, thinking_budget: int = 10240):
+        """Async wrapper — delegates to _call_llm_sync."""
+        return self._call_llm_sync(system_prompt, user_prompt, thinking_budget)
 
     @staticmethod
     def _classify_error(error_msg: str, original_code: str) -> dict:
@@ -869,6 +1134,15 @@ class HtmlToGoogleSlidesConverter:
         for smart, straight in {"\u2018": "'", "\u2019": "'", "\u201c": '"', "\u201d": '"'}.items():
             code = code.replace(smart, straight)
 
+        # Strip 'alpha' from rgbColor dicts — the Slides API rejects it.
+        import re as _re
+        _alpha_pat = _re.compile(r"""[,\s]*['"]alpha['"]\s*:\s*[\d.]+""")
+        if 'alpha' in code:
+            new_code = _alpha_pat.sub('', code)
+            if new_code != code:
+                logger.info("Prep: stripped 'alpha' entries from rgbColor dicts")
+                code = new_code
+
         # Fix missing 'shapeProperties' wrapper in updateShapeProperties.
         # LLM consistently puts shapeBackgroundFill/outline directly inside
         # updateShapeProperties — the API requires them inside 'shapeProperties'.
@@ -898,6 +1172,26 @@ class HtmlToGoogleSlidesConverter:
                     out.append(lines[i])
                 i += 1
             code = '\n'.join(out)
+
+        # Fix 'paragraphStyle' → 'style' inside updateParagraphStyle blocks.
+        # LLM often uses {'updateParagraphStyle': {..., 'paragraphStyle': {...}}}
+        # but the API requires {'updateParagraphStyle': {..., 'style': {...}}}.
+        if 'updateParagraphStyle' in code:
+            if "'paragraphStyle'" in code:
+                logger.info("Prep: fixing 'paragraphStyle' → 'style' in updateParagraphStyle")
+                code = code.replace("'paragraphStyle'", "'style'")
+            if '"paragraphStyle"' in code:
+                logger.info("Prep: fixing \"paragraphStyle\" → \"style\" in updateParagraphStyle")
+                code = code.replace('"paragraphStyle"', '"style"')
+
+        # Same fix for updateTextStyle — LLM sometimes uses 'textStyle' instead of 'style'.
+        if 'updateTextStyle' in code:
+            if "'textStyle'" in code:
+                logger.info("Prep: fixing 'textStyle' → 'style' in updateTextStyle")
+                code = code.replace("'textStyle'", "'style'")
+            if '"textStyle"' in code:
+                logger.info("Prep: fixing \"textStyle\" → \"style\" in updateTextStyle")
+                code = code.replace('"textStyle"', '"style"')
 
         # Re-quote single-quoted literals that contain contractions (Don't, it's, etc.)
         code = _fix_apostrophe_strings(code)
