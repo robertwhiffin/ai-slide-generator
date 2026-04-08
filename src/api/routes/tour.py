@@ -38,11 +38,7 @@ def _load_fixture() -> dict:
 
 
 def _get_user_prompt(fixture: dict) -> str:
-    return fixture.get(
-        "chat_prompt",
-        "Create 3 slides about the benefits of AI in modern healthcare, "
-        "with a title slide, key advantages, and future outlook.",
-    )
+    return fixture["chat_prompt"]
 
 
 def _phase1_create_session(created_by: str) -> dict:
@@ -91,16 +87,7 @@ def _phase2_add_slides(session_id: str, created_by: str) -> dict:
         modified_by=created_by,
     )
 
-    assistant_reply = fixture.get(
-        "chat_reply",
-        f"Here's your deck with {len(slides)} slides! I've created:\n\n"
-        "1. **Title Slide** — introducing AI in healthcare\n"
-        "2. **Key Advantages** — early detection, personalized treatment, "
-        "operational efficiency, and drug discovery\n"
-        "3. **Future Outlook** — predictive monitoring, AI-assisted surgery, "
-        "and global health equity\n\n"
-        "Feel free to ask me to refine any slide, add new ones, or change the style.",
-    )
+    assistant_reply = fixture["chat_reply"]
 
     sm.add_message(
         session_id=session_id,

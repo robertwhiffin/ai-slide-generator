@@ -22,5 +22,7 @@
       "html": "<div class=\"slide outlook-slide\">\n  <h2>Future Outlook</h2>\n  <ul>\n    <li><strong>Predictive Health Monitoring</strong> — Wearable devices combined with AI will shift medicine from reactive treatment to proactive prevention</li>\n    <li><strong>AI-Assisted Surgery</strong> — Robotic systems guided by real-time AI analysis will enable more precise and less invasive procedures</li>\n    <li><strong>Global Health Equity</strong> — AI-powered diagnostics deployed via mobile devices can bring specialist-level care to underserved communities worldwide</li>\n  </ul>\n  <p style=\"margin-top: 24px; font-style: italic; color: #6b7280;\">The future of healthcare is intelligent, personalized, and accessible to all.</p>\n</div>",
       "scripts": ""
     }
-  ]
+  ],
+  "chat_prompt": "Create 3 slides about the benefits of AI in modern healthcare, with a title slide, key advantages, and future outlook.",
+  "chat_reply": "Here's your deck with 3 slides! I've created:\n\n1. **Title Slide** — introducing AI in healthcare\n2. **Key Advantages** — early detection, personalized treatment, operational efficiency, and drug discovery\n3. **Future Outlook** — predictive monitoring, AI-assisted surgery, and global health equity\n\nFeel free to ask me to refine any slide, add new ones, or change the style."
 }

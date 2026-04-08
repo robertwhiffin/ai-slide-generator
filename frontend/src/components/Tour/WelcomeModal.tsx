@@ -2,6 +2,8 @@ import { useState } from 'react';
 import { X, Layers, Compass, MessageSquare, Wrench, Download, History } from 'lucide-react';
 import { useTour } from '../../contexts/TourContext';
 
+type Tab = 'overview' | 'features';
+
 const FEATURES = [
   {
     icon: MessageSquare,
@@ -29,22 +31,11 @@ const FEATURES = [
   },
 ];
 
-type Tab = 'overview' | 'features';
-
 export function WelcomeModal() {
   const { showWelcome, startTour, dismissWelcome } = useTour();
   const [activeTab, setActiveTab] = useState<Tab>('overview');
-  const [dontShow, setDontShow] = useState(false);
 
   if (!showWelcome) return null;
-
-  const handleDismiss = () => {
-    if (dontShow) {
-      dismissWelcome();
-    } else {
-      dismissWelcome();
-    }
-  };
 
   return (
     <div className="fixed inset-0 z-[10001] flex items-center justify-center bg-black/40 backdrop-blur-sm">
@@ -61,7 +52,7 @@ export function WelcomeModal() {
             </div>
           </div>
           <button
-            onClick={handleDismiss}
+            onClick={dismissWelcome}
             className="p-1.5 text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded-lg transition-colors"
           >
             <X className="w-5 h-5" />
@@ -152,31 +143,20 @@ export function WelcomeModal() {
         </div>
 
         {/* Footer */}
-        <div className="flex items-center justify-between px-6 py-4 border-t border-gray-100 bg-gray-50/50">
-          <label className="flex items-center gap-2 text-sm text-gray-500 cursor-pointer select-none">
-            <input
-              type="checkbox"
-              checked={dontShow}
-              onChange={(e) => setDontShow(e.target.checked)}
-              className="rounded border-gray-300 text-blue-600 focus:ring-blue-500"
-            />
-            Don't show this again
-          </label>
-          <div className="flex items-center gap-2">
-            <button
-              onClick={startTour}
-              className="flex items-center gap-2 px-4 py-2 text-sm font-medium text-gray-700 bg-white border border-gray-200 rounded-lg hover:bg-gray-50 transition-colors"
-            >
-              <Compass className="w-4 h-4" />
-              Take the Tour
-            </button>
-            <button
-              onClick={handleDismiss}
-              className="px-5 py-2 text-sm font-medium text-white bg-blue-600 rounded-lg hover:bg-blue-700 transition-colors"
-            >
-              Get Started
-            </button>
-          </div>
+        <div className="flex items-center justify-end gap-2 px-6 py-4 border-t border-gray-100 bg-gray-50/50">
+          <button
+            onClick={startTour}
+            className="flex items-center gap-2 px-4 py-2 text-sm font-medium text-gray-700 bg-white border border-gray-200 rounded-lg hover:bg-gray-50 transition-colors"
+          >
+            <Compass className="w-4 h-4" />
+            Take the Tour
+          </button>
+          <button
+            onClick={dismissWelcome}
+            className="px-5 py-2 text-sm font-medium text-white bg-blue-600 rounded-lg hover:bg-blue-700 transition-colors"
+          >
+            Get Started
+          </button>
         </div>
       </div>
     </div>
