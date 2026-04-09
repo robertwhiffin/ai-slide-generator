@@ -325,14 +325,23 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
       const viewingDeleted = urlSessionId === deletedId || sessionId === deletedId;
       if (viewingDeleted) {
         api.releaseEditingLock(deletedId);
-        if (urlSessionId === deletedId) {
+        const leaveSessionRoute = urlSessionId === deletedId;
+        if (leaveSessionRoute) {
           navigate('/', { replace: true });
         }
-        createNewSession();
-        setSlideDeck(null);
-        setRawHtml(null);
-        setLastSavedTime(null);
-        deckVersionRef.current = 0;
+        const resetWorkspace = () => {
+          createNewSession();
+          setSlideDeck(null);
+          setRawHtml(null);
+          setLastSavedTime(null);
+          deckVersionRef.current = 0;
+        };
+        // Defer reset until after the URL drops /sessions/:id so the restore effect does not reload the demo row (often 0 slides if phase 2 never ran).
+        if (leaveSessionRoute) {
+          setTimeout(resetWorkspace, 0);
+        } else {
+          resetWorkspace();
+        }
       }
     };
     window.addEventListener('tour:demo-session-deleted', handler);
