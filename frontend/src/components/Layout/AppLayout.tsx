@@ -316,6 +316,30 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
     return () => window.removeEventListener('tour:refresh-session', handler);
   }, [navigate]);
 
+  // Tour finished: leave the demo session in the UI, then the tour deletes it in the background
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const { sessionId: deletedId } = (e as CustomEvent<{ sessionId: string }>).detail;
+      if (!deletedId) return;
+
+      const viewingDeleted = urlSessionId === deletedId || sessionId === deletedId;
+      if (viewingDeleted) {
+        api.releaseEditingLock(deletedId);
+        if (urlSessionId === deletedId) {
+          navigate('/', { replace: true });
+        }
+        createNewSession();
+        setSlideDeck(null);
+        setRawHtml(null);
+        setLastSavedTime(null);
+        deckVersionRef.current = 0;
+      }
+      setSessionsRefreshKey(k => k + 1);
+    };
+    window.addEventListener('tour:demo-session-deleted', handler);
+    return () => window.removeEventListener('tour:demo-session-deleted', handler);
+  }, [navigate, createNewSession, urlSessionId, sessionId]);
+
   // When URL has sessionId, restore that session (load deck if we don't have it yet).
   // sessionId is intentionally NOT in deps — we use sessionIdRef.current in the guard instead.
   // This prevents the effect from re-firing when switchSession internally calls setSessionId,
