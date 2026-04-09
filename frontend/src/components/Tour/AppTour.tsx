@@ -48,13 +48,18 @@ async function loadDemoSlides(): Promise<void> {
   }
 }
 
-/** Clears module state, tells the shell to leave the demo session if needed, then deletes server-side (fire-and-forget, errors ignored). */
+/** Clears module state, tells the shell to leave the demo session if needed, then deletes server-side (errors ignored). Sidebar refresh runs only after DELETE succeeds so the list does not still show the demo. */
 function scheduleDeleteTourDemoSession(): void {
   const sid = _demoSessionId;
   _demoSessionId = null;
   if (!sid) return;
   window.dispatchEvent(new CustomEvent('tour:demo-session-deleted', { detail: { sessionId: sid } }));
-  void api.deleteSession(sid).catch(() => {});
+  void api
+    .deleteSession(sid)
+    .then(() => {
+      window.dispatchEvent(new Event('tour:sessions-list-refresh'));
+    })
+    .catch(() => {});
 }
 
 function expandAgentConfig(): Promise<void> {

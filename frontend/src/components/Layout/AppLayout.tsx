@@ -334,11 +334,17 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
         setLastSavedTime(null);
         deckVersionRef.current = 0;
       }
-      setSessionsRefreshKey(k => k + 1);
     };
     window.addEventListener('tour:demo-session-deleted', handler);
     return () => window.removeEventListener('tour:demo-session-deleted', handler);
   }, [navigate, createNewSession, urlSessionId, sessionId]);
+
+  // After tour demo DELETE completes — refetch session lists (sidebar / history). Must run after server removal, not when the tour ends.
+  useEffect(() => {
+    const handler = () => setSessionsRefreshKey(k => k + 1);
+    window.addEventListener('tour:sessions-list-refresh', handler);
+    return () => window.removeEventListener('tour:sessions-list-refresh', handler);
+  }, []);
 
   // When URL has sessionId, restore that session (load deck if we don't have it yet).
   // sessionId is intentionally NOT in deps — we use sessionIdRef.current in the guard instead.
