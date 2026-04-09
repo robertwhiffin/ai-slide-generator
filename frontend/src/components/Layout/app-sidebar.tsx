@@ -102,6 +102,7 @@ export function AppSidebar({
       <SidebarContent>
         <DeckHistory
           onSessionSelect={onSessionSelect}
+          onNewSession={onNewSession}
           currentSessionId={currentSessionId}
           refreshKey={sessionsRefreshKey}
         />

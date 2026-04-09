@@ -18,6 +18,7 @@ import type { Slide, SlideDeck } from '../../types/slide';
 import { SlideTile } from './SlideTile';
 import { PresentationMode } from '../PresentationMode';
 import { api } from '../../services/api';
+import { ConfirmDialog } from '../ConfirmDialog';
 import { useSelection } from '../../contexts/SelectionContext';
 import { exportSlideDeckToPDF } from '../../services/pdf_client';
 import { useSession } from '../../contexts/SessionContext';
@@ -61,6 +62,7 @@ function SlidePanelComponent(props: SlidePanelProps, ref: React.Ref<SlidePanelHa
   const exportMenuRef = useRef<HTMLDivElement>(null);
   const [isPresentationMode, setIsPresentationMode] = useState(false);
   const [optimizingSlideIndex, setOptimizingSlideIndex] = useState<number | null>(null);
+  const [deleteSlideIndex, setDeleteSlideIndex] = useState<number | null>(null);
   const { selectedIndices, setSelection, clearSelection } = useSelection();
   const { sessionId } = useSession();
   const { showToast } = useToast();
@@ -139,10 +141,15 @@ function SlidePanelComponent(props: SlidePanelProps, ref: React.Ref<SlidePanelHa
     }
   };
 
-  const handleDeleteSlide = async (index: number) => {
+  const handleDeleteSlide = (index: number) => {
     if (readOnly || !slideDeck || !sessionId) return;
-    
-    if (!confirm(`Delete slide ${index + 1}?`)) return;
+    setDeleteSlideIndex(index);
+  };
+
+  const handleDeleteSlideConfirm = async () => {
+    if (deleteSlideIndex === null || !sessionId) return;
+    const index = deleteSlideIndex;
+    setDeleteSlideIndex(null);
 
     const editId = ++deckEditCounterRef.current;
     try {
@@ -584,6 +591,13 @@ function SlidePanelComponent(props: SlidePanelProps, ref: React.Ref<SlidePanelHa
 
   return (
     <div className="h-full flex flex-col bg-gray-50" data-testid="slide-panel">
+      <ConfirmDialog
+        open={deleteSlideIndex !== null}
+        title="Delete Slide"
+        message={`Delete slide ${(deleteSlideIndex ?? 0) + 1}?`}
+        onConfirm={handleDeleteSlideConfirm}
+        onCancel={() => setDeleteSlideIndex(null)}
+      />
       {lockedBy && (
         <div className="bg-amber-50 border-b border-amber-200 px-4 py-2.5 flex items-center gap-2">
           <svg className="w-4 h-4 text-amber-600 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
