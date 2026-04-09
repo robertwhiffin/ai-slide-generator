@@ -367,6 +367,8 @@ export function AppTour() {
         showProgress: true,
         spotlightRadius: 8,
         buttons: ['skip', 'back', 'close', 'primary'],
+        // Default is 'close' (advance one step); X should end the tour like Skip Tour.
+        closeButtonAction: 'skip',
       }}
       locale={{
         back: 'Back',
