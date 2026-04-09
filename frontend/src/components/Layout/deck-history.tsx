@@ -6,6 +6,7 @@ import {
   Layers,
 } from "lucide-react"
 import { api, type Session } from "@/services/api"
+import { ConfirmDialog } from "@/components/ConfirmDialog"
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -25,34 +26,42 @@ import {
 
 interface DeckHistoryProps {
   onSessionSelect: (sessionId: string) => void
+  onNewSession?: () => void
   currentSessionId?: string | null
   refreshKey?: number
 }
 
 export function DeckHistory({
   onSessionSelect,
+  onNewSession,
   currentSessionId,
   refreshKey,
 }: DeckHistoryProps) {
   const { isMobile } = useSidebar()
   const [sessions, setSessions] = useState<Session[]>([])
+  const [deleteTarget, setDeleteTarget] = useState<string | null>(null)
 
   useEffect(() => {
-    // Load recent sessions (limit to 5)
     api.listSessions(5)
       .then(result => setSessions(result.sessions))
       .catch(err => console.error('Failed to load sessions:', err))
-  }, [refreshKey]) // Reload only when refresh is explicitly triggered; active highlight is render-driven
+  }, [refreshKey])
 
-  const handleDelete = async (sessionId: string, e: React.MouseEvent) => {
+  const handleDeleteClick = (sessionId: string, e: React.MouseEvent) => {
     e.stopPropagation()
-    if (!confirm('Delete this session? This cannot be undone.')) return
+    setDeleteTarget(sessionId)
+  }
 
+  const handleDeleteConfirm = async () => {
+    if (!deleteTarget) return
+    const id = deleteTarget
+    const wasActive = id === currentSessionId
+    setDeleteTarget(null)
     try {
-      await api.deleteSession(sessionId)
-      // Reload sessions after delete
+      await api.deleteSession(id)
       const result = await api.listSessions(5)
       setSessions(result.sessions)
+      if (wasActive) onNewSession?.()
     } catch (err) {
       console.error('Failed to delete session:', err)
     }
@@ -77,6 +86,13 @@ export function DeckHistory({
 
   return (
     <SidebarGroup className="group-data-[collapsible=icon]:hidden">
+      <ConfirmDialog
+        open={!!deleteTarget}
+        title="Delete Session"
+        message="Delete this session? This cannot be undone."
+        onConfirm={handleDeleteConfirm}
+        onCancel={() => setDeleteTarget(null)}
+      />
       <SidebarGroupLabel>Recent Decks</SidebarGroupLabel>
       <SidebarMenu>
         {sessions.map((session) => (
@@ -114,7 +130,7 @@ export function DeckHistory({
                   <span>Open Deck</span>
                 </DropdownMenuItem>
                 <DropdownMenuSeparator />
-                <DropdownMenuItem onClick={(e) => handleDelete(session.session_id, e)}>
+                <DropdownMenuItem onClick={(e) => handleDeleteClick(session.session_id, e)}>
                   <Trash2 className="text-muted-foreground" />
                   <span>Delete</span>
                 </DropdownMenuItem>

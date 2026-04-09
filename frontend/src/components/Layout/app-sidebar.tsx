@@ -111,6 +111,7 @@ export function AppSidebar({
       <SidebarContent data-tour="deck-history">
         <DeckHistory
           onSessionSelect={onSessionSelect}
+          onNewSession={onNewSession}
           currentSessionId={currentSessionId}
           refreshKey={sessionsRefreshKey}
         />
