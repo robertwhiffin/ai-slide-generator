@@ -17,7 +17,7 @@ from sqlalchemy import (
     String,
     Text,
 )
-from sqlalchemy.orm import relationship
+from sqlalchemy.orm import backref, relationship
 
 from src.core.database import Base
 
@@ -47,7 +47,7 @@ class ChatRequest(Base):
     result_json = Column(Text, nullable=True)
 
     # Relationship
-    session = relationship("UserSession")
+    session = relationship("UserSession", back_populates="chat_requests")
 
     __table_args__ = (Index("ix_chat_requests_session_id", "session_id"),)
 
@@ -137,6 +137,7 @@ class UserSession(Base):
         "SessionMessage",
         back_populates="session",
         cascade="all, delete-orphan",
+        passive_deletes=True,
         order_by="SessionMessage.created_at",
     )
     slide_deck = relationship(
@@ -144,18 +145,36 @@ class UserSession(Base):
         back_populates="session",
         uselist=False,
         cascade="all, delete-orphan",
+        passive_deletes=True,
     )
     versions = relationship(
         "SlideDeckVersion",
         back_populates="session",
         cascade="all, delete-orphan",
+        passive_deletes=True,
         order_by="SlideDeckVersion.version_number.desc()",
+    )
+    chat_requests = relationship(
+        "ChatRequest",
+        back_populates="session",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
+    deck_contributors = relationship(
+        "DeckContributor",
+        back_populates="user_session",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
     )
     parent_session = relationship(
         "UserSession",
         remote_side=[id],
         foreign_keys=[parent_session_id],
-        backref="contributor_sessions",
+        backref=backref(
+            "contributor_sessions",
+            cascade="all, delete-orphan",
+            passive_deletes=True,
+        ),
     )
 
     # Indexes for common queries
