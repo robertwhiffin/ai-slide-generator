@@ -28,7 +28,7 @@ usage() {
     echo "  delete    Delete a Databricks App"
     echo ""
     echo "Required Arguments:"
-    echo "  --env <environment>    Environment from deployment.yaml (e.g., development, staging, production)"
+    echo "  --env <environment>    Environment from deployment.yaml (e.g., fevm, staging, production)"
     echo "  --profile <profile>    Databricks CLI profile from ~/.databrickscfg"
     echo ""
     echo "Options:"
@@ -38,11 +38,11 @@ usage() {
     echo "  -h, --help                   Show this help message"
     echo ""
     echo "Examples:"
-    echo "  $0 create --env development --profile my-profile"
-    echo "  $0 update --env development --profile my-profile"
-    echo "  $0 update --env development --profile my-profile --reset-db"
+    echo "  $0 create --env fevm --profile my-profile"
+    echo "  $0 update --env fevm --profile my-profile"
+    echo "  $0 update --env fevm --profile my-profile --reset-db"
     echo "  $0 update --env staging --profile my-profile --skip-build"
-    echo "  $0 delete --env development --profile my-profile"
+    echo "  $0 delete --env fevm --profile my-profile"
     exit 1
 }
 
@@ -112,7 +112,7 @@ fi
 
 # Note: Environment names must match keys in config/deployment.yaml
 # Add new environments to the regex below when adding to deployment.yaml
-if [[ ! "$ENV" =~ ^(development|staging|production|test)$ ]]; then
+if [[ ! "$ENV" =~ ^(development|staging|production|test|fevm)$ ]]; then
     echo -e "${RED}Invalid environment: $ENV${NC}"
     echo "   Check config/deployment.yaml for valid environment names"
     exit 1
