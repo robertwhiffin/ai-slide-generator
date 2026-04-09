@@ -48,6 +48,15 @@ async function loadDemoSlides(): Promise<void> {
   }
 }
 
+/** Clears module state, tells the shell to leave the demo session if needed, then deletes server-side (fire-and-forget, errors ignored). */
+function scheduleDeleteTourDemoSession(): void {
+  const sid = _demoSessionId;
+  _demoSessionId = null;
+  if (!sid) return;
+  window.dispatchEvent(new CustomEvent('tour:demo-session-deleted', { detail: { sessionId: sid } }));
+  void api.deleteSession(sid).catch(() => {});
+}
+
 function expandAgentConfig(): Promise<void> {
   return new Promise(resolve => {
     const toggle = document.querySelector<HTMLElement>('[data-tour="agent-config-toggle"]');
@@ -315,7 +324,7 @@ const TOUR_STEPS: Step[] = [
     target: '[data-tour="page-help"]',
     title: "You're All Set!",
     content:
-      "That's the full tour! The example deck is yours to keep — edit it, export it, or delete it anytime.\n\n" +
+      "That's the full tour! The example deck used for this walkthrough is removed automatically when you finish.\n\n" +
       'To create your own deck, click "+New Deck" and type a prompt in the chat.\n\n' +
       'You can replay this tour anytime from the "App Tour" button at the bottom of the sidebar.',
     placement: 'center',
@@ -335,6 +344,7 @@ export function AppTour() {
       action === ACTIONS.SKIP
     ) {
       endTour();
+      scheduleDeleteTourDemoSession();
     }
   };
 
