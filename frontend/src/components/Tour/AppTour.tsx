@@ -1,4 +1,4 @@
-import { Joyride, type EventData, type Step, STATUS, ACTIONS } from 'react-joyride';
+import { Joyride, type EventData, type Step, STATUS, ACTIONS, EVENTS } from 'react-joyride';
 import { useTour } from '../../contexts/TourContext';
 import { api } from '../../services/api';
 
@@ -341,13 +341,15 @@ export function AppTour() {
   const { isTourActive, endTour } = useTour();
 
   const handleEvent = (data: EventData) => {
-    const { status, action } = data;
+    const { status, action, type } = data;
 
-    if (
+    const tourStopped =
+      type === EVENTS.TOUR_END ||
       status === STATUS.FINISHED ||
       status === STATUS.SKIPPED ||
-      action === ACTIONS.SKIP
-    ) {
+      action === ACTIONS.SKIP;
+
+    if (tourStopped) {
       endTour();
       scheduleDeleteTourDemoSession();
     }
