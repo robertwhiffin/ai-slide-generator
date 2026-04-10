@@ -100,7 +100,7 @@ export function PageHeader({
       <Separator orientation="vertical" className="h-4" />
 
       {/* Left: Title row (title + Save + version) and subtitle below */}
-      <div className="flex min-w-0 flex-1 flex-col gap-0">
+      <div className="flex min-w-0 flex-1 flex-col gap-0" data-tour="header-title">
         <div className="flex items-center gap-2 min-w-0 leading-tight">
           {isEditing ? (
             <input
@@ -144,7 +144,7 @@ export function PageHeader({
       </div>
 
       {/* Right: Export status, Export, Share, Present, Profile */}
-      <div className="flex items-center gap-2">
+      <div className="flex items-center gap-2" data-tour="header-actions">
         {exportStatus && (
           <span className="text-xs text-muted-foreground whitespace-nowrap max-w-[140px] truncate" title={exportStatus}>
             {exportStatus}

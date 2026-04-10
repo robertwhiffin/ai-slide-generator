@@ -25,7 +25,7 @@ export function NavSecondary({
       <SidebarGroupContent>
         <SidebarMenu>
           {items.map((item) => (
-            <SidebarMenuItem key={item.title}>
+            <SidebarMenuItem key={item.title} data-tour={`nav-${item.viewId}`}>
               <SidebarMenuButton
                 isActive={activeView === item.viewId}
                 onClick={() => onNavigate(item.viewId)}

@@ -17,6 +17,14 @@ export default defineConfig({
     trace: 'on-first-retry',
     // Increase action timeout in CI
     actionTimeout: process.env.CI ? 15000 : 10000,
+    // Dismiss the app tour welcome modal so it doesn't block E2E interactions
+    storageState: {
+      cookies: [],
+      origins: [{
+        origin: 'http://localhost:3000',
+        localStorage: [{ name: 'tellr-app-tour-completed', value: 'true' }],
+      }],
+    },
   },
   projects: [
     {

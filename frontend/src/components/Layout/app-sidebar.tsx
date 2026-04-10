@@ -7,11 +7,13 @@ import {
   Palette,
   Image,
   Layers,
+  Compass,
 } from "lucide-react"
 import { NavMain } from "@/components/Layout/nav-main"
 import { NavSecondary } from "@/components/Layout/nav-secondary"
 import { DeckHistory } from "@/components/Layout/deck-history"
 import { BrandHeader } from "@/components/Layout/brand-header"
+import { useTour } from "@/contexts/TourContext"
 import {
   Sidebar,
   SidebarContent,
@@ -20,6 +22,9 @@ import {
   SidebarRail,
   SidebarGroup,
   SidebarGroupLabel,
+  SidebarMenu,
+  SidebarMenuItem,
+  SidebarMenuButton,
 } from "@/ui/sidebar"
 
 type ViewMode = 'main' | 'profiles' | 'deck_prompts' | 'slide_styles' | 'images' | 'history' | 'help'
@@ -83,23 +88,27 @@ export function AppSidebar({
   sessionsRefreshKey,
   ...props
 }: AppSidebarProps) {
+  const { startTour } = useTour()
+
   return (
-    <Sidebar className="border-r-0" {...props}>
+    <Sidebar className="border-r-0" data-tour="sidebar" {...props}>
       <SidebarHeader>
         <BrandHeader />
-        <NavMain
-          items={navMainItems}
-          activeView={currentView}
-          onNavigate={(viewId) => {
-            if (viewId === 'main') {
-              onNewSession()
-            } else {
-              onViewChange(viewId as ViewMode)
-            }
-          }}
-        />
+        <div data-tour="new-deck">
+          <NavMain
+            items={navMainItems}
+            activeView={currentView}
+            onNavigate={(viewId) => {
+              if (viewId === 'main') {
+                onNewSession()
+              } else {
+                onViewChange(viewId as ViewMode)
+              }
+            }}
+          />
+        </div>
       </SidebarHeader>
-      <SidebarContent>
+      <SidebarContent data-tour="deck-history">
         <DeckHistory
           onSessionSelect={onSessionSelect}
           onNewSession={onNewSession}
@@ -108,7 +117,7 @@ export function AppSidebar({
         />
       </SidebarContent>
       <SidebarFooter>
-        <SidebarGroup>
+        <SidebarGroup data-tour="configure-section">
           <SidebarGroupLabel>Configure</SidebarGroupLabel>
           <NavSecondary
             items={navSecondaryItems}
@@ -116,6 +125,14 @@ export function AppSidebar({
             onNavigate={(viewId) => onViewChange(viewId as ViewMode)}
           />
         </SidebarGroup>
+        <SidebarMenu>
+          <SidebarMenuItem>
+            <SidebarMenuButton onClick={startTour}>
+              <Compass />
+              <span>App Tour</span>
+            </SidebarMenuButton>
+          </SidebarMenuItem>
+        </SidebarMenu>
       </SidebarFooter>
       <SidebarRail />
     </Sidebar>
