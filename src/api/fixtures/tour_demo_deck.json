@@ -1,0 +1,28 @@
+{
+  "title": "Example Deck — AI in Healthcare",
+  "css": "/* Tour demo deck styles */\n.slide { font-family: 'Segoe UI', system-ui, -apple-system, sans-serif; padding: 60px; box-sizing: border-box; width: 100%; height: 100%; display: flex; flex-direction: column; justify-content: center; }\n.slide h1 { font-size: 2.8em; font-weight: 700; margin: 0 0 16px 0; line-height: 1.2; }\n.slide h2 { font-size: 1.8em; font-weight: 600; margin: 0 0 12px 0; line-height: 1.3; }\n.slide p { font-size: 1.15em; line-height: 1.7; margin: 0 0 12px 0; color: #374151; }\n.slide ul { list-style: none; padding: 0; margin: 16px 0; }\n.slide ul li { padding: 10px 0 10px 32px; position: relative; font-size: 1.1em; line-height: 1.6; color: #374151; }\n.slide ul li::before { content: ''; position: absolute; left: 0; top: 18px; width: 10px; height: 10px; border-radius: 50%; }\n.title-slide { background: linear-gradient(135deg, #1e40af 0%, #7c3aed 100%); color: white; text-align: center; justify-content: center; align-items: center; }\n.title-slide h1 { font-size: 3.2em; color: white; text-shadow: 0 2px 8px rgba(0,0,0,0.15); }\n.title-slide p { color: rgba(255,255,255,0.9); font-size: 1.3em; max-width: 600px; }\n.content-slide { background: #ffffff; }\n.content-slide h2 { color: #1e40af; border-bottom: 3px solid #3b82f6; padding-bottom: 8px; display: inline-block; }\n.content-slide ul li::before { background: #3b82f6; }\n.outlook-slide { background: linear-gradient(135deg, #f0f9ff 0%, #ede9fe 100%); }\n.outlook-slide h2 { color: #7c3aed; border-bottom: 3px solid #8b5cf6; padding-bottom: 8px; display: inline-block; }\n.outlook-slide ul li::before { background: #8b5cf6; }\n.badge { display: inline-block; background: rgba(255,255,255,0.2); padding: 8px 20px; border-radius: 20px; font-size: 0.85em; letter-spacing: 1px; text-transform: uppercase; margin-bottom: 24px; }",
+  "external_scripts": [],
+  "scripts": "",
+  "slides": [
+    {
+      "index": 0,
+      "slide_id": "tour-demo-slide-1",
+      "html": "<div class=\"slide title-slide\">\n  <div class=\"badge\">AI &amp; Healthcare</div>\n  <h1>The Benefits of AI in Modern Healthcare</h1>\n  <p>How artificial intelligence is transforming patient care, diagnostics, and medical research</p>\n</div>",
+      "scripts": ""
+    },
+    {
+      "index": 1,
+      "slide_id": "tour-demo-slide-2",
+      "html": "<div class=\"slide content-slide\">\n  <h2>Key Advantages</h2>\n  <ul>\n    <li><strong>Early Disease Detection</strong> — AI algorithms can identify patterns in medical imaging that human eyes might miss, catching diseases like cancer at earlier, more treatable stages</li>\n    <li><strong>Personalized Treatment Plans</strong> — Machine learning models analyze patient data to recommend treatments tailored to individual genetics, lifestyle, and medical history</li>\n    <li><strong>Operational Efficiency</strong> — Automated scheduling, documentation, and triage reduce administrative burden, letting healthcare professionals focus on patient care</li>\n    <li><strong>Drug Discovery Acceleration</strong> — AI simulations can test millions of molecular combinations in days rather than years, dramatically speeding up pharmaceutical R&amp;D</li>\n  </ul>\n</div>",
+      "scripts": ""
+    },
+    {
+      "index": 2,
+      "slide_id": "tour-demo-slide-3",
+      "html": "<div class=\"slide outlook-slide\">\n  <h2>Future Outlook</h2>\n  <ul>\n    <li><strong>Predictive Health Monitoring</strong> — Wearable devices combined with AI will shift medicine from reactive treatment to proactive prevention</li>\n    <li><strong>AI-Assisted Surgery</strong> — Robotic systems guided by real-time AI analysis will enable more precise and less invasive procedures</li>\n    <li><strong>Global Health Equity</strong> — AI-powered diagnostics deployed via mobile devices can bring specialist-level care to underserved communities worldwide</li>\n  </ul>\n  <p style=\"margin-top: 24px; font-style: italic; color: #6b7280;\">The future of healthcare is intelligent, personalized, and accessible to all.</p>\n</div>",
+      "scripts": ""
+    }
+  ],
+  "chat_prompt": "Create 3 slides about the benefits of AI in modern healthcare, with a title slide, key advantages, and future outlook.",
+  "chat_reply": "Here's your deck with 3 slides! I've created:\n\n1. **Title Slide** — introducing AI in healthcare\n2. **Key Advantages** — early detection, personalized treatment, operational efficiency, and drug discovery\n3. **Future Outlook** — predictive monitoring, AI-assisted surgery, and global health equity\n\nFeel free to ask me to refine any slide, add new ones, or change the style."
+}

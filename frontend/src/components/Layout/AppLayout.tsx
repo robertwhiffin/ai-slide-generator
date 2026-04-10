@@ -281,6 +281,80 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
     setViewMode(initialView);
   }, [initialView]);
 
+  // Allow the app tour to navigate back to the main view via a custom DOM event
+  useEffect(() => {
+    const handler = () => {
+      setViewMode('main');
+      navigate('/');
+    };
+    window.addEventListener('tour:navigate-main', handler);
+    return () => window.removeEventListener('tour:navigate-main', handler);
+  }, [navigate]);
+
+  // Allow the app tour to load a pre-built demo deck via a custom DOM event
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const { sessionId } = (e as CustomEvent).detail;
+      if (sessionId) {
+        setViewMode('main');
+        navigate(`/sessions/${sessionId}/edit`);
+      }
+    };
+    window.addEventListener('tour:load-demo-deck', handler);
+    return () => window.removeEventListener('tour:load-demo-deck', handler);
+  }, [navigate]);
+
+  // After tour phase 2 adds slides+messages, re-navigate to reload everything
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const { sessionId: sid } = (e as CustomEvent).detail;
+      if (!sid) return;
+      navigate('/', { replace: true });
+      setTimeout(() => navigate(`/sessions/${sid}/edit`, { replace: true }), 50);
+    };
+    window.addEventListener('tour:refresh-session', handler);
+    return () => window.removeEventListener('tour:refresh-session', handler);
+  }, [navigate]);
+
+  // Tour finished: leave the demo session in the UI, then the tour deletes it in the background
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const { sessionId: deletedId } = (e as CustomEvent<{ sessionId: string }>).detail;
+      if (!deletedId) return;
+
+      const viewingDeleted = urlSessionId === deletedId || sessionId === deletedId;
+      if (viewingDeleted) {
+        api.releaseEditingLock(deletedId);
+        const leaveSessionRoute = urlSessionId === deletedId;
+        if (leaveSessionRoute) {
+          navigate('/', { replace: true });
+        }
+        const resetWorkspace = () => {
+          createNewSession();
+          setSlideDeck(null);
+          setRawHtml(null);
+          setLastSavedTime(null);
+          deckVersionRef.current = 0;
+        };
+        // Defer reset until after the URL drops /sessions/:id so the restore effect does not reload the demo row (often 0 slides if phase 2 never ran).
+        if (leaveSessionRoute) {
+          setTimeout(resetWorkspace, 0);
+        } else {
+          resetWorkspace();
+        }
+      }
+    };
+    window.addEventListener('tour:demo-session-deleted', handler);
+    return () => window.removeEventListener('tour:demo-session-deleted', handler);
+  }, [navigate, createNewSession, urlSessionId, sessionId]);
+
+  // After tour demo DELETE completes — refetch session lists (sidebar / history). Must run after server removal, not when the tour ends.
+  useEffect(() => {
+    const handler = () => setSessionsRefreshKey(k => k + 1);
+    window.addEventListener('tour:sessions-list-refresh', handler);
+    return () => window.removeEventListener('tour:sessions-list-refresh', handler);
+  }, []);
+
   // When URL has sessionId, restore that session (load deck if we don't have it yet).
   // sessionId is intentionally NOT in deps — we use sessionIdRef.current in the guard instead.
   // This prevents the effect from re-firing when switchSession internally calls setSessionId,
@@ -673,8 +747,8 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
 
             <div className="relative flex-1 overflow-hidden">
               <div className="absolute inset-0 flex">
-                <div className="w-[32%] min-w-[260px] border-r border-border bg-card flex flex-col">
-                  <div className="shrink-0 relative z-10 overflow-visible">
+                <div className="w-[32%] min-w-[260px] border-r border-border bg-card flex flex-col" data-tour="chat-panel">
+                  <div className="shrink-0 relative z-10 overflow-visible" data-tour="agent-config">
                     <AgentConfigBar />
                   </div>
                   <ChatPanel
@@ -702,14 +776,16 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
                   />
                 </div>
 
-                <SelectionRibbon
-                  key={versionKey}
-                  slideDeck={displayDeck}
-                  onSlideNavigate={handleSlideNavigate}
-                  versionKey={versionKey}
-                />
+                <div data-tour="selection-ribbon">
+                  <SelectionRibbon
+                    key={versionKey}
+                    slideDeck={displayDeck}
+                    onSlideNavigate={handleSlideNavigate}
+                    versionKey={versionKey}
+                  />
+                </div>
 
-                <div className="flex-1 bg-background">
+                <div className="flex-1 bg-background" data-tour="slide-panel">
                   <SlidePanel
                     key={versionKey}
                     ref={slidePanelRef}
@@ -750,7 +826,7 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
         )}
 
         {viewMode === 'profiles' && (
-          <div className="flex h-full flex-col">
+          <div className="flex h-full flex-col" data-tour="page-profiles">
             <div className="shrink-0">
               <SimplePageHeader title="Agent Profiles" />
             </div>
@@ -765,7 +841,7 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
         )}
 
         {viewMode === 'deck_prompts' && (
-          <div className="flex h-full flex-col">
+          <div className="flex h-full flex-col" data-tour="page-deck-prompts">
             <div className="shrink-0">
               <SimplePageHeader title="Deck Prompts" />
             </div>
@@ -778,7 +854,7 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
         )}
 
         {viewMode === 'slide_styles' && (
-          <div className="flex h-full flex-col">
+          <div className="flex h-full flex-col" data-tour="page-slide-styles">
             <div className="shrink-0">
               <SimplePageHeader title="Slide Styles" />
             </div>
@@ -791,7 +867,7 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
         )}
 
         {viewMode === 'images' && (
-          <div className="flex h-full flex-col">
+          <div className="flex h-full flex-col" data-tour="page-images">
             <div className="shrink-0">
               <SimplePageHeader title="Image library" />
             </div>
@@ -804,7 +880,7 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
         )}
 
         {viewMode === 'help' && (
-          <div className="flex h-full flex-col">
+          <div className="flex h-full flex-col" data-tour="page-help">
             <div className="shrink-0">
               <SimplePageHeader title="Help" />
             </div>

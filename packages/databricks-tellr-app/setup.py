@@ -60,5 +60,8 @@ setup(
         "": ".",
     },
     include_package_data=False,
-    package_data={"databricks_tellr_app": ["_assets/**"]},
+    package_data={
+        "databricks_tellr_app": ["_assets/**"],
+        "src.api": ["fixtures/*.json"],
+    },
 )
