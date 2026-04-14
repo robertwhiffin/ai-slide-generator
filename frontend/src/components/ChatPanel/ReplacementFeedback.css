@@ -1,7 +1,12 @@
+.replacement-feedback-container {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
 .replacement-feedback {
   padding: 0.75rem 1rem;
   border-radius: 6px;
-  margin-top: 0.5rem;
   font-size: 0.875rem;
   font-weight: 500;
 }
@@ -16,5 +21,19 @@
   background: #fef2f2;
   border: 1px solid #ef4444;
   color: #991b1b;
+}
+
+.replacement-feedback.conflict-note {
+  background: #fefce8;
+  border: 1px solid #eab308;
+  color: #854d0e;
+  font-weight: 400;
+}
+
+.replacement-feedback.sync-error {
+  background: #fef2f2;
+  border: 1px solid #ef4444;
+  color: #991b1b;
+  font-weight: 400;
 }
 

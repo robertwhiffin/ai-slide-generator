@@ -297,7 +297,15 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(({
           }
 
           if (event.replacement_info && slideContext) {
-            setLastReplacement(event.replacement_info);
+            // Include conflict_note from metadata if present (RC11)
+            const replacementWithConflict = {
+              ...event.replacement_info,
+              conflict_note: event.metadata?.conflict_note,
+            };
+            setLastReplacement(replacementWithConflict);
+          } else if (event.metadata?.sync_error) {
+            // RC14: Deck sync error (no replacement_info, but show error feedback)
+            setLastReplacement({ sync_error: event.metadata.sync_error });
           }
 
           // Refresh agent config to pick up updated conversation_ids from Genie tools
