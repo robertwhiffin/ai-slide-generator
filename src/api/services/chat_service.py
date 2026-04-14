@@ -377,6 +377,17 @@ class ChatService:
 
         # RC13: Auto-create slide_context from text reference (sync path)
         # Runs before agent build so mode can be determined accurately.
+        logger.info(
+            "RC13: Checking condition (sync)",
+            extra={
+                "session_id": session_id,
+                "_is_edit": _is_edit,
+                "_slide_refs": _slide_refs,
+                "slide_context_is_none": slide_context is None,
+                "slide_context_indices": slide_context.get("indices") if slide_context else None,
+                "rc13_will_run": _is_edit and bool(_slide_refs) and not slide_context,
+            },
+        )
         if _is_edit and _slide_refs and not slide_context:
             existing_deck = self._get_or_load_deck(session_id)
             if existing_deck and len(existing_deck.slides) > 0:
@@ -616,8 +627,18 @@ class ChatService:
 
             # RC11: Check for conflict between selection and text reference (sync path)
             conflict_note = None
+            text_refs, _ = self._parse_slide_references(message)
+            logger.info(
+                "RC11: Checking for selection/text conflict (sync)",
+                extra={
+                    "session_id": session_id,
+                    "has_slide_context": slide_context is not None,
+                    "slide_context_indices": slide_context.get("indices", []) if slide_context else None,
+                    "text_refs": text_refs,
+                    "message_preview": message[:100] if message else None,
+                },
+            )
             if slide_context:
-                text_refs, _ = self._parse_slide_references(message)
                 if text_refs:
                     selected_indices = slide_context.get("indices", [])
                     if set(text_refs) != set(selected_indices):
@@ -637,6 +658,16 @@ class ChatService:
                             content=conflict_note,
                             message_type="info",
                         )
+                    else:
+                        logger.info(
+                            "RC11: No conflict - indices match (sync)",
+                            extra={"session_id": session_id, "selected_indices": selected_indices, "text_refs": text_refs},
+                        )
+                else:
+                    logger.info(
+                        "RC11: Skipped - no text reference found in message (sync)",
+                        extra={"session_id": session_id},
+                    )
 
             # Substitute image placeholders before sending to client
             slide_deck_dict, raw_html = self._substitute_images_for_response(slide_deck_dict, raw_html)
@@ -837,6 +868,17 @@ class ChatService:
 
         # RC13: Auto-create slide_context from text reference (e.g., "edit slide 7")
         # Runs before agent build so mode can be determined accurately.
+        logger.info(
+            "RC13: Checking condition",
+            extra={
+                "session_id": session_id,
+                "_is_edit": _is_edit,
+                "_slide_refs": _slide_refs,
+                "slide_context_is_none": slide_context is None,
+                "slide_context_indices": slide_context.get("indices") if slide_context else None,
+                "rc13_will_run": _is_edit and bool(_slide_refs) and not slide_context,
+            },
+        )
         if _is_edit and _slide_refs and not slide_context:
             existing_deck = self._get_or_load_deck(session_id)
             if existing_deck and len(existing_deck.slides) > 0:
@@ -886,27 +928,30 @@ class ChatService:
                         "This can happen if a previous save failed. "
                         "Please refresh the page to resync your session."
                     )
-                    session_manager.add_message(
-                        session_id=session_id,
-                        role="assistant",
-                        content=error_msg,
-                        message_type="error",
-                    )
-                    yield StreamEvent(
-                        type=StreamEventType.ASSISTANT,
-                        content=error_msg,
-                    )
                     early_deck_dict = existing_deck.to_dict() if existing_deck else None
                     if early_deck_dict:
                         early_deck_dict, _ = self._substitute_images_for_response(early_deck_dict)
+                    # Include error in metadata for ReplacementFeedback display
                     yield StreamEvent(
                         type=StreamEventType.COMPLETE,
                         slides=early_deck_dict,
+                        metadata={"sync_error": error_msg},
                     )
                     return
 
         # RC11: Detect conflict between selection and text reference
         conflict_note = None
+        # Debug: Log RC11 inputs
+        logger.info(
+            "RC11: Checking for selection/text conflict",
+            extra={
+                "session_id": session_id,
+                "has_slide_context": slide_context is not None,
+                "slide_context_indices": slide_context.get("indices", []) if slide_context else None,
+                "_slide_refs": _slide_refs,
+                "message_preview": message[:100] if message else None,
+            },
+        )
         if slide_context:
             if _slide_refs:
                 selected_indices = slide_context.get("indices", [])
@@ -925,6 +970,20 @@ class ChatService:
                             "text_refs": _slide_refs,
                         },
                     )
+                else:
+                    logger.info(
+                        "RC11: No conflict - indices match",
+                        extra={
+                            "session_id": session_id,
+                            "selected_indices": selected_indices,
+                            "_slide_refs": _slide_refs,
+                        },
+                    )
+            else:
+                logger.info(
+                    "RC11: Skipped - no text reference found in message",
+                    extra={"session_id": session_id},
+                )
 
         # Capture deck version BEFORE LLM runs so we can detect concurrent edits.
         _deck_version_before_llm = self._get_deck_version(session_id)
@@ -1333,30 +1392,21 @@ class ChatService:
         # Update session activity
         session_manager.update_last_activity(session_id)
 
-        # RC11: Yield conflict note if selection differed from text reference
-        if conflict_note:
-            yield StreamEvent(
-                type=StreamEventType.ASSISTANT,
-                content=conflict_note,
-            )
-            # Persist the note
-            session_manager.add_message(
-                session_id=session_id,
-                role="assistant",
-                content=conflict_note,
-                message_type="info",
-            )
-
         # Substitute image placeholders before sending to client
         slide_deck_dict, raw_html = self._substitute_images_for_response(slide_deck_dict, raw_html)
 
-        # Yield final complete event FIRST so the user sees slides immediately
+        # RC11: Include conflict note in metadata for ReplacementFeedback display
+        complete_metadata = result.get("metadata") or {}
+        if conflict_note:
+            complete_metadata["conflict_note"] = conflict_note
+
+        # Yield final complete event with slides and optional conflict note
         yield StreamEvent(
             type=StreamEventType.COMPLETE,
             slides=slide_deck_dict,
             raw_html=raw_html,
             replacement_info=_sanitize_replacement_info(replacement_info),
-            metadata=result.get("metadata"),
+            metadata=complete_metadata if complete_metadata else None,
             experiment_url=experiment_url or result.get("experiment_url"),
         )
 
