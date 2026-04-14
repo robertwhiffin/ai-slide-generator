@@ -41,22 +41,25 @@ def _create_model():
     Uses the fixed LLM configuration from DEFAULT_CONFIG. LLM settings
     are NOT user-configurable — they are backend infrastructure defaults.
 
+    Uses the system client (service principal) so that users do not need
+    workspace-level permissions on the model serving endpoint.
+
     Returns:
         ChatDatabricks model instance
     """
     from databricks_langchain import ChatDatabricks
 
-    from src.core.databricks_client import get_user_client
+    from src.core.databricks_client import get_system_client
 
     llm_config = DEFAULT_CONFIG["llm"]
-    user_client = get_user_client()
+    system_client = get_system_client()
 
     model = ChatDatabricks(
         endpoint=llm_config["endpoint"],
         temperature=llm_config["temperature"],
         max_tokens=llm_config["max_tokens"],
         top_p=0.95,
-        workspace_client=user_client,
+        workspace_client=system_client,
     )
 
     logger.info(
