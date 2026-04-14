@@ -26,9 +26,27 @@ const buildMessage = (info: ReplacementInfo): string => {
 export const ReplacementFeedback: React.FC<ReplacementFeedbackProps> = ({
   replacementInfo,
 }) => {
+  // RC14: If only sync_error, show error without success message
+  if (replacementInfo.sync_error && !replacementInfo.original_count) {
+    return (
+      <div className="replacement-feedback-container">
+        <div className="replacement-feedback sync-error">
+          {replacementInfo.sync_error}
+        </div>
+      </div>
+    );
+  }
+
   return (
-    <div className="replacement-feedback success">
-      {buildMessage(replacementInfo)}
+    <div className="replacement-feedback-container">
+      <div className="replacement-feedback success">
+        {buildMessage(replacementInfo)}
+      </div>
+      {replacementInfo.conflict_note && (
+        <div className="replacement-feedback conflict-note">
+          {replacementInfo.conflict_note}
+        </div>
+      )}
     </div>
   );
 };
