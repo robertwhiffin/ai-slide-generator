@@ -118,16 +118,13 @@ def agent_with_mocks(mock_settings, mock_client, mock_mlflow, mock_langchain_com
         "src.services.agent.get_service_principal_folder"
     ) as mock_get_sp_folder, patch(
         "src.services.agent.get_system_client"
-    ) as mock_get_system, patch(
-        "src.services.agent.get_user_client"
-    ) as mock_get_user:
+    ) as mock_get_system:
         mock_get_settings.return_value = mock_settings
         mock_get_client.return_value = mock_client
         mock_init_genie.return_value = "test-genie-conv-id"
         mock_get_username.return_value = "test-user@example.com"
         mock_get_sp_folder.return_value = None  # Local dev mode
         mock_get_system.return_value = mock_client
-        mock_get_user.return_value = mock_client
 
         agent = SlideGeneratorAgent()
         return agent
@@ -176,14 +173,14 @@ class TestLLMErrorHandling:
         ) as mock_get_username, patch(
             "src.services.agent.get_service_principal_folder"
         ) as mock_get_sp_folder, patch(
-            "src.services.agent.get_user_client"
-        ) as mock_get_user:
+            "src.services.agent.get_system_client"
+        ) as mock_get_system:
             mock_get_settings.return_value = mock_settings
             mock_get_client.return_value = mock_client
             mock_init_genie.return_value = "test-genie-conv-id"
             mock_get_username.return_value = "test-user@example.com"
             mock_get_sp_folder.return_value = None
-            mock_get_user.return_value = mock_client
+            mock_get_system.return_value = mock_client
 
             agent = SlideGeneratorAgent()
 
@@ -217,14 +214,14 @@ class TestLLMErrorHandling:
         ) as mock_get_username, patch(
             "src.services.agent.get_service_principal_folder"
         ) as mock_get_sp_folder, patch(
-            "src.services.agent.get_user_client"
-        ) as mock_get_user:
+            "src.services.agent.get_system_client"
+        ) as mock_get_system:
             mock_get_settings.return_value = mock_settings
             mock_get_client.return_value = mock_client
             mock_init_genie.return_value = "test-genie-conv-id"
             mock_get_username.return_value = "test-user@example.com"
             mock_get_sp_folder.return_value = None
-            mock_get_user.return_value = mock_client
+            mock_get_system.return_value = mock_client
 
             agent = SlideGeneratorAgent()
 
@@ -256,14 +253,14 @@ class TestLLMErrorHandling:
         ) as mock_get_username, patch(
             "src.services.agent.get_service_principal_folder"
         ) as mock_get_sp_folder, patch(
-            "src.services.agent.get_user_client"
-        ) as mock_get_user:
+            "src.services.agent.get_system_client"
+        ) as mock_get_system:
             mock_get_settings.return_value = mock_settings
             mock_get_client.return_value = mock_client
             mock_init_genie.return_value = "test-genie-conv-id"
             mock_get_username.return_value = "test-user@example.com"
             mock_get_sp_folder.return_value = None
-            mock_get_user.return_value = mock_client
+            mock_get_system.return_value = mock_client
 
             agent = SlideGeneratorAgent()
 
@@ -301,14 +298,14 @@ class TestLLMErrorHandling:
         ) as mock_get_username, patch(
             "src.services.agent.get_service_principal_folder"
         ) as mock_get_sp_folder, patch(
-            "src.services.agent.get_user_client"
-        ) as mock_get_user:
+            "src.services.agent.get_system_client"
+        ) as mock_get_system:
             mock_get_settings.return_value = mock_settings
             mock_get_client.return_value = mock_client
             mock_init_genie.return_value = "test-genie-conv-id"
             mock_get_username.return_value = "test-user@example.com"
             mock_get_sp_folder.return_value = None
-            mock_get_user.return_value = mock_client
+            mock_get_system.return_value = mock_client
 
             agent = SlideGeneratorAgent()
 
@@ -344,14 +341,14 @@ class TestLLMErrorHandling:
         ) as mock_get_username, patch(
             "src.services.agent.get_service_principal_folder"
         ) as mock_get_sp_folder, patch(
-            "src.services.agent.get_user_client"
-        ) as mock_get_user:
+            "src.services.agent.get_system_client"
+        ) as mock_get_system:
             mock_get_settings.return_value = mock_settings
             mock_get_client.return_value = mock_client
             mock_init_genie.return_value = "test-genie-conv-id"
             mock_get_username.return_value = "test-user@example.com"
             mock_get_sp_folder.return_value = None
-            mock_get_user.return_value = mock_client
+            mock_get_system.return_value = mock_client
 
             agent = SlideGeneratorAgent()
 
@@ -382,14 +379,14 @@ class TestLLMErrorHandling:
         ) as mock_get_username, patch(
             "src.services.agent.get_service_principal_folder"
         ) as mock_get_sp_folder, patch(
-            "src.services.agent.get_user_client"
-        ) as mock_get_user:
+            "src.services.agent.get_system_client"
+        ) as mock_get_system:
             mock_get_settings.return_value = mock_settings
             mock_get_client.return_value = mock_client
             mock_init_genie.return_value = "test-genie-conv-id"
             mock_get_username.return_value = "test-user@example.com"
             mock_get_sp_folder.return_value = None
-            mock_get_user.return_value = mock_client
+            mock_get_system.return_value = mock_client
 
             agent = SlideGeneratorAgent()
 
@@ -690,14 +687,14 @@ class TestStateRecovery:
         ) as mock_get_username, patch(
             "src.services.agent.get_service_principal_folder"
         ) as mock_get_sp_folder, patch(
-            "src.services.agent.get_user_client"
-        ) as mock_get_user:
+            "src.services.agent.get_system_client"
+        ) as mock_get_system:
             mock_get_settings.return_value = mock_settings
             mock_get_client.return_value = mock_client
             mock_init_genie.return_value = "test-genie-conv-id"
             mock_get_username.return_value = "test-user@example.com"
             mock_get_sp_folder.return_value = None
-            mock_get_user.return_value = mock_client
+            mock_get_system.return_value = mock_client
 
             agent = SlideGeneratorAgent()
 
@@ -737,14 +734,14 @@ class TestStateRecovery:
         ) as mock_get_username, patch(
             "src.services.agent.get_service_principal_folder"
         ) as mock_get_sp_folder, patch(
-            "src.services.agent.get_user_client"
-        ) as mock_get_user:
+            "src.services.agent.get_system_client"
+        ) as mock_get_system:
             mock_get_settings.return_value = mock_settings
             mock_get_client.return_value = mock_client
             mock_init_genie.return_value = "test-genie-conv-id"
             mock_get_username.return_value = "test-user@example.com"
             mock_get_sp_folder.return_value = None
-            mock_get_user.return_value = mock_client
+            mock_get_system.return_value = mock_client
 
             agent = SlideGeneratorAgent()
 
@@ -818,13 +815,13 @@ class TestGracefulDegradation:
         ) as mock_get_username, patch(
             "src.services.agent.get_service_principal_folder"
         ) as mock_get_sp_folder, patch(
-            "src.services.agent.get_user_client"
-        ) as mock_get_user:
+            "src.services.agent.get_system_client"
+        ) as mock_get_system:
             mock_get_settings.return_value = mock_settings_no_genie
             mock_get_client.return_value = mock_client
             mock_get_username.return_value = "test-user@example.com"
             mock_get_sp_folder.return_value = None
-            mock_get_user.return_value = mock_client
+            mock_get_system.return_value = mock_client
 
             # Agent should initialize without Genie
             agent = SlideGeneratorAgent()
@@ -857,8 +854,8 @@ class TestGracefulDegradation:
         ) as mock_get_username, patch(
             "src.services.agent.get_service_principal_folder"
         ) as mock_get_sp_folder, patch(
-            "src.services.agent.get_user_client"
-        ) as mock_get_user:
+            "src.services.agent.get_system_client"
+        ) as mock_get_system:
             # Mock MLflow to fail
             mock_mlflow_fail.set_tracking_uri.side_effect = Exception("MLflow unavailable")
             mock_mlflow_fail.langchain.autolog.side_effect = Exception("MLflow unavailable")
@@ -868,7 +865,7 @@ class TestGracefulDegradation:
             mock_init_genie.return_value = "test-genie-conv-id"
             mock_get_username.return_value = "test-user@example.com"
             mock_get_sp_folder.return_value = None
-            mock_get_user.return_value = mock_client
+            mock_get_system.return_value = mock_client
 
             # Agent should still initialize despite MLflow errors
             agent = SlideGeneratorAgent()
@@ -888,8 +885,8 @@ class TestGracefulDegradation:
         ) as mock_get_username, patch(
             "src.services.agent.get_service_principal_folder"
         ) as mock_get_sp_folder, patch(
-            "src.services.agent.get_user_client"
-        ) as mock_get_user, patch(
+            "src.services.agent.get_system_client"
+        ) as mock_get_system, patch(
             "src.services.agent.query_genie_space"
         ) as mock_query_genie:
             mock_get_settings.return_value = mock_settings
@@ -897,7 +894,7 @@ class TestGracefulDegradation:
             mock_init_genie.return_value = "test-genie-conv-id"
             mock_get_username.return_value = "test-user@example.com"
             mock_get_sp_folder.return_value = None
-            mock_get_user.return_value = mock_client
+            mock_get_system.return_value = mock_client
 
             # Mock Genie to fail
             mock_query_genie.side_effect = GenieToolError("Genie unavailable")
