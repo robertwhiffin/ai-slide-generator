@@ -14,12 +14,12 @@ from src.core.defaults import DEFAULT_CONFIG
 
 def test_agent_create_model_uses_default_config():
     """Verify agent._create_model() reads endpoint/temperature/etc from DEFAULT_CONFIG."""
-    with patch("src.services.agent.get_user_client") as mock_user_client, \
+    with patch("src.services.agent.get_system_client") as mock_system_client, \
          patch("src.services.agent.ChatDatabricks") as mock_chat, \
          patch("src.services.agent.get_settings") as mock_get_settings, \
          patch("src.services.agent.get_databricks_client") as mock_db_client, \
          patch("src.services.agent.mlflow"):
-        mock_user_client.return_value = MagicMock()
+        mock_system_client.return_value = MagicMock()
         mock_chat.return_value = MagicMock()
         mock_settings = MagicMock()
         mock_settings.prompts = {"system_prompt": "test", "slide_style": "test style", "slide_editing_instructions": "test"}
@@ -41,7 +41,7 @@ def test_agent_create_model_uses_default_config():
             temperature=llm_config["temperature"],
             max_tokens=llm_config["max_tokens"],
             top_p=llm_config["top_p"],
-            workspace_client=mock_user_client.return_value,
+            workspace_client=mock_system_client.return_value,
         )
 
 
