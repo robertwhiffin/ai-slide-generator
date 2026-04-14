@@ -44,4 +44,8 @@ export interface ReplacementInfo {
   error?: string | null;
   canvas_ids?: string[];
   is_add_operation?: boolean;
+  /** RC11: Conflict note when selection differs from text reference */
+  conflict_note?: string;
+  /** RC14: Deck sync error when frontend/backend state mismatch */
+  sync_error?: string;
 }
