@@ -2,8 +2,13 @@
 
 from __future__ import annotations
 
+import html
+import logging
+import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+
+logger = logging.getLogger(__name__)
 
 from bs4 import BeautifulSoup
 
@@ -484,13 +489,17 @@ class SlideDeck:
             'slides': slides_list,
         }
 
-    def to_html_document(self, chart_js_cdn: str = None) -> str:
+    def to_html_document(self, chart_js_cdn: Optional[str] = None) -> str:
         """Serialize the deck as a standalone renderable HTML document.
 
         Produces a complete <!doctype html> page with the deck's CSS, external
         scripts (with the Chart.js CDN URL overridable for air-gapped
         environments), all slide HTML in order, and per-slide scripts
         aggregated at the bottom.
+
+        All caller-supplied and LLM-generated content is escaped before
+        interpolation to prevent XSS propagation through the MCP layer to
+        downstream consumers (Stride, Vibe, etc.).
 
         Args:
             chart_js_cdn: Override for the Chart.js CDN URL. If provided,
@@ -500,11 +509,14 @@ class SlideDeck:
         Returns:
             A complete HTML document string, renderable in any modern browser.
         """
-        title = self.title or "Slide Deck"
+        # Issue 1: Escape title to prevent XSS via </title><script>... injection.
+        title = html.escape(self.title or "Slide Deck")
+
+        # Issue 8: chart_js_cdn is Optional[str] (annotation fixed in signature above).
 
         # Build external scripts list, applying the Chart.js CDN override
         # without mutating self.external_scripts.
-        scripts_list: list[str] = []
+        scripts_list: List[str] = []
         replaced_default = False
         for s in self.external_scripts:
             if chart_js_cdn is not None and s == self.CHART_JS_URL:
@@ -516,28 +528,64 @@ class SlideDeck:
         if chart_js_cdn is not None and not replaced_default and chart_js_cdn not in scripts_list:
             scripts_list.append(chart_js_cdn)
 
-        external_script_tags = "\n".join(
-            f'  <script src="{src}"></script>' for src in scripts_list
-        )
+        # Issue 3: Escape and validate each src URL before interpolating into
+        # the attribute, to prevent attribute-escape XSS (e.g. src with embedded
+        # quote + onerror handler). Also skip non-http(s) URLs as an extra
+        # defense-in-depth measure.
+        script_tag_parts: List[str] = []
+        for src in scripts_list:
+            if not (src.startswith("http://") or src.startswith("https://")):
+                logger.warning(
+                    "to_html_document: skipping external script URL with unexpected "
+                    "scheme (expected http/https): %r",
+                    src,
+                )
+                continue
+            escaped_src = html.escape(src, quote=True)
+            script_tag_parts.append(f'  <script src="{escaped_src}"></script>')
+        external_script_tags = "\n".join(script_tag_parts)
+
+        # Issue 2: Strip any HTML tags from CSS before embedding in the style block,
+        # to prevent LLM-generated CSS from breaking out of the style element and
+        # injecting arbitrary markup. A </style> closes the style block; any other
+        # HTML tag (e.g. <script>) inside CSS is also illegitimate and must be removed.
+        safe_css = re.sub(r"</?\s*\w[^>]*>", "", self.css, flags=re.IGNORECASE)
 
         slide_html = "\n".join(slide.html for slide in self.slides)
         aggregated_scripts = self.scripts  # IIFE-wrapped per existing property
 
-        return (
-            "<!doctype html>\n"
-            "<html>\n"
-            "<head>\n"
-            '  <meta charset="utf-8">\n'
-            f"  <title>{title}</title>\n"
-            f"  <style>\n{self.css}\n  </style>\n"
-            f"{external_script_tags}\n"
-            "</head>\n"
-            "<body>\n"
-            f"{slide_html}\n"
-            f"<script>\n{aggregated_scripts}\n</script>\n"
-            "</body>\n"
-            "</html>\n"
-        )
+        html_parts: List[str] = [
+            "<!doctype html>",
+            "<html>",
+            "<head>",
+            '  <meta charset="utf-8">',
+            f"  <title>{title}</title>",
+        ]
+
+        # Issue 5: Only emit the <style> block when css is non-empty (matches knit()).
+        if safe_css:
+            html_parts.append(f"  <style>\n{safe_css}\n  </style>")
+
+        if external_script_tags:
+            html_parts.append(external_script_tags)
+
+        html_parts.extend([
+            "</head>",
+            "<body>",
+            slide_html,
+        ])
+
+        # Issue 4: Only emit the <script> block when there are actual scripts (matches knit()).
+        if aggregated_scripts:
+            html_parts.append(f"<script>\n{aggregated_scripts}\n</script>")
+
+        html_parts.extend([
+            "</body>",
+            "</html>",
+            "",  # trailing newline
+        ])
+
+        return "\n".join(html_parts)
 
     def __len__(self) -> int:
         """Return number of slides.

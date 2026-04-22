@@ -43,7 +43,7 @@ def test_to_html_document_includes_deck_css(minimal_deck):
 
 def test_to_html_document_includes_chart_js_cdn(minimal_deck):
     out = minimal_deck.to_html_document()
-    assert "chart.js" in out
+    assert f'<script src="{SlideDeck.CHART_JS_URL}">' in out
 
 
 def test_to_html_document_includes_all_slide_html(minimal_deck):
@@ -75,3 +75,37 @@ def test_to_html_document_is_deterministic(minimal_deck):
     a = minimal_deck.to_html_document()
     b = minimal_deck.to_html_document()
     assert a == b
+
+
+def test_to_html_document_does_not_mutate_external_scripts(minimal_deck):
+    original = list(minimal_deck.external_scripts)
+    minimal_deck.to_html_document(chart_js_cdn="https://other.cdn/chart.js")
+    assert minimal_deck.external_scripts == original
+
+
+def test_to_html_document_escapes_title():
+    """Title with HTML/script content must not break out of the <title> element."""
+    malicious_title = '</title><script>alert(1)</script><title>X'
+    deck = SlideDeck(title=malicious_title)
+    out = deck.to_html_document()
+    # The exact <script> tag should NOT appear unescaped
+    assert "<script>alert(1)</script>" not in out
+    # Escaped form should appear (html.escape converts < > to &lt; &gt;)
+    assert "&lt;script&gt;alert(1)&lt;/script&gt;" in out
+
+
+def test_to_html_document_strips_style_closer_from_css():
+    """CSS containing </style> must not be able to break out of the style block."""
+    malicious_css = "body { color: red; }</style><script>alert(1)</script><style>"
+    deck = SlideDeck(title="X", css=malicious_css)
+    out = deck.to_html_document()
+    # The injected script tag should not appear as executable markup
+    assert "<script>alert(1)</script>" not in out
+
+
+def test_to_html_document_escapes_chart_js_cdn_attribute():
+    """A CDN URL that tries to break out of the src attribute must be neutralized."""
+    deck = SlideDeck(title="X")
+    out = deck.to_html_document(chart_js_cdn='https://ok.cdn/chart.js" onerror="alert(1)')
+    # Unescaped onerror attribute should NOT appear
+    assert 'onerror="alert(1)"' not in out
