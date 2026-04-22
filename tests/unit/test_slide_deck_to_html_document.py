@@ -1,5 +1,7 @@
 """Tests for SlideDeck.to_html_document() serializer."""
 
+import re
+
 import pytest
 
 from src.domain.slide import Slide
@@ -95,17 +97,54 @@ def test_to_html_document_escapes_title():
 
 
 def test_to_html_document_strips_style_closer_from_css():
-    """CSS containing </style> must not be able to break out of the style block."""
-    malicious_css = "body { color: red; }</style><script>alert(1)</script><style>"
+    """CSS containing </style> must not be able to break out of the style block.
+
+    Uses only a surgical strip of </style> tags; everything else (including
+    legitimate CSS with <, and any non-</style> HTML-shaped text inside CSS
+    string/data-URI contexts) must survive.
+    """
+    malicious_css = (
+        "body { color: red; }"
+        "</style>"
+        "<script>alert(1)</script>"
+        "<style>"
+    )
     deck = SlideDeck(title="X", css=malicious_css)
     out = deck.to_html_document()
-    # The injected script tag should not appear as executable markup
-    assert "<script>alert(1)</script>" not in out
+
+    # Legitimate CSS survives
+    assert "body { color: red; }" in out
+
+    # The </style> that would break out of our style element is stripped
+    # (case-insensitive). After stripping, exactly ONE </style> remains
+    # in the output — the one we emit ourselves as the closer.
+    closers = len(re.findall(r"</\s*style\s*>", out, flags=re.IGNORECASE))
+    assert closers == 1, f"expected exactly 1 </style>, saw {closers}"
+
+
+def test_to_html_document_preserves_legitimate_css_with_angle_brackets():
+    """CSS containing <> in string literals or data URIs must be preserved."""
+    legit_css = (
+        "p::before { content: '<foo>'; }\n"
+        "div { background: url('data:image/svg+xml,<svg></svg>'); }"
+    )
+    deck = SlideDeck(title="X", css=legit_css)
+    out = deck.to_html_document()
+    assert "content: '<foo>';" in out
+    assert "data:image/svg+xml,<svg></svg>" in out
 
 
 def test_to_html_document_escapes_chart_js_cdn_attribute():
     """A CDN URL that tries to break out of the src attribute must be neutralized."""
     deck = SlideDeck(title="X")
-    out = deck.to_html_document(chart_js_cdn='https://ok.cdn/chart.js" onerror="alert(1)')
-    # Unescaped onerror attribute should NOT appear
+    malicious_cdn = 'https://ok.cdn/chart.js" onerror="alert(1)'
+    out = deck.to_html_document(chart_js_cdn=malicious_cdn)
+
+    # Unescaped onerror attribute must not appear
     assert 'onerror="alert(1)"' not in out
+
+    # Escaped form (both " in the URL escaped to &quot;) appears — proving
+    # we emitted the tag with the URL, just safely escaped, rather than
+    # dropping it. The input URL contains two literal quotes (the attribute-
+    # breakout and the opening of the injected onerror); both get escaped.
+    assert "chart.js&quot; onerror=&quot;alert(1)" in out
