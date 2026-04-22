@@ -213,6 +213,7 @@ async def worker() -> None:
         try:
             request_id, payload = await job_queue.get()
             jobs[request_id]["status"] = "running"
+            jobs[request_id]["started_at"] = datetime.utcnow()
 
             try:
                 await process_chat_request(request_id, payload)

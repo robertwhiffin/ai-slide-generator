@@ -120,3 +120,71 @@ async def test_sweep_marks_multiple_timed_out_jobs():
     assert job_queue.jobs["req-fresh"]["status"] == "running"
     for i in range(3):
         assert job_queue.jobs[f"req-{i}"]["status"] == "failed"
+
+
+# ---- Integration: worker populates started_at correctly --------------------
+
+
+@pytest.mark.asyncio
+async def test_job_entry_gets_started_at_when_worker_marks_running():
+    """
+    Integration-style test: when the worker flips a job to running, started_at
+    must be populated so the timeout sweeper can judge its age.
+
+    The actual status flip to "running" happens inside worker() (not
+    process_chat_request), because process_chat_request only updates the DB
+    row via session_manager. The in-memory jobs dict — which the sweeper
+    reads — is flipped inline in the worker loop. This test captures the
+    entry state at the moment process_chat_request is invoked (via an
+    AsyncMock side_effect), which is immediately after the worker has
+    flipped status to "running" — the exact point the sweeper cares about.
+    """
+    import asyncio
+    from unittest.mock import AsyncMock, patch
+
+    request_id = "req-integ-1"
+    captured: dict = {}
+
+    async def _capture_entry(_rid, _payload):
+        # Snapshot the jobs entry exactly when the worker hands off to
+        # process_chat_request — i.e., right after the status flip.
+        captured["entry"] = dict(job_queue.jobs[_rid])
+
+    with patch(
+        "src.api.services.job_queue.process_chat_request",
+        new=AsyncMock(side_effect=_capture_entry),
+    ):
+        await job_queue.enqueue_job(
+            request_id,
+            {
+                "session_id": "sess-integ",
+                "message": "hello",
+            },
+        )
+
+        worker_task = asyncio.create_task(job_queue.worker())
+        try:
+            # Wait for the worker to drain our single queued item. join()
+            # resolves once task_done() has been called for every queued
+            # item, which in worker() happens after process_chat_request
+            # returns (i.e., after our capture ran).
+            await asyncio.wait_for(job_queue.job_queue.join(), timeout=2.0)
+        finally:
+            worker_task.cancel()
+            try:
+                await worker_task
+            except asyncio.CancelledError:
+                pass
+
+    entry = captured.get("entry")
+    assert entry is not None, (
+        "worker should have invoked process_chat_request for the enqueued job"
+    )
+    assert entry.get("status") == "running", (
+        "worker must flip status to running before calling process_chat_request"
+    )
+    assert "started_at" in entry, (
+        "worker must populate started_at when the job enters the running "
+        "state, so the timeout sweeper can age it"
+    )
+    assert isinstance(entry["started_at"], datetime)
