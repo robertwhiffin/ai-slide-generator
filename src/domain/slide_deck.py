@@ -484,9 +484,64 @@ class SlideDeck:
             'slides': slides_list,
         }
 
+    def to_html_document(self, chart_js_cdn: str = None) -> str:
+        """Serialize the deck as a standalone renderable HTML document.
+
+        Produces a complete <!doctype html> page with the deck's CSS, external
+        scripts (with the Chart.js CDN URL overridable for air-gapped
+        environments), all slide HTML in order, and per-slide scripts
+        aggregated at the bottom.
+
+        Args:
+            chart_js_cdn: Override for the Chart.js CDN URL. If provided,
+                replaces the default Chart.js entry in external_scripts for
+                this serialization only (does NOT mutate the deck).
+
+        Returns:
+            A complete HTML document string, renderable in any modern browser.
+        """
+        title = self.title or "Slide Deck"
+
+        # Build external scripts list, applying the Chart.js CDN override
+        # without mutating self.external_scripts.
+        scripts_list: list[str] = []
+        replaced_default = False
+        for s in self.external_scripts:
+            if chart_js_cdn is not None and s == self.CHART_JS_URL:
+                scripts_list.append(chart_js_cdn)
+                replaced_default = True
+            else:
+                scripts_list.append(s)
+        # If no default was present but caller specified an override, append it.
+        if chart_js_cdn is not None and not replaced_default and chart_js_cdn not in scripts_list:
+            scripts_list.append(chart_js_cdn)
+
+        external_script_tags = "\n".join(
+            f'  <script src="{src}"></script>' for src in scripts_list
+        )
+
+        slide_html = "\n".join(slide.html for slide in self.slides)
+        aggregated_scripts = self.scripts  # IIFE-wrapped per existing property
+
+        return (
+            "<!doctype html>\n"
+            "<html>\n"
+            "<head>\n"
+            '  <meta charset="utf-8">\n'
+            f"  <title>{title}</title>\n"
+            f"  <style>\n{self.css}\n  </style>\n"
+            f"{external_script_tags}\n"
+            "</head>\n"
+            "<body>\n"
+            f"{slide_html}\n"
+            f"<script>\n{aggregated_scripts}\n</script>\n"
+            "</body>\n"
+            "</html>\n"
+        )
+
     def __len__(self) -> int:
         """Return number of slides.
-        
+
         Returns:
             Number of slides in the deck
         """
