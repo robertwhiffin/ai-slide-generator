@@ -8,14 +8,23 @@ import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-logger = logging.getLogger(__name__)
-
 from bs4 import BeautifulSoup
 
 from src.utils.css_utils import merge_css
 from src.utils.html_utils import split_script_by_canvas
 
 from .slide import Slide
+
+logger = logging.getLogger(__name__)
+
+# Surgical sanitizer for CSS embedded inside a <style> element. The only
+# HTML sequence that can break out of a <style> element during parsing is
+# the element's end tag, because <style> is a raw-text element (per the
+# HTML Standard). Anything else — <script>, <img>, inline-SVG markup, etc.
+# — is treated as CSS text by the parser and cannot escape. Stripping
+# tag-shaped substrings more broadly would corrupt legitimate CSS such as
+# `content: '<foo>'` and data-URI SVGs (`url('data:image/svg+xml,<svg></svg>')`).
+_STYLE_CLOSER_RE = re.compile(r"</\s*style\s*>", re.IGNORECASE)
 
 
 class SlideDeck:
@@ -545,11 +554,12 @@ class SlideDeck:
             script_tag_parts.append(f'  <script src="{escaped_src}"></script>')
         external_script_tags = "\n".join(script_tag_parts)
 
-        # Issue 2: Strip any HTML tags from CSS before embedding in the style block,
-        # to prevent LLM-generated CSS from breaking out of the style element and
-        # injecting arbitrary markup. A </style> closes the style block; any other
-        # HTML tag (e.g. <script>) inside CSS is also illegitimate and must be removed.
-        safe_css = re.sub(r"</?\s*\w[^>]*>", "", self.css, flags=re.IGNORECASE)
+        # Issue 2 (narrowed): Strip only </style> closers from CSS before embedding
+        # in the <style> block. Broader tag stripping would corrupt legitimate CSS
+        # content such as string literals (`content: '<foo>'`) and inline-SVG data
+        # URIs; it is also unnecessary because <style> is a raw-text element and
+        # </style> is the only sequence that can end it. See _STYLE_CLOSER_RE.
+        safe_css = _STYLE_CLOSER_RE.sub("", self.css) if self.css else ""
 
         slide_html = "\n".join(slide.html for slide in self.slides)
         aggregated_scripts = self.scripts  # IIFE-wrapped per existing property
