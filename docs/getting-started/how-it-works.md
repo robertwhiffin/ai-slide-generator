@@ -25,6 +25,7 @@
 - **Respects permissions** — Uses Unity Catalog security out of the box
 - **Conversational editing** — Refine slides through natural language ("add a comparison to Q3", "make the EMEA section more prominent")
 - **Prompt-only mode** — Works without Genie for general-purpose slide generation
+- **Agent-ready** — Call tellr from other Databricks Apps or MCP-compatible agents (Claude Code, Cursor) via a Model Context Protocol server. Programmatically generated decks are attributed to the end user and appear alongside UI-created ones. See the [MCP Integration Guide](../technical/mcp-integration-guide.md).
 
 tellr is the third pillar in Databricks' AI/BI suite, completing the story alongside Genie and Dashboards: conversational analytics, conversational dashboards, and now **conversational presentations**.
 
