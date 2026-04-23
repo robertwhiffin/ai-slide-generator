@@ -280,6 +280,21 @@ cd frontend && npx playwright test
 
 ---
 
+## Documentation updates
+
+After the component work lands (between the last TDD cycle and the manual verification), walk through the docs and align wording with the new two-tier model. Keep the edits minimal — no new pages, just a few targeted tweaks.
+
+Files to revisit:
+
+- **`docs/technical/mcp-server.md`** — The `slide_style_id` row in the `create_deck` input schema currently says "Omit for default." Clarify: "Omit to use the system default (settable at `/admin`); MCP cannot see per-user localStorage overrides."
+- **`docs/technical/mcp-integration-guide.md`** — Cross-check any mention of slide style defaults and align with the MCP server doc's updated wording so they don't drift.
+- **`docs/technical/frontend-overview.md`** — Add a short note that `/admin` now exposes a "Slide Style" tab for setting the system default, and briefly describe the two-tier resolution (localStorage → DB `is_default` → `is_system` fallback) so a future reader can understand why the frontend helper `resolveDefaultStyleId()` has three tiers.
+- **`docs/technical/database-configuration.md`** — If it references `slide_style_library.is_default`, confirm the description matches the new behavior (one row system-wide, settable via `/admin`).
+
+What to write: one or two sentences per file. The goal is to leave no stale descriptions claiming there's no UI surface for changing the DB default, which is where the docs stand today. Do NOT rewrite these docs wholesale — scope is "fix the specific lines that would mislead a reader after this change ships."
+
+Commit the docs update as its own commit (not bundled with component code) so a future `git log` reader can see "docs align with new admin affordance" as a discrete step.
+
 ## Post-Implementation Manual Verification (after deploy)
 
 Per spec section 9:
@@ -295,6 +310,7 @@ One commit per TDD cycle is ideal but not mandatory — two commits is acceptabl
 
 - Commit A — fixture + tab wiring (Cycles 1 + 2 + test-data update).
 - Commit B — everything else (Cycles 3-7 + API method + component).
+- Commit C — docs updates (see "Documentation updates" section).
 
 Plus a final commit for the manual verification notes if any surprises emerge.
 
