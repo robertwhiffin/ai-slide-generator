@@ -406,3 +406,137 @@ async def test_get_deck_status_falls_back_to_db_when_job_popped_from_memory(
         assert result["html_document"].lower().startswith("<!doctype")
         assert result["deck_url"] == "https://t.example/sessions/sess-1/edit"
         assert result["metadata"]["latency_ms"] == 15000
+
+
+# ---- edit_deck ----------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_edit_deck_submits_with_slide_context(fake_request, identity):
+    from src.api import mcp_server
+
+    # session_manager.get_slide_deck returns the deck dict
+    fake_deck = {
+        "title": "x",
+        "slides": [
+            {"html": "<div class='slide'>0</div>", "scripts": ""},
+            {"html": "<div class='slide'>1</div>", "scripts": ""},
+            {"html": "<div class='slide'>2</div>", "scripts": ""},
+        ],
+        "css": "",
+        "external_scripts": [],
+        "head_meta": {},
+    }
+
+    async def _fake_enqueue(**kwargs):
+        return "req-edit-1"
+
+    with patch("src.api.mcp_server.mcp_auth_scope") as auth_scope, \
+         patch("src.api.mcp_server.permission_service") as perm_svc, \
+         patch("src.api.mcp_server.get_session_manager") as get_sm, \
+         patch("src.api.mcp_server.enqueue_create_job", side_effect=_fake_enqueue) as enqueue:
+
+        auth_scope.return_value.__enter__.return_value = identity
+        auth_scope.return_value.__exit__.return_value = False
+        perm_svc.can_edit_deck.return_value = True
+
+        sm = MagicMock()
+        sm.get_slide_deck.return_value = fake_deck
+        get_sm.return_value = sm
+
+        result = await mcp_server._edit_deck_impl(
+            request=fake_request,
+            session_id="sess-1",
+            instruction="make slide 2 more exciting",
+            slide_indices=[1],
+        )
+
+        enqueue.assert_called_once()
+        kwargs = enqueue.call_args.kwargs
+        assert kwargs["session_id"] == "sess-1"
+        assert kwargs["prompt"] == "make slide 2 more exciting"
+        assert kwargs["mode"] == "edit"
+        assert kwargs["slide_context"]["indices"] == [1]
+        assert kwargs["slide_context"]["slide_htmls"] == ["<div class='slide'>1</div>"]
+
+        assert result == {
+            "session_id": "sess-1",
+            "request_id": "req-edit-1",
+            "status": "pending",
+        }
+
+
+@pytest.mark.asyncio
+async def test_edit_deck_submits_without_slide_context_when_indices_omitted(
+    fake_request, identity
+):
+    from src.api import mcp_server
+
+    async def _fake_enqueue(**kwargs):
+        return "req-edit-2"
+
+    with patch("src.api.mcp_server.mcp_auth_scope") as auth_scope, \
+         patch("src.api.mcp_server.permission_service") as perm_svc, \
+         patch("src.api.mcp_server.get_session_manager") as get_sm, \
+         patch("src.api.mcp_server.enqueue_create_job", side_effect=_fake_enqueue) as enqueue:
+
+        auth_scope.return_value.__enter__.return_value = identity
+        auth_scope.return_value.__exit__.return_value = False
+        perm_svc.can_edit_deck.return_value = True
+
+        sm = MagicMock()
+        # If slide_indices is omitted, get_slide_deck should NOT be called
+        sm.get_slide_deck.return_value = None
+        get_sm.return_value = sm
+
+        await mcp_server._edit_deck_impl(
+            request=fake_request,
+            session_id="sess-1",
+            instruction="make it more exciting",
+        )
+
+        kwargs = enqueue.call_args.kwargs
+        assert kwargs["mode"] == "edit"
+        assert kwargs["slide_context"] is None
+
+
+@pytest.mark.asyncio
+async def test_edit_deck_rejects_non_contiguous_indices(fake_request, identity):
+    from src.api import mcp_server
+    from src.api.mcp_server import MCPToolError
+
+    with patch("src.api.mcp_server.mcp_auth_scope") as auth_scope, \
+         patch("src.api.mcp_server.permission_service") as perm_svc:
+
+        auth_scope.return_value.__enter__.return_value = identity
+        auth_scope.return_value.__exit__.return_value = False
+        perm_svc.can_edit_deck.return_value = True
+
+        with pytest.raises(MCPToolError) as exc:
+            await mcp_server._edit_deck_impl(
+                request=fake_request,
+                session_id="sess-1",
+                instruction="edit",
+                slide_indices=[0, 2],  # not contiguous
+            )
+        assert "contiguous" in str(exc.value).lower()
+
+
+@pytest.mark.asyncio
+async def test_edit_deck_denies_without_edit_permission(fake_request, identity):
+    from src.api import mcp_server
+    from src.api.mcp_server import MCPToolError
+
+    with patch("src.api.mcp_server.mcp_auth_scope") as auth_scope, \
+         patch("src.api.mcp_server.permission_service") as perm_svc:
+
+        auth_scope.return_value.__enter__.return_value = identity
+        auth_scope.return_value.__exit__.return_value = False
+        perm_svc.can_edit_deck.return_value = False
+
+        with pytest.raises(MCPToolError):
+            await mcp_server._edit_deck_impl(
+                request=fake_request,
+                session_id="sess-other",
+                instruction="edit",
+            )
