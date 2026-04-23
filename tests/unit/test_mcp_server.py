@@ -540,3 +540,69 @@ async def test_edit_deck_denies_without_edit_permission(fake_request, identity):
                 session_id="sess-other",
                 instruction="edit",
             )
+
+
+# ---- get_deck -----------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_get_deck_returns_deck_without_job(fake_request, identity):
+    from src.api import mcp_server
+
+    fake_session = {"session_id": "sess-1", "title": "Existing Deck"}
+    fake_deck = {
+        "title": "Existing Deck",
+        "slides": [{"html": "<div class='slide'>1</div>", "scripts": ""}],
+        "css": "",
+        "external_scripts": ["https://cdn.jsdelivr.net/npm/chart.js"],
+        "head_meta": {},
+    }
+
+    with patch("src.api.mcp_server.mcp_auth_scope") as auth_scope, \
+         patch("src.api.mcp_server.permission_service") as perm_svc, \
+         patch("src.api.mcp_server.get_session_manager") as get_sm, \
+         patch("src.api.mcp_server._public_app_url", return_value="https://t.example"):
+
+        auth_scope.return_value.__enter__.return_value = identity
+        auth_scope.return_value.__exit__.return_value = False
+        perm_svc.can_view_deck.return_value = True
+
+        sm = MagicMock()
+        sm.get_session.return_value = fake_session
+        sm.get_slide_deck.return_value = fake_deck
+        get_sm.return_value = sm
+
+        result = await mcp_server._get_deck_impl(
+            request=fake_request,
+            session_id="sess-1",
+        )
+
+        assert result["session_id"] == "sess-1"
+        assert result["slide_count"] == 1
+        assert result["title"] == "Existing Deck"
+        assert "deck" in result
+        assert result["html_document"].lower().startswith("<!doctype")
+        assert result["deck_url"] == "https://t.example/sessions/sess-1/edit"
+        assert result["deck_view_url"] == "https://t.example/sessions/sess-1/view"
+        # Fields tied to a job/turn are absent
+        for absent_key in ("status", "request_id", "messages", "replacement_info", "metadata"):
+            assert absent_key not in result
+
+
+@pytest.mark.asyncio
+async def test_get_deck_denies_without_view_permission(fake_request, identity):
+    from src.api import mcp_server
+    from src.api.mcp_server import MCPToolError
+
+    with patch("src.api.mcp_server.mcp_auth_scope") as auth_scope, \
+         patch("src.api.mcp_server.permission_service") as perm_svc:
+
+        auth_scope.return_value.__enter__.return_value = identity
+        auth_scope.return_value.__exit__.return_value = False
+        perm_svc.can_view_deck.return_value = False
+
+        with pytest.raises(MCPToolError):
+            await mcp_server._get_deck_impl(
+                request=fake_request,
+                session_id="sess-other",
+            )

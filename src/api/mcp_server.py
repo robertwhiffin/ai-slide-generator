@@ -788,3 +788,65 @@ async def _edit_deck_impl(
     except Exception as e:
         logger.exception("MCP edit_deck failed")
         raise MCPToolError(f"Internal error: {e}") from e
+
+
+# ---------------------------------------------------------------------------
+# get_deck
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool(
+    name="get_deck",
+    description=(
+        "Retrieve the current state of a deck without submitting new work. "
+        "Returns structured slide data, a standalone HTML document, and "
+        "URLs into tellr's editor — same payload as a ready get_deck_status "
+        "response, without status/request_id/messages. Idempotent; no job "
+        "queue interaction. Use when you have a session_id from earlier and "
+        "want to re-render without polling."
+    ),
+)
+async def get_deck(ctx: Context, session_id: str) -> dict:
+    return await _get_deck_impl(
+        request=_request_from_context(ctx),
+        session_id=session_id,
+    )
+
+
+async def _get_deck_impl(request: Request, session_id: str) -> dict:
+    """Implementation, separated from the decorated tool for testability.
+
+    Idempotent read-only counterpart to ``get_deck_status``'s ready branch:
+    no job-queue interaction, no ``request_id``/``status``/``messages`` in
+    the response. Reuses ``_render_deck_response`` so the deck-shaped
+    fields stay identical to those in a ready ``get_deck_status`` reply.
+    """
+    try:
+        with mcp_auth_scope(request):
+            if not permission_service.can_view_deck(session_id):
+                raise MCPToolError(
+                    "Deck not found or you do not have permission to view it"
+                )
+
+            sm = get_session_manager()
+            session = sm.get_session(session_id)
+            if session is None:
+                raise MCPToolError(
+                    f"Deck not found: session_id={session_id}"
+                )
+            deck_dict = sm.get_slide_deck(session_id) or {}
+            base = _public_app_url()
+
+            deck_fields = _render_deck_response(deck_dict, session, base)
+
+            return {
+                "session_id": session_id,
+                **deck_fields,
+            }
+    except MCPToolError:
+        raise
+    except MCPAuthError as e:
+        raise MCPToolError(f"Authentication failed: {e}") from e
+    except Exception as e:
+        logger.exception("MCP get_deck failed")
+        raise MCPToolError(f"Internal error: {e}") from e
