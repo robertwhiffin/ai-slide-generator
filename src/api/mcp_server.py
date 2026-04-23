@@ -24,10 +24,68 @@ from fastapi import Request
 from mcp.server.fastmcp import Context, FastMCP
 
 from src.api.mcp_auth import MCPAuthError, mcp_auth_scope
-from src.api.services.job_queue import enqueue_job
+from src.api.services.job_queue import enqueue_job, get_job_status
 from src.api.services.session_manager import get_session_manager
+from src.core.database import get_db_session
+from src.core.permission_context import get_permission_context
+from src.domain.slide import Slide
+from src.domain.slide_deck import SlideDeck
+from src.services.permission_service import get_permission_service
 
 logger = logging.getLogger(__name__)
+
+
+class _PermissionServiceFacade:
+    """Module-level facade exposing a simplified permission-check API.
+
+    The underlying ``PermissionService.can_view_deck`` requires a DB session
+    and a set of identity kwargs; the MCP tool handlers only have a string
+    ``session_id`` and rely on the identity ContextVars that
+    ``mcp_auth_scope`` already bound. This facade bridges the two so tool
+    implementations can call ``permission_service.can_view_deck(session_id)``
+    without re-plumbing auth context. Unit tests replace this facade by
+    patching ``src.api.mcp_server.permission_service`` with a MagicMock, so
+    the facade is not exercised in test paths.
+    """
+
+    def can_view_deck(self, session_id: str) -> bool:
+        """Return True if the current MCP caller has view access on the deck.
+
+        Resolves the string ``session_id`` to the underlying ``UserSession.id``
+        (integer PK), then delegates to the shared ``PermissionService``. The
+        caller's identity is read from the request-scoped permission
+        ContextVar populated by ``mcp_auth_scope``.
+        """
+        ctx = get_permission_context()
+        if ctx is None:
+            return False
+        svc = get_permission_service()
+        with get_db_session() as db:
+            from src.database.models.session import UserSession
+
+            session = (
+                db.query(UserSession)
+                .filter(UserSession.session_id == session_id)
+                .first()
+            )
+            if session is None:
+                return False
+            # Creator always has view access (mirrors PermissionService's
+            # get_deck_permission creator check, done here on the string-id
+            # fast path so a brand-new session the caller just created is
+            # viewable even before any DeckContributor row exists).
+            if session.created_by and session.created_by == ctx.user_name:
+                return True
+            return svc.can_view_deck(
+                db,
+                session.id,
+                user_id=ctx.user_id,
+                user_name=ctx.user_name,
+                group_ids=ctx.group_ids,
+            )
+
+
+permission_service = _PermissionServiceFacade()
 
 # FastMCP instance — one per process. Tools are registered via decorators
 # added in subsequent tasks (create_deck, get_deck_status, edit_deck, get_deck).
@@ -292,3 +350,158 @@ async def _create_deck_impl(
         raise MCPToolError(
             f"Internal error (correlation_id={correlation_id}): {e}"
         ) from e
+
+
+# ---------------------------------------------------------------------------
+# Deck response serializer (shared by get_deck_status and get_deck)
+# ---------------------------------------------------------------------------
+
+
+def _render_deck_response(session: dict, base_url: str) -> dict:
+    """Serialize a session's deck into the MCP response fields.
+
+    Returns a dict carrying ``slide_count``, ``title``, ``deck``,
+    ``html_document``, ``deck_url``, and ``deck_view_url``. The input
+    ``session`` is expected to carry a ``deck_json`` payload (the
+    structured deck dict persisted by the worker) plus a ``title`` and
+    ``session_id``. This helper is extracted so ``get_deck`` (Task 9)
+    can reuse the exact same shape without drift between the two tools.
+
+    ``SlideDeck`` has no ``from_dict`` constructor, so the deck is
+    rebuilt by constructing ``Slide`` instances for each entry in
+    ``deck_json["slides"]`` and handing them to ``SlideDeck.__init__``
+    together with the stored title, CSS, external scripts, and head
+    metadata.
+    """
+    deck_json = session.get("deck_json") or {}
+    if deck_json:
+        slides = [
+            Slide(
+                html=s.get("html", ""),
+                scripts=s.get("scripts", ""),
+                slide_id=s.get("slide_id"),
+                created_by=s.get("created_by"),
+                created_at=s.get("created_at"),
+                modified_by=s.get("modified_by"),
+                modified_at=s.get("modified_at"),
+            )
+            for s in deck_json.get("slides", [])
+        ]
+        deck = SlideDeck(
+            title=deck_json.get("title") or session.get("title"),
+            css=deck_json.get("css", ""),
+            external_scripts=list(deck_json.get("external_scripts") or []),
+            slides=slides,
+            head_meta=dict(deck_json.get("head_meta") or {}),
+        )
+    else:
+        deck = SlideDeck(title=session.get("title"))
+
+    session_id = session["session_id"]
+    deck_url = (
+        f"{base_url}/sessions/{session_id}/edit"
+        if base_url
+        else f"/sessions/{session_id}/edit"
+    )
+    deck_view_url = (
+        f"{base_url}/sessions/{session_id}/view"
+        if base_url
+        else f"/sessions/{session_id}/view"
+    )
+    return {
+        "slide_count": len(deck.slides),
+        "title": session.get("title") or deck.title,
+        "deck": deck.to_dict(),
+        "html_document": deck.to_html_document(),
+        "deck_url": deck_url,
+        "deck_view_url": deck_view_url,
+    }
+
+
+# ---------------------------------------------------------------------------
+# get_deck_status
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool(
+    name="get_deck_status",
+    description=(
+        "Poll the status of a deck generation or edit job. Returns "
+        "lightweight status while pending/running; when ready, returns the "
+        "complete deck as structured slide data, a standalone HTML "
+        "document, and URLs into tellr's full editor and view-only surfaces."
+    ),
+)
+async def get_deck_status(
+    ctx: Context,
+    session_id: str,
+    request_id: str,
+) -> dict:
+    return await _get_deck_status_impl(
+        request=_request_from_context(ctx),
+        session_id=session_id,
+        request_id=request_id,
+    )
+
+
+async def _get_deck_status_impl(
+    request: Request, session_id: str, request_id: str
+) -> dict:
+    """Implementation, separated from the decorated tool for testability."""
+    try:
+        with mcp_auth_scope(request):
+            if not permission_service.can_view_deck(session_id):
+                raise MCPToolError(
+                    "Deck not found or you do not have permission to view it"
+                )
+
+            status = get_job_status(request_id)
+            if status is None:
+                raise MCPToolError(f"Unknown request_id: {request_id}")
+
+            job_status = status.get("status", "pending")
+
+            if job_status in ("pending", "running"):
+                return {
+                    "session_id": session_id,
+                    "request_id": request_id,
+                    "status": job_status,
+                    "progress": status.get("progress"),
+                }
+
+            if job_status in ("failed", "error"):
+                return {
+                    "session_id": session_id,
+                    "request_id": request_id,
+                    "status": "failed",
+                    "error": status.get("error", "Generation failed"),
+                }
+
+            # status == "ready" (MCP-layer contract; mapped from the worker's
+            # completion signal by the caller of get_job_status).
+            session_manager = get_session_manager()
+            session = session_manager.get_session(session_id)
+            base = _public_app_url()
+            deck_fields = _render_deck_response(session, base)
+
+            return {
+                "session_id": session_id,
+                "request_id": request_id,
+                "status": "ready",
+                **deck_fields,
+                "replacement_info": status.get("replacement_info"),
+                "messages": status.get("messages") or [],
+                "metadata": {
+                    "mode": status.get("mode"),
+                    "tool_calls": status.get("tool_calls"),
+                    "latency_ms": status.get("latency_ms"),
+                    "correlation_id": status.get("correlation_id"),
+                },
+            }
+    except MCPToolError:
+        raise
+    except MCPAuthError as e:
+        raise MCPToolError(f"Authentication failed: {e}") from e
+    except Exception as e:
+        logger.exception("MCP get_deck_status failed")
+        raise MCPToolError(f"Internal error: {e}") from e

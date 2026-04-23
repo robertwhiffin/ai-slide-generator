@@ -140,3 +140,148 @@ async def test_create_deck_surfaces_auth_error_as_tool_error(fake_request):
                 prompt="foo",
             )
         assert "auth" in str(exc.value).lower() or "credentials" in str(exc.value).lower()
+
+
+# ---- get_deck_status ----------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_get_deck_status_returns_pending_shape(fake_request, identity):
+    from src.api import mcp_server
+
+    with patch("src.api.mcp_server.mcp_auth_scope") as auth_scope, \
+         patch("src.api.mcp_server.get_job_status") as get_status, \
+         patch("src.api.mcp_server.permission_service") as perm_svc:
+
+        auth_scope.return_value.__enter__.return_value = identity
+        auth_scope.return_value.__exit__.return_value = False
+
+        perm_svc.can_view_deck.return_value = True
+        get_status.return_value = {"status": "pending", "session_id": "sess-1"}
+
+        result = await mcp_server._get_deck_status_impl(
+            request=fake_request,
+            session_id="sess-1",
+            request_id="req-1",
+        )
+
+        assert result == {
+            "session_id": "sess-1",
+            "request_id": "req-1",
+            "status": "pending",
+            "progress": None,
+        }
+
+
+@pytest.mark.asyncio
+async def test_get_deck_status_returns_ready_with_full_deck(fake_request, identity):
+    from src.api import mcp_server
+
+    fake_session = {
+        "session_id": "sess-1",
+        "title": "Q3 Pitch",
+        "deck_json": {
+            "title": "Q3 Pitch",
+            "slides": [{"html": "<div class='slide'>A</div>", "scripts": ""}],
+            "css": "",
+            "external_scripts": ["https://cdn.jsdelivr.net/npm/chart.js"],
+            "head_meta": {},
+        },
+    }
+
+    fake_turn_messages = [
+        {"role": "user", "content": "make Q3 deck"},
+        {"role": "assistant", "content": "I created 1 slide..."},
+    ]
+
+    with patch("src.api.mcp_server.mcp_auth_scope") as auth_scope, \
+         patch("src.api.mcp_server.get_job_status") as get_status, \
+         patch("src.api.mcp_server.permission_service") as perm_svc, \
+         patch("src.api.mcp_server.get_session_manager") as get_sm, \
+         patch("src.api.mcp_server._public_app_url", return_value="https://t.example"):
+
+        auth_scope.return_value.__enter__.return_value = identity
+        auth_scope.return_value.__exit__.return_value = False
+
+        perm_svc.can_view_deck.return_value = True
+        get_status.return_value = {
+            "status": "ready",
+            "session_id": "sess-1",
+            "messages": fake_turn_messages,
+            "replacement_info": None,
+            "mode": "generate",
+            "latency_ms": 10000,
+            "tool_calls": 0,
+            "correlation_id": None,
+        }
+
+        sm = MagicMock()
+        sm.get_session.return_value = fake_session
+        get_sm.return_value = sm
+
+        result = await mcp_server._get_deck_status_impl(
+            request=fake_request,
+            session_id="sess-1",
+            request_id="req-1",
+        )
+
+        assert result["status"] == "ready"
+        assert result["session_id"] == "sess-1"
+        assert result["slide_count"] == 1
+        assert result["title"] == "Q3 Pitch"
+        assert "deck" in result and "slides" in result["deck"]
+        assert result["html_document"].lower().startswith("<!doctype")
+        assert result["deck_url"] == "https://t.example/sessions/sess-1/edit"
+        assert result["deck_view_url"] == "https://t.example/sessions/sess-1/view"
+        assert result["messages"] == fake_turn_messages
+        assert result["replacement_info"] is None
+
+
+@pytest.mark.asyncio
+async def test_get_deck_status_returns_failed_with_error(fake_request, identity):
+    from src.api import mcp_server
+
+    with patch("src.api.mcp_server.mcp_auth_scope") as auth_scope, \
+         patch("src.api.mcp_server.get_job_status") as get_status, \
+         patch("src.api.mcp_server.permission_service") as perm_svc:
+
+        auth_scope.return_value.__enter__.return_value = identity
+        auth_scope.return_value.__exit__.return_value = False
+
+        perm_svc.can_view_deck.return_value = True
+        get_status.return_value = {
+            "status": "failed",
+            "session_id": "sess-1",
+            "error": "Generation exceeded maximum duration (10 minutes)",
+        }
+
+        result = await mcp_server._get_deck_status_impl(
+            request=fake_request,
+            session_id="sess-1",
+            request_id="req-1",
+        )
+
+        assert result["status"] == "failed"
+        assert "10 minutes" in result["error"]
+
+
+@pytest.mark.asyncio
+async def test_get_deck_status_denies_when_not_permitted(fake_request, identity):
+    from src.api import mcp_server
+    from src.api.mcp_server import MCPToolError
+
+    with patch("src.api.mcp_server.mcp_auth_scope") as auth_scope, \
+         patch("src.api.mcp_server.permission_service") as perm_svc:
+
+        auth_scope.return_value.__enter__.return_value = identity
+        auth_scope.return_value.__exit__.return_value = False
+
+        perm_svc.can_view_deck.return_value = False
+
+        with pytest.raises(MCPToolError) as exc:
+            await mcp_server._get_deck_status_impl(
+                request=fake_request,
+                session_id="sess-other",
+                request_id="req-1",
+            )
+        assert "permission" in str(exc.value).lower() or "not found" in str(exc.value).lower()
