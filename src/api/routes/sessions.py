@@ -127,10 +127,17 @@ def _check_deck_permission_for_session(
         min_permission: Minimum required permission level.
 
     Raises:
+        HTTPException 404: If the session does not exist (stale tab, deleted session, wrong ID).
         HTTPException 403: If the caller lacks the required permission.
     """
     session_manager = get_session_manager()
-    session_info = session_manager.get_session(session_id)
+    try:
+        session_info = session_manager.get_session(session_id)
+    except SessionNotFoundError:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Session not found: {session_id}",
+        ) from None
     with get_db_session() as db:
         _require_session_access(session_info, db, min_permission)
 

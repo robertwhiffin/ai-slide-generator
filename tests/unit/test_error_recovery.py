@@ -70,7 +70,10 @@ def mock_client():
 @pytest.fixture
 def mock_mlflow():
     """Mock MLflow for testing."""
-    with patch("src.services.agent.mlflow") as mock_mlflow:
+    with patch("src.services.agent.mlflow") as mock_mlflow, patch(
+        "src.services.agent.create_databricks_experiment",
+        return_value="test-exp-id",
+    ):
         # Mock start_span as a context manager
         span = Mock()
         span.__enter__ = Mock(return_value=span)

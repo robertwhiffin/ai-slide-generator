@@ -43,3 +43,13 @@ env:
   # Falls back to the local identity table when the system client is
   # unavailable (local development without Databricks).
   # ==========================================================================
+
+  # MLflow Unity Catalog tracing (see docs/technical/mlflow-uc-tracing.md)
+  - name: MLFLOW_TRACING_SQL_WAREHOUSE_ID
+    value: "1f9d201bba403ed4"
+  - name: TELLR_MLFLOW_UC_CATALOG
+    value: "serverless_stable_146eas_catalog"
+  - name: TELLR_MLFLOW_UC_SCHEMA
+    value: "tellr-mlflow-uc-schema"
+  - name: TELLR_MLFLOW_UC_TABLE_PREFIX
+    value: "tellr_stage_otel"

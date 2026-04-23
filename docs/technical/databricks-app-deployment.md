@@ -554,7 +554,7 @@ Common deployment errors:
        value: "${MY_NEW_VAR}"
    ```
 
-2. Update `_write_app_yaml()` in deploy.py to substitute the value
+2. Resolve the value in `_write_app_yaml()` / deployment config (or add a key to `mlflow_tracing` / `TELLR_DEPLOY_*` pattern in `deploy.py` if it is another deploy-time secret)
 
 3. Republish packages
 

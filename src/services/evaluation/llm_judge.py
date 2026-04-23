@@ -4,13 +4,21 @@ This module provides LLM-based evaluation of slide data accuracy using
 MLflow's genai.evaluate() API. It performs semantic comparison between Genie 
 source data and slide content, and creates proper Evaluation Runs in MLflow.
 
+When ``mlflow.genai.evaluate`` fails due to blocked egress to
+``*.storage.cloud.databricks.com`` or inconsistent MLflow experiment state,
+Tellr falls back to a **direct** ChatDatabricks call (same rating rules) so
+verification still returns a result without Evaluation Runs in MLflow.
+
 MLflow Structure:
 - inputs: Context about what's being verified
 - outputs: The slide content (what LLM generated)
 - expectations: The Genie source data (ground truth)
 """
 
+import asyncio
+import json
 import logging
+import re
 import time
 from dataclasses import dataclass
 from typing import Any, Dict, List, Literal, Optional
@@ -18,6 +26,7 @@ from typing import Any, Dict, List, Literal, Optional
 import pandas as pd
 
 from src.core.defaults import DEFAULT_CONFIG
+from src.core.mlflow_tracing import configure_tracing_environment, create_databricks_experiment
 
 logger = logging.getLogger(__name__)
 
@@ -101,6 +110,121 @@ JUDGE_INSTRUCTIONS = """You are verifying that a presentation slide accurately r
 Provide your rating and explain your reasoning in 2-3 sentences."""
 
 
+_DIRECT_JUDGE_JSON_PROMPT = """You are verifying that a presentation slide accurately represents source data.
+
+Return **only** valid JSON (no markdown fences), one object with keys:
+- "rating": one of "green", "amber", "red"
+- "explanation": 2-3 sentences of reasoning
+
+## SOURCE DATA (Ground Truth)
+{genie_data}
+
+## SLIDE CONTENT (To Verify)
+{slide_content}
+
+## Rules (summary)
+- green: numbers and claims match source (formatting differences OK).
+- amber: mostly correct, minor issues or omissions.
+- red: wrong numbers, hallucinations, or major errors.
+"""
+
+
+def _collect_exception_messages(exc: BaseException) -> str:
+    parts: list[str] = []
+    e: BaseException | None = exc
+    while e is not None:
+        parts.append(str(e))
+        e = e.__cause__
+    return " ".join(parts).lower()
+
+
+def _mlflow_evaluate_should_use_direct_fallback(exc: BaseException) -> bool:
+    """True when MLflow harness failed for infra reasons we can bypass with direct LLM."""
+    blob = _collect_exception_messages(exc)
+    if "storage.cloud.databricks.com" in blob and (
+        "connection refused" in blob
+        or "connectionerror" in blob
+        or "newconnectionerror" in blob
+        or "max retries" in blob
+    ):
+        return True
+    if "resource_does_not_exist" in blob and "does not exist" in blob:
+        return True
+    return False
+
+
+def _parse_judge_json_response(text: str) -> tuple[str, str]:
+    """Parse model output into (rating, explanation)."""
+    raw = text.strip()
+    if raw.startswith("```"):
+        raw = re.sub(r"^```(?:json)?\s*", "", raw, flags=re.IGNORECASE)
+        raw = re.sub(r"\s*```\s*$", "", raw)
+    try:
+        data = json.loads(raw)
+        rating = str(data.get("rating", "")).strip().lower()
+        explanation = str(data.get("explanation", "")).strip()
+        if rating in RATING_SCORES:
+            return rating, explanation
+    except (json.JSONDecodeError, TypeError, ValueError):
+        pass
+    m = re.search(r'"rating"\s*:\s*"(green|amber|red)"', text, re.IGNORECASE)
+    if m:
+        rating = m.group(1).lower()
+        em = re.search(r'"explanation"\s*:\s*"((?:[^"\\]|\\.)*)"', text)
+        expl = em.group(1) if em else text[:800]
+        return rating, expl.replace("\\n", "\n")
+    return "unknown", text[:800]
+
+
+def _evaluate_with_judge_direct_llm(
+    genie_data: str,
+    slide_content: str,
+    model: str,
+    start_time: float,
+    trace_id: Optional[str],
+) -> LLMJudgeResult:
+    """Run judge via ChatDatabricks only (no MLflow genai.evaluate / Evaluation Runs)."""
+    from databricks_langchain import ChatDatabricks
+    from langchain_core.messages import HumanMessage
+
+    from src.core.databricks_client import get_system_client
+
+    llm_config = DEFAULT_CONFIG["llm"]
+    max_chars = 100_000
+    gd = genie_data[:max_chars]
+    sc = slide_content[:max_chars]
+    prompt = _DIRECT_JUDGE_JSON_PROMPT.format(genie_data=gd, slide_content=sc)
+
+    chat = ChatDatabricks(
+        endpoint=model,
+        temperature=0.2,
+        max_tokens=min(2048, int(llm_config.get("max_tokens", 4096))),
+        top_p=0.95,
+        workspace_client=get_system_client(),
+    )
+    resp = chat.invoke([HumanMessage(content=prompt)])
+    text = (getattr(resp, "content", None) or "").strip()
+    rating, explanation = _parse_judge_json_response(text)
+    score = RATING_SCORES.get(rating, 0)
+    duration_ms = int((time.time() - start_time) * 1000)
+    logger.info(
+        "LLM judge direct fallback completed: rating=%s score=%s duration_ms=%s",
+        rating,
+        score,
+        duration_ms,
+    )
+    return LLMJudgeResult(
+        score=score,
+        explanation=explanation,
+        issues=[],
+        rating=rating,
+        duration_ms=duration_ms,
+        error=False,
+        trace_id=trace_id,
+        run_id=None,
+    )
+
+
 async def evaluate_with_judge(
     genie_data: str,
     slide_content: str,
@@ -135,6 +259,7 @@ async def evaluate_with_judge(
 
         # Set tracking URI to Databricks (not local ./mlruns)
         mlflow.set_tracking_uri("databricks")
+        configure_tracing_environment()
         logger.info("LLM judge: set MLflow tracking URI to databricks")
 
         # Use passed experiment_id (per-session) or compute user experiment path
@@ -176,7 +301,7 @@ async def evaluate_with_judge(
                         logger.warning(f"LLM judge: failed to create parent folder {parent_folder}: {e}")
                         # Continue anyway - experiment creation might still work
                 
-                experiment_id = mlflow.create_experiment(experiment_name)
+                experiment_id = create_databricks_experiment(experiment_name)
                 logger.info(f"LLM judge: created experiment with ID: {experiment_id}")
             else:
                 experiment_id = experiment.experiment_id
@@ -203,10 +328,27 @@ async def evaluate_with_judge(
         }])
 
         # Run evaluation using mlflow.genai.evaluate() - THIS creates Evaluation Runs
-        eval_result = mlflow.genai.evaluate(
-            data=eval_data,
-            scorers=[accuracy_judge],
-        )
+        try:
+            eval_result = mlflow.genai.evaluate(
+                data=eval_data,
+                scorers=[accuracy_judge],
+            )
+        except Exception as eval_exc:
+            if _mlflow_evaluate_should_use_direct_fallback(eval_exc):
+                logger.warning(
+                    "MLflow genai.evaluate failed (egress or MLflow state); "
+                    "using direct LLM judge without Evaluation Runs. Error: %s",
+                    eval_exc,
+                )
+                return await asyncio.to_thread(
+                    _evaluate_with_judge_direct_llm,
+                    genie_data,
+                    slide_content,
+                    model,
+                    start_time,
+                    trace_id,
+                )
+            raise
 
         # Extract results from evaluation
         run_id = eval_result.run_id

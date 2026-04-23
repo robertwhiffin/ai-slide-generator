@@ -6,7 +6,9 @@ from io import BytesIO
 from typing import List, Optional
 
 from PIL import Image as PILImage
-from sqlalchemy.orm import Session
+from sqlalchemy import String, cast
+from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.orm import Query, Session
 
 from src.database.models.image import ImageAsset
 
@@ -102,19 +104,14 @@ def get_image_base64(db: Session, image_id: int) -> tuple[str, str]:
     return b64, image.mime_type
 
 
-def search_images(
+def _search_images_query(
     db: Session,
     category: Optional[str] = None,
     tags: Optional[List[str]] = None,
     query: Optional[str] = None,
     uploaded_by: Optional[str] = None,
-) -> List[ImageAsset]:
-    """Search images by metadata. Returns metadata only (no image_data loaded).
-
-    Note: SQLAlchemy loads all columns by default. For list views, the caller
-    should use deferred loading or column selection if performance becomes an
-    issue with many large images. For MVP, this is fine.
-    """
+) -> Query[ImageAsset]:
+    """Build the ORM query for search_images (exposed for PostgreSQL SQL compile tests)."""
     q = db.query(ImageAsset).filter(ImageAsset.is_active == True)
 
     # Exclude ephemeral images from default library view
@@ -131,12 +128,51 @@ def search_images(
             (ImageAsset.original_filename.ilike(search))
             | (ImageAsset.description.ilike(search))
         )
-    # Tag filtering: PostgreSQL JSON containment: tags @> '["branding"]'
+    # Tag filtering: On PostgreSQL use CAST(... AS jsonb).contains() so SQL uses @>.
+    # Sessions may be SQLite in tests while Lakebase is Postgres — the ORM column can
+    # still resolve as JSON, and JSON.contains() compiles to invalid/wrong LIKE. Casting
+    # forces @>. SQLite: match serialized JSON string elements with LIKE + escapes.
     if tags:
-        for tag in tags:
-            q = q.filter(ImageAsset.tags.contains([tag]))
+        bind = db.get_bind()
+        if bind.dialect.name == "postgresql":
+            tags_jsonb = cast(ImageAsset.tags, JSONB)
+            for tag in tags:
+                q = q.filter(tags_jsonb.contains([tag]))
+        else:
+            tags_text = cast(ImageAsset.tags, String)
+            for tag in tags:
+                safe = (
+                    tag.replace("\\", "\\\\")
+                    .replace("%", "\\%")
+                    .replace("_", "\\_")
+                    .replace('"', "")
+                )
+                needle = f'%"{safe}"%'
+                q = q.filter(tags_text.like(needle, escape="\\"))
 
-    return q.order_by(ImageAsset.created_at.desc()).all()
+    return q.order_by(ImageAsset.created_at.desc())
+
+
+def search_images(
+    db: Session,
+    category: Optional[str] = None,
+    tags: Optional[List[str]] = None,
+    query: Optional[str] = None,
+    uploaded_by: Optional[str] = None,
+) -> List[ImageAsset]:
+    """Search images by metadata. Returns metadata only (no image_data loaded).
+
+    Note: SQLAlchemy loads all columns by default. For list views, the caller
+    should use deferred loading or column selection if performance becomes an
+    issue with many large images. For MVP, this is fine.
+    """
+    return _search_images_query(
+        db,
+        category=category,
+        tags=tags,
+        query=query,
+        uploaded_by=uploaded_by,
+    ).all()
 
 
 def delete_image(db: Session, image_id: int, user: str) -> None:

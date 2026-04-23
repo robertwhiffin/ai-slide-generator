@@ -50,6 +50,14 @@ environments:
       branch_from: "production"   # ephemeral branch of production on every deploy
       capacity: "CU_1"  # Options: CU_1, CU_2, CU_4, CU_8
       # schema omitted — inherited from the branch_from env (production)
+    # Optional: MLflow GenAI traces in Unity Catalog (see docs/technical/mlflow-uc-tracing.md)
+    # mlflow_tracing:
+    #   sql_warehouse_id: "<warehouse-id>"
+    #   uc_catalog: "main"
+    #   uc_schema: "mlflow_traces"
+    #   uc_table_prefix: "tellr_staging"
+    # Alternatively set deploy-time env vars (not committed): TELLR_DEPLOY_MLFLOW_TRACING_SQL_WAREHOUSE_ID,
+    # TELLR_DEPLOY_MLFLOW_UC_CATALOG, TELLR_DEPLOY_MLFLOW_UC_SCHEMA, TELLR_DEPLOY_MLFLOW_UC_TABLE_PREFIX
 
   production:
     app_name: "ai-slide-generator"
