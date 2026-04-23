@@ -79,13 +79,16 @@ def main() -> int:
     }
     resp = httpx.post(mcp_url, headers=headers_base, json=init_body, timeout=30)
     resp.raise_for_status()
+    # tellr's FastMCP is configured stateless (multi-worker safety), so the
+    # server doesn't emit mcp-session-id. Echo one if it happens to be
+    # present (stateful deployments) for forward compatibility.
     session_id = resp.headers.get("mcp-session-id")
-    if not session_id:
-        print(f"ERROR: no mcp-session-id in response headers: {dict(resp.headers)}")
-        return 1
-    print(f"  mcp-session-id: {session_id}")
-
-    mcp_headers = {**headers_base, "mcp-session-id": session_id}
+    if session_id:
+        print(f"  mcp-session-id: {session_id}")
+        mcp_headers = {**headers_base, "mcp-session-id": session_id}
+    else:
+        print("  stateless transport (no mcp-session-id issued)")
+        mcp_headers = headers_base
 
     # Step 1b: required notifications/initialized
     print("Step 1b: notifications/initialized")

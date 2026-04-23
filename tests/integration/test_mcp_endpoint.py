@@ -69,9 +69,11 @@ def _mcp_headers(session_id: str | None = None, with_auth: bool = True) -> dict:
 
     The transport demands ``Accept`` include both ``application/json``
     and ``text/event-stream`` so the server can choose its response
-    encoding. ``mcp-session-id`` is echoed back on ``initialize`` and
-    must be replayed on every subsequent JSON-RPC call in the same
-    session (including the required ``notifications/initialized``).
+    encoding. tellr runs FastMCP in stateless mode (see
+    ``src/api/mcp_server.py``), so the server never issues an
+    ``mcp-session-id`` header; callers may send one and the server
+    ignores it. We keep the ``session_id`` parameter for compatibility
+    with tests that still want to pass a value.
 
     ``Host`` is set to a value that matches FastMCP's DNS rebinding
     allowed-list wildcards. FastMCP auto-enables protection when its
@@ -157,20 +159,20 @@ def _is_tool_error(body: dict) -> bool:
     return bool(result.get("isError"))
 
 
-def _initialize_session(client: TestClient) -> str:
-    """Run the MCP initialize handshake and return the session id.
+def _initialize_session(client: TestClient) -> str | None:
+    """Run the MCP initialize handshake and return the session id (or None).
 
-    Also sends the required ``notifications/initialized`` callback that
-    FastMCP expects before tool calls will be processed.
+    Also sends the ``notifications/initialized`` callback. FastMCP runs
+    in stateless mode here so no ``mcp-session-id`` is issued and the
+    notification is effectively a no-op, but we keep the sequence to
+    exercise the same shape of handshake real clients send.
     """
     init = client.post(MCP_PATH, headers=_mcp_headers(), json=_init_payload())
     assert init.status_code == 200, (
         f"initialize returned {init.status_code}: {init.text!r}"
     )
     session_id = init.headers.get("mcp-session-id")
-    assert session_id, "server did not issue mcp-session-id on initialize"
 
-    # Required per MCP spec: clients must signal readiness before tool calls.
     client.post(
         MCP_PATH,
         headers=_mcp_headers(session_id=session_id),
@@ -280,13 +282,17 @@ def client():
 # ---------------------------------------------------------------------------
 
 
-def test_initialize_returns_session_id(client, mock_identity_client):
-    """The MCP initialize handshake succeeds and issues a session id."""
+def test_initialize_succeeds(client, mock_identity_client):
+    """The MCP initialize handshake returns a 200 JSON-RPC envelope.
+
+    tellr runs FastMCP in stateless mode so no ``mcp-session-id`` is
+    emitted; we just verify the endpoint is wired up and capabilities
+    negotiation works.
+    """
     resp = client.post(MCP_PATH, headers=_mcp_headers(), json=_init_payload())
     assert resp.status_code == 200, resp.text
-    assert resp.headers.get("mcp-session-id"), (
-        "server did not return an mcp-session-id header on initialize"
-    )
+    body = _decode_mcp_response(resp)
+    assert "result" in body, f"unexpected envelope: {body!r}"
 
 
 def test_tools_list_returns_four_tools(client, mock_identity_client):
@@ -390,12 +396,10 @@ def test_rejects_request_without_auth(client):
     )
 
     session_id = init.headers.get("mcp-session-id")
-    assert session_id, (
-        "initialize succeeded but no mcp-session-id header was issued"
-    )
 
-    # Send the initialized notification so the server will accept a
-    # follow-up tool call (still no auth header).
+    # Send the initialized notification to mimic a real client handshake
+    # shape (still no auth header). In stateless mode the server ignores
+    # the session_id; we pass it through if one happened to be issued.
     client.post(
         MCP_PATH,
         headers=_mcp_headers(session_id=session_id, with_auth=False),

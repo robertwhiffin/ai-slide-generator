@@ -42,17 +42,23 @@ The caller does not need any tellr-specific configuration — no client credenti
 | Protocol | MCP Streamable HTTP, spec revision `2025-03-26` |
 | Transport | JSON-RPC 2.0 over HTTP POST |
 | Required `Accept` header | `application/json, text/event-stream` |
-| Session header (after `initialize`) | `mcp-session-id: <server-issued>` |
+| Session mode | **Stateless** — server does not issue `mcp-session-id` |
 
 **Mandatory trailing slash.** `POST /mcp` returns `307 Temporary Redirect` to `/mcp/`. Always POST to `/mcp/` directly — the redirect will strip `POST` semantics with some clients.
 
-**Handshake sequence.** Every session must run through the standard MCP handshake before any `tools/*` call:
+**Stateless transport.** tellr runs FastMCP with `stateless_http=True` because the app is served by multiple uvicorn workers and the Databricks Apps proxy does not guarantee session affinity. Each HTTP POST is handled independently on whichever worker picks it up. Consequences for callers:
 
-1. `initialize` (request/response) — server returns an `mcp-session-id` header the client echoes on every subsequent call.
+- The server does **not** emit the `mcp-session-id` response header on `initialize`. Clients MUST NOT require one.
+- Clients MAY still send `mcp-session-id` on follow-up requests — it is ignored.
+- The tellr deck `session_id` returned by `create_deck` is a separate concept (app-level state in Lakebase) and is persistent across calls.
+
+**Handshake sequence.** MCP clients should still run the standard handshake before `tools/*` calls — the server accepts it and well-behaved clients expect to send it:
+
+1. `initialize` (request/response).
 2. `notifications/initialized` (notification, no response expected; 200/202 both acceptable).
 3. `tools/list`, `tools/call` — one or more.
 
-Skipping step 2 produces spec-compliant but inconsistent behaviour from FastMCP.
+In stateless mode each of these runs as an independent transport on the server, but the client-visible sequence is unchanged.
 
 **Finding your tellr app URL.** The app URL is shown on the Databricks Apps UI page for the `tellr` app, or via the CLI:
 
@@ -377,15 +383,17 @@ def decode(resp: httpx.Response) -> dict:
         raise RuntimeError("SSE response without data frame")
     return resp.json()
 
-# 1. initialize -> grab mcp-session-id
+# 1. initialize. tellr runs stateless, so no mcp-session-id is issued;
+#    forward one if the server does return it (future-proofing).
 r = httpx.post(MCP_URL, headers=HEADERS, timeout=30, json={
     "jsonrpc": "2.0", "id": 1, "method": "initialize",
     "params": {"protocolVersion": "2025-03-26", "capabilities": {},
                "clientInfo": {"name": "my-app", "version": "1.0"}}})
 r.raise_for_status()
-mcp_headers = {**HEADERS, "mcp-session-id": r.headers["mcp-session-id"]}
+sid = r.headers.get("mcp-session-id")
+mcp_headers = {**HEADERS, **({"mcp-session-id": sid} if sid else {})}
 
-# 2. notifications/initialized (required before tools/*)
+# 2. notifications/initialized (part of the handshake real clients send)
 httpx.post(MCP_URL, headers=mcp_headers, timeout=30, json={
     "jsonrpc": "2.0", "method": "notifications/initialized"})
 
@@ -530,7 +538,8 @@ The `.slide` wrapper invariant is preserved — tellr never emits a slide withou
 | Deck generated via MCP does not appear in the tellr UI for the intended user | Caller forwarded a service-principal token, so the deck was attributed to the SP rather than the user | For user-initiated flows, switch to OBO forwarding (section 4.2 recipe A). SP-authenticated calls are accepted but the resulting deck is attributed to the SP — expected behavior for batch / automation use cases, but not what you want if a specific user needs the deck in their UI. |
 | `isError: true` with a "permission" message on `get_deck_status` / `edit_deck` / `get_deck` | Caller identity does not match the deck's `created_by` or any `DeckContributor` row | Check `created_by` on the session. Either call with that user's token or share the deck to the calling user via tellr's UI. |
 | Chart.js fails to load in an air-gapped environment | Default CDN unreachable | See section 8.3 — rewrite the CDN URL through a proxy; v1.1 will expose `chart_js_cdn` as a tool parameter. |
-| `initialize` returns no `mcp-session-id` header | Deployment did not pick up the MCP router | Redeploy tellr; check `/api/health`; confirm `app.mount("/mcp", ...)` ran by looking for `MCP server mounted at /mcp` in the app logs. |
+| `initialize` returns no `mcp-session-id` header | Expected — tellr runs stateless (see section 3). If the endpoint also returns HTML or non-JSON, the deployment did not pick up the MCP router; redeploy and confirm `app.mount("/mcp", ...)` ran by looking for `MCP server mounted at /mcp` in the app logs. |
+| Intermittent HTTP 404 `Session not found` from a multi-worker deployment | Only applies if FastMCP is running stateful (`stateless_http=False`); a 3-step handshake can split across workers that don't share session state | Leave tellr in its default stateless mode (section 3). If you've deliberately flipped it back, either pin to a single worker (`UVICORN_WORKERS=1`) or re-enable stateless. |
 | Client receives HTML instead of JSON on the first POST | Target URL is `/mcp` (no trailing slash) and the client followed the 307 to a GET | Always POST to `/mcp/` directly |
 
 ---
