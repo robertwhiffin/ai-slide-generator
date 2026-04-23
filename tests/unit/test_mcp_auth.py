@@ -147,3 +147,21 @@ def test_scope_clears_context_even_on_exception(fake_user_client):
         assert set_user.call_args_list[-1].args[0] is None
         assert set_client.call_args_list[-1].args[0] is None
         assert set_perm.call_args_list[-1].args[0] is None
+
+
+def test_mcp_identity_repr_does_not_leak_token():
+    """The dataclass repr must not include the raw bearer token, so the
+    identity object is safe to log even if someone writes
+    ``logger.info("id=%s", identity)`` in the future."""
+    from src.api.mcp_auth import MCPIdentity
+    identity = MCPIdentity(
+        user_id="u-1",
+        user_name="alice@example.com",
+        token="super-secret-bearer-token",
+        source="authorization-bearer",
+    )
+    rendered = repr(identity)
+    assert "super-secret-bearer-token" not in rendered
+    # user_name and source still in repr (useful for debugging)
+    assert "alice@example.com" in rendered
+    assert "authorization-bearer" in rendered
