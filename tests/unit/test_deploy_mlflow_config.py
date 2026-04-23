@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import pytest
 
+pytest.importorskip("databricks_tellr", reason="databricks-tellr package not installed")
+
 from databricks_tellr.deploy import (
     _mlflow_flat_from_env_section,
     _mlflow_substitutions_for_app_yaml,
