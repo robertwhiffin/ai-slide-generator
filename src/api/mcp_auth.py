@@ -143,10 +143,6 @@ def extract_mcp_identity(request: Request) -> MCPIdentity:
                 source="x-forwarded-identity",
             )
 
-    logger.warning(
-        "MCP auth: no credentials presented; received header keys: %s",
-        sorted(request.headers.keys()),
-    )
     raise MCPAuthError("Authentication required: no credentials presented")
 
 
