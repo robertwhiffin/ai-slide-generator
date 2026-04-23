@@ -74,6 +74,10 @@ def extract_mcp_identity(request: Request) -> MCPIdentity:
             )
 
     if not token:
+        logger.warning(
+            "MCP auth: no credentials presented; received header keys: %s",
+            sorted(request.headers.keys()),
+        )
         raise MCPAuthError("Authentication required: no credentials presented")
 
     try:
