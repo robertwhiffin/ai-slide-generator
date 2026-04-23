@@ -357,24 +357,36 @@ async def _create_deck_impl(
 # ---------------------------------------------------------------------------
 
 
-def _render_deck_response(session: dict, base_url: str) -> dict:
+def _render_deck_response(
+    deck_dict: Optional[dict], session: dict, base_url: str
+) -> dict:
     """Serialize a session's deck into the MCP response fields.
 
     Returns a dict carrying ``slide_count``, ``title``, ``deck``,
-    ``html_document``, ``deck_url``, and ``deck_view_url``. The input
-    ``session`` is expected to carry a ``deck_json`` payload (the
-    structured deck dict persisted by the worker) plus a ``title`` and
-    ``session_id``. This helper is extracted so ``get_deck`` (Task 9)
-    can reuse the exact same shape without drift between the two tools.
+    ``html_document``, ``deck_url``, and ``deck_view_url``. This helper
+    is extracted so ``get_deck_status`` and ``get_deck`` (Task 9) produce
+    identical response shapes without drift between the two tools.
+
+    Args:
+        deck_dict: Structured deck payload as returned by
+            ``SessionManager.get_slide_deck(session_id)``. Typically has
+            ``title``, ``slides``, ``css``, ``external_scripts``, and
+            ``head_meta`` keys. May be ``None`` when the session has no
+            deck yet (empty deck is rendered in that case).
+        session: Session info from ``SessionManager.get_session(session_id)``.
+            Used for ``session_id`` (required for URL construction) and
+            ``title`` fallback when the deck has no title.
+        base_url: Public app URL prefix for building deck URLs. Empty
+            string yields relative URLs.
 
     ``SlideDeck`` has no ``from_dict`` constructor, so the deck is
     rebuilt by constructing ``Slide`` instances for each entry in
-    ``deck_json["slides"]`` and handing them to ``SlideDeck.__init__``
+    ``deck_dict["slides"]`` and handing them to ``SlideDeck.__init__``
     together with the stored title, CSS, external scripts, and head
     metadata.
     """
-    deck_json = session.get("deck_json") or {}
-    if deck_json:
+    deck_dict = deck_dict or {}
+    if deck_dict:
         slides = [
             Slide(
                 html=s.get("html", ""),
@@ -385,14 +397,14 @@ def _render_deck_response(session: dict, base_url: str) -> dict:
                 modified_by=s.get("modified_by"),
                 modified_at=s.get("modified_at"),
             )
-            for s in deck_json.get("slides", [])
+            for s in deck_dict.get("slides", [])
         ]
         deck = SlideDeck(
-            title=deck_json.get("title") or session.get("title"),
-            css=deck_json.get("css", ""),
-            external_scripts=list(deck_json.get("external_scripts") or []),
+            title=deck_dict.get("title") or session.get("title"),
+            css=deck_dict.get("css", ""),
+            external_scripts=list(deck_dict.get("external_scripts") or []),
             slides=slides,
-            head_meta=dict(deck_json.get("head_meta") or {}),
+            head_meta=dict(deck_dict.get("head_meta") or {}),
         )
     else:
         deck = SlideDeck(title=session.get("title"))
@@ -447,7 +459,17 @@ async def get_deck_status(
 async def _get_deck_status_impl(
     request: Request, session_id: str, request_id: str
 ) -> dict:
-    """Implementation, separated from the decorated tool for testability."""
+    """Implementation, separated from the decorated tool for testability.
+
+    Mirrors the data-access pattern of ``GET /api/chat/poll/{request_id}``:
+    the in-memory ``jobs`` dict is authoritative for pending/running/failed
+    state, but worker completion pops the in-memory entry (see
+    ``job_queue.process_chat_request``'s ``finally`` clause). To see the
+    ready/error terminal state we have to fall back to the persisted
+    ``chat_request`` DB row, then re-fetch the deck via
+    ``SessionManager.get_slide_deck`` since neither ``get_job_status``
+    nor ``get_session`` carry the structured deck payload.
+    """
     try:
         with mcp_auth_scope(request):
             if not permission_service.can_view_deck(session_id):
@@ -455,47 +477,129 @@ async def _get_deck_status_impl(
                     "Deck not found or you do not have permission to view it"
                 )
 
-            status = get_job_status(request_id)
-            if status is None:
+            session_manager = get_session_manager()
+
+            # Phase 1: in-memory fast path. The worker updates this dict as
+            # it transitions pending -> running, and the timeout sweeper
+            # flips stuck jobs to "failed". On successful completion the
+            # worker pops the entry, so "completed"/"success" are not
+            # normally observed here — but we still treat them as a
+            # fall-through signal in case a caller observes a race.
+            entry = get_job_status(request_id)
+            if entry is not None:
+                job_status = entry.get("status", "pending")
+
+                if job_status in ("pending", "running"):
+                    return {
+                        "session_id": session_id,
+                        "request_id": request_id,
+                        "status": job_status,
+                        "progress": entry.get("progress"),
+                    }
+
+                if job_status == "failed":
+                    return {
+                        "session_id": session_id,
+                        "request_id": request_id,
+                        "status": "failed",
+                        "error": entry.get("error", "Generation failed"),
+                    }
+                # Any other status ("error", "completed", "success",
+                # unexpected values): fall through to DB for authoritative
+                # state. Worker-raised errors also land in the DB via
+                # update_chat_request_status(request_id, "error", ...).
+
+            # Phase 2: DB fallback. ``get_chat_request`` returns a dict with
+            # ``status``, ``error_message``, ``result`` (the JSON blob the
+            # worker stored via ``set_chat_request_result`` — slides,
+            # raw_html, replacement_info, experiment_url, metadata,
+            # session_title), plus timestamps and the INTEGER session_id.
+            chat_request = session_manager.get_chat_request(request_id)
+            if chat_request is None:
                 raise MCPToolError(f"Unknown request_id: {request_id}")
 
-            job_status = status.get("status", "pending")
+            # Cross-check: the request must belong to the session the caller
+            # supplied. ``chat_request["session_id"]`` is the integer PK, so
+            # resolve it to the string form for comparison. Without this,
+            # a caller with view access on any deck could probe for
+            # messages/metadata of arbitrary other requests.
+            owning_session_id = session_manager.get_session_id_for_request(
+                request_id
+            )
+            if owning_session_id != session_id:
+                raise MCPToolError(f"Unknown request_id: {request_id}")
 
-            if job_status in ("pending", "running"):
+            db_status = chat_request.get("status")
+
+            if db_status in ("pending", "running"):
                 return {
                     "session_id": session_id,
                     "request_id": request_id,
-                    "status": job_status,
-                    "progress": status.get("progress"),
+                    "status": db_status,
+                    "progress": None,
                 }
 
-            if job_status in ("failed", "error"):
+            if db_status == "error":
                 return {
                     "session_id": session_id,
                     "request_id": request_id,
                     "status": "failed",
-                    "error": status.get("error", "Generation failed"),
+                    "error": chat_request.get("error_message")
+                    or "Generation failed",
                 }
 
-            # status == "ready" (MCP-layer contract; mapped from the worker's
-            # completion signal by the caller of get_job_status).
-            session_manager = get_session_manager()
+            if db_status != "completed":
+                # Unknown terminal state — surface as failure so callers
+                # aren't left polling forever.
+                return {
+                    "session_id": session_id,
+                    "request_id": request_id,
+                    "status": "failed",
+                    "error": f"Unknown job status: {db_status!r}",
+                }
+
+            # Ready path. The worker stored the deck via
+            # SessionManager.save_slide_deck (from inside send_message_streaming)
+            # before calling set_chat_request_result, so get_slide_deck is
+            # authoritative.
             session = session_manager.get_session(session_id)
+            deck_dict = session_manager.get_slide_deck(session_id)
             base = _public_app_url()
-            deck_fields = _render_deck_response(session, base)
+            deck_fields = _render_deck_response(deck_dict, session, base)
+
+            # ``result`` is a JSON blob the worker wrote. Per
+            # job_queue.process_chat_request, keys are: slides, raw_html,
+            # replacement_info, experiment_url, metadata, session_title.
+            result = chat_request.get("result") or {}
+            result_metadata = result.get("metadata") or {}
+
+            # Messages for this turn: the worker persists each streamed
+            # event as a SessionMessage tagged with the request_id, so
+            # get_messages_for_request gives us the turn's transcript.
+            db_messages = session_manager.get_messages_for_request(request_id)
+            messages = [
+                {
+                    "role": m.get("role"),
+                    "content": m.get("content"),
+                    "message_type": m.get("message_type"),
+                    "created_at": m.get("created_at"),
+                }
+                for m in db_messages
+            ]
 
             return {
                 "session_id": session_id,
                 "request_id": request_id,
                 "status": "ready",
                 **deck_fields,
-                "replacement_info": status.get("replacement_info"),
-                "messages": status.get("messages") or [],
+                "replacement_info": result.get("replacement_info"),
+                "messages": messages,
                 "metadata": {
-                    "mode": status.get("mode"),
-                    "tool_calls": status.get("tool_calls"),
-                    "latency_ms": status.get("latency_ms"),
-                    "correlation_id": status.get("correlation_id"),
+                    "tool_calls": result_metadata.get("tool_calls"),
+                    "latency_ms": result_metadata.get("latency_ms")
+                    or result_metadata.get("latency_seconds"),
+                    "experiment_url": result.get("experiment_url"),
+                    "session_title": result.get("session_title"),
                 },
             }
     except MCPToolError:
