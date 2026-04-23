@@ -227,7 +227,7 @@ FastMCP (the MCP server library tellr uses) tracks sessions by the `mcp-session-
 Workaround: **open a fresh MCP session per tool call.** The helper `_open_session` in the example above does this. The server-side deck session (identified by `session_id` + `request_id` in the `create_deck` response) is separate from the MCP transport session and is fully persistent, so re-initialising the transport between polls is safe and cheap.
 
 **Gotcha 3 — `deck_url` might be relative.**
-If tellr's `TELLR_APP_URL` (or `DATABRICKS_APP_URL`) env var is unset, `deck_url` comes back as a path-only string like `/sessions/.../edit`. Rendered in your app, the browser will resolve it against *your app's* origin, not tellr's. On production tellr deployments both envs should be set; if you're seeing this, check tellr's deployment config.
+If tellr's `DATABRICKS_APP_URL` env var is unset, `deck_url` comes back as a path-only string like `/sessions/.../edit`. Rendered in your app, the browser will resolve it against *your app's* origin, not tellr's. Databricks Apps sets `DATABRICKS_APP_URL` automatically on production deployments, so this should only bite during local dev or misconfigured environments.
 
 **Gotcha 4 — Generation time.**
 Single-slide prompts generate in ~10-30s, 10-slide decks take 3-8 minutes. The hard server-side timeout is 10 minutes (`JOB_HARD_TIMEOUT_SECONDS`). Match your client deadline to it or shorter.

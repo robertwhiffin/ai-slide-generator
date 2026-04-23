@@ -131,12 +131,14 @@ mcp = FastMCP("tellr")
 def _public_app_url() -> str:
     """Return the base URL for constructing deck_url / deck_view_url.
 
-    Reads TELLR_APP_URL from the environment; this is set at deploy time
-    by the Databricks App platform or by local dev config. Returns an
-    empty string if unset — tool handlers should treat empty as "build
-    relative URLs" rather than fail hard.
+    Reads DATABRICKS_APP_URL from the environment. The Databricks Apps
+    platform injects this automatically on production deployments, so no
+    manual configuration is required. Returns an empty string if unset
+    (e.g., local dev) — tool handlers treat empty as "build relative URLs"
+    rather than fail hard, and the browser resolves the resulting paths
+    against whatever host is serving the page.
     """
-    return os.getenv("TELLR_APP_URL", "").rstrip("/")
+    return os.getenv("DATABRICKS_APP_URL", "").rstrip("/")
 
 
 # ---------------------------------------------------------------------------
