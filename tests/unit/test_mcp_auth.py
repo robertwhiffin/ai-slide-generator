@@ -111,6 +111,83 @@ def test_bearer_extraction_trims_whitespace(fake_user_client):
     assert identity.token == "tok-spaced"
 
 
+# ---- Priority 3: x-forwarded-identity (app-to-app) ------------------------
+
+
+def test_forwarded_identity_resolved_when_env_var_enabled(monkeypatch):
+    monkeypatch.setenv("TELLR_TRUST_FORWARDED_IDENTITY", "true")
+    req = _FakeRequest(
+        headers={
+            "x-forwarded-email": "alice@example.com",
+            "x-forwarded-user": "12345@99999",
+        }
+    )
+    identity = extract_mcp_identity(req)
+
+    assert identity.user_name == "alice@example.com"
+    assert identity.user_id == "12345"
+    assert identity.token is None
+    assert identity.source == "x-forwarded-identity"
+
+
+def test_forwarded_identity_rejected_when_env_var_disabled(monkeypatch):
+    monkeypatch.delenv("TELLR_TRUST_FORWARDED_IDENTITY", raising=False)
+    req = _FakeRequest(
+        headers={
+            "x-forwarded-email": "alice@example.com",
+            "x-forwarded-user": "12345@99999",
+        }
+    )
+    with pytest.raises(MCPAuthError):
+        extract_mcp_identity(req)
+
+
+def test_token_takes_precedence_over_forwarded_identity(
+    monkeypatch, fake_user_client
+):
+    """Even with TELLR_TRUST_FORWARDED_IDENTITY on, a presented token wins."""
+    monkeypatch.setenv("TELLR_TRUST_FORWARDED_IDENTITY", "true")
+    req = _FakeRequest(
+        headers={
+            "authorization": "Bearer tok-bearer",
+            "x-forwarded-email": "alice@example.com",
+            "x-forwarded-user": "12345@99999",
+        }
+    )
+    with patch(
+        "src.api.mcp_auth.get_or_create_user_client",
+        return_value=fake_user_client,
+    ):
+        identity = extract_mcp_identity(req)
+
+    assert identity.token == "tok-bearer"
+    assert identity.source == "authorization-bearer"
+
+
+def test_forwarded_identity_handles_malformed_user_header(monkeypatch):
+    """x-forwarded-user without '@' yields user_id=None, not a crash."""
+    monkeypatch.setenv("TELLR_TRUST_FORWARDED_IDENTITY", "true")
+    req = _FakeRequest(
+        headers={
+            "x-forwarded-email": "alice@example.com",
+            "x-forwarded-user": "bare-user-id",  # no @workspace suffix
+        }
+    )
+    identity = extract_mcp_identity(req)
+
+    assert identity.user_name == "alice@example.com"
+    assert identity.user_id is None
+    assert identity.source == "x-forwarded-identity"
+
+
+def test_forwarded_identity_requires_email(monkeypatch):
+    """x-forwarded-user without x-forwarded-email is insufficient."""
+    monkeypatch.setenv("TELLR_TRUST_FORWARDED_IDENTITY", "true")
+    req = _FakeRequest(headers={"x-forwarded-user": "12345@99999"})
+    with pytest.raises(MCPAuthError):
+        extract_mcp_identity(req)
+
+
 # ---- mcp_auth_scope context manager --------------------------------------
 
 
@@ -147,6 +224,35 @@ def test_scope_clears_context_even_on_exception(fake_user_client):
         assert set_user.call_args_list[-1].args[0] is None
         assert set_client.call_args_list[-1].args[0] is None
         assert set_perm.call_args_list[-1].args[0] is None
+
+
+def test_scope_uses_system_client_for_forwarded_identity(monkeypatch):
+    """Priority 3 path binds tellr's SP client (no user token available)."""
+    monkeypatch.setenv("TELLR_TRUST_FORWARDED_IDENTITY", "true")
+    req = _FakeRequest(
+        headers={
+            "x-forwarded-email": "alice@example.com",
+            "x-forwarded-user": "12345@99999",
+        }
+    )
+    sp_client = MagicMock(name="sp_client")
+
+    with patch("src.api.mcp_auth.get_system_client", return_value=sp_client), \
+         patch("src.api.mcp_auth.get_or_create_user_client") as user_client_factory, \
+         patch("src.api.mcp_auth.set_user_client") as set_client:
+
+        with mcp_auth_scope(req) as identity:
+            assert identity.source == "x-forwarded-identity"
+            assert identity.token is None
+
+        # User-client factory should never be touched (no token to pass)
+        user_client_factory.assert_not_called()
+        # SP client was bound on entry
+        bound_clients = [
+            call.args[0] for call in set_client.call_args_list
+            if call.args[0] is not None
+        ]
+        assert bound_clients == [sp_client]
 
 
 def test_mcp_identity_repr_does_not_leak_token():
