@@ -27,6 +27,11 @@ job_queue: asyncio.Queue = asyncio.Queue()
 # a predictable upper bound on poll duration independent of deploy cadence.
 JOB_HARD_TIMEOUT_SECONDS = 600
 
+# How often the timeout sweeper loop wakes up to scan for stuck jobs.
+# Shorter values catch stuck jobs faster but scan more often; 60 is
+# the sweet spot given the 10-minute stuck-job cutoff.
+TIMEOUT_SWEEP_INTERVAL_SECONDS = 60
+
 
 async def enqueue_job(request_id: str, payload: dict) -> None:
     """Add a job to the queue.
@@ -344,7 +349,7 @@ async def mark_timed_out_jobs_loop() -> None:
     """
     while True:
         try:
-            await asyncio.sleep(60)
+            await asyncio.sleep(TIMEOUT_SWEEP_INTERVAL_SECONDS)
             marked = await mark_timed_out_jobs_once()
             if marked:
                 logger.info(
