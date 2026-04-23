@@ -296,6 +296,28 @@ class TestAcquireEditingLockPermission:
             result = _run(acquire_editing_lock(owner_session.session_id))
             assert result == {"locked": True}
 
+    def test_missing_session_returns_404(self, db):
+        """Stale or unknown session_id must return 404, not an unhandled ASGI error."""
+        from src.api.routes.sessions import acquire_editing_lock
+        from fastapi import HTTPException
+
+        from src.api.services.session_manager import SessionNotFoundError
+
+        missing_id = "57acb753-54cc-4f90-a012-00cc4533c26b"
+        mock_mgr = MagicMock()
+        mock_mgr.get_session.side_effect = SessionNotFoundError(
+            f"Session not found: {missing_id}"
+        )
+
+        with patch("src.api.routes.sessions.get_session_manager", return_value=mock_mgr), \
+             patch("src.api.routes.sessions.get_current_user", return_value="editor@test.com"), \
+             patch("src.api.routes.sessions.get_permission_context", return_value=_editor_ctx()), \
+             patch("src.api.routes.sessions.get_db_session", _fake_db_session(db)):
+            with pytest.raises(HTTPException) as exc_info:
+                _run(acquire_editing_lock(missing_id))
+            assert exc_info.value.status_code == 404
+            assert missing_id in (exc_info.value.detail or "")
+
 
 class TestReleaseEditingLockPermission:
     """release_editing_lock must enforce require_edit_deck."""

@@ -1,10 +1,13 @@
 """Image asset model — metadata and binary data stored together in Lakebase."""
 from datetime import datetime
 
-from sqlalchemy import Boolean, Column, DateTime, Integer, LargeBinary, String, Text
-from sqlalchemy.dialects.postgresql import JSON
+from sqlalchemy import Boolean, Column, DateTime, Integer, JSON, LargeBinary, String, Text
+from sqlalchemy.dialects.postgresql import JSONB
 
 from src.core.database import Base
+
+# JSON on SQLite (tests); JSONB on PostgreSQL/Lakebase for proper @> containment on tags.
+_TagsColumn = JSON().with_variant(JSONB(), "postgresql")
 
 
 class ImageAsset(Base):
@@ -32,7 +35,7 @@ class ImageAsset(Base):
     thumbnail_base64 = Column(Text, nullable=True)
 
     # Organization
-    tags = Column(JSON, default=list)                        # ["branding", "logo", "chart"]
+    tags = Column(_TagsColumn, default=list)                 # ["branding", "logo", "chart"]
     description = Column(Text, nullable=True)
     category = Column(String(50), nullable=True)             # 'branding', 'content', 'background', 'ephemeral'
 

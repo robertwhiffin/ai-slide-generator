@@ -135,6 +135,12 @@ class ChatService:
             session_id, username
         )
 
+        # Active experiment must be set before LangChain autolog emits traces (tools, etc.).
+        if experiment_id:
+            import mlflow
+
+            mlflow.set_experiment(experiment_id=experiment_id)
+
         # Persist experiment_id to database if newly created
         if experiment_id and experiment_id != db_session.get("experiment_id"):
             session_manager = get_session_manager()
@@ -1449,6 +1455,12 @@ class ChatService:
 
         import mlflow
 
+        from src.core.mlflow_tracing import (
+            configure_tracing_environment,
+            create_databricks_experiment,
+            get_unity_catalog_trace_location,
+        )
+
         # Determine experiment path based on environment
         sp_folder = get_service_principal_folder()
         
@@ -1471,7 +1483,8 @@ class ChatService:
 
         try:
             mlflow.set_tracking_uri("databricks")
-            
+            configure_tracing_environment()
+
             # Check if experiment already exists
             experiment = mlflow.get_experiment_by_name(experiment_path)
             
@@ -1481,6 +1494,14 @@ class ChatService:
                     f"Using existing user experiment: {experiment_id}",
                     extra={"session_id": session_id, "experiment_path": experiment_path},
                 )
+                if get_unity_catalog_trace_location() is not None:
+                    logger.warning(
+                        "TELLR_MLFLOW_UC_* is set but this experiment already existed; "
+                        "UC trace_location only applies to newly created experiments. "
+                        "Delete the experiment at %s and run Tellr again to bind UC traces.",
+                        experiment_path,
+                        extra={"session_id": session_id, "experiment_path": experiment_path},
+                    )
             else:
                 # Ensure parent folder exists before creating experiment
                 # The folder structure is: {sp_folder}/{username}/ai-slide-generator
@@ -1494,8 +1515,8 @@ class ChatService:
                         logger.warning(f"Failed to create parent folder {parent_folder}: {e}")
                         # Continue anyway - experiment creation might still work
                 
-                # Create new experiment for user
-                experiment_id = mlflow.create_experiment(experiment_path)
+                # Create new experiment for user (optional Unity Catalog trace location)
+                experiment_id = create_databricks_experiment(experiment_path)
                 logger.info(
                     f"Created new user experiment: {experiment_id}",
                     extra={"session_id": session_id, "experiment_path": experiment_path},
