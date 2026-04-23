@@ -7,7 +7,7 @@ In production, also serves the React frontend as static files.
 import asyncio
 import logging
 import os
-from contextlib import ExitStack, asynccontextmanager
+from contextlib import AsyncExitStack, ExitStack, asynccontextmanager
 from importlib import resources
 from pathlib import Path
 
@@ -52,16 +52,44 @@ IS_TESTING = ENVIRONMENT == "test"
 _worker_task = None
 _export_worker_task = None
 _cleanup_task = None
+_timeout_task = None
 _frontend_assets_stack: ExitStack | None = None
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Lifespan context manager for startup/shutdown events."""
-    global _worker_task, _export_worker_task, _cleanup_task, _frontend_assets_stack
+    global _worker_task, _export_worker_task, _cleanup_task, _timeout_task, _frontend_assets_stack
 
     # Startup
     logger.info(f"Starting AI Slide Generator API (environment: {ENVIRONMENT})")
+
+    # The FastMCP streamable-HTTP transport spawns per-session async tasks
+    # inside a task group owned by its StreamableHTTPSessionManager. That
+    # task group is initialised by ``session_manager.run()`` and is
+    # required before ``handle_request`` will accept any POST. When the
+    # MCP app is nested under FastAPI via ``app.mount("/mcp", ...)``,
+    # Starlette does NOT run the nested app's lifespan, so we have to
+    # enter the session manager context here. AsyncExitStack guarantees
+    # clean teardown of the task group on shutdown alongside the other
+    # worker tasks below.
+    #
+    # Skipped under pytest: ``StreamableHTTPSessionManager.run()`` can
+    # only be entered once per process, and unit-test suites instantiate
+    # the ``TestClient`` (and therefore the lifespan) multiple times
+    # against the same module-level FastMCP singleton. MCP endpoint
+    # coverage lives in the integration tests, which set up their own
+    # session manager lifecycle.
+    mcp_lifespan_stack = AsyncExitStack()
+    if os.getenv("PYTEST_CURRENT_TEST") is None:
+        from src.api.mcp_server import mcp as tellr_mcp
+
+        await mcp_lifespan_stack.enter_async_context(
+            tellr_mcp.session_manager.run()
+        )
+        logger.info("MCP session manager started")
+    else:
+        logger.info("Pytest detected: skipping MCP session manager startup")
 
     # Start Lakebase token refresh if running in Databricks Apps
     # Must happen before init_db() so OAuth token is ready for database connections
@@ -111,6 +139,11 @@ async def lifespan(app: FastAPI):
         _export_worker_task = await start_export_worker()
         logger.info("Export job queue worker started")
 
+        # Start the MCP job timeout sweeper
+        from src.api.services.job_queue import mark_timed_out_jobs_loop
+        _timeout_task = asyncio.create_task(mark_timed_out_jobs_loop())
+        logger.info("MCP job timeout sweeper started")
+
         # Start the request log cleanup task
         from src.api.middleware.request_logging import request_log_cleanup_loop
         _cleanup_task = asyncio.create_task(request_log_cleanup_loop())
@@ -158,6 +191,19 @@ async def lifespan(app: FastAPI):
         except asyncio.CancelledError:
             pass
         logger.info("Request log cleanup task stopped")
+
+    if _timeout_task:
+        _timeout_task.cancel()
+        try:
+            await _timeout_task
+        except asyncio.CancelledError:
+            pass
+        logger.info("MCP job timeout sweeper stopped")
+
+    # Tear down the FastMCP session manager's task group. Safe to call
+    # unconditionally — the stack was entered unconditionally at startup.
+    await mcp_lifespan_stack.aclose()
+    logger.info("MCP session manager stopped")
 
     if _frontend_assets_stack:
         _frontend_assets_stack.close()
@@ -359,6 +405,23 @@ app.include_router(contributors_router, prefix="/api/settings", tags=["settings"
 app.include_router(deck_prompts_router, prefix="/api/settings", tags=["settings"])
 app.include_router(identities_router, prefix="/api/settings", tags=["settings"])
 app.include_router(slide_styles_router, prefix="/api/settings", tags=["settings"])
+
+# MCP server — mount the FastMCP streamable-HTTP ASGI app at /mcp.
+# Must be registered before the SPA catch-all (which is added lazily by
+# ``_mount_frontend`` inside the lifespan when running in production),
+# otherwise JSON-RPC POSTs to /mcp would be swallowed by the SPA route
+# and return index.html instead of reaching the tool handlers.
+#
+# Set ``streamable_http_path = "/"`` so the sub-app's internal route is
+# ``/``; when Starlette mounts the sub-app at ``/mcp`` it strips the
+# ``/mcp`` prefix before forwarding, so an external POST to ``/mcp``
+# lands on the sub-app's ``/`` route. Without this, the sub-app's
+# default internal route would be ``/mcp`` and external requests would
+# need to hit ``/mcp/mcp``.
+from src.api.mcp_server import mcp as tellr_mcp  # noqa: E402
+tellr_mcp.settings.streamable_http_path = "/"
+app.mount("/mcp", tellr_mcp.streamable_http_app())
+logger.info("MCP server mounted at /mcp")
 
 
 @app.get("/api/health")
