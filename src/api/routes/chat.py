@@ -30,6 +30,7 @@ from src.api.services.session_manager import SessionNotFoundError, get_session_m
 from src.core.context_utils import run_in_thread_with_context
 from src.core.database import get_db
 from src.core.permission_context import get_permission_context
+from src.core.settings_db import get_default_slide_style_id
 from src.core.user_context import get_current_user
 from src.database.models.profile_contributor import PermissionLevel
 from src.services.permission_service import get_permission_service, PERMISSION_PRIORITY
@@ -37,40 +38,6 @@ from src.services.permission_service import get_permission_service, PERMISSION_P
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api", tags=["chat"])
-
-
-def _get_default_style_id() -> int | None:
-    """Return the ID of the default slide style (is_default=True, is_active=True), or None."""
-    from src.core.database import get_db_session
-    from src.database.models import SlideStyleLibrary
-
-    try:
-        with get_db_session() as db:
-            # Primary: explicit default
-            style = (
-                db.query(SlideStyleLibrary.id)
-                .filter(
-                    SlideStyleLibrary.is_default == True,  # noqa: E712
-                    SlideStyleLibrary.is_active == True,  # noqa: E712
-                )
-                .first()
-            )
-            if style:
-                return style.id
-
-            # Fallback: system style (defensive, for mid-migration)
-            style = (
-                db.query(SlideStyleLibrary.id)
-                .filter(
-                    SlideStyleLibrary.is_system == True,  # noqa: E712
-                    SlideStyleLibrary.is_active == True,  # noqa: E712
-                )
-                .first()
-            )
-            return style.id if style else None
-    except Exception:
-        # Column may not exist yet (pre-migration)
-        return None
 
 
 def _check_chat_permission(session_id: str, db: DBSession) -> None:
@@ -155,7 +122,7 @@ def _maybe_create_session(request: ChatRequest, session_manager) -> bool:
     # Build full agent_config_data with defaults (used for session creation)
     agent_config_data = explicit_config or AgentConfig().model_dump()
     if agent_config_data.get("slide_style_id") is None:
-        default_id = _get_default_style_id()
+        default_id = get_default_slide_style_id()
         if default_id is not None:
             agent_config_data["slide_style_id"] = default_id
 
