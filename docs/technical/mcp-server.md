@@ -87,7 +87,7 @@ Three common setups. Pick the one that matches where your code runs.
 
 When your app is itself a Databricks App running in the same workspace as tellr, the platform injects the end user's token into your app as `x-forwarded-access-token`. Extract that token and forward it as `Authorization: Bearer` on the outbound call to tellr. See section 7.3 for a complete code example.
 
-> **Deliberately unsupported: using your own service-principal token.** Do *not* call tellr with the service principal token that Databricks Apps also exposes to your backend. Decks created that way will be attributed to the SP, which will not match any real user in the tellr UI — they will be invisible to the people who asked for them, and permission checks on subsequent `get_deck_status` / `edit_deck` calls from a different identity will fail. Always forward the end user's `x-forwarded-access-token`.
+> **Service-principal calls: accepted, but attributed to the SP.** Calling tellr with the service principal token that Databricks Apps also exposes to your backend will succeed — the request is not blocked — but the resulting deck's `created_by` will be the SP. That means it will **not appear in any human user's tellr UI** (it is attributed to the SP in deck listings, logs, and MLflow), and any later `get_deck_status` / `edit_deck` call made under a different identity will fail the permission check. For user-initiated flows where the deck should surface to a specific user, forward the end user's `x-forwarded-access-token` instead. SP-authenticated calls remain legitimate for batch / automation use cases (scheduled report generation, test harnesses, shared-workspace pipelines) where no specific user needs the deck in their UI.
 
 #### B. External MCP client (Claude Code, Claude Desktop, Cursor, etc.)
 
@@ -226,7 +226,7 @@ Each tool subsection below mirrors the `@mcp.tool` descriptions in `src/api/mcp_
   "messages": [ { "role": "assistant", "content": "...",
                    "message_type": "reasoning", "created_at": "..." } ],
   "metadata": {
-    "tool_calls": [ ... ],
+    "tool_calls": 3,                                     // number of tool invocations during this generation
     "latency_ms": 47213,
     "experiment_url": "https://.../mlflow/...",
     "session_title": "Q3 renewals briefing"
@@ -506,7 +506,7 @@ The `.slide` wrapper invariant is preserved — tellr never emits a slide withou
 |-------|----------|
 | Polling cadence | Poll `get_deck_status` every 1–2 seconds with a small backoff if the server is under load. Do not poll faster than 500 ms — the endpoint is not optimised for sub-second polling and you will see the timeout sweeper cost in headroom. |
 | Error retry | Respect any `retry_after_seconds` hint on rate-limit responses; otherwise back off exponentially. `isError: true` on a tool result is *application* failure, not transport failure — do not retry blindly. |
-| Identity | Always forward the end user's OBO token (section 4.2 recipe A). Never call with a service-principal token if the deck should surface to a specific user. |
+| Identity | Forward the end user's OBO token (section 4.2 recipe A) for any user-initiated flow — it is the recommended path and guarantees the deck surfaces to that user. Service-principal tokens are accepted and legitimate for batch / automation use cases, but the resulting deck is attributed to the SP and will not appear in any human user's tellr UI. |
 | Correlation IDs | Pass a `correlation_id` on every `create_deck` / `edit_deck` call. It flows through server logs, worker state, and the chat request row, making cross-system traces trivial. |
 | Trailing slash | Always POST to `/mcp/`. `POST /mcp` returns `307 Temporary Redirect`, which some HTTP clients silently downgrade to `GET`. |
 | Handshake | After `initialize`, send `notifications/initialized` before any `tools/*` call. |
@@ -520,8 +520,8 @@ The `.slide` wrapper invariant is preserved — tellr never emits a slide withou
 | Symptom | Likely cause | What to try |
 |---------|--------------|-------------|
 | `401` / `Authentication failed` with a token that works elsewhere | Proxy or gateway stripped `Authorization` on the way in; or `x-forwarded-access-token` absent when the caller expected it | Log the exact headers the tellr process received; if you are running behind an extra proxy, ensure it preserves `Authorization` unmodified |
-| `status: running` never transitions to `ready` | Worker stuck or generation truly slow | The timeout sweeper marks jobs `failed` after 10 minutes (`JOB_HARD_TIMEOUT_SECONDS`). If you reliably exceed that, inspect server logs for the MLflow experiment URL in the `metadata` field of a successful call to see where the agent stalls. |
-| Deck generated via MCP does not appear in the tellr UI for the intended user | Caller forwarded a service-principal token instead of the user's OBO token | Switch to OBO forwarding (section 4.2 recipe A). Decks created under the SP identity are not visible to any workspace user. |
+| `status: running` never transitions to `ready` | Worker stuck or generation truly slow | The timeout sweeper automatically transitions stuck jobs to `failed` after 10 minutes (`JOB_HARD_TIMEOUT_SECONDS = 600s`) — no manual intervention needed. Once the job surfaces as `failed`, server logs (keyed on `correlation_id` / `request_id`) are the primary diagnosis surface; the tellr UI's Run Details link on the owning session also exposes the same information. Note: `metadata.experiment_url` only appears on *ready* responses — it is an observability aid for completed runs (MLflow traces, tool-call spans, latency breakdown), not a stuck-job probe. |
+| Deck generated via MCP does not appear in the tellr UI for the intended user | Caller forwarded a service-principal token, so the deck was attributed to the SP rather than the user | For user-initiated flows, switch to OBO forwarding (section 4.2 recipe A). SP-authenticated calls are accepted but the resulting deck is attributed to the SP — expected behavior for batch / automation use cases, but not what you want if a specific user needs the deck in their UI. |
 | `isError: true` with a "permission" message on `get_deck_status` / `edit_deck` / `get_deck` | Caller identity does not match the deck's `created_by` or any `DeckContributor` row | Check `created_by` on the session. Either call with that user's token or share the deck to the calling user via tellr's UI. |
 | Chart.js fails to load in an air-gapped environment | Default CDN unreachable | See section 8.3 — rewrite the CDN URL through a proxy; v1.1 will expose `chart_js_cdn` as a tool parameter. |
 | `initialize` returns no `mcp-session-id` header | Deployment did not pick up the MCP router | Redeploy tellr; check `/api/health`; confirm `app.mount("/mcp", ...)` ran by looking for `MCP server mounted at /mcp` in the app logs. |
