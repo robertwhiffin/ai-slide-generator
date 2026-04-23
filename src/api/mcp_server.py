@@ -84,6 +84,42 @@ class _PermissionServiceFacade:
                 group_ids=ctx.group_ids,
             )
 
+    def can_edit_deck(self, session_id: str) -> bool:
+        """Return True if the current MCP caller has edit access on the deck.
+
+        Mirrors ``can_view_deck`` but gates on CAN_EDIT (or higher) rather
+        than any access. Resolves the string ``session_id`` to the
+        underlying ``UserSession.id`` (integer PK) and delegates to the
+        shared ``PermissionService``. The session creator is short-
+        circuited to True — creators implicitly hold CAN_MANAGE, which
+        includes edit — on the string-id fast path so a session the
+        caller just created is editable before any DeckContributor row
+        exists.
+        """
+        ctx = get_permission_context()
+        if ctx is None:
+            return False
+        svc = get_permission_service()
+        with get_db_session() as db:
+            from src.database.models.session import UserSession
+
+            session = (
+                db.query(UserSession)
+                .filter(UserSession.session_id == session_id)
+                .first()
+            )
+            if session is None:
+                return False
+            if session.created_by and session.created_by == ctx.user_name:
+                return True
+            return svc.can_edit_deck(
+                db,
+                session.id,
+                user_id=ctx.user_id,
+                user_name=ctx.user_name,
+                group_ids=ctx.group_ids,
+            )
+
 
 permission_service = _PermissionServiceFacade()
 
@@ -608,4 +644,147 @@ async def _get_deck_status_impl(
         raise MCPToolError(f"Authentication failed: {e}") from e
     except Exception as e:
         logger.exception("MCP get_deck_status failed")
+        raise MCPToolError(f"Internal error: {e}") from e
+
+
+# ---------------------------------------------------------------------------
+# edit_deck
+# ---------------------------------------------------------------------------
+
+
+def _check_contiguous(indices: list[int]) -> None:
+    """Raise MCPToolError unless indices form a contiguous run.
+
+    The edit pipeline's ``_parse_slide_replacements`` / ``_apply_slide_
+    replacements`` helpers assume the caller-supplied slide range is a
+    single contiguous slice so replacement output can be spliced back in
+    at a single index. Callers that want to edit disjoint slides should
+    issue one ``edit_deck`` call per slice.
+    """
+    if not indices:
+        return
+    sorted_idx = sorted(indices)
+    for a, b in zip(sorted_idx, sorted_idx[1:]):
+        if b - a != 1:
+            raise MCPToolError(
+                "slide_indices must be contiguous (e.g. [2, 3, 4], not [2, 4])"
+            )
+
+
+@mcp.tool(
+    name="edit_deck",
+    description=(
+        "Refine an existing deck through a natural-language instruction. "
+        "Optionally target specific contiguous slides via slide_indices. "
+        "The edit is applied in-place; the session_id and deck_url stay "
+        "stable across edits. Returns a request_id; the caller polls "
+        "get_deck_status for completion and receives the updated deck "
+        "plus replacement_info summarizing what changed."
+    ),
+)
+async def edit_deck(
+    ctx: Context,
+    session_id: str,
+    instruction: str,
+    slide_indices: Optional[list[int]] = None,
+    correlation_id: Optional[str] = None,
+) -> dict:
+    return await _edit_deck_impl(
+        request=_request_from_context(ctx),
+        session_id=session_id,
+        instruction=instruction,
+        slide_indices=slide_indices,
+        correlation_id=correlation_id,
+    )
+
+
+async def _edit_deck_impl(
+    request: Request,
+    session_id: str,
+    instruction: str,
+    slide_indices: Optional[list[int]] = None,
+    correlation_id: Optional[str] = None,
+) -> dict:
+    """Implementation, separated from the decorated tool for testability.
+
+    Reuses ``enqueue_create_job`` with ``mode="edit"`` so the worker
+    dispatches to the existing ChatService edit path (slide_context
+    present => editing_mode in ``agent.chat_async_streaming``). When
+    ``slide_indices`` is provided we pull the current slide HTMLs via
+    ``SessionManager.get_slide_deck`` and bundle them into the
+    ``slide_context`` dict the agent's ``_format_slide_context`` helper
+    expects (``{"indices": [...], "slide_htmls": [...]}``). Without
+    ``slide_indices`` the job is submitted with ``slide_context=None``
+    — still edit-mode, but the agent will operate against the full deck.
+    """
+    if not instruction or not instruction.strip():
+        raise MCPToolError("instruction must be a non-empty string")
+    if slide_indices is not None:
+        _check_contiguous(slide_indices)
+
+    try:
+        with mcp_auth_scope(request) as identity:
+            if not permission_service.can_edit_deck(session_id):
+                raise MCPToolError(
+                    "Deck not found or you do not have permission to edit it"
+                )
+
+            slide_context: Optional[dict] = None
+            if slide_indices:
+                sm = get_session_manager()
+                deck = sm.get_slide_deck(session_id)
+                if deck is None:
+                    raise MCPToolError(
+                        f"Deck not found for session_id: {session_id}"
+                    )
+                all_slides = deck.get("slides") or []
+                try:
+                    slide_htmls = [
+                        all_slides[i]["html"] for i in slide_indices
+                    ]
+                except IndexError as e:
+                    raise MCPToolError(
+                        f"slide_indices contains out-of-range index: {e}"
+                    ) from e
+                except (TypeError, KeyError) as e:
+                    raise MCPToolError(
+                        f"Failed to read slide html at index: {e}"
+                    ) from e
+                slide_context = {
+                    "indices": slide_indices,
+                    "slide_htmls": slide_htmls,
+                }
+
+            request_id = await enqueue_create_job(
+                session_id=session_id,
+                prompt=instruction,
+                mode="edit",
+                slide_context=slide_context,
+                correlation_id=correlation_id,
+            )
+
+            logger.info(
+                "MCP edit_deck submitted",
+                extra={
+                    "event": "mcp_tool_invoked",
+                    "tool_name": "edit_deck",
+                    "session_id": session_id,
+                    "request_id": request_id,
+                    "user_name": identity.user_name,
+                    "slide_indices": slide_indices,
+                    "correlation_id": correlation_id,
+                },
+            )
+
+            return {
+                "session_id": session_id,
+                "request_id": request_id,
+                "status": "pending",
+            }
+    except MCPToolError:
+        raise
+    except MCPAuthError as e:
+        raise MCPToolError(f"Authentication failed: {e}") from e
+    except Exception as e:
+        logger.exception("MCP edit_deck failed")
         raise MCPToolError(f"Internal error: {e}") from e
