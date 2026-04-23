@@ -148,3 +148,11 @@ def test_to_html_document_escapes_chart_js_cdn_attribute():
     # dropping it. The input URL contains two literal quotes (the attribute-
     # breakout and the opening of the injected onerror); both get escaped.
     assert "chart.js&quot; onerror=&quot;alert(1)" in out
+
+
+def test_to_html_document_includes_lang_and_viewport(minimal_deck):
+    """Output should declare language (a11y) and viewport (mobile)."""
+    out = minimal_deck.to_html_document()
+    assert 'lang="en"' in out
+    assert 'name="viewport"' in out
+    assert "width=device-width" in out
