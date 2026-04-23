@@ -147,6 +147,7 @@ async def test_create_deck_surfaces_auth_error_as_tool_error(fake_request):
 
 @pytest.mark.asyncio
 async def test_get_deck_status_returns_pending_shape(fake_request, identity):
+    """In-memory fast path: job is queued but hasn't started yet."""
     from src.api import mcp_server
 
     with patch("src.api.mcp_server.mcp_auth_scope") as auth_scope, \
@@ -175,48 +176,70 @@ async def test_get_deck_status_returns_pending_shape(fake_request, identity):
 
 @pytest.mark.asyncio
 async def test_get_deck_status_returns_ready_with_full_deck(fake_request, identity):
+    """DB ready path: worker finished and popped the in-memory job, so the
+    MCP tool reads the completed ``chat_request`` row and re-fetches the
+    deck via ``SessionManager.get_slide_deck``."""
     from src.api import mcp_server
 
-    fake_session = {
-        "session_id": "sess-1",
+    fake_session = {"session_id": "sess-1", "title": "Q3 Pitch"}
+    fake_deck = {
         "title": "Q3 Pitch",
-        "deck_json": {
-            "title": "Q3 Pitch",
-            "slides": [{"html": "<div class='slide'>A</div>", "scripts": ""}],
-            "css": "",
-            "external_scripts": ["https://cdn.jsdelivr.net/npm/chart.js"],
-            "head_meta": {},
+        "slides": [{"html": "<div class='slide'>A</div>", "scripts": ""}],
+        "css": "",
+        "external_scripts": ["https://cdn.jsdelivr.net/npm/chart.js"],
+        "head_meta": {},
+    }
+    fake_chat_request = {
+        "request_id": "req-1",
+        "session_id": 42,  # integer PK, real session_manager returns this
+        "status": "completed",
+        "error_message": None,
+        "created_at": "2026-04-22T12:00:00",
+        "completed_at": "2026-04-22T12:00:10",
+        "result": {
+            "slides": fake_deck["slides"],
+            "raw_html": "<html>...</html>",
+            "replacement_info": None,
+            "experiment_url": "https://mlflow.example/exp/123",
+            "metadata": {"tool_calls": 0, "latency_ms": 10000},
+            "session_title": "Q3 Pitch",
         },
     }
-
     fake_turn_messages = [
-        {"role": "user", "content": "make Q3 deck"},
-        {"role": "assistant", "content": "I created 1 slide..."},
+        {
+            "id": 1,
+            "role": "user",
+            "content": "make Q3 deck",
+            "message_type": "user_query",
+            "created_at": "2026-04-22T12:00:00",
+            "metadata": None,
+        },
+        {
+            "id": 2,
+            "role": "assistant",
+            "content": "I created 1 slide...",
+            "message_type": None,
+            "created_at": "2026-04-22T12:00:09",
+            "metadata": None,
+        },
     ]
 
     with patch("src.api.mcp_server.mcp_auth_scope") as auth_scope, \
-         patch("src.api.mcp_server.get_job_status") as get_status, \
+         patch("src.api.mcp_server.get_job_status", return_value=None), \
          patch("src.api.mcp_server.permission_service") as perm_svc, \
          patch("src.api.mcp_server.get_session_manager") as get_sm, \
          patch("src.api.mcp_server._public_app_url", return_value="https://t.example"):
 
         auth_scope.return_value.__enter__.return_value = identity
         auth_scope.return_value.__exit__.return_value = False
-
         perm_svc.can_view_deck.return_value = True
-        get_status.return_value = {
-            "status": "ready",
-            "session_id": "sess-1",
-            "messages": fake_turn_messages,
-            "replacement_info": None,
-            "mode": "generate",
-            "latency_ms": 10000,
-            "tool_calls": 0,
-            "correlation_id": None,
-        }
 
         sm = MagicMock()
+        sm.get_chat_request.return_value = fake_chat_request
+        sm.get_session_id_for_request.return_value = "sess-1"
+        sm.get_slide_deck.return_value = fake_deck
         sm.get_session.return_value = fake_session
+        sm.get_messages_for_request.return_value = fake_turn_messages
         get_sm.return_value = sm
 
         result = await mcp_server._get_deck_status_impl(
@@ -233,12 +256,19 @@ async def test_get_deck_status_returns_ready_with_full_deck(fake_request, identi
         assert result["html_document"].lower().startswith("<!doctype")
         assert result["deck_url"] == "https://t.example/sessions/sess-1/edit"
         assert result["deck_view_url"] == "https://t.example/sessions/sess-1/view"
-        assert result["messages"] == fake_turn_messages
         assert result["replacement_info"] is None
+        assert result["metadata"]["latency_ms"] == 10000
+        assert result["metadata"]["experiment_url"] == "https://mlflow.example/exp/123"
+        # Messages come from the DB turn transcript, not from the job dict.
+        assert len(result["messages"]) == 2
+        assert result["messages"][0]["role"] == "user"
+        assert result["messages"][0]["content"] == "make Q3 deck"
 
 
 @pytest.mark.asyncio
 async def test_get_deck_status_returns_failed_with_error(fake_request, identity):
+    """In-memory failed path: the timeout sweeper flipped a stuck job to
+    ``failed`` before the worker could complete it."""
     from src.api import mcp_server
 
     with patch("src.api.mcp_server.mcp_auth_scope") as auth_scope, \
@@ -285,3 +315,94 @@ async def test_get_deck_status_denies_when_not_permitted(fake_request, identity)
                 request_id="req-1",
             )
         assert "permission" in str(exc.value).lower() or "not found" in str(exc.value).lower()
+
+
+@pytest.mark.asyncio
+async def test_get_deck_status_falls_back_to_db_when_job_popped_from_memory(
+    fake_request, identity
+):
+    """When a worker completes, its in-memory job entry is popped. The
+    MCP tool must fall back to the DB chat_request row to reconstruct
+    the ready state, fetching the deck via ``get_slide_deck`` rather
+    than assuming it was baked into ``get_session`` output."""
+    from src.api import mcp_server
+
+    fake_session = {"session_id": "sess-1", "title": "Q3 Pitch"}
+    fake_deck = {
+        "title": "Q3 Pitch",
+        "slides": [{"html": "<div class='slide'>A</div>", "scripts": ""}],
+        "css": "",
+        "external_scripts": ["https://cdn.jsdelivr.net/npm/chart.js"],
+        "head_meta": {},
+    }
+    fake_chat_request = {
+        "request_id": "req-1",
+        "session_id": 42,  # integer PK, real session_manager returns this
+        "status": "completed",
+        "error_message": None,
+        "created_at": "2026-04-22T12:00:00",
+        "completed_at": "2026-04-22T12:00:15",
+        "result": {
+            "slides": fake_deck["slides"],
+            "raw_html": "<html>...</html>",
+            "replacement_info": None,
+            "experiment_url": None,
+            "metadata": {"tool_calls": 0, "latency_ms": 15000},
+        },
+    }
+
+    with patch("src.api.mcp_server.mcp_auth_scope") as auth_scope, \
+         patch("src.api.mcp_server.get_job_status", return_value=None) as get_status, \
+         patch("src.api.mcp_server.permission_service") as perm_svc, \
+         patch("src.api.mcp_server.get_session_manager") as get_sm, \
+         patch("src.api.mcp_server._public_app_url", return_value="https://t.example"):
+
+        auth_scope.return_value.__enter__.return_value = identity
+        auth_scope.return_value.__exit__.return_value = False
+        perm_svc.can_view_deck.return_value = True
+
+        sm = MagicMock()
+        sm.get_chat_request.return_value = fake_chat_request
+        sm.get_session_id_for_request.return_value = "sess-1"
+        sm.get_slide_deck.return_value = fake_deck
+        sm.get_session.return_value = fake_session
+        sm.get_messages_for_request.return_value = [
+            {
+                "id": 1,
+                "role": "user",
+                "content": "make Q3 deck",
+                "message_type": "user_query",
+                "created_at": "2026-04-22T12:00:00",
+                "metadata": None,
+            },
+            {
+                "id": 2,
+                "role": "assistant",
+                "content": "Done.",
+                "message_type": None,
+                "created_at": "2026-04-22T12:00:14",
+                "metadata": None,
+            },
+        ]
+        get_sm.return_value = sm
+
+        result = await mcp_server._get_deck_status_impl(
+            request=fake_request,
+            session_id="sess-1",
+            request_id="req-1",
+        )
+
+        # Confirm the in-memory fast path saw None (worker popped the entry).
+        get_status.assert_called_once_with("req-1")
+        # Confirm the DB was consulted next.
+        sm.get_chat_request.assert_called_once_with("req-1")
+        # Confirm the deck was re-fetched via the dedicated method, not
+        # read from session.get_session output.
+        sm.get_slide_deck.assert_called_once_with("sess-1")
+
+        assert result["status"] == "ready"
+        assert result["slide_count"] == 1
+        assert "deck" in result
+        assert result["html_document"].lower().startswith("<!doctype")
+        assert result["deck_url"] == "https://t.example/sessions/sess-1/edit"
+        assert result["metadata"]["latency_ms"] == 15000
