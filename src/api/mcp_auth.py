@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import logging
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Iterator, Optional
 
 from fastapi import Request
@@ -44,7 +44,7 @@ class MCPAuthError(Exception):
 class MCPIdentity:
     user_id: Optional[str]
     user_name: str
-    token: str
+    token: str = field(repr=False)
     source: str  # "x-forwarded-access-token" or "authorization-bearer"
 
 
