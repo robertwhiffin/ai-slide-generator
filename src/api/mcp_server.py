@@ -126,7 +126,19 @@ permission_service = _PermissionServiceFacade()
 
 # FastMCP instance — one per process. Tools are registered via decorators
 # added in subsequent tasks (create_deck, get_deck_status, edit_deck, get_deck).
-mcp = FastMCP("tellr")
+#
+# stateless_http=True: tellr runs multiple uvicorn workers
+# (UVICORN_WORKERS=4 on Databricks Apps), and FastMCP's default stateful
+# session store is an in-memory dict on each worker process. Without
+# session affinity at the proxy layer, the three requests of a normal
+# handshake (initialize → notifications/initialized → tools/call) can
+# land on different workers, producing HTTP 404 "Session not found"
+# intermittently — especially on longer generate+poll loops where many
+# handshakes happen. Stateless mode sidesteps this entirely: each HTTP
+# request is self-contained, no server-side session lookup, no
+# possibility of session-not-found. This is the mode the MCP spec
+# (2025-03-26) prescribes for multi-node deployments.
+mcp = FastMCP("tellr", stateless_http=True)
 
 
 def _public_app_url() -> str:

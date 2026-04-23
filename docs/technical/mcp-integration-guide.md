@@ -101,18 +101,19 @@ def _rpc(
 
 
 def _open_session(client: httpx.Client, url: str) -> dict:
-    """Run initialize + notifications/initialized; return mcp-session-id header.
+    """Run initialize + notifications/initialized; return any session header.
 
-    Each tool call should open its own session — see "Gotcha: MCP session
-    lifetime" below for why.
+    tellr runs FastMCP stateless, so the server does not emit
+    ``mcp-session-id``. We still run the handshake shape real clients
+    send, and forward a session id if the server does return one.
     """
     init_resp, _ = _rpc(client, url, "initialize", params={
         "protocolVersion": "2025-03-26",
         "capabilities": {},
         "clientInfo": {"name": "my-app", "version": "0.1"},
     }, id_=1)
-    sid = init_resp.headers["mcp-session-id"]
-    headers = {"mcp-session-id": sid}
+    sid = init_resp.headers.get("mcp-session-id")
+    headers = {"mcp-session-id": sid} if sid else {}
     _rpc(client, url, "notifications/initialized", extra_headers=headers)
     return headers
 
@@ -221,10 +222,8 @@ Open the deployed app's URL, paste your tellr app URL, enter a prompt, click Gen
 **Gotcha 1 — Don't send `Authorization: Bearer` or forward the OBO token.**
 It gets stripped by the proxy. Tellr sees nothing and returns "Authentication required: no credentials presented." The correct pattern is to send no auth headers at all from your app and rely on the proxy's identity headers.
 
-**Gotcha 2 — MCP transport sessions age out mid-poll.**
-FastMCP (the MCP server library tellr uses) tracks sessions by the `mcp-session-id` returned from `initialize`. For reasons that aren't fully obvious, active polling on a session does not reset its lifetime; a 5+ minute generation will eventually hit HTTP 404 `"Session not found"` on a poll even if you're polling every 2 seconds.
-
-Workaround: **open a fresh MCP session per tool call.** The helper `_open_session` in the example above does this. The server-side deck session (identified by `session_id` + `request_id` in the `create_deck` response) is separate from the MCP transport session and is fully persistent, so re-initialising the transport between polls is safe and cheap.
+**Gotcha 2 — Tellr's MCP endpoint is stateless; don't require `mcp-session-id`.**
+Tellr runs FastMCP with `stateless_http=True` because the app is served by multiple uvicorn workers and the Databricks Apps proxy does not guarantee session affinity — a stateful handshake's three requests (`initialize` → `notifications/initialized` → `tools/call`) can otherwise split across workers and produce HTTP 404 `"Session not found"`. In stateless mode the server doesn't emit `mcp-session-id` at all; read it with `.get()` rather than `[…]` and only echo it on follow-ups if it's present. The server-side deck session (identified by `session_id` + `request_id` in the `create_deck` response) is a separate app-level concept and is fully persistent.
 
 **Gotcha 3 — `deck_url` might be relative.**
 If tellr's `DATABRICKS_APP_URL` env var is unset, `deck_url` comes back as a path-only string like `/sessions/.../edit`. Rendered in your app, the browser will resolve it against *your app's* origin, not tellr's. Databricks Apps sets `DATABRICKS_APP_URL` automatically on production deployments, so this should only bite during local dev or misconfigured environments.
@@ -428,7 +427,7 @@ Full schemas and examples: [`mcp-server.md`](./mcp-server.md) section 5.
 | `Authentication required: no credentials presented` | No auth headers arrived (proxy stripped them, or external caller didn't send a Bearer). | App-to-app: confirm `x-forwarded-email` is set on your app's inbound requests. External: check your Bearer header is reaching tellr (curl the `/api/health` endpoint with the same token). |
 | `HTTP 401` (empty body `{}`) on external `/mcp/` calls | You're using a PAT (`dapi...`); the Apps proxy rejects PATs for app access. | Switch to an OAuth U2M token via a `databricks-cli` auth profile — see §3.1. |
 | `HTTP 401` mid-session after working fine earlier | OAuth access token (~1-hour lifetime) has expired; `claude mcp add` stored it as a static header. | Re-register the MCP server with a fresh token — see §3.3 (`tellr-refresh` one-liner). |
-| `HTTP 404 {"message": "Session not found"}` | The `mcp-session-id` you're reusing has expired. | Open a fresh MCP session (re-run `initialize` + `notifications/initialized`) per tool call in long-running poll loops. |
+| `HTTP 404 {"message": "Session not found"}` | Your client is echoing an `mcp-session-id` against tellr's stateless endpoint while the request is routed to a different worker than the one that (historically) issued the id. Should not occur with current tellr builds. | Treat `mcp-session-id` as optional — read with `.get()`, only echo when present. Upgrade to a current tellr build if calls against a prior deployment produce this error. |
 | `create_deck tool error: ...` | Tool execution failed after auth succeeded (LLM error, input validation, etc.). | Read the error text — it's the underlying reason. |
 | `Deck not found or you do not have permission to view it` | Your identity doesn't match the deck's creator and you're not a contributor. | Check `created_by` on the deck; use the creator's identity or share the deck. |
 

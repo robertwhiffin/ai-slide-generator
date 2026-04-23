@@ -38,7 +38,9 @@ SUCCESS
   returns.
 - FastMCP responds with `text/event-stream` for some requests. The
   script's `_decode_response` helper handles both JSON and SSE frames.
-- If `initialize` returns no `mcp-session-id` header, the deployment
-  did not pick up the MCP router — redeploy and check `/api/health`.
+- tellr runs FastMCP in stateless mode, so `initialize` will not
+  return an `mcp-session-id` header — that's expected. If the endpoint
+  returns HTML instead of a JSON-RPC envelope, the deployment did not
+  pick up the MCP router — redeploy and check `/api/health`.
 - If auth fails with the token, try generating a fresh PAT or using
   `databricks auth login` output.
