@@ -444,7 +444,6 @@ Full schemas and examples: [`mcp-server.md`](./mcp-server.md) section 5.
 
 - [`mcp-server.md`](./mcp-server.md) — protocol-level reference, full tool schemas, transport details.
 - [`permissions-model.md`](./permissions-model.md) — `can_view_deck` / `can_edit_deck` semantics.
-- Design spec: [`docs/superpowers/specs/2026-04-22-tellr-mcp-server-design.md`](../superpowers/specs/2026-04-22-tellr-mcp-server-design.md) — architecture rationale and v1.1 roadmap.
 
 ### 4.5 Getting help
 

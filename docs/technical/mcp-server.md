@@ -546,7 +546,6 @@ The `.slide` wrapper invariant is preserved — tellr never emits a slide withou
 
 ## 12. Cross-References
 
-- [MCP server design spec](../superpowers/specs/2026-04-22-tellr-mcp-server-design.md) — architecture rationale, open verification items, and deferred feature list
 - [Backend Overview](./backend-overview.md) — FastAPI entry points, `ChatService`, `SessionManager`, `PermissionService`
 - [Real-Time Streaming](./real-time-streaming.md) — the polling + `chat_requests` infrastructure that MCP tools reuse
 - [Permissions Model](./permissions-model.md) — `can_view_deck` / `can_edit_deck` semantics and the `DeckContributor` rows
