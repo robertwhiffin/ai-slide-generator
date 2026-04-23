@@ -13,7 +13,7 @@ Two distinct patterns, different auth, different code:
 | Pattern | When to use | Auth source |
 |---|---|---|
 | **A. Databricks App → tellr** (in-workspace) | You're building another Databricks App that should create decks on behalf of the signed-in user. | Identity headers injected by the Databricks Apps proxy (`x-forwarded-email`, `x-forwarded-user`). No token — tellr trusts the proxy. |
-| **B. External agent → tellr** (laptop / CI / CLI) | You're wiring tellr into an MCP client like Claude Code, Claude Desktop, or Cursor, or calling from a script outside Databricks Apps. | User-supplied Databricks PAT, sent as `Authorization: Bearer`. |
+| **B. External agent → tellr** (laptop / CI / CLI) | You're wiring tellr into an MCP client like Claude Code, Claude Desktop, or Cursor, or calling from a script outside Databricks Apps. | User OAuth (U2M) access token from a `databricks-cli` profile, sent as `Authorization: Bearer`. **PATs do not work against Databricks Apps** — see §3.1. |
 
 Pick one and jump to its section. If you need both (e.g., a tool that runs in an app but also has a local-dev mode), build each path separately rather than trying to unify them — the auth models are fundamentally different.
 
@@ -239,38 +239,125 @@ The proxy sets it, strips any caller-supplied version, and signs the whole inter
 
 ## 3. Part B — External agent → tellr (Claude Code / Cursor / CLI)
 
-When your MCP client is running *outside* Databricks Apps — on your laptop, in CI, or in a non-Databricks service — the proxy isn't in the way, and Databricks Apps is happy to accept an `Authorization: Bearer` header. So the integration is much simpler.
+When your MCP client is running *outside* Databricks Apps — on your laptop, in CI, or in a non-Databricks service — the proxy isn't in the way and Databricks Apps will accept a user bearer token in the `Authorization` header. Two ways to get that token in place:
 
-### 3.1 Auth: get a Databricks PAT
+1. **§3.2 Auto-discovered OAuth (recommended).** Your MCP client does the full OAuth dance itself: browser consent once, refresh token cached, silent renewal thereafter. Works with any MCP-spec-compliant client.
+2. **§3.3 Static OAuth token (fallback).** You mint the token yourself with the Databricks CLI and paste it into the client's header config. Simple; requires manual refresh every ~1 hour.
 
-```bash
-# Short-lived (auto-refreshed):
-databricks auth token | jq -r .access_token
+Whichever path you pick, the one thing you **can't** do is use a PAT — see §3.1.
 
-# Or create a long-lived PAT via workspace UI:
-# User Settings → Developer → Access tokens → Generate new token
-```
+### 3.1 Auth constraint: OAuth U2M only, not PATs
 
-Export it:
+**Verified gotcha:** even a PAT that works against workspace APIs returns HTTP 401 from an app's `/mcp/` endpoint. The Apps proxy has its own authorization layer and only accepts OAuth U2M tokens for app-scoped access. Concretely:
 
 ```bash
-export DATABRICKS_TOKEN=<your-token>
+# PAT against workspace API — works:
+curl -sS -o /dev/null -w "%{http_code}\n" \
+  "https://<workspace>/api/2.0/preview/scim/v2/Me" \
+  -H "Authorization: Bearer dapi<...>"
+# → 200
+
+# Same PAT against the tellr app's MCP endpoint — rejected:
+curl -sS -o /dev/null -w "%{http_code}\n" -X POST \
+  "https://<tellr-app-url>/mcp/" \
+  -H "Authorization: Bearer dapi<...>" \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}'
+# → 401
 ```
 
-### 3.2 Wire it into your MCP client
+Save PATs for workspace REST APIs; for Databricks Apps (including tellr), always use an OAuth user access token.
 
-**Claude Code / Claude Desktop:**
+### 3.2 Auto-discovered OAuth (recommended, general-purpose)
+
+This is a spec-level feature — not Claude Code specific. The [MCP authorization spec](https://modelcontextprotocol.io/specification/) uses [RFC 9728](https://datatracker.ietf.org/doc/html/rfc9728) *OAuth 2.0 Protected Resource Metadata* plus OAuth 2.1 with Dynamic Client Registration. Any spec-compliant MCP client (Claude Code, Claude Desktop, Cursor, VS Code MCP, Continue, etc.) can auto-discover the OAuth server and run the flow on your behalf.
+
+How it works end-to-end:
+
+1. You register the MCP server in your client with a URL and **no** bearer header.
+2. First tool call goes unauthenticated → server returns HTTP 401 with a `WWW-Authenticate` header pointing at `/.well-known/oauth-protected-resource`.
+3. Client fetches that metadata — for a Databricks App it looks like:
+   ```json
+   {
+     "resource": "https://<tellr-app-url>",
+     "authorization_servers": ["https://<workspace>/oidc"],
+     "scopes_supported": ["sql", "iam.current-user:read", ...]
+   }
+   ```
+4. Client performs Dynamic Client Registration against the authorization server, opens a browser for user consent, receives an access token + refresh token, and caches them.
+5. Subsequent calls use the access token; when it expires, the client uses the refresh token to mint a new one silently. **No manual refresh ever.**
+
+First-tool-call UX: a browser tab pops open for consent. Afterwards, invisible.
+
+**Client-specific wiring:**
+
+*Claude Code:*
+
+```bash
+claude mcp add --transport http tellr "https://<tellr-app-url>/mcp/"
+# (no --header flag — that's what triggers the OAuth flow on first use)
+```
+
+Then in a Claude session, invoke any tellr tool (or run `/mcp`); a browser window opens for consent, you sign in, done.
+
+*Cursor / other streamable-HTTP clients:* drop the `headers` block from your config:
+
+```json
+{
+  "mcpServers": {
+    "tellr": {
+      "url": "https://<tellr-app-url>/mcp/",
+      "transport": "streamable-http"
+    }
+  }
+}
+```
+
+*Generic:* any client that claims MCP authorization support needs only the URL; it will handle discovery + browser consent + refresh token storage itself.
+
+**When auto-discovery won't work:**
+
+- Your MCP client hasn't implemented the MCP authorization spec yet (check its release notes).
+- You're running headless / in CI / on a box with no browser — the OAuth consent step can't complete interactively. Use §3.3.
+- You need to pin a specific identity (e.g., a service principal) rather than the interactive user who runs the consent flow.
+
+### 3.3 Static OAuth token (fallback)
+
+When your client doesn't support MCP OAuth discovery, or you're running headless, you can mint an OAuth U2M token via the Databricks CLI and paste it into the client's header config yourself.
+
+One-time profile setup in `~/.databrickscfg`:
+
+```ini
+[tellr-dev-oauth]
+host      = https://<tellr-workspace>.cloud.databricks.com/
+auth_type = databricks-cli
+```
+
+One-time OAuth handshake (opens a browser, caches the refresh token locally under `~/.databricks/`):
+
+```bash
+databricks auth login -p tellr-dev-oauth
+```
+
+Then `databricks auth token -p tellr-dev-oauth` silently mints a fresh ~1-hour access token on demand (using the cached refresh token — no browser round-trip):
+
+```bash
+databricks auth token -p tellr-dev-oauth | jq -r .access_token
+```
+
+Wire it up:
+
+*Claude Code:*
 
 ```bash
 claude mcp add --transport http tellr "https://<tellr-app-url>/mcp/" \
-  --header "Authorization: Bearer $DATABRICKS_TOKEN"
+  --header "Authorization: Bearer $(databricks auth token -p tellr-dev-oauth | jq -r .access_token)"
+
+claude mcp list | grep tellr
+# → tellr: https://<tellr-app-url>/mcp/ (HTTP) - ✓ Connected
 ```
 
-Then in a Claude session, run `/mcp` to confirm `tellr` shows `connected` with four tools (`create_deck`, `get_deck_status`, `edit_deck`, `get_deck`). Ask Claude to make a deck:
-
-> Create a three-slide deck summarising our Q3 renewals, then give me the deck URL.
-
-**Cursor / other streamable-HTTP clients:** same URL + header pattern in whatever config shape your client uses. Example shape:
+*Cursor / generic:*
 
 ```json
 {
@@ -279,20 +366,45 @@ Then in a Claude session, run `/mcp` to confirm `tellr` shows `connected` with f
       "url": "https://<tellr-app-url>/mcp/",
       "transport": "streamable-http",
       "headers": {
-        "Authorization": "Bearer ${DATABRICKS_TOKEN}"
+        "Authorization": "Bearer <paste output of `databricks auth token -p tellr-dev-oauth | jq -r .access_token` here>"
       }
     }
   }
 }
 ```
 
-### 3.3 Gotchas
+### 3.4 Refreshing a static token
 
-**Token expiry.** `databricks auth token` tokens last ~1 hour. When Claude starts reporting "Authentication failed" mid-session, refresh and re-register the MCP server. PATs last as configured by the workspace admin.
+Only applies to §3.3 — §3.2 handles refresh automatically.
+
+`claude mcp add` captures `--header` as a **static string**; it is not re-evaluated per call. OAuth access tokens expire after ~1 hour; once expired, every tool call returns 401 and the client reports "Authentication failed."
+
+Re-register with a fresh token. Keep it as a shell function:
+
+```bash
+tellr-refresh() {
+  claude mcp remove tellr 2>/dev/null
+  claude mcp add --transport http tellr "https://<tellr-app-url>/mcp/" \
+    --header "Authorization: Bearer $(databricks auth token -p tellr-dev-oauth | jq -r .access_token)"
+}
+```
+
+Run `tellr-refresh` whenever you see 401s, or at the start of any session that's been idle for more than an hour. Refresh completes in under a second.
+
+For unattended runs longer than an hour (CI, background agents):
+
+- Re-run `tellr-refresh` on a timer (cron, `launchd`, `systemd` timer) every ~45 minutes, **or**
+- Wrap tellr in a tiny local stdio→HTTP MCP proxy that reads a fresh token per request — equivalent behaviour to §3.2 for clients that don't yet speak MCP OAuth.
+
+### 3.5 Gotchas
+
+**PATs → 401 from the Apps proxy.** Don't use long-lived PATs for app access; see §3.1.
+
+**App-level access is a separate check.** OAuth authenticates *who you are*; the Apps proxy additionally checks you're on the app's user list. If sign-in succeeds but `/mcp/` still returns 403, ask the app owner to grant your user access.
 
 **Trailing slash on the URL.** Always POST to `/mcp/` (with slash). `/mcp` (no slash) returns a 307 redirect that some clients silently downgrade to GET and break on. The `claude mcp add` command sometimes strips the trailing slash — double-check with `claude mcp list`.
 
-**Handshake.** After `initialize`, MCP requires a `notifications/initialized` before any `tools/*`. The official MCP clients handle this for you; if you're writing raw HTTP, don't skip it.
+**Handshake.** After `initialize`, MCP requires a `notifications/initialized` before any `tools/*`. Official MCP clients handle this for you; if you're writing raw HTTP, don't skip it.
 
 ---
 
@@ -314,6 +426,8 @@ Full schemas and examples: [`mcp-server.md`](./mcp-server.md) section 5.
 | Error text | Cause | Fix |
 |---|---|---|
 | `Authentication required: no credentials presented` | No auth headers arrived (proxy stripped them, or external caller didn't send a Bearer). | App-to-app: confirm `x-forwarded-email` is set on your app's inbound requests. External: check your Bearer header is reaching tellr (curl the `/api/health` endpoint with the same token). |
+| `HTTP 401` (empty body `{}`) on external `/mcp/` calls | You're using a PAT (`dapi...`); the Apps proxy rejects PATs for app access. | Switch to an OAuth U2M token via a `databricks-cli` auth profile — see §3.1. |
+| `HTTP 401` mid-session after working fine earlier | OAuth access token (~1-hour lifetime) has expired; `claude mcp add` stored it as a static header. | Re-register the MCP server with a fresh token — see §3.3 (`tellr-refresh` one-liner). |
 | `HTTP 404 {"message": "Session not found"}` | The `mcp-session-id` you're reusing has expired. | Open a fresh MCP session (re-run `initialize` + `notifications/initialized`) per tool call in long-running poll loops. |
 | `create_deck tool error: ...` | Tool execution failed after auth succeeded (LLM error, input validation, etc.). | Read the error text — it's the underlying reason. |
 | `Deck not found or you do not have permission to view it` | Your identity doesn't match the deck's creator and you're not a contributor. | Check `created_by` on the deck; use the creator's identity or share the deck. |
