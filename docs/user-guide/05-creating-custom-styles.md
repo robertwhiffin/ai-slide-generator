@@ -2,6 +2,15 @@
 
 This guide covers what goes into a Slide Style, what CSS is safe to include, and how to convert an existing slide template into a style configuration.
 
+## Defaults: corporate vs. personal
+
+Every new deck starts with a slide style applied. Where that style comes from depends on whether you've customized things for yourself.
+
+- **Corporate default (system-wide).** One slide style is marked as the organization's default. Every user who hasn't overridden it sees that style on every new deck — the same way a new document in your corporate Google Workspace picks up your company's template. Decks generated via the MCP API also use this default. Tellr admins set the corporate default from the hidden `/admin` page ("Slide Style" tab); there's no link in the main navigation — you need to know the URL.
+- **Personal override.** You can pin a different style as *your* default by clicking "Set as default" on any style in the Slide Styles page. Your choice is remembered in your current browser only and takes precedence over the corporate default for your new decks. (MCP decks still use the corporate default regardless of your personal choice.)
+
+For one-off decks, you can always change the style for a single session from the agent config bar without affecting either default.
+
 ## Overview
 
 A Slide Style is a text block that tells the AI how your slides should look. It can contain:

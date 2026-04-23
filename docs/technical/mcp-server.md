@@ -141,7 +141,7 @@ Each tool subsection below mirrors the `@mcp.tool` descriptions in `src/api/mcp_
 |-------|------|----------|-------------|
 | `prompt` | string | yes | Natural-language description of the deck. Any length; longer prompts with explicit slide-by-slide structure tend to work best. |
 | `num_slides` | integer (1–50) | no | Target slide count. The agent is not strictly constrained; treat as a hint. |
-| `slide_style_id` | integer | no | ID of a `SlideStyle` row in tellr's config. Omit for default. |
+| `slide_style_id` | integer | no | ID of a `SlideStyle` row in tellr's config. Omit to use the system default — the row marked `is_default=true` in `slide_style_library`, settable by an admin at tellr's `/admin` page. MCP cannot see per-user browser-side overrides (localStorage). |
 | `deck_prompt_id` | integer | no | ID of a `DeckPrompt` row. Omit for default. |
 | `correlation_id` | string | no | Opaque ID echoed in server logs for cross-system trace correlation. |
 
