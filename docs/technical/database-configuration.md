@@ -228,7 +228,7 @@ class SlideStyleLibrary(Base):
     image_guidelines: str | None # Markdown instructions for image usage in slides
     is_active: bool              # Whether available for selection
     is_system: bool              # Protected system styles (cannot be edited/deleted)
-    is_default: bool             # Which style is applied to new sessions by default
+    is_default: bool             # System-wide default. Exactly one row is true at a time; settable only from the /admin "Slide Style" tab. Read by the server-side default resolver and by MCP create_deck when the caller omits slide_style_id.
     created_by: str | None
     created_at: datetime
     updated_by: str | None

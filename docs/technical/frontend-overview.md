@@ -146,7 +146,9 @@ Used by: `AgentConfigBar`, `ChatPanel`.
 | Slide Style | `userDefaultSlideStyleId` | localStorage > server `is_default` > server `is_system` |
 | Deck Prompt | `userDefaultDeckPromptId` | localStorage only (no server-side default) |
 
-Users set their defaults via the "Set as default" button on each settings page (`/profiles`, `/slide-styles`, `/deck-prompts`). The preference is per-browser, not synced to the backend.
+Users set their personal defaults via the "Set as default" button on each settings page (`/profiles`, `/slide-styles`, `/deck-prompts`). The preference is per-browser, not synced to the backend.
+
+For slide styles specifically, the server-side `is_default` row is the **system-wide corporate default**, set only from the hidden `/admin` → "Slide Style" tab. New users (who haven't clicked "Set as default" on any slide style in their browser) see the corporate default on every new deck, mirroring the "new Google Slides deck follows corporate branding" experience. MCP `create_deck` always uses the system default — it cannot read per-user localStorage — so flipping the admin choice instantly affects all MCP-initiated decks.
 
 ### 4c. Profile Context (`src/contexts/ProfileContext.tsx`)
 
