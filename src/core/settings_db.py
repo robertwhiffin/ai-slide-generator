@@ -27,6 +27,46 @@ logger = logging.getLogger(__name__)
 _active_profile_id: Optional[int] = None
 
 
+def get_default_slide_style_id() -> Optional[int]:
+    """Return the ID of the tellr-configured default slide style, or ``None``.
+
+    Resolves the primary ``is_default=True`` row from ``slide_style_library``;
+    falls back to ``is_system=True`` as a defensive mid-migration safety net.
+    Used by both the browser chat flow and the MCP ``create_deck`` tool so new
+    sessions pick up the user-configured default when no explicit
+    ``slide_style_id`` is supplied.
+    """
+    from src.database.models import SlideStyleLibrary
+
+    try:
+        with get_db_session() as db:
+            # Primary: explicit default
+            style = (
+                db.query(SlideStyleLibrary.id)
+                .filter(
+                    SlideStyleLibrary.is_default == True,  # noqa: E712
+                    SlideStyleLibrary.is_active == True,  # noqa: E712
+                )
+                .first()
+            )
+            if style:
+                return style.id
+
+            # Fallback: system style (defensive, for mid-migration)
+            style = (
+                db.query(SlideStyleLibrary.id)
+                .filter(
+                    SlideStyleLibrary.is_system == True,  # noqa: E712
+                    SlideStyleLibrary.is_active == True,  # noqa: E712
+                )
+                .first()
+            )
+            return style.id if style else None
+    except Exception:
+        # Column may not exist yet (pre-migration)
+        return None
+
+
 class GenieSettings(BaseSettings):
     """Genie configuration settings."""
 

@@ -86,6 +86,85 @@ async def test_create_deck_creates_session_and_submits_job(fake_request, identit
 
 
 @pytest.mark.asyncio
+async def test_create_deck_falls_back_to_tellr_default_slide_style(
+    fake_request, identity
+):
+    """When the caller omits slide_style_id, create_deck should populate
+    agent_config with the tellr-configured default (slide_style_library.
+    is_default=True) so MCP-initiated sessions pick up the same style the
+    browser flow does.
+    """
+    from src.api import mcp_server
+
+    mock_session = {"session_id": "sess-123"}
+
+    with patch("src.api.mcp_server.mcp_auth_scope") as auth_scope, \
+         patch("src.api.mcp_server.get_session_manager") as get_sm, \
+         patch("src.api.mcp_server.get_default_slide_style_id") as get_default, \
+         patch("src.api.mcp_server.enqueue_create_job") as enqueue:
+
+        auth_scope.return_value.__enter__.return_value = identity
+        auth_scope.return_value.__exit__.return_value = False
+
+        sm = MagicMock()
+        sm.create_session.return_value = mock_session
+        get_sm.return_value = sm
+
+        get_default.return_value = 17
+
+        async def _fake_enqueue(**kwargs):
+            return "req-42"
+
+        enqueue.side_effect = _fake_enqueue
+
+        await mcp_server._create_deck_impl(
+            request=fake_request,
+            prompt="a deck about widgets",
+        )
+
+        get_default.assert_called_once()
+        agent_config = sm.create_session.call_args.kwargs["agent_config"]
+        assert agent_config["slide_style_id"] == 17
+
+
+@pytest.mark.asyncio
+async def test_create_deck_skips_default_lookup_when_slide_style_id_provided(
+    fake_request, identity
+):
+    """An explicit slide_style_id should short-circuit the default lookup."""
+    from src.api import mcp_server
+
+    mock_session = {"session_id": "sess-123"}
+
+    with patch("src.api.mcp_server.mcp_auth_scope") as auth_scope, \
+         patch("src.api.mcp_server.get_session_manager") as get_sm, \
+         patch("src.api.mcp_server.get_default_slide_style_id") as get_default, \
+         patch("src.api.mcp_server.enqueue_create_job") as enqueue:
+
+        auth_scope.return_value.__enter__.return_value = identity
+        auth_scope.return_value.__exit__.return_value = False
+
+        sm = MagicMock()
+        sm.create_session.return_value = mock_session
+        get_sm.return_value = sm
+
+        async def _fake_enqueue(**kwargs):
+            return "req-42"
+
+        enqueue.side_effect = _fake_enqueue
+
+        await mcp_server._create_deck_impl(
+            request=fake_request,
+            prompt="a deck about widgets",
+            slide_style_id=9,
+        )
+
+        get_default.assert_not_called()
+        agent_config = sm.create_session.call_args.kwargs["agent_config"]
+        assert agent_config["slide_style_id"] == 9
+
+
+@pytest.mark.asyncio
 async def test_create_deck_rejects_empty_prompt(fake_request, identity):
     from src.api import mcp_server
     from src.api.mcp_server import MCPToolError

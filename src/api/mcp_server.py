@@ -28,6 +28,7 @@ from src.api.services.job_queue import enqueue_job, get_job_status
 from src.api.services.session_manager import get_session_manager
 from src.core.database import get_db_session
 from src.core.permission_context import get_permission_context
+from src.core.settings_db import get_default_slide_style_id
 from src.domain.slide import Slide
 from src.domain.slide_deck import SlideDeck
 from src.services.permission_service import get_permission_service
@@ -332,8 +333,16 @@ async def _create_deck_impl(
     try:
         with mcp_auth_scope(request) as identity:
             agent_config: dict[str, Any] = {"tools": []}
-            if slide_style_id is not None:
-                agent_config["slide_style_id"] = slide_style_id
+            # Mirror the browser chat flow: if the caller didn't specify a
+            # style, fall back to the tellr-configured default
+            # (slide_style_library.is_default=True) rather than the
+            # hardcoded DEFAULT_SLIDE_STYLE constant that agent_factory
+            # uses when agent_config.slide_style_id is absent.
+            effective_style_id = slide_style_id
+            if effective_style_id is None:
+                effective_style_id = get_default_slide_style_id()
+            if effective_style_id is not None:
+                agent_config["slide_style_id"] = effective_style_id
             if deck_prompt_id is not None:
                 agent_config["deck_prompt_id"] = deck_prompt_id
             if num_slides is not None:
