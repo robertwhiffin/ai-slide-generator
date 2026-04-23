@@ -2,6 +2,8 @@
 
 **One-Line Summary:** Call tellr programmatically from other Databricks Apps or MCP-compatible agent tools over a FastMCP Streamable HTTP endpoint — create, poll, refine, and retrieve decks without touching the browser UI.
 
+> **Looking for a how-to?** This document is the protocol-level reference (tool schemas, JSON-RPC shapes, auth priority model). If you're integrating tellr into your own app or into an MCP client like Claude Code, start with the **[MCP Integration Guide](./mcp-integration-guide.md)** — it has complete worked examples for both paths plus the gotchas we learned during rollout.
+
 ---
 
 ## 1. Overview
@@ -83,11 +85,15 @@ The resolved identity is bound to request-scoped ContextVars (`current_user`, `u
 
 Three common setups. Pick the one that matches where your code runs.
 
-#### A. In-workspace Databricks App (OBO forwarding)
+#### A. In-workspace Databricks App (forwarded identity)
 
-When your app is itself a Databricks App running in the same workspace as tellr, the platform injects the end user's token into your app as `x-forwarded-access-token`. Extract that token and forward it as `Authorization: Bearer` on the outbound call to tellr. See section 7.3 for a complete code example.
+When your app is itself a Databricks App running in the same workspace as tellr, the Databricks Apps proxy **strips** any caller-supplied `Authorization` and `x-forwarded-access-token` headers on ingress (security hardening) and **injects** proxy-attested identity headers instead: `x-forwarded-email`, `x-forwarded-user`, `x-forwarded-preferred-username`.
 
-> **Service-principal calls: accepted, but attributed to the SP.** Calling tellr with the service principal token that Databricks Apps also exposes to your backend will succeed — the request is not blocked — but the resulting deck's `created_by` will be the SP. That means it will **not appear in any human user's tellr UI** (it is attributed to the SP in deck listings, logs, and MLflow), and any later `get_deck_status` / `edit_deck` call made under a different identity will fail the permission check. For user-initiated flows where the deck should surface to a specific user, forward the end user's `x-forwarded-access-token` instead. SP-authenticated calls remain legitimate for batch / automation use cases (scheduled report generation, test harnesses, shared-workspace pipelines) where no specific user needs the deck in their UI.
+Tellr accepts these identity headers as a third priority in `extract_mcp_identity` (gated on `TELLR_TRUST_FORWARDED_IDENTITY=true`, which production deployments set). No user token is available on this path; downstream Databricks API calls use tellr's own service principal, but deck attribution still reflects the real user via the forwarded email.
+
+**Your app should not send `Authorization` or `x-forwarded-access-token` on the outbound call — both will be stripped and sending them is misleading.** Just send the JSON-RPC body; the proxy adds identity headers automatically.
+
+For a complete worked example (Streamlit app, ~150 lines), see **[MCP Integration Guide Part A](./mcp-integration-guide.md#2-part-a--databricks-app--tellr)**.
 
 #### B. External MCP client (Claude Code, Claude Desktop, Cursor, etc.)
 

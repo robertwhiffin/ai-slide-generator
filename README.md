@@ -126,7 +126,8 @@ Step-by-step instructions with screenshots:
 | [Backend Overview](docs/technical/backend-overview.md) | FastAPI, agent lifecycle, API contracts |
 | [Frontend Overview](docs/technical/frontend-overview.md) | React components, state management |
 | [Databricks Deployment](docs/technical/databricks-app-deployment.md) | Deployment CLI, environments |
-| [MCP Server](docs/technical/mcp-server.md) | Call tellr programmatically from other Databricks Apps or MCP agent tools |
+| [MCP Integration Guide](docs/technical/mcp-integration-guide.md) | How-to: wire tellr into your Databricks App or into an MCP client like Claude Code |
+| [MCP Server Reference](docs/technical/mcp-server.md) | Protocol, tool schemas, response payloads |
 | [Database Config](docs/technical/database-configuration.md) | PostgreSQL/Lakebase schema |
 
 ### More Technical Docs
