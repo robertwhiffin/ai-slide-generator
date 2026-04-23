@@ -286,10 +286,19 @@ After the component work lands (between the last TDD cycle and the manual verifi
 
 Files to revisit:
 
+**Technical docs:**
+
 - **`docs/technical/mcp-server.md`** — The `slide_style_id` row in the `create_deck` input schema currently says "Omit for default." Clarify: "Omit to use the system default (settable at `/admin`); MCP cannot see per-user localStorage overrides."
 - **`docs/technical/mcp-integration-guide.md`** — Cross-check any mention of slide style defaults and align with the MCP server doc's updated wording so they don't drift.
 - **`docs/technical/frontend-overview.md`** — Add a short note that `/admin` now exposes a "Slide Style" tab for setting the system default, and briefly describe the two-tier resolution (localStorage → DB `is_default` → `is_system` fallback) so a future reader can understand why the frontend helper `resolveDefaultStyleId()` has three tiers.
 - **`docs/technical/database-configuration.md`** — If it references `slide_style_library.is_default`, confirm the description matches the new behavior (one row system-wide, settable via `/admin`).
+
+**User-facing docs:**
+
+- **`docs/user-guide/05-creating-custom-styles.md`** — The primary place users learn about slide styles. Add a short section (one or two paragraphs) covering: (a) there is a system-wide "corporate" default that applies to every new deck out of the box, settable only at `/admin`; (b) the existing "Set as default" button on their own slide style list continues to let them set a personal default that overrides the corporate one for their browser only. Frame it the way the design's Google Slides analogy does — "new decks inherit the corporate look unless you've chosen otherwise for yourself."
+- **`docs/user-guide/02-creating-profiles.md`** — If it describes slide style selection flow in terms that imply "the default is whatever your last choice was," update to reference the two-tier model briefly and cross-link to 05-creating-custom-styles.
+- **`docs/user-guide/01-generating-slides.md`** — Scan for any mention of default styling and align if needed; likely nothing to change.
+- **`docs/user-guide/README.md`** — If it has a table of contents entry or section overview touching styles, ensure nothing there conflicts with the new model.
 
 What to write: one or two sentences per file. The goal is to leave no stale descriptions claiming there's no UI surface for changing the DB default, which is where the docs stand today. Do NOT rewrite these docs wholesale — scope is "fix the specific lines that would mislead a reader after this change ships."
 
