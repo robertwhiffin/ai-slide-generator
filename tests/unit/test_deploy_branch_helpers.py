@@ -68,52 +68,62 @@ from databricks_tellr.deploy import _create_branch_from
 
 
 class TestCreateBranchFrom:
-    def test_creates_branch_with_correct_source(self, mock_ws):
-        # Set up mocks for the create_branch call
+    def test_creates_branch_with_correct_source(self, mock_ws, monkeypatch):
+        # Freeze time so the generated branch_id is deterministic.
+        monkeypatch.setattr("databricks_tellr.deploy.time.time", lambda: 1777000000)
+        expected_branch_id = "staging-1777000000"
+
         create_op = MagicMock()
         mock_ws.postgres.create_branch.return_value = create_op
 
-        # Set up endpoints polling: first call returns empty, then returns one
         endpoint_ready = MagicMock()
-        endpoint_ready.name = "projects/db-tellr/branches/staging/endpoints/ep1"
+        endpoint_ready.name = (
+            f"projects/db-tellr/branches/{expected_branch_id}/endpoints/ep1"
+        )
         endpoint_ready.status = MagicMock(
             hosts=MagicMock(host="staging-ep1.example.com")
         )
-        # list_endpoints returns an iterator; mock returns ready endpoint.
-        # Use side_effect so each call gets a fresh iterator (avoids
-        # one-shot iter() exhaustion if polling ever loops).
+        # Fresh iterator per call — avoids one-shot iter() exhaustion if polling loops.
         mock_ws.postgres.list_endpoints.side_effect = (
             lambda **kw: iter([endpoint_ready])
         )
-        mock_ws.postgres.get_endpoint.return_value = endpoint_ready
 
         result = _create_branch_from(
             mock_ws,
             project_name="db-tellr",
             source_branch="production",
-            target_branch="staging",
+            target_branch_prefix="staging",
         )
 
         # Verify create_branch call shape
         call_kwargs = mock_ws.postgres.create_branch.call_args.kwargs
         assert call_kwargs["parent"] == "projects/db-tellr"
-        assert call_kwargs["branch_id"] == "staging"
+        # branch_id is {prefix}-{timestamp} — a fresh unique ID per deploy.
+        assert call_kwargs["branch_id"] == expected_branch_id
         branch_arg = call_kwargs["branch"]
         assert branch_arg.spec.source_branch == "projects/db-tellr/branches/production"
-        # Databricks API requires an expiration policy on every branch.
-        # We manage the lifecycle explicitly (delete+recreate per deploy).
-        assert branch_arg.spec.no_expiry is True
+        # Databricks API requires an expiration policy. We use ttl=1 day and
+        # rely on TTL-driven auto-cleanup rather than explicit delete.
+        assert branch_arg.spec.ttl is not None
+        assert branch_arg.spec.ttl.seconds == 86400
+        # no_expiry MUST NOT be set when ttl is — they're mutually exclusive.
+        assert not branch_arg.spec.no_expiry
 
-        # Verify operation waited
         create_op.wait.assert_called_once()
 
         # Verify returned lakebase_result shape
         assert result["type"] == "autoscaling"
         assert result["name"] == "db-tellr"
         assert result["host"] == "staging-ep1.example.com"
-        assert result["endpoint_name"] == "projects/db-tellr/branches/staging/endpoints/ep1"
+        assert (
+            result["endpoint_name"]
+            == f"projects/db-tellr/branches/{expected_branch_id}/endpoints/ep1"
+        )
         assert result["project_id"] == "db-tellr"
         assert result["instance_name"] is None
+        # New field: callers (SP role registration, schema grants) use this
+        # to reference the unique branch name.
+        assert result["branch_id"] == expected_branch_id
 
     def test_raises_when_no_endpoint_after_timeout(self, mock_ws, monkeypatch):
         """If list_endpoints never returns a ready endpoint, raise DeploymentError."""
@@ -121,14 +131,9 @@ class TestCreateBranchFrom:
 
         create_op = MagicMock()
         mock_ws.postgres.create_branch.return_value = create_op
-        # Always empty — use side_effect so every poll gets a fresh empty
-        # iterator (return_value = iter([]) exhausts after the first call,
-        # making subsequent list(...) calls silently also return []).
         mock_ws.postgres.list_endpoints.side_effect = lambda **kw: iter([])
 
-        # Patch sleep so the test doesn't actually wait
         monkeypatch.setattr("databricks_tellr.deploy.time.sleep", lambda *_: None)
-        # Shrink the timeout for fast test
         monkeypatch.setattr("databricks_tellr.deploy._BRANCH_ENDPOINT_TIMEOUT_S", 0.1)
 
         with pytest.raises(DeploymentError, match="no endpoint ready"):
@@ -139,32 +144,29 @@ from databricks_tellr.deploy import _recreate_ephemeral_branch
 
 
 class TestRecreateEphemeralBranch:
-    def test_deletes_then_creates(self, mock_ws, monkeypatch):
+    def test_delegates_to_create_without_deleting(self, mock_ws, monkeypatch):
+        """Delete step removed — TTL handles cleanup. Verify we ONLY create."""
         calls = []
 
         def fake_delete(ws, project, branch):
             calls.append(("delete", branch))
 
-        def fake_create(ws, project, source, target):
-            calls.append(("create", source, target))
-            return {"host": "x", "endpoint_name": "e", "type": "autoscaling"}
+        def fake_create(ws, project, source, prefix):
+            calls.append(("create", source, prefix))
+            return {"host": "x", "endpoint_name": "e", "type": "autoscaling",
+                    "branch_id": f"{prefix}-12345"}
 
-        monkeypatch.setattr(
-            "databricks_tellr.deploy._delete_branch", fake_delete
-        )
-        monkeypatch.setattr(
-            "databricks_tellr.deploy._create_branch_from", fake_create
-        )
+        monkeypatch.setattr("databricks_tellr.deploy._delete_branch", fake_delete)
+        monkeypatch.setattr("databricks_tellr.deploy._create_branch_from", fake_create)
 
         result = _recreate_ephemeral_branch(
             mock_ws,
             project_name="db-tellr",
             source_branch="production",
-            target_branch="staging",
+            target_branch_prefix="staging",
         )
 
-        assert calls == [
-            ("delete", "staging"),
-            ("create", "production", "staging"),
-        ]
+        # No delete — only create.
+        assert calls == [("create", "production", "staging")]
         assert result["host"] == "x"
+        assert result["branch_id"] == "staging-12345"
