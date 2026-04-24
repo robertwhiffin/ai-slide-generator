@@ -124,3 +124,38 @@ class TestCreateBranchFrom:
 
         with pytest.raises(DeploymentError, match="no endpoint ready"):
             _create_branch_from(mock_ws, "db-tellr", "production", "staging")
+
+
+from databricks_tellr.deploy import _recreate_ephemeral_branch
+
+
+class TestRecreateEphemeralBranch:
+    def test_deletes_then_creates(self, mock_ws, monkeypatch):
+        calls = []
+
+        def fake_delete(ws, project, branch):
+            calls.append(("delete", branch))
+
+        def fake_create(ws, project, source, target):
+            calls.append(("create", source, target))
+            return {"host": "x", "endpoint_name": "e", "type": "autoscaling"}
+
+        monkeypatch.setattr(
+            "databricks_tellr.deploy._delete_branch", fake_delete
+        )
+        monkeypatch.setattr(
+            "databricks_tellr.deploy._create_branch_from", fake_create
+        )
+
+        result = _recreate_ephemeral_branch(
+            mock_ws,
+            project_name="db-tellr",
+            source_branch="production",
+            target_branch="staging",
+        )
+
+        assert calls == [
+            ("delete", "staging"),
+            ("create", "production", "staging"),
+        ]
+        assert result["host"] == "x"
