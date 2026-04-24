@@ -1672,7 +1672,7 @@ class ChatService:
             if re.search(pattern, lower_message):
                 logger.info(
                     "Detected add slide intent in message",
-                    extra={"message": message[:50], "matched_pattern": pattern},
+                    extra={"user_message": message[:50], "matched_pattern": pattern},
                 )
                 return True
         return False
@@ -1700,7 +1700,7 @@ class ChatService:
             if re.search(pattern, lower_message):
                 logger.info(
                     "Detected 'beginning' position intent - absolute position 0",
-                    extra={"message": message[:50], "matched_pattern": pattern},
+                    extra={"user_message": message[:50], "matched_pattern": pattern},
                 )
                 return ("beginning", 0)
         
@@ -1715,7 +1715,7 @@ class ChatService:
             if re.search(pattern, lower_message):
                 logger.info(
                     "Detected 'before' position intent - relative to selection",
-                    extra={"message": message[:50], "matched_pattern": pattern},
+                    extra={"user_message": message[:50], "matched_pattern": pattern},
                 )
                 return ("before", None)
         
@@ -1746,7 +1746,7 @@ class ChatService:
             if re.search(pattern, lower_message):
                 logger.info(
                     "Detected generation intent",
-                    extra={"message": message[:50], "matched_pattern": pattern},
+                    extra={"user_message": message[:50], "matched_pattern": pattern},
                 )
                 return True
         return False
@@ -1774,7 +1774,7 @@ class ChatService:
             if re.search(pattern, lower_message):
                 logger.info(
                     "Detected explicit replace intent",
-                    extra={"message": message[:50], "matched_pattern": pattern},
+                    extra={"user_message": message[:50], "matched_pattern": pattern},
                 )
                 return True
         return False
@@ -1799,7 +1799,7 @@ class ChatService:
             if re.search(pattern, lower_message):
                 logger.info(
                     "Detected edit intent",
-                    extra={"message": message[:50], "matched_pattern": pattern},
+                    extra={"user_message": message[:50], "matched_pattern": pattern},
                 )
                 return True
         return False
