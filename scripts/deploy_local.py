@@ -32,7 +32,6 @@ sys.path.insert(0, str(PROJECT_ROOT / "packages" / "databricks-tellr"))
 from databricks_tellr.deploy import (
     DeploymentError,
     _branch_exists,
-    _delete_branch,
     _get_workspace_client,
     _get_or_create_lakebase,
     _probe_autoscaling_available,
@@ -307,12 +306,12 @@ def create_local(
             encryption_key = _check_branching_preconditions(ws, config)
             print(f"   Preflight OK (source: {branch_from_env})")
 
-            print(f"Recreating ephemeral branch '{env}' from '{branch_from_env}'...")
+            print(f"Creating ephemeral branch off '{branch_from_env}'...")
             lakebase_result = _recreate_ephemeral_branch(
                 ws, lakebase_name, branch_from_env, env
             )
             print(
-                f"   Branch '{env}' ready "
+                f"   Branch '{lakebase_result['branch_id']}' ready "
                 f"(endpoint: {lakebase_result['host']})"
             )
         else:
@@ -370,7 +369,12 @@ def create_local(
             client_id = _get_app_client_id(app)
             if client_id:
                 print("Configuring SP role on autoscaling project...")
-                sp_branch = env if branch_from_env else "production"
+                # For branching envs, use the unique branch_id the helper
+                # generated (e.g. "staging-1777000000"). For non-branching,
+                # fall back to the production branch.
+                sp_branch = (
+                    lakebase_result.get("branch_id") if branch_from_env else "production"
+                )
                 _ensure_sp_autoscaling_role(
                     ws, lakebase_name, client_id, branch_name=sp_branch
                 )
@@ -459,7 +463,7 @@ def update_local(
                 ws, lakebase_name, branch_from_env, env
             )
             print(
-                f"   Branch '{env}' ready "
+                f"   Branch '{lakebase_result['branch_id']}' ready "
                 f"(endpoint: {lakebase_result['host']})"
             )
 
@@ -469,7 +473,8 @@ def update_local(
             if client_id:
                 print("Configuring SP role on new branch...")
                 _ensure_sp_autoscaling_role(
-                    ws, lakebase_name, client_id, branch_name=env
+                    ws, lakebase_name, client_id,
+                    branch_name=lakebase_result["branch_id"],
                 )
             else:
                 print(
@@ -582,12 +587,10 @@ def delete_local(env: str, profile: str, reset_database: bool = False) -> dict[s
         profile=profile,
     )
 
-    if branch_from_env:
-        ws = _get_workspace_client(profile=profile)
-        print(f"Deleting ephemeral branch '{env}'...")
-        _delete_branch(ws, config["lakebase_name"], env)
-        print(f"   Branch '{env}' deleted")
-        result["branch_deleted"] = env
+    # Intentionally do NOT delete ephemeral branches here. Lakebase's delete
+    # is async and its purge window causes fixed-ID reuse to collide. We rely
+    # on the branch TTL (_BRANCH_TTL_SECONDS in databricks_tellr.deploy) to
+    # garbage-collect. Leftover branches are harmless and auto-expire.
 
     return result
 

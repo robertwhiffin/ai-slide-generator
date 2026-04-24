@@ -35,6 +35,7 @@ try:
     from databricks.sdk.service.postgres import (
         Branch,
         BranchSpec,
+        Duration,
         Project,
         ProjectDefaultEndpointSettings,
         ProjectSpec,
@@ -1003,19 +1004,39 @@ def _delete_branch(
         raise
 
 
+# Lakebase branch TTL: 1 day. Branches auto-expire and are garbage-collected
+# after this window. The deploy flow relies on this for cleanup — we never
+# explicitly delete old branches, because Lakebase's delete is async and its
+# purge window is unpredictable (fixed-name reuse hits "branch id already
+# exists" for many minutes after delete). Unique-per-deploy IDs + TTL sidesteps
+# the whole issue.
+_BRANCH_TTL_SECONDS = 86400
+
+
 def _create_branch_from(
     ws: WorkspaceClient,
     project_name: str,
     source_branch: str,
-    target_branch: str,
+    target_branch_prefix: str,
 ) -> dict[str, Any]:
     """Create a new Lakebase branch as a child of `source_branch`.
 
-    Waits on the create operation, then polls list_endpoints on the new
-    branch until an endpoint with a populated host appears
-    (up to _BRANCH_ENDPOINT_TIMEOUT_S). Raises DeploymentError on timeout.
+    The branch ID is `{target_branch_prefix}-{unix_timestamp}` so that every
+    deploy gets a fresh unique ID. This avoids the "branch id already exists"
+    collision we hit when trying to reuse a fixed ID right after a delete —
+    Lakebase's delete is async and its purge window is unpredictable.
 
-    Returns a lakebase_result-shaped dict pointing at the new branch.
+    Branch is created with a 1-day TTL so Lakebase garbage-collects it for us.
+    The staging app the branch backs will break after ~1 day; re-deploy to get
+    a fresh branch. This trade is intentional: no cleanup code, no stale state.
+
+    Waits on the create operation, then polls list_endpoints on the new branch
+    until an endpoint with a populated host appears (up to
+    _BRANCH_ENDPOINT_TIMEOUT_S). Raises DeploymentError on timeout.
+
+    Returns a lakebase_result-shaped dict pointing at the new branch, with an
+    added `branch_id` field so callers can reference the unique name (e.g.,
+    for SP role registration).
     """
     if not HAS_AUTOSCALING_SDK:
         raise DeploymentError(
@@ -1023,18 +1044,24 @@ def _create_branch_from(
             "Upgrade databricks-sdk."
         )
 
+    branch_id = f"{target_branch_prefix}-{int(time.time())}"
     source_path = f"projects/{project_name}/branches/{source_branch}"
     target_parent = f"projects/{project_name}"
-    target_path = f"projects/{project_name}/branches/{target_branch}"
+    target_path = f"projects/{project_name}/branches/{branch_id}"
 
-    logger.info(f"Creating branch {target_branch} from {source_branch}")
+    logger.info(f"Creating branch {branch_id} from {source_branch}")
     operation = ws.postgres.create_branch(
         parent=target_parent,
-        branch=Branch(spec=BranchSpec(source_branch=source_path, no_expiry=True)),
-        branch_id=target_branch,
+        branch=Branch(
+            spec=BranchSpec(
+                source_branch=source_path,
+                ttl=Duration(seconds=_BRANCH_TTL_SECONDS),
+            )
+        ),
+        branch_id=branch_id,
     )
     operation.wait()
-    logger.info(f"Branch {target_branch} created")
+    logger.info(f"Branch {branch_id} created")
 
     # Poll for endpoint readiness
     deadline = time.time() + _BRANCH_ENDPOINT_TIMEOUT_S
@@ -1054,7 +1081,7 @@ def _create_branch_from(
 
     if endpoint is None:
         raise DeploymentError(
-            f"Branch {target_branch} created but no endpoint ready within "
+            f"Branch {branch_id} created but no endpoint ready within "
             f"{_BRANCH_ENDPOINT_TIMEOUT_S}s"
         )
 
@@ -1066,6 +1093,7 @@ def _create_branch_from(
         "endpoint_name": endpoint.name,
         "project_id": project_name,
         "instance_name": None,
+        "branch_id": branch_id,
     }
 
 
@@ -1073,14 +1101,17 @@ def _recreate_ephemeral_branch(
     ws: WorkspaceClient,
     project_name: str,
     source_branch: str,
-    target_branch: str,
+    target_branch_prefix: str,
 ) -> dict[str, Any]:
-    """Delete `target_branch` if it exists, then create it from `source_branch`.
+    """Create a fresh ephemeral Lakebase branch for this deploy.
 
-    Returns the lakebase_result dict for the newly-created branch.
+    Thin wrapper around _create_branch_from for call-site readability. Does
+    NOT delete any prior branch — we rely on Lakebase's TTL-driven garbage
+    collection (see _BRANCH_TTL_SECONDS) to clean up old branches, because
+    explicit delete has an async purge window that causes fixed-ID reuse to
+    collide for many minutes.
     """
-    _delete_branch(ws, project_name, target_branch)
-    return _create_branch_from(ws, project_name, source_branch, target_branch)
+    return _create_branch_from(ws, project_name, source_branch, target_branch_prefix)
 
 
 def _write_requirements(
