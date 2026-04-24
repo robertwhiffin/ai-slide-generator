@@ -173,6 +173,23 @@ test.describe('HelpTabs', () => {
     await expect(page.getByRole('heading', { name: 'What is MCP?' })).toBeVisible();
     await expect(page.getByRole('heading', { name: "Who's this for?" })).toBeVisible();
   });
+
+  test('MCP tab shows the live endpoint URL ending in /mcp/', async ({ page }) => {
+    await goToHelp(page);
+    await getHelpTabButton(page, 'MCP').click();
+
+    const endpointBlock = page.getByTestId('mcp-endpoint-url');
+    await expect(endpointBlock).toBeVisible();
+    await expect(endpointBlock).toContainText('/mcp/');
+  });
+
+  test('MCP tab has a copy endpoint button', async ({ page }) => {
+    await goToHelp(page);
+    await getHelpTabButton(page, 'MCP').click();
+    await expect(
+      page.getByRole('button', { name: /copy endpoint/i }),
+    ).toBeVisible();
+  });
 });
 
 // ============================================

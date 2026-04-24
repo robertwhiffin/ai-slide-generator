@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { FiMessageSquare, FiClock, FiSettings, FiInfo, FiShield, FiFileText, FiLayout, FiExternalLink, FiImage } from 'react-icons/fi';
 import { FaGavel } from 'react-icons/fa';
 import { DOCS_URLS } from '../../constants/docs';
+import { useToast } from '../../contexts/ToastContext';
 
 type HelpTab = 'overview' | 'generator' | 'history' | 'profiles' | 'deck_prompts' | 'slide_styles' | 'images' | 'verification' | 'mcp';
 
@@ -777,31 +778,72 @@ Use {{image:12}} as the background for the title slide.`}
 );
 
 // MCP Tab Content
-const MCPTab: React.FC = () => (
-  <div className="space-y-6">
-    <section>
-      <h2 className="text-lg font-semibold text-gray-800 mb-3">What is MCP?</h2>
-      <p className="text-gray-600">
-        The Model Context Protocol (MCP) exposes tellr's deck generator as a
-        programmatic endpoint. Agents like Claude Code, Claude Desktop, and
-        Cursor — and any HTTP-speaking client — can create, edit, and
-        retrieve decks without the browser UI. Decks generated over MCP land
-        in your tellr history exactly as if you'd made them interactively.
-      </p>
-    </section>
+const MCPTab: React.FC = () => {
+  const { showToast } = useToast();
+  const mcpEndpoint = `${window.location.origin}/mcp/`;
 
-    <section>
-      <h2 className="text-lg font-semibold text-gray-800 mb-3">Who's this for?</h2>
-      <p className="text-gray-600">
-        Developers and power users who want to automate deck creation — a CI
-        job that drops a weekly briefing into Slack, an internal app that
-        turns a CRM record into a pitch deck, an agent runtime that calls
-        tellr as one tool in a wider workflow. If you only need interactive
-        generation, stay on the main page.
-      </p>
-    </section>
-  </div>
-);
+  const copyEndpoint = async () => {
+    try {
+      await navigator.clipboard.writeText(mcpEndpoint);
+      showToast('MCP endpoint copied to clipboard', 'success');
+    } catch {
+      showToast(
+        `Unable to copy automatically — endpoint is ${mcpEndpoint}`,
+        'error',
+      );
+    }
+  };
+
+  return (
+    <div className="space-y-6">
+      <section>
+        <h2 className="text-lg font-semibold text-gray-800 mb-3">What is MCP?</h2>
+        <p className="text-gray-600">
+          The Model Context Protocol (MCP) exposes tellr's deck generator as a
+          programmatic endpoint. Agents like Claude Code, Claude Desktop, and
+          Cursor — and any HTTP-speaking client — can create, edit, and
+          retrieve decks without the browser UI. Decks generated over MCP land
+          in your tellr history exactly as if you'd made them interactively.
+        </p>
+      </section>
+
+      <section>
+        <h2 className="text-lg font-semibold text-gray-800 mb-3">Who's this for?</h2>
+        <p className="text-gray-600">
+          Developers and power users who want to automate deck creation — a CI
+          job that drops a weekly briefing into Slack, an internal app that
+          turns a CRM record into a pitch deck, an agent runtime that calls
+          tellr as one tool in a wider workflow. If you only need interactive
+          generation, stay on the main page.
+        </p>
+      </section>
+
+      <section>
+        <h2 className="text-lg font-semibold text-gray-800 mb-3">Your endpoint</h2>
+        <div className="flex items-center gap-2 rounded bg-gray-50 border border-gray-200 p-3">
+          <code
+            data-testid="mcp-endpoint-url"
+            className="text-sm font-mono flex-1 break-all"
+          >
+            {mcpEndpoint}
+          </code>
+          <button
+            type="button"
+            onClick={() => void copyEndpoint()}
+            aria-label="Copy endpoint URL"
+            className="shrink-0 text-xs font-medium text-blue-600 hover:text-blue-700 hover:underline"
+          >
+            Copy endpoint
+          </button>
+        </div>
+        <p className="text-xs text-gray-500 mt-2">
+          For production deployments behind a custom hostname, see the full
+          guide for how to resolve the correct URL.
+        </p>
+      </section>
+    </div>
+  );
+};
 
 // Reusable doc link component for tab footers
 const DocLink: React.FC<{ href: string; label: string }> = ({ href, label }) => (
