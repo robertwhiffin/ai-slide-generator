@@ -1,5 +1,7 @@
 """Tests for branch_from resolution in load_deployment_config."""
 from pathlib import Path
+from unittest.mock import MagicMock
+
 import pytest
 import yaml
 
@@ -92,3 +94,29 @@ class TestLoadDeploymentConfig:
         (tmp_path / "config" / "deployment.yaml").write_text(yaml.safe_dump(bad))
         with pytest.raises(Exception, match="same database_name"):
             load_deployment_config("staging")
+
+
+class TestResetDbNoopWarning:
+    def test_reset_db_warning_printed_for_branching_env(
+        self, config_path, capsys, monkeypatch
+    ):
+        """update_local with a branching env + reset_database prints a warning and ignores the flag."""
+        from scripts import deploy_local
+
+        # Patch every side-effecting call in update_local down to the warning print
+        monkeypatch.setattr(
+            deploy_local, "_get_workspace_client", lambda profile=None: MagicMock()
+        )
+        # Make preflight fail loudly with a recognisable error — we just want to
+        # get past the warning print, not execute the rest of the flow.
+        def boom(*a, **kw):
+            raise deploy_local.DeploymentError("STOP")
+        monkeypatch.setattr(deploy_local, "_check_branching_preconditions", boom)
+
+        with pytest.raises(deploy_local.DeploymentError, match="STOP"):
+            deploy_local.update_local(
+                env="staging", profile="p", reset_database=True
+            )
+
+        captured = capsys.readouterr()
+        assert "--reset-db is a no-op for branching envs" in captured.out
