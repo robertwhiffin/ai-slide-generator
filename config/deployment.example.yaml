@@ -22,9 +22,14 @@ environments:
 
   staging:
     # Staging deploys against an ephemeral Lakebase branch forked from production
-    # on every `deploy_local.sh create|update --env staging`. The branch is
-    # named after the env (`staging`) and is deleted on `delete --env staging`.
-    # Requires production to be deployed first (uses prod's encryption key).
+    # on every `deploy_local.sh create|update --env staging`. Each deploy creates
+    # a uniquely-named branch `{env}-{unix_timestamp}` (e.g. staging-1777035101)
+    # and relies on Lakebase's 1-day branch TTL for cleanup — `delete --env staging`
+    # removes the app but leaves branches to auto-expire. Requires production to
+    # be deployed first; staging reads prod's encryption key and schema
+    # (app_data_prod) so it's a near-mirror of prod for integration testing.
+    # The staging app will break after ~24h when its branch expires; redeploy
+    # to get a fresh copy.
     app_name: "ai-slide-generator-staging"
     description: "AI Slide Generator - Staging (ephemeral branch of prod)"
     workspace_path: "/Workspace/Shared/apps/staging/ai-slide-generator"
