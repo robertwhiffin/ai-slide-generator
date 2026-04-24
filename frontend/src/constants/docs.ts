@@ -13,6 +13,10 @@ export const DOCS_URLS = {
   exportingGoogleSlides: userGuide('exporting-to-google-slides'),
   retrievingFeedback: userGuide('retrieving-feedback'),
 
+  // MCP (technical reference + integration guide)
+  mcpServer: `${DOCS_BASE}/technical/mcp-server`,
+  mcpIntegrationGuide: `${DOCS_BASE}/technical/mcp-integration-guide`,
+
   customStylesCSS: userGuide('creating-custom-styles#raw-css'),
   customStylesCSSFeatures: userGuide('creating-custom-styles#css-features-that-work'),
   customStylesConstraints: userGuide('creating-custom-styles#fixed-constraints'),
