@@ -1061,6 +1061,20 @@ def _create_branch_from(
     }
 
 
+def _recreate_ephemeral_branch(
+    ws: WorkspaceClient,
+    project_name: str,
+    source_branch: str,
+    target_branch: str,
+) -> dict[str, Any]:
+    """Delete `target_branch` if it exists, then create it from `source_branch`.
+
+    Returns the lakebase_result dict for the newly-created branch.
+    """
+    _delete_branch(ws, project_name, target_branch)
+    return _create_branch_from(ws, project_name, source_branch, target_branch)
+
+
 def _write_requirements(
     staging_dir: Path,
     app_version: Optional[str],
