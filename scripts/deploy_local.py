@@ -31,9 +31,12 @@ sys.path.insert(0, str(PROJECT_ROOT / "packages" / "databricks-tellr"))
 
 from databricks_tellr.deploy import (
     DeploymentError,
+    _branch_exists,
     _get_workspace_client,
     _get_or_create_lakebase,
+    _probe_autoscaling_available,
     _read_existing_encryption_key,
+    _recreate_ephemeral_branch,
     _write_requirements,
     _write_app_yaml,
     _upload_files,
@@ -203,6 +206,53 @@ def upload_wheel(
         )
 
     return f"./wheels/{wheel_path.name}"
+
+
+def _check_branching_preconditions(
+    ws: WorkspaceClient, config: dict[str, Any]
+) -> str:
+    """Run preconditions for branching-mode deploy. Return prod's encryption key.
+
+    Raises DeploymentError if any precondition fails, BEFORE any mutating
+    ws.postgres call.
+    """
+    branch_from_env = config["branch_from_env"]
+    branch_from_workspace_path = config["branch_from_workspace_path"]
+    project_name = config["lakebase_name"]
+
+    # 1+2 handled by load_deployment_config. By the time we get here,
+    # branch_from_env is already resolved and database_name matches.
+
+    # 3 + 4: source app.yaml exists and has a key
+    encryption_key = _read_existing_encryption_key(ws, branch_from_workspace_path)
+    if not encryption_key:
+        raise DeploymentError(
+            f"{branch_from_env} not deployed — deploy {branch_from_env} first "
+            f"(could not read GOOGLE_OAUTH_ENCRYPTION_KEY from "
+            f"{branch_from_workspace_path}/app.yaml)"
+        )
+
+    # 5: Lakebase is autoscaling
+    if not _probe_autoscaling_available(ws):
+        raise DeploymentError(
+            f"Lakebase branching requires autoscaling; "
+            f"{project_name} is not an autoscaling project"
+        )
+    try:
+        ws.postgres.get_project(name=f"projects/{project_name}")
+    except Exception as e:
+        raise DeploymentError(
+            f"Lakebase branching requires autoscaling; "
+            f"{project_name} is not an autoscaling project (get_project failed: {e})"
+        ) from e
+
+    # 6: source branch exists
+    if not _branch_exists(ws, project_name, branch_from_env):
+        raise DeploymentError(
+            f'source branch "{branch_from_env}" not found in project {project_name}'
+        )
+
+    return encryption_key
 
 
 def create_local(
