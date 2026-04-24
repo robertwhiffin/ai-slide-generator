@@ -65,12 +65,14 @@ class ImageAsset(Base):
     size_bytes      = Column(Integer)
     image_data      = Column(LargeBinary)      # Raw bytes (max 5MB)
     thumbnail_base64 = Column(Text)            # "data:image/jpeg;base64,..." or None for SVG
-    tags            = Column(JSON)             # ["branding", "logo"]
+    tags            = Column(...)             # JSON array; JSONB on PostgreSQL, JSON on SQLite (tests)
     description     = Column(Text)
     category        = Column(String(50))       # 'branding', 'content', 'background', 'ephemeral'
     uploaded_by     = Column(String(255))
     is_active       = Column(Boolean)          # Soft delete
 ```
+
+Implementation uses `JSON().with_variant(JSONB(), "postgresql")` so tag search uses native `@>` on PostgreSQL/Lakebase. Existing databases with `tags` still typed as `json` are upgraded to `jsonb` automatically at startup (`_migrate_image_assets_tags_json_to_jsonb` in `src/core/database.py`).
 
 **Invariants:**
 - `image_data` stores raw bytes; base64 encoding happens on read

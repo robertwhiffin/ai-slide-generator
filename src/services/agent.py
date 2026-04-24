@@ -6,6 +6,7 @@ capabilities with MLflow tracing integration.
 """
 
 import logging
+import os
 import queue
 import re
 import uuid
@@ -24,6 +25,11 @@ from langchain_core.tools import StructuredTool
 from pydantic import BaseModel, Field
 
 from src.core.defaults import DEFAULT_CONFIG
+from src.core.mlflow_tracing import (
+    configure_tracing_environment,
+    create_databricks_experiment,
+    get_unity_catalog_trace_location,
+)
 from src.core.databricks_client import (
     get_current_username,
     get_databricks_client,
@@ -165,14 +171,25 @@ class SlideGeneratorAgent:
         try:
             tracking_uri = "databricks"
             mlflow.set_tracking_uri(tracking_uri)
+            configure_tracing_environment()
             logger.info("MLflow tracking configured", extra={"tracking_uri": tracking_uri})
 
-            # Enable LangChain autologging
-            try:
-                mlflow.langchain.autolog()
-                logger.info("MLflow LangChain autologging enabled")
-            except Exception as e:
-                logger.warning(f"Failed to enable MLflow LangChain autologging: {e}")
+            # LangChain autolog uses ContextVars that break across FastAPI/async + thread
+            # boundaries (mlflow#22088). Disable by default; set TELLR_MLFLOW_LANGCHAIN_AUTOLOG=1
+            # to enable fine-grained LangChain traces in environments where that is safe.
+            autolog_flag = (os.getenv("TELLR_MLFLOW_LANGCHAIN_AUTOLOG") or "").strip().lower()
+            if autolog_flag in ("1", "true", "yes", "on"):
+                try:
+                    mlflow.langchain.autolog()
+                    logger.info("MLflow LangChain autologging enabled (TELLR_MLFLOW_LANGCHAIN_AUTOLOG)")
+                except Exception as e:
+                    logger.warning(f"Failed to enable MLflow LangChain autologging: {e}")
+            else:
+                logger.info(
+                    "MLflow LangChain autologging skipped (default). "
+                    "Set TELLR_MLFLOW_LANGCHAIN_AUTOLOG=1 to enable; leaving off avoids "
+                    "ContextVar 'different Context' warnings under async apps."
+                )
         except Exception as e:
             logger.warning(f"Failed to configure MLflow tracking: {e}")
 
@@ -214,6 +231,7 @@ class SlideGeneratorAgent:
         )
 
         try:
+            configure_tracing_environment()
             # Check if experiment already exists
             experiment = mlflow.get_experiment_by_name(experiment_path)
             
@@ -223,6 +241,14 @@ class SlideGeneratorAgent:
                     f"Using existing user experiment: {experiment_id}",
                     extra={"session_id": session_id, "experiment_path": experiment_path},
                 )
+                if get_unity_catalog_trace_location() is not None:
+                    logger.warning(
+                        "TELLR_MLFLOW_UC_* is set but this experiment already existed; "
+                        "UC trace_location only applies to newly created experiments. "
+                        "Delete the experiment at %s and run Tellr again to bind UC traces.",
+                        experiment_path,
+                        extra={"session_id": session_id, "experiment_path": experiment_path},
+                    )
             else:
                 # Ensure parent folder exists before creating experiment
                 if sp_folder:
@@ -234,8 +260,8 @@ class SlideGeneratorAgent:
                         logger.warning(f"Failed to create parent folder {parent_folder}: {e}")
                         # Continue anyway - experiment creation might still work
                 
-                # Create new experiment for user
-                experiment_id = mlflow.create_experiment(experiment_path)
+                # Create new experiment for user (optional Unity Catalog trace location)
+                experiment_id = create_databricks_experiment(experiment_path)
                 logger.info(
                     f"Created new user experiment: {experiment_id}",
                     extra={"session_id": session_id, "experiment_path": experiment_path},

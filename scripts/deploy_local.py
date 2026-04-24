@@ -34,6 +34,8 @@ from databricks_tellr.deploy import (
     _branch_exists,
     _get_workspace_client,
     _get_or_create_lakebase,
+    _mlflow_flat_from_env_section,
+    _mlflow_substitutions_for_app_yaml,
     _probe_autoscaling_available,
     _read_existing_encryption_key,
     _recreate_ephemeral_branch,
@@ -96,6 +98,7 @@ def load_deployment_config(env: str) -> dict[str, Any]:
 
     env_config = environments[env]
     lakebase_config = env_config.get("lakebase", {})
+    ml_flat = _mlflow_flat_from_env_section(env_config)
 
     branch_from = lakebase_config.get("branch_from")
     schema_name = lakebase_config.get("schema")
@@ -131,6 +134,7 @@ def load_deployment_config(env: str) -> dict[str, Any]:
         "schema_name": schema_name,
         "branch_from_env": branch_from,
         "branch_from_workspace_path": branch_from_workspace_path,
+        **ml_flat,
     }
 
 
@@ -333,6 +337,10 @@ def create_local(
             _write_requirements(staging_dir, None, local_wheel_path=local_wheel_ref)
             print("   Generated requirements.txt (local wheel)")
 
+            mlflow_subs = _mlflow_substitutions_for_app_yaml(
+                deployment_flat=config,
+                overrides=None,
+            )
             _write_app_yaml(
                 staging_dir,
                 lakebase_name,
@@ -340,6 +348,7 @@ def create_local(
                 seed_databricks_defaults=seed_databricks_defaults,
                 encryption_key=encryption_key,  # None → _write_app_yaml generates one
                 lakebase_result=lakebase_result,
+                mlflow_tracing=mlflow_subs,
             )
             print("   Generated app.yaml")
 
@@ -528,6 +537,10 @@ def update_local(
             _write_requirements(staging_dir, None, local_wheel_path=local_wheel_ref)
             print("   Generated requirements.txt (local wheel)")
 
+            mlflow_subs = _mlflow_substitutions_for_app_yaml(
+                deployment_flat=config,
+                overrides=None,
+            )
             _write_app_yaml(
                 staging_dir,
                 lakebase_name,
@@ -535,6 +548,7 @@ def update_local(
                 seed_databricks_defaults=seed_databricks_defaults,
                 encryption_key=encryption_key,
                 lakebase_result=lakebase_result,
+                mlflow_tracing=mlflow_subs,
             )
             print("   Generated app.yaml")
 

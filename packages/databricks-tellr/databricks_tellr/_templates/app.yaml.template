@@ -35,3 +35,16 @@ env:
   # src/api/mcp_auth.py and docs/technical/mcp-server.md section 4.2A.
   - name: TELLR_TRUST_FORWARDED_IDENTITY
     value: "true"
+  # Unity Catalog MLflow traces (MLflow 3.11+). See docs/technical/mlflow-uc-tracing.md
+  - name: MLFLOW_TRACING_SQL_WAREHOUSE_ID
+    value: "${MLFLOW_TRACING_SQL_WAREHOUSE_ID}"
+  - name: TELLR_MLFLOW_UC_CATALOG
+    value: "${TELLR_MLFLOW_UC_CATALOG}"
+  - name: TELLR_MLFLOW_UC_SCHEMA
+    value: "${TELLR_MLFLOW_UC_SCHEMA}"
+  - name: TELLR_MLFLOW_UC_TABLE_PREFIX
+    value: "${TELLR_MLFLOW_UC_TABLE_PREFIX}"
+  # Optional: set to "1" to enable mlflow.langchain.autolog (default off in app — avoids
+  # ContextVar "different Context" warnings under FastAPI). See docs/technical/llm-as-judge-verification.md
+  # - name: TELLR_MLFLOW_LANGCHAIN_AUTOLOG
+  #   value: "1"

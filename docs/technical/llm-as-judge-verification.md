@@ -6,12 +6,15 @@ Automatic numerical accuracy verification for generated slides using MLflow's cu
 
 ## Stack / Entry Points
 
-- **Backend:** MLflow 3.6+ (`make_judge` API), litellm 1.80+ (Databricks model routing), FastAPI verification routes
+- **Backend:** MLflow 3.11+ (`make_judge` API, optional UC trace location), litellm 1.80+ (Databricks model routing), FastAPI verification routes
 - **Frontend:** React auto-verification in `SlidePanel`, verification badge component, feedback UI
 - **Storage:** PostgreSQL `verification_map` column (JSON keyed by content hash)
-- **MLflow:** Traces logged to Databricks workspace for verification runs and human feedback
+- **MLflow:** Traces logged to Databricks (default control plane or [Unity Catalog tables](mlflow-uc-tracing.md) when configured)
 - **Boot files:** `src/services/evaluation/llm_judge.py` (core evaluator), `src/api/routes/verification.py` (API endpoints), `src/utils/slide_hash.py` (content hashing)
 - **Environment:** Requires `DATABRICKS_HOST` and `DATABRICKS_TOKEN` for MLflow tracking
+- **Databricks Apps:** Allow egress to `*.storage.cloud.databricks.com` if `mlflow.genai.evaluate` must download trace artifacts; otherwise judge may fall back (see below).
+- **`TELLR_MLFLOW_LANGCHAIN_AUTOLOG`:** Set to `1` / `true` / `on` to enable `mlflow.langchain.autolog()`. **Default is off** in the agent to avoid MLflow `ContextVar` “different Context” warnings under FastAPI/async + threads ([mlflow#22088](https://github.com/mlflow/mlflow/issues/22088)).
+- **Judge fallback:** If `mlflow.genai.evaluate` fails with regional **storage** connection errors or `RESOURCE_DOES_NOT_EXIST` (orphaned experiment / run), `evaluate_with_judge` runs a **direct** `ChatDatabricks` JSON judge (same green/amber/red rules). You still get a verification rating, but **no** MLflow Evaluation Run for that request (`run_id` may be null).
 
 ---
 
