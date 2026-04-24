@@ -307,6 +307,40 @@ class TestEnsureSpAutoscalingRole:
         assert kwargs["parent"] == "projects/my-project/branches/production"
 
 
+class TestEnsureSpAutoscalingRoleBranchName:
+    """Tests that _ensure_sp_autoscaling_role uses the branch_name kwarg."""
+
+    def test_default_branch_is_production(self, mock_ws):
+        # get_role raises not-found so we go down the create path
+        mock_ws.postgres.get_role.side_effect = Exception("not found")
+        create_op = MagicMock()
+        mock_ws.postgres.create_role.return_value = create_op
+
+        with patch("databricks_tellr.deploy.HAS_ROLE_SDK", True):
+            _ensure_sp_autoscaling_role(mock_ws, "db-tellr", "client-123")
+
+        # Inspect parent path used for role creation
+        assert (
+            mock_ws.postgres.create_role.call_args.kwargs["parent"]
+            == "projects/db-tellr/branches/production"
+        )
+
+    def test_custom_branch_name_threads_through(self, mock_ws):
+        mock_ws.postgres.get_role.side_effect = Exception("not found")
+        create_op = MagicMock()
+        mock_ws.postgres.create_role.return_value = create_op
+
+        with patch("databricks_tellr.deploy.HAS_ROLE_SDK", True):
+            _ensure_sp_autoscaling_role(
+                mock_ws, "db-tellr", "client-123", branch_name="staging"
+            )
+
+        assert (
+            mock_ws.postgres.create_role.call_args.kwargs["parent"]
+            == "projects/db-tellr/branches/staging"
+        )
+
+
 # ---------------------------------------------------------------------------
 # _create_app
 # ---------------------------------------------------------------------------
@@ -549,3 +583,37 @@ class TestUpdateDatabricks:
         )
 
         assert result["lakebase_type"] == "autoscaling"
+
+
+class TestGetOrCreateLakebaseAutoscalingBranchName:
+    def test_default_branch_is_production(self, mock_ws):
+        # Mock get_project so we skip the create path
+        mock_ws.postgres.get_project.return_value = MagicMock()
+        endpoint = MagicMock()
+        endpoint.name = "projects/db-tellr/branches/production/endpoints/ep1"
+        endpoint.status = MagicMock(hosts=MagicMock(host="prod-host"))
+        mock_ws.postgres.list_endpoints.return_value = iter([endpoint])
+        mock_ws.postgres.get_endpoint.return_value = endpoint
+
+        _get_or_create_lakebase_autoscaling(mock_ws, "db-tellr", "CU_1")
+
+        mock_ws.postgres.list_endpoints.assert_called_once_with(
+            parent="projects/db-tellr/branches/production"
+        )
+
+    def test_custom_branch_name(self, mock_ws):
+        mock_ws.postgres.get_project.return_value = MagicMock()
+        endpoint = MagicMock()
+        endpoint.name = "projects/db-tellr/branches/staging/endpoints/ep1"
+        endpoint.status = MagicMock(hosts=MagicMock(host="staging-host"))
+        mock_ws.postgres.list_endpoints.return_value = iter([endpoint])
+        mock_ws.postgres.get_endpoint.return_value = endpoint
+
+        result = _get_or_create_lakebase_autoscaling(
+            mock_ws, "db-tellr", "CU_1", branch_name="staging"
+        )
+
+        mock_ws.postgres.list_endpoints.assert_called_once_with(
+            parent="projects/db-tellr/branches/staging"
+        )
+        assert result["host"] == "staging-host"
