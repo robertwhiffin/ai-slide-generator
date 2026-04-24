@@ -166,6 +166,13 @@ test.describe('HelpTabs', () => {
     await goToHelp(page);
     await expect(getHelpTabButton(page, 'MCP')).toBeVisible();
   });
+
+  test('MCP tab shows What is MCP and Who is this for sections', async ({ page }) => {
+    await goToHelp(page);
+    await getHelpTabButton(page, 'MCP').click();
+    await expect(page.getByRole('heading', { name: 'What is MCP?' })).toBeVisible();
+    await expect(page.getByRole('heading', { name: "Who's this for?" })).toBeVisible();
+  });
 });
 
 // ============================================

@@ -777,7 +777,31 @@ Use {{image:12}} as the background for the title slide.`}
 );
 
 // MCP Tab Content
-const MCPTab: React.FC = () => <div>TBD</div>;
+const MCPTab: React.FC = () => (
+  <div className="space-y-6">
+    <section>
+      <h2 className="text-lg font-semibold text-gray-800 mb-3">What is MCP?</h2>
+      <p className="text-gray-600">
+        The Model Context Protocol (MCP) exposes tellr's deck generator as a
+        programmatic endpoint. Agents like Claude Code, Claude Desktop, and
+        Cursor — and any HTTP-speaking client — can create, edit, and
+        retrieve decks without the browser UI. Decks generated over MCP land
+        in your tellr history exactly as if you'd made them interactively.
+      </p>
+    </section>
+
+    <section>
+      <h2 className="text-lg font-semibold text-gray-800 mb-3">Who's this for?</h2>
+      <p className="text-gray-600">
+        Developers and power users who want to automate deck creation — a CI
+        job that drops a weekly briefing into Slack, an internal app that
+        turns a CRM record into a pitch deck, an agent runtime that calls
+        tellr as one tool in a wider workflow. If you only need interactive
+        generation, stay on the main page.
+      </p>
+    </section>
+  </div>
+);
 
 // Reusable doc link component for tab footers
 const DocLink: React.FC<{ href: string; label: string }> = ({ href, label }) => (
