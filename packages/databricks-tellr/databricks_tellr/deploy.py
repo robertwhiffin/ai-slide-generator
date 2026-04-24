@@ -61,6 +61,92 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 
+def _strip_str(val: Any) -> str:
+    if val is None:
+        return ""
+    return str(val).strip()
+
+
+def _mlflow_flat_from_env_section(env_config: dict[str, Any]) -> dict[str, str]:
+    """Read MLflow UC tracing settings from one environment block in deployment.yaml."""
+    mt = env_config.get("mlflow_tracing")
+    if not isinstance(mt, dict):
+        mt = {}
+
+    def first(*vals: Any) -> str:
+        for v in vals:
+            s = _strip_str(v)
+            if s:
+                return s
+        return ""
+
+    return {
+        "mlflow_tracing_sql_warehouse_id": first(
+            mt.get("sql_warehouse_id"),
+            env_config.get("mlflow_tracing_sql_warehouse_id"),
+        ),
+        "tellr_mlflow_uc_catalog": first(
+            mt.get("uc_catalog"),
+            env_config.get("tellr_mlflow_uc_catalog"),
+        ),
+        "tellr_mlflow_uc_schema": first(
+            mt.get("uc_schema"),
+            env_config.get("tellr_mlflow_uc_schema"),
+        ),
+        "tellr_mlflow_uc_table_prefix": first(
+            mt.get("uc_table_prefix"),
+            env_config.get("tellr_mlflow_uc_table_prefix"),
+        ),
+    }
+
+
+def _mlflow_substitutions_for_app_yaml(
+    *,
+    deployment_flat: dict[str, Any] | None = None,
+    overrides: dict[str, str] | None = None,
+) -> dict[str, str]:
+    """Resolve the four app.yaml.template MLflow / UC placeholders.
+
+    Precedence per key: ``overrides`` (template key names) > values loaded from
+    deployment YAML (flat keys on ``deployment_flat``) > deploy-time environment
+    variables ``TELLR_DEPLOY_MLFLOW_*`` (so CI/notebooks can inject secrets without
+    committing them to YAML).
+    """
+    deployment_flat = deployment_flat or {}
+    overrides = overrides or {}
+    rows = (
+        (
+            "MLFLOW_TRACING_SQL_WAREHOUSE_ID",
+            "mlflow_tracing_sql_warehouse_id",
+            "TELLR_DEPLOY_MLFLOW_TRACING_SQL_WAREHOUSE_ID",
+        ),
+        (
+            "TELLR_MLFLOW_UC_CATALOG",
+            "tellr_mlflow_uc_catalog",
+            "TELLR_DEPLOY_MLFLOW_UC_CATALOG",
+        ),
+        (
+            "TELLR_MLFLOW_UC_SCHEMA",
+            "tellr_mlflow_uc_schema",
+            "TELLR_DEPLOY_MLFLOW_UC_SCHEMA",
+        ),
+        (
+            "TELLR_MLFLOW_UC_TABLE_PREFIX",
+            "tellr_mlflow_uc_table_prefix",
+            "TELLR_DEPLOY_MLFLOW_UC_TABLE_PREFIX",
+        ),
+    )
+    out: dict[str, str] = {}
+    for tpl_key, flat_key, env_key in rows:
+        v = _strip_str(overrides.get(tpl_key))
+        if not v:
+            v = _strip_str(deployment_flat.get(flat_key))
+        if not v:
+            v = _strip_str(os.getenv(env_key))
+        out[tpl_key] = v
+    return out
+
+
 class DeploymentError(Exception):
     """Raised when deployment fails."""
 
@@ -111,6 +197,7 @@ def create(
     config_yaml_path: str | None = None,
     encryption_key: str | None = None,
     use_test_pypi: bool = False,
+    mlflow_tracing: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Deploy Tellr to Databricks Apps.
 
@@ -141,6 +228,12 @@ def create(
         config_yaml_path: Path to deployment config YAML (mutually exclusive with other args)
         encryption_key: Fernet key for Google OAuth encryption. Auto-generated if not provided.
         use_test_pypi: If True, install app package from Test PyPI instead of real PyPI.
+        mlflow_tracing: Optional overrides for UC tracing env vars in generated ``app.yaml``.
+            Keys: ``MLFLOW_TRACING_SQL_WAREHOUSE_ID``, ``TELLR_MLFLOW_UC_CATALOG``,
+            ``TELLR_MLFLOW_UC_SCHEMA``, ``TELLR_MLFLOW_UC_TABLE_PREFIX``. With
+            ``config_yaml_path``, YAML ``mlflow_tracing`` applies first; non-empty
+            entries here override. Empty slots can be filled from deploy-time env
+            vars ``TELLR_DEPLOY_MLFLOW_*``.
 
     Returns:
         Dictionary with deployment info:
@@ -169,6 +262,7 @@ def create(
         seed_databricks_defaults=False,
         encryption_key=encryption_key,
         use_test_pypi=use_test_pypi,
+        mlflow_tracing=mlflow_tracing,
     )
 
 
@@ -183,6 +277,7 @@ def update(
     profile: str | None = None,
     encryption_key: str | None = None,
     use_test_pypi: bool = False,
+    mlflow_tracing: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Deploy a new version of an existing Tellr app.
 
@@ -200,6 +295,9 @@ def update(
         encryption_key: Fernet key for Google OAuth encryption. If not provided, the
             existing key is read from the deployed app.yaml to preserve encrypted data.
         use_test_pypi: If True, install app package from Test PyPI instead of real PyPI.
+        mlflow_tracing: Optional overrides for UC tracing env vars (same keys as ``create``).
+            Values from deployment YAML are not loaded on update; use this argument or
+            ``TELLR_DEPLOY_MLFLOW_*`` environment variables.
 
     Returns:
         Dictionary with deployment info
@@ -219,6 +317,7 @@ def update(
         seed_databricks_defaults=False,
         encryption_key=encryption_key,
         use_test_pypi=use_test_pypi,
+        mlflow_tracing=mlflow_tracing,
     )
 
 
@@ -242,6 +341,7 @@ def _create_databricks(
     seed_databricks_defaults: bool = True,
     encryption_key: str | None = None,
     use_test_pypi: bool = False,
+    mlflow_tracing: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Deploy Tellr to Databricks Apps with configurable seeding.
     
@@ -262,6 +362,7 @@ def _create_databricks(
         seed_databricks_defaults: If True, seed Databricks-specific content on startup
         encryption_key: Fernet key for Google OAuth encryption. Auto-generated if not provided.
         use_test_pypi: If True, install app package from Test PyPI instead of real PyPI.
+        mlflow_tracing: Optional overrides for UC tracing placeholders in ``app.yaml``.
 
     Returns:
         Dictionary with deployment info
@@ -272,17 +373,25 @@ def _create_databricks(
     """
     ws = _get_workspace_client(client, profile)
 
+    deployment_flat_for_mlflow: dict[str, Any] = {}
+
     # Handle YAML config loading
     if config_yaml_path:
         if any([lakebase_name, schema_name, app_name, app_file_workspace_path]):
             raise ValueError("config_yaml_path cannot be used with other arguments")
         config = _load_deployment_config(config_yaml_path)
+        deployment_flat_for_mlflow = config
         lakebase_name = config.get("lakebase_name")
         schema_name = config.get("schema_name")
         app_name = config.get("app_name")
         app_file_workspace_path = config.get("app_file_workspace_path")
         lakebase_compute = config.get("lakebase_compute", lakebase_compute)
         app_compute = config.get("app_compute", app_compute)
+
+    mlflow_subs = _mlflow_substitutions_for_app_yaml(
+        deployment_flat=deployment_flat_for_mlflow,
+        overrides=mlflow_tracing,
+    )
 
     # Validate required arguments
     if not all([lakebase_name, schema_name, app_name, app_file_workspace_path]):
@@ -319,6 +428,7 @@ def _create_databricks(
                 encryption_key=encryption_key,
                 lakebase_result=lakebase_result,
                 use_test_pypi=use_test_pypi,
+                mlflow_tracing=mlflow_subs,
             )
             print("   Generated app.yaml (with encryption key)")
 
@@ -391,6 +501,7 @@ def _update_databricks(
     seed_databricks_defaults: bool = True,
     encryption_key: str | None = None,
     use_test_pypi: bool = False,
+    mlflow_tracing: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Deploy a new version of an existing Tellr app with configurable seeding.
     
@@ -409,6 +520,7 @@ def _update_databricks(
         encryption_key: Fernet key for Google OAuth encryption. If not provided, reads
             the existing key from the deployed app.yaml to preserve encrypted data.
         use_test_pypi: If True, install app package from Test PyPI instead of real PyPI.
+        mlflow_tracing: Optional overrides for UC tracing placeholders in ``app.yaml``.
 
     Returns:
         Dictionary with deployment info
@@ -419,6 +531,11 @@ def _update_databricks(
     print(f"Updating Tellr app: {app_name}")
 
     ws = _get_workspace_client(client, profile)
+
+    mlflow_subs = _mlflow_substitutions_for_app_yaml(
+        deployment_flat={},
+        overrides=mlflow_tracing,
+    )
 
     # Preserve the existing encryption key so we don't invalidate encrypted data
     if not encryption_key:
@@ -452,6 +569,7 @@ def _update_databricks(
                 encryption_key=encryption_key,
                 lakebase_result=lakebase_result,
                 use_test_pypi=use_test_pypi,
+                mlflow_tracing=mlflow_subs,
             )
             _upload_files(ws, staging, app_file_workspace_path)
             print("   Files updated")
@@ -666,6 +784,11 @@ def _load_deployment_config(config_yaml_path: str) -> dict[str, str]:
             database_name: ...
             schema: ...
             capacity: ...
+          mlflow_tracing:  # optional
+            sql_warehouse_id: ...
+            uc_catalog: ...
+            uc_schema: ...
+            uc_table_prefix: ...
     """
     with open(config_yaml_path, "r", encoding="utf-8") as handle:
         config = yaml.safe_load(handle) or {}
@@ -680,6 +803,7 @@ def _load_deployment_config(config_yaml_path: str) -> dict[str, str]:
 
     env_config = environments[env_name]
     lakebase_config = env_config.get("lakebase", {})
+    ml_flat = _mlflow_flat_from_env_section(env_config)
 
     return {
         "app_name": env_config.get("app_name"),
@@ -688,6 +812,7 @@ def _load_deployment_config(config_yaml_path: str) -> dict[str, str]:
         "lakebase_name": lakebase_config.get("database_name"),
         "schema_name": lakebase_config.get("schema"),
         "lakebase_compute": lakebase_config.get("capacity"),
+        **ml_flat,
     }
 
 
@@ -1170,6 +1295,7 @@ def _write_app_yaml(
     encryption_key: str | None = None,
     lakebase_result: dict[str, Any] | None = None,
     use_test_pypi: bool = False,
+    mlflow_tracing: dict[str, str] | None = None,
 ) -> None:
     """Generate app.yaml with environment variables.
 
@@ -1182,6 +1308,8 @@ def _write_app_yaml(
             Auto-generated if not provided.
         lakebase_result: Result dict from _get_or_create_lakebase() with type info.
         use_test_pypi: If True, install from Test PyPI instead of real PyPI.
+        mlflow_tracing: Resolved template keys for UC tracing (four entries). If
+            omitted, values are taken only from ``TELLR_DEPLOY_MLFLOW_*`` env vars.
     """
     # Build init_database call - only show seed_databricks_defaults when True
     if seed_databricks_defaults:
@@ -1206,6 +1334,9 @@ def _write_app_yaml(
         if use_test_pypi else ""
     )
 
+    if mlflow_tracing is None:
+        mlflow_tracing = _mlflow_substitutions_for_app_yaml()
+
     template_content = _load_template("app.yaml.template")
     content = Template(template_content).substitute(
         LAKEBASE_INSTANCE=lakebase_name,
@@ -1217,6 +1348,14 @@ def _write_app_yaml(
         LAKEBASE_PROJECT_ID=lakebase_project_id,
         LAKEBASE_ENDPOINT_NAME=lakebase_endpoint_name,
         PIP_INDEX_ARGS=pip_index_args,
+        MLFLOW_TRACING_SQL_WAREHOUSE_ID=mlflow_tracing.get(
+            "MLFLOW_TRACING_SQL_WAREHOUSE_ID", ""
+        ),
+        TELLR_MLFLOW_UC_CATALOG=mlflow_tracing.get("TELLR_MLFLOW_UC_CATALOG", ""),
+        TELLR_MLFLOW_UC_SCHEMA=mlflow_tracing.get("TELLR_MLFLOW_UC_SCHEMA", ""),
+        TELLR_MLFLOW_UC_TABLE_PREFIX=mlflow_tracing.get(
+            "TELLR_MLFLOW_UC_TABLE_PREFIX", ""
+        ),
     )
     (staging_dir / "app.yaml").write_text(content)
 

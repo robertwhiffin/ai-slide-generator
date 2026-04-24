@@ -55,6 +55,8 @@ tellr.create(
 
 That's it. Open your Databricks Apps to find tellr running.
 
+**Optional — MLflow traces in Unity Catalog:** For production, you can route GenAI traces to UC Delta tables (recommended for some Apps deployments). Configure `mlflow_tracing` in `config/deployment.yaml`, set `TELLR_DEPLOY_MLFLOW_*` env vars at deploy time, or pass `mlflow_tracing={...}` to `tellr.create` / `tellr.update`. See [`docs/technical/mlflow-uc-tracing.md`](docs/technical/mlflow-uc-tracing.md).
+
 ### Update or Delete
 
 ```python

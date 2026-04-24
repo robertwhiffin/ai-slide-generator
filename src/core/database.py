@@ -492,6 +492,45 @@ def _run_migrations(engine, schema: str | None = None):
         # --- deck-centric permissions: drop profile_id, migrate CAN_VIEW → CAN_USE ---
         _migrate_deck_permissions_model(conn, inspector, schema, _qual, is_sqlite)
 
+        # --- image_assets.tags: json → jsonb (PostgreSQL) for native @> queries ---
+        _migrate_image_assets_tags_json_to_jsonb(conn, schema, _qual, is_sqlite)
+
+
+def _migrate_image_assets_tags_json_to_jsonb(conn, schema, _qual, is_sqlite) -> None:
+    """Alter image_assets.tags from json to jsonb on PostgreSQL (idempotent).
+
+    Existing DBs created before JSONB model used PostgreSQL ``json`` for tags; SQLAlchemy
+    ``.contains()`` on ``json`` emitted invalid ``json ~~ text``. New installs use JSONB
+    via ``with_variant``; this migration aligns old rows.
+    """
+    if is_sqlite:
+        return
+
+    from sqlalchemy import text
+
+    sch = schema or "public"
+    row = conn.execute(
+        text(
+            """
+            SELECT udt_name FROM information_schema.columns
+            WHERE table_schema = :schema AND table_name = 'image_assets' AND column_name = 'tags'
+            """
+        ),
+        {"schema": sch},
+    ).fetchone()
+    if not row:
+        return
+    if row[0] != "json":
+        return
+
+    table = "image_assets"
+    logger.info(f"Migration: altering {table}.tags from json to jsonb (schema={sch})")
+    conn.execute(
+        text(
+            f"ALTER TABLE {_qual(table)} ALTER COLUMN tags TYPE jsonb USING tags::jsonb"
+        )
+    )
+
 
 def _migrate_google_credentials_to_global(conn, inspector, schema, _qual, is_sqlite):
     """Copy first non-null google_credentials_encrypted to global table, then null out profiles."""

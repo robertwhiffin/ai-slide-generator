@@ -1,8 +1,11 @@
 """Unit tests for image upload, thumbnail, search, and delete service."""
 import base64
+import re
+from unittest.mock import MagicMock, patch
 
 import pytest
 from sqlalchemy import create_engine
+from sqlalchemy.dialects import postgresql
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
@@ -280,6 +283,57 @@ class TestSearchImages:
 
         results = image_service.search_images(db_session)
         assert results[0].original_filename == "new.png"
+
+    def test_postgres_tag_filter_uses_jsonb_containment_not_like_on_json(self, db_session):
+        """Regression: Lakebase/Postgres failed with json ~~ text when tags=['logo','branding'].
+
+        The ORM may still attach the JSON variant when the Session uses SQLite; we always
+        ``cast(tags AS jsonb).contains(...)`` for the Postgres branch so SQL uses ``@>``.
+        """
+        mock_bind = MagicMock()
+        mock_bind.dialect.name = "postgresql"
+        with patch.object(db_session, "get_bind", return_value=mock_bind):
+            q = image_service._search_images_query(
+                db_session,
+                tags=["logo", "branding"],
+            )
+        compiled = str(
+            q.statement.compile(
+                dialect=postgresql.dialect(),
+                compile_kwargs={"literal_binds": False},
+            )
+        )
+        assert "@>" in compiled, f"expected JSONB containment in SQL, got:\n{compiled}"
+        assert re.search(r"cast\s*\(\s*.*tags.*jsonb", compiled, re.IGNORECASE | re.DOTALL), (
+            f"expected CAST(... AS JSONB) around tags in SQL, got:\n{compiled}"
+        )
+        assert "image_assets.tags LIKE" not in compiled.replace(" ", "").lower()
+
+    def test_filter_by_tags_runtime_multiple_tags(self, db_session, png_1x1):
+        """Agent-style filter tags=['logo','branding'] returns rows that include both tags."""
+        image_service.upload_image(
+            db=db_session,
+            file_content=png_1x1,
+            original_filename="corp-logo.png",
+            mime_type="image/png",
+            user="u1",
+            tags=["logo", "branding"],
+            category="branding",
+        )
+        image_service.upload_image(
+            db=db_session,
+            file_content=png_1x1,
+            original_filename="chart.png",
+            mime_type="image/png",
+            user="u1",
+            tags=["chart", "data"],
+            category="content",
+        )
+        results = image_service.search_images(db_session, tags=["logo", "branding"])
+        assert len(results) == 1
+        assert results[0].original_filename == "corp-logo.png"
+        assert "logo" in (results[0].tags or [])
+        assert "branding" in (results[0].tags or [])
 
 
 # ===== Soft Delete =====
