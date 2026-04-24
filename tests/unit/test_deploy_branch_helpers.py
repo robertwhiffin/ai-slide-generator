@@ -100,6 +100,9 @@ class TestCreateBranchFrom:
         assert call_kwargs["branch_id"] == "staging"
         branch_arg = call_kwargs["branch"]
         assert branch_arg.spec.source_branch == "projects/db-tellr/branches/production"
+        # Databricks API requires an expiration policy on every branch.
+        # We manage the lifecycle explicitly (delete+recreate per deploy).
+        assert branch_arg.spec.no_expiry is True
 
         # Verify operation waited
         create_op.wait.assert_called_once()

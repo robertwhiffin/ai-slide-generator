@@ -1030,7 +1030,7 @@ def _create_branch_from(
     logger.info(f"Creating branch {target_branch} from {source_branch}")
     operation = ws.postgres.create_branch(
         parent=target_parent,
-        branch=Branch(spec=BranchSpec(source_branch=source_path)),
+        branch=Branch(spec=BranchSpec(source_branch=source_path, no_expiry=True)),
         branch_id=target_branch,
     )
     operation.wait()
