@@ -79,8 +79,12 @@ class TestCreateBranchFrom:
         endpoint_ready.status = MagicMock(
             hosts=MagicMock(host="staging-ep1.example.com")
         )
-        # list_endpoints returns an iterator; mock returns ready endpoint
-        mock_ws.postgres.list_endpoints.return_value = iter([endpoint_ready])
+        # list_endpoints returns an iterator; mock returns ready endpoint.
+        # Use side_effect so each call gets a fresh iterator (avoids
+        # one-shot iter() exhaustion if polling ever loops).
+        mock_ws.postgres.list_endpoints.side_effect = (
+            lambda **kw: iter([endpoint_ready])
+        )
         mock_ws.postgres.get_endpoint.return_value = endpoint_ready
 
         result = _create_branch_from(
@@ -114,8 +118,10 @@ class TestCreateBranchFrom:
 
         create_op = MagicMock()
         mock_ws.postgres.create_branch.return_value = create_op
-        # Always empty
-        mock_ws.postgres.list_endpoints.return_value = iter([])
+        # Always empty — use side_effect so every poll gets a fresh empty
+        # iterator (return_value = iter([]) exhausts after the first call,
+        # making subsequent list(...) calls silently also return []).
+        mock_ws.postgres.list_endpoints.side_effect = lambda **kw: iter([])
 
         # Patch sleep so the test doesn't actually wait
         monkeypatch.setattr("databricks_tellr.deploy.time.sleep", lambda *_: None)

@@ -444,6 +444,16 @@ def update_local(
             encryption_key = _check_branching_preconditions(ws, config)
             print(f"   Preflight OK (source: {branch_from_env})")
 
+            # Verify the app exists BEFORE branch recreation so we don't leave
+            # an orphan staging branch when the user runs update before create.
+            try:
+                app = ws.apps.get(name=app_name)
+            except Exception as e:
+                raise DeploymentError(
+                    f"App '{app_name}' does not exist — "
+                    f"run 'deploy_local.sh create --env {env}' first"
+                ) from e
+
             print(f"Recreating ephemeral branch '{env}' from '{branch_from_env}'...")
             lakebase_result = _recreate_ephemeral_branch(
                 ws, lakebase_name, branch_from_env, env
@@ -453,13 +463,17 @@ def update_local(
                 f"(endpoint: {lakebase_result['host']})"
             )
 
-            # Register SP role on the new staging branch
-            app = ws.apps.get(name=app_name)
+            # Register SP role on the new staging branch.
+            # (`app` was fetched above — reuse it; no need to re-GET.)
             client_id = _get_app_client_id(app)
             if client_id:
                 print("Configuring SP role on new branch...")
                 _ensure_sp_autoscaling_role(
                     ws, lakebase_name, client_id, branch_name=env
+                )
+            else:
+                print(
+                    "   Warning: Could not get SP client ID — role setup skipped"
                 )
 
             # Grant schema perms on the new branch
@@ -552,6 +566,13 @@ def delete_local(env: str, profile: str, reset_database: bool = False) -> dict[s
     """Delete a Databricks App (and its ephemeral branch, if branching)."""
     config = load_deployment_config(env)
     branch_from_env = config.get("branch_from_env")
+
+    if branch_from_env and reset_database:
+        print(
+            "WARNING: --reset-db is a no-op for branching envs "
+            "(the branch itself is about to be deleted). Ignoring."
+        )
+        reset_database = False
 
     result = delete(
         app_name=config["app_name"],
