@@ -9,6 +9,7 @@ from __future__ import annotations
 import logging
 import os
 import shutil
+import time
 import uuid
 from contextlib import contextmanager
 from importlib import metadata, resources
@@ -31,7 +32,13 @@ from databricks.sdk.service.workspace import ImportFormat
 
 # Autoscaling imports (Lakebase next-gen)
 try:
-    from databricks.sdk.service.postgres import Project, ProjectDefaultEndpointSettings, ProjectSpec
+    from databricks.sdk.service.postgres import (
+        Branch,
+        BranchSpec,
+        Project,
+        ProjectDefaultEndpointSettings,
+        ProjectSpec,
+    )
     HAS_AUTOSCALING_SDK = True
 except ImportError:
     HAS_AUTOSCALING_SDK = False
@@ -704,6 +711,11 @@ def _capacity_to_autoscaling_cu(capacity: str) -> tuple[float, float]:
     return min_cu, max_cu
 
 
+# How long to poll for a new branch's endpoint to come up before giving up.
+_BRANCH_ENDPOINT_TIMEOUT_S = 120
+_BRANCH_ENDPOINT_POLL_INTERVAL_S = 3
+
+
 def _probe_autoscaling_available(ws: WorkspaceClient) -> bool:
     """Check if Lakebase Autoscaling API is available in this workspace."""
     if not HAS_AUTOSCALING_SDK:
@@ -981,6 +993,72 @@ def _delete_branch(
             logger.info(f"Branch {branch_name} not found (already deleted)")
             return
         raise
+
+
+def _create_branch_from(
+    ws: WorkspaceClient,
+    project_name: str,
+    source_branch: str,
+    target_branch: str,
+) -> dict[str, Any]:
+    """Create a new Lakebase branch as a child of `source_branch`.
+
+    Waits on the create operation, then polls list_endpoints on the new
+    branch until an endpoint with a populated host appears
+    (up to _BRANCH_ENDPOINT_TIMEOUT_S). Raises DeploymentError on timeout.
+
+    Returns a lakebase_result-shaped dict pointing at the new branch.
+    """
+    if not HAS_AUTOSCALING_SDK:
+        raise DeploymentError(
+            "Autoscaling SDK not available — cannot create Lakebase branch. "
+            "Upgrade databricks-sdk."
+        )
+
+    source_path = f"projects/{project_name}/branches/{source_branch}"
+    target_parent = f"projects/{project_name}"
+    target_path = f"projects/{project_name}/branches/{target_branch}"
+
+    logger.info(f"Creating branch {target_branch} from {source_branch}")
+    operation = ws.postgres.create_branch(
+        parent=target_parent,
+        branch=Branch(spec=BranchSpec(source_branch=source_path)),
+        branch_id=target_branch,
+    )
+    operation.wait()
+    logger.info(f"Branch {target_branch} created")
+
+    # Poll for endpoint readiness
+    deadline = time.time() + _BRANCH_ENDPOINT_TIMEOUT_S
+    endpoint = None
+    while time.time() < deadline:
+        endpoints = list(ws.postgres.list_endpoints(parent=target_path))
+        ready = [
+            e for e in endpoints
+            if getattr(e, "status", None)
+            and getattr(e.status, "hosts", None)
+            and getattr(e.status.hosts, "host", None)
+        ]
+        if ready:
+            endpoint = ready[0]
+            break
+        time.sleep(_BRANCH_ENDPOINT_POLL_INTERVAL_S)
+
+    if endpoint is None:
+        raise DeploymentError(
+            f"Branch {target_branch} created but no endpoint ready within "
+            f"{_BRANCH_ENDPOINT_TIMEOUT_S}s"
+        )
+
+    return {
+        "name": project_name,
+        "type": "autoscaling",
+        "status": "created",
+        "host": endpoint.status.hosts.host,
+        "endpoint_name": endpoint.name,
+        "project_id": project_name,
+        "instance_name": None,
+    }
 
 
 def _write_requirements(
