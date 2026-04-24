@@ -307,6 +307,40 @@ class TestEnsureSpAutoscalingRole:
         assert kwargs["parent"] == "projects/my-project/branches/production"
 
 
+class TestEnsureSpAutoscalingRoleBranchName:
+    """Tests that _ensure_sp_autoscaling_role uses the branch_name kwarg."""
+
+    def test_default_branch_is_production(self, mock_ws):
+        # get_role raises not-found so we go down the create path
+        mock_ws.postgres.get_role.side_effect = Exception("not found")
+        create_op = MagicMock()
+        mock_ws.postgres.create_role.return_value = create_op
+
+        with patch("databricks_tellr.deploy.HAS_ROLE_SDK", True):
+            _ensure_sp_autoscaling_role(mock_ws, "db-tellr", "client-123")
+
+        # Inspect parent path used for role creation
+        assert (
+            mock_ws.postgres.create_role.call_args.kwargs["parent"]
+            == "projects/db-tellr/branches/production"
+        )
+
+    def test_custom_branch_name_threads_through(self, mock_ws):
+        mock_ws.postgres.get_role.side_effect = Exception("not found")
+        create_op = MagicMock()
+        mock_ws.postgres.create_role.return_value = create_op
+
+        with patch("databricks_tellr.deploy.HAS_ROLE_SDK", True):
+            _ensure_sp_autoscaling_role(
+                mock_ws, "db-tellr", "client-123", branch_name="staging"
+            )
+
+        assert (
+            mock_ws.postgres.create_role.call_args.kwargs["parent"]
+            == "projects/db-tellr/branches/staging"
+        )
+
+
 # ---------------------------------------------------------------------------
 # _create_app
 # ---------------------------------------------------------------------------

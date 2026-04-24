@@ -787,7 +787,10 @@ def _get_or_create_lakebase_autoscaling(
 
 
 def _ensure_sp_autoscaling_role(
-    ws: WorkspaceClient, project_name: str, client_id: str
+    ws: WorkspaceClient,
+    project_name: str,
+    client_id: str,
+    branch_name: str = "production",
 ) -> None:
     """Create or verify the SP's Postgres role on an autoscaling project.
 
@@ -803,6 +806,7 @@ def _ensure_sp_autoscaling_role(
         ws: WorkspaceClient
         project_name: Autoscaling project name (e.g. "teller-dev-mohamed")
         client_id: The app service principal's client ID (UUID)
+        branch_name: Branch under the project to attach the role to (default "production").
     """
     if not HAS_ROLE_SDK:
         logger.warning(
@@ -812,7 +816,7 @@ def _ensure_sp_autoscaling_role(
         print("   Warning: SDK too old for role API — SP role must be configured manually")
         return
 
-    branch_path = f"projects/{project_name}/branches/production"
+    branch_path = f"projects/{project_name}/branches/{branch_name}"
     role_id = f"sp-{client_id}"
     role_path = f"{branch_path}/roles/{role_id}"
 
