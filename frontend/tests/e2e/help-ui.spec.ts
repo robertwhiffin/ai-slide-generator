@@ -213,6 +213,12 @@ test.describe('HelpTabs', () => {
     // Default tab is Overview.
     await expect(page.getByText(/Programmatic API via MCP/)).toBeVisible();
   });
+
+  test('Overview Quick Link navigates to the MCP tab', async ({ page }) => {
+    await goToHelp(page);
+    await page.getByRole('button', { name: /Learn about MCP/ }).click();
+    await expect(page.getByRole('heading', { name: 'What is MCP?' })).toBeVisible();
+  });
 });
 
 // ============================================

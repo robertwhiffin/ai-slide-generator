@@ -129,6 +129,7 @@ const OverviewTab: React.FC<{
         <QuickLinkButton tab="deck_prompts" label="Learn about Deck Prompts →" />
         <QuickLinkButton tab="slide_styles" label="Learn about Slide Styles →" />
         <QuickLinkButton tab="images" label="Learn about Images →" />
+        <QuickLinkButton tab="mcp" label="Learn about MCP →" />
       </div>
     </section>
 
