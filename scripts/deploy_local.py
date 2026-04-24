@@ -414,17 +414,7 @@ def update_local(
     reset_database: bool = False,
     seed_databricks_defaults: bool = True,
 ) -> dict[str, Any]:
-    """Update an existing Databricks App using locally-built wheels.
-
-    Args:
-        env: Environment name (development, staging, production)
-        profile: Databricks CLI profile name
-        reset_database: If True, drop and recreate the schema
-        seed_databricks_defaults: If True, seed Databricks-specific content
-
-    Returns:
-        Dictionary with deployment info
-    """
+    """Update an existing Databricks App using locally-built wheels."""
     config = load_deployment_config(env)
     ws = _get_workspace_client(profile=profile)
 
@@ -432,21 +422,65 @@ def update_local(
     workspace_path = config["workspace_path"]
     lakebase_name = config["lakebase_name"]
     schema_name = config["schema_name"]
+    branch_from_env = config.get("branch_from_env")
+
+    if branch_from_env and reset_database:
+        print(
+            "WARNING: --reset-db is a no-op for branching envs "
+            "(each deploy is already a fresh branch). Ignoring."
+        )
+        reset_database = False
 
     print(f"Updating AI Slide Generator (local wheels): {app_name}")
+    if branch_from_env:
+        print(f"   Branching from: {branch_from_env} (ephemeral branch '{env}')")
     print()
 
     try:
-        # Get current Lakebase state (needed for connection info and type)
-        print("Checking Lakebase database...")
-        lakebase_result = _get_or_create_lakebase(
-            ws, lakebase_name, config["lakebase_capacity"]
-        )
+        # Branching mode: preflight + recreate branch
+        if branch_from_env:
+            print("Running branching preflight checks...")
+            encryption_key = _check_branching_preconditions(ws, config)
+            print(f"   Preflight OK (source: {branch_from_env})")
+
+            print(f"Recreating ephemeral branch '{env}' from '{branch_from_env}'...")
+            lakebase_result = _recreate_ephemeral_branch(
+                ws, lakebase_name, branch_from_env, env
+            )
+            print(
+                f"   Branch '{env}' ready "
+                f"(endpoint: {lakebase_result['host']})"
+            )
+
+            # Register SP role on the new staging branch
+            app = ws.apps.get(name=app_name)
+            client_id = _get_app_client_id(app)
+            if client_id:
+                print("Configuring SP role on new branch...")
+                _ensure_sp_autoscaling_role(
+                    ws, lakebase_name, client_id, branch_name=env
+                )
+
+            # Grant schema perms on the new branch
+            print("Granting schema permissions on new branch...")
+            _setup_database_schema(
+                ws, app, lakebase_name, schema_name,
+                lakebase_result=lakebase_result,
+            )
+            print(f"   Schema '{schema_name}' permissions configured")
+        else:
+            # Standard path (prod/dev): get current Lakebase state
+            print("Checking Lakebase database...")
+            lakebase_result = _get_or_create_lakebase(
+                ws, lakebase_name, config["lakebase_capacity"]
+            )
+            encryption_key = _read_existing_encryption_key(ws, workspace_path)
+
         lakebase_type = lakebase_result.get("type", "provisioned")
         print(f"   Lakebase: {lakebase_result['name']} (type={lakebase_type})")
         print()
 
-        # Reset database if requested
+        # Reset database if requested (non-branching only; warning already printed)
         if reset_database:
             print("Resetting database schema...")
             app = ws.apps.get(name=app_name)
@@ -466,9 +500,6 @@ def update_local(
         local_wheel_ref = upload_wheel(ws, wheel_path, workspace_path)
         print(f"   Uploaded: {local_wheel_ref}")
         print()
-
-        # Preserve the existing encryption key so we don't invalidate encrypted data
-        encryption_key = _read_existing_encryption_key(ws, workspace_path)
 
         # Generate and upload deployment files
         print("Preparing deployment files...")
@@ -508,6 +539,7 @@ def update_local(
             "deployment_id": result.deployment_id,
             "wheel": wheel_path.name,
             "status": "updated",
+            "branch": env if branch_from_env else None,
             "database_reset": reset_database,
         }
 
