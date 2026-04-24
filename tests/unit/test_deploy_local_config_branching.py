@@ -120,3 +120,34 @@ class TestResetDbNoopWarning:
 
         captured = capsys.readouterr()
         assert "--reset-db is a no-op for branching envs" in captured.out
+
+
+class TestUpdateLocalMissingApp:
+    """Regression: update_local branching path raises a clear error when the app doesn't exist."""
+
+    def test_missing_app_raises_actionable_error(
+        self, config_path, monkeypatch
+    ):
+        from scripts import deploy_local
+
+        # Return a mock ws whose apps.get raises NotFound-style exception
+        mock_ws = MagicMock()
+        mock_ws.apps.get.side_effect = Exception("Resource not found")
+        monkeypatch.setattr(
+            deploy_local, "_get_workspace_client", lambda profile=None: mock_ws
+        )
+        # Preflight passes (we want to exercise the NEW early-app-check, not preflight failure)
+        monkeypatch.setattr(
+            deploy_local, "_check_branching_preconditions",
+            lambda ws, cfg: "dummy-key",
+        )
+
+        with pytest.raises(
+            deploy_local.DeploymentError,
+            match=r"App .* does not exist.*run 'deploy_local.sh create --env staging' first",
+        ):
+            deploy_local.update_local(env="staging", profile="p")
+
+        # Confirm we never called _recreate_ephemeral_branch — the whole point.
+        mock_ws.postgres.create_branch.assert_not_called()
+        mock_ws.postgres.delete_branch.assert_not_called()
