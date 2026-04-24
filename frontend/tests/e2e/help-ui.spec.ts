@@ -161,6 +161,11 @@ test.describe('HelpTabs', () => {
 
     await expect(page.getByRole('heading', { name: 'What are Slide Styles?' })).toBeVisible();
   });
+
+  test('MCP tab renders in the tab strip', async ({ page }) => {
+    await goToHelp(page);
+    await expect(getHelpTabButton(page, 'MCP')).toBeVisible();
+  });
 });
 
 // ============================================

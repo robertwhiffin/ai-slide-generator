@@ -3,7 +3,7 @@ import { FiMessageSquare, FiClock, FiSettings, FiInfo, FiShield, FiFileText, FiL
 import { FaGavel } from 'react-icons/fa';
 import { DOCS_URLS } from '../../constants/docs';
 
-type HelpTab = 'overview' | 'generator' | 'history' | 'profiles' | 'deck_prompts' | 'slide_styles' | 'images' | 'verification';
+type HelpTab = 'overview' | 'generator' | 'history' | 'profiles' | 'deck_prompts' | 'slide_styles' | 'images' | 'verification' | 'mcp';
 
 export const HelpPage: React.FC = () => {
   const [activeTab, setActiveTab] = useState<HelpTab>('overview');
@@ -48,6 +48,7 @@ export const HelpPage: React.FC = () => {
         <TabButton tab="deck_prompts" label="Deck Prompts" icon={FiFileText} />
         <TabButton tab="slide_styles" label="Slide Styles" icon={FiLayout} />
         <TabButton tab="images" label="Images" icon={FiImage} />
+        <TabButton tab="mcp" label="MCP" icon={FiExternalLink} />
       </div>
 
       {/* Content area */}
@@ -60,6 +61,7 @@ export const HelpPage: React.FC = () => {
         {activeTab === 'deck_prompts' && <DeckPromptsTab />}
         {activeTab === 'slide_styles' && <SlideStylesTab />}
         {activeTab === 'images' && <ImagesTab />}
+        {activeTab === 'mcp' && <MCPTab />}
       </div>
     </div>
   );
@@ -773,6 +775,9 @@ Use {{image:12}} as the background for the title slide.`}
     <DocLink href={DOCS_URLS.uploadingImages} label="Uploading Images Guide" />
   </div>
 );
+
+// MCP Tab Content
+const MCPTab: React.FC = () => <div>TBD</div>;
 
 // Reusable doc link component for tab footers
 const DocLink: React.FC<{ href: string; label: string }> = ({ href, label }) => (
