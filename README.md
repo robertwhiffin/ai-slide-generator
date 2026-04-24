@@ -18,6 +18,7 @@ AI slide generators exist — but they can't touch your governed data without br
 - **Respects permissions** — Uses Unity Catalog security out of the box
 - **Conversational editing** — Refine slides through natural language ("add a comparison to Q3", "make the EMEA section more prominent")
 - **Prompt-only mode** — Works without Genie for general-purpose slide generation
+- **Agent-ready** — Call tellr from other Databricks Apps or MCP-compatible agents (Claude Code, Cursor) via a Model Context Protocol server. Programmatically generated decks are attributed to the end user and appear alongside UI-created ones. See the [MCP Integration Guide](docs/technical/mcp-integration-guide.md).
 
 tellr is the third pillar in Databricks' AI/BI suite, completing the story alongside Genie and Dashboards: conversational analytics, conversational dashboards, and now **conversational presentations**.
 
@@ -126,6 +127,8 @@ Step-by-step instructions with screenshots:
 | [Backend Overview](docs/technical/backend-overview.md) | FastAPI, agent lifecycle, API contracts |
 | [Frontend Overview](docs/technical/frontend-overview.md) | React components, state management |
 | [Databricks Deployment](docs/technical/databricks-app-deployment.md) | Deployment CLI, environments |
+| [MCP Integration Guide](docs/technical/mcp-integration-guide.md) | How-to: wire tellr into your Databricks App or into an MCP client like Claude Code |
+| [MCP Server Reference](docs/technical/mcp-server.md) | Protocol, tool schemas, response payloads |
 | [Database Config](docs/technical/database-configuration.md) | PostgreSQL/Lakebase schema |
 
 ### More Technical Docs

@@ -20,6 +20,18 @@ logger = logging.getLogger(__name__)
 jobs: Dict[str, Dict[str, Any]] = {}
 job_queue: asyncio.Queue = asyncio.Queue()
 
+# Maximum duration (seconds) a chat request can stay in "running" before the
+# hard-timeout sweeper marks it failed. Belt-and-suspenders on top of the
+# startup recover_stuck_requests() pass: the sweeper runs continuously while
+# the app is up, whereas recovery only runs at process boot. Gives MCP callers
+# a predictable upper bound on poll duration independent of deploy cadence.
+JOB_HARD_TIMEOUT_SECONDS = 600
+
+# How often the timeout sweeper loop wakes up to scan for stuck jobs.
+# Shorter values catch stuck jobs faster but scan more often; 60 is
+# the sweet spot given the 10-minute stuck-job cutoff.
+TIMEOUT_SWEEP_INTERVAL_SECONDS = 60
+
 
 async def enqueue_job(request_id: str, payload: dict) -> None:
     """Add a job to the queue.
@@ -206,6 +218,7 @@ async def worker() -> None:
         try:
             request_id, payload = await job_queue.get()
             jobs[request_id]["status"] = "running"
+            jobs[request_id]["started_at"] = datetime.utcnow()
 
             try:
                 await process_chat_request(request_id, payload)
@@ -276,4 +289,78 @@ async def recover_stuck_requests() -> int:
             logger.info(f"Recovered {count} stuck requests")
 
     return count
+
+
+async def mark_timed_out_jobs_once() -> int:
+    """Single sweep: mark running jobs older than JOB_HARD_TIMEOUT_SECONDS as failed.
+
+    Examines the in-memory ``jobs`` dict. For any entry whose ``status`` is
+    ``"running"`` and whose ``started_at`` is older than the timeout, flips
+    the status to ``"failed"`` and records an explanatory error. Jobs with
+    no ``started_at`` are left untouched (we cannot determine age).
+
+    Does NOT cancel the underlying worker coroutine — it only marks the
+    in-memory record. A stuck worker slot remains occupied until the next
+    app restart. See the spec's Error Handling section for the reasoning
+    behind this choice.
+
+    Returns:
+        Number of jobs marked failed in this sweep (useful for logging).
+    """
+    now = datetime.utcnow()
+    cutoff = now - timedelta(seconds=JOB_HARD_TIMEOUT_SECONDS)
+    marked = 0
+
+    for request_id, entry in list(jobs.items()):
+        if entry.get("status") != "running":
+            continue
+        started_at = entry.get("started_at")
+        if started_at is None:
+            continue
+        if started_at > cutoff:
+            continue
+
+        entry["status"] = "failed"
+        entry["error"] = (
+            f"Generation exceeded maximum duration "
+            f"({JOB_HARD_TIMEOUT_SECONDS // 60} minutes)"
+        )
+        entry["ended_at"] = now
+        marked += 1
+        logger.warning(
+            "Marked job as timed-out",
+            extra={
+                "request_id": request_id,
+                "session_id": entry.get("session_id"),
+                "age_seconds": (now - started_at).total_seconds(),
+            },
+        )
+
+    return marked
+
+
+async def mark_timed_out_jobs_loop() -> None:
+    """Background loop: runs ``mark_timed_out_jobs_once()`` every 60 seconds.
+
+    Started in the FastAPI lifespan alongside the existing chat/export workers
+    and request-log cleanup loop. Survives its own exceptions so a single
+    transient failure does not take the loop down for the lifetime of the
+    process. Responds to ``asyncio.CancelledError`` for clean shutdown.
+    """
+    while True:
+        try:
+            await asyncio.sleep(TIMEOUT_SWEEP_INTERVAL_SECONDS)
+            marked = await mark_timed_out_jobs_once()
+            if marked:
+                logger.info(
+                    "Timeout sweep marked %d job(s) as failed", marked
+                )
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.warning(
+                "Timeout sweep iteration failed",
+                exc_info=True,
+                extra={"error": str(e)},
+            )
 

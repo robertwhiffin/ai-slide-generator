@@ -28,7 +28,7 @@ Click the add button to browse available Genie spaces and MCP servers. Select on
 
 ### Step 03: Select Style and Prompt
 
-Use the AgentConfigBar to pick a slide style (visual appearance) and optionally a deck prompt (content template).
+Use the AgentConfigBar to pick a slide style (visual appearance) and optionally a deck prompt (content template). New sessions pre-fill with your personal default if you've set one, otherwise with the organization's corporate default — see [Creating Custom Slide Styles → Defaults: corporate vs. personal](./05-creating-custom-styles.md#defaults-corporate-vs-personal) for how those two levels work.
 
 ## Saving a Configuration as a Profile
 

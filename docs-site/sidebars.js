@@ -64,6 +64,8 @@ const sidebars = {
         'technical/image-upload',
         'technical/google-slides-integration',
         'technical/feedback-system',
+        'technical/mcp-server',
+        'technical/mcp-integration-guide',
       ],
     },
   ],
