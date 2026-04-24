@@ -730,7 +730,10 @@ def _probe_autoscaling_available(ws: WorkspaceClient) -> bool:
 
 
 def _get_or_create_lakebase_autoscaling(
-    ws: WorkspaceClient, database_name: str, capacity: str
+    ws: WorkspaceClient,
+    database_name: str,
+    capacity: str,
+    branch_name: str = "production",
 ) -> dict[str, Any]:
     """Get or create a Lakebase Autoscaling project.
 
@@ -764,11 +767,12 @@ def _get_or_create_lakebase_autoscaling(
 
     # Get the primary endpoint for connection info
     endpoints = list(ws.postgres.list_endpoints(
-        parent=f"projects/{database_name}/branches/production"
+        parent=f"projects/{database_name}/branches/{branch_name}"
     ))
     if not endpoints:
         raise DeploymentError(
-            f"No endpoints found for autoscaling project {database_name}"
+            f"No endpoints found for autoscaling project {database_name} "
+            f"on branch {branch_name}"
         )
 
     endpoint = ws.postgres.get_endpoint(name=endpoints[0].name)
