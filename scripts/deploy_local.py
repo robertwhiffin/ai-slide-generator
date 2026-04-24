@@ -47,17 +47,36 @@ from databricks_tellr.deploy import (
 )
 
 
+def _load_branch_source_config(
+    environments: dict, source_env_name: str
+) -> dict:
+    """Return {workspace_path, schema, database_name} from the source env.
+
+    Raises:
+        DeploymentError: if source env is missing.
+    """
+    if source_env_name not in environments:
+        raise DeploymentError(
+            f'branch_from "{source_env_name}" not found in deployment config'
+        )
+    src = environments[source_env_name]
+    src_lb = src.get("lakebase", {})
+    return {
+        "workspace_path": src.get("workspace_path"),
+        "schema": src_lb.get("schema"),
+        "database_name": src_lb.get("database_name"),
+    }
+
+
 def load_deployment_config(env: str) -> dict[str, Any]:
     """Load deployment configuration for the specified environment.
 
-    Args:
-        env: Environment name (development, staging, production)
-
-    Returns:
-        Dictionary with deployment configuration
+    Supports `lakebase.branch_from: <env>` — when set, the target env
+    inherits `schema` from the source env and the output dict carries
+    `branch_from_env` + `branch_from_workspace_path` so callers can run the
+    branching flow.
     """
     config_path = PROJECT_ROOT / "config" / "deployment.yaml"
-
     if not config_path.exists():
         raise DeploymentError(f"Deployment config not found: {config_path}")
 
@@ -75,6 +94,30 @@ def load_deployment_config(env: str) -> dict[str, Any]:
     env_config = environments[env]
     lakebase_config = env_config.get("lakebase", {})
 
+    branch_from = lakebase_config.get("branch_from")
+    schema_name = lakebase_config.get("schema")
+    branch_from_workspace_path = None
+
+    if branch_from:
+        src = _load_branch_source_config(environments, branch_from)
+        if src["database_name"] != lakebase_config.get("database_name"):
+            raise DeploymentError(
+                f"branching requires same database_name; "
+                f'{env}={lakebase_config.get("database_name")}, '
+                f'{branch_from}={src["database_name"]}'
+            )
+        # Inherit schema from source env. If this env also specified a schema
+        # and it differs, raise — avoid silent mismatches.
+        if schema_name and schema_name != src["schema"]:
+            raise DeploymentError(
+                f"branching env '{env}' declared schema '{schema_name}' "
+                f"which differs from source env '{branch_from}' schema "
+                f"'{src['schema']}'. Remove the schema field from '{env}' "
+                f"or change it to match."
+            )
+        schema_name = src["schema"]
+        branch_from_workspace_path = src["workspace_path"]
+
     return {
         "app_name": env_config.get("app_name"),
         "description": env_config.get("description", "AI Slide Generator"),
@@ -82,7 +125,9 @@ def load_deployment_config(env: str) -> dict[str, Any]:
         "compute_size": env_config.get("compute_size", "MEDIUM"),
         "lakebase_name": lakebase_config.get("database_name"),
         "lakebase_capacity": lakebase_config.get("capacity", "CU_1"),
-        "schema_name": lakebase_config.get("schema"),
+        "schema_name": schema_name,
+        "branch_from_env": branch_from,
+        "branch_from_workspace_path": branch_from_workspace_path,
     }
 
 
