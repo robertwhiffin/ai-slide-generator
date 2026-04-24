@@ -190,6 +190,23 @@ test.describe('HelpTabs', () => {
       page.getByRole('button', { name: /copy endpoint/i }),
     ).toBeVisible();
   });
+
+  test('MCP tab shows prerequisites', async ({ page }) => {
+    await goToHelp(page);
+    await getHelpTabButton(page, 'MCP').click();
+    await expect(page.getByRole('heading', { name: 'Prerequisites' })).toBeVisible();
+    await expect(page.getByText(/Databricks user token/i)).toBeVisible();
+  });
+
+  test('MCP tab links to the integration guide', async ({ page }) => {
+    await goToHelp(page);
+    await getHelpTabButton(page, 'MCP').click();
+
+    const link = page.getByRole('link', { name: /MCP Integration Guide/i });
+    await expect(link).toBeVisible();
+    const href = await link.getAttribute('href');
+    expect(href).toContain('/technical/mcp-integration-guide');
+  });
 });
 
 // ============================================

@@ -841,6 +841,19 @@ const MCPTab: React.FC = () => {
           guide for how to resolve the correct URL.
         </p>
       </section>
+
+      <section>
+        <h2 className="text-lg font-semibold text-gray-800 mb-3">Prerequisites</h2>
+        <ul className="list-disc list-inside text-gray-600 space-y-2">
+          <li>A Databricks user token (OAuth U2M or PAT)</li>
+          <li>
+            An MCP-capable client: Claude Code, Claude Desktop, Cursor, or a
+            raw HTTP library that speaks JSON-RPC 2.0
+          </li>
+        </ul>
+      </section>
+
+      <DocLink href={DOCS_URLS.mcpIntegrationGuide} label="MCP Integration Guide" />
     </div>
   );
 };
