@@ -9,6 +9,7 @@ from __future__ import annotations
 import logging
 import os
 import shutil
+import time
 import uuid
 from contextlib import contextmanager
 from importlib import metadata, resources
@@ -31,7 +32,14 @@ from databricks.sdk.service.workspace import ImportFormat
 
 # Autoscaling imports (Lakebase next-gen)
 try:
-    from databricks.sdk.service.postgres import Project, ProjectDefaultEndpointSettings, ProjectSpec
+    from databricks.sdk.service.postgres import (
+        Branch,
+        BranchSpec,
+        Duration,
+        Project,
+        ProjectDefaultEndpointSettings,
+        ProjectSpec,
+    )
     HAS_AUTOSCALING_SDK = True
 except ImportError:
     HAS_AUTOSCALING_SDK = False
@@ -704,6 +712,11 @@ def _capacity_to_autoscaling_cu(capacity: str) -> tuple[float, float]:
     return min_cu, max_cu
 
 
+# How long to poll for a new branch's endpoint to come up before giving up.
+_BRANCH_ENDPOINT_TIMEOUT_S = 120
+_BRANCH_ENDPOINT_POLL_INTERVAL_S = 3
+
+
 def _probe_autoscaling_available(ws: WorkspaceClient) -> bool:
     """Check if Lakebase Autoscaling API is available in this workspace."""
     if not HAS_AUTOSCALING_SDK:
@@ -718,7 +731,10 @@ def _probe_autoscaling_available(ws: WorkspaceClient) -> bool:
 
 
 def _get_or_create_lakebase_autoscaling(
-    ws: WorkspaceClient, database_name: str, capacity: str
+    ws: WorkspaceClient,
+    database_name: str,
+    capacity: str,
+    branch_name: str = "production",
 ) -> dict[str, Any]:
     """Get or create a Lakebase Autoscaling project.
 
@@ -752,11 +768,12 @@ def _get_or_create_lakebase_autoscaling(
 
     # Get the primary endpoint for connection info
     endpoints = list(ws.postgres.list_endpoints(
-        parent=f"projects/{database_name}/branches/production"
+        parent=f"projects/{database_name}/branches/{branch_name}"
     ))
     if not endpoints:
         raise DeploymentError(
-            f"No endpoints found for autoscaling project {database_name}"
+            f"No endpoints found for autoscaling project {database_name} "
+            f"on branch {branch_name}"
         )
 
     endpoint = ws.postgres.get_endpoint(name=endpoints[0].name)
@@ -775,7 +792,10 @@ def _get_or_create_lakebase_autoscaling(
 
 
 def _ensure_sp_autoscaling_role(
-    ws: WorkspaceClient, project_name: str, client_id: str
+    ws: WorkspaceClient,
+    project_name: str,
+    client_id: str,
+    branch_name: str = "production",
 ) -> None:
     """Create or verify the SP's Postgres role on an autoscaling project.
 
@@ -791,6 +811,7 @@ def _ensure_sp_autoscaling_role(
         ws: WorkspaceClient
         project_name: Autoscaling project name (e.g. "teller-dev-mohamed")
         client_id: The app service principal's client ID (UUID)
+        branch_name: Branch under the project to attach the role to (default "production").
     """
     if not HAS_ROLE_SDK:
         logger.warning(
@@ -800,7 +821,7 @@ def _ensure_sp_autoscaling_role(
         print("   Warning: SDK too old for role API — SP role must be configured manually")
         return
 
-    branch_path = f"projects/{project_name}/branches/production"
+    branch_path = f"projects/{project_name}/branches/{branch_name}"
     role_id = f"sp-{client_id}"
     role_path = f"{branch_path}/roles/{role_id}"
 
@@ -940,6 +961,157 @@ def _get_or_create_lakebase(
     result = _get_or_create_lakebase_provisioned(ws, database_name, capacity)
     logger.info(f"Using Lakebase Provisioned: {result['name']}")
     return result
+
+
+def _branch_exists(
+    ws: WorkspaceClient, project_name: str, branch_name: str
+) -> bool:
+    """Return True if the Lakebase branch exists, False on not-found.
+
+    Any error other than not-found is surfaced.
+    """
+    try:
+        ws.postgres.get_branch(
+            name=f"projects/{project_name}/branches/{branch_name}"
+        )
+        return True
+    except Exception as e:
+        error_str = str(e).lower()
+        if "not found" in error_str or "does not exist" in error_str:
+            return False
+        raise
+
+
+def _delete_branch(
+    ws: WorkspaceClient, project_name: str, branch_name: str
+) -> None:
+    """Delete a Lakebase branch. Idempotent — no-op if the branch is missing.
+
+    Waits on the long-running delete operation. Any error other than
+    not-found is surfaced.
+    """
+    try:
+        operation = ws.postgres.delete_branch(
+            name=f"projects/{project_name}/branches/{branch_name}"
+        )
+        operation.wait()
+        logger.info(f"Deleted Lakebase branch: {branch_name}")
+    except Exception as e:
+        error_str = str(e).lower()
+        if "not found" in error_str or "does not exist" in error_str:
+            logger.info(f"Branch {branch_name} not found (already deleted)")
+            return
+        raise
+
+
+# Lakebase branch TTL: 1 day. Branches auto-expire and are garbage-collected
+# after this window. The deploy flow relies on this for cleanup — we never
+# explicitly delete old branches, because Lakebase's delete is async and its
+# purge window is unpredictable (fixed-name reuse hits "branch id already
+# exists" for many minutes after delete). Unique-per-deploy IDs + TTL sidesteps
+# the whole issue.
+_BRANCH_TTL_SECONDS = 86400
+
+
+def _create_branch_from(
+    ws: WorkspaceClient,
+    project_name: str,
+    source_branch: str,
+    target_branch_prefix: str,
+) -> dict[str, Any]:
+    """Create a new Lakebase branch as a child of `source_branch`.
+
+    The branch ID is `{target_branch_prefix}-{unix_timestamp}` so that every
+    deploy gets a fresh unique ID. This avoids the "branch id already exists"
+    collision we hit when trying to reuse a fixed ID right after a delete —
+    Lakebase's delete is async and its purge window is unpredictable.
+
+    Branch is created with a 1-day TTL so Lakebase garbage-collects it for us.
+    The staging app the branch backs will break after ~1 day; re-deploy to get
+    a fresh branch. This trade is intentional: no cleanup code, no stale state.
+
+    Waits on the create operation, then polls list_endpoints on the new branch
+    until an endpoint with a populated host appears (up to
+    _BRANCH_ENDPOINT_TIMEOUT_S). Raises DeploymentError on timeout.
+
+    Returns a lakebase_result-shaped dict pointing at the new branch, with an
+    added `branch_id` field so callers can reference the unique name (e.g.,
+    for SP role registration).
+    """
+    if not HAS_AUTOSCALING_SDK:
+        raise DeploymentError(
+            "Autoscaling SDK not available — cannot create Lakebase branch. "
+            "Upgrade databricks-sdk."
+        )
+
+    branch_id = f"{target_branch_prefix}-{int(time.time())}"
+    source_path = f"projects/{project_name}/branches/{source_branch}"
+    target_parent = f"projects/{project_name}"
+    target_path = f"projects/{project_name}/branches/{branch_id}"
+
+    logger.info(f"Creating branch {branch_id} from {source_branch}")
+    operation = ws.postgres.create_branch(
+        parent=target_parent,
+        branch=Branch(
+            spec=BranchSpec(
+                source_branch=source_path,
+                ttl=Duration(seconds=_BRANCH_TTL_SECONDS),
+            )
+        ),
+        branch_id=branch_id,
+    )
+    operation.wait()
+    logger.info(f"Branch {branch_id} created")
+
+    # Poll for endpoint readiness
+    deadline = time.time() + _BRANCH_ENDPOINT_TIMEOUT_S
+    endpoint = None
+    while time.time() < deadline:
+        endpoints = list(ws.postgres.list_endpoints(parent=target_path))
+        ready = [
+            e for e in endpoints
+            if getattr(e, "status", None)
+            and getattr(e.status, "hosts", None)
+            and getattr(e.status.hosts, "host", None)
+        ]
+        if ready:
+            endpoint = ready[0]
+            break
+        time.sleep(_BRANCH_ENDPOINT_POLL_INTERVAL_S)
+
+    if endpoint is None:
+        raise DeploymentError(
+            f"Branch {branch_id} created but no endpoint ready within "
+            f"{_BRANCH_ENDPOINT_TIMEOUT_S}s"
+        )
+
+    return {
+        "name": project_name,
+        "type": "autoscaling",
+        "status": "created",
+        "host": endpoint.status.hosts.host,
+        "endpoint_name": endpoint.name,
+        "project_id": project_name,
+        "instance_name": None,
+        "branch_id": branch_id,
+    }
+
+
+def _recreate_ephemeral_branch(
+    ws: WorkspaceClient,
+    project_name: str,
+    source_branch: str,
+    target_branch_prefix: str,
+) -> dict[str, Any]:
+    """Create a fresh ephemeral Lakebase branch for this deploy.
+
+    Thin wrapper around _create_branch_from for call-site readability. Does
+    NOT delete any prior branch — we rely on Lakebase's TTL-driven garbage
+    collection (see _BRANCH_TTL_SECONDS) to clean up old branches, because
+    explicit delete has an async purge window that causes fixed-ID reuse to
+    collide for many minutes.
+    """
+    return _create_branch_from(ws, project_name, source_branch, target_branch_prefix)
 
 
 def _write_requirements(
