@@ -824,7 +824,7 @@ class SlideGeneratorAgent:
             if re.search(pattern, lower_message):
                 logger.info(
                     "Detected add slide intent",
-                    extra={"message": message[:50], "matched_pattern": pattern},
+                    extra={"user_message": message[:50], "matched_pattern": pattern},
                 )
                 return True
         return False
