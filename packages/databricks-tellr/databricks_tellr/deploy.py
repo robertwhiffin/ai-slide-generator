@@ -942,6 +942,25 @@ def _get_or_create_lakebase(
     return result
 
 
+def _branch_exists(
+    ws: WorkspaceClient, project_name: str, branch_name: str
+) -> bool:
+    """Return True if the Lakebase branch exists, False on not-found.
+
+    Any error other than not-found is surfaced.
+    """
+    try:
+        ws.postgres.get_branch(
+            name=f"projects/{project_name}/branches/{branch_name}"
+        )
+        return True
+    except Exception as e:
+        error_str = str(e).lower()
+        if "not found" in error_str or "does not exist" in error_str:
+            return False
+        raise
+
+
 def _write_requirements(
     staging_dir: Path,
     app_version: Optional[str],
