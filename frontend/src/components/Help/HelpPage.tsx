@@ -80,6 +80,7 @@ const OverviewTab: React.FC<{
         <li>Creates presentation slides from natural language using AI</li>
         <li>Pulls data from Databricks Genie spaces for data-driven presentations</li>
         <li>Supports iterative editing through conversational interface</li>
+        <li>Programmatic API via MCP — call tellr from agents, CI, or other apps</li>
       </ul>
     </section>
 

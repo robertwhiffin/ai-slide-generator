@@ -207,6 +207,12 @@ test.describe('HelpTabs', () => {
     const href = await link.getAttribute('href');
     expect(href).toContain('/technical/mcp-integration-guide');
   });
+
+  test('Overview tab shows MCP as a headline capability', async ({ page }) => {
+    await goToHelp(page);
+    // Default tab is Overview.
+    await expect(page.getByText(/Programmatic API via MCP/)).toBeVisible();
+  });
 });
 
 // ============================================
