@@ -277,12 +277,15 @@ def create_local(
     workspace_path = config["workspace_path"]
     lakebase_name = config["lakebase_name"]
     schema_name = config["schema_name"]
+    branch_from_env = config.get("branch_from_env")
 
     print("Deploying AI Slide Generator (local wheels)...")
     print(f"   App name: {app_name}")
     print(f"   Workspace path: {workspace_path}")
     print(f"   Lakebase: {lakebase_name}")
     print(f"   Schema: {schema_name}")
+    if branch_from_env:
+        print(f"   Branching from: {branch_from_env} (ephemeral branch '{env}')")
     print()
 
     try:
@@ -296,11 +299,28 @@ def create_local(
         print(f"   Uploaded: {local_wheel_ref}")
         print()
 
-        # Create Lakebase instance (autoscaling first with fallback)
-        print("Setting up Lakebase database...")
-        lakebase_result = _get_or_create_lakebase(
-            ws, lakebase_name, config["lakebase_capacity"]
-        )
+        # Branching mode: preflight + recreate branch
+        encryption_key = None
+        if branch_from_env:
+            print("Running branching preflight checks...")
+            encryption_key = _check_branching_preconditions(ws, config)
+            print(f"   Preflight OK (source: {branch_from_env})")
+
+            print(f"Recreating ephemeral branch '{env}' from '{branch_from_env}'...")
+            lakebase_result = _recreate_ephemeral_branch(
+                ws, lakebase_name, branch_from_env, env
+            )
+            print(
+                f"   Branch '{env}' ready "
+                f"(endpoint: {lakebase_result['host']})"
+            )
+        else:
+            # Standard path: get/create project + read production endpoint
+            print("Setting up Lakebase database...")
+            lakebase_result = _get_or_create_lakebase(
+                ws, lakebase_name, config["lakebase_capacity"]
+            )
+
         lakebase_type = lakebase_result.get("type", "provisioned")
         print(f"   Lakebase: {lakebase_result['name']} ({lakebase_result['status']})")
         print(f"   Type: {lakebase_type}")
@@ -318,6 +338,7 @@ def create_local(
                 lakebase_name,
                 schema_name,
                 seed_databricks_defaults=seed_databricks_defaults,
+                encryption_key=encryption_key,  # None → _write_app_yaml generates one
                 lakebase_result=lakebase_result,
             )
             print("   Generated app.yaml")
@@ -343,12 +364,15 @@ def create_local(
         print("   App registered")
         print()
 
-        # For autoscaling, create SP role via Postgres API before schema setup
+        # Register SP role on the target branch (staging branch or production branch)
         if lakebase_type == "autoscaling":
             client_id = _get_app_client_id(app)
             if client_id:
                 print("Configuring SP role on autoscaling project...")
-                _ensure_sp_autoscaling_role(ws, lakebase_name, client_id)
+                sp_branch = env if branch_from_env else "production"
+                _ensure_sp_autoscaling_role(
+                    ws, lakebase_name, client_id, branch_name=sp_branch
+                )
             else:
                 print("   Warning: Could not get SP client ID — role setup skipped")
 
@@ -376,6 +400,7 @@ def create_local(
             "lakebase_name": lakebase_name,
             "schema_name": schema_name,
             "wheel": wheel_path.name,
+            "branch": env if branch_from_env else None,
             "status": "created",
         }
 
