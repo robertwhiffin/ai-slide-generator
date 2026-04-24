@@ -961,6 +961,28 @@ def _branch_exists(
         raise
 
 
+def _delete_branch(
+    ws: WorkspaceClient, project_name: str, branch_name: str
+) -> None:
+    """Delete a Lakebase branch. Idempotent — no-op if the branch is missing.
+
+    Waits on the long-running delete operation. Any error other than
+    not-found is surfaced.
+    """
+    try:
+        operation = ws.postgres.delete_branch(
+            name=f"projects/{project_name}/branches/{branch_name}"
+        )
+        operation.wait()
+        logger.info(f"Deleted Lakebase branch: {branch_name}")
+    except Exception as e:
+        error_str = str(e).lower()
+        if "not found" in error_str or "does not exist" in error_str:
+            logger.info(f"Branch {branch_name} not found (already deleted)")
+            return
+        raise
+
+
 def _write_requirements(
     staging_dir: Path,
     app_version: Optional[str],
