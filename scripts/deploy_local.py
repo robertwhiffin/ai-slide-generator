@@ -32,6 +32,7 @@ sys.path.insert(0, str(PROJECT_ROOT / "packages" / "databricks-tellr"))
 from databricks_tellr.deploy import (
     DeploymentError,
     _branch_exists,
+    _delete_branch,
     _get_workspace_client,
     _get_or_create_lakebase,
     _probe_autoscaling_available,
@@ -548,25 +549,26 @@ def update_local(
 
 
 def delete_local(env: str, profile: str, reset_database: bool = False) -> dict[str, Any]:
-    """Delete a Databricks App.
-
-    Args:
-        env: Environment name (development, staging, production)
-        profile: Databricks CLI profile name
-        reset_database: If True, drop the schema before deleting
-
-    Returns:
-        Dictionary with deletion status
-    """
+    """Delete a Databricks App (and its ephemeral branch, if branching)."""
     config = load_deployment_config(env)
+    branch_from_env = config.get("branch_from_env")
 
-    return delete(
+    result = delete(
         app_name=config["app_name"],
         lakebase_name=config["lakebase_name"],
         schema_name=config["schema_name"],
         reset_database=reset_database,
         profile=profile,
     )
+
+    if branch_from_env:
+        ws = _get_workspace_client(profile=profile)
+        print(f"Deleting ephemeral branch '{env}'...")
+        _delete_branch(ws, config["lakebase_name"], env)
+        print(f"   Branch '{env}' deleted")
+        result["branch_deleted"] = env
+
+    return result
 
 
 def main() -> None:
