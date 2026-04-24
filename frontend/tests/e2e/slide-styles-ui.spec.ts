@@ -210,10 +210,10 @@ test.describe('SlideStyleList', () => {
   test('shows Preview button for all styles', async ({ page }) => {
     await goToSlideStyles(page);
 
-    // Both styles should have Preview button
+    // Every style (active or inactive) renders with a Preview button.
     const previewButtons = page.getByRole('button', { name: 'Preview' });
     await expect(previewButtons.first()).toBeVisible();
-    expect(await previewButtons.count()).toBe(2);
+    expect(await previewButtons.count()).toBe(3);
   });
 
   test('Preview button toggles to Hide when clicked', async ({ page }) => {

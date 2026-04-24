@@ -409,6 +409,11 @@ export const configApi = {
       method: 'DELETE',
     }),
 
+  setSlideStyleSystemDefault: (styleId: number): Promise<SlideStyle> =>
+    fetchJson(`${API_BASE}/slide-styles/${styleId}/set-default`, {
+      method: 'POST',
+    }),
+
 
   // Google OAuth Credentials (global, admin-only)
 

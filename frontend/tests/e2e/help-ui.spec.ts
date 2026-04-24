@@ -161,6 +161,64 @@ test.describe('HelpTabs', () => {
 
     await expect(page.getByRole('heading', { name: 'What are Slide Styles?' })).toBeVisible();
   });
+
+  test('MCP tab renders in the tab strip', async ({ page }) => {
+    await goToHelp(page);
+    await expect(getHelpTabButton(page, 'MCP')).toBeVisible();
+  });
+
+  test('MCP tab shows What is MCP and Who is this for sections', async ({ page }) => {
+    await goToHelp(page);
+    await getHelpTabButton(page, 'MCP').click();
+    await expect(page.getByRole('heading', { name: 'What is MCP?' })).toBeVisible();
+    await expect(page.getByRole('heading', { name: "Who's this for?" })).toBeVisible();
+  });
+
+  test('MCP tab shows the live endpoint URL ending in /mcp/', async ({ page }) => {
+    await goToHelp(page);
+    await getHelpTabButton(page, 'MCP').click();
+
+    const endpointBlock = page.getByTestId('mcp-endpoint-url');
+    await expect(endpointBlock).toBeVisible();
+    await expect(endpointBlock).toContainText('/mcp/');
+  });
+
+  test('MCP tab has a copy endpoint button', async ({ page }) => {
+    await goToHelp(page);
+    await getHelpTabButton(page, 'MCP').click();
+    await expect(
+      page.getByRole('button', { name: /copy endpoint/i }),
+    ).toBeVisible();
+  });
+
+  test('MCP tab shows prerequisites', async ({ page }) => {
+    await goToHelp(page);
+    await getHelpTabButton(page, 'MCP').click();
+    await expect(page.getByRole('heading', { name: 'Prerequisites' })).toBeVisible();
+    await expect(page.getByText(/Databricks user token/i)).toBeVisible();
+  });
+
+  test('MCP tab links to the integration guide', async ({ page }) => {
+    await goToHelp(page);
+    await getHelpTabButton(page, 'MCP').click();
+
+    const link = page.getByRole('link', { name: /MCP Integration Guide/i });
+    await expect(link).toBeVisible();
+    const href = await link.getAttribute('href');
+    expect(href).toContain('/technical/mcp-integration-guide');
+  });
+
+  test('Overview tab shows MCP as a headline capability', async ({ page }) => {
+    await goToHelp(page);
+    // Default tab is Overview.
+    await expect(page.getByText(/Programmatic API via MCP/)).toBeVisible();
+  });
+
+  test('Overview Quick Link navigates to the MCP tab', async ({ page }) => {
+    await goToHelp(page);
+    await page.getByRole('button', { name: /Learn about MCP/ }).click();
+    await expect(page.getByRole('heading', { name: 'What is MCP?' })).toBeVisible();
+  });
 });
 
 // ============================================

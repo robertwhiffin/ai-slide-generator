@@ -106,6 +106,7 @@ export const mockSlideStyles = {
       style_content: "/* System default CSS */",
       is_active: true,
       is_system: true,
+      is_default: true,
       created_by: "system",
       created_at: "2026-01-08T20:10:28.692105",
       updated_by: "system",
@@ -119,13 +120,28 @@ export const mockSlideStyles = {
       style_content: "/* Databricks brand style CSS */",
       is_active: true,
       is_system: false,
+      is_default: false,
       created_by: "system",
       created_at: "2026-01-08T20:10:28.695640",
       updated_by: "system",
       updated_at: "2026-01-08T20:10:28.695641"
+    },
+    {
+      id: 3,
+      name: "Archived Legacy",
+      description: "Retired style kept for historical reference.",
+      category: "Brand",
+      style_content: "/* archived */",
+      is_active: false,
+      is_system: false,
+      is_default: false,
+      created_by: "system",
+      created_at: "2026-01-08T20:10:28.700000",
+      updated_by: "system",
+      updated_at: "2026-01-08T20:10:28.700000"
     }
   ],
-  total: 2
+  total: 3
 };
 
 // Sessions endpoint returns { sessions: [...], count: n }
