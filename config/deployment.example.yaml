@@ -21,8 +21,12 @@ environments:
       capacity: "CU_1"  # Options: CU_1, CU_2, CU_4, CU_8
 
   staging:
+    # Staging deploys against an ephemeral Lakebase branch forked from production
+    # on every `deploy_local.sh create|update --env staging`. The branch is
+    # named after the env (`staging`) and is deleted on `delete --env staging`.
+    # Requires production to be deployed first (uses prod's encryption key).
     app_name: "ai-slide-generator-staging"
-    description: "AI Slide Generator - Staging Environment"
+    description: "AI Slide Generator - Staging (ephemeral branch of prod)"
     workspace_path: "/Workspace/Shared/apps/staging/ai-slide-generator"
     permissions:
       - group_name: "developers"
@@ -33,12 +37,14 @@ environments:
     env_vars:
       ENVIRONMENT: "staging"
       LOG_LEVEL: "INFO"
-      LAKEBASE_INSTANCE: "ai-slide-generator-staging-db"
-      LAKEBASE_SCHEMA: "app_data"
+      LAKEBASE_INSTANCE: "ai-slide-generator-db"  # must match production
+      # LAKEBASE_SCHEMA is derived from branch_from env — do not set here
     lakebase:
-      database_name: "ai-slide-generator-staging-db"
-      schema: "app_data"
+      # Must match production's database_name (same Lakebase autoscaling project).
+      database_name: "ai-slide-generator-db"
+      branch_from: "production"   # ephemeral branch of production on every deploy
       capacity: "CU_1"  # Options: CU_1, CU_2, CU_4, CU_8
+      # schema omitted — inherited from the branch_from env (production)
 
   production:
     app_name: "ai-slide-generator"
