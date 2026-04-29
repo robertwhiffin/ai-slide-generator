@@ -38,13 +38,13 @@ The caller does not need any tellr-specific configuration — no client credenti
 
 | Item | Value |
 |------|-------|
-| URL | `https://<your-tellr-app-url>/mcp/` |
+| URL | `https://<your-tellr-app-url>/mcp` (or `/mcp/` — both accepted) |
 | Protocol | MCP Streamable HTTP, spec revision `2025-03-26` |
 | Transport | JSON-RPC 2.0 over HTTP POST |
 | Required `Accept` header | `application/json, text/event-stream` |
 | Session mode | **Stateless** — server does not issue `mcp-session-id` |
 
-**Mandatory trailing slash.** `POST /mcp` returns `307 Temporary Redirect` to `/mcp/`. Always POST to `/mcp/` directly — the redirect will strip `POST` semantics with some clients.
+**Both `/mcp` and `/mcp/` are accepted.** A path-rewrite middleware in `src/api/main.py` makes the two forms behave identically — single round-trip, no redirect. Documented examples below use the no-slash form; existing clients hard-coded to `/mcp/` continue to work unchanged.
 
 **Stateless transport.** tellr runs FastMCP with `stateless_http=True` because the app is served by multiple uvicorn workers and the Databricks Apps proxy does not guarantee session affinity. Each HTTP POST is handled independently on whichever worker picks it up. Consequences for callers:
 
@@ -109,7 +109,7 @@ External MCP runtimes register tellr in their `mcp_servers.json`-style config. P
 {
   "mcpServers": {
     "tellr": {
-      "url": "https://<your-tellr-app-url>/mcp/",
+      "url": "https://<your-tellr-app-url>/mcp",
       "transport": "streamable-http",
       "headers": {
         "Authorization": "Bearer ${DATABRICKS_TOKEN}"
@@ -123,7 +123,7 @@ Refresh the token when it expires (PATs last as configured by the workspace admi
 
 #### C. Direct HTTP
 
-For CI scripts, smoke tests, or notebooks, speak JSON-RPC to `/mcp/` directly. See the full recipe in section 7, or the reference implementation in `scripts/mcp_smoke/mcp_smoke_httpx.py`.
+For CI scripts, smoke tests, or notebooks, speak JSON-RPC to `/mcp` directly. See the full recipe in section 7, or the reference implementation in `scripts/mcp_smoke/mcp_smoke_httpx.py`.
 
 ---
 
@@ -348,7 +348,7 @@ Each tool subsection below mirrors the `@mcp.tool` descriptions in `src/api/mcp_
 |------|----------------|----------|
 | `src/api/mcp_server.py` | Declares `FastMCP` instance; registers the four `@mcp.tool` handlers; builds request-scoped auth scope for each call. | `ChatService`, `SessionManager`, `PermissionService`, `job_queue` |
 | `src/api/mcp_auth.py` | Dual-token resolution: reads `x-forwarded-access-token` or `Authorization: Bearer`, calls `current_user.me()`, binds `current_user` / `user_client` / `permission_context` ContextVars. | Databricks SDK (`WorkspaceClient`) |
-| `src/api/main.py` | Mounts the FastMCP sub-app at `/mcp` with `streamable_http_path="/"`, so external POSTs to `/mcp/` route correctly. Starts the 10-minute timeout sweeper on lifespan. | `tellr_mcp.streamable_http_app()` |
+| `src/api/main.py` | Mounts the FastMCP sub-app at `/mcp` with `streamable_http_path="/"`, and registers a path-rewrite middleware so external POSTs to `/mcp` (or `/mcp/`) route correctly. Starts the 10-minute timeout sweeper on lifespan. | `tellr_mcp.streamable_http_app()` |
 | `src/api/services/job_queue.py` | In-process asyncio queue for chat jobs. Timeout sweeper flips stuck `running` jobs to `failed` after `JOB_HARD_TIMEOUT_SECONDS = 600`. | `chat_requests` table |
 | `src/domain/slide_deck.py` | `SlideDeck.to_html_document()` emits the standalone HTML payload returned in `html_document`. CSS is sanitized; slide content is HTML-escaped to prevent XSS through MCP consumers. | — |
 | `src/services/permission_service.py` | `can_view_deck` / `can_edit_deck` checks used before every tool that touches a deck. Creator short-circuit lets a freshly created session be viewed/edited before any `DeckContributor` row exists. | `user_sessions`, `deck_contributors` |
@@ -367,7 +367,7 @@ Lightly edited from `scripts/mcp_smoke/mcp_smoke_httpx.py`; drop into any Python
 import json, os, time, httpx
 
 TELLR_URL = os.environ["TELLR_URL"].rstrip("/")
-MCP_URL = f"{TELLR_URL}/mcp/"
+MCP_URL = f"{TELLR_URL}/mcp"
 HEADERS = {
     "Authorization": f"Bearer {os.environ['DATABRICKS_TOKEN']}",
     "Content-Type": "application/json",
@@ -434,7 +434,7 @@ else:
 {
   "mcpServers": {
     "tellr": {
-      "url": "https://<your-tellr-app-url>/mcp/",
+      "url": "https://<your-tellr-app-url>/mcp",
       "transport": "streamable-http",
       "headers": {
         "Authorization": "Bearer ${DATABRICKS_TOKEN}"
@@ -522,7 +522,7 @@ The `.slide` wrapper invariant is preserved — tellr never emits a slide withou
 | Error retry | Respect any `retry_after_seconds` hint on rate-limit responses; otherwise back off exponentially. `isError: true` on a tool result is *application* failure, not transport failure — do not retry blindly. |
 | Identity | Forward the end user's OBO token (section 4.2 recipe A) for any user-initiated flow — it is the recommended path and guarantees the deck surfaces to that user. Service-principal tokens are accepted and legitimate for batch / automation use cases, but the resulting deck is attributed to the SP and will not appear in any human user's tellr UI. |
 | Correlation IDs | Pass a `correlation_id` on every `create_deck` / `edit_deck` call. It flows through server logs, worker state, and the chat request row, making cross-system traces trivial. |
-| Trailing slash | Always POST to `/mcp/`. `POST /mcp` returns `307 Temporary Redirect`, which some HTTP clients silently downgrade to `GET`. |
+| Trailing slash | Either `/mcp` or `/mcp/` works. A middleware rewrites the bare path before routing. |
 | Handshake | After `initialize`, send `notifications/initialized` before any `tools/*` call. |
 | Hand-off vs. render | Prefer `deck_url` when the user needs the full tellr editor (presentation mode, Google Slides / PPTX export, Monaco HTML editing, save points). Render `html_document` / iterate `deck.slides` for passive previews or custom editing UIs. |
 | Session lifetime | One session = one deck. Reuse the same `session_id` for subsequent `edit_deck` / `get_deck` calls so you benefit from the session lock and chat history. A new `create_deck` call starts a fresh session. |
@@ -540,7 +540,7 @@ The `.slide` wrapper invariant is preserved — tellr never emits a slide withou
 | Chart.js fails to load in an air-gapped environment | Default CDN unreachable | See section 8.3 — rewrite the CDN URL through a proxy; v1.1 will expose `chart_js_cdn` as a tool parameter. |
 | `initialize` returns no `mcp-session-id` header | Expected — tellr runs stateless (see section 3). If the endpoint also returns HTML or non-JSON, the deployment did not pick up the MCP router; redeploy and confirm `app.mount("/mcp", ...)` ran by looking for `MCP server mounted at /mcp` in the app logs. |
 | Intermittent HTTP 404 `Session not found` from a multi-worker deployment | Only applies if FastMCP is running stateful (`stateless_http=False`); a 3-step handshake can split across workers that don't share session state | Leave tellr in its default stateless mode (section 3). If you've deliberately flipped it back, either pin to a single worker (`UVICORN_WORKERS=1`) or re-enable stateless. |
-| Client receives HTML instead of JSON on the first POST | Target URL is `/mcp` (no trailing slash) and the client followed the 307 to a GET | Always POST to `/mcp/` directly |
+| Client receives HTML instead of JSON on the first POST | Either the SPA catch-all is intercepting (deployed app missing the path-rewrite middleware) or the URL points at the wrong host. | Verify `MCP server mounted at /mcp` appears in the app logs, and curl `POST /mcp` directly with `Accept: application/json, text/event-stream` to confirm a JSON-RPC envelope returns. |
 
 ---
 
