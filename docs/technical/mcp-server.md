@@ -123,7 +123,7 @@ Refresh the token when it expires (PATs last as configured by the workspace admi
 
 #### C. Direct HTTP
 
-For CI scripts, smoke tests, or notebooks, speak JSON-RPC to `/mcp/` directly. See the full recipe in section 7, or the reference implementation in `scripts/mcp_smoke/mcp_smoke_httpx.py`.
+For CI scripts, smoke tests, or notebooks, speak JSON-RPC to `/mcp` directly. See the full recipe in section 7, or the reference implementation in `scripts/mcp_smoke/mcp_smoke_httpx.py`.
 
 ---
 
@@ -348,7 +348,7 @@ Each tool subsection below mirrors the `@mcp.tool` descriptions in `src/api/mcp_
 |------|----------------|----------|
 | `src/api/mcp_server.py` | Declares `FastMCP` instance; registers the four `@mcp.tool` handlers; builds request-scoped auth scope for each call. | `ChatService`, `SessionManager`, `PermissionService`, `job_queue` |
 | `src/api/mcp_auth.py` | Dual-token resolution: reads `x-forwarded-access-token` or `Authorization: Bearer`, calls `current_user.me()`, binds `current_user` / `user_client` / `permission_context` ContextVars. | Databricks SDK (`WorkspaceClient`) |
-| `src/api/main.py` | Mounts the FastMCP sub-app at `/mcp` with `streamable_http_path="/"`, so external POSTs to `/mcp/` route correctly. Starts the 10-minute timeout sweeper on lifespan. | `tellr_mcp.streamable_http_app()` |
+| `src/api/main.py` | Mounts the FastMCP sub-app at `/mcp` with `streamable_http_path="/"`, and registers a path-rewrite middleware so external POSTs to `/mcp` (or `/mcp/`) route correctly. Starts the 10-minute timeout sweeper on lifespan. | `tellr_mcp.streamable_http_app()` |
 | `src/api/services/job_queue.py` | In-process asyncio queue for chat jobs. Timeout sweeper flips stuck `running` jobs to `failed` after `JOB_HARD_TIMEOUT_SECONDS = 600`. | `chat_requests` table |
 | `src/domain/slide_deck.py` | `SlideDeck.to_html_document()` emits the standalone HTML payload returned in `html_document`. CSS is sanitized; slide content is HTML-escaped to prevent XSS through MCP consumers. | — |
 | `src/services/permission_service.py` | `can_view_deck` / `can_edit_deck` checks used before every tool that touches a deck. Creator short-circuit lets a freshly created session be viewed/edited before any `DeckContributor` row exists. | `user_sessions`, `deck_contributors` |

@@ -401,7 +401,7 @@ For unattended runs longer than an hour (CI, background agents):
 
 **App-level access is a separate check.** OAuth authenticates *who you are*; the Apps proxy additionally checks you're on the app's user list. If sign-in succeeds but `/mcp` still returns 403, ask the app owner to grant your user access.
 
-**Trailing slash on the URL.** Both `/mcp` and `/mcp/` work; a path-rewrite middleware in tellr accepts either. The `claude mcp add` command sometimes strips the slash — that's now harmless. (Historical note: deployments before April 2026 returned 405 for `/mcp` with no slash; if you're integrating against a pinned-old build, append the slash.)
+**Trailing slash on the URL.** Both `/mcp` and `/mcp/` work; a path-rewrite middleware in tellr accepts either. The `claude mcp add` command sometimes strips the slash — that's fine. (Older builds returned `405 Method Not Allowed` for `/mcp` without a slash; if you're hitting that against a pinned-old deployment, add the slash.)
 
 **Handshake.** After `initialize`, MCP requires a `notifications/initialized` before any `tools/*`. Official MCP clients handle this for you; if you're writing raw HTTP, don't skip it.
 
