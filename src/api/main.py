@@ -219,6 +219,30 @@ app = FastAPI(
 )
 
 
+@app.middleware("http")
+async def normalize_mcp_path(request: Request, call_next):
+    """Make POST /mcp behave like POST /mcp/.
+
+    The SPA catch-all (``@app.get("/{full_path:path}")`` added by
+    ``_mount_frontend``) intercepts non-GET requests to ``/mcp`` and
+    causes Starlette to return 405 instead of routing to the FastMCP
+    Mount. Rewriting the ASGI scope path before route resolution
+    sidesteps that interaction and avoids emitting a 307 the client
+    has to follow (which can drop ``Authorization`` or method-downgrade
+    in misbehaving HTTP clients — Claude Code v2.1.123 via stdio→HTTP
+    proxy was the original report).
+
+    GET is left alone so ``/mcp`` continues to render the SPA in a
+    browser. The match is exact so ``/mcp/``, ``/mcp/anything``, and
+    ``/mcp-something`` are all unaffected; query strings live in
+    ``scope["query_string"]`` and are not touched.
+    """
+    if request.url.path == "/mcp" and request.method != "GET":
+        request.scope["path"] = "/mcp/"
+        request.scope["raw_path"] = b"/mcp/"
+    return await call_next(request)
+
+
 def _resolve_frontend_dist() -> tuple[ExitStack, Path] | None:
     """Resolve frontend assets bundled in the app package."""
     try:
