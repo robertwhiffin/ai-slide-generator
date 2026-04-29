@@ -19,10 +19,14 @@ Two SDK-specific gotchas to keep in mind when reading these tests:
    and patch ``init_db`` + migration helpers to no-ops so no DB is
    touched during lifespan.
 
-2. ``POST /mcp`` returns a 307 redirect to ``/mcp/``. Hitting the
-   trailing-slash path directly avoids TestClient's redirect handling
-   (which may or may not follow redirects automatically depending on
-   the httpx version).
+2. The ``normalize_mcp_path`` middleware in ``src/api/main.py`` rewrites
+   ``POST /mcp`` to ``POST /mcp/`` in the ASGI scope so both forms reach
+   the FastMCP sub-app. The test fixture here doesn't run
+   ``_mount_frontend`` (production-only), so without the middleware
+   ``POST /mcp`` would 307; with the middleware it returns 200 directly.
+   Existing tests still use ``MCP_PATH = "/mcp/"`` for stability —
+   ``test_mcp_endpoint_accepts_both_slash_forms`` is the dedicated
+   regression guard for the no-slash case.
 """
 
 from __future__ import annotations
@@ -37,10 +41,12 @@ import pytest
 from fastapi.testclient import TestClient
 
 
-# Trailing slash: the FastMCP streamable-HTTP transport internally
-# mounts its route at "/", and main.py mounts that sub-app at "/mcp".
-# External POST to "/mcp" returns a 307 to "/mcp/"; going straight to
-# the slashed form bypasses that round trip.
+# FastMCP's streamable-HTTP transport mounts its route at "/", and
+# main.py mounts that sub-app at "/mcp". External clients can POST to
+# either ``/mcp`` or ``/mcp/`` thanks to the ``normalize_mcp_path``
+# middleware. Existing tests pin to the slashed form for stability;
+# ``test_mcp_endpoint_accepts_both_slash_forms`` covers the no-slash
+# case explicitly.
 MCP_PATH = "/mcp/"
 
 
