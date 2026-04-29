@@ -19,10 +19,14 @@ Two SDK-specific gotchas to keep in mind when reading these tests:
    and patch ``init_db`` + migration helpers to no-ops so no DB is
    touched during lifespan.
 
-2. ``POST /mcp`` returns a 307 redirect to ``/mcp/``. Hitting the
-   trailing-slash path directly avoids TestClient's redirect handling
-   (which may or may not follow redirects automatically depending on
-   the httpx version).
+2. The ``normalize_mcp_path`` middleware in ``src/api/main.py`` rewrites
+   ``POST /mcp`` to ``POST /mcp/`` in the ASGI scope so both forms reach
+   the FastMCP sub-app. The test fixture here doesn't run
+   ``_mount_frontend`` (production-only), so without the middleware
+   ``POST /mcp`` would 307; with the middleware it returns 200 directly.
+   Existing tests still use ``MCP_PATH = "/mcp/"`` for stability —
+   ``test_mcp_endpoint_accepts_both_slash_forms`` is the dedicated
+   regression guard for the no-slash case.
 """
 
 from __future__ import annotations
@@ -37,10 +41,12 @@ import pytest
 from fastapi.testclient import TestClient
 
 
-# Trailing slash: the FastMCP streamable-HTTP transport internally
-# mounts its route at "/", and main.py mounts that sub-app at "/mcp".
-# External POST to "/mcp" returns a 307 to "/mcp/"; going straight to
-# the slashed form bypasses that round trip.
+# FastMCP's streamable-HTTP transport mounts its route at "/", and
+# main.py mounts that sub-app at "/mcp". External clients can POST to
+# either ``/mcp`` or ``/mcp/`` thanks to the ``normalize_mcp_path``
+# middleware. Existing tests pin to the slashed form for stability;
+# ``test_mcp_endpoint_accepts_both_slash_forms`` covers the no-slash
+# case explicitly.
 MCP_PATH = "/mcp/"
 
 
@@ -476,3 +482,64 @@ def test_permission_denied_on_other_users_deck(client, mock_identity_client):
     assert (
         "permission" in lowered or "not found" in lowered
     ), f"denial error didn't mention permission/not-found: {text!r}"
+
+
+def test_mcp_endpoint_accepts_both_slash_forms(client, mock_identity_client):
+    """Regression guard: POST /mcp and POST /mcp/ behave identically.
+
+    The SPA catch-all (``@app.get("/{full_path:path}")`` added by
+    ``_mount_frontend`` in production) used to make ``POST /mcp`` return
+    405 with ``allow: GET``, since Starlette's ``Mount`` cannot tell the
+    outer router which methods FastMCP accepts. In tests
+    ``IS_PRODUCTION`` is false so ``_mount_frontend`` doesn't run and
+    Mount itself returns a 307 redirect for the bare path. The
+    ``normalize_mcp_path`` middleware in ``main.py`` rewrites
+    ``/mcp -> /mcp/`` in the ASGI scope so both forms reach the FastMCP
+    sub-app's POST handler in a single round-trip.
+
+    ``follow_redirects=False`` is critical: without it, ``TestClient``
+    would silently follow a 307 from ``/mcp`` to ``/mcp/`` and the test
+    would pass even if the middleware regressed.
+    """
+    # Run the standard MCP handshake against the canonical slashed path
+    # first so any FastMCP-internal state (none today, since stateless)
+    # mirrors what the existing tests do.
+    _initialize_session(client)
+
+    body = _jsonrpc("tools/list", rid=2)
+
+    no_slash = client.post(
+        "/mcp",
+        headers=_mcp_headers(),
+        json=body,
+        follow_redirects=False,
+    )
+    with_slash = client.post(
+        "/mcp/",
+        headers=_mcp_headers(),
+        json=body,
+        follow_redirects=False,
+    )
+
+    assert no_slash.status_code == 200, (
+        f"POST /mcp should return 200 after the middleware rewrite, "
+        f"got {no_slash.status_code}: {no_slash.text!r}"
+    )
+    assert with_slash.status_code == 200, with_slash.text
+
+    no_slash_body = _decode_mcp_response(no_slash)
+    with_slash_body = _decode_mcp_response(with_slash)
+
+    no_slash_tools = {
+        t["name"] for t in no_slash_body["result"]["tools"]
+    }
+    with_slash_tools = {
+        t["name"] for t in with_slash_body["result"]["tools"]
+    }
+    assert no_slash_tools == with_slash_tools, (
+        f"tool sets differ between paths: "
+        f"no_slash={no_slash_tools} with_slash={with_slash_tools}"
+    )
+    assert {
+        "create_deck", "get_deck_status", "edit_deck", "get_deck",
+    } <= no_slash_tools, f"unexpected tool set: {no_slash_tools}"

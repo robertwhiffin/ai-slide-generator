@@ -120,7 +120,7 @@ def _open_session(client: httpx.Client, url: str) -> dict:
 
 def generate_deck(tellr_base: str, prompt_text: str, status) -> dict:
     """Submit create_deck → poll get_deck_status → return ready payload."""
-    mcp = f"{tellr_base}/mcp/"
+    mcp = f"{tellr_base}/mcp"
     correlation = f"my-app-{uuid.uuid4().hex[:8]}"
 
     # No Authorization header, no x-forwarded-access-token — the proxy
@@ -247,7 +247,7 @@ Whichever path you pick, the one thing you **can't** do is use a PAT — see §3
 
 ### 3.1 Auth constraint: OAuth U2M only, not PATs
 
-**Verified gotcha:** even a PAT that works against workspace APIs returns HTTP 401 from an app's `/mcp/` endpoint. The Apps proxy has its own authorization layer and only accepts OAuth U2M tokens for app-scoped access. Concretely:
+**Verified gotcha:** even a PAT that works against workspace APIs returns HTTP 401 from an app's `/mcp` endpoint. The Apps proxy has its own authorization layer and only accepts OAuth U2M tokens for app-scoped access. Concretely:
 
 ```bash
 # PAT against workspace API — works:
@@ -258,7 +258,7 @@ curl -sS -o /dev/null -w "%{http_code}\n" \
 
 # Same PAT against the tellr app's MCP endpoint — rejected:
 curl -sS -o /dev/null -w "%{http_code}\n" -X POST \
-  "https://<tellr-app-url>/mcp/" \
+  "https://<tellr-app-url>/mcp" \
   -H "Authorization: Bearer dapi<...>" \
   -H "Content-Type: application/json" \
   -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}'
@@ -293,7 +293,7 @@ First-tool-call UX: a browser tab pops open for consent. Afterwards, invisible.
 *Claude Code:*
 
 ```bash
-claude mcp add --transport http tellr "https://<tellr-app-url>/mcp/"
+claude mcp add --transport http tellr "https://<tellr-app-url>/mcp"
 # (no --header flag — that's what triggers the OAuth flow on first use)
 ```
 
@@ -305,7 +305,7 @@ Then in a Claude session, invoke any tellr tool (or run `/mcp`); a browser windo
 {
   "mcpServers": {
     "tellr": {
-      "url": "https://<tellr-app-url>/mcp/",
+      "url": "https://<tellr-app-url>/mcp",
       "transport": "streamable-http"
     }
   }
@@ -349,11 +349,11 @@ Wire it up:
 *Claude Code:*
 
 ```bash
-claude mcp add --transport http tellr "https://<tellr-app-url>/mcp/" \
+claude mcp add --transport http tellr "https://<tellr-app-url>/mcp" \
   --header "Authorization: Bearer $(databricks auth token -p tellr-dev-oauth | jq -r .access_token)"
 
 claude mcp list | grep tellr
-# → tellr: https://<tellr-app-url>/mcp/ (HTTP) - ✓ Connected
+# → tellr: https://<tellr-app-url>/mcp (HTTP) - ✓ Connected
 ```
 
 *Cursor / generic:*
@@ -362,7 +362,7 @@ claude mcp list | grep tellr
 {
   "mcpServers": {
     "tellr": {
-      "url": "https://<tellr-app-url>/mcp/",
+      "url": "https://<tellr-app-url>/mcp",
       "transport": "streamable-http",
       "headers": {
         "Authorization": "Bearer <paste output of `databricks auth token -p tellr-dev-oauth | jq -r .access_token` here>"
@@ -383,7 +383,7 @@ Re-register with a fresh token. Keep it as a shell function:
 ```bash
 tellr-refresh() {
   claude mcp remove tellr 2>/dev/null
-  claude mcp add --transport http tellr "https://<tellr-app-url>/mcp/" \
+  claude mcp add --transport http tellr "https://<tellr-app-url>/mcp" \
     --header "Authorization: Bearer $(databricks auth token -p tellr-dev-oauth | jq -r .access_token)"
 }
 ```
@@ -399,9 +399,9 @@ For unattended runs longer than an hour (CI, background agents):
 
 **PATs → 401 from the Apps proxy.** Don't use long-lived PATs for app access; see §3.1.
 
-**App-level access is a separate check.** OAuth authenticates *who you are*; the Apps proxy additionally checks you're on the app's user list. If sign-in succeeds but `/mcp/` still returns 403, ask the app owner to grant your user access.
+**App-level access is a separate check.** OAuth authenticates *who you are*; the Apps proxy additionally checks you're on the app's user list. If sign-in succeeds but `/mcp` still returns 403, ask the app owner to grant your user access.
 
-**Trailing slash on the URL.** Always POST to `/mcp/` (with slash). `/mcp` (no slash) returns a 307 redirect that some clients silently downgrade to GET and break on. The `claude mcp add` command sometimes strips the trailing slash — double-check with `claude mcp list`.
+**Trailing slash on the URL.** Both `/mcp` and `/mcp/` work; a path-rewrite middleware in tellr accepts either. The `claude mcp add` command sometimes strips the slash — that's fine. (Older builds returned `405 Method Not Allowed` for `/mcp` without a slash; if you're hitting that against a pinned-old deployment, add the slash.)
 
 **Handshake.** After `initialize`, MCP requires a `notifications/initialized` before any `tools/*`. Official MCP clients handle this for you; if you're writing raw HTTP, don't skip it.
 
@@ -425,7 +425,7 @@ Full schemas and examples: [`mcp-server.md`](./mcp-server.md) section 5.
 | Error text | Cause | Fix |
 |---|---|---|
 | `Authentication required: no credentials presented` | No auth headers arrived (proxy stripped them, or external caller didn't send a Bearer). | App-to-app: confirm `x-forwarded-email` is set on your app's inbound requests. External: check your Bearer header is reaching tellr (curl the `/api/health` endpoint with the same token). |
-| `HTTP 401` (empty body `{}`) on external `/mcp/` calls | You're using a PAT (`dapi...`); the Apps proxy rejects PATs for app access. | Switch to an OAuth U2M token via a `databricks-cli` auth profile — see §3.1. |
+| `HTTP 401` (empty body `{}`) on external `/mcp` calls | You're using a PAT (`dapi...`); the Apps proxy rejects PATs for app access. | Switch to an OAuth U2M token via a `databricks-cli` auth profile — see §3.1. |
 | `HTTP 401` mid-session after working fine earlier | OAuth access token (~1-hour lifetime) has expired; `claude mcp add` stored it as a static header. | Re-register the MCP server with a fresh token — see §3.3 (`tellr-refresh` one-liner). |
 | `HTTP 404 {"message": "Session not found"}` | Your client is echoing an `mcp-session-id` against tellr's stateless endpoint while the request is routed to a different worker than the one that (historically) issued the id. Should not occur with current tellr builds. | Treat `mcp-session-id` as optional — read with `.get()`, only echo when present. Upgrade to a current tellr build if calls against a prior deployment produce this error. |
 | `create_deck tool error: ...` | Tool execution failed after auth succeeded (LLM error, input validation, etc.). | Read the error text — it's the underlying reason. |
