@@ -45,6 +45,11 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
   const navigate = useNavigate();
   const [slideDeck, setSlideDeck] = useState<SlideDeck | null>(null);
   const [rawHtml, setRawHtml] = useState<string | null>(null);
+  // Gates "Export as PPTX (editable)" menu item. Probed once on mount
+  // from /api/export/pptx/editable/available — undefined while probing,
+  // then true/false. We render the option only when explicitly true so
+  // a missing sidecar doesn't show a broken menu item.
+  const [editableExportEnabled, setEditableExportEnabled] = useState<boolean | null>(null);
   const [viewMode, setViewMode] = useState<ViewMode>(initialView);
   const [showSaveDialog, setShowSaveDialog] = useState(false);
   const [showShareDialog, setShowShareDialog] = useState(false);
@@ -618,6 +623,19 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
     slidePanelRef.current?.exportPPTX();
   }, []);
 
+  const handleExportPPTXEditable = useCallback(() => {
+    slidePanelRef.current?.exportPPTXEditable();
+  }, []);
+
+  // Probe the editable-PPTX sidecar availability on mount.
+  useEffect(() => {
+    let cancelled = false;
+    api.editableExportAvailable().then((r) => {
+      if (!cancelled) setEditableExportEnabled(!!r.available);
+    });
+    return () => { cancelled = true; };
+  }, []);
+
   const handleExportPDF = useCallback(() => {
     slidePanelRef.current?.exportPDF();
   }, []);
@@ -628,14 +646,17 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
 
   const handleExportGoogleSlides = useCallback(async () => {
     if (!sessionId || !slideDeck) return;
+    // Open a blank tab synchronously inside the click handler so the user
+    // gesture isn't lost across awaits — Chrome blocks `window.open` after
+    // an await chain. Redirect this tab once the Slides URL is ready.
+    const popup = window.open('about:blank', '_blank');
     try {
-      // Check auth first
       const { authorized } = await api.checkGoogleSlidesAuth();
-
       if (!authorized) {
         setExportStatus('Waiting for Google authorization...');
         const authResult = await openOAuthPopup();
         if (!authResult) {
+          popup?.close();
           setExportStatus(null);
           showToast('Google authorization was not completed. Please try again.', 'error');
           return;
@@ -651,10 +672,14 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
       setExportStatus(null);
       showToast('Export complete', 'success');
       if (presentation_url && !alreadyOpened) {
-        window.open(presentation_url, '_blank');
+        if (popup && !popup.closed) popup.location.href = presentation_url;
+        else window.open(presentation_url, '_blank');
+      } else {
+        popup?.close();
       }
     } catch (err) {
       console.error('Google Slides export failed:', err);
+      popup?.close();
       setExportStatus(null);
       showToast('Export to Google Slides failed', 'error');
     }
@@ -704,6 +729,7 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
                 onShare={!viewOnly && sessionId ? handleShare : undefined}
                 onCopyLink={!viewOnly && sessionId ? handleCopyLink : undefined}
                 onExportPPTX={slideDeck ? handleExportPPTX : undefined}
+                onExportPPTXEditable={slideDeck && editableExportEnabled ? handleExportPPTXEditable : undefined}
                 onExportPDF={slideDeck ? handleExportPDF : undefined}
                 onExportHTML={slideDeck ? handleExportHTML : undefined}
                 onExportGoogleSlides={slideDeck ? handleExportGoogleSlides : undefined}

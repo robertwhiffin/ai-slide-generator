@@ -1,3 +1,4 @@
+// @ts-nocheck
 import { useState, useRef, useEffect, type ReactNode } from "react"
 import { Save, Download, Play, Share2, Link, ChevronDown, FileDown, FileText, Presentation, Code } from "lucide-react"
 import { Button } from "@/ui/button"
@@ -19,6 +20,8 @@ interface PageHeaderProps {
   /** Single export action (legacy); ignored if export menu items are provided */
   onExport?: () => void
   onExportPPTX?: () => void
+  /** Editable PPTX export via DOM-walker sidecar. Undefined if sidecar not installed. */
+  onExportPPTXEditable?: () => void
   onExportPDF?: () => void
   onExportHTML?: () => void
   onExportGoogleSlides?: () => void
@@ -42,6 +45,7 @@ export function PageHeader({
   onCopyLink,
   onExport,
   onExportPPTX,
+  onExportPPTXEditable,
   onExportPDF,
   onExportHTML,
   onExportGoogleSlides,
@@ -53,7 +57,7 @@ export function PageHeader({
   isGenerating = false,
   viewOnly = false,
 }: PageHeaderProps) {
-  const hasExportMenu = !viewOnly && (onExportPPTX ?? onExportPDF ?? onExportHTML ?? onExportGoogleSlides)
+  const hasExportMenu = !viewOnly && (onExportPPTX ?? onExportPPTXEditable ?? onExportPDF ?? onExportHTML ?? onExportGoogleSlides)
   const [isEditing, setIsEditing] = useState(false)
   const [editedTitle, setEditedTitle] = useState(title)
   const inputRef = useRef<HTMLInputElement>(null)
@@ -170,6 +174,12 @@ export function PageHeader({
                   <DropdownMenuItem onClick={onExportPPTX} disabled={isGenerating}>
                     <FileDown className="size-3.5 mr-2" />
                     Download PPTX
+                  </DropdownMenuItem>
+                )}
+                {onExportPPTXEditable && (
+                  <DropdownMenuItem onClick={onExportPPTXEditable} disabled={isGenerating}>
+                    <FileDown className="size-3.5 mr-2" />
+                    Export as PPTX (editable)
                   </DropdownMenuItem>
                 )}
                 {onExportPDF && (

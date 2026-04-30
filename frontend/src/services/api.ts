@@ -1115,6 +1115,80 @@ export const api = {
   },
 
   /**
+   * Probe whether the editable-PPTX sidecar is installed on the backend.
+   * Returned `available: false` means the button should not render / be disabled.
+   */
+  async editableExportAvailable(): Promise<{ available: boolean }> {
+    try {
+      const response = await fetch(`${API_BASE_URL}/api/export/pptx/editable/available`);
+      if (!response.ok) return { available: false };
+      return response.json();
+    } catch {
+      return { available: false };
+    }
+  },
+
+  /**
+   * Editable-PPTX export — four modes matching Claude Design's picker:
+   *   'universal'     (default) - substitute to Arial/Consolas
+   *   'custom'        - keep authored brand fonts (best if user has them)
+   *   'google_slides' - keep brand names; Google Slides pulls from Google Fonts
+   *   'screenshot'    - render each slide to PNG via html2canvas and embed
+   *                     as a picture per slide (pixel-perfect, not editable)
+   */
+  async exportPptxEditable(
+    deck: import('../types/slide').SlideDeck,
+    sessionId?: string,
+    fontMode: 'universal' | 'custom' | 'google_slides' | 'screenshot' = 'universal',
+  ): Promise<Blob> {
+    if (fontMode === 'screenshot') {
+      return this._exportPptxScreenshot(deck, sessionId);
+    }
+    const { extractSlideRecordsForExport } = await import('./domWalker');
+    const slides = await extractSlideRecordsForExport(deck, fontMode);
+    const response = await fetch(`${API_BASE_URL}/api/export/pptx/editable/from-records`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        session_id: sessionId || null,
+        title: deck.title || 'slides',
+        slides,
+        font_mode: fontMode,
+      }),
+    });
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({}));
+      throw new ApiError(response.status, error.detail || 'Editable PPTX export failed');
+    }
+    return response.blob();
+  },
+
+  async _exportPptxScreenshot(
+    deck: import('../types/slide').SlideDeck,
+    sessionId?: string,
+  ): Promise<Blob> {
+    // Reuse the html2canvas + iframe capture already proven by pdf_client.ts.
+    const { captureDeckAsPngDataUrls } = await import('./screenshotCapture');
+    const images = await captureDeckAsPngDataUrls(deck);
+    const response = await fetch(`${API_BASE_URL}/api/export/pptx/editable/from-images`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        session_id: sessionId || null,
+        title: deck.title || 'slides',
+        images,
+        width_px: 1280,
+        height_px: 720,
+      }),
+    });
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({}));
+      throw new ApiError(response.status, error.detail || 'Screenshot PPTX export failed');
+    }
+    return response.blob();
+  },
+
+  /**
    * Export slides to PowerPoint format using async polling
    * 
    * This method handles the full export flow:
@@ -1189,59 +1263,47 @@ export const api = {
   },
 
   /**
-   * Export slides to Google Slides using async polling.
+   * Export slides to Google Slides via the records → PPTX → Drive
+   * auto-convert pipeline.
    *
-   * Full flow: capture charts -> start job -> poll until done -> return URL.
-   * Uses the same async job pattern as PPTX export to avoid proxy timeouts.
+   * The frontend extracts the same DOM-walker records the editable-PPTX
+   * export uses, the backend builds PPTX bytes via ``build_pptx``, and
+   * Drive auto-converts on upload (mimeType=application/vnd.google-apps
+   * .presentation). Single synchronous round-trip — no polling.
    */
   async exportToGoogleSlides(
     sessionId: string,
     slideDeck?: import('../types/slide').SlideDeck,
     onProgress?: (progress: number, total: number, status: string) => void,
   ): Promise<{ presentation_id: string; presentation_url: string; alreadyOpened: boolean }> {
-    // Step 1: Capture chart images client-side
-    const chartImages = slideDeck
-      ? await captureChartImages(slideDeck, onProgress)
-      : undefined;
+    if (!slideDeck) {
+      throw new ApiError(400, 'No slide deck to export');
+    }
 
-    // Step 2: Start async export job
-    onProgress?.(0, slideDeck?.slides.length || 0, 'Starting Google Slides export...');
+    onProgress?.(0, slideDeck.slides.length, 'Building PPTX from slides…');
+    const { extractSlideRecordsForExport } = await import('./domWalker');
+    const slides = await extractSlideRecordsForExport(slideDeck, 'google_slides');
 
-    const startResponse = await fetch(`${API_BASE_URL}/api/export/google-slides`, {
+    onProgress?.(slideDeck.slides.length, slideDeck.slides.length, 'Uploading to Google Drive…');
+    const response = await fetch(`${API_BASE_URL}/api/export/google-slides/from-records`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         session_id: sessionId,
-        chart_images: chartImages,
+        title: slideDeck.title || 'Presentation',
+        slides,
+        font_mode: 'google_slides',
       }),
     });
 
-    if (!startResponse.ok) {
-      const error = await startResponse.json().catch(() => ({}));
-      throw new ApiError(startResponse.status, error.detail || 'Google Slides export failed');
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({}));
+      throw new ApiError(response.status, error.detail || 'Google Slides export failed');
     }
 
-    const { job_id } = await startResponse.json();
-    console.log(`[GSLIDES_EXPORT] Job started: ${job_id}`);
-
-    // Step 3: Poll until complete — open deck as soon as URL is available
-    let earlyOpened = false;
-    const status = await pollExportJob(
-      `${API_BASE_URL}/api/export/google-slides/poll/${job_id}`,
-      'GSLIDES_EXPORT',
-      onProgress,
-      (url) => {
-        earlyOpened = true;
-        window.open(url, '_blank');
-      },
-    );
-
-    onProgress?.(status.total_slides, status.total_slides, 'Done!');
-    return {
-      presentation_id: status.presentation_id!,
-      presentation_url: status.presentation_url!,
-      alreadyOpened: earlyOpened,
-    };
+    const { presentation_id, presentation_url } = await response.json();
+    onProgress?.(slideDeck.slides.length, slideDeck.slides.length, 'Done!');
+    return { presentation_id, presentation_url, alreadyOpened: false };
   },
 
   // =========================================================================

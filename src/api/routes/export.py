@@ -544,7 +544,7 @@ async def export_to_pptx(request: ExportPPTXRequest):
             safe_title = "".join(c if c.isalnum() or c in (' ', '-', '_') else '_' for c in title)
             filename = f"{safe_title.replace(' ', '_')}.pptx"
             
-            logger.info("PPTX export completed", extra={"path": output_path, "filename": filename})
+            logger.info("PPTX export completed", extra={"path": output_path, "pptx_filename": filename})
             
             # Cleanup function for temporary files
             def cleanup():
@@ -794,14 +794,181 @@ async def download_pptx_export(job_id: str, background_tasks: BackgroundTasks):
     
     logger.info(
         "Serving PPTX download",
-        extra={"job_id": job_id, "filename": filename},
+        extra={"job_id": job_id, "pptx_filename": filename},
     )
     
     # Schedule cleanup after download
     background_tasks.add_task(cleanup_export_job, job_id)
-    
+
     return FileResponse(
         path=output_path,
         filename=filename,
         media_type="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    )
+
+
+# ---------------------------------------------------------------------------
+# Editable PPTX export (Claude-Design-style DOM walker)
+# ---------------------------------------------------------------------------
+
+class ExportPPTXEditableRequest(BaseModel):
+    """Request for the editable-PPTX export path.
+
+    No chart_images field — the sidecar walks the live DOM, so rasterized
+    chart snapshots from the client aren't needed.
+    """
+    session_id: str
+
+
+@router.get("/pptx/editable/available")
+async def editable_export_available() -> dict:
+    """Tell the frontend whether the editable-PPTX path is available.
+
+    The path used to depend on a Node sidecar (Puppeteer+pptxgenjs) that
+    we couldn't install on Databricks Apps (non-root, memory-constrained).
+    We now run the DOM walker in the user's browser and emit PPTX on the
+    server with python-pptx, so the path is always available as long as
+    python-pptx is installed.
+    """
+    try:
+        import pptx  # noqa: F401
+        return {"available": True, "strategy": "client-walker+python-pptx"}
+    except Exception as e:
+        return {"available": False, "error": str(e)}
+
+
+class ExportPPTXFromRecordsRequest(BaseModel):
+    """Request body for the client-walker editable-PPTX export path."""
+    session_id: Optional[str] = None  # optional — title can be inferred
+    title: Optional[str] = None
+    slides: list[dict]  # [{nodes: [...], notes: "..."}]
+    font_mode: Optional[str] = "universal"  # "universal" | "custom" | "google_slides"
+
+
+@router.post("/pptx/editable/from-records")
+async def export_pptx_editable_from_records(request: ExportPPTXFromRecordsRequest):
+    """Accept DOM-walker records produced by the frontend and return a
+    byte-complete editable ``.pptx``.
+
+    See ``frontend/src/services/domWalker.ts`` for the extraction side.
+    The contract is: each slide carries ``nodes`` (drawable records in
+    slide-px coordinates) and ``notes`` (speaker-notes string). Nothing
+    here talks to headless Chromium; the browser did that work already.
+    """
+    from src.services.pptx_from_records import build_pptx
+
+    title = request.title or "slides"
+    if not request.slides:
+        raise HTTPException(status_code=400, detail="No slides supplied")
+    font_mode = request.font_mode or "universal"
+    if font_mode not in ("universal", "custom", "google_slides"):
+        font_mode = "universal"
+    try:
+        pptx_bytes = build_pptx(title, request.slides, font_mode=font_mode)
+    except Exception as e:
+        logger.exception(f"Editable PPTX emission failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+    safe = "".join(c if c.isalnum() or c in "-_" else "_" for c in title).strip("_") or "slides"
+    from fastapi.responses import Response
+    return Response(
+        content=pptx_bytes,
+        media_type="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        headers={"Content-Disposition": f'attachment; filename="{safe}_editable.pptx"'},
+    )
+
+
+class ExportPPTXFromImagesRequest(BaseModel):
+    """Screenshot-mode export. Client captures each slide via html2canvas
+    and POSTs PNG data URLs; we build a .pptx with one picture per slide.
+    Not editable but pixel-identical to the preview.
+    """
+    session_id: Optional[str] = None
+    title: Optional[str] = None
+    images: list[str]  # per-slide data URLs (data:image/png;base64,...)
+    width_px: int = 1280
+    height_px: int = 720
+
+
+@router.post("/pptx/editable/from-images")
+async def export_pptx_screenshot_from_images(request: ExportPPTXFromImagesRequest):
+    """Screenshot-based .pptx — each slide is a single embedded image.
+    Pixel-perfect fidelity, but nothing is editable."""
+    import base64, io, re
+    from pptx import Presentation
+    from pptx.util import Emu
+
+    if not request.images:
+        raise HTTPException(status_code=400, detail="No images supplied")
+
+    PX_TO_EMU = 9525
+    prs = Presentation()
+    prs.slide_width = Emu(request.width_px * PX_TO_EMU)
+    prs.slide_height = Emu(request.height_px * PX_TO_EMU)
+    blank = prs.slide_layouts[6]
+
+    for src in request.images:
+        slide = prs.slides.add_slide(blank)
+        m = re.match(r"data:image/[^;]+;base64,(.+)", src or "")
+        if not m:
+            continue
+        try:
+            raw = base64.b64decode(m.group(1))
+        except Exception:
+            continue
+        slide.shapes.add_picture(
+            io.BytesIO(raw),
+            Emu(0), Emu(0),
+            Emu(request.width_px * PX_TO_EMU),
+            Emu(request.height_px * PX_TO_EMU),
+        )
+
+    buf = io.BytesIO()
+    prs.save(buf)
+    title = request.title or "slides"
+    safe = "".join(c if c.isalnum() or c in "-_" else "_" for c in title).strip("_") or "slides"
+    from fastapi.responses import Response
+    return Response(
+        content=buf.getvalue(),
+        media_type="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        headers={"Content-Disposition": f'attachment; filename="{safe}_screenshot.pptx"'},
+    )
+
+
+@router.post("/pptx/editable")
+async def export_pptx_editable(request: ExportPPTXEditableRequest):
+    """Export a slide deck to an editable PPTX via the DOM-walker sidecar.
+
+    Synchronous (no job queue) — the sidecar is fast (<30s for typical decks)
+    and the existing async path is kept intact for the raster exporter.
+    """
+    from src.services.html_editable_exporter import (
+        export as export_editable,
+        EditableExportError,
+    )
+
+    chat_service = get_chat_service()
+    slide_deck = chat_service.get_slides(request.session_id)
+    if not slide_deck or not slide_deck.get("slides"):
+        raise HTTPException(status_code=404, detail="No slides available")
+
+    try:
+        pptx_bytes = export_editable(slide_deck)
+    except EditableExportError as e:
+        # 503 — editable path not installed / sidecar broken. Client can
+        # fall back to the raster export, but we never silently do so:
+        # hiding a missing Chromium install makes it invisible to operators.
+        logger.warning(f"Editable PPTX export failed: {e}")
+        raise HTTPException(status_code=503, detail=str(e))
+
+    safe_title = (slide_deck.get("title") or "slides").replace(" ", "_")
+    safe_title = "".join(c if c.isalnum() or c in "-_" else "_" for c in safe_title)
+
+    from fastapi.responses import Response
+    return Response(
+        content=pptx_bytes,
+        media_type="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        headers={
+            "Content-Disposition": f'attachment; filename="{safe_title}_editable.pptx"',
+        },
     )

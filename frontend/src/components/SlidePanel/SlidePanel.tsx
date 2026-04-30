@@ -19,6 +19,7 @@ import { SlideTile } from './SlideTile';
 import { PresentationMode } from '../PresentationMode';
 import { api } from '../../services/api';
 import { ConfirmDialog } from '../ConfirmDialog';
+import { EditableExportModal } from './EditableExportModal';
 import { useSelection } from '../../contexts/SelectionContext';
 import { exportSlideDeckToPDF } from '../../services/pdf_client';
 import { useSession } from '../../contexts/SessionContext';
@@ -45,6 +46,7 @@ interface SlidePanelProps {
 export interface SlidePanelHandle {
   exportPDF: () => void;
   exportPPTX: () => void;
+  exportPPTXEditable: () => void;
   exportHTML: () => void;
   openPresentationMode: () => void;
 }
@@ -57,6 +59,8 @@ function SlidePanelComponent(props: SlidePanelProps, ref: React.Ref<SlidePanelHa
   const [viewMode, _setViewMode] = useState<ViewMode>('tiles');
   const [isExportingPDF, setIsExportingPDF] = useState(false);
   const [isExportingPPTX, setIsExportingPPTX] = useState(false);
+  const [isExportingPPTXEditable, setIsExportingPPTXEditable] = useState(false);
+  const [editableExportModalOpen, setEditableExportModalOpen] = useState(false);
   const [_exportProgress, setExportProgress] = useState<{ current: number; total: number; status: string } | null>(null);
   const [showExportMenu, setShowExportMenu] = useState(false);
   const exportMenuRef = useRef<HTMLDivElement>(null);
@@ -315,6 +319,42 @@ function SlidePanelComponent(props: SlidePanelProps, ref: React.Ref<SlidePanelHa
     }
   };
 
+  // Entry point: opens the 4-option modal instead of firing export
+  // immediately. The modal's onGenerate fires `runEditableExport`.
+  const handleExportPPTXEditable = () => {
+    if (!slideDeck || !sessionId || isExportingPPTXEditable) return;
+    setShowExportMenu(false);
+    setEditableExportModalOpen(true);
+  };
+
+  const runEditableExport = async (mode: 'custom' | 'universal' | 'google_slides' | 'screenshot') => {
+    if (!slideDeck || !sessionId || isExportingPPTXEditable) return;
+    setIsExportingPPTXEditable(true);
+    onExportStatusChange?.(mode === 'screenshot' ? 'Capturing screenshots…' : 'Exporting editable PPTX…');
+    try {
+      const blob = await api.exportPptxEditable(slideDeck, sessionId, mode);
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      const timestamp = new Date().toISOString().slice(0, 10);
+      const suffix = mode === 'screenshot' ? 'screenshot' : 'editable';
+      a.download = `${slideDeck.title || 'slides'}_${timestamp}_${suffix}.pptx`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      window.URL.revokeObjectURL(url);
+      onExportStatusChange?.(null);
+      showToast(`${mode === 'screenshot' ? 'Screenshot' : 'Editable'} PPTX downloaded`, 'success');
+    } catch (error) {
+      console.error('PPTX export failed:', error);
+      const message = error instanceof Error ? error.message : 'Failed to export PPTX.';
+      alert(message);
+    } finally {
+      setIsExportingPPTXEditable(false);
+      onExportStatusChange?.(null);
+    }
+  };
+
   const handleSaveAsHTML = () => {
     if (!slideDeck) return;
 
@@ -447,6 +487,7 @@ function SlidePanelComponent(props: SlidePanelProps, ref: React.Ref<SlidePanelHa
   useImperativeHandle(ref, () => ({
     exportPDF: handleExportPDF,
     exportPPTX: handleExportPPTX,
+    exportPPTXEditable: handleExportPPTXEditable,
     exportHTML: handleSaveAsHTML,
     openPresentationMode: () => setIsPresentationMode(true),
   }));
@@ -597,6 +638,11 @@ function SlidePanelComponent(props: SlidePanelProps, ref: React.Ref<SlidePanelHa
         message={`Delete slide ${(deleteSlideIndex ?? 0) + 1}?`}
         onConfirm={handleDeleteSlideConfirm}
         onCancel={() => setDeleteSlideIndex(null)}
+      />
+      <EditableExportModal
+        open={editableExportModalOpen}
+        onClose={() => setEditableExportModalOpen(false)}
+        onGenerate={(mode) => runEditableExport(mode)}
       />
       {lockedBy && (
         <div className="bg-amber-50 border-b border-amber-200 px-4 py-2.5 flex items-center gap-2">

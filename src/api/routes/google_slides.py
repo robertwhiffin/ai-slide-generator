@@ -10,7 +10,7 @@ user tokens are stored per-user in the ``google_oauth_tokens`` table.
 import json
 import logging
 import os
-from typing import Optional
+from typing import Any, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse
@@ -20,7 +20,9 @@ from sqlalchemy.orm import Session
 from src.api.services.chat_service import get_chat_service
 from src.api.routes.export import ExportJobResponse
 from src.core.database import get_db
+from src.services.drive_uploader import replace_presentation, upload_pptx_as_slides
 from src.services.google_slides_auth import GoogleSlidesAuth, GoogleSlidesAuthError
+from src.services.pptx_from_records import EmitError, build_pptx
 
 logger = logging.getLogger(__name__)
 
@@ -342,3 +344,98 @@ async def poll_google_slides_export(job_id: str):
         return ExportJobResponse(**build_export_job_response(job_id))
     except ValueError:
         raise HTTPException(status_code=404, detail="Export job not found")
+
+
+# -------------------------------------------------------------------------
+# Records-based export — PPTX → Drive auto-convert to Slides
+# -------------------------------------------------------------------------
+
+
+class GoogleSlidesFromRecordsRequest(BaseModel):
+    """Records-based Google Slides export request.
+
+    Mirrors the editable-PPTX ``/from-records`` route shape so the
+    frontend can reuse ``extractSlideRecordsForExport``.
+    """
+    session_id: str
+    title: str
+    slides: list[dict[str, Any]]
+    font_mode: str = "google_slides"
+
+
+class GoogleSlidesExportResponse(BaseModel):
+    presentation_id: str
+    presentation_url: str
+
+
+@router.post("/from-records", response_model=GoogleSlidesExportResponse)
+async def export_google_slides_from_records(
+    request: GoogleSlidesFromRecordsRequest,
+    db: Session = Depends(get_db),
+):
+    """Build a PPTX from DOM-walker records and upload to Drive.
+
+    Drive's ``files.create`` with ``mimeType=application/vnd.google-apps.
+    presentation`` triggers automatic conversion to a native Google
+    Slides deck — no per-element Slides API calls needed.
+
+    Re-exports on the same session overwrite the previous presentation.
+    """
+    try:
+        auth = _get_auth(db)
+    except GoogleSlidesAuthError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    if not auth.is_authorized():
+        raise HTTPException(
+            status_code=401,
+            detail="Not authorized with Google. Complete the OAuth flow first.",
+        )
+
+    try:
+        pptx_bytes = build_pptx(
+            title=request.title,
+            slides=request.slides,
+            font_mode=request.font_mode,
+        )
+    except EmitError as exc:
+        logger.error("PPTX build failed for Google Slides export", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"PPTX build failed: {exc}") from exc
+
+    from src.api.services.session_manager import get_session_manager
+    session_manager = get_session_manager()
+    existing_info = session_manager.get_google_slides_info(request.session_id)
+    existing_id = existing_info["presentation_id"] if existing_info else None
+
+    try:
+        if existing_id:
+            presentation_id, url = replace_presentation(
+                auth, existing_id, pptx_bytes, request.title,
+            )
+        else:
+            presentation_id, url = upload_pptx_as_slides(
+                auth, pptx_bytes, request.title,
+            )
+    except Exception as exc:
+        logger.error("Drive upload failed", exc_info=True)
+        raise HTTPException(status_code=502, detail=f"Drive upload failed: {exc}") from exc
+
+    session_manager.set_google_slides_info(
+        session_id=request.session_id,
+        presentation_id=presentation_id,
+        presentation_url=url,
+    )
+
+    logger.info(
+        "Google Slides export complete",
+        extra={
+            "session_id": request.session_id,
+            "presentation_id": presentation_id,
+            "replaced": bool(existing_id),
+        },
+    )
+
+    return GoogleSlidesExportResponse(
+        presentation_id=presentation_id,
+        presentation_url=url,
+    )
