@@ -1,0 +1,5 @@
+src/services/databricks_slides/assets/databricks/template.pptx
+[BRAND TEMPLATE] Databricks Corporate Slide 2025 2.pptx
+app.yaml
+services/html-to-pptx/node_modules/
+services/html-to-pptx/tests/.out/
