@@ -38,17 +38,20 @@ class HuashuExportError(RuntimeError):
 def _local_dev_gate() -> bool:
     """True iff this process is running on a developer machine, not Apps.
 
-    Hard rules:
-      - DATABRICKS_APP_NAME being set means we're inside a deployed Apps
-        container. Disable.
-      - HUASHU_PIPELINE_ENABLED=1 is an explicit override (rare, e.g.
-        running the local backend with a custom env).
+    Hard rules (in priority order):
+      - HUASHU_PIPELINE_ENABLED=1 explicit opt-in. This is what
+        app.yaml.darwish sets so the route works on Databricks Apps
+        (Chromium installed during boot via `npx playwright install
+        chromium`). Wins over the Apps-name check.
+      - DATABRICKS_APP_NAME being set without the opt-in means a
+        deployed Apps container that hasn't installed Chromium —
+        keep disabled to fail fast.
       - Otherwise allow if ENVIRONMENT=development.
     """
-    if os.environ.get("DATABRICKS_APP_NAME"):
-        return False
     if os.environ.get("HUASHU_PIPELINE_ENABLED") == "1":
         return True
+    if os.environ.get("DATABRICKS_APP_NAME"):
+        return False
     return os.environ.get("ENVIRONMENT") == "development"
 
 

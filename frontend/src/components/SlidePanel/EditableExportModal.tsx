@@ -46,20 +46,16 @@ const BASE_OPTIONS: Option[] = [
   },
 ];
 
-// Only shown in local dev (Vite's `import.meta.env.DEV` is true on `npm run dev`,
-// false on the production build that ships to FEVM). Server-side gate also
-// blocks via DATABRICKS_APP_NAME / ENVIRONMENT, so even if this slipped into
-// production, the route would 503.
+// Always-visible huashu option (now enabled on prod too — the deployed
+// app installs Chromium during boot per app.yaml.darwish, and the backend
+// gate accepts the route on Apps when HUASHU_PIPELINE_ENABLED=1).
 const HUASHU_OPTION: Option = {
   value: 'huashu',
-  title: 'Huashu (test) · server-side Playwright',
-  description: 'Local-only. Runs alchaincyf/huashu-design html2pptx.js. Slides not following huashu\'s 4 rules will fail validation.',
-  tag: 'Local',
+  title: 'Huashu · server-side Playwright',
+  description: 'Pixel-faithful pipeline using alchaincyf/huashu-design + Chromium. Slower but matches the native HTML rendering most closely.',
 };
 
-const OPTIONS: Option[] = (import.meta as any).env?.DEV
-  ? [...BASE_OPTIONS, HUASHU_OPTION]
-  : BASE_OPTIONS;
+const OPTIONS: Option[] = [...BASE_OPTIONS, HUASHU_OPTION];
 
 export function EditableExportModal({ open, onClose, onGenerate }: Props) {
   const [mode, setMode] = useState<EditableExportMode>('universal');

@@ -950,10 +950,19 @@ async function html2pptx(htmlFile, pres, options = {}) {
   } = options;
 
   try {
-    // Use Chrome on macOS, default Chromium on Unix
+    // Use Chrome on macOS, default Chromium on Unix.
+    // On Linux (Databricks Apps container), we run as non-root and need
+    // --no-sandbox; --disable-dev-shm-usage avoids /dev/shm size issues
+    // common in containers.
     const launchOptions = { env: { TMPDIR: tmpDir } };
     if (process.platform === 'darwin') {
       launchOptions.channel = 'chrome';
+    } else {
+      launchOptions.args = [
+        '--no-sandbox',
+        '--disable-setuid-sandbox',
+        '--disable-dev-shm-usage',
+      ];
     }
 
     const browser = await chromium.launch(launchOptions);
