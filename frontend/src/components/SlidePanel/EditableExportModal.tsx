@@ -7,7 +7,7 @@
 
 import React, { useState } from 'react';
 
-export type EditableExportMode = 'custom' | 'universal' | 'google_slides' | 'screenshot' | 'huashu';
+export type EditableExportMode = 'custom' | 'universal' | 'google_slides' | 'screenshot';
 
 interface Props {
   open: boolean;
@@ -22,7 +22,7 @@ interface Option {
   tag?: string;
 }
 
-const BASE_OPTIONS: Option[] = [
+const OPTIONS: Option[] = [
   {
     value: 'custom',
     title: 'Editable · custom fonts',
@@ -45,21 +45,6 @@ const BASE_OPTIONS: Option[] = [
     description: 'Pixel-perfect slides as images. Not editable, but exactly what you see.',
   },
 ];
-
-// Only shown in local dev (Vite's `import.meta.env.DEV` is true on `npm run dev`,
-// false on the production build that ships to FEVM). Server-side gate also
-// blocks via DATABRICKS_APP_NAME / ENVIRONMENT, so even if this slipped into
-// production, the route would 503.
-const HUASHU_OPTION: Option = {
-  value: 'huashu',
-  title: 'Huashu (test) · server-side Playwright',
-  description: 'Local-only. Runs alchaincyf/huashu-design html2pptx.js. Slides not following huashu\'s 4 rules will fail validation.',
-  tag: 'Local',
-};
-
-const OPTIONS: Option[] = (import.meta as any).env?.DEV
-  ? [...BASE_OPTIONS, HUASHU_OPTION]
-  : BASE_OPTIONS;
 
 export function EditableExportModal({ open, onClose, onGenerate }: Props) {
   const [mode, setMode] = useState<EditableExportMode>('universal');

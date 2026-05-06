@@ -535,6 +535,352 @@ const WALKER_SOURCE = `
 `;
 
 /**
+ * Huashu-style DOM mutation pass. Ported from
+ * `services/pptx-emit-huashu/preprocess.mjs` (which runs server-side under
+ * Playwright in the local-only huashu pipeline). Running these mutations
+ * client-side, scoped to the visible slide root, makes our existing walker
+ * produce the same fidelity (tables flattened, badge pills centered, code
+ * panels collapsed to one text frame, gradient bg picked up by hasVisualFill,
+ * etc.) without requiring Chromium server-side. That's why this works on
+ * Databricks Apps where the original huashu pipeline can't run.
+ *
+ * Exposes window.__huashuPreprocess(slideRoot). Called per-slide in
+ * extractSlideRecordsForExport before window.__extractSlide(slideRoot).
+ */
+const PREPROCESS_SOURCE = `
+(function () {
+  const BLOCK_TAGS = new Set([
+    'DIV', 'P', 'H1', 'H2', 'H3', 'H4', 'H5', 'H6',
+    'UL', 'OL', 'LI', 'TABLE', 'THEAD', 'TBODY', 'TR', 'TD', 'TH',
+    'IMG', 'CANVAS', 'VIDEO', 'AUDIO', 'IFRAME', 'SVG',
+    'SECTION', 'ARTICLE', 'ASIDE', 'HEADER', 'FOOTER', 'NAV',
+    'FIGURE', 'FIGCAPTION', 'PRE', 'HR',
+  ]);
+  function isInlineNode(node) {
+    if (node.nodeType === 3 /* TEXT_NODE */) {
+      return node.textContent.trim().length > 0;
+    }
+    if (node.nodeType !== 1 /* ELEMENT_NODE */) return false;
+    return !BLOCK_TAGS.has(node.tagName);
+  }
+
+  // ─── Monospace code blocks → single multi-line text frame ──────────
+  function flattenMonospaceCodeBlocks(root) {
+    let count = 0;
+    root.querySelectorAll('div').forEach((panel) => {
+      const cs = window.getComputedStyle(panel);
+      const fam = (cs.fontFamily || '').toLowerCase();
+      const isMono = /\\bmono(space)?\\b|courier|consolas|menlo|monaco/i.test(fam);
+      if (!isMono) return;
+      const childDivs = Array.from(panel.children).filter((c) => c.tagName === 'DIV');
+      if (childDivs.length < 2) return;
+      const fragment = document.createDocumentFragment();
+      Array.from(panel.childNodes).forEach((child) => {
+        if (child.nodeType === 1 && child.tagName === 'DIV') {
+          // Replace leading regular spaces in the FIRST text-node with NBSP
+          // so emit.mjs's whitespace-collapse doesn't eat the indent.
+          const inlineChildren = Array.from(child.childNodes);
+          for (let i = 0; i < inlineChildren.length; i++) {
+            const n = inlineChildren[i];
+            if (n.nodeType === 3 /* TEXT_NODE */) {
+              const t = n.textContent;
+              const m = t.match(/^( +)/);
+              if (m) {
+                n.textContent = '\\u00A0'.repeat(m[1].length) + t.slice(m[1].length);
+              }
+            }
+            fragment.appendChild(n);
+          }
+          fragment.appendChild(document.createElement('br'));
+        } else if (child.nodeType === 1 && child.tagName === 'BR') {
+          // Explicit <br> in source = blank-line separator. Emit NBSP+<br>
+          // so back-to-back paragraph breaks don't collapse to one.
+          fragment.appendChild(document.createTextNode('\\u00A0'));
+          fragment.appendChild(document.createElement('br'));
+        } else if (child.nodeType === 3 /* TEXT_NODE */ && !child.textContent.trim()) {
+          // skip whitespace-only text nodes between block siblings
+        } else {
+          fragment.appendChild(child.cloneNode(true));
+        }
+      });
+      panel.innerHTML = '';
+      const p = document.createElement('p');
+      p.style.margin = '0';
+      p.style.padding = '0';
+      p.style.fontSize = cs.fontSize;
+      p.style.fontFamily = cs.fontFamily;
+      p.style.fontWeight = cs.fontWeight;
+      p.style.color = cs.color;
+      p.style.lineHeight = cs.lineHeight;
+      p.style.textAlign = 'left';
+      p.style.whiteSpace = 'normal';
+      p.appendChild(fragment);
+      panel.appendChild(p);
+      count++;
+    });
+    return count;
+  }
+
+  // ─── Wrap inline content in <p> with pinned font (preserves emoji/font size) ───
+  function wrapInlineRunsIn(parent) {
+    let count = 0;
+    const children = Array.from(parent.childNodes);
+    let i = 0;
+    const parentCs = window.getComputedStyle(parent);
+    const inheritedFont = {
+      fontSize: parentCs.fontSize,
+      fontFamily: parentCs.fontFamily,
+      fontWeight: parentCs.fontWeight,
+      fontStyle: parentCs.fontStyle,
+      color: parentCs.color,
+      lineHeight: parentCs.lineHeight,
+      textAlign: parentCs.textAlign,
+      letterSpacing: parentCs.letterSpacing,
+    };
+    while (i < children.length) {
+      if (!isInlineNode(children[i])) { i++; continue; }
+      const run = [];
+      while (i < children.length && isInlineNode(children[i])) {
+        run.push(children[i]);
+        i++;
+      }
+      const p = document.createElement('p');
+      p.style.margin = '0';
+      p.style.padding = '0';
+      Object.assign(p.style, inheritedFont);
+      parent.insertBefore(p, run[0]);
+      run.forEach((n) => p.appendChild(n));
+      count++;
+    }
+    return count;
+  }
+  function wrapBareTextInDivs(root) {
+    let wrapped = 0;
+    root.querySelectorAll('div, pre, code').forEach((parent) => {
+      wrapped += wrapInlineRunsIn(parent);
+    });
+    return wrapped;
+  }
+
+  // ─── Replace bg-image divs with nested <img> so the bitmap survives ──
+  function replaceBackgroundImageWithImg(root) {
+    let replaced = 0;
+    root.querySelectorAll('div').forEach((div) => {
+      const cs = window.getComputedStyle(div);
+      const bg = cs.backgroundImage;
+      if (!bg || bg === 'none') return;
+      if (bg.includes('gradient')) return;  // walker rasterizes gradients itself
+      const m = bg.match(/url\\((["']?)([^"')]+)\\1\\)/);
+      if (!m) return;
+      const url = m[2];
+      div.style.backgroundImage = 'none';
+      const pos = cs.position;
+      if (pos === 'static' || !pos) div.style.position = 'relative';
+      const img = document.createElement('img');
+      img.src = url;
+      img.style.cssText =
+        'position:absolute;left:0;top:0;width:100%;height:100%;' +
+        'object-fit:' + (cs.backgroundSize === 'contain' ? 'contain' : 'cover') + ';' +
+        'z-index:-1;pointer-events:none;';
+      div.insertBefore(img, div.firstChild);
+      replaced++;
+    });
+    return replaced;
+  }
+
+  // ─── Peel bg/border/shadow off text tags onto a wrapper div ─────────
+  function peelBackgroundsOffTextTags(root) {
+    const textTags = ['p', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6'];
+    let peeled = 0;
+    textTags.forEach((tag) => {
+      root.querySelectorAll(tag).forEach((el) => {
+        const cs = window.getComputedStyle(el);
+        const hasBg = cs.backgroundColor && cs.backgroundColor !== 'rgba(0, 0, 0, 0)' && cs.backgroundColor !== 'transparent';
+        const hasBorder = parseFloat(cs.borderTopWidth) > 0 ||
+                          parseFloat(cs.borderRightWidth) > 0 ||
+                          parseFloat(cs.borderBottomWidth) > 0 ||
+                          parseFloat(cs.borderLeftWidth) > 0;
+        const hasShadow = cs.boxShadow && cs.boxShadow !== 'none';
+        if (!hasBg && !hasBorder && !hasShadow) return;
+        const wrap = document.createElement('div');
+        wrap.style.cssText =
+          'display:inline-block;' +
+          (hasBg ? 'background:' + cs.backgroundColor + ';' : '') +
+          (hasBorder ? 'border:' + cs.borderTopWidth + ' ' + cs.borderTopStyle + ' ' + cs.borderTopColor + ';' : '') +
+          (hasShadow ? 'box-shadow:' + cs.boxShadow + ';' : '') +
+          'border-radius:' + cs.borderRadius + ';' +
+          'padding:' + cs.padding + ';';
+        el.parentNode.insertBefore(wrap, el);
+        wrap.appendChild(el);
+        el.style.background = 'none';
+        el.style.border = '0';
+        el.style.boxShadow = 'none';
+        el.style.padding = '0';
+        peeled++;
+      });
+    });
+    return peeled;
+  }
+
+  // ─── Tables → flat positioned cell-divs anchored to slide root ──────
+  function flattenTables(root) {
+    let cellCount = 0;
+    const rootRect = root.getBoundingClientRect();
+    root.querySelectorAll('table').forEach((table) => {
+      const cells = table.querySelectorAll('th, td');
+      if (!cells.length) return;
+      cells.forEach((cell) => {
+        const cellRect = cell.getBoundingClientRect();
+        if (cellRect.width === 0 || cellRect.height === 0) return;
+        const x = cellRect.left - rootRect.left;
+        const y = cellRect.top - rootRect.top;
+        const w = cellRect.width;
+        const h = cellRect.height;
+        const cs = window.getComputedStyle(cell);
+
+        const div = document.createElement('div');
+        const styleParts = [
+          'position: absolute',
+          'left: ' + x + 'px',
+          'top: ' + y + 'px',
+          'width: ' + w + 'px',
+          'height: ' + h + 'px',
+          'box-sizing: border-box',
+          'padding: ' + cs.padding,
+          'background: ' + cs.backgroundColor,
+          'font-family: ' + cs.fontFamily,
+          'font-size: ' + cs.fontSize,
+          'color: ' + cs.color,
+          'text-align: ' + cs.textAlign,
+          'display: flex',
+          'flex-direction: column',
+          'justify-content: center',
+        ];
+        const sides = ['Top', 'Right', 'Bottom', 'Left'];
+        sides.forEach((side) => {
+          const w_ = cs['border' + side + 'Width'];
+          if (w_ && parseFloat(w_) > 0) {
+            styleParts.push(
+              'border-' + side.toLowerCase() + ': ' + w_ + ' ' +
+              cs['border' + side + 'Style'] + ' ' + cs['border' + side + 'Color']
+            );
+          }
+        });
+        div.style.cssText = styleParts.join('; ') + ';';
+
+        const innerHtml = cell.innerHTML.trim();
+        if (/^<(p|h[1-6]|ul|ol)\\b/i.test(innerHtml)) {
+          div.innerHTML = innerHtml;
+        } else {
+          const p = document.createElement('p');
+          p.style.margin = '0';
+          p.style.padding = '0';
+          p.innerHTML = innerHtml;
+          div.appendChild(p);
+        }
+        // Append to the SLIDE ROOT (section), not document.body — that way
+        // our walker reaches the cell-div via root.children traversal.
+        root.appendChild(div);
+        cellCount++;
+      });
+      table.style.display = 'none';
+    });
+    return cellCount;
+  }
+
+  // ─── Inline elements with bg → standalone positioned pill divs ──────
+  function emitInlineBackgrounds(root) {
+    let count = 0;
+    const SELECTOR = 'span, mark, kbd';
+    root.querySelectorAll(SELECTOR).forEach((el) => {
+      const cs = window.getComputedStyle(el);
+      const bg = cs.backgroundColor;
+      if (!bg || bg === 'rgba(0, 0, 0, 0)' || bg === 'transparent') return;
+      const elRect = el.getBoundingClientRect();
+      if (elRect.width === 0 || elRect.height === 0) return;
+      const innerHtml = el.innerHTML;
+      if (!innerHtml.trim()) return;
+
+      const wrapper = el.closest('p, h1, h2, h3, h4, h5, h6, li');
+      const ancestor = (wrapper ? wrapper.parentElement : el.parentElement);
+      if (!ancestor) return;
+
+      const ancestorRect = ancestor.getBoundingClientRect();
+      const acs = window.getComputedStyle(ancestor);
+      const padLeft = parseFloat(acs.paddingLeft) || 0;
+      const padRight = parseFloat(acs.paddingRight) || 0;
+      const padTop = parseFloat(acs.paddingTop) || 0;
+      const padBottom = parseFloat(acs.paddingBottom) || 0;
+      const borderLeft = parseFloat(acs.borderLeftWidth) || 0;
+      const borderRight = parseFloat(acs.borderRightWidth) || 0;
+      const borderTop = parseFloat(acs.borderTopWidth) || 0;
+      const borderBottom = parseFloat(acs.borderBottomWidth) || 0;
+      const contentWidth =
+        ancestorRect.width - padLeft - padRight - borderLeft - borderRight;
+      const contentHeight =
+        ancestorRect.height - padTop - padBottom - borderTop - borderBottom;
+      const x = Math.max(0, (contentWidth - elRect.width) / 2);
+      const y = Math.max(0, (contentHeight - elRect.height) / 2);
+
+      const pill = document.createElement('div');
+      pill.style.cssText =
+        'position: absolute;' +
+        'left: ' + x + 'px;' +
+        'top: ' + y + 'px;' +
+        'width: ' + elRect.width + 'px;' +
+        'height: ' + elRect.height + 'px;' +
+        'background: ' + bg + ';' +
+        'border-radius: ' + cs.borderRadius + ';' +
+        'padding: ' + cs.padding + ';' +
+        'box-sizing: border-box;' +
+        'pointer-events: none;' +
+        'display: flex; align-items: center; justify-content: center;';
+
+      const p = document.createElement('p');
+      p.style.margin = '0';
+      p.style.padding = '0';
+      p.style.fontSize = cs.fontSize;
+      p.style.fontFamily = cs.fontFamily;
+      p.style.fontWeight = cs.fontWeight;
+      p.style.fontStyle = cs.fontStyle;
+      p.style.color = cs.color;
+      p.style.lineHeight = cs.lineHeight;
+      p.style.letterSpacing = cs.letterSpacing;
+      p.style.textAlign = 'center';
+      p.style.whiteSpace = 'nowrap';
+      p.innerHTML = innerHtml;
+      pill.appendChild(p);
+
+      const ap = window.getComputedStyle(ancestor).position;
+      if (ap === 'static' || !ap) ancestor.style.position = 'relative';
+
+      const insertRef = wrapper && wrapper.parentElement === ancestor
+        ? wrapper
+        : ancestor.firstChild;
+      ancestor.insertBefore(pill, insertRef);
+      el.remove();
+      count++;
+    });
+    return count;
+  }
+
+  // ─── Orchestrator: scoped to slide section root ─────────────────────
+  function preprocessSlide(root) {
+    if (!root) return null;
+    const codeBlocks = flattenMonospaceCodeBlocks(root);
+    const wrapped = wrapBareTextInDivs(root);
+    const replacedImgs = replaceBackgroundImageWithImg(root);
+    const peeledTextTags = peelBackgroundsOffTextTags(root);
+    const tableCells = flattenTables(root);
+    const inlineBgs = emitInlineBackgrounds(root);
+    return { codeBlocks, wrapped, replacedImgs, peeledTextTags, tableCells, inlineBgs };
+  }
+
+  window.__huashuPreprocess = preprocessSlide;
+})();
+`;
+
+/**
  * Apply font substitution to every element in the iframe before measurement.
  * Inline style beats system-installed brand fonts unconditionally, so the
  * walker measures against the fallback (Arial/Consolas) that pptxgenjs will
@@ -631,6 +977,15 @@ export async function extractSlideRecordsForExport(
       throw new Error('walker script injection failed — __extractSlide not defined');
     }
 
+    // Inject huashu-style DOM-mutation preprocessor.
+    const injectPre = d.createElement('script');
+    injectPre.textContent = PREPROCESS_SOURCE;
+    d.head.appendChild(injectPre);
+    if (typeof (w as any).__huashuPreprocess !== 'function') {
+      console.error('[walker] PREPROCESS_SOURCE failed to define __huashuPreprocess');
+      throw new Error('preprocess script injection failed');
+    }
+
     // Force brand fonts → fallback on every element (inline style = max specificity).
     if (fontMode === 'universal') {
       try {
@@ -659,6 +1014,54 @@ export async function extractSlideRecordsForExport(
       }
       await new Promise(r => setTimeout(r, SLIDE_SETTLE_MS));
       try { await (w as any).document.fonts.ready; } catch (_) {}
+
+      // If this slide has <canvas> elements (Chart.js), wait for them
+      // to (a) have non-zero attribute dims and (b) produce a non-empty
+      // toDataURL, then add a settle for the chart's animation to flush.
+      // Mirrors the post-networkidle wait we do server-side in huashu.
+      try {
+        const hasCanvases = (w as any).eval(`
+          document.querySelectorAll('section.slide-container[data-slide-index="${i}"] canvas').length > 0
+        `);
+        if (hasCanvases) {
+          const deadline = Date.now() + 5000;
+          while (Date.now() < deadline) {
+            const allReady = (w as any).eval(`
+              (function () {
+                const cs = document.querySelectorAll('section.slide-container[data-slide-index="${i}"] canvas');
+                for (const c of cs) {
+                  if (!c.width || !c.height) return false;
+                  try { if (c.toDataURL('image/png').length <= 200) return false; } catch (e) {}
+                }
+                return true;
+              })();
+            `);
+            if (allReady) break;
+            await new Promise(r => setTimeout(r, 150));
+          }
+          // Chart.js default animation is ~1s; let it finish.
+          await new Promise(r => setTimeout(r, 1500));
+        }
+      } catch (e) {
+        console.warn(`[walker] canvas wait failed on slide ${i}:`, e);
+      }
+
+      // Run huashu-style DOM mutations (flatten tables, badge pills, code
+      // panels, etc.) on the slide root BEFORE walking. Best-effort —
+      // failure here just means the slide exports without those wins.
+      try {
+        const stats = (w as any).eval(`
+          (function () {
+            const root = document.querySelector('section.slide-container[data-slide-index="${i}"]');
+            return root ? window.__huashuPreprocess(root) : null;
+          })();
+        `);
+        if (stats) {
+          console.log(`[walker] slide ${i} preprocess:`, stats);
+        }
+      } catch (e) {
+        console.warn(`[walker] preprocess failed on slide ${i}:`, e);
+      }
 
       let extract;
       try {

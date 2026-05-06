@@ -327,39 +327,14 @@ function SlidePanelComponent(props: SlidePanelProps, ref: React.Ref<SlidePanelHa
     setEditableExportModalOpen(true);
   };
 
-  const runEditableExport = async (mode: 'custom' | 'universal' | 'google_slides' | 'screenshot' | 'huashu') => {
+  const runEditableExport = async (mode: 'custom' | 'universal' | 'google_slides' | 'screenshot') => {
     if (!slideDeck || !sessionId || isExportingPPTXEditable) return;
     setIsExportingPPTXEditable(true);
-    const statusMsg = mode === 'screenshot' ? 'Capturing screenshots…'
-      : mode === 'huashu' ? 'Running huashu (server-side Playwright)…'
+    const statusMsg = mode === 'screenshot'
+      ? 'Capturing screenshots…'
       : 'Exporting editable PPTX…';
     onExportStatusChange?.(statusMsg);
     try {
-      if (mode === 'huashu') {
-        const result = await api.exportPptxHuashu(sessionId);
-        const url = window.URL.createObjectURL(result.blob);
-        const a = document.createElement('a');
-        a.href = url;
-        const timestamp = new Date().toISOString().slice(0, 10);
-        a.download = `${slideDeck.title || 'slides'}_${timestamp}_huashu.pptx`;
-        document.body.appendChild(a);
-        a.click();
-        document.body.removeChild(a);
-        window.URL.revokeObjectURL(url);
-        onExportStatusChange?.(null);
-        if (result.failures.length === 0) {
-          showToast(`Huashu PPTX downloaded (${result.succeeded}/${result.totalSlides} slides)`, 'success');
-        } else {
-          // Show warning toast + log per-slide errors so the user can see
-          // exactly which huashu rule each rejected slide violated.
-          console.warn('[huashu] per-slide failures:', result.failures);
-          showToast(
-            `Huashu PPTX: ${result.succeeded}/${result.totalSlides} slides exported (${result.failures.length} rejected — see console)`,
-            'info',
-          );
-        }
-        return;
-      }
       const blob = await api.exportPptxEditable(slideDeck, sessionId, mode);
       const url = window.URL.createObjectURL(blob);
       const a = document.createElement('a');
@@ -375,10 +350,6 @@ function SlidePanelComponent(props: SlidePanelProps, ref: React.Ref<SlidePanelHa
       showToast(`${mode === 'screenshot' ? 'Screenshot' : 'Editable'} PPTX downloaded`, 'success');
     } catch (error) {
       console.error('PPTX export failed:', error);
-      const failures = (error as any)?.failures;
-      if (Array.isArray(failures) && failures.length > 0) {
-        console.warn('[huashu] per-slide failures (all rejected):', failures);
-      }
       const message = error instanceof Error ? error.message : 'Failed to export PPTX.';
       alert(message);
     } finally {
