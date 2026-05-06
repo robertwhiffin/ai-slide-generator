@@ -1163,6 +1163,54 @@ export const api = {
     return response.blob();
   },
 
+  /**
+   * Local-only "huashu (test)" export. Sends session_id; backend fetches
+   * the deck and runs alchaincyf/huashu-design's html2pptx.js pipeline
+   * (server-side Playwright + pptxgenjs) over each slide's complete HTML.
+   * Returns the .pptx blob plus per-slide validation failures (parsed
+   * from the X-Huashu-Failures response header) so the UI can surface
+   * what huashu rejected.
+   */
+  async huashuExportAvailable(): Promise<{ available: boolean }> {
+    try {
+      const response = await fetch(`${API_BASE_URL}/api/export/pptx/editable/huashu/available`);
+      if (!response.ok) return { available: false };
+      return response.json();
+    } catch {
+      return { available: false };
+    }
+  },
+
+  async exportPptxHuashu(sessionId: string): Promise<{
+    blob: Blob;
+    totalSlides: number;
+    succeeded: number;
+    failures: Array<{ slide_index: number; error: string }>;
+  }> {
+    const response = await fetch(`${API_BASE_URL}/api/export/pptx/editable/huashu/from-html`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ session_id: sessionId }),
+    });
+    if (!response.ok) {
+      let detail: any = null;
+      try { detail = await response.json(); } catch { /* binary or empty */ }
+      const msg = detail?.detail?.message || detail?.detail || `huashu export failed (HTTP ${response.status})`;
+      const err = new ApiError(response.status, typeof msg === 'string' ? msg : JSON.stringify(msg));
+      (err as any).failures = detail?.detail?.failures || [];
+      throw err;
+    }
+    const failuresHeader = response.headers.get('X-Huashu-Failures');
+    const totalSlides = parseInt(response.headers.get('X-Huashu-Total-Slides') || '0', 10);
+    const succeeded = parseInt(response.headers.get('X-Huashu-Succeeded') || '0', 10);
+    let failures: Array<{ slide_index: number; error: string }> = [];
+    if (failuresHeader) {
+      try { failures = JSON.parse(failuresHeader); } catch { /* malformed header */ }
+    }
+    const blob = await response.blob();
+    return { blob, totalSlides, succeeded, failures };
+  },
+
   async _exportPptxScreenshot(
     deck: import('../types/slide').SlideDeck,
     sessionId?: string,
