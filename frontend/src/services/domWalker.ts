@@ -30,6 +30,14 @@ export interface RunRecord {
   family: string;
   breakLine?: boolean;
 }
+export interface ShadowSpec {
+  type: 'outer';
+  angle: number;
+  blur: number;
+  color: string;
+  offset: number;
+  opacity: number;
+}
 export interface RectRecord {
   kind: 'rect';
   x: number; y: number; w: number; h: number;
@@ -37,12 +45,14 @@ export interface RectRecord {
   stroke?: string | null;
   strokeW?: number;
   radius?: number;
+  shadow?: ShadowSpec;
   _depth?: number;
 }
 export interface ImageRecord {
   kind: 'image';
   x: number; y: number; w: number; h: number;
   src: string;
+  rotate?: number;
   _depth?: number;
 }
 export interface TextRecord {
@@ -51,6 +61,7 @@ export interface TextRecord {
   runs: RunRecord[];
   align: string;
   valign: string;
+  rotate?: number;
   _depth?: number;
 }
 export type SlideRecord = RectRecord | ImageRecord | TextRecord;
@@ -137,6 +148,101 @@ const WALKER_SOURCE = `
                 'borderBottomLeftRadius', 'borderBottomRightRadius']
       .map(k => parseFloat(cs[k]) || 0);
     return Math.max.apply(null, rs);
+  }
+
+  // ─── cherry-picks from huashu-design's html2pptx.js ─────────────────
+  // CSS text-transform → applied to text content before emission so PPT
+  // shows what the browser shows (not what node.textContent returns).
+  function applyTextTransform(text, transform) {
+    if (!transform || transform === 'none') return text;
+    if (transform === 'uppercase') return text.toUpperCase();
+    if (transform === 'lowercase') return text.toLowerCase();
+    if (transform === 'capitalize') {
+      return text.replace(/\\b\\w/g, function (c) { return c.toUpperCase(); });
+    }
+    return text;
+  }
+
+  // Read CSS transform + writing-mode → degrees (0–359) or null.
+  // Handles both "rotate(45deg)" and matrix() forms (browser sometimes
+  // canonicalizes rotate into matrix). writing-mode: vertical-rl maps to
+  // 90deg, vertical-lr to 270deg.
+  function getRotation(transform, writingMode) {
+    var angle = 0;
+    if (writingMode === 'vertical-rl') angle = 90;
+    else if (writingMode === 'vertical-lr') angle = 270;
+    if (transform && transform !== 'none') {
+      var rotateMatch = transform.match(/rotate\\((-?\\d+(?:\\.\\d+)?)deg\\)/);
+      if (rotateMatch) {
+        angle += parseFloat(rotateMatch[1]);
+      } else {
+        var matrixMatch = transform.match(/matrix\\(([^)]+)\\)/);
+        if (matrixMatch) {
+          var values = matrixMatch[1].split(',').map(parseFloat);
+          var matrixAngle = Math.atan2(values[1], values[0]) * (180 / Math.PI);
+          angle += Math.round(matrixAngle);
+        }
+      }
+    }
+    angle = angle % 360;
+    if (angle < 0) angle += 360;
+    return angle === 0 ? null : angle;
+  }
+
+  // Browser getBoundingClientRect on a rotated element returns the
+  // axis-aligned bounding box of the rotated content. PowerPoint expects
+  // the un-rotated box + a rotation angle (rotated about its center).
+  // For 90/270 we can recover unrotated dims by swap; for arbitrary
+  // angles we use offsetWidth/Height (always the unrotated CSS dims).
+  function getRotatedBox(el, box, rotation) {
+    if (rotation === null) return box;
+    if (rotation === 90 || rotation === 270) {
+      var cx = box.x + box.w / 2;
+      var cy = box.y + box.h / 2;
+      return { x: cx - box.h / 2, y: cy - box.w / 2, w: box.h, h: box.w };
+    }
+    var cx2 = box.x + box.w / 2;
+    var cy2 = box.y + box.h / 2;
+    return {
+      x: cx2 - el.offsetWidth / 2,
+      y: cy2 - el.offsetHeight / 2,
+      w: el.offsetWidth,
+      h: el.offsetHeight,
+    };
+  }
+
+  // CSS box-shadow → pptxgenjs shadow option. Inset shadows skipped
+  // (corrupt the PPTX file when round-tripped). Computed-style format:
+  //   "rgba(0,0,0,0.3) 2px 2px 8px 0px"
+  function parseBoxShadow(boxShadow) {
+    if (!boxShadow || boxShadow === 'none') return null;
+    if (/inset/.test(boxShadow)) return null;
+    var colorMatch = boxShadow.match(/rgba?\\([^)]+\\)/);
+    var parts = boxShadow.match(/(-?[\\d.]+)(?:px|pt)/g);
+    if (!parts || parts.length < 2) return null;
+    var offsetX = parseFloat(parts[0]);
+    var offsetY = parseFloat(parts[1]);
+    var blur = parts.length > 2 ? parseFloat(parts[2]) : 0;
+    var angle = 0;
+    if (offsetX !== 0 || offsetY !== 0) {
+      angle = Math.atan2(offsetY, offsetX) * (180 / Math.PI);
+      if (angle < 0) angle += 360;
+    }
+    var offset = Math.sqrt(offsetX * offsetX + offsetY * offsetY) * 0.75;  // px → pt
+    var opacity = 0.5;
+    var colorHex = '000000';
+    if (colorMatch) {
+      var c = parseColor(colorMatch[0]);
+      if (c) { colorHex = c.hex; opacity = c.alpha; }
+    }
+    return {
+      type: 'outer',
+      angle: Math.round(angle),
+      blur: blur * 0.75,
+      color: colorHex,
+      offset: offset,
+      opacity: opacity,
+    };
   }
 
   function isVisible(el, cs) {
@@ -240,17 +346,20 @@ const WALKER_SOURCE = `
   }
   function extractRuns(rootEl) {
     const runs = [];
-    const parentStyle = runStyle(getComputedStyle(rootEl));
+    const rootCs = getComputedStyle(rootEl);
+    const parentStyle = runStyle(rootCs);
+    const rootTransform = rootCs.textTransform || 'none';
     let current = Object.assign({ text: '' }, parentStyle);
     const flush = () => {
       if (current.text.length > 0) runs.push(Object.assign({}, current));
       current = Object.assign({ text: '' }, parentStyle);
     };
-    function walk(node, inherited) {
+    function walk(node, inherited, textTransform) {
       for (const child of node.childNodes) {
         if (child.nodeType === 3 /* TEXT_NODE */) {
-          const t = child.nodeValue.replace(/\\s+/g, ' ');
+          var t = child.nodeValue.replace(/\\s+/g, ' ');
           if (!t) continue;
+          t = applyTextTransform(t, textTransform);
           if (!sameStyle(current, inherited)) {
             flush();
             current = Object.assign({ text: '' }, inherited);
@@ -265,12 +374,14 @@ const WALKER_SOURCE = `
           const cs = getComputedStyle(child);
           if (cs.display === 'none' || cs.visibility === 'hidden') continue;
           const childStyle = runStyle(cs);
+          const childTransform = (cs.textTransform && cs.textTransform !== 'none')
+            ? cs.textTransform : textTransform;
           const isBlock = cs.display.indexOf('block') === 0 || cs.display === 'flex' || cs.display === 'grid';
           if (isBlock && current.text) {
             flush();
             runs.push(Object.assign({ text: '', breakLine: true }, inherited));
           }
-          walk(child, childStyle);
+          walk(child, childStyle, childTransform);
           if (isBlock) {
             flush();
             runs.push(Object.assign({ text: '', breakLine: true }, inherited));
@@ -278,7 +389,7 @@ const WALKER_SOURCE = `
         }
       }
     }
-    walk(rootEl, parentStyle);
+    walk(rootEl, parentStyle, rootTransform);
     flush();
     while (runs.length && runs[runs.length - 1].breakLine && !runs[runs.length - 1].text) {
       runs.pop();
@@ -308,6 +419,12 @@ const WALKER_SOURCE = `
       const cs = getComputedStyle(el);
       if (!isVisible(el, cs)) return;
       const box = rel(el.getBoundingClientRect());
+      // Rotation is intentionally NOT applied to non-leaf rects — children
+      // are already in post-transform browser coords, so rotating a parent
+      // container would diverge from its (axis-aligned-in-PPT) children.
+      // We apply rotation only to text leaves, <img>, and <canvas>.
+      const rotation = getRotation(cs.transform, cs.writingMode);
+      const shadow = parseBoxShadow(cs.boxShadow);
 
       // 1. Background fill (rect + optional rasterized gradient overlay).
       if (hasVisualFill(cs) && box.w > 0 && box.h > 0) {
@@ -330,7 +447,7 @@ const WALKER_SOURCE = `
         const borderColor = parseColor(cs.borderTopColor);
         const borderW = parseFloat(cs.borderTopWidth) || 0;
         if (fill || borderW > 0) {
-          records.push({
+          const rect = {
             kind: 'rect',
             x: box.x, y: box.y, w: box.w, h: box.h,
             fill: fill ? fill.hex : null,
@@ -338,7 +455,9 @@ const WALKER_SOURCE = `
             strokeW: borderW,
             radius: parseRadius(cs),
             _depth: depth,
-          });
+          };
+          if (shadow) rect.shadow = shadow;
+          records.push(rect);
         }
         // Optional gradient raster overlay on top (so gradient visuals
         // retain their full color range). If canvas rasterization fails
@@ -363,28 +482,43 @@ const WALKER_SOURCE = `
       if (isTextLeaf(el)) {
         const runs = extractRuns(el);
         if (runs.some(r => r.text)) {
-          records.push({
+          const tbox = rotation !== null ? getRotatedBox(el, box, rotation) : box;
+          const rec = {
             kind: 'text',
-            x: box.x, y: box.y, w: box.w, h: box.h,
+            x: tbox.x, y: tbox.y, w: tbox.w, h: tbox.h,
             runs: runs,
             align: cs.textAlign === 'start' ? 'left' : cs.textAlign,
             valign: 'top',
             _depth: depth,
-          });
+          };
+          if (rotation !== null) rec.rotate = rotation;
+          records.push(rec);
         }
         return;
       }
 
       // 3. <img>.
       if (el.tagName === 'IMG' && el.src) {
-        records.push(Object.assign({ kind: 'image' }, box, { src: el.currentSrc || el.src, _depth: depth }));
+        const ibox = rotation !== null ? getRotatedBox(el, box, rotation) : box;
+        const rec = Object.assign({ kind: 'image' }, ibox, {
+          src: el.currentSrc || el.src,
+          _depth: depth,
+        });
+        if (rotation !== null) rec.rotate = rotation;
+        records.push(rec);
         return;
       }
 
       // 4. <canvas> → rasterize.
       if (el.tagName === 'CANVAS') {
         try {
-          records.push(Object.assign({ kind: 'image' }, box, { src: el.toDataURL('image/png'), _depth: depth }));
+          const cbox = rotation !== null ? getRotatedBox(el, box, rotation) : box;
+          const rec = Object.assign({ kind: 'image' }, cbox, {
+            src: el.toDataURL('image/png'),
+            _depth: depth,
+          });
+          if (rotation !== null) rec.rotate = rotation;
+          records.push(rec);
         } catch (e) { /* tainted canvas */ }
         return;
       }

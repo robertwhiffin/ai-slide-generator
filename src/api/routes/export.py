@@ -972,3 +972,103 @@ async def export_pptx_editable(request: ExportPPTXEditableRequest):
             "Content-Disposition": f'attachment; filename="{safe_title}_editable.pptx"',
         },
     )
+
+
+# ---------------------------------------------------------------------------
+# Huashu pipeline (alchaincyf/huashu-design) — LOCAL-ONLY test export
+# ---------------------------------------------------------------------------
+# Uses Playwright + their html2pptx.js server-side. Not deployed to Apps:
+# the gate in pptx_from_html_huashu.is_available() blocks anything but
+# local dev. Surface as an additive 5th export mode in the frontend modal.
+
+
+@router.get("/pptx/editable/huashu/available")
+async def export_pptx_huashu_available() -> dict:
+    """Tell the frontend whether the huashu test pipeline is available.
+
+    Returns False on Databricks Apps; True only when local-dev gate passes
+    AND `npx playwright install chromium` has been run.
+    """
+    from src.services.pptx_from_html_huashu import is_available
+
+    return {"available": is_available()}
+
+
+@router.post("/pptx/editable/huashu/from-html")
+async def export_pptx_huashu_from_html(request: ExportPPTXEditableRequest):
+    """Run the LLM-generated deck HTML through huashu's html2pptx pipeline.
+
+    Local-only. Returns 503 if the gate doesn't pass. On a partial
+    success (some slides reject, others pass), still returns the .pptx
+    with an ``X-Huashu-Failures`` header carrying the per-slide error
+    JSON so the frontend can surface what huashu objected to.
+    """
+    from src.services.pptx_from_html_huashu import (
+        HuashuExportError,
+        build_pptx_huashu,
+        is_available,
+    )
+
+    if not is_available():
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "huashu pipeline not available — local dev only. Ensure "
+                "ENVIRONMENT=development is set, services/pptx-emit-huashu/ "
+                "has node_modules installed, and `npx playwright install "
+                "chromium` has been run."
+            ),
+        )
+
+    chat_service = get_chat_service()
+    slide_deck = chat_service.get_slides(request.session_id)
+    if not slide_deck or not slide_deck.get("slides"):
+        raise HTTPException(status_code=404, detail="No slides available")
+
+    slides_with_html: list[dict] = []
+    for slide in slide_deck["slides"]:
+        complete_html = build_slide_html(slide, slide_deck)
+        slides_with_html.append({
+            "html": complete_html,
+            "notes": slide.get("speaker_notes") or slide.get("notes") or "",
+        })
+
+    title = slide_deck.get("title") or "slides"
+
+    try:
+        pptx_bytes, failures = build_pptx_huashu(title, slides_with_html)
+    except HuashuExportError as e:
+        logger.exception("Huashu sidecar hard-failed")
+        raise HTTPException(status_code=500, detail=str(e))
+
+    if not pptx_bytes:
+        # All slides rejected by huashu validation — return a structured
+        # 422 so the frontend can render the per-slide errors instead of
+        # downloading an empty file.
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "message": "All slides failed huashu validation",
+                "failures": failures,
+            },
+        )
+
+    safe_title = "".join(c if c.isalnum() or c in "-_" else "_" for c in title).strip("_") or "slides"
+
+    headers = {
+        "Content-Disposition": f'attachment; filename="{safe_title}_huashu.pptx"',
+        "X-Huashu-Total-Slides": str(len(slides_with_html)),
+        "X-Huashu-Succeeded": str(len(slides_with_html) - len(failures)),
+    }
+    if failures:
+        # Compact JSON so it fits comfortably in a header. Frontend parses
+        # it for the "N slides failed" toast.
+        import json as _json
+        headers["X-Huashu-Failures"] = _json.dumps(failures, ensure_ascii=True)
+
+    from fastapi.responses import Response
+    return Response(
+        content=pptx_bytes,
+        media_type="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        headers=headers,
+    )

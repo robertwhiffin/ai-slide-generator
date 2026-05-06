@@ -73,6 +73,7 @@ function emitRect(s, r) {
       ? { color: r.stroke, width: r.strokeW }
       : { type: 'none' },
   };
+  if (r.shadow) opts.shadow = r.shadow;
   if (r.radius > 0) {
     // pptxgenjs rectRadius is a factor 0..0.5 of min(w,h).
     opts.rectRadius = Math.min(0.5, r.radius / Math.min(r.w, r.h));
@@ -84,6 +85,7 @@ function emitRect(s, r) {
 
 function emitImage(s, r) {
   const opts = { x: px(r.x), y: px(r.y), w: px(r.w), h: px(r.h) };
+  if (r.rotate) opts.rotate = r.rotate;
   if (typeof r.src === 'string' && r.src.startsWith('data:')) {
     opts.data = r.src;
   } else if (r.src) {
@@ -111,7 +113,7 @@ function emitText(s, r, fontMode) {
     }));
   if (!textArr.length) return;
 
-  s.addText(textArr, {
+  const textOpts = {
     x: px(r.x),
     y: px(r.y),
     // +2px slack to absorb sub-pixel rounding between browser layout and
@@ -127,7 +129,9 @@ function emitText(s, r, fontMode) {
     autoFit: false,
     fit: 'none',
     wrap: true,
-  });
+  };
+  if (r.rotate) textOpts.rotate = r.rotate;
+  s.addText(textArr, textOpts);
 }
 
 // ───── main ──────────────────────────────────────────────────────────

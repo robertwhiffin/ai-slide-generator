@@ -1,0 +1,15 @@
+{
+  "name": "pptx-emit-huashu",
+  "version": "0.1.0",
+  "private": true,
+  "type": "commonjs",
+  "description": "Local-only Tellr export sidecar that wraps alchaincyf/huashu-design's html2pptx.js. Playwright + pptxgenjs server-side render. Not deployed to Databricks Apps (no Chromium there).",
+  "scripts": {
+    "emit": "node emit_deck.mjs"
+  },
+  "dependencies": {
+    "playwright": "^1.49.0",
+    "pptxgenjs": "^3.12.0",
+    "sharp": "^0.33.0"
+  }
+}
