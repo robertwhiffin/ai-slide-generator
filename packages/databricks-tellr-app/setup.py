@@ -8,6 +8,15 @@ from setuptools import find_packages, setup
 from setuptools.command.build_py import build_py
 
 
+_SIDECAR_IGNORE = shutil.ignore_patterns(
+    "node_modules",
+    "sys-libs",
+    ".databricks",
+    "*.log",
+    "package-lock.json",
+)
+
+
 class BuildWithFrontend(build_py):
     """Build the frontend bundle and copy into package assets."""
 
@@ -20,6 +29,11 @@ class BuildWithFrontend(build_py):
         src_target = package_root / "src"
         assets_root = package_root / "databricks_tellr_app" / "_assets"
         frontend_target = assets_root / "frontend"
+        sidecars_root = assets_root / "sidecars"
+        records_sidecar_src = repo_root / "services" / "pptx-emit"
+        records_sidecar_target = sidecars_root / "pptx-emit"
+        huashu_sidecar_src = repo_root / "services" / "pptx-emit-huashu"
+        huashu_sidecar_target = sidecars_root / "pptx-emit-huashu"
 
         try:
             if frontend_dir.exists():
@@ -36,10 +50,34 @@ class BuildWithFrontend(build_py):
                     shutil.rmtree(src_target)
                 shutil.copytree(src_dir, src_target)
 
+            sidecars_root.mkdir(parents=True, exist_ok=True)
+            if records_sidecar_src.exists():
+                if records_sidecar_target.exists():
+                    shutil.rmtree(records_sidecar_target)
+                shutil.copytree(
+                    records_sidecar_src,
+                    records_sidecar_target,
+                    ignore=_SIDECAR_IGNORE,
+                )
+            if huashu_sidecar_src.exists():
+                if huashu_sidecar_target.exists():
+                    shutil.rmtree(huashu_sidecar_target)
+                shutil.copytree(
+                    huashu_sidecar_src,
+                    huashu_sidecar_target,
+                    ignore=_SIDECAR_IGNORE,
+                )
+
             super().run()
         finally:
             if frontend_target.exists():
                 shutil.rmtree(frontend_target)
+            if records_sidecar_target.exists():
+                shutil.rmtree(records_sidecar_target)
+            if huashu_sidecar_target.exists():
+                shutil.rmtree(huashu_sidecar_target)
+            if sidecars_root.exists() and not any(sidecars_root.iterdir()):
+                sidecars_root.rmdir()
             if assets_root.exists() and not any(assets_root.iterdir()):
                 assets_root.rmdir()
             if src_target.exists():
