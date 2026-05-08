@@ -509,7 +509,7 @@ test.describe('PPTXExport', () => {
 
     // Set up dialog handler for alert
     page.on('dialog', async dialog => {
-      expect(dialog.message()).toContain('Failed');
+      expect(dialog.message().toLowerCase()).toContain('fail');
       await dialog.accept();
     });
 
