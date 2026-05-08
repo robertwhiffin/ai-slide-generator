@@ -26,6 +26,15 @@ echo "=== build-artifacts.sh in $SIDECAR_DIR ==="
 echo "--- node_modules.tar.gz ---"
 rm -rf node_modules node_modules.tar.gz
 
+# IMPORTANT: skip Playwright's postinstall chromium download. The deployed
+# app's setup.sh runs `playwright install chromium` at boot. Letting npm
+# ci do it here means the runner downloads ~150 MB of Chromium that we
+# never ship — and worse, on GitHub's ubuntu-latest the postinstall
+# regularly crashes mid-download with "npm error Exit handler never called!"
+# leaving node_modules with empty package directories. v0.3.2's broken
+# wheel was caused by exactly this.
+export PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
+
 if [ -f package-lock.json ]; then
   npm ci --omit=dev
 else
@@ -33,10 +42,29 @@ else
   npm install --omit=dev
 fi
 
+# Hard-fail if node_modules came out empty/partial (e.g. npm crashed
+# without raising an exit code). v0.3.2 shipped a 4 KB tarball because
+# this check didn't exist; never again.
+if [ ! -f node_modules/playwright/cli.js ] && [ ! -f node_modules/playwright-core/cli.js ]; then
+  echo "ERROR: npm ci finished but node_modules has no playwright/cli.js"
+  echo "       (most likely Playwright postinstall crashed; check above logs)"
+  ls -la node_modules/playwright 2>&1 | head
+  ls -la node_modules/playwright-core 2>&1 | head
+  exit 1
+fi
+
 # Tar the dir, then remove the on-disk copy so wheel build doesn't see
 # both `node_modules/` and `node_modules.tar.gz`.
 tar czf node_modules.tar.gz node_modules
 rm -rf node_modules
+
+# Sanity check: tarball must be at least 1 MB. A working tree compresses
+# to ~12 MB; anything under 1 MB is definitely broken.
+TGZ_SIZE=$(stat -c%s node_modules.tar.gz 2>/dev/null || stat -f%z node_modules.tar.gz)
+if [ "$TGZ_SIZE" -lt 1000000 ]; then
+  echo "ERROR: node_modules.tar.gz is only $TGZ_SIZE bytes (expected >1 MB)"
+  exit 1
+fi
 echo "    $(du -h node_modules.tar.gz)"
 
 # ---------- 2. sys-libs-bullseye.tar.gz ---------------------------------
@@ -58,8 +86,13 @@ TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 
 # Comprehensive list of Bullseye packages whose .so's Chromium loads.
-# Adding a new package is safe (extra .so's just sit in the bundle and
-# get picked up via LD_LIBRARY_PATH if Chromium needs them).
+# This script runs on Ubuntu 22.04 (Jammy) — see publish.yml's
+# `runs-on: ubuntu-22.04` pin. Jammy's package names are close enough
+# to Bullseye for these libs that apt-downloading them produces a working
+# bundle for the Apps Bullseye-base container. (Earlier we used
+# ubuntu-latest = Noble = 24.04, where libssl1.1, libtiff5, libwebp6,
+# libpng16-16, libjpeg62-turbo no longer exist; that's why v0.3.2 shipped
+# an empty sys-libs tarball.)
 PACKAGES="
   libnspr4
   libnss3
@@ -111,7 +144,7 @@ PACKAGES="
   libuuid1
   libwayland-client0
   libwayland-cursor0
-  libwebp6
+  libwebp7
   libdatrie1
   zlib1g
 "
@@ -135,10 +168,28 @@ find extracted -name "*.so*" -print0 | while IFS= read -r -d '' f; do
 done
 
 cd "$SIDECAR_DIR"
-echo "    sys-libs-bullseye/ has $(ls sys-libs-bullseye | wc -l) .so files"
+SO_COUNT=$(ls sys-libs-bullseye 2>/dev/null | wc -l)
+echo "    sys-libs-bullseye/ has $SO_COUNT .so files"
+
+# Hard-fail if apt-get download silently dropped most packages (e.g. running
+# on a too-new Ubuntu where Bullseye package names no longer exist).
+# Working bundle has 100+ .so files; anything under 30 is broken.
+if [ "$SO_COUNT" -lt 30 ]; then
+  echo "ERROR: sys-libs-bullseye/ only has $SO_COUNT .so files (expected 100+)"
+  echo "       Most likely apt-get download failed for most packages — check"
+  echo "       above for 'E: Unable to locate' / 'E: Can't select candidate' errors."
+  echo "       This usually means the runner OS is too new (need Ubuntu 22.04 / Jammy)."
+  exit 1
+fi
 
 tar czf sys-libs-bullseye.tar.gz sys-libs-bullseye
 rm -rf sys-libs-bullseye
+
+TGZ_SIZE=$(stat -c%s sys-libs-bullseye.tar.gz 2>/dev/null || stat -f%z sys-libs-bullseye.tar.gz)
+if [ "$TGZ_SIZE" -lt 1000000 ]; then
+  echo "ERROR: sys-libs-bullseye.tar.gz is only $TGZ_SIZE bytes (expected >1 MB)"
+  exit 1
+fi
 echo "    $(du -h sys-libs-bullseye.tar.gz)"
 
 echo "=== build-artifacts.sh done ==="
