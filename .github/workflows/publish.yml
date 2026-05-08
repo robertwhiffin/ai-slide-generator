@@ -73,6 +73,13 @@ jobs:
       - name: Install build tools
         run: pip install build
 
+      - name: Build huashu bootstrap artifacts
+        # Produces services/pptx-emit-huashu/{node_modules,sys-libs-bullseye}.tar.gz
+        # which setup.py copies into the wheel's _assets/sidecars/pptx-emit-huashu/.
+        # setup.sh extracts them at boot on the deployed app. Apt-downloads
+        # Bullseye runtime libs (libnspr4, libnss3, etc.) for Chromium.
+        run: bash services/pptx-emit-huashu/build-artifacts.sh
+
       - name: Build databricks-tellr
         run: python -m build --sdist --wheel packages/databricks-tellr
 
