@@ -6,7 +6,19 @@ command:
   - "sh"
   - "-c"
   - |
-    pip install --upgrade --no-cache-dir ${PIP_INDEX_ARGS}-r requirements.txt && python -c "from databricks_tellr_app.run import init_database; ${INIT_DATABASE_CALL}" && python -m databricks_tellr_app.run
+    set -e
+    pip install --upgrade --no-cache-dir ${PIP_INDEX_ARGS}-r requirements.txt
+    python -c "from databricks_tellr_app.run import init_database; ${INIT_DATABASE_CALL}"
+    # Backgrounded huashu (Claude Design path) bootstrap. Extracts the
+    # bundled node_modules + sys-libs tarballs and runs `playwright install
+    # chromium`. While running, the /huashu/available endpoint reports
+    # not-ready and the frontend falls back to the records pipeline. Once
+    # the cache exists, the route flips on automatically.
+    HUASHU_SETUP=$(python -c "import os, databricks_tellr_app; print(os.path.join(os.path.dirname(databricks_tellr_app.__file__), '_assets', 'sidecars', 'pptx-emit-huashu', 'setup.sh'))" 2>/dev/null || true)
+    if [ -n "$HUASHU_SETUP" ] && [ -f "$HUASHU_SETUP" ]; then
+      sh "$HUASHU_SETUP" &
+    fi
+    python -m databricks_tellr_app.run
 
 env:
   - name: ENVIRONMENT
@@ -48,3 +60,12 @@ env:
   # ContextVar "different Context" warnings under FastAPI). See docs/technical/llm-as-judge-verification.md
   # - name: TELLR_MLFLOW_LANGCHAIN_AUTOLOG
   #   value: "1"
+  # Opt-in to the Claude Design (huashu) PPTX path. When "1", the backend
+  # serves /api/export/pptx/editable/huashu/from-html using server-side
+  # Chromium + Playwright (faster + higher fidelity than the records
+  # pipeline). Default off — the backgrounded setup.sh in the boot
+  # command above prepares artifacts either way, so flipping this to "1"
+  # later is a no-redeploy change. Frontend falls back to the records
+  # pipeline when this is off OR when setup.sh is still running.
+  - name: HUASHU_PIPELINE_ENABLED
+    value: "0"
