@@ -24,46 +24,63 @@ LOG=/tmp/huashu-setup.log
 echo "=== huashu setup at $(date -u +%FT%TZ) ===" > "$LOG"
 echo "sidecar dir: $SIDECAR_DIR" >> "$LOG"
 
-# 1. node_modules — extract from tarball if missing OR present-but-empty.
-# We can't trust just `[ -d node_modules ]` because the wheel can ship empty
-# placeholder dirs (node_modules/playwright/, node_modules/playwright-core/)
-# that look like a valid tree until you actually try to use them. Validate
-# by probing for a known file (the playwright CLI). If it's missing, force
-# a clean re-extract from the tarball.
-if [ -d node_modules ] && { [ -f node_modules/playwright/cli.js ] || [ -f node_modules/playwright-core/cli.js ]; }; then
-  echo "[setup] node_modules already present and valid, skipping extract" >> "$LOG"
-elif [ -f node_modules.tar.gz ]; then
-  if [ -d node_modules ]; then
-    echo "[setup] node_modules dir present but missing playwright CLI; clearing for clean extract" >> "$LOG"
-    rm -rf node_modules
+# 1. node_modules — re-extract from tarball if missing, partial, OR if the
+# tarball is newer than the extracted dir (i.e. wheel was upgraded since
+# last boot). Container filesystem persists across pip upgrades, so we
+# can't just check "did node_modules exist" — that would hold us on the
+# OLD extracted tree forever. Stamp the tarball's mtime against the
+# extracted dir; if they don't match, re-extract.
+needs_extract_node=true
+if [ -d node_modules ] && \
+   { [ -f node_modules/playwright/cli.js ] || [ -f node_modules/playwright-core/cli.js ]; } && \
+   [ -f node_modules.tar.gz ] && \
+   [ "node_modules.tar.gz" -ot "node_modules" ]; then
+  echo "[setup] node_modules up-to-date with tarball, skipping extract" >> "$LOG"
+  needs_extract_node=false
+fi
+if [ "$needs_extract_node" = "true" ]; then
+  if [ ! -f node_modules.tar.gz ]; then
+    echo "[setup] WARN: no node_modules.tar.gz to extract" >> "$LOG"
+  else
+    if [ -d node_modules ]; then
+      echo "[setup] node_modules stale or missing playwright CLI; clearing for clean extract" >> "$LOG"
+      rm -rf node_modules
+    fi
+    echo "[setup] extracting node_modules.tar.gz" >> "$LOG"
+    tar xzf node_modules.tar.gz >> "$LOG" 2>&1
+    # Touch dir so future mtime comparison picks up tarball updates.
+    touch node_modules
+    echo "[setup] node_modules ready" >> "$LOG"
   fi
-  echo "[setup] extracting node_modules.tar.gz" >> "$LOG"
-  tar xzf node_modules.tar.gz >> "$LOG" 2>&1
-  echo "[setup] node_modules ready" >> "$LOG"
-else
-  echo "[setup] WARN: no node_modules dir and no node_modules.tar.gz" >> "$LOG"
 fi
 
-# 2. sys-libs — extracted dir should be named sys-libs/ (the Python wrapper
-# looks for that path). The tarball contains a top-level sys-libs-bullseye/
-# dir, which we rename. Validate by probing for libnss3.so (Chromium's
-# core network-security lib) so a half-extracted sys-libs/ is forced to
-# re-extract.
-if [ -d sys-libs ] && [ -f sys-libs/libnss3.so ]; then
-  echo "[setup] sys-libs already present and valid, skipping extract" >> "$LOG"
-elif [ -f sys-libs-bullseye.tar.gz ]; then
-  if [ -d sys-libs ] || [ -d sys-libs-bullseye ]; then
-    echo "[setup] sys-libs dir present but incomplete; clearing for clean extract" >> "$LOG"
-    rm -rf sys-libs sys-libs-bullseye
+# 2. sys-libs — same pattern. Extracted dir is sys-libs/ (the Python
+# wrapper's path); tarball is sys-libs-bullseye.tar.gz with a top-level
+# sys-libs-bullseye/ dir we rename.
+needs_extract_sys=true
+if [ -d sys-libs ] && \
+   [ -f sys-libs/libnss3.so ] && \
+   [ -f sys-libs-bullseye.tar.gz ] && \
+   [ "sys-libs-bullseye.tar.gz" -ot "sys-libs" ]; then
+  echo "[setup] sys-libs up-to-date with tarball, skipping extract" >> "$LOG"
+  needs_extract_sys=false
+fi
+if [ "$needs_extract_sys" = "true" ]; then
+  if [ ! -f sys-libs-bullseye.tar.gz ]; then
+    echo "[setup] WARN: no sys-libs-bullseye.tar.gz to extract" >> "$LOG"
+  else
+    if [ -d sys-libs ] || [ -d sys-libs-bullseye ]; then
+      echo "[setup] sys-libs stale or incomplete; clearing for clean extract" >> "$LOG"
+      rm -rf sys-libs sys-libs-bullseye
+    fi
+    echo "[setup] extracting sys-libs-bullseye.tar.gz" >> "$LOG"
+    tar xzf sys-libs-bullseye.tar.gz >> "$LOG" 2>&1
+    if [ -d sys-libs-bullseye ]; then
+      mv sys-libs-bullseye sys-libs
+      touch sys-libs
+      echo "[setup] sys-libs ready" >> "$LOG"
+    fi
   fi
-  echo "[setup] extracting sys-libs-bullseye.tar.gz" >> "$LOG"
-  tar xzf sys-libs-bullseye.tar.gz >> "$LOG" 2>&1
-  if [ -d sys-libs-bullseye ]; then
-    mv sys-libs-bullseye sys-libs
-    echo "[setup] sys-libs ready" >> "$LOG"
-  fi
-else
-  echo "[setup] WARN: no sys-libs dir and no sys-libs-bullseye.tar.gz" >> "$LOG"
 fi
 
 # 3. Chromium — Playwright CLI does the download + caches under
