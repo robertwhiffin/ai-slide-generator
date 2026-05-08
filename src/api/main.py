@@ -303,6 +303,11 @@ if not IS_PRODUCTION:
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
+        expose_headers=[
+            "X-Huashu-Failures",
+            "X-Huashu-Total-Slides",
+            "X-Huashu-Succeeded",
+        ],
     )
 
 

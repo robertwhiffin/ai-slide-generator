@@ -10,7 +10,7 @@ user tokens are stored per-user in the ``google_oauth_tokens`` table.
 import json
 import logging
 import os
-from typing import Optional
+from typing import Any, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse
@@ -20,7 +20,9 @@ from sqlalchemy.orm import Session
 from src.api.services.chat_service import get_chat_service
 from src.api.routes.export import ExportJobResponse
 from src.core.database import get_db
+from src.services.drive_uploader import replace_presentation, upload_pptx_as_slides
 from src.services.google_slides_auth import GoogleSlidesAuth, GoogleSlidesAuthError
+from src.services.pptx_from_records import EmitError, build_pptx
 
 logger = logging.getLogger(__name__)
 
@@ -342,3 +344,242 @@ async def poll_google_slides_export(job_id: str):
         return ExportJobResponse(**build_export_job_response(job_id))
     except ValueError:
         raise HTTPException(status_code=404, detail="Export job not found")
+
+
+# -------------------------------------------------------------------------
+# Records-based export — PPTX → Drive auto-convert to Slides
+# -------------------------------------------------------------------------
+
+
+class GoogleSlidesFromRecordsRequest(BaseModel):
+    """Records-based Google Slides export request.
+
+    Mirrors the editable-PPTX ``/from-records`` route shape so the
+    frontend can reuse ``extractSlideRecordsForExport``.
+    """
+    session_id: str
+    title: str
+    slides: list[dict[str, Any]]
+    font_mode: str = "google_slides"
+
+
+class GoogleSlidesExportResponse(BaseModel):
+    presentation_id: str
+    presentation_url: str
+
+
+@router.post("/from-records", response_model=GoogleSlidesExportResponse)
+async def export_google_slides_from_records(
+    request: GoogleSlidesFromRecordsRequest,
+    db: Session = Depends(get_db),
+):
+    """Build a PPTX from DOM-walker records and upload to Drive.
+
+    Drive's ``files.create`` with ``mimeType=application/vnd.google-apps.
+    presentation`` triggers automatic conversion to a native Google
+    Slides deck — no per-element Slides API calls needed.
+
+    Re-exports on the same session overwrite the previous presentation.
+    """
+    try:
+        auth = _get_auth(db)
+    except GoogleSlidesAuthError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    if not auth.is_authorized():
+        raise HTTPException(
+            status_code=401,
+            detail="Not authorized with Google. Complete the OAuth flow first.",
+        )
+
+    try:
+        pptx_bytes = build_pptx(
+            title=request.title,
+            slides=request.slides,
+            font_mode=request.font_mode,
+        )
+    except EmitError as exc:
+        logger.error("PPTX build failed for Google Slides export", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"PPTX build failed: {exc}") from exc
+
+    from src.api.services.session_manager import get_session_manager
+    session_manager = get_session_manager()
+    existing_info = session_manager.get_google_slides_info(request.session_id)
+    existing_id = existing_info["presentation_id"] if existing_info else None
+
+    try:
+        if existing_id:
+            presentation_id, url = replace_presentation(
+                auth, existing_id, pptx_bytes, request.title,
+            )
+        else:
+            presentation_id, url = upload_pptx_as_slides(
+                auth, pptx_bytes, request.title,
+            )
+    except Exception as exc:
+        logger.error("Drive upload failed", exc_info=True)
+        raise HTTPException(status_code=502, detail=f"Drive upload failed: {exc}") from exc
+
+    session_manager.set_google_slides_info(
+        session_id=request.session_id,
+        presentation_id=presentation_id,
+        presentation_url=url,
+    )
+
+    logger.info(
+        "Google Slides export complete",
+        extra={
+            "session_id": request.session_id,
+            "presentation_id": presentation_id,
+            "replaced": bool(existing_id),
+        },
+    )
+
+    return GoogleSlidesExportResponse(
+        presentation_id=presentation_id,
+        presentation_url=url,
+    )
+
+
+# -------------------------------------------------------------------------
+# Huashu-based export — server-side Chromium → PPTX → Drive auto-convert
+# -------------------------------------------------------------------------
+
+
+class GoogleSlidesFromHuashuRequest(BaseModel):
+    """Huashu-based Google Slides export request.
+
+    No client-side records needed — the backend fetches the deck from
+    session storage and builds complete HTML server-side.
+    """
+    session_id: str
+
+
+@router.post("/from-huashu", response_model=GoogleSlidesExportResponse)
+async def export_google_slides_from_huashu(
+    request: GoogleSlidesFromHuashuRequest,
+    db: Session = Depends(get_db),
+):
+    """Build a PPTX via the huashu (Playwright + Chromium) pipeline and
+    upload to Drive.
+
+    Trade-offs vs. ``/from-records``:
+      * Higher fidelity — server-side Chromium re-renders the actual deck
+        HTML and walks the rendered DOM, getting exact positions/fonts/
+        colors instead of relying on the client-side walker's records.
+      * Slower — ~20-30s for a 10-slide deck because Chromium spawns per
+        slide. Acceptable for a one-shot Drive upload.
+      * ``bypass_validation=True`` is set so every slide makes it into the
+        output PPTX even if it violates huashu's design rules. Without
+        this, failing slides would be silently dropped from the deck on
+        Drive (e.g. slide 7 missing, numbering shifted) — terrible UX.
+
+    Re-exports on the same session overwrite the previous presentation
+    (same as ``/from-records``).
+    """
+    from src.services.pptx_from_html_huashu import (
+        HuashuExportError,
+        build_pptx_huashu,
+    )
+
+    try:
+        auth = _get_auth(db)
+    except GoogleSlidesAuthError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    if not auth.is_authorized():
+        raise HTTPException(
+            status_code=401,
+            detail="Not authorized with Google. Complete the OAuth flow first.",
+        )
+
+    chat_service = get_chat_service()
+    slide_deck = chat_service.get_slides(request.session_id)
+    if not slide_deck or not slide_deck.get("slides"):
+        raise HTTPException(status_code=404, detail="No slides available")
+
+    # Substitute {{image:ID}} placeholders with base64 data URIs (same as the
+    # legacy /export route). Use a fresh session because the request's `db`
+    # is held by the route's transaction context.
+    from src.core.database import get_db_session
+    from src.utils.image_utils import substitute_deck_dict_images
+    with get_db_session() as imdb:
+        substitute_deck_dict_images(slide_deck, imdb)
+
+    title = slide_deck.get("title") or "Presentation"
+    slides_data = slide_deck.get("slides") or []
+
+    slides_html = [
+        {
+            "html": _build_slide_html(slide, slide_deck),
+            "notes": slide.get("notes") or "",
+        }
+        for slide in slides_data
+    ]
+
+    try:
+        pptx_bytes, failures = build_pptx_huashu(
+            title=title,
+            slides_html=slides_html,
+            bypass_validation=True,
+        )
+    except HuashuExportError as exc:
+        logger.error("Huashu pipeline error for Google Slides export", exc_info=True)
+        raise HTTPException(
+            status_code=503,
+            detail=f"Huashu pipeline unavailable: {exc}",
+        ) from exc
+
+    if not pptx_bytes:
+        # With bypass_validation=True the only way this happens is if every
+        # slide hit a non-validation error (e.g. chromium failed to launch
+        # for all of them). Surface the failures so the user can debug.
+        logger.error(
+            "Huashu produced no output even with bypass; failures=%s", failures
+        )
+        raise HTTPException(
+            status_code=500,
+            detail=f"Huashu produced no output. failures={failures}",
+        )
+
+    from src.api.services.session_manager import get_session_manager
+    session_manager = get_session_manager()
+    existing_info = session_manager.get_google_slides_info(request.session_id)
+    existing_id = existing_info["presentation_id"] if existing_info else None
+
+    try:
+        if existing_id:
+            presentation_id, url = replace_presentation(
+                auth, existing_id, pptx_bytes, title,
+            )
+        else:
+            presentation_id, url = upload_pptx_as_slides(
+                auth, pptx_bytes, title,
+            )
+    except Exception as exc:
+        logger.error("Drive upload failed (huashu path)", exc_info=True)
+        raise HTTPException(
+            status_code=502,
+            detail=f"Drive upload failed: {exc}",
+        ) from exc
+
+    session_manager.set_google_slides_info(
+        session_id=request.session_id,
+        presentation_id=presentation_id,
+        presentation_url=url,
+    )
+
+    logger.info(
+        "Google Slides huashu export complete",
+        extra={
+            "session_id": request.session_id,
+            "presentation_id": presentation_id,
+            "replaced": bool(existing_id),
+            "huashu_failures": len(failures),
+        },
+    )
+
+    return GoogleSlidesExportResponse(
+        presentation_id=presentation_id,
+        presentation_url=url,
+    )
