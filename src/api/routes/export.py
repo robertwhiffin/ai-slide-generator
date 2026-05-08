@@ -1189,7 +1189,17 @@ async def export_pptx_huashu_from_html(request: ExportPPTXEditableRequest):
     title = slide_deck.get("title") or "slides"
 
     try:
-        pptx_bytes, failures = build_pptx_huashu(title, slides_with_html)
+        # bypass_validation=True so slides that violate huashu's strict
+        # design rules (overflow > 100px, text-near-bottom-edge, layout
+        # dimension mismatch, etc.) still ship in the PPTX. AI-generated
+        # decks routinely fail those rules; without bypass the user gets
+        # a 422 "all slides failed validation" instead of a working file.
+        # Mirrors the Google Slides /from-huashu route's behaviour.
+        # Per-slide failure metadata still comes back in `failures` and
+        # rides on the X-Huashu-Failures response header for the frontend.
+        pptx_bytes, failures = build_pptx_huashu(
+            title, slides_with_html, bypass_validation=True
+        )
     except HuashuExportError as e:
         logger.exception("Huashu sidecar hard-failed")
         raise HTTPException(status_code=500, detail=str(e))
