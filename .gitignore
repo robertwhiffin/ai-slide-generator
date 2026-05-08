@@ -64,10 +64,10 @@ mlruns/
 # Frontend / Node.js
 node_modules/
 
-# Claude Design (huashu) bootstrap artifacts — built by
-# services/pptx-emit-huashu/build-artifacts.sh in CI, never committed.
-services/pptx-emit-huashu/node_modules.tar.gz
-services/pptx-emit-huashu/sys-libs-bullseye.tar.gz
+# Claude Design (huashu) bootstrap — the tarballs ARE committed (CI's
+# npm ci is too unreliable to rebuild them every publish; see
+# services/pptx-emit-huashu/build-artifacts.sh for regen instructions).
+# These are the on-disk extracted forms that should never be committed.
 services/pptx-emit-huashu/sys-libs/
 services/pptx-emit-huashu/sys-libs-bullseye/
 frontend/.vite/
