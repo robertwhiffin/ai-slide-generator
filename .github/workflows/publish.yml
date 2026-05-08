@@ -54,12 +54,7 @@ jobs:
 
   build:
     name: Build Packages
-    # Pinned to 22.04 (Jammy) so apt-get download finds the Bullseye-era
-    # package names that services/pptx-emit-huashu/build-artifacts.sh relies
-    # on (libssl1.1, libtiff5, libwebp6/7, libjpeg62-turbo, libpng16-16).
-    # Newer runners (24.04 Noble) have removed these and silently produce
-    # an empty sys-libs bundle — see commit history of v0.3.2 for the trail.
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-latest
     needs: validate
     steps:
       - uses: actions/checkout@v4
