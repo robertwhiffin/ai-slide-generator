@@ -24,10 +24,19 @@ LOG=/tmp/huashu-setup.log
 echo "=== huashu setup at $(date -u +%FT%TZ) ===" > "$LOG"
 echo "sidecar dir: $SIDECAR_DIR" >> "$LOG"
 
-# 1. node_modules — extract from tarball if not already present.
-if [ -d node_modules ]; then
-  echo "[setup] node_modules already present, skipping extract" >> "$LOG"
+# 1. node_modules — extract from tarball if missing OR present-but-empty.
+# We can't trust just `[ -d node_modules ]` because the wheel can ship empty
+# placeholder dirs (node_modules/playwright/, node_modules/playwright-core/)
+# that look like a valid tree until you actually try to use them. Validate
+# by probing for a known file (the playwright CLI). If it's missing, force
+# a clean re-extract from the tarball.
+if [ -d node_modules ] && { [ -f node_modules/playwright/cli.js ] || [ -f node_modules/playwright-core/cli.js ]; }; then
+  echo "[setup] node_modules already present and valid, skipping extract" >> "$LOG"
 elif [ -f node_modules.tar.gz ]; then
+  if [ -d node_modules ]; then
+    echo "[setup] node_modules dir present but missing playwright CLI; clearing for clean extract" >> "$LOG"
+    rm -rf node_modules
+  fi
   echo "[setup] extracting node_modules.tar.gz" >> "$LOG"
   tar xzf node_modules.tar.gz >> "$LOG" 2>&1
   echo "[setup] node_modules ready" >> "$LOG"
@@ -37,10 +46,16 @@ fi
 
 # 2. sys-libs — extracted dir should be named sys-libs/ (the Python wrapper
 # looks for that path). The tarball contains a top-level sys-libs-bullseye/
-# dir, which we rename. Idempotent.
-if [ -d sys-libs ]; then
-  echo "[setup] sys-libs already present, skipping extract" >> "$LOG"
+# dir, which we rename. Validate by probing for libnss3.so (Chromium's
+# core network-security lib) so a half-extracted sys-libs/ is forced to
+# re-extract.
+if [ -d sys-libs ] && [ -f sys-libs/libnss3.so ]; then
+  echo "[setup] sys-libs already present and valid, skipping extract" >> "$LOG"
 elif [ -f sys-libs-bullseye.tar.gz ]; then
+  if [ -d sys-libs ] || [ -d sys-libs-bullseye ]; then
+    echo "[setup] sys-libs dir present but incomplete; clearing for clean extract" >> "$LOG"
+    rm -rf sys-libs sys-libs-bullseye
+  fi
   echo "[setup] extracting sys-libs-bullseye.tar.gz" >> "$LOG"
   tar xzf sys-libs-bullseye.tar.gz >> "$LOG" 2>&1
   if [ -d sys-libs-bullseye ]; then
