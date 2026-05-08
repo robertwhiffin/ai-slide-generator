@@ -28,8 +28,30 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
-SIDECAR_DIR = REPO_ROOT / "services" / "pptx-emit"
+def _resolve_sidecar_dir() -> Path:
+    # Dev / editable install: services/ lives at the repo root.
+    dev = Path(__file__).resolve().parents[2] / "services" / "pptx-emit"
+    if dev.exists():
+        return dev
+    # Wheel install: setup.py copies the sidecar under databricks_tellr_app/_assets/sidecars/.
+    try:
+        from databricks_tellr_app import _assets_root  # type: ignore
+        wheel = Path(_assets_root()) / "sidecars" / "pptx-emit"
+        if wheel.exists():
+            return wheel
+    except Exception:
+        pass
+    try:
+        import databricks_tellr_app  # type: ignore
+        wheel = Path(databricks_tellr_app.__file__).resolve().parent / "_assets" / "sidecars" / "pptx-emit"
+        if wheel.exists():
+            return wheel
+    except Exception:
+        pass
+    return dev
+
+
+SIDECAR_DIR = _resolve_sidecar_dir()
 SIDECAR_BUNDLE = SIDECAR_DIR / "emit.bundle.mjs"
 SIDECAR_SCRIPT = SIDECAR_DIR / "emit.mjs"
 SIDECAR_TIMEOUT_SECONDS = 120
