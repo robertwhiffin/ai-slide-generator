@@ -60,12 +60,12 @@ env:
   # ContextVar "different Context" warnings under FastAPI). See docs/technical/llm-as-judge-verification.md
   # - name: TELLR_MLFLOW_LANGCHAIN_AUTOLOG
   #   value: "1"
-  # Opt-in to the Claude Design (huashu) PPTX path. When "1", the backend
-  # serves /api/export/pptx/editable/huashu/from-html using server-side
-  # Chromium + Playwright (faster + higher fidelity than the records
-  # pipeline). Default off — the backgrounded setup.sh in the boot
-  # command above prepares artifacts either way, so flipping this to "1"
-  # later is a no-redeploy change. Frontend falls back to the records
-  # pipeline when this is off OR when setup.sh is still running.
+  # Claude Design (huashu) PPTX path. When "1", the backend serves
+  # /api/export/pptx/editable/huashu/from-html using server-side Chromium
+  # + Playwright (faster + higher fidelity than the records pipeline).
+  # Default on — the backgrounded setup.sh in the boot command above
+  # prepares artifacts; until they're ready, is_available() returns false
+  # and the frontend falls back to the records pipeline transparently.
+  # Set to "0" if you want to force-disable the fast path entirely.
   - name: HUASHU_PIPELINE_ENABLED
-    value: "0"
+    value: "1"
