@@ -14,9 +14,9 @@ command:
     # chromium`. While running, the /huashu/available endpoint reports
     # not-ready and the frontend falls back to the records pipeline. Once
     # the cache exists, the route flips on automatically.
-    HUASHU_SETUP=$(python -c "import os, databricks_tellr_app; print(os.path.join(os.path.dirname(databricks_tellr_app.__file__), '_assets', 'sidecars', 'pptx-emit-huashu', 'setup.sh'))" 2>/dev/null || true)
-    if [ -n "$HUASHU_SETUP" ] && [ -f "$HUASHU_SETUP" ]; then
-      sh "$HUASHU_SETUP" &
+    HUASHU_SETUP=$$(python -c "import os, databricks_tellr_app; print(os.path.join(os.path.dirname(databricks_tellr_app.__file__), '_assets', 'sidecars', 'pptx-emit-huashu', 'setup.sh'))" 2>/dev/null || true)
+    if [ -n "$$HUASHU_SETUP" ] && [ -f "$$HUASHU_SETUP" ]; then
+      sh "$$HUASHU_SETUP" &
     fi
     python -m databricks_tellr_app.run
 
