@@ -489,6 +489,22 @@ def _run_migrations(engine, schema: str | None = None):
         # --- permissions model: parent_session_id, locking, optimistic concurrency ---
         _migrate_permissions_columns(conn, inspector, schema, _qual, is_sqlite)
 
+        # --- export_jobs: add status_message ---
+        # The ExportJob ORM declared status_message in April 2026 but no
+        # ALTER was shipped at the time. Lakebase Postgres tables provisioned
+        # before that date are still missing the column, so every async
+        # export INSERT fails with UndefinedColumn. Idempotent guard.
+        export_jobs_table = "export_jobs"
+        try:
+            ej_cols = {c["name"] for c in inspector.get_columns(export_jobs_table, schema=schema)}
+        except Exception:
+            ej_cols = set()
+        if ej_cols and "status_message" not in ej_cols:
+            logger.info(f"Migration: adding status_message column to {export_jobs_table}")
+            conn.execute(text(
+                f"ALTER TABLE {_qual(export_jobs_table)} ADD COLUMN status_message TEXT NULL"
+            ))
+
         # --- deck-centric permissions: drop profile_id, migrate CAN_VIEW → CAN_USE ---
         _migrate_deck_permissions_model(conn, inspector, schema, _qual, is_sqlite)
 

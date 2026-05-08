@@ -629,9 +629,7 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
   const handleExportGoogleSlides = useCallback(async () => {
     if (!sessionId || !slideDeck) return;
     try {
-      // Check auth first
       const { authorized } = await api.checkGoogleSlidesAuth();
-
       if (!authorized) {
         setExportStatus('Waiting for Google authorization...');
         const authResult = await openOAuthPopup();
@@ -643,20 +641,35 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
       }
 
       setExportStatus('Exporting to Google Slides…');
-      const { presentation_url, alreadyOpened } = await api.exportToGoogleSlides(
+      const { presentation_url } = await api.exportToGoogleSlides(
         sessionId,
         slideDeck,
         (_progress, _total, status) => setExportStatus(status || 'Exporting…')
       );
       setExportStatus(null);
-      showToast('Export complete', 'success');
-      if (presentation_url && !alreadyOpened) {
-        window.open(presentation_url, '_blank');
+
+      if (!presentation_url) {
+        showToast('Slides ready (no URL returned)', 'success');
+        return;
+      }
+      // Try to auto-open the Slides URL in a new tab. Modern browsers
+      // typically block `window.open` after the long await chain (the user
+      // gesture from the click expires after a few seconds, and huashu
+      // takes 20-30s). Detect block and fall back to a persistent toast
+      // carrying a clickable link so the URL is never lost.
+      const opened = window.open(presentation_url, '_blank');
+      if (!opened || opened.closed || typeof opened.closed === 'undefined') {
+        showToast('Slides ready', 'success', {
+          link: { text: 'Open in Google Slides', url: presentation_url },
+        });
+      } else {
+        showToast('Slides ready', 'success');
       }
     } catch (err) {
       console.error('Google Slides export failed:', err);
       setExportStatus(null);
-      showToast('Export to Google Slides failed', 'error');
+      const msg = err instanceof Error ? err.message : 'Export to Google Slides failed';
+      showToast(msg, 'error');
     }
   }, [sessionId, slideDeck, showToast, openOAuthPopup]);
 
