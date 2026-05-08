@@ -63,6 +63,13 @@ mlruns/
 
 # Frontend / Node.js
 node_modules/
+
+# Claude Design (huashu) bootstrap artifacts — built by
+# services/pptx-emit-huashu/build-artifacts.sh in CI, never committed.
+services/pptx-emit-huashu/node_modules.tar.gz
+services/pptx-emit-huashu/sys-libs-bullseye.tar.gz
+services/pptx-emit-huashu/sys-libs/
+services/pptx-emit-huashu/sys-libs-bullseye/
 frontend/.vite/
 frontend/dist/
 *.local
