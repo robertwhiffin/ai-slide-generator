@@ -57,7 +57,6 @@ function SlidePanelComponent(props: SlidePanelProps, ref: React.Ref<SlidePanelHa
   const [viewMode, _setViewMode] = useState<ViewMode>('tiles');
   const [isExportingPDF, setIsExportingPDF] = useState(false);
   const [isExportingPPTX, setIsExportingPPTX] = useState(false);
-  const [_exportProgress, setExportProgress] = useState<{ current: number; total: number; status: string } | null>(null);
   const [showExportMenu, setShowExportMenu] = useState(false);
   const exportMenuRef = useRef<HTMLDivElement>(null);
   const [isPresentationMode, setIsPresentationMode] = useState(false);
@@ -277,40 +276,73 @@ function SlidePanelComponent(props: SlidePanelProps, ref: React.Ref<SlidePanelHa
 
     setIsExportingPPTX(true);
     setShowExportMenu(false);
-    setExportProgress({ current: 0, total: slideDeck.slides.length, status: 'Starting...' });
-    onExportStatusChange?.('Starting export...');
+    onExportStatusChange?.('Generating PPTX…');
 
-    try {
-      const blob = await api.exportToPPTX(
-        sessionId, 
-        true, 
-        slideDeck,
-        (progress, total, status) => {
-          setExportProgress({ current: progress, total, status });
-          onExportStatusChange?.(status);
-        }
-      );
-      
+    const downloadBlob = (blob: Blob, suffix = '') => {
       const url = window.URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
       const timestamp = new Date().toISOString().slice(0, 10);
-      a.download = `${slideDeck.title || 'slides'}_${timestamp}.pptx`;
+      const trailing = suffix ? `_${suffix}` : '';
+      a.download = `${slideDeck.title || 'slides'}_${timestamp}${trailing}.pptx`;
       document.body.appendChild(a);
       a.click();
       document.body.removeChild(a);
       window.URL.revokeObjectURL(url);
+    };
+
+    try {
+      // Try the Claude Design path first.
+      const result = await api.exportPptxHuashu(sessionId);
+      downloadBlob(result.blob);
       onExportStatusChange?.(null);
-      showToast('PPTX downloaded', 'success');
+      if (result.failures.length === 0) {
+        showToast(`PPTX downloaded (${result.succeeded}/${result.totalSlides} slides)`, 'success');
+      } else {
+        // Per-slide failures get logged for the developer; user sees a
+        // softer info toast so they know not all slides made it in.
+        console.warn('[huashu] per-slide failures:', result.failures);
+        showToast(
+          `PPTX: ${result.succeeded}/${result.totalSlides} slides exported (${result.failures.length} rejected — see console)`,
+          'info',
+        );
+      }
     } catch (error) {
+      // Fallback path: if the Claude Design path isn't bootstrapped on this
+      // deployment (returns 503), retry via the records pipeline so the
+      // user still gets a working export.
+      const status = (error as any)?.status;
+      const message = error instanceof Error ? error.message : '';
+      const isUnavailable =
+        status === 503 ||
+        /huashu pipeline not available/i.test(message) ||
+        /pipeline (?:still )?installing/i.test(message);
+      if (isUnavailable) {
+        try {
+          onExportStatusChange?.('Falling back to records pipeline (slower)…');
+          const blob = await api.exportPptxEditable(slideDeck, sessionId, 'universal');
+          downloadBlob(blob);
+          onExportStatusChange?.(null);
+          showToast('PPTX downloaded (records pipeline)', 'success');
+          return;
+        } catch (fallbackErr) {
+          console.error('PPTX records-fallback export failed:', fallbackErr);
+          const fbMsg = fallbackErr instanceof Error ? fallbackErr.message : 'Failed to export PPTX.';
+          alert(fbMsg);
+          return;
+        } finally {
+          setIsExportingPPTX(false);
+          onExportStatusChange?.(null);
+        }
+      }
       console.error('PPTX export failed:', error);
-      const message = error instanceof Error 
-        ? error.message 
-        : 'Failed to export PPTX. Please try again.';
-      alert(message);
+      const failures = (error as any)?.failures;
+      if (Array.isArray(failures) && failures.length > 0) {
+        console.warn('[huashu] per-slide failures (all rejected):', failures);
+      }
+      alert(message || 'Failed to export PPTX. Please try again.');
     } finally {
       setIsExportingPPTX(false);
-      setExportProgress(null);
       onExportStatusChange?.(null);
     }
   };

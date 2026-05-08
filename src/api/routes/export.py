@@ -544,7 +544,7 @@ async def export_to_pptx(request: ExportPPTXRequest):
             safe_title = "".join(c if c.isalnum() or c in (' ', '-', '_') else '_' for c in title)
             filename = f"{safe_title.replace(' ', '_')}.pptx"
             
-            logger.info("PPTX export completed", extra={"path": output_path, "filename": filename})
+            logger.info("PPTX export completed", extra={"path": output_path, "pptx_filename": filename})
             
             # Cleanup function for temporary files
             def cleanup():
@@ -794,14 +794,434 @@ async def download_pptx_export(job_id: str, background_tasks: BackgroundTasks):
     
     logger.info(
         "Serving PPTX download",
-        extra={"job_id": job_id, "filename": filename},
+        extra={"job_id": job_id, "pptx_filename": filename},
     )
     
     # Schedule cleanup after download
     background_tasks.add_task(cleanup_export_job, job_id)
-    
+
     return FileResponse(
         path=output_path,
         filename=filename,
         media_type="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    )
+
+
+# ---------------------------------------------------------------------------
+# Editable PPTX export (Claude-Design-style DOM walker)
+# ---------------------------------------------------------------------------
+
+class ExportPPTXEditableRequest(BaseModel):
+    """Request for the editable-PPTX export path.
+
+    No chart_images field — the sidecar walks the live DOM, so rasterized
+    chart snapshots from the client aren't needed.
+    """
+    session_id: str
+
+
+@router.get("/pptx/editable/available")
+async def editable_export_available() -> dict:
+    """Tell the frontend whether the editable-PPTX path is available.
+
+    The path used to depend on a Node sidecar (Puppeteer+pptxgenjs) that
+    we couldn't install on Databricks Apps (non-root, memory-constrained).
+    We now run the DOM walker in the user's browser and emit PPTX on the
+    server with python-pptx, so the path is always available as long as
+    python-pptx is installed.
+    """
+    try:
+        import pptx  # noqa: F401
+        return {"available": True, "strategy": "client-walker+python-pptx"}
+    except Exception as e:
+        return {"available": False, "error": str(e)}
+
+
+class ExportPPTXFromRecordsRequest(BaseModel):
+    """Request body for the client-walker editable-PPTX export path."""
+    session_id: Optional[str] = None  # optional — title can be inferred
+    title: Optional[str] = None
+    slides: list[dict]  # [{nodes: [...], notes: "..."}]
+    font_mode: Optional[str] = "universal"  # "universal" | "custom" | "google_slides"
+
+
+@router.post("/pptx/editable/from-records")
+async def export_pptx_editable_from_records(request: ExportPPTXFromRecordsRequest):
+    """Accept DOM-walker records produced by the frontend and return a
+    byte-complete editable ``.pptx``.
+
+    See ``frontend/src/services/domWalker.ts`` for the extraction side.
+    The contract is: each slide carries ``nodes`` (drawable records in
+    slide-px coordinates) and ``notes`` (speaker-notes string). Nothing
+    here talks to headless Chromium; the browser did that work already.
+    """
+    from src.services.pptx_from_records import build_pptx
+
+    title = request.title or "slides"
+    if not request.slides:
+        raise HTTPException(status_code=400, detail="No slides supplied")
+    font_mode = request.font_mode or "universal"
+    if font_mode not in ("universal", "custom", "google_slides"):
+        font_mode = "universal"
+    try:
+        pptx_bytes = build_pptx(title, request.slides, font_mode=font_mode)
+    except Exception as e:
+        logger.exception(f"Editable PPTX emission failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+    safe = "".join(c if c.isalnum() or c in "-_" else "_" for c in title).strip("_") or "slides"
+    from fastapi.responses import Response
+    return Response(
+        content=pptx_bytes,
+        media_type="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        headers={"Content-Disposition": f'attachment; filename="{safe}_editable.pptx"'},
+    )
+
+
+class ExportPPTXFromImagesRequest(BaseModel):
+    """Screenshot-mode export. Client captures each slide via html2canvas
+    and POSTs PNG data URLs; we build a .pptx with one picture per slide.
+    Not editable but pixel-identical to the preview.
+    """
+    session_id: Optional[str] = None
+    title: Optional[str] = None
+    images: list[str]  # per-slide data URLs (data:image/png;base64,...)
+    width_px: int = 1280
+    height_px: int = 720
+
+
+@router.post("/pptx/editable/from-images")
+async def export_pptx_screenshot_from_images(request: ExportPPTXFromImagesRequest):
+    """Screenshot-based .pptx — each slide is a single embedded image.
+    Pixel-perfect fidelity, but nothing is editable."""
+    import base64, io, re
+    from pptx import Presentation
+    from pptx.util import Emu
+
+    if not request.images:
+        raise HTTPException(status_code=400, detail="No images supplied")
+
+    PX_TO_EMU = 9525
+    prs = Presentation()
+    prs.slide_width = Emu(request.width_px * PX_TO_EMU)
+    prs.slide_height = Emu(request.height_px * PX_TO_EMU)
+    blank = prs.slide_layouts[6]
+
+    for src in request.images:
+        slide = prs.slides.add_slide(blank)
+        m = re.match(r"data:image/[^;]+;base64,(.+)", src or "")
+        if not m:
+            continue
+        try:
+            raw = base64.b64decode(m.group(1))
+        except Exception:
+            continue
+        slide.shapes.add_picture(
+            io.BytesIO(raw),
+            Emu(0), Emu(0),
+            Emu(request.width_px * PX_TO_EMU),
+            Emu(request.height_px * PX_TO_EMU),
+        )
+
+    buf = io.BytesIO()
+    prs.save(buf)
+    title = request.title or "slides"
+    safe = "".join(c if c.isalnum() or c in "-_" else "_" for c in title).strip("_") or "slides"
+    from fastapi.responses import Response
+    return Response(
+        content=buf.getvalue(),
+        media_type="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        headers={"Content-Disposition": f'attachment; filename="{safe}_screenshot.pptx"'},
+    )
+
+
+@router.post("/pptx/editable")
+async def export_pptx_editable(request: ExportPPTXEditableRequest):
+    """Export a slide deck to an editable PPTX via the DOM-walker sidecar.
+
+    Synchronous (no job queue) — the sidecar is fast (<30s for typical decks)
+    and the existing async path is kept intact for the raster exporter.
+    """
+    from src.services.html_editable_exporter import (
+        export as export_editable,
+        EditableExportError,
+    )
+
+    chat_service = get_chat_service()
+    slide_deck = chat_service.get_slides(request.session_id)
+    if not slide_deck or not slide_deck.get("slides"):
+        raise HTTPException(status_code=404, detail="No slides available")
+
+    try:
+        pptx_bytes = export_editable(slide_deck)
+    except EditableExportError as e:
+        # 503 — editable path not installed / sidecar broken. Client can
+        # fall back to the raster export, but we never silently do so:
+        # hiding a missing Chromium install makes it invisible to operators.
+        logger.warning(f"Editable PPTX export failed: {e}")
+        raise HTTPException(status_code=503, detail=str(e))
+
+    safe_title = (slide_deck.get("title") or "slides").replace(" ", "_")
+    safe_title = "".join(c if c.isalnum() or c in "-_" else "_" for c in safe_title)
+
+    from fastapi.responses import Response
+    return Response(
+        content=pptx_bytes,
+        media_type="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        headers={
+            "Content-Disposition": f'attachment; filename="{safe_title}_editable.pptx"',
+        },
+    )
+
+
+# ---------------------------------------------------------------------------
+# Huashu pipeline (alchaincyf/huashu-design) — LOCAL-ONLY test export
+# ---------------------------------------------------------------------------
+# Uses Playwright + their html2pptx.js server-side. Not deployed to Apps:
+# the gate in pptx_from_html_huashu.is_available() blocks anything but
+# local dev. Surface as an additive 5th export mode in the frontend modal.
+
+
+@router.get("/pptx/editable/huashu/available")
+async def export_pptx_huashu_available() -> dict:
+    """Tell the frontend whether the huashu pipeline is available.
+
+    Returns the boolean plus per-check diagnostics so it's clear which
+    requirement is missing on a given deployment (helpful while we're
+    bringing chromium up on the Apps container).
+    """
+    import os
+    import shutil
+    from pathlib import Path
+
+    from src.services.pptx_from_html_huashu import (
+        SIDECAR_DIR, SIDECAR_SCRIPT, _has_chromium, is_available,
+    )
+
+    home = Path.home()
+    chromium_paths = [
+        str(p) for p in (
+            home / "Library" / "Caches" / "ms-playwright",
+            home / ".cache" / "ms-playwright",
+        )
+        if p.exists()
+    ]
+    setup_log_path = Path("/tmp/huashu-setup.log")
+    setup_log_tail = None
+    setup_log_size = None
+    if setup_log_path.exists():
+        try:
+            setup_log_size = setup_log_path.stat().st_size
+            with open(setup_log_path) as f:
+                lines = f.readlines()
+            setup_log_tail = "".join(lines[-40:])
+        except Exception as e:  # noqa: BLE001
+            setup_log_tail = f"(error reading log: {e})"
+    cache_dir_listing = []
+    cache_root = home / ".cache"
+    if cache_root.exists():
+        try:
+            cache_dir_listing = [p.name for p in cache_root.iterdir()]
+        except Exception:  # noqa: BLE001
+            pass
+    tmp_listing = []
+    try:
+        tmp_listing = sorted(p.name for p in Path("/tmp").iterdir())[:50]
+    except Exception:  # noqa: BLE001
+        pass
+    return {
+        "available": is_available(),
+        "checks": {
+            "huashu_pipeline_enabled": os.environ.get("HUASHU_PIPELINE_ENABLED") == "1",
+            "databricks_app_name": os.environ.get("DATABRICKS_APP_NAME") or None,
+            "environment": os.environ.get("ENVIRONMENT"),
+            "node_on_path": shutil.which("node") is not None,
+            "sidecar_dir": str(SIDECAR_DIR),
+            "sidecar_script_exists": SIDECAR_SCRIPT.exists(),
+            "playwright_node_modules": (SIDECAR_DIR / "node_modules" / "playwright").exists(),
+            "pptxgenjs_node_modules": (SIDECAR_DIR / "node_modules" / "pptxgenjs").exists(),
+            "playwright_dir_listing": _list_dir_safe(SIDECAR_DIR / "node_modules" / "playwright"),
+            "playwright_core_dir_listing": _list_dir_safe(SIDECAR_DIR / "node_modules" / "playwright-core"),
+            "chromium_cache": _has_chromium(),
+            "chromium_cache_paths": chromium_paths,
+            "home": str(home),
+            "playwright_browsers_path_env": os.environ.get("PLAYWRIGHT_BROWSERS_PATH"),
+            "cache_root_listing": cache_dir_listing,
+            "setup_log_path_exists": setup_log_path.exists(),
+            "setup_log_size": setup_log_size,
+            "setup_log_tail": setup_log_tail,
+            "tmp_listing": tmp_listing,
+        },
+    }
+
+
+def _list_dir_safe(p) -> list[str]:
+    try:
+        return sorted(c.name for c in p.iterdir())
+    except Exception:  # noqa: BLE001
+        return []
+
+
+@router.post("/pptx/editable/huashu/install-chromium")
+async def export_pptx_huashu_install_chromium() -> dict:
+    """Synchronously run `npx playwright install chromium` and return the output.
+
+    Diagnostic-only: lets us see exactly why the boot-time background install
+    is silently failing on the Databricks Apps container.
+    """
+    import subprocess
+    from pathlib import Path
+
+    from src.services.pptx_from_html_huashu import SIDECAR_DIR, sidecar_subprocess_env
+
+    env = sidecar_subprocess_env()
+    env.setdefault("HOME", str(Path.home()))
+    cli = SIDECAR_DIR / "node_modules" / "playwright" / "cli.js"
+    if not cli.exists():
+        return {"error": f"playwright cli not found at {cli}"}
+    try:
+        result = subprocess.run(
+            ["node", str(cli), "install", "chromium"],
+            cwd=str(SIDECAR_DIR),
+            capture_output=True,
+            timeout=300,
+            check=False,
+            env=env,
+        )
+        return {
+            "returncode": result.returncode,
+            "stdout_tail": result.stdout.decode("utf-8", errors="replace")[-4000:],
+            "stderr_tail": result.stderr.decode("utf-8", errors="replace")[-4000:],
+            "home": env.get("HOME"),
+            "path_env": env.get("PATH"),
+        }
+    except subprocess.TimeoutExpired as e:
+        return {
+            "error": "timeout",
+            "stdout_tail": (e.stdout or b"").decode("utf-8", errors="replace")[-4000:],
+            "stderr_tail": (e.stderr or b"").decode("utf-8", errors="replace")[-4000:],
+        }
+    except Exception as e:  # noqa: BLE001
+        return {"error": f"{type(e).__name__}: {e}"}
+
+
+@router.post("/pptx/editable/huashu/probe-launch")
+async def export_pptx_huashu_probe_launch() -> dict:
+    """Spawn chromium with our standard launch options. No html2pptx, no pptxgenjs.
+
+    De-risks the rest of the sidecar: if this exits 0 with PROBE_OK on the
+    deployed app, chromium-on-Apps is solid and the full export will work.
+    """
+    import subprocess
+    from pathlib import Path
+
+    from src.services.pptx_from_html_huashu import SIDECAR_DIR, sidecar_subprocess_env
+
+    probe_js = SIDECAR_DIR / "probe_launch.mjs"
+    if not probe_js.exists():
+        return {"error": f"probe_launch.mjs not found at {probe_js}"}
+
+    env = sidecar_subprocess_env()
+    env.setdefault("HOME", str(Path.home()))
+    try:
+        result = subprocess.run(
+            ["node", str(probe_js)],
+            cwd=str(SIDECAR_DIR),
+            capture_output=True,
+            timeout=60,
+            check=False,
+            env=env,
+        )
+        return {
+            "returncode": result.returncode,
+            "stdout": result.stdout.decode("utf-8", errors="replace")[-2000:],
+            "stderr": result.stderr.decode("utf-8", errors="replace")[-2000:],
+        }
+    except subprocess.TimeoutExpired as e:
+        return {
+            "error": "timeout",
+            "stdout_tail": (e.stdout or b"").decode("utf-8", errors="replace")[-2000:],
+            "stderr_tail": (e.stderr or b"").decode("utf-8", errors="replace")[-2000:],
+        }
+    except Exception as e:  # noqa: BLE001
+        return {"error": f"{type(e).__name__}: {e}"}
+
+
+@router.post("/pptx/editable/huashu/from-html")
+async def export_pptx_huashu_from_html(request: ExportPPTXEditableRequest):
+    """Run the LLM-generated deck HTML through huashu's html2pptx pipeline.
+
+    Local-only. Returns 503 if the gate doesn't pass. On a partial
+    success (some slides reject, others pass), still returns the .pptx
+    with an ``X-Huashu-Failures`` header carrying the per-slide error
+    JSON so the frontend can surface what huashu objected to.
+    """
+    from src.services.pptx_from_html_huashu import (
+        HuashuExportError,
+        build_pptx_huashu,
+        is_available,
+    )
+
+    if not is_available():
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "huashu pipeline not available — local dev only. Ensure "
+                "ENVIRONMENT=development is set, services/pptx-emit-huashu/ "
+                "has node_modules installed, and `npx playwright install "
+                "chromium` has been run."
+            ),
+        )
+
+    chat_service = get_chat_service()
+    slide_deck = chat_service.get_slides(request.session_id)
+    if not slide_deck or not slide_deck.get("slides"):
+        raise HTTPException(status_code=404, detail="No slides available")
+
+    slides_with_html: list[dict] = []
+    for slide in slide_deck["slides"]:
+        complete_html = build_slide_html(slide, slide_deck)
+        slides_with_html.append({
+            "html": complete_html,
+            "notes": slide.get("speaker_notes") or slide.get("notes") or "",
+        })
+
+    title = slide_deck.get("title") or "slides"
+
+    try:
+        pptx_bytes, failures = build_pptx_huashu(title, slides_with_html)
+    except HuashuExportError as e:
+        logger.exception("Huashu sidecar hard-failed")
+        raise HTTPException(status_code=500, detail=str(e))
+
+    if not pptx_bytes:
+        # All slides rejected by huashu validation — return a structured
+        # 422 so the frontend can render the per-slide errors instead of
+        # downloading an empty file.
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "message": "All slides failed huashu validation",
+                "failures": failures,
+            },
+        )
+
+    safe_title = "".join(c if c.isalnum() or c in "-_" else "_" for c in title).strip("_") or "slides"
+
+    headers = {
+        "Content-Disposition": f'attachment; filename="{safe_title}_huashu.pptx"',
+        "X-Huashu-Total-Slides": str(len(slides_with_html)),
+        "X-Huashu-Succeeded": str(len(slides_with_html) - len(failures)),
+    }
+    if failures:
+        # Compact JSON so it fits comfortably in a header. Frontend parses
+        # it for the "N slides failed" toast.
+        import json as _json
+        headers["X-Huashu-Failures"] = _json.dumps(failures, ensure_ascii=True)
+
+    from fastapi.responses import Response
+    return Response(
+        content=pptx_bytes,
+        media_type="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        headers=headers,
     )

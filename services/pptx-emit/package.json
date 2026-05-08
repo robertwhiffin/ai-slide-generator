@@ -1,0 +1,13 @@
+{
+  "name": "pptx-emit",
+  "version": "0.1.0",
+  "type": "module",
+  "private": true,
+  "description": "Records JSON -> editable PPTX emitter (pptxgenjs). Replaces the Python python-pptx + XML post-process path so output matches Claude Design's flavor.",
+  "scripts": {
+    "emit": "node emit.mjs"
+  },
+  "dependencies": {
+    "pptxgenjs": "^3.12.0"
+  }
+}
