@@ -1,7 +1,7 @@
 """Configuration profile model."""
 from datetime import datetime
 
-from sqlalchemy import Boolean, Column, DateTime, Integer, JSON, String, Text
+from sqlalchemy import JSON, Boolean, Column, DateTime, Integer, String, Text
 from sqlalchemy.orm import relationship
 
 from src.core.database import Base
@@ -27,10 +27,22 @@ class ConfigProfile(Base):
     # Agent configuration override (tools, style, prompts) — stored as JSON blob
     agent_config = Column(JSON, nullable=True, default=None)
 
+    # LLM-as-judge backend for slide verification (admin: default profile row)
+    llm_judge_backend = Column(String(32), nullable=False, default="direct")
+
     # Relationships
-    genie_spaces = relationship("ConfigGenieSpace", back_populates="profile", cascade="all, delete-orphan")
-    prompts = relationship("ConfigPrompts", back_populates="profile", uselist=False, cascade="all, delete-orphan")
-    contributors = relationship("ConfigProfileContributor", back_populates="profile", cascade="all, delete-orphan")
+    genie_spaces = relationship(
+        "ConfigGenieSpace", back_populates="profile", cascade="all, delete-orphan"
+    )
+    prompts = relationship(
+        "ConfigPrompts",
+        back_populates="profile",
+        uselist=False,
+        cascade="all, delete-orphan",
+    )
+    contributors = relationship(
+        "ConfigProfileContributor", back_populates="profile", cascade="all, delete-orphan"
+    )
 
     # Note: single_default_profile constraint handled in migration
 

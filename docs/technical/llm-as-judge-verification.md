@@ -14,7 +14,9 @@ Automatic numerical accuracy verification for generated slides using MLflow's cu
 - **Environment:** Requires `DATABRICKS_HOST` and `DATABRICKS_TOKEN` for MLflow tracking
 - **Databricks Apps:** Allow egress to `*.storage.cloud.databricks.com` if `mlflow.genai.evaluate` must download trace artifacts; otherwise judge may fall back (see below).
 - **`TELLR_MLFLOW_LANGCHAIN_AUTOLOG`:** Set to `1` / `true` / `on` to enable `mlflow.langchain.autolog()`. **Default is off** in the agent to avoid MLflow `ContextVar` “different Context” warnings under FastAPI/async + threads ([mlflow#22088](https://github.com/mlflow/mlflow/issues/22088)).
-- **Judge fallback:** If `mlflow.genai.evaluate` fails with regional **storage** connection errors or `RESOURCE_DOES_NOT_EXIST` (orphaned experiment / run), `evaluate_with_judge` runs a **direct** `ChatDatabricks` JSON judge (same green/amber/red rules). You still get a verification rating, but **no** MLflow Evaluation Run for that request (`run_id` may be null).
+- **Judge fallback:** If `mlflow.genai.evaluate` fails with regional **storage** connection errors, `RESOURCE_DOES_NOT_EXIST` (orphaned experiment / run), or **`'NoneType' object has no attribute 'info'`** (MLflow harness: evaluation trace never became readable—often tracing/egress related), `evaluate_with_judge` runs a **direct** `ChatDatabricks` JSON judge (same rating rules, including **unknown** when source is non-substantive). You still get a verification rating, but **no** MLflow Evaluation Run for that request (`run_id` may be null). Prefer **Admin → Judge → Direct** (the app default) if MLflow tracing stays broken in your environment.
+- **Admin Judge panel:** Admin → **Judge** tab chooses **Direct ChatDatabricks judge** (default) or **MLflow LLM judge**. The choice is stored as `llm_judge_backend` on the resolved `config_profiles` row (`direct` | `mlflow`). Direct mode skips MLflow for verification entirely (no Evaluation Run; `run_id` null). API: `GET`/`PUT /api/admin/judge-backend`.
+- **Unable to verify (`unknown`):** The judge prompts require **unknown** (not red) when source data has no substantive ground truth (e.g. only “no results” / empty tool payloads). The verification route also short-circuits common empty-result-only tool text before calling the LLM so the UI shows **Unable to verify** instead of **Review required**.
 
 ---
 
@@ -32,9 +34,11 @@ Slides generated/modified → Frontend (SlidePanel.tsx)
                 - Slide HTML + scripts (what LLM generated)
                 - Genie query results (source truth)
                                    ↓
-              evaluate_with_judge(genie_data, slide_content)
+              evaluate_with_judge(..., judge_backend from settings)
                                    ↓
-              MLflow make_judge creates custom prompt judge:
+              If backend is MLflow: make_judge + genai.evaluate; if Direct: ChatDatabricks JSON only (ratings include unknown when source is insufficient)
+                                   ↓
+              MLflow path: make_judge creates custom prompt judge:
                 - Semantic comparison (7M = 7,000,000)
                 - Derived calc validation (growth % from Q1/Q2)
                 - Chart data accuracy (Chart.js arrays)

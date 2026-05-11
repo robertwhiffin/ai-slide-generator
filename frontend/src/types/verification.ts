@@ -5,7 +5,7 @@
  * - green: ≥80% - No issues detected
  * - amber: 50-79% - Review suggested
  * - red: <50% - Review required
- * - unknown: No source data available (title slides, etc.)
+ * - unknown: No substantive source data (empty tool results, no-results messages, etc.)
  * - error: Verification failed
  */
 

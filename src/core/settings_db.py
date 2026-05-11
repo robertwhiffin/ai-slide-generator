@@ -9,10 +9,12 @@ settings API endpoints.
 import logging
 import os
 from functools import lru_cache
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from sqlalchemy.orm import Session
 
 from src.core.database import get_db_session
 from src.database.models import (
@@ -25,6 +27,41 @@ logger = logging.getLogger(__name__)
 
 # Global variable to track the currently active profile
 _active_profile_id: Optional[int] = None
+
+LLMJudgeBackend = Literal["mlflow", "direct"]
+
+
+def normalize_llm_judge_backend(value: Optional[str]) -> LLMJudgeBackend:
+    """Return ``mlflow`` only when explicitly set; otherwise ``direct`` (default)."""
+    if (value or "").strip().lower() == "mlflow":
+        return "mlflow"
+    return "direct"
+
+
+def resolve_config_profile_for_judge_backend(db: Session) -> Optional[ConfigProfile]:
+    """Row that stores ``llm_judge_backend`` for the workspace.
+
+    Prefer ``is_default=True`` among non-deleted profiles. If none (for example
+    Databricks deploys that never ran YAML seed), use the oldest non-deleted
+    profile by id so a single user-created profile still works.
+    """
+    p = (
+        db.query(ConfigProfile)
+        .filter(
+            ConfigProfile.is_default == True,  # noqa: E712
+            ConfigProfile.is_deleted == False,  # noqa: E712
+        )
+        .order_by(ConfigProfile.id)
+        .first()
+    )
+    if p is not None:
+        return p
+    return (
+        db.query(ConfigProfile)
+        .filter(ConfigProfile.is_deleted == False)  # noqa: E712
+        .order_by(ConfigProfile.id)
+        .first()
+    )
 
 
 def get_default_slide_style_id() -> Optional[int]:
@@ -158,6 +195,9 @@ class AppSettings(BaseSettings):
     # Environment identifier
     environment: str = "development"
 
+    # Slide verification judge (from default config profile; see Admin Judge panel)
+    llm_judge_backend: LLMJudgeBackend = "direct"
+
     @field_validator("databricks_host")
     @classmethod
     def validate_databricks_host(cls, v: str) -> str:
@@ -214,6 +254,7 @@ def load_settings_from_database(profile_id: Optional[int] = None) -> AppSettings
                         genie=None,
                         prompts={},
                         environment=os.getenv("ENVIRONMENT", "development"),
+                        llm_judge_backend="direct",
                     )
             else:
                 # Specific profile requested
@@ -248,7 +289,10 @@ def load_settings_from_database(profile_id: Optional[int] = None) -> AppSettings
                     deck_prompt_content = deck_prompt.prompt_content
                     logger.info(
                         "Loaded deck prompt",
-                        extra={"deck_prompt_name": deck_prompt.name, "deck_prompt_id": deck_prompt.id}
+                        extra={
+                            "deck_prompt_name": deck_prompt.name,
+                            "deck_prompt_id": deck_prompt.id,
+                        },
                     )
 
             # Load slide style content if selected
@@ -265,7 +309,10 @@ def load_settings_from_database(profile_id: Optional[int] = None) -> AppSettings
                     image_guidelines = slide_style.image_guidelines
                     logger.info(
                         "Loaded slide style",
-                        extra={"slide_style_name": slide_style.name, "slide_style_id": slide_style.id}
+                        extra={
+                            "slide_style_name": slide_style.name,
+                            "slide_style_id": slide_style.id,
+                        },
                     )
 
             # Create Genie settings only if configured
@@ -274,6 +321,13 @@ def load_settings_from_database(profile_id: Optional[int] = None) -> AppSettings
                 genie_settings = GenieSettings(
                     default_space_id=genie_space.space_id,
                     description=genie_space.description or "",
+                )
+
+            judge_prof = resolve_config_profile_for_judge_backend(db)
+            judge_backend: LLMJudgeBackend = "direct"
+            if judge_prof is not None:
+                judge_backend = normalize_llm_judge_backend(
+                    getattr(judge_prof, "llm_judge_backend", None)
                 )
 
             settings = AppSettings(
@@ -289,6 +343,7 @@ def load_settings_from_database(profile_id: Optional[int] = None) -> AppSettings
                     "slide_editing_instructions": prompts.slide_editing_instructions,
                 },
                 environment=os.getenv("ENVIRONMENT", "development"),
+                llm_judge_backend=judge_backend,
             )
 
             logger.info(
