@@ -3,7 +3,6 @@
 import io
 import logging
 import sys
-import traceback
 from typing import Tuple
 
 from googleapiclient.http import MediaIoBaseUpload
@@ -62,50 +61,17 @@ def upload_pptx_as_slides(
     web_view_url = file.get("webViewLink", f"https://docs.google.com/presentation/d/{presentation_id}/edit")
     _debug(f"Created presentation: id={presentation_id}")
 
-    # Try to grant viewing permission so the iframe can render without cookies.
-    # Strategy: first try "anyone with link" (most permissive). If org policy
-    # blocks that, fall back to sharing explicitly with domain members.
-    _grant_view_permission(drive_service, presentation_id)
+    # File is created with the requesting user's OAuth credentials, so it
+    # lives in their Drive with full owner access. They open it in a new
+    # browser tab using their existing Google session — no additional
+    # sharing needed. Previously we granted "anyone-with-link writer" so
+    # an embedded iframe could render without cookies, but the actual UI
+    # uses window.open(url, '_blank') and the broad share was getting
+    # flagged by DoControl as an open-access violation. Users who want
+    # to share with others can do so via Google Drive's normal sharing UI.
 
     _debug(f"Upload complete: url={web_view_url}")
     return presentation_id, web_view_url
-
-
-def _grant_view_permission(drive_service, file_id: str) -> None:
-    """Attempt to make the file viewable without requiring browser cookies.
-
-    Tries progressively: anyone-with-link → domain-wide. Logs each attempt
-    to stderr so we can diagnose which (if any) succeeded.
-    """
-    # Attempt 1: anyone with the link can edit (so the iframe's /edit mode works)
-    try:
-        drive_service.permissions().create(
-            fileId=file_id,
-            body={"type": "anyone", "role": "writer"},
-            fields="id",
-            supportsAllDrives=True,
-        ).execute()
-        _debug(f"OK: anyone-with-link WRITER granted on {file_id}")
-        return
-    except Exception as e:
-        _debug(f"FAIL anyone-with-link writer: {type(e).__name__}: {e}")
-        _debug(traceback.format_exc())
-
-    # Attempt 2: share editable with the databricks.com domain
-    try:
-        drive_service.permissions().create(
-            fileId=file_id,
-            body={"type": "domain", "domain": "databricks.com", "role": "writer"},
-            fields="id",
-            supportsAllDrives=True,
-        ).execute()
-        _debug(f"OK: databricks.com domain WRITER granted on {file_id}")
-        return
-    except Exception as e:
-        _debug(f"FAIL domain share writer: {type(e).__name__}: {e}")
-        _debug(traceback.format_exc())
-
-    _debug(f"No view permission could be granted on {file_id} — iframe will likely fail")
 
 
 def replace_presentation(
