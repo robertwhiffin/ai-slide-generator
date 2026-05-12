@@ -19,7 +19,7 @@ The AI Slide Generator uses a PostgreSQL database to manage configuration profil
 The database consists of configuration and session tables:
 
 **Configuration Tables:**
-1. **`config_profiles`** - Named configuration snapshots with `agent_config` JSON
+1. **`config_profiles`** - Named configuration snapshots with `agent_config` JSON, plus **`llm_judge_backend`** (`mlflow` \| `direct`) for slide verification (default `mlflow`; see [LLM as Judge](llm-as-judge-verification.md))
 2. **`config_genie_spaces`** - Genie space configuration (one per profile)
 3. **`config_prompts`** - Prompt configuration (system prompt, deck prompt/style references)
 4. **`config_profile_contributors`** - Profile-level sharing permissions (user/group access)

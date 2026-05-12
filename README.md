@@ -55,6 +55,8 @@ tellr.create(
 
 That's it. Open your Databricks Apps to find tellr running.
 
+**Slide verification:** By default tellr uses **MLflow** LLM-as-judge (`mlflow.genai.evaluate`, Evaluation Runs). Admins can switch to **Direct** (ChatDatabricks only) under Admin → Judge when regional storage egress is blocked or MLflow evaluate is unreliable. Ratings include **unable to verify** when there is no substantive source data. See [`docs/technical/llm-as-judge-verification.md`](docs/technical/llm-as-judge-verification.md).
+
 **Optional — MLflow traces in Unity Catalog:** For production, you can route GenAI traces to UC Delta tables (recommended for some Apps deployments). Configure `mlflow_tracing` in `config/deployment.yaml`, set `TELLR_DEPLOY_MLFLOW_*` env vars at deploy time, or pass `mlflow_tracing={...}` to `tellr.create` / `tellr.update`. See [`docs/technical/mlflow-uc-tracing.md`](docs/technical/mlflow-uc-tracing.md).
 
 ### Update or Delete

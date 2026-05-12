@@ -202,7 +202,7 @@ No additional code was needed for profile support.
 
 ## Slide Verification
 
-The LLM-as-judge verification system works with **all tool types**, not just Genie. The verification endpoint (`src/api/routes/verification.py`) collects source data from all tool results in the session's chat history — regardless of which tool produced them (Genie, Vector Index, Agent Bricks, Model Endpoint, MCP). The judge compares slide content against this source data and rates accuracy (green/amber/red).
+The LLM-as-judge verification system works with **all tool types**, not just Genie. The verification endpoint (`src/api/routes/verification.py`) collects source data from all tool results in the session's chat history — regardless of which tool produced them (Genie, Vector Index, Agent Bricks, Model Endpoint, MCP). The judge compares slide content against this source data and rates accuracy (**green** / **amber** / **red** / **unknown** when there is no substantive source).
 
 Sessions with no tool results (prompt-only mode) show "Unable to verify" — this is expected.
 

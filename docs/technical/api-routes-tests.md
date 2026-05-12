@@ -171,6 +171,7 @@ tests/integration/test_api_routes.py::TestVerificationEndpoints
 | `test_verify_slide_no_slides` | POST `/api/verification/{index}` | No slides | 404 |
 | `test_verify_slide_index_out_of_range` | POST `/api/verification/{index}` | Invalid index | 404 |
 | `test_verify_slide_no_genie_data` | POST `/api/verification/{index}` | No source data | 200 (unknown) |
+| `test_verify_slide_insufficient_source_skips_judge` | POST `/api/verification/{index}` | Only empty/no-result tool text | 200 (unknown); judge not called |
 | `test_submit_feedback_success` | POST `/api/verification/{index}/feedback` | Submit feedback | 200 |
 | `test_submit_feedback_without_trace_id` | POST `/api/verification/{index}/feedback` | Missing trace_id (skipped) | 200 (`linked_to_trace: false`) |
 | `test_get_genie_link_success` | GET `/api/verification/genie-link` | Has conversation | 200 |
@@ -179,7 +180,7 @@ tests/integration/test_api_routes.py::TestVerificationEndpoints
 
 **Note:** `test_submit_feedback_without_trace_id` is currently skipped (`@pytest.mark.skip`) due to MLflow mocking complexity.
 
-**Verification Result:** Returns `rating: "unknown"` when no Genie data available.
+**Verification Result:** Returns `rating: "unknown"` when there is no tool source data, or when combined tool text is only empty/no-result style payloads (insufficient ground truth). See `tests/unit/test_verification_insufficient_source.py` for heuristics.
 
 ---
 
