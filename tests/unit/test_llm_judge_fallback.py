@@ -81,7 +81,9 @@ async def test_evaluate_with_judge_direct_skips_mlflow():
         {"rating": "green", "explanation": "Matches source."}
     )
 
-    with patch("databricks_langchain.ChatDatabricks") as mock_chat_cls:
+    with patch(
+        "src.core.databricks_client.get_system_client", return_value=MagicMock()
+    ), patch("databricks_langchain.ChatDatabricks") as mock_chat_cls:
         mock_chat_cls.return_value.invoke.return_value = mock_resp
         out = await evaluate_with_judge(
             genie_data="x",
