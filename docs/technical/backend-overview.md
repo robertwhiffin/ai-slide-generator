@@ -485,7 +485,7 @@ Keep this doc synchronized whenever you add new modules, features (e.g., streami
 ## Cross-References
 
 - [Frontend Overview](frontend-overview.md) -- UI/state patterns and backend touchpoints
-- [LLM as Judge Verification](llm-as-judge-verification.md) -- Auto slide accuracy verification using MLflow and human feedback collection
+- [LLM as Judge Verification](llm-as-judge-verification.md) -- Auto slide accuracy verification (MLflow judge by default; optional Direct + automatic fallback; human feedback)
 - [Database Configuration](database-configuration.md) -- Schema details including `verification_map` for content-hash-based verification persistence
 - [Real-Time Streaming](real-time-streaming.md) -- SSE events and conversation persistence
 - [Multi-User Concurrency](multi-user-concurrency.md) -- session locking and async handling

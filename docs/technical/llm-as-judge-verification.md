@@ -14,8 +14,8 @@ Automatic numerical accuracy verification for generated slides using MLflow's cu
 - **Environment:** Requires `DATABRICKS_HOST` and `DATABRICKS_TOKEN` for MLflow tracking
 - **Databricks Apps:** Allow egress to `*.storage.cloud.databricks.com` if `mlflow.genai.evaluate` must download trace artifacts; otherwise judge may fall back (see below).
 - **`TELLR_MLFLOW_LANGCHAIN_AUTOLOG`:** Set to `1` / `true` / `on` to enable `mlflow.langchain.autolog()`. **Default is off** in the agent to avoid MLflow `ContextVar` “different Context” warnings under FastAPI/async + threads ([mlflow#22088](https://github.com/mlflow/mlflow/issues/22088)).
-- **Judge fallback:** If `mlflow.genai.evaluate` fails with regional **storage** connection errors, `RESOURCE_DOES_NOT_EXIST` (orphaned experiment / run), or **`'NoneType' object has no attribute 'info'`** (MLflow harness: evaluation trace never became readable—often tracing/egress related), `evaluate_with_judge` runs a **direct** `ChatDatabricks` JSON judge (same rating rules, including **unknown** when source is non-substantive). You still get a verification rating, but **no** MLflow Evaluation Run for that request (`run_id` may be null). Prefer **Admin → Judge → Direct** (the app default) if MLflow tracing stays broken in your environment.
-- **Admin Judge panel:** Admin → **Judge** tab chooses **Direct ChatDatabricks judge** (default) or **MLflow LLM judge**. The choice is stored as `llm_judge_backend` on the resolved `config_profiles` row (`direct` | `mlflow`). Direct mode skips MLflow for verification entirely (no Evaluation Run; `run_id` null). API: `GET`/`PUT /api/admin/judge-backend`.
+- **Judge fallback:** If `mlflow.genai.evaluate` fails with regional **storage** connection errors, `RESOURCE_DOES_NOT_EXIST` (orphaned experiment / run), or **`'NoneType' object has no attribute 'info'`** (MLflow harness: evaluation trace never became readable—often tracing/egress related), `evaluate_with_judge` runs a **direct** `ChatDatabricks` JSON judge (same rating rules, including **unknown** when source is non-substantive). You still get a verification rating, but **no** MLflow Evaluation Run for that request (`run_id` may be null). **Default** verification backend is **MLflow**; use **Admin → Judge → Direct** when storage egress is blocked or MLflow evaluate is unreliable.
+- **Admin Judge panel:** Admin → **Judge** tab chooses **MLflow LLM judge** (default) or **Direct ChatDatabricks judge**. The choice is stored as `llm_judge_backend` on the resolved `config_profiles` row (`mlflow` \| `direct`). Direct mode skips MLflow for verification entirely (no Evaluation Run; `run_id` null). API: `GET`/`PUT /api/admin/judge-backend`. If no profile row exists yet, `GET` returns `mlflow`.
 - **Unable to verify (`unknown`):** The judge prompts require **unknown** (not red) when source data has no substantive ground truth (e.g. only “no results” / empty tool payloads). The verification route also short-circuits common empty-result-only tool text before calling the LLM so the UI shows **Unable to verify** instead of **Review required**.
 
 ---
@@ -93,13 +93,14 @@ RATING_SCORES = {
     "green": 85,   # No issues detected (≥80%)
     "amber": 65,   # Review suggested (50-79%)
     "red": 25,     # Review required (&lt;50%)
+    "unknown": 0,  # Unable to verify — no substantive source / non-verifiable
 }
 
 # Rating thresholds:
 # - green: ≥80% — All data correctly represents source
 # - amber: 50-79% — Some concerns, review suggested
-# - red: &lt;50% — Significant issues, review required
-# - unknown: No source data available (title slides, etc.)
+# - red: &lt;50% — Significant issues when substantive source exists (review required)
+# - unknown: No substantive source data (empty tool results, no-results-only payloads, etc.)
 ```
 
 | Rating | Score Range | Badge Label | User Action |
@@ -107,7 +108,7 @@ RATING_SCORES = {
 | 🟢 Green | ≥80% | No issues | Proceed with confidence |
 | 🟡 Amber | 50-79% | Review suggested | Quick review recommended |
 | 🔴 Red | &lt;50% | Review required | Must review before using |
-| ⚪ Unknown | N/A | Unable to verify | No source data available |
+| ⚪ Unknown | N/A | Unable to verify | No substantive source data to compare |
 
 ### 3. Content Hash Persistence
 
@@ -136,7 +137,7 @@ The custom prompt judge evaluates:
 - **Chart data:** Chart.js `data: [7.2, 8.5, 9.1]` compared to source CSV
 - **Format tolerance:** Rounding, currency symbols, percentage conversion allowed
 
-See `src/services/evaluation/llm_judge.py::_build_judge_prompt()` for full prompt text.
+Prompt text lives in `llm_judge.py` as **`JUDGE_INSTRUCTIONS`** (MLflow `make_judge`) and **`_DIRECT_JUDGE_JSON_PROMPT`** (direct JSON path). Both instruct the model to return **`unknown`** when the source has no substantive ground truth (so the UI shows “Unable to verify” instead of treating empty results as fabrication / red).
 
 ---
 
@@ -146,7 +147,8 @@ See `src/services/evaluation/llm_judge.py::_build_judge_prompt()` for full promp
 
 | Path | Responsibility | APIs Touched |
 |------|----------------|--------------|
-| `src/services/evaluation/llm_judge.py` | Core judge evaluation logic using MLflow 3.x make_judge | MLflow (`mlflow.genai.make_judge`, `mlflow.set_tracking_uri`) |
+| `src/services/evaluation/llm_judge.py` | Core judge: MLflow `make_judge` + `genai.evaluate`, or direct `ChatDatabricks` JSON | MLflow / Databricks model serving |
+| `src/api/routes/admin.py` | `GET`/`PUT /api/admin/judge-backend` — persists `llm_judge_backend` on resolved profile | `config_profiles.llm_judge_backend` |
 | `src/services/evaluation/__init__.py` | Exports `evaluate_with_judge`, `LLMJudgeResult`, `RATING_SCORES` | None (module exports) |
 | `src/api/routes/verification.py` | FastAPI endpoints for verification and feedback | MLflow (`log_feedback`), `SessionManager`, `evaluate_with_judge` |
 | `src/utils/slide_hash.py` | HTML normalization and content hash computation | None (pure functions) |
@@ -161,7 +163,7 @@ See `src/services/evaluation/llm_judge.py::_build_judge_prompt()` for full promp
 | `frontend/src/components/SlidePanel/SlideTile.tsx` | Hosts badge, edit detection | — |
 | `frontend/src/services/api.ts` | API client methods for verification flow | `/api/verification/*` endpoints |
 | `frontend/src/types/verification.ts` | TypeScript types and utility functions (badge colors, icons) | None (types only) |
-| `frontend/src/components/Help/HelpPage.tsx` | Verification tab with user documentation | None (UI only) |
+| `frontend/src/components/Admin/AdminJudgeSettings.tsx` | Admin UI: MLflow vs Direct judge backend | `GET`/`PUT /api/admin/judge-backend` |
 
 ---
 
@@ -179,9 +181,10 @@ See `src/services/evaluation/llm_judge.py::_build_judge_prompt()` for full promp
    - Calls `runAutoVerification()` for unverified slides in parallel
 
 3. **Backend verifies each slide**
-   - Fetch slide HTML + Genie query results
-   - If no Genie data → return `rating="unknown"` (skip verification)
-   - Call `evaluate_with_judge(genie_data, slide_content)`
+   - Fetch slide HTML + tool results from the session (Genie, Vector Search, MCP, etc.)
+   - If there is **no** tool source text → return `rating="unknown"` (skip judge)
+   - If source text matches **insufficient-data heuristics** (e.g. only “no rows” / “no images found” with no substantive metrics) → return `unknown` without calling the LLM (same UX as empty source)
+   - Otherwise call `evaluate_with_judge(genie_data, slide_content, judge_backend=…)` (**MLflow** by default; **Direct** if set in Admin)
    - Save result to `verification_map[content_hash]`
 
 4. **Frontend displays results**
@@ -225,6 +228,8 @@ This decoupling prevents the race condition where verification timing (especiall
 
 | Method | Path | Request Body | Response | Purpose |
 |--------|------|--------------|----------|---------|
+| `GET` | `/api/admin/judge-backend` | – | `{ backend: "mlflow" \| "direct" }` | Current workspace judge mode (default `mlflow` when no profile row) |
+| `PUT` | `/api/admin/judge-backend` | `{ backend: "mlflow" \| "direct" }` | `{ backend }` | Persist judge mode on resolved `config_profiles` row |
 | `POST` | `/api/verification/{slide_index}` | `{ session_id }` | `VerifySlideResponse` | Verify slide accuracy |
 | `POST` | `/api/verification/{slide_index}/feedback` | `{ session_id, is_positive, rationale?, trace_id? }` | `{ status, message, linked_to_trace }` | Submit human feedback |
 | `GET` | `/api/verification/genie-link?session_id=...` | – | `{ has_genie_conversation, url?, message }` | Get Genie conversation URL |
@@ -276,35 +281,40 @@ mlflow.log_feedback(
 
 ### Error Handling
 
-1. **No Genie data (title slides, no-query sessions)**
+1. **No tool source data (title slides, no-query sessions)**
    - Backend returns `score=0`, `rating="unknown"`
    - Frontend shows gray badge: "? Unknown"
    - Not an error – expected for non-data slides
 
-2. **MLflow judge failure (network, model timeout)**
+2. **Only empty / no-result tool payloads** (e.g. “No images found matching your criteria” with no metrics)
+   - Backend returns `unknown` (heuristic short-circuit or judge returns `unknown`)
+   - Same gray badge as no-data
+
+3. **MLflow judge failure (network, model timeout)**
    - Backend catches exception, returns `error=true`, `error_message`
    - Frontend shows red badge: "! Error"
    - Error result not persisted
 
-3. **Feedback submission failure**
+4. **Feedback submission failure**
    - If `log_feedback()` fails, error logged but request returns 200
    - Response includes `linked_to_trace: false`
 
 ### Logging & Tracing
 
 - **Verification events:** Structured logs with session_id, slide_index, score, rating, content_hash
-- **MLflow traces:** All verifications logged to Databricks
+- **MLflow traces / Evaluation Runs:** When backend is **mlflow** (default), verifications use the per-session experiment. **Direct** mode and automatic fallback skip Evaluation Runs (`run_id` may be null).
 - **Performance:** Judge latency typically 1-3 seconds
 
 ### Configuration
 
-```python
-# src/services/evaluation/llm_judge.py
-DATABRICKS_MODEL = "databricks-claude-3-5-sonnet"
-JUDGE_TEMPERATURE = 0  # Deterministic judgments
+**Judge backend (workspace-wide)**  
+- Stored on `config_profiles.llm_judge_backend` (`mlflow` \| `direct`). The Admin API resolves the row with `resolve_config_profile_for_judge_backend` (prefer `is_default`, else oldest non-deleted profile).  
+- **Default:** `mlflow` — `mlflow.genai.evaluate` + Evaluation Runs (per-session experiment).  
+- **Direct:** ChatDatabricks JSON judge only — use when regional storage egress to `*.storage.cloud.databricks.com` is blocked or MLflow evaluate fails; no Evaluation Run (`run_id` null). Automatic **fallback** to Direct still occurs on certain MLflow infrastructure errors even when the saved preference is MLflow.
 
-# MLflow tracking
-mlflow.set_tracking_uri("databricks")
+```python
+# src/services/evaluation/llm_judge.py — model endpoint name (see DEFAULT_CONFIG)
+# MLflow: mlflow.set_tracking_uri("databricks") before evaluate
 ```
 
 ### Database Migration
@@ -323,10 +333,10 @@ Backward compatible – NULL treated as empty dict `{}`.
 
 ### Adding New Validation Checks
 
-1. Update judge prompt in `src/services/evaluation/llm_judge.py::_build_judge_prompt()`
+1. Update judge prompts in `src/services/evaluation/llm_judge.py` (`JUDGE_INSTRUCTIONS` for MLflow, `_DIRECT_JUDGE_JSON_PROMPT` for Direct)
 2. Add new issue types to prompt
 3. Update frontend `VerificationResult` interface if needed
-4. Add test cases in `test_llm_judge_spike.py`
+4. Add test cases in `tests/unit/test_llm_judge_fallback.py` (and integration verification tests as needed)
 
 ### Changing Rating Thresholds
 
@@ -376,5 +386,5 @@ The LLM as Judge verifies each slide against **all** Genie query results from th
 
 ---
 
-**Last Updated:** 2024-12-16  
-**Status:** ✅ Production-ready (Phase 1 – Numerical Accuracy + Auto-Verification)
+**Last Updated:** May 11, 2026  
+**Status:** ✅ Production-ready (Phase 1 – Numerical Accuracy + Auto-Verification; MLflow default + optional Direct + `unknown` for non-substantive source)
