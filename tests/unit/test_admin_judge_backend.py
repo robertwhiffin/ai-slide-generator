@@ -60,12 +60,12 @@ def test_client(db_engine, session_factory):
 
 
 def test_normalize_llm_judge_backend():
-    assert normalize_llm_judge_backend(None) == "direct"
-    assert normalize_llm_judge_backend("") == "direct"
+    assert normalize_llm_judge_backend(None) == "mlflow"
+    assert normalize_llm_judge_backend("") == "mlflow"
     assert normalize_llm_judge_backend("MLFLOW") == "mlflow"
     assert normalize_llm_judge_backend("direct") == "direct"
     assert normalize_llm_judge_backend(" DIRECT ") == "direct"
-    assert normalize_llm_judge_backend("other") == "direct"
+    assert normalize_llm_judge_backend("other") == "mlflow"
 
 
 def test_get_judge_backend_default_profile_direct(db_session, test_client):
@@ -83,10 +83,10 @@ def test_get_judge_backend_default_profile_direct(db_session, test_client):
     assert r.json() == {"backend": "direct"}
 
 
-def test_get_judge_backend_no_profile_returns_direct_default(db_session, test_client):
+def test_get_judge_backend_no_profile_returns_mlflow_default(db_session, test_client):
     r = test_client.get("/api/admin/judge-backend")
     assert r.status_code == 200
-    assert r.json() == {"backend": "direct"}
+    assert r.json() == {"backend": "mlflow"}
 
 
 def test_put_judge_backend_rejects_invalid(test_client):

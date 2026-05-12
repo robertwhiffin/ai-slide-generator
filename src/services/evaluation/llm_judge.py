@@ -273,7 +273,7 @@ async def evaluate_with_judge(
         model: Databricks model endpoint name
         trace_id: Optional trace ID to link feedback
         experiment_id: Optional MLflow experiment ID to use (per-session experiment)
-        judge_backend: ``direct`` (default) or ``mlflow``. When ``None``, reads
+        judge_backend: ``mlflow`` (default) or ``direct``. When ``None``, reads
             ``llm_judge_backend`` from app settings (Admin Judge panel).
 
     Returns:
@@ -287,7 +287,7 @@ async def evaluate_with_judge(
         try:
             resolved = normalize_llm_judge_backend(get_settings().llm_judge_backend)
         except Exception:
-            resolved = "direct"
+            resolved = "mlflow"
     else:
         resolved = normalize_llm_judge_backend(judge_backend)
 

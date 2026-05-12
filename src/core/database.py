@@ -472,13 +472,13 @@ def _run_migrations(engine, schema: str | None = None):
             logger.info(f"Migration: adding llm_judge_backend column to {table_name}")
             conn.execute(text(
                 f"ALTER TABLE {qualified_table} ADD COLUMN llm_judge_backend VARCHAR(32) "
-                "DEFAULT 'direct' NOT NULL"
+                "DEFAULT 'mlflow' NOT NULL"
             ))
         elif not is_sqlite:
             try:
                 conn.execute(text(
                     f"ALTER TABLE {qualified_table} ALTER COLUMN llm_judge_backend "
-                    "SET DEFAULT 'direct'"
+                    "SET DEFAULT 'mlflow'"
                 ))
             except Exception as ex:
                 logger.debug(

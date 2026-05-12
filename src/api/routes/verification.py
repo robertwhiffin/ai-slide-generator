@@ -209,7 +209,7 @@ async def verify_slide(slide_index: int, request: VerifySlideRequest):
         )
 
         settings = get_settings()
-        judge_backend = getattr(settings, "llm_judge_backend", None) or "direct"
+        judge_backend = getattr(settings, "llm_judge_backend", None) or "mlflow"
 
         # Run LLM judge evaluation using session's experiment (backend from Admin Judge)
         result = await evaluate_with_judge(

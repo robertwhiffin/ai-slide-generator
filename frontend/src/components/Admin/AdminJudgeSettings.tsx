@@ -3,7 +3,7 @@ import { adminApi, type LlmJudgeBackend } from '../../api/admin';
 import { useToast } from '../../contexts/ToastContext';
 
 export const AdminJudgeSettings: React.FC = () => {
-  const [backend, setBackend] = useState<LlmJudgeBackend>('direct');
+  const [backend, setBackend] = useState<LlmJudgeBackend>('mlflow');
   const [loaded, setLoaded] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -74,7 +74,8 @@ export const AdminJudgeSettings: React.FC = () => {
           <span>
             <span className="font-medium text-gray-900">MLflow LLM judge</span>
             <span className="block text-xs text-gray-500 mt-0.5">
-              Uses mlflow.genai.evaluate and your per-session experiment (Evaluation Runs).
+              Default — uses mlflow.genai.evaluate and your per-session experiment (Evaluation
+              Runs).
             </span>
           </span>
         </label>
@@ -90,8 +91,9 @@ export const AdminJudgeSettings: React.FC = () => {
           <span>
             <span className="font-medium text-gray-900">Direct ChatDatabricks judge</span>
             <span className="block text-xs text-gray-500 mt-0.5">
-              Default — same rating rules plus “unable to verify” when source is empty; no
-              MLflow Evaluation Run (run_id will be empty).
+              Same green / amber / red / unknown rules; calls the model endpoint only (no MLflow
+              Evaluation Run; run_id empty). Use when egress to regional storage is blocked or
+              MLflow evaluate is unreliable.
             </span>
           </span>
         </label>

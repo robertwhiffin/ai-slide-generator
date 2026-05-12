@@ -39,7 +39,7 @@ def get_judge_backend(db: Session = Depends(get_db)):
     """Return the workspace LLM-as-judge backend (default profile, else oldest active)."""
     p = resolve_config_profile_for_judge_backend(db)
     if not p:
-        return {"backend": "direct"}
+        return {"backend": "mlflow"}
     return {
         "backend": normalize_llm_judge_backend(getattr(p, "llm_judge_backend", None)),
     }
