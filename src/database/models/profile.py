@@ -28,7 +28,7 @@ class ConfigProfile(Base):
     agent_config = Column(JSON, nullable=True, default=None)
 
     # LLM-as-judge backend for slide verification (admin: default profile row)
-    llm_judge_backend = Column(String(32), nullable=False, default="direct")
+    llm_judge_backend = Column(String(32), nullable=False, default="mlflow")
 
     # Relationships
     genie_spaces = relationship(

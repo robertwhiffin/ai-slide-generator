@@ -851,7 +851,7 @@ class TestVerificationEndpoints:
         mock_session_manager.save_verification.return_value = None
 
         mock_settings = MagicMock()
-        mock_settings.llm_judge_backend = "direct"
+        mock_settings.llm_judge_backend = "mlflow"
 
         # Mock the evaluate_with_judge function
         with patch("src.api.routes.verification.get_settings", return_value=mock_settings):

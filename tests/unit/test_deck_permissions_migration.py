@@ -55,7 +55,7 @@ def engine_with_legacy_columns(sqlite_engine):
         conn.execute(text(
             "INSERT INTO config_profiles "
             "(name, is_default, is_deleted, created_at, updated_at, llm_judge_backend) "
-            "VALUES ('test-profile', 0, 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, 'direct')"
+            "VALUES ('test-profile', 0, 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, 'mlflow')"
         ))
         conn.execute(text(
             "UPDATE config_profiles SET global_permission = 'CAN_VIEW' WHERE name = 'test-profile'"

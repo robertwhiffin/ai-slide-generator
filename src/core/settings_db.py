@@ -32,10 +32,10 @@ LLMJudgeBackend = Literal["mlflow", "direct"]
 
 
 def normalize_llm_judge_backend(value: Optional[str]) -> LLMJudgeBackend:
-    """Return ``mlflow`` only when explicitly set; otherwise ``direct`` (default)."""
-    if (value or "").strip().lower() == "mlflow":
-        return "mlflow"
-    return "direct"
+    """Return ``direct`` only when value is exactly that; otherwise ``mlflow`` (default)."""
+    if (value or "").strip().lower() == "direct":
+        return "direct"
+    return "mlflow"
 
 
 def resolve_config_profile_for_judge_backend(db: Session) -> Optional[ConfigProfile]:
@@ -196,7 +196,7 @@ class AppSettings(BaseSettings):
     environment: str = "development"
 
     # Slide verification judge (from default config profile; see Admin Judge panel)
-    llm_judge_backend: LLMJudgeBackend = "direct"
+    llm_judge_backend: LLMJudgeBackend = "mlflow"
 
     @field_validator("databricks_host")
     @classmethod
@@ -254,7 +254,7 @@ def load_settings_from_database(profile_id: Optional[int] = None) -> AppSettings
                         genie=None,
                         prompts={},
                         environment=os.getenv("ENVIRONMENT", "development"),
-                        llm_judge_backend="direct",
+                        llm_judge_backend="mlflow",
                     )
             else:
                 # Specific profile requested
@@ -324,7 +324,7 @@ def load_settings_from_database(profile_id: Optional[int] = None) -> AppSettings
                 )
 
             judge_prof = resolve_config_profile_for_judge_backend(db)
-            judge_backend: LLMJudgeBackend = "direct"
+            judge_backend: LLMJudgeBackend = "mlflow"
             if judge_prof is not None:
                 judge_backend = normalize_llm_judge_backend(
                     getattr(judge_prof, "llm_judge_backend", None)
