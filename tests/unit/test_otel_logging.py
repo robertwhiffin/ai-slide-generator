@@ -26,4 +26,4 @@ def test_configure_idempotent(monkeypatch: pytest.MonkeyPatch) -> None:
     assert h1 is not None
     h2 = configure_app_telemetry_logging_if_enabled()
     assert h2 is h1
-    assert len(root.handlers) == before + 
+    assert len(root.handlers) == before + 1
