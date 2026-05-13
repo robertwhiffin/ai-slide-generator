@@ -84,6 +84,10 @@ export const PresentationMode: React.FC<PresentationModeProps> = ({
     .slide-container > * {
       width: 100%;
       height: 100%;
+      /* Zero any margin a deck CSS may add to its slide root — margins push
+         the slide inside the 720px clipping container and cause bottom-edge
+         truncation (e.g. ".slide { margin: 40px auto }" preview-mode styles). */
+      margin: 0 !important;
     }
   </style>
 </head>
