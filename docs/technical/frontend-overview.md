@@ -104,7 +104,7 @@ interface Slide {
 }
 ```
 
-Slides are HTML snippets embedded in iframes for preview. The optional `verification` field stores auto-verification accuracy checks using MLflow's LLM as Judge (runs automatically when slides are generated or edited).
+Slides are HTML snippets embedded in iframes for preview. The optional `verification` field stores auto-verification checks (**MLflow LLM-as-judge** by default; **Direct** ChatDatabricks optional via Admin) against tool/source data from the session.
 
 ### 3. Selection Context (`src/contexts/SelectionContext.tsx`)
 

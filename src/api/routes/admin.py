@@ -6,11 +6,17 @@ Includes global Google OAuth credentials management.
 import logging
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
+from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from src.api.utils.validation import validate_credentials_json
 from src.core.database import get_db
 from src.core.encryption import decrypt_data, encrypt_data
+from src.core.settings_db import (
+    normalize_llm_judge_backend,
+    reload_settings,
+    resolve_config_profile_for_judge_backend,
+)
 from src.core.user_context import get_current_user
 from src.database.models import GoogleGlobalCredentials
 from src.database.models.google_oauth_token import GoogleOAuthToken
@@ -20,6 +26,48 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/admin", tags=["admin"])
 
 _MAX_CREDENTIALS_SIZE = 100 * 1024
+
+
+class JudgeBackendUpdate(BaseModel):
+    """Request body for PUT /api/admin/judge-backend."""
+
+    backend: str = Field(..., description="mlflow or direct")
+
+
+@router.get("/judge-backend")
+def get_judge_backend(db: Session = Depends(get_db)):
+    """Return the workspace LLM-as-judge backend (default profile, else oldest active)."""
+    p = resolve_config_profile_for_judge_backend(db)
+    if not p:
+        return {"backend": "mlflow"}
+    return {
+        "backend": normalize_llm_judge_backend(getattr(p, "llm_judge_backend", None)),
+    }
+
+
+@router.put("/judge-backend")
+def put_judge_backend(body: JudgeBackendUpdate, db: Session = Depends(get_db)):
+    """Set the workspace LLM-as-judge backend on the resolved config profile row."""
+    raw = (body.backend or "").strip().lower()
+    if raw not in ("mlflow", "direct"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="backend must be 'mlflow' or 'direct'",
+        )
+    p = resolve_config_profile_for_judge_backend(db)
+    if not p:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=(
+                "No configuration profile found. Create at least one Tellr "
+                "configuration profile before saving judge settings."
+            ),
+        )
+    p.llm_judge_backend = raw
+    db.commit()
+    reload_settings()
+    logger.info("Admin updated llm_judge_backend", extra={"llm_judge_backend": raw})
+    return {"backend": raw}
 
 
 @router.post("/google-credentials")

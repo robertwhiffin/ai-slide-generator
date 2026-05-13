@@ -66,7 +66,7 @@ function TellrFeatures() {
     {
       title: 'LLM Verification',
       icon: '✅',
-      description: 'Automatically verify slide accuracy against source data using MLflow\'s make_judge API for quality assurance.',
+      description: 'Verify slide accuracy against session tool data with MLflow LLM-as-judge (default) or optional Direct mode; ratings include unable-to-verify when source is empty.',
     },
     {
       title: 'Export & Share',

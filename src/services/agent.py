@@ -10,6 +10,7 @@ import os
 import queue
 import re
 import uuid
+from contextlib import nullcontext
 from datetime import datetime
 from typing import Any, Optional, Tuple
 
@@ -25,6 +26,7 @@ from langchain_core.tools import StructuredTool
 from pydantic import BaseModel, Field
 
 from src.core.defaults import DEFAULT_CONFIG
+from src.core.mlflow_agent_spans import mlflow_agent_generate_spans_enabled
 from src.core.mlflow_tracing import (
     configure_tracing_environment,
     create_databricks_experiment,
@@ -44,6 +46,13 @@ from src.utils.html_utils import extract_canvas_ids_from_script, split_script_by
 from src.utils.js_validator import validate_and_fix_javascript
 
 logger = logging.getLogger(__name__)
+
+
+class _NoopMlflowSpan:
+    """Stand-in when ``mlflow.start_span`` is skipped (Direct judge / env policy)."""
+
+    def set_attribute(self, *args: Any, **kwargs: Any) -> None:
+        return None
 
 
 class AgentError(Exception):
@@ -91,8 +100,10 @@ class SlideGeneratorAgent:
     - ConversationBufferMemory for full history
     - Genie conversation_id persistence across turns
 
-    All operations are traced via MLflow for observability.
-    All intermediate steps are captured for chat interface display.
+    Slide generation may be wrapped in MLflow spans when enabled (see
+    ``src/core/mlflow_agent_spans.py``); when disabled, Genie/tool runs avoid
+    regional trace artifact uploads. Intermediate steps are always captured for
+    the chat UI.
     """
 
     def __init__(
@@ -1269,12 +1280,14 @@ class SlideGeneratorAgent:
             )
 
         try:
-            # Set session's experiment as active for tracing
-            if session.get("experiment_id"):
+            use_mlflow_span = mlflow_agent_generate_spans_enabled()
+            if use_mlflow_span and session.get("experiment_id"):
                 mlflow.set_experiment(experiment_id=session["experiment_id"])
+                span_cm = mlflow.start_span(name="generate_slides")
+            else:
+                span_cm = nullcontext(_NoopMlflowSpan())
 
-            # Use mlflow.start_span for manual tracing
-            with mlflow.start_span(name="generate_slides") as span:
+            with span_cm as span:
                 # Set custom attributes including session metadata for filtering
                 span.set_attribute("question", question)
                 span.set_attribute("session_id", session_id)
@@ -1494,11 +1507,14 @@ class SlideGeneratorAgent:
             )
 
         try:
-            # Set session's experiment as active for tracing
-            if session.get("experiment_id"):
+            use_mlflow_span = mlflow_agent_generate_spans_enabled()
+            if use_mlflow_span and session.get("experiment_id"):
                 mlflow.set_experiment(experiment_id=session["experiment_id"])
+                span_cm = mlflow.start_span(name="generate_slides_streaming")
+            else:
+                span_cm = nullcontext(_NoopMlflowSpan())
 
-            with mlflow.start_span(name="generate_slides_streaming") as span:
+            with span_cm as span:
                 # Set custom attributes including session metadata for filtering
                 span.set_attribute("question", question)
                 span.set_attribute("session_id", session_id)
