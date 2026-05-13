@@ -309,7 +309,10 @@ const VerificationTab: React.FC = () => (
           <span className="px-2 py-1 text-xs font-medium rounded bg-gray-100 text-gray-600 border border-gray-300 flex items-center gap-1">
             <span className="text-gray-500">○</span> Unable to verify
           </span>
-          <span className="text-sm text-gray-700">No source data available (e.g., title slides with no numbers)</span>
+          <span className="text-sm text-gray-700">
+            No substantive source data to compare (e.g. title slides, empty tool results, or
+            no-results messages only)
+          </span>
         </div>
       </div>
     </section>

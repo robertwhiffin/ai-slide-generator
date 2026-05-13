@@ -468,6 +468,22 @@ def _run_migrations(engine, schema: str | None = None):
             conn.execute(text(
                 f"ALTER TABLE {qualified_table} ADD COLUMN global_permission VARCHAR(20) NULL"
             ))
+        if "llm_judge_backend" not in columns:
+            logger.info(f"Migration: adding llm_judge_backend column to {table_name}")
+            conn.execute(text(
+                f"ALTER TABLE {qualified_table} ADD COLUMN llm_judge_backend VARCHAR(32) "
+                "DEFAULT 'mlflow' NOT NULL"
+            ))
+        elif not is_sqlite:
+            try:
+                conn.execute(text(
+                    f"ALTER TABLE {qualified_table} ALTER COLUMN llm_judge_backend "
+                    "SET DEFAULT 'mlflow'"
+                ))
+            except Exception as ex:
+                logger.debug(
+                    "Migration: skip llm_judge_backend server default alter: %s", ex
+                )
         # --- config_profiles: migrate is_global bool to global_permission ---
         if "is_global" in columns:
             logger.info(f"Migration: migrating is_global to global_permission")

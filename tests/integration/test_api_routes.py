@@ -850,24 +850,28 @@ class TestVerificationEndpoints:
         mock_session_manager.get_experiment_id.return_value = "exp-123"
         mock_session_manager.save_verification.return_value = None
 
-        # Mock the evaluate_with_judge function
-        with patch("src.api.routes.verification.evaluate_with_judge") as mock_eval:
-            mock_result = MagicMock()
-            mock_result.score = 0.95
-            mock_result.rating = "excellent"
-            mock_result.explanation = "Great accuracy"
-            mock_result.issues = []
-            mock_result.duration_ms = 500
-            mock_result.trace_id = "trace-123"
-            mock_result.error = False
-            mock_result.error_message = None
-            mock_eval.return_value = mock_result
+        mock_settings = MagicMock()
+        mock_settings.llm_judge_backend = "mlflow"
 
-            # Mock compute_slide_hash
-            with patch("src.utils.slide_hash.compute_slide_hash", return_value="hash123"):
-                response = client.post("/api/verification/0", json={
-                    "session_id": "test-123"
-                })
+        # Mock the evaluate_with_judge function
+        with patch("src.api.routes.verification.get_settings", return_value=mock_settings):
+            with patch("src.api.routes.verification.evaluate_with_judge") as mock_eval:
+                mock_result = MagicMock()
+                mock_result.score = 0.95
+                mock_result.rating = "excellent"
+                mock_result.explanation = "Great accuracy"
+                mock_result.issues = []
+                mock_result.duration_ms = 500
+                mock_result.trace_id = "trace-123"
+                mock_result.error = False
+                mock_result.error_message = None
+                mock_eval.return_value = mock_result
+
+                # Mock compute_slide_hash
+                with patch("src.utils.slide_hash.compute_slide_hash", return_value="hash123"):
+                    response = client.post("/api/verification/0", json={
+                        "session_id": "test-123"
+                    })
 
         assert response.status_code == 200
         data = response.json()
@@ -931,6 +935,38 @@ class TestVerificationEndpoints:
         data = response.json()
         assert data["rating"] == "unknown"
         assert "No source data" in data["explanation"]
+
+    def test_verify_slide_insufficient_source_skips_judge(self, client, mock_session_manager):
+        """Empty-result-only tool payloads return unknown without calling the LLM judge."""
+        mock_session_manager.get_session.return_value = {
+            "session_id": "test-123",
+            "genie_conversation_id": "genie-1",
+        }
+        mock_session_manager.get_slide_deck.return_value = {
+            "slides": [{"html": "<div>Genie Code is 10x faster</div>"}],
+            "slide_count": 1,
+        }
+        mock_session_manager.get_messages.return_value = [
+            {
+                "role": "tool",
+                "message_type": "tool_result",
+                "content": "No images found matching your criteria.",
+            }
+        ]
+        mock_session_manager.save_verification.return_value = None
+
+        with patch("src.utils.slide_hash.compute_slide_hash", return_value="hash456"):
+            with patch("src.api.routes.verification.evaluate_with_judge") as mock_eval:
+                response = client.post(
+                    "/api/verification/0",
+                    json={"session_id": "test-123"},
+                )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["rating"] == "unknown"
+        assert "No substantive source data" in data["explanation"]
+        mock_eval.assert_not_called()
 
     @pytest.mark.skip(reason="MLflow mocking requires complex setup - mlflow is imported inside function")
     def test_submit_feedback_success(self, client, mock_session_manager):

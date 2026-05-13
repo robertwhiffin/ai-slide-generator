@@ -1,9 +1,10 @@
 import React, { useState } from 'react';
 import { FeedbackDashboard } from '../Feedback/FeedbackDashboard';
 import { GoogleSlidesAuthForm } from '../config/GoogleSlidesAuthForm';
+import { AdminJudgeSettings } from './AdminJudgeSettings';
 import { AdminSlideStyleDefault } from './AdminSlideStyleDefault';
 
-type TabId = 'feedback' | 'google_slides' | 'slide_style';
+type TabId = 'feedback' | 'google_slides' | 'slide_style' | 'judge';
 
 export const AdminPage: React.FC = () => {
   const [activeTab, setActiveTab] = useState<TabId>('feedback');
@@ -14,7 +15,7 @@ export const AdminPage: React.FC = () => {
         <header className="mb-6">
           <h1 className="text-2xl font-bold text-gray-900">Admin</h1>
           <p className="text-sm text-gray-500 mt-1">
-            Feedback reports and Google Slides configuration.
+            Feedback reports, Google Slides, slide style defaults, and LLM judge backend.
           </p>
         </header>
 
@@ -64,6 +65,20 @@ export const AdminPage: React.FC = () => {
           >
             Slide Style
           </button>
+          <button
+            role="tab"
+            aria-selected={activeTab === 'judge'}
+            aria-controls="judge-panel"
+            id="judge-tab"
+            onClick={() => setActiveTab('judge')}
+            className={`px-4 py-2 font-medium text-sm border-b-2 transition-colors -mb-px ${
+              activeTab === 'judge'
+                ? 'border-blue-500 text-blue-600'
+                : 'border-transparent text-gray-600 hover:text-gray-900 hover:border-gray-300'
+            }`}
+          >
+            Judge
+          </button>
         </div>
 
         <div
@@ -94,6 +109,16 @@ export const AdminPage: React.FC = () => {
           className={activeTab !== 'slide_style' ? 'sr-only' : ''}
         >
           <AdminSlideStyleDefault />
+        </div>
+
+        <div
+          role="tabpanel"
+          id="judge-panel"
+          aria-labelledby="judge-tab"
+          hidden={activeTab !== 'judge'}
+          className={activeTab !== 'judge' ? 'sr-only' : ''}
+        >
+          <AdminJudgeSettings />
         </div>
       </div>
     </div>

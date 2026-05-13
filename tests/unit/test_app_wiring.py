@@ -57,6 +57,7 @@ class TestAppRoutes:
         route_paths = {r.path for r in app.routes if hasattr(r, "path")}
         assert "/api/admin/google-credentials" in route_paths
         assert "/api/admin/google-credentials/status" in route_paths
+        assert "/api/admin/judge-backend" in route_paths
 
     def test_health_endpoint(self):
         """Health endpoint still works."""
