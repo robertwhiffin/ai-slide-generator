@@ -58,7 +58,11 @@ export const AdminJudgeSettings: React.FC = () => {
         Controls how slide verification scores slides against tool/source data.{' '}
         <strong>MLflow</strong> logs Evaluation Runs in MLflow (requires MLflow tracking and may use
         regional Databricks storage). <strong>Direct</strong> calls the model endpoint only via
-        ChatDatabricks (no MLflow Evaluation Run; use when egress to storage hosts is blocked).
+        ChatDatabricks (no MLflow Evaluation Run; use when egress to storage hosts is blocked). When
+        Direct is saved, Tellr also skips MLflow <code>start_span</code> around Genie/chat slide
+        generation so tool runs do not upload trace artifacts to regional storage (set{' '}
+        <code>TELLR_MLFLOW_DISABLE_AGENT_SPANS=0</code> to keep agent spans while using Direct
+        verification).
       </p>
       <fieldset className="rounded border border-gray-200 bg-white p-4 space-y-3">
         <legend className="sr-only">Choose judge backend</legend>
