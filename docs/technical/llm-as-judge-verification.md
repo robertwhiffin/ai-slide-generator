@@ -18,7 +18,19 @@ Automatic numerical accuracy verification for generated slides using MLflow's cu
 - **Admin Judge panel:** Admin → **Judge** tab chooses **MLflow LLM judge** (default) or **Direct ChatDatabricks judge**. The choice is stored as `llm_judge_backend` on the resolved `config_profiles` row (`mlflow` \| `direct`). Direct mode skips MLflow for verification entirely (no Evaluation Run; `run_id` null). API: `GET`/`PUT /api/admin/judge-backend`. If no profile row exists yet, `GET` returns `mlflow`.
 - **Unable to verify (`unknown`):** The judge prompts require **unknown** (not red) when source data has no substantive ground truth (e.g. only “no results” / empty tool payloads). The verification route also short-circuits common empty-result-only tool text before calling the LLM so the UI shows **Unable to verify** instead of **Review required**.
 
----
+### Genie / chat vs verification (regional storage)
+
+**Admin → Direct** turns off MLflow for **slide verification** only. Until this change, the **agent** still called `mlflow.start_span` around each slide generation (including Genie tool calls). That path uploads trace JSON to `*.storage.cloud.databricks.com` — the same host that `mlflow.genai.evaluate` uses — so you could still see `Connection refused` / retry logs while chatting even with Direct judge.
+
+**Current behavior:** when `llm_judge_backend` is **Direct** (default auto policy), Tellr **does not** open MLflow generate spans for `generate_slides` / `generate_slides_streaming`, so Genie/tool runs should not hit regional trace artifact URLs. Override with environment variable:
+
+| `TELLR_MLFLOW_DISABLE_AGENT_SPANS` | Meaning |
+|------------------------------------|---------|
+| *(unset)* | **Auto:** spans **off** if Admin judge is Direct; spans **on** if judge is MLflow |
+| `1` / `true` / `on` | Spans **always off** (even with MLflow judge) |
+| `0` / `false` / `off` | Spans **always on** (even with Direct judge — restores old behavior) |
+
+Session creation may still ensure an MLflow **experiment** exists for the user; that uses the control plane and is separate from per-trace artifact uploads. If you still see storage errors, check **LangChain autolog** (`TELLR_MLFLOW_LANGCHAIN_AUTOLOG`) and other MLflow integrations outside Tellr.
 
 ## Architecture Snapshot
 
@@ -147,6 +159,7 @@ Prompt text lives in `llm_judge.py` as **`JUDGE_INSTRUCTIONS`** (MLflow `make_ju
 
 | Path | Responsibility | APIs Touched |
 |------|----------------|--------------|
+| `src/core/mlflow_agent_spans.py` | When to wrap slide generation in MLflow spans (avoids regional storage when Admin judge is Direct) | `get_settings`, env `TELLR_MLFLOW_DISABLE_AGENT_SPANS` |
 | `src/services/evaluation/llm_judge.py` | Core judge: MLflow `make_judge` + `genai.evaluate`, or direct `ChatDatabricks` JSON | MLflow / Databricks model serving |
 | `src/api/routes/admin.py` | `GET`/`PUT /api/admin/judge-backend` — persists `llm_judge_backend` on resolved profile | `config_profiles.llm_judge_backend` |
 | `src/services/evaluation/__init__.py` | Exports `evaluate_with_judge`, `LLMJudgeResult`, `RATING_SCORES` | None (module exports) |
