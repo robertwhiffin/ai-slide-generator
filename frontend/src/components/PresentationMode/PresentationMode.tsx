@@ -166,70 +166,80 @@ export const PresentationMode: React.FC<PresentationModeProps> = ({
     }
   }, [currentSlideHTML]);
 
-  // Handle keyboard navigation. Deps intentionally empty: slideCount comes from
-  // the frozen deck snapshot, onExit lives in onExitRef. Re-running this effect
-  // on every parent re-render (3s mentions polling) was leaving keypresses
-  // unhandled mid-swap, which felt like a freeze.
-  useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => {
-      // Only handle if not typing in an input/textarea
-      const target = e.target as HTMLElement;
-      if (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable) {
-        return;
-      }
+  // Single source of truth for keyboard handling, stored in a ref so it can be
+  // attached to the iframe's contentDocument on every load (see handleIframeLoad)
+  // without re-defining the handler. Without this, if focus lands inside the
+  // iframe — which happens after a tab switch back, after entering fullscreen,
+  // or after a click into slide content — keydown events fire in the iframe's
+  // document and don't bubble up to the parent window, so navigation breaks.
+  const handleKeyDownRef = useRef<(e: KeyboardEvent) => void>(() => {});
+  handleKeyDownRef.current = (e: KeyboardEvent) => {
+    const target = e.target as HTMLElement | null;
+    if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable)) {
+      return;
+    }
+    switch (e.key) {
+      case 'ArrowRight':
+      case 'ArrowDown':
+      case ' ': // Spacebar
+        e.preventDefault();
+        e.stopPropagation();
+        setCurrentSlideIndex((prev) => Math.min(prev + 1, slideCount - 1));
+        break;
+      case 'ArrowLeft':
+      case 'ArrowUp':
+        e.preventDefault();
+        e.stopPropagation();
+        setCurrentSlideIndex((prev) => Math.max(prev - 1, 0));
+        break;
+      case 'Home':
+        e.preventDefault();
+        e.stopPropagation();
+        setCurrentSlideIndex(0);
+        break;
+      case 'End':
+        e.preventDefault();
+        e.stopPropagation();
+        setCurrentSlideIndex(slideCount - 1);
+        break;
+      case 'f':
+      case 'F':
+        e.preventDefault();
+        e.stopPropagation();
+        toggleFullscreenRef.current();
+        break;
+      case 'Escape':
+        e.preventDefault();
+        e.stopPropagation();
+        onExitRef.current();
+        break;
+    }
+  };
 
-      switch (e.key) {
-        case 'ArrowRight':
-        case 'ArrowDown':
-        case ' ': // Spacebar
-          e.preventDefault();
-          e.stopPropagation();
-          setCurrentSlideIndex((prev) => Math.min(prev + 1, slideCount - 1));
-          break;
-        case 'ArrowLeft':
-        case 'ArrowUp':
-          e.preventDefault();
-          e.stopPropagation();
-          setCurrentSlideIndex((prev) => Math.max(prev - 1, 0));
-          break;
-        case 'Home':
-          e.preventDefault();
-          e.stopPropagation();
-          setCurrentSlideIndex(0);
-          break;
-        case 'End':
-          e.preventDefault();
-          e.stopPropagation();
-          setCurrentSlideIndex(slideCount - 1);
-          break;
-        case 'f':
-        case 'F':
-          e.preventDefault();
-          e.stopPropagation();
-          toggleFullscreenRef.current();
-          break;
-        case 'Escape':
-          e.preventDefault();
-          e.stopPropagation();
-          onExitRef.current();
-          break;
+  // Re-grab focus when returning to the tab so the parent listener actually
+  // sees keypresses. The iframe listener (attached in handleIframeLoad) covers
+  // the case where focus is in the iframe itself.
+  useEffect(() => {
+    const handleVisibility = () => {
+      if (document.visibilityState === 'visible' && containerRef.current) {
+        containerRef.current.focus();
       }
     };
+    document.addEventListener('visibilitychange', handleVisibility);
+    return () => document.removeEventListener('visibilitychange', handleVisibility);
+  }, []);
 
-    // Attach to both window and document for better coverage
-    window.addEventListener('keydown', handleKeyDown, true); // Use capture phase
-    document.addEventListener('keydown', handleKeyDown, true);
-
-    // Focus the container to ensure keyboard events are captured
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => handleKeyDownRef.current(e);
+    window.addEventListener('keydown', onKey, true);
+    document.addEventListener('keydown', onKey, true);
     if (containerRef.current) {
       containerRef.current.focus();
     }
-
     return () => {
-      window.removeEventListener('keydown', handleKeyDown, true);
-      document.removeEventListener('keydown', handleKeyDown, true);
+      window.removeEventListener('keydown', onKey, true);
+      document.removeEventListener('keydown', onKey, true);
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // Focus container on mount to capture keyboard events
@@ -302,11 +312,20 @@ export const PresentationMode: React.FC<PresentationModeProps> = ({
     return () => clearTimeout(t);
   }, []);
 
-  // Handle iframe load - refocus container to capture keyboard events
+  // Handle iframe load — refocus the container, AND attach the keydown
+  // handler to the iframe's freshly-loaded contentDocument so navigation works
+  // even when focus lands inside the iframe (which happens after tab switch,
+  // re-entering fullscreen, or clicking on slide content). srcdoc reloads
+  // create a new contentDocument each time, so we re-attach per load; the old
+  // document is GC'd along with its listener.
   const handleIframeLoad = () => {
-    // Don't focus iframe, keep focus on container for keyboard navigation
     if (containerRef.current) {
       containerRef.current.focus();
+    }
+    const doc = iframeRef.current?.contentDocument;
+    if (doc) {
+      const onKey = (e: KeyboardEvent) => handleKeyDownRef.current(e);
+      doc.addEventListener('keydown', onKey, true);
     }
   };
 
