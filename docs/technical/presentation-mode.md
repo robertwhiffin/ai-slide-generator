@@ -6,11 +6,13 @@ This document explains how the presentation mode feature works, including the cu
 
 ## Feature Summary
 
-Presentation mode displays slides in a fullscreen, keyboard-navigable viewer that shows one slide at a time. Users can also download a self-contained HTML file containing all slides for offline viewing or printing.
+Presentation mode displays slides in a keyboard-navigable viewer that shows one slide at a time. By default it opens "full window" — a fixed-position overlay covering `100vw × 100vh` — and can be promoted to browser fullscreen on demand (F or toolbar button), matching Google Slides' Slideshow / Cmd+Shift+Enter flow. Users can also download a self-contained HTML file containing all slides for offline viewing or printing.
 
 | Capability | Entry Point | Output |
 | --- | --- | --- |
-| Present fullscreen | "Present" button in SlidePanel header | Fullscreen overlay with single-slide iframe |
+| Present (full-window) | "Present" button in SlidePanel header | Fixed-position overlay with single-slide iframe; browser chrome still visible |
+| Present (fullscreen) | F key or toolbar button inside the overlay | Browser fullscreen (`document.documentElement.requestFullscreen()`) |
+| Start at current slide | "Present" button | Opens at whichever slide is most visible in the scroll viewport (or the selected one) |
 | Download HTML | "Export" → "Save as HTML" in SlidePanel header | Standalone `.html` file with all slides |
 | Debug mode | `?debug=true` or `localStorage.debug='true'` | Shows Raw HTML tabs |
 
@@ -58,7 +60,7 @@ The presentation mode shows one slide at a time in an iframe, updating the ifram
 
 ### 1. Presentation Mode HTML Structure
 
-The presentation mode generates HTML for a single slide at a time. Each slide is wrapped in a container that maintains the 16:9 aspect ratio (1280×720px):
+The presentation mode generates HTML for a single slide at a time. Each slide is wrapped in a `.slide-container` that maintains the 16:9 aspect ratio (1280×720px). **CSS ordering matters here** — the deck's own CSS (`slideDeck.css`) is injected before a final reset so deck styles can't squash the layout:
 
 ```html
 <!DOCTYPE html>
@@ -68,27 +70,30 @@ The presentation mode generates HTML for a single slide at a time. Each slide is
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <!-- external_scripts (Chart.js, etc.) -->
   <style>
-    * {
-      margin: 0;
-      padding: 0;
-      box-sizing: border-box;
-    }
+    * { box-sizing: border-box; }
     html, body {
       width: 100%;
       height: 100%;
-      overflow: auto;
+      overflow: hidden;
       background: #ffffff;
     }
+    canvas { max-width: 100%; height: auto; }
+
+    /* slideDeck.css is injected here */
+
+    /* Reset AFTER deck CSS so per-deck rules can't override these */
     body {
-      display: flex;
-      justify-content: center;
-      align-items: center;
-      padding: 0;
-      margin: 0;
+      display: flex !important;
+      justify-content: center !important;
+      align-items: flex-start !important;
+      padding: 0 !important;
+      margin: 0 !important;
     }
     .slide-container {
       width: 1280px;
       height: 720px;
+      flex-shrink: 0;
+      flex-grow: 0;
       position: relative;
       background: #ffffff;
       overflow: hidden;
@@ -97,12 +102,11 @@ The presentation mode generates HTML for a single slide at a time. Each slide is
     .slide-container > * {
       width: 100%;
       height: 100%;
+      /* Zero any margin a deck CSS may add to its slide root — preview/gallery
+         styles often set ".slide { margin: 40px auto }" which would push the
+         slide inside the 720px clipping box and truncate the bottom. */
+      margin: 0 !important;
     }
-    canvas {
-      max-width: 100%;
-      height: auto;
-    }
-    /* slideDeck.css */
   </style>
 </head>
 <body>
@@ -115,6 +119,12 @@ The presentation mode generates HTML for a single slide at a time. Each slide is
 </body>
 </html>
 ```
+
+Why each defensive rule exists:
+
+- **`!important` body resets after the deck CSS** — Some slide styles set the body to a flex column with padding/gap (intended for a stacked-preview view). Without this reset, body padding could shrink the slide-container via flex-layout and clip the slide.
+- **`flex-shrink: 0; flex-grow: 0;` on `.slide-container`** — Belt-and-braces: even if body padding sneaks through, the slide-container won't shrink below 720px.
+- **`margin: 0 !important` on `.slide-container > *`** — Deck CSS commonly emits `.slide { margin: 40px auto }` for the gallery view. In present mode that 40px top margin pushes content past the 720px container and clips the bottom.
 
 The iframe's `srcdoc` is updated whenever `currentSlideIndex` changes, causing a re-render of the slide content. The iframe itself is scaled using CSS `transform: scale()` to fit the viewport while maintaining the 16:9 aspect ratio without distortion.
 
@@ -193,52 +203,104 @@ This approach:
 - Automatically adjusts on window resize and orientation changes
 - Recalculates scale when entering fullscreen mode
 
-### 4. Fullscreen Management
+### 4. Full-Window Default + Opt-in Fullscreen
 
-`PresentationMode` uses the Fullscreen API:
-- On mount: `document.documentElement.requestFullscreen()` (with graceful fallback if denied)
-- On fullscreen enter: Recalculates scale factor to account for viewport size changes
-- On exit: Listens to `fullscreenchange` event; when `!document.fullscreenElement`, calls `onExit()`
-- Cleanup: Exits fullscreen if component unmounts while still active
+`PresentationMode` defaults to **full window**: a React portal mounted on `document.body` with `position: fixed; top: 0; left: 0; width: 100vw; height: 100vh; zIndex: 9999`. The browser chrome stays visible (so the user can still see their tabs / URL bar) — this is the same UX as Google Slides' "Slideshow" view.
 
-The component renders via React portal to `document.body`, creating a fullscreen overlay with black background. The scale factor is recalculated when entering fullscreen to ensure proper sizing in the new viewport.
-
-### 5. Keyboard Navigation
-
-Navigation is handled by React event listeners attached to `window` and `document` in capture phase:
+Browser fullscreen is **opt-in** and toggles in either direction via:
+- The `F` key, or
+- The fullscreen toggle button in the top-right toolbar
 
 ```tsx
-const handleKeyDown = (e: KeyboardEvent) => {
-  // Skip if typing in input/textarea
-  const target = e.target as HTMLElement;
-  if (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable) {
-    return;
-  }
-
-  switch (e.key) {
-    case 'ArrowRight':
-    case 'ArrowDown':
-    case ' ': // Spacebar
-      setCurrentSlideIndex((prev) => Math.min(prev + 1, slideDeck.slides.length - 1));
-      break;
-    case 'ArrowLeft':
-    case 'ArrowUp':
-      setCurrentSlideIndex((prev) => Math.max(prev - 1, 0));
-      break;
-    case 'Home':
-      setCurrentSlideIndex(0);
-      break;
-    case 'End':
-      setCurrentSlideIndex(slideDeck.slides.length - 1);
-      break;
-    case 'Escape':
-      onExit();
-      break;
+const toggleFullscreen = () => {
+  if (document.fullscreenElement) {
+    document.exitFullscreen().catch(() => {});
+  } else {
+    document.documentElement.requestFullscreen().catch(() => {});
   }
 };
 ```
 
-The container div has `tabIndex={-1}` and receives focus to capture keyboard events. The iframe does not receive focus; navigation is handled at the parent level.
+A `fullscreenchange` listener mirrors the browser's actual fullscreen state into local `isFullscreen` state and recalculates the scale factor (viewport dimensions change when fullscreen toggles). The listener does **not** call `onExit` — exiting fullscreen drops the user back to full-window, not all the way out of presentation mode. To fully exit, the user presses Esc a second time.
+
+The resulting Esc behavior is naturally two-stage, like Keynote/PowerPoint:
+
+| Mode | Esc behavior |
+| --- | --- |
+| Fullscreen | Browser intercepts Esc and exits fullscreen → drops to full-window |
+| Full-window | Component's keydown handler fires `onExit()` → exits presentation entirely |
+
+On unmount the component releases any held fullscreen lock with `document.exitFullscreen()`.
+
+### 5. Keyboard Navigation
+
+Navigation is handled by a single keydown function stored in a ref so it can be attached to multiple targets without re-defining:
+
+| Key | Action |
+| --- | --- |
+| → / ↓ / Space | Next slide |
+| ← / ↑ | Previous slide |
+| Home / End | Jump to first / last slide |
+| F | Toggle browser fullscreen |
+| Esc | Exit (two-stage — see Full-Window section above) |
+
+The handler is attached to **three** targets:
+
+1. `window` and `document` of the parent page (capture phase) — catches keys when focus is on the body or any non-iframe element.
+2. The iframe's `contentDocument` — re-attached on every iframe `srcdoc` load. Without this, if focus lands inside the iframe (which happens after tab switch back, after re-entering fullscreen, or after clicking on slide content), keydown events fire inside the iframe and don't bubble to the parent window.
+
+A `visibilitychange` listener also refocuses the container when the tab becomes visible again, so the parent-level listener has a chance to receive keys cleanly.
+
+The handler short-circuits if the event target is an `INPUT`, `TEXTAREA`, or `contenteditable` element, so users can still type in form fields embedded in slides.
+
+### 6. Deck Snapshot (Freeze Prevention)
+
+`PresentationMode` snapshots the `slideDeck` prop into a ref on mount and reads from the snapshot for everything thereafter:
+
+```tsx
+const deckSnapshotRef = useRef(slideDeck);
+const deck = deckSnapshotRef.current;
+```
+
+This is **not just an optimization** — it's a correctness fix. `ChatPanel` polls `/api/sessions/<id>/mentions` every 3 seconds, which re-renders `SlidePanel` and passes a new `slideDeck` reference to `<PresentationMode>` on every poll. Before snapshotting, the component's `useMemo([currentSlideIndex, slideDeck])` recomputed the iframe `srcdoc` every 3s, causing the iframe to reload mid-keypress and stalling navigation. Symptom: the presentation "froze" after a few seconds of inactivity.
+
+Snapshotting also matches the user expectation set by Google Slides — edits made in the chat panel while presenting **do not** retroactively update the open presentation. To see edits, the user re-opens Present.
+
+### 7. Start at Current Slide
+
+`SlidePanel` resolves a "current slide" index at the moment the Present button is clicked, and passes it to `<PresentationMode>` as `startIndex`:
+
+```tsx
+const openPresentationFromActive = useCallback(() => {
+  const total = slideDeck?.slides.length ?? 0;
+  let idx = 0;
+
+  if (selectedIndices.length > 0) {
+    // Explicit selection wins
+    idx = selectedIndices[0];
+  } else {
+    // Pick the slide spanning a virtual trigger line ~25% from the top
+    const triggerY = window.innerHeight * 0.25;
+    for (const [tileIndex, el] of slideRefs.current) {
+      const r = el.getBoundingClientRect();
+      if (r.top <= triggerY && r.bottom > triggerY) {
+        idx = tileIndex;
+        break;
+      }
+    }
+  }
+
+  setPresentationStartIndex(Math.max(0, Math.min(idx, Math.max(0, total - 1))));
+  setIsPresentationMode(true);
+}, [selectedIndices, slideDeck]);
+```
+
+Two rules:
+
+- **Explicit selection wins.** If the user has clicked/selected a slide, present from there.
+- **Otherwise, trigger line at 25% from top.** The slide whose bounding box covers the line is "current". This pattern matches docs-site TOC highlighting and is stable as you scroll — the trigger only advances when one tile's bottom edge crosses above the line, so adjacent tiles don't oscillate when they're equally visible.
+
+Computed on click (not via a live observer) — cheaper, deterministic, and avoids stale state during fast scrolling.
 
 ---
 
@@ -246,9 +308,9 @@ The container div has `tabIndex={-1}` and receives focus to capture keyboard eve
 
 | Path | Responsibility |
 | --- | --- |
-| `frontend/src/components/PresentationMode/PresentationMode.tsx` | Renders fullscreen portal with single-slide iframe, calculates and applies responsive scaling, manages fullscreen lifecycle, handles keyboard navigation, updates iframe content on slide change |
+| `frontend/src/components/PresentationMode/PresentationMode.tsx` | Renders the full-window portal with single-slide iframe; snapshots the deck to immunize against parent re-renders; manages opt-in browser fullscreen; handles keyboard navigation across parent + iframe documents; auto-hides chrome in fullscreen |
 | `frontend/src/components/PresentationMode/index.ts` | Barrel export |
-| `frontend/src/components/SlidePanel/SlidePanel.tsx` | Hosts Present/Export buttons, generates download HTML (all slides), toggles presentation state |
+| `frontend/src/components/SlidePanel/SlidePanel.tsx` | Hosts Present/Export buttons, resolves "current slide" on Present click (selection wins → else trigger-line at 25% from top), generates download HTML (all slides), toggles presentation state |
 
 ---
 
@@ -257,17 +319,20 @@ The container div has `tabIndex={-1}` and receives focus to capture keyboard eve
 ### Present Flow
 
 1. User clicks "Present" button in `SlidePanel`
-2. `setIsPresentationMode(true)` renders `&lt;PresentationMode&gt;` via React portal to `document.body`
-3. Component calculates initial scale factor based on viewport dimensions
-4. Component requests fullscreen (with fallback if denied)
-5. `useMemo` generates HTML for current slide (index 0 initially)
-6. Iframe loads with `srcdoc={currentSlideHTML}` and applies scale transform
-7. Container div receives focus to capture keyboard events
-8. `waitForChartJs` polls then runs current slide's scripts
-9. User navigates with arrow keys/Space; `currentSlideIndex` state updates
-10. `useEffect` detects `currentSlideIndex` change, updates iframe `srcdoc` with new slide HTML
-11. Scale recalculates automatically on window resize or orientation change
-12. Escape key or fullscreen exit triggers `onExit()`, unmounting component
+2. `openPresentationFromActive` resolves `startIndex` (selected slide, else slide at the 25%-from-top trigger line)
+3. `setIsPresentationMode(true)` renders `<PresentationMode>` via React portal to `document.body`
+4. Component snapshots the deck into `deckSnapshotRef` so the iframe is immune to upstream re-renders (e.g. ChatPanel's 3s polling)
+5. Component calculates initial scale factor based on viewport dimensions
+6. `useMemo` generates HTML for the starting slide
+7. Iframe loads with `srcdoc={currentSlideHTML}` and applies scale transform from `transformOrigin: center center`
+8. Container div receives focus; keydown handler is also attached to the iframe's `contentDocument` so navigation works regardless of which document holds focus
+9. `waitForChartJs` polls then runs current slide's scripts
+10. Keyboard-shortcut hint is visible for ~3s, then fades out
+11. User navigates with arrow keys / Space; `currentSlideIndex` updates
+12. `useEffect` updates iframe `srcdoc` on slide change; the keydown listener is re-attached to the new `contentDocument` on each load
+13. Scale recalculates automatically on window resize, orientation change, and fullscreen toggle
+14. (Optional) F key or toolbar button toggles browser fullscreen; toolbar/hint/counter all hide while fullscreen is active
+15. Esc unwinds fullscreen first (browser-handled); a second Esc exits the presentation entirely via the component's keydown handler
 
 ### Download Flow
 
@@ -303,9 +368,10 @@ The iframe wrapper uses CSS `transform: scale()` to scale the 1280×720px iframe
 | Space | Next slide |
 | Home | Jump to first slide |
 | End | Jump to last slide |
-| Escape | Exit presentation mode |
+| F | Toggle browser fullscreen |
+| Escape | Exit fullscreen (if active) → exit presentation (if already full-window) |
 
-Navigation hints are displayed in the top-right corner of the presentation overlay.
+A navigation hint (`← → Navigate · F Fullscreen · Esc Exit`) appears in the top-left for the first ~3 seconds after open, then fades out so it stops covering slide content. In fullscreen the hint stays hidden.
 
 ---
 
@@ -321,19 +387,23 @@ When enabled, "Raw HTML (Rendered)" and "Raw HTML (Text)" tabs appear in `SlideP
 
 ## Presentation Overlay UI
 
-The presentation mode includes two overlays:
+The overlay has three pieces of chrome, all of which **auto-hide in fullscreen** so the slides own the screen (the user is expected to know F/Esc/arrows once they've committed to fullscreen). In full-window mode, the toolbar and counter stay visible; only the hint auto-hides after 3 seconds.
 
 ### Slide Counter (Bottom Center)
-- Shows current slide number and total: `{currentSlideIndex + 1} / {slideDeck.slides.length}`
-- Styled with semi-transparent black background, white text
-- Positioned absolutely at bottom center
+- Shows current slide number and total: `{currentSlideIndex + 1} / {slideCount}` (`slideCount` comes from the deck snapshot, not the live prop)
+- Semi-transparent black background, white text
+- `pointerEvents: 'none'` so clicks pass through to the iframe
 
-### Navigation Hints (Top Right)
-- Displays: "← → Navigate | ESC Exit"
-- Styled with semi-transparent black background, white text, reduced opacity
-- Positioned absolutely at top right
+### Toolbar (Top Right)
+- Two interactive buttons rendered with inline SVG icons (Unicode glyphs like `⤢ / ⤡ / ✕` render inconsistently across fonts/OSes):
+  - Fullscreen toggle (`F` shortcut equivalent) — icon swaps between "enter" and "exit" arrows
+  - Close (`Esc` shortcut equivalent)
+- `pointerEvents` flips to `none` while hidden so users can't accidentally click an invisible button
 
-Both overlays have `pointerEvents: 'none'` to allow clicks to pass through to the iframe.
+### Navigation Hint (Top Left)
+- `← → Navigate · F Fullscreen · Esc Exit`
+- Visible only for the first ~3 seconds after open, then fades out (opacity transition)
+- `pointerEvents: 'none'`
 
 ---
 
@@ -376,10 +446,11 @@ If chart initialization fails:
 
 ### Error Handling
 
-- **Fullscreen denied:** Presentation still shows in overlay (graceful fallback)
+- **Fullscreen denied:** No effect on default flow (we never auto-request fullscreen). If a user invokes F/the toolbar button and the browser denies the request, the promise rejection is swallowed and the presentation stays in full-window.
 - **Chart.js timeout:** After 50 attempts (5 seconds), logs error but continues
 - **Script errors:** Logged to console but don't crash presentation
 - **Keyboard events in inputs:** Ignored to allow typing in form fields within slides
+- **Focus lost to iframe:** Mitigated by attaching the keydown listener to the iframe's `contentDocument` on every load, plus a `visibilitychange` listener that refocuses the container when the tab regains visibility
 
 ### Iframe Sandbox
 
@@ -428,25 +499,44 @@ The iframe uses `sandbox="allow-scripts allow-same-origin"` to:
 
 ### State Management
 
-- `currentSlideIndex`: Tracks which slide is currently displayed (0-based)
-- `scale`: Calculated scale factor for responsive iframe sizing (maintains 16:9 aspect ratio)
-- `iframeRef`: Reference to the iframe element for updating `srcdoc`
-- `containerRef`: Reference to the container div for keyboard focus
-- `wrapperRef`: Reference to the iframe wrapper div (for potential future use)
+State (`useState`):
+- `currentSlideIndex` — Which slide is currently displayed (0-based; initialized from the `startIndex` prop)
+- `scale` — Calculated scale factor for responsive iframe sizing
+- `isFullscreen` — Mirrors `!!document.fullscreenElement`; drives chrome visibility
+- `hintVisible` — `true` for the first 3s, then `false`. Combined with `controlsVisible` to drive hint opacity
+
+Derived: `controlsVisible = !isFullscreen` — single switch for toolbar/counter/hint visibility.
+
+Refs:
+- `iframeRef` — Iframe element, used to push `srcdoc` updates without React reconciliation
+- `containerRef` — The portal container, used for focus management
+- `wrapperRef` — Iframe wrapper (legacy; available for future use)
+- `onExitRef` — Stabilizes the `onExit` callback so it can be read from event handlers without re-running effects on parent re-renders
+- `toggleFullscreenRef` — Same pattern for the fullscreen toggle (invoked from the keydown handler)
+- `handleKeyDownRef` — Single source of truth for the keydown logic; attached to parent window/document AND to the iframe's `contentDocument` on each load
+- `deckSnapshotRef` — Captures the `slideDeck` prop on mount; the iframe HTML reads from this snapshot, not the live prop (see "Deck Snapshot" above)
 
 ### HTML Generation
 
-The `currentSlideHTML` is memoized with dependencies on `currentSlideIndex` and `slideDeck`. When either changes, new HTML is generated for the current slide, including:
+`currentSlideHTML` is memoized with **dependencies on `[currentSlideIndex]` only** — the deck is read from `deckSnapshotRef.current`, not the live `slideDeck` prop, so parent re-renders (e.g. the 3s mentions poll) don't recompute the HTML or reload the iframe.
+
+The memoized HTML includes:
 - External scripts (Chart.js CDN links)
-- Slide-specific CSS from `slideDeck.css`
+- Deck-level CSS (`deck.css`), followed by the `!important` reset
 - Current slide's HTML content
 - Current slide's scripts (wrapped in `waitForChartJs`)
 
 ### Iframe Updates
 
-When `currentSlideHTML` changes, a `useEffect` updates the iframe's `srcdoc` property, causing the iframe to reload with the new slide content. This ensures:
+When `currentSlideHTML` changes, a `useEffect` updates the iframe's `srcdoc` property, causing the iframe to reload with the new slide content. The `handleIframeLoad` callback then:
+
+1. Refocuses the container so keyboard nav keeps working
+2. Re-attaches the keydown listener to the **new** `contentDocument` (the old one was destroyed by the srcdoc swap)
+
+This ensures:
 - Each slide's scripts execute independently
 - Charts initialize correctly for each slide
+- Navigation works regardless of which document currently holds focus
 - No state leakage between slides
 
 

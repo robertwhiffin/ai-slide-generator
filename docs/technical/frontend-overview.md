@@ -329,7 +329,7 @@ interface SlideStyle {
 | `src/components/config/ConfirmDialog.tsx` | Reusable confirmation dialog for destructive actions (deleting profiles, changing defaults) | None (props only) |
 | `src/components/config/ContributorsManager.tsx` | Profile sharing UI; add/update/remove contributors (users/groups) with permission levels | `configApi.listContributors`, `configApi.addContributor`, `configApi.updateContributor`, `configApi.removeContributor`, `configApi.searchIdentities` |
 | `src/components/DeckContributorsManager.tsx` | Deck (session) sharing UI; add/update/remove contributors with CAN_VIEW/CAN_EDIT/CAN_MANAGE permissions | `configApi.listDeckContributors`, `configApi.addDeckContributor`, `configApi.updateDeckContributor`, `configApi.removeDeckContributor` |
-| `src/components/PresentationMode/PresentationMode.tsx` | Fullscreen slide presentation with keyboard navigation; wraps scripts in try/catch for graceful chart failures | None (renders slide HTML in iframe) |
+| `src/components/PresentationMode/PresentationMode.tsx` | Full-window slide presentation (opt-in browser fullscreen via F/toolbar) with keyboard navigation; snapshots deck on mount to immunize against parent re-renders; wraps scripts in try/catch for graceful chart failures | None (renders slide HTML in iframe) |
 
 ---
 
