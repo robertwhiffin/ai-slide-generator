@@ -60,6 +60,7 @@ function SlidePanelComponent(props: SlidePanelProps, ref: React.Ref<SlidePanelHa
   const [showExportMenu, setShowExportMenu] = useState(false);
   const exportMenuRef = useRef<HTMLDivElement>(null);
   const [isPresentationMode, setIsPresentationMode] = useState(false);
+  const [presentationStartIndex, setPresentationStartIndex] = useState(0);
   const [optimizingSlideIndex, setOptimizingSlideIndex] = useState<number | null>(null);
   const [deleteSlideIndex, setDeleteSlideIndex] = useState<number | null>(null);
   const { selectedIndices, setSelection, clearSelection } = useSelection();
@@ -476,11 +477,37 @@ function SlidePanelComponent(props: SlidePanelProps, ref: React.Ref<SlidePanelHa
     URL.revokeObjectURL(url);
   };
 
+  const openPresentationFromActive = useCallback(() => {
+    const total = slideDeck?.slides.length ?? 0;
+    let idx = 0;
+
+    if (selectedIndices.length > 0) {
+      // Explicit selection wins — clicking a tile is an unambiguous "current".
+      idx = selectedIndices[0];
+    } else {
+      // No selection: pick the slide spanning a virtual trigger line ~25% from
+      // the top of the viewport. As you scroll, the trigger only advances when
+      // one tile's bottom crosses above the line, so there's no oscillation
+      // between two equally-visible tiles. Pattern used by docs-site TOCs.
+      const triggerY = window.innerHeight * 0.25;
+      for (const [tileIndex, el] of slideRefs.current) {
+        const r = el.getBoundingClientRect();
+        if (r.top <= triggerY && r.bottom > triggerY) {
+          idx = tileIndex;
+          break;
+        }
+      }
+    }
+
+    setPresentationStartIndex(Math.max(0, Math.min(idx, Math.max(0, total - 1))));
+    setIsPresentationMode(true);
+  }, [selectedIndices, slideDeck]);
+
   useImperativeHandle(ref, () => ({
     exportPDF: handleExportPDF,
     exportPPTX: handleExportPPTX,
     exportHTML: handleSaveAsHTML,
-    openPresentationMode: () => setIsPresentationMode(true),
+    openPresentationMode: openPresentationFromActive,
   }));
 
   useEffect(() => {
@@ -686,7 +713,7 @@ function SlidePanelComponent(props: SlidePanelProps, ref: React.Ref<SlidePanelHa
         <PresentationMode
           slideDeck={slideDeck}
           onExit={() => setIsPresentationMode(false)}
-          startIndex={0}
+          startIndex={presentationStartIndex}
         />
       )}
     </div>
