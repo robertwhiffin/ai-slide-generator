@@ -60,6 +60,7 @@ class TestAppRoutes:
             f"[DIAG] admin_mod is main's admin? "
             f"{getattr(main_mod, 'admin', None) is admin_mod}\n"
             f"[DIAG] sorted paths={sorted(route_paths)}\n"
+            f"[DIAG_INCLUDE] {getattr(main_mod, '_DIAG_INCLUDE', None)}\n"
         )
         assert "/api/export/google-slides/auth/status" in route_paths, diag
         assert "/api/export/google-slides/auth/url" in route_paths

@@ -435,6 +435,15 @@ app.include_router(deck_prompts_router, prefix="/api/settings", tags=["settings"
 app.include_router(identities_router, prefix="/api/settings", tags=["settings"])
 app.include_router(slide_styles_router, prefix="/api/settings", tags=["settings"])
 
+# [DIAG] capture router population + import stack at include time
+import traceback as _diag_tb
+_DIAG_INCLUDE = {
+    "admin_routes_at_include": len(admin.router.routes),
+    "gs_routes_at_include": len(google_slides.router.routes),
+    "app_routes_at_include": len(app.routes),
+    "import_stack": "".join(_diag_tb.format_stack()),
+}
+
 # MCP server — mount the FastMCP streamable-HTTP ASGI app at /mcp.
 # Must be registered before the SPA catch-all (which is added lazily by
 # ``_mount_frontend`` inside the lifespan when running in production),
