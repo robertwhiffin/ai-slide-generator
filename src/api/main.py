@@ -412,8 +412,18 @@ app.add_middleware(RequestLoggingMiddleware)
 # Include API routers
 _diag_before = len(app.routes)
 _diag_admin_routes_now = len(admin.router.routes)
+_diag_admin_route_repr = [
+    (type(r).__name__, getattr(r, "path", "NOPATH")) for r in admin.router.routes
+]
+_diag_admin_router_type = (
+    type(admin.router).__module__ + "." + type(admin.router).__qualname__
+)
+_diag_app_router_type = type(app.router).__module__ + "." + type(app.router).__qualname__
 app.include_router(admin.router)
 _diag_after_admin = len(app.routes)
+_diag_app_routes_repr = [
+    (type(r).__name__, getattr(r, "path", "NOPATH")) for r in app.routes
+]
 app.include_router(agent_config.router)
 app.include_router(chat.router)
 app.include_router(feedback.router)
@@ -442,7 +452,11 @@ app.include_router(slide_styles_router, prefix="/api/settings", tags=["settings"
 _DIAG_INCLUDE = {
     "before_includes": _diag_before,
     "admin_router_routes_at_include_call": _diag_admin_routes_now,
+    "admin_route_repr": _diag_admin_route_repr,
+    "admin_router_type": _diag_admin_router_type,
+    "app_router_type": _diag_app_router_type,
     "after_admin_include": _diag_after_admin,
+    "app_routes_repr_after_admin": _diag_app_routes_repr,
     "app_router_is_routes": app.router.routes is app.routes,
     "len_app_router_routes": len(app.router.routes),
     "app_routes_at_include": len(app.routes),
