@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import type { SlideDeck } from '../../types/slide';
+import { buildSlideDocument } from '../../services/slideDocument';
 
 interface PresentationModeProps {
   slideDeck: SlideDeck;
@@ -35,17 +36,9 @@ export const PresentationMode: React.FC<PresentationModeProps> = ({
     const slide = deck.slides[currentSlideIndex];
     const slideScripts = slide.scripts || '';
 
-    const externalScriptsHtml = deck.external_scripts
-      .map((src) => `<script src="${src}"></script>`)
-      .join('\n');
-
-    return `<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  ${externalScriptsHtml}
-  <style>
+    // Layout/reset CSS that wraps the deck CSS. Passed as extraHeadStyle so it
+    // is appended after deck.css inside the builder's <style> block.
+    const extraHeadStyle = `
     * {
       box-sizing: border-box;
     }
@@ -60,7 +53,6 @@ export const PresentationMode: React.FC<PresentationModeProps> = ({
       max-width: 100%;
       height: auto;
     }
-    ${deck.css}
     /* Reset body styles AFTER deck CSS so per-deck CSS can't squash the slide
        by adding body padding/flex centering (which would shrink the 720px
        slide-container via flex layout and clip content at the top). */
@@ -88,14 +80,9 @@ export const PresentationMode: React.FC<PresentationModeProps> = ({
          the slide inside the 720px clipping container and cause bottom-edge
          truncation (e.g. ".slide { margin: 40px auto }" preview-mode styles). */
       margin: 0 !important;
-    }
-  </style>
-</head>
-<body>
-  <div class="slide-container">
-    ${slide.html}
-  </div>
-  <script>
+    }`;
+
+    const bootstrapScripts = `
     // Wait for Chart.js to be available before running scripts
     function waitForChartJs(callback, maxAttempts = 50) {
       let attempts = 0;
@@ -129,10 +116,20 @@ export const PresentationMode: React.FC<PresentationModeProps> = ({
       });
     } else {
       waitForChartJs(initializeCharts);
-    }
-  </script>
-</body>
-</html>`;
+    }`;
+
+    return buildSlideDocument(
+      `<div class="slide-container">
+    ${slide.html}
+  </div>`,
+      {
+        css: deck.css,
+        externalScripts: deck.external_scripts,
+        scripts: bootstrapScripts,
+        extraHeadStyle,
+        includeKeyBridge: true,
+      },
+    );
     // deck is captured once via deckSnapshotRef; only the active slide changes
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentSlideIndex]);
@@ -246,6 +243,27 @@ export const PresentationMode: React.FC<PresentationModeProps> = ({
     };
   }, []);
 
+  // AISEC-248: receive key events forwarded from the sandboxed iframe (which no
+  // longer shares our origin, so we cannot reach its contentDocument directly).
+  useEffect(() => {
+    const onMessage = (e: MessageEvent) => {
+      if (e.source !== iframeRef.current?.contentWindow) return;
+      if (e.data?.type !== 'tellr:slide-key') return;
+      handleKeyDownRef.current({
+        key: e.data.key,
+        code: e.data.code,
+        shiftKey: e.data.shiftKey,
+        ctrlKey: e.data.ctrlKey,
+        metaKey: e.data.metaKey,
+        altKey: e.data.altKey,
+        preventDefault: () => {},
+        stopPropagation: () => {},
+      } as KeyboardEvent);
+    };
+    window.addEventListener('message', onMessage);
+    return () => window.removeEventListener('message', onMessage);
+  }, []);
+
   // Focus container on mount to capture keyboard events
   useEffect(() => {
     // Small delay to ensure DOM is ready
@@ -316,20 +334,13 @@ export const PresentationMode: React.FC<PresentationModeProps> = ({
     return () => clearTimeout(t);
   }, []);
 
-  // Handle iframe load — refocus the container, AND attach the keydown
-  // handler to the iframe's freshly-loaded contentDocument so navigation works
-  // even when focus lands inside the iframe (which happens after tab switch,
-  // re-entering fullscreen, or clicking on slide content). srcdoc reloads
-  // create a new contentDocument each time, so we re-attach per load; the old
-  // document is GC'd along with its listener.
+  // Handle iframe load — only refocus the container. We can no longer reach the
+  // iframe's contentDocument (the iframe is sandboxed without allow-same-origin,
+  // AISEC-248), so keyboard events that fire inside it are forwarded to the
+  // parent via the postMessage key bridge instead (see the 'message' effect).
   const handleIframeLoad = () => {
     if (containerRef.current) {
       containerRef.current.focus();
-    }
-    const doc = iframeRef.current?.contentDocument;
-    if (doc) {
-      const onKey = (e: KeyboardEvent) => handleKeyDownRef.current(e);
-      doc.addEventListener('keydown', onKey, true);
     }
   };
 
@@ -514,7 +525,7 @@ export const PresentationMode: React.FC<PresentationModeProps> = ({
             // visually pins the slide to the bottom of the viewport.
             transformOrigin: 'center center',
           }}
-          sandbox="allow-scripts allow-same-origin"
+          sandbox="allow-scripts"
           title={`Slide ${currentSlideIndex + 1}`}
           onLoad={handleIframeLoad}
         />
