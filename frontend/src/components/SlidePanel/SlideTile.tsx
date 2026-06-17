@@ -10,6 +10,7 @@ import { HTMLEditorModal } from './HTMLEditorModal';
 import { useSelection } from '../../contexts/SelectionContext';
 import { VerificationBadge } from './VerificationBadge';
 import { api } from '../../services/api';
+import { buildSlideDocument } from '../../services/slideDocument';
 
 function formatRelativeTime(iso: string): string {
   const date = new Date(iso);
@@ -142,21 +143,7 @@ export const SlideTile: React.FC<SlideTileProps> = ({
   const slideHTML = useMemo(() => {
     const slideScripts = slide.scripts || '';
     const slideId = slide.slide_id.replace(/'/g, "\\'");
-    return `
-<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  ${slideDeck.external_scripts.map(src => 
-    `<script src="${src}"></script>`
-  ).join('\n  ')}
-  <style>${slideDeck.css}</style>
-</head>
-<body>
-  ${slide.html}
-  ${slideScripts ? `<script>${slideScripts}</script>` : ''}
-  <script>
+    const heightReporter = `
 (function() {
   function sendHeight() {
     var h = Math.max(document.documentElement.scrollHeight, document.documentElement.offsetHeight, document.body.scrollHeight, document.body.offsetHeight);
@@ -165,11 +152,12 @@ export const SlideTile: React.FC<SlideTileProps> = ({
   if (document.readyState === 'complete') sendHeight(); else window.addEventListener('load', sendHeight);
   setTimeout(sendHeight, 100);
   setTimeout(sendHeight, 500);
-})();
-</script>
-</body>
-</html>
-    `.trim();
+})();`;
+    return buildSlideDocument(slide.html, {
+      css: slideDeck.css,
+      externalScripts: slideDeck.external_scripts,
+      scripts: `${slideScripts}\n${heightReporter}`,
+    });
   }, [slide.html, slide.scripts, slide.slide_id, slideDeck.css, slideDeck.external_scripts]);
 
   useEffect(() => {
