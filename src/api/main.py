@@ -410,7 +410,10 @@ from src.api.middleware.request_logging import RequestLoggingMiddleware
 app.add_middleware(RequestLoggingMiddleware)
 
 # Include API routers
+_diag_before = len(app.routes)
+_diag_admin_routes_now = len(admin.router.routes)
 app.include_router(admin.router)
+_diag_after_admin = len(app.routes)
 app.include_router(agent_config.router)
 app.include_router(chat.router)
 app.include_router(feedback.router)
@@ -437,6 +440,11 @@ app.include_router(slide_styles_router, prefix="/api/settings", tags=["settings"
 
 # [DIAG] per-router audit at include time
 _DIAG_INCLUDE = {
+    "before_includes": _diag_before,
+    "admin_router_routes_at_include_call": _diag_admin_routes_now,
+    "after_admin_include": _diag_after_admin,
+    "app_router_is_routes": app.router.routes is app.routes,
+    "len_app_router_routes": len(app.router.routes),
     "app_routes_at_include": len(app.routes),
     "app_paths_at_include": sorted({r.path for r in app.routes if hasattr(r, "path")}),
     "per_router": {
