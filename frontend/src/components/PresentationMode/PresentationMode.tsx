@@ -503,16 +503,22 @@ export const PresentationMode: React.FC<PresentationModeProps> = ({
         ← → Navigate · F Fullscreen · Esc Exit
       </div>
 
-      {/* Iframe wrapper that maintains 16:9 aspect ratio and scales to fit viewport */}
+      {/* Wrapper holds the native-size iframe and carries the scale transform.
+          We scale this plain <div> (centered by the parent container's flexbox)
+          rather than the <iframe> itself: a CSS transform on a normal element
+          composites reliably, whereas scaling an iframe full of canvas/CSS-
+          animation layers intermittently fails to paint until a reflow (the
+          "black screen on Present" bug). Same responsive fit-to-window behaviour
+          — `scale` is still min(vw/1280, vh/720), recomputed on resize. */}
       <div
         ref={wrapperRef}
         style={{
-          width: '100vw',
-          height: '100vh',
-          display: 'flex',
-          justifyContent: 'center',
-          alignItems: 'center',
+          width: '1280px',
+          height: '720px',
+          flexShrink: 0,
           position: 'relative',
+          transform: `scale(${scale})`,
+          transformOrigin: 'center center',
         }}
       >
         <iframe
@@ -527,14 +533,6 @@ export const PresentationMode: React.FC<PresentationModeProps> = ({
             margin: 0,
             padding: 0,
             pointerEvents: 'auto',
-            transform: `scale(${scale})`,
-            // Keep the scaled iframe centered. Truncation of slide CONTENT is
-            // handled inside the iframe via .slide-container overflow:hidden;
-            // transformOrigin here only controls how the unavoidable empty
-            // space (when viewport aspect ratio ≠ 16:9) is distributed.
-            // center-center splits it top+bottom equally — biasing to top
-            // visually pins the slide to the bottom of the viewport.
-            transformOrigin: 'center center',
           }}
           sandbox="allow-scripts"
           title={`Slide ${currentSlideIndex + 1}`}
