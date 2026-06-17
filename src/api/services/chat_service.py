@@ -1417,17 +1417,9 @@ class ChatService:
         if conflict_note:
             complete_metadata["conflict_note"] = conflict_note
 
-        # AISEC-248: if the safety gate rejected the first attempt and rebuilt,
-        # surface a chat message so the user knows why generation took an extra pass.
-        safety_notice = complete_metadata.get("safety_notice")
-        if safety_notice:
-            session_manager.add_message(
-                session_id=session_id,
-                role="assistant",
-                content=safety_notice,
-                message_type="info",
-            )
-            yield StreamEvent(type=StreamEventType.ASSISTANT, content=safety_notice)
+        # AISEC-248: the safety-gate retry notice is emitted live (mid-stream) via
+        # callback_handler.emit_notice during agent execution, so it appears in the
+        # correct chat order (HTML attempt 1 → notice → rebuild). Nothing to do here.
 
         # Yield final complete event with slides and optional conflict note
         yield StreamEvent(
