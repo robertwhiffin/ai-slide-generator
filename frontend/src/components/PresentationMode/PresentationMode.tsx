@@ -160,12 +160,15 @@ export const PresentationMode: React.FC<PresentationModeProps> = ({
     };
   }, []);
 
-  // Update iframe content when slide changes
-  useEffect(() => {
-    if (iframeRef.current) {
-      iframeRef.current.srcdoc = currentSlideHTML;
-    }
-  }, [currentSlideHTML]);
+  // NOTE: the iframe content comes solely from the `srcDoc={currentSlideHTML}`
+  // prop below. We previously ALSO assigned `iframeRef.current.srcdoc` here on
+  // every currentSlideHTML change — but assigning srcdoc forces a full reload, so
+  // the iframe loaded twice (prop + imperative) and the two loads raced each
+  // other (and the Chart.js CDN fetch, and the repaint nudge). When the losing
+  // reload landed last with nothing to re-trigger a paint, the slide showed
+  // black — intermittently, biased toward chart decks (variable fetch timing).
+  // React already updates srcDoc when currentSlideHTML changes, so the prop alone
+  // is sufficient and deterministic: one load per slide, no race.
 
   // Single source of truth for keyboard handling, stored in a ref so it can be
   // attached to the iframe's contentDocument on every load (see handleIframeLoad)
