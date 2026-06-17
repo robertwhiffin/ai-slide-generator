@@ -435,13 +435,19 @@ app.include_router(deck_prompts_router, prefix="/api/settings", tags=["settings"
 app.include_router(identities_router, prefix="/api/settings", tags=["settings"])
 app.include_router(slide_styles_router, prefix="/api/settings", tags=["settings"])
 
-# [DIAG] capture router population + import stack at include time
-import traceback as _diag_tb
+# [DIAG] per-router audit at include time
 _DIAG_INCLUDE = {
-    "admin_routes_at_include": len(admin.router.routes),
-    "gs_routes_at_include": len(google_slides.router.routes),
     "app_routes_at_include": len(app.routes),
-    "import_stack": "".join(_diag_tb.format_stack()),
+    "app_paths_at_include": sorted({r.path for r in app.routes if hasattr(r, "path")}),
+    "per_router": {
+        "admin": len(admin.router.routes),
+        "chat": len(chat.router.routes),
+        "google_slides": len(google_slides.router.routes),
+        "sessions": len(sessions.router.routes),
+        "export": len(export.router.routes),
+    },
+    "include_router_func": repr(app.include_router),
+    "fastapi_include_router": repr(__import__("fastapi").FastAPI.include_router),
 }
 
 # MCP server — mount the FastMCP streamable-HTTP ASGI app at /mcp.
