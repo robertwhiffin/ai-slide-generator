@@ -6,12 +6,18 @@
 // CDNs; form-action 'none' blocks form-POST exfil — form-action does NOT fall
 // back to default-src, so it must be set explicitly; base-uri 'none' stops a
 // rewritten <base> from re-pointing relative URLs).
+//
+// Google Fonts (fonts.googleapis.com stylesheet + fonts.gstatic.com font files)
+// are allowed: decks routinely use them (e.g. Inter), and a render-blocking
+// <link rel="stylesheet"> that CSP blocks leaves the slide blank until a reflow
+// (the "black screen until you toggle fullscreen" bug). They are static,
+// well-known hosts and are not an exfiltration channel (connect-src stays 'none').
 export const SLIDE_CSP =
   "default-src 'none'; " +
   "script-src 'unsafe-inline' https://cdn.jsdelivr.net https://cdn.tailwindcss.com; " +
-  "style-src 'unsafe-inline'; " +
+  "style-src 'unsafe-inline' https://fonts.googleapis.com; " +
   "img-src data:; " +
-  "font-src data: https://cdn.jsdelivr.net; " +
+  "font-src data: https://cdn.jsdelivr.net https://fonts.gstatic.com; " +
   "connect-src 'none'; " +
   "form-action 'none'; " +
   "base-uri 'none';";
