@@ -309,6 +309,35 @@ class StreamingCallbackHandler(BaseCallbackHandler):
 
         self._current_tool_name = None
 
+    def emit_notice(self, content: str) -> None:
+        """Emit a mid-stream informational assistant message (persist + stream).
+
+        Used by the output safety gate (AISEC-248) to tell the user, between the
+        rejected first attempt and the rebuild, that disallowed content was found.
+        Mirrors on_llm_end so the notice lands in the live event order — i.e.
+        HTML(attempt 1) → notice → HTML(attempt 2) — rather than after both.
+        """
+        try:
+            msg = self.session_manager.add_message(
+                session_id=self.session_id,
+                role="assistant",
+                content=content,
+                message_type="info",
+                request_id=self.request_id,
+            )
+            message_id = msg.get("id")
+        except Exception as e:
+            logger.error(f"Failed to persist notice: {e}")
+            message_id = None
+
+        self.event_queue.put(
+            StreamEvent(
+                type=StreamEventType.ASSISTANT,
+                content=content,
+                message_id=message_id,
+            )
+        )
+
     def emit_complete(
         self,
         slides: Optional[Dict[str, Any]] = None,

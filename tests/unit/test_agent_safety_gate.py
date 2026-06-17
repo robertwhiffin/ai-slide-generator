@@ -42,3 +42,32 @@ def test_safety_retry_notice_is_generic():
     # Generic copy — names the category, not the specific pattern.
     assert "external network/resource access" in SAFETY_RETRY_NOTICE
     assert "Attempting to build again" in SAFETY_RETRY_NOTICE
+
+
+def test_on_retry_fires_before_regenerate_when_unsafe():
+    order = []
+
+    def regenerate():
+        order.append("regenerate")
+        return "<div class='slide'>now clean</div>"
+
+    def on_retry():
+        order.append("on_retry")
+
+    out, retried = _run_output_safety_gate(
+        '<script>fetch("https://x")</script>', regenerate, session_id="s1", on_retry=on_retry
+    )
+    assert retried is True
+    # Notice must be emitted BEFORE the rebuild so it lands between attempts.
+    assert order == ["on_retry", "regenerate"]
+
+
+def test_on_retry_not_called_when_clean():
+    calls = []
+    _run_output_safety_gate(
+        "<div class='slide'>clean</div>",
+        lambda: "x",
+        session_id="s1",
+        on_retry=lambda: calls.append("x"),
+    )
+    assert calls == []

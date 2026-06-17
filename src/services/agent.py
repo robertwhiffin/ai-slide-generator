@@ -84,7 +84,7 @@ SAFETY_RETRY_NOTICE = (
 )
 
 
-def _run_output_safety_gate(html_output, regenerate, session_id):
+def _run_output_safety_gate(html_output, regenerate, session_id, on_retry=None):
     """Reject unsafe LLM HTML, retry once with a corrective instruction, then fail.
 
     Args:
@@ -92,6 +92,10 @@ def _run_output_safety_gate(html_output, regenerate, session_id):
         regenerate: zero-arg callable that re-invokes the agent with a corrective
             instruction and returns a new HTML string.
         session_id: for logging.
+        on_retry: optional zero-arg callback fired the moment a retry is triggered
+            (before regeneration). Used by the streaming path to surface
+            SAFETY_RETRY_NOTICE *between* the two attempts so it appears in the
+            live chat order, not after both. Exceptions are swallowed.
 
     Returns:
         Tuple of (safe_html, retried) where ``retried`` is True if the first
@@ -113,6 +117,12 @@ def _run_output_safety_gate(html_output, regenerate, session_id):
         mlflow.log_param("safety_gate_retry", ",".join(findings)[:250])
     except Exception:
         pass
+
+    if on_retry is not None:
+        try:
+            on_retry()
+        except Exception:
+            logger.warning("safety-gate on_retry callback failed", exc_info=True)
 
     retried = regenerate()
     retry_findings = scan_html_for_unsafe_patterns(retried)
@@ -1698,10 +1708,15 @@ class SlideGeneratorAgent:
                     )
                     return r["output"]
 
-                html_output, _safety_retried = _run_output_safety_gate(
-                    html_output, _regen_corrective, session_id
+                # Surface the notice mid-stream (between attempt 1 and the rebuild)
+                # via the callback queue so it lands in live chat order, not after
+                # both attempts. emit_notice persists it too, so no metadata needed.
+                html_output, _ = _run_output_safety_gate(
+                    html_output,
+                    _regen_corrective,
+                    session_id,
+                    on_retry=lambda: callback_handler.emit_notice(SAFETY_RETRY_NOTICE),
                 )
-                _safety_notice = SAFETY_RETRY_NOTICE if _safety_retried else None
 
                 # Update chat history
                 chat_history.add_message(HumanMessage(content=full_question))
@@ -1737,8 +1752,6 @@ class SlideGeneratorAgent:
                     "mode": "edit" if editing_mode else "generate",
                     "streaming": True,
                 }
-                if _safety_notice:
-                    metadata["safety_notice"] = _safety_notice
 
                 span.set_attribute("output_length", len(html_output))
                 span.set_attribute("tool_calls", len(intermediate_steps))
