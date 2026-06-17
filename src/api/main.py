@@ -410,20 +410,7 @@ from src.api.middleware.request_logging import RequestLoggingMiddleware
 app.add_middleware(RequestLoggingMiddleware)
 
 # Include API routers
-_diag_before = len(app.routes)
-_diag_admin_routes_now = len(admin.router.routes)
-_diag_admin_route_repr = [
-    (type(r).__name__, getattr(r, "path", "NOPATH")) for r in admin.router.routes
-]
-_diag_admin_router_type = (
-    type(admin.router).__module__ + "." + type(admin.router).__qualname__
-)
-_diag_app_router_type = type(app.router).__module__ + "." + type(app.router).__qualname__
 app.include_router(admin.router)
-_diag_after_admin = len(app.routes)
-_diag_app_routes_repr = [
-    (type(r).__name__, getattr(r, "path", "NOPATH")) for r in app.routes
-]
 app.include_router(agent_config.router)
 app.include_router(chat.router)
 app.include_router(feedback.router)
@@ -447,30 +434,6 @@ app.include_router(contributors_router, prefix="/api/settings", tags=["settings"
 app.include_router(deck_prompts_router, prefix="/api/settings", tags=["settings"])
 app.include_router(identities_router, prefix="/api/settings", tags=["settings"])
 app.include_router(slide_styles_router, prefix="/api/settings", tags=["settings"])
-
-# [DIAG] per-router audit at include time
-_DIAG_INCLUDE = {
-    "before_includes": _diag_before,
-    "admin_router_routes_at_include_call": _diag_admin_routes_now,
-    "admin_route_repr": _diag_admin_route_repr,
-    "admin_router_type": _diag_admin_router_type,
-    "app_router_type": _diag_app_router_type,
-    "after_admin_include": _diag_after_admin,
-    "app_routes_repr_after_admin": _diag_app_routes_repr,
-    "app_router_is_routes": app.router.routes is app.routes,
-    "len_app_router_routes": len(app.router.routes),
-    "app_routes_at_include": len(app.routes),
-    "app_paths_at_include": sorted({r.path for r in app.routes if hasattr(r, "path")}),
-    "per_router": {
-        "admin": len(admin.router.routes),
-        "chat": len(chat.router.routes),
-        "google_slides": len(google_slides.router.routes),
-        "sessions": len(sessions.router.routes),
-        "export": len(export.router.routes),
-    },
-    "include_router_func": repr(app.include_router),
-    "fastapi_include_router": repr(__import__("fastapi").FastAPI.include_router),
-}
 
 # MCP server — mount the FastMCP streamable-HTTP ASGI app at /mcp.
 # Must be registered before the SPA catch-all (which is added lazily by
