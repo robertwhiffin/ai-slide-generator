@@ -34,10 +34,23 @@ from src.core.settings_db import get_default_slide_style_id
 from src.core.user_context import get_current_user
 from src.database.models.profile_contributor import PermissionLevel
 from src.services.permission_service import get_permission_service, PERMISSION_PRIORITY
+from src.utils.pi_filter import scan_for_injection
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api", tags=["chat"])
+
+
+def _reject_if_injection(message: str) -> None:
+    """Block user input that matches known prompt-injection patterns."""
+    matches = scan_for_injection(message)
+    if matches:
+        logger.warning("Blocked chat message (injection patterns)", extra={"patterns": matches})
+        raise HTTPException(
+            status_code=400,
+            detail="Your message was blocked because it resembles a prompt-injection attempt. "
+                   "Please rephrase your request.",
+        )
 
 
 def _check_chat_permission(session_id: str, db: DBSession) -> None:
@@ -203,6 +216,9 @@ async def send_message(
     # Check permission before processing
     _check_chat_permission(request.session_id, db)
 
+    # AISEC-248: block prompt-injection attempts in inbound user input
+    _reject_if_injection(request.message)
+
     session_manager = get_session_manager()
 
     # Create session on the fly if none provided
@@ -296,6 +312,9 @@ async def send_message_streaming(
 
     # Check permission before processing
     _check_chat_permission(request.session_id, db)
+
+    # AISEC-248: block prompt-injection attempts in inbound user input
+    _reject_if_injection(request.message)
 
     session_manager = get_session_manager()
     current_user = get_current_user()
