@@ -683,6 +683,17 @@ class ChatService:
             if conflict_note:
                 messages = messages + [{"role": "assistant", "content": conflict_note}]
 
+            # AISEC-248: surface a chat message if the safety gate rebuilt the deck.
+            safety_notice = (result.get("metadata") or {}).get("safety_notice")
+            if safety_notice:
+                session_manager.add_message(
+                    session_id=session_id,
+                    role="assistant",
+                    content=safety_notice,
+                    message_type="info",
+                )
+                messages = messages + [{"role": "assistant", "content": safety_notice}]
+
             response = {
                 "messages": messages,
                 "slide_deck": slide_deck_dict,
@@ -1405,6 +1416,18 @@ class ChatService:
         complete_metadata = result.get("metadata") or {}
         if conflict_note:
             complete_metadata["conflict_note"] = conflict_note
+
+        # AISEC-248: if the safety gate rejected the first attempt and rebuilt,
+        # surface a chat message so the user knows why generation took an extra pass.
+        safety_notice = complete_metadata.get("safety_notice")
+        if safety_notice:
+            session_manager.add_message(
+                session_id=session_id,
+                role="assistant",
+                content=safety_notice,
+                message_type="info",
+            )
+            yield StreamEvent(type=StreamEventType.ASSISTANT, content=safety_notice)
 
         # Yield final complete event with slides and optional conflict note
         yield StreamEvent(
