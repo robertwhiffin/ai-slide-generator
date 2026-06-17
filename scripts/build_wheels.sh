@@ -101,9 +101,17 @@ if ! python -m build --version >/dev/null 2>&1; then
     fi
 fi
 
-# Clean previous builds
+# Clean previous builds.
+# NOTE: build/ and *.egg-info must be removed too. setuptools' build_py copies
+# package data into build/lib/ but only ADDS/overwrites — it never deletes files
+# that no longer exist in the source. Frontend bundles have content-hashed names
+# (index-<hash>.js), so every build leaves its old hashes behind in build/lib/,
+# which then get re-zipped into each new wheel (AISEC-248: caused a 35MB wheel of
+# accumulated bundles). Always start from a clean staging tree.
 echo -e "${BLUE}Cleaning previous builds...${NC}"
 rm -rf "$TELLR_DIR/dist" "$APP_DIR/dist"
+rm -rf "$TELLR_DIR/build" "$APP_DIR/build"
+rm -rf "$TELLR_DIR"/*.egg-info "$APP_DIR"/*.egg-info
 
 # Apply dev version suffix to both packages
 TELLR_DEV_VERSION="${TELLR_ORIG_VERSION}${DEV_SUFFIX}"

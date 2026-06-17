@@ -9,11 +9,14 @@ from setuptools.command.build_py import build_py
 
 
 # Files in services/pptx-emit-huashu/ NOT to ship in the wheel:
-#   - node_modules/ and sys-libs/ are bulky uncompressed trees; the wheel
-#     instead ships the gzipped tarballs (node_modules.tar.gz and
-#     sys-libs-bullseye.tar.gz) which setup.sh extracts at boot. The
-#     tarballs are produced by services/pptx-emit-huashu/build-artifacts.sh
-#     and are not in _SIDECAR_IGNORE so they DO ship.
+#   - node_modules/ and sys-libs/ are bulky uncompressed trees.
+#   - node_modules.tar.gz (12MB) and sys-libs-bullseye.tar.gz (19MB): the huashu
+#     PPTX pipeline is LOCAL-ONLY (needs Chromium via Playwright, which Databricks
+#     Apps containers don't have — see src/services/pptx_from_html_huashu.py,
+#     is_available() returns False outside the local-dev gate). Local dev resolves
+#     the sidecar from services/pptx-emit-huashu/ directly, NOT from the wheel, so
+#     these 31MB of tarballs were pure dead weight that pushed the app wheel past
+#     the 10MB Databricks workspace-file import limit (AISEC-248). Excluded.
 #   - package-lock.json is needed at build-artifacts.sh time but not at
 #     runtime (the lockfile is consumed when the tarball is built).
 #   - build-artifacts.sh is a CI/build helper, never a runtime script.
@@ -21,6 +24,8 @@ _SIDECAR_IGNORE = shutil.ignore_patterns(
     "node_modules",
     "sys-libs",
     "sys-libs-bullseye",
+    "node_modules.tar.gz",
+    "sys-libs-bullseye.tar.gz",
     ".databricks",
     "*.log",
     "package-lock.json",
