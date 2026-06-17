@@ -342,6 +342,17 @@ export const PresentationMode: React.FC<PresentationModeProps> = ({
     if (containerRef.current) {
       containerRef.current.focus();
     }
+    // Force the scaled iframe to recomposite after its content paints. Heavy CSS
+    // animations inside a transform:scale iframe can otherwise stay blank until a
+    // scale change happens *after* the content paints — the "black screen on
+    // Present until you toggle fullscreen" bug. The fullscreen handler is
+    // confirmed to fix it (it recomputes scale on a short timeout); replicate
+    // that here on load. The epsilon guarantees a real transform change even when
+    // the computed scale is otherwise unchanged (windowed mode). Imperceptible
+    // (~0.6px for one frame), runs once per slide load.
+    const target = () => Math.min(window.innerWidth / 1280, window.innerHeight / 720);
+    setTimeout(() => setScale(target() + 0.0005), 16);
+    setTimeout(() => setScale(target()), 80);
   };
 
   return createPortal(
