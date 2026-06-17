@@ -42,27 +42,10 @@ class TestAppRoutes:
 
     def test_google_slides_routes_registered(self):
         """Google Slides auth + export routes are reachable."""
-        import sys
-        import src.api.main as main_mod
         from src.api.main import app
-        from src.api.routes import admin as admin_mod, google_slides as gs_mod
 
         route_paths = {r.path for r in app.routes if hasattr(r, "path")}
-        diag = (
-            f"\n[DIAG] id(app)={id(app)} id(main.app)={id(main_mod.app)} "
-            f"same_obj={app is main_mod.app}\n"
-            f"[DIAG] main in sys.modules id={id(sys.modules.get('src.api.main'))}\n"
-            f"[DIAG] total app.routes={len(app.routes)}\n"
-            f"[DIAG] admin.router routes={len(admin_mod.router.routes)} "
-            f"id(admin_mod)={id(admin_mod)}\n"
-            f"[DIAG] gs.router routes={len(gs_mod.router.routes)} "
-            f"id(gs_mod)={id(gs_mod)}\n"
-            f"[DIAG] admin_mod is main's admin? "
-            f"{getattr(main_mod, 'admin', None) is admin_mod}\n"
-            f"[DIAG] sorted paths={sorted(route_paths)}\n"
-            f"[DIAG_INCLUDE] {getattr(main_mod, '_DIAG_INCLUDE', None)}\n"
-        )
-        assert "/api/export/google-slides/auth/status" in route_paths, diag
+        assert "/api/export/google-slides/auth/status" in route_paths
         assert "/api/export/google-slides/auth/url" in route_paths
         assert "/api/export/google-slides/auth/callback" in route_paths
         assert "/api/export/google-slides" in route_paths
