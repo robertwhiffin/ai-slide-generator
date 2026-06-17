@@ -80,7 +80,7 @@ Rationale: legitimate slides never use these constructs, so detection is genuine
 
 ## PR 2 — Prompt-injection defences (Finding 2)
 
-Chosen depth: **Step 1 (spotlighting + heuristic blocklist + length caps) + self-reflection.** Classifier-based detection (Prompt Guard 2 / Llama Guard) is **deferred** to a possible follow-up.
+Chosen depth: **Step 1 (spotlighting + heuristic blocklist + length caps)** plus a **deterministic** output gate (see 2.4 — an LLM self-reflection judge was implemented then removed in favour of deterministic enforcement). Classifier-based detection (Prompt Guard 2 / Llama Guard) is **deferred** to a possible follow-up.
 
 ### 2.1 Spotlighting (treat tool output as untrusted data)
 
@@ -97,29 +97,42 @@ This is the highest-value / lowest-cost layer.
 
 - New module `src/utils/pi_filter.py`: `scan_for_injection(text) -> list[str]` over a **high-precision** pattern set (e.g. `ignore (all )?(previous|prior|above) instructions`, `you are now (a|an)`, `disregard the (above|previous)`, line-start `system:`, `### INSTRUCTION`). Patterns are tuned to avoid blocking normal editing phrasing ("ignore the previous layout").
 - **User input** (`src/api/routes/chat.py` / chat service, on the inbound message): on a match → **block** with HTTP 400 + explanatory message; log the event.
-- **Tool output**: on a match → **flag + log only** (do not block — real data may innocently contain such strings; spotlighting + self-reflection cover this case).
+- **Tool output**: on a match → **flag + log only** (do not block — real data may innocently contain such strings; spotlighting covers this case).
 
 ### 2.3 Length caps
 
 - User chat input: `max_length=8192` on `ChatRequest.message` (`src/api/schemas/requests.py:61`) → 422 on overflow.
 - Tool output: cap at 32 KB in the tool wrappers, appending a `…[truncated]` marker.
 
-### 2.4 Self-reflection (output-side gate)
+### 2.4 Output-side gate — deterministic only (LLM judge removed)
 
-- After the deck HTML is assembled and after the 1.3 pattern scan passes, make **one** LLM call asking whether the output contains external URLs, data the user did not request, or evidence of following instructions embedded in data. Structured response `{ "safe": bool, "reasons": [string] }`.
-- **Model:** a separate, configurable endpoint — default **`databricks-gpt-5-4-nano`** (cheap/fast, keeps the hot path light). Wired as its own `ChatDatabricks` instance via env config (e.g. `TELLR_REFLECTION_MODEL`), distinct from the generation model. Endpoint reachability verified during implementation.
-- **Runs on every generation** (per decision). Behind an env flag (`TELLR_SELF_REFLECTION_ENABLED`, default on) so it can be disabled under load.
-- On `safe: false` → block the response, surface a clear message, log the verdict + reasons to MLflow.
-- Streaming path (`generate_slides_streaming`): reflection runs **after** the stream completes and **before** persistence — adds a short post-stream beat of latency (acceptable; nano keeps it small).
+> **Revised post-implementation.** The original design used a secondary "self-reflection"
+> LLM judge (`databricks-gpt-5-4-nano`) on every generation. It was **removed**: with all
+> external contact blocked deterministically (CSP + sandbox + the scanner in 1.3), the slide
+> *cannot* exfiltrate regardless of content, so "did the model follow an injected instruction?"
+> degrades from a security question to a quality one (worst case: a wrong slide shown to the
+> same OBO-authorized user — not a leak). The nano judge added latency, cost, and false
+> positives (it blocked a legitimate deck by misreading its own CDN allowlist and flagging
+> normal `new Chart(...)`). Its only unique value — catching exotic exfil vectors — is served
+> better and deterministically by hardening the scanner and CSP:
 
-Sequencing of the output gates (cheapest first): 1.3 pattern scan (+ retry) → 2.4 self-reflection → persist.
+- **CSP hardening** (`SLIDE_CSP` in `slideDocument.ts`): add `form-action 'none'` (it does **not**
+  fall back to `default-src`, so form-POST exfil was otherwise open) and `base-uri 'none'`.
+- **Scanner extension** (`html_safety.py`, 1.3): also flag the navigation/redirect vectors CSP
+  cannot block — `(window|document).location` assignment, `location.href/assign/replace`,
+  `window.open(`, and `<meta http-equiv="refresh">`. CSP3 dropped `navigate-to`, so a frame can
+  navigate itself to an attacker URL; these patterns close that at generation time. High-precision
+  (legitimate slides never navigate; prose like "Sales by location" does not match).
+
+Sequencing of the output gate: 1.3 deterministic scan (+ one corrective retry) → persist. No LLM call.
 
 ---
 
 ## Out of scope
 
 - **Finding 3** (autonomous MCP / model-endpoint execution without human-in-the-loop) — rebutted by the team.
-- **Classifier-based PI detection** (Prompt Guard 2 / Llama Guard) — deferred; spotlighting + blocklist + self-reflection are the chosen Step-1+ layers.
+- **Classifier-based PI detection** (Prompt Guard 2 / Llama Guard) — deferred.
+- **LLM self-reflection judge** — implemented then removed (see 2.4); deterministic enforcement is the chosen output gate.
 - The two LOW findings (not enumerated in the source report body).
 
 ---
@@ -131,8 +144,8 @@ Sequencing of the output gates (cheapest first): 1.3 pattern scan (+ retry) → 
 - E2E / manual: Presentation mode renders Chart.js + Tailwind under CSP; keyboard navigation (arrows / space / esc) works via the postMessage bridge with `allow-scripts` only; a slide containing `<img src="https://example.com/x.png">` does **not** make the request (CSP); `fetch()` in a slide script is blocked.
 
 **PR2**
-- Unit: `pi_filter` matches injection patterns and *not* benign editing phrases; tool-output wrapping produces `<untrusted-data>` markers; length caps enforce 8 KB / 32 KB; self-reflection blocks on a crafted exfil payload and passes a clean deck.
-- Integration: indirect-injection scenario — Genie returns a row instructing the model to add an external beacon; verify spotlighting + self-reflection prevent it from reaching the rendered slide.
+- Unit: `pi_filter` matches injection patterns and *not* benign editing phrases; tool-output wrapping produces `<untrusted-data>` markers; length caps enforce 8 KB / 32 KB; the deterministic scanner flags exfil/navigation/redirect patterns and passes a clean Chart.js deck.
+- Integration: indirect-injection scenario — Genie returns a row instructing the model to add an external beacon; verify spotlighting + the scanner + CSP prevent it from reaching/firing in the rendered slide.
 
 ---
 
@@ -140,6 +153,6 @@ Sequencing of the output gates (cheapest first): 1.3 pattern scan (+ retry) → 
 
 1. **Tailwind `'unsafe-eval'`** — confirm whether the Play CDN needs it under CSP; if so, add narrowly and document.
 2. **Blocklist false positives** — keep patterns high-precision; monitor 400s after rollout.
-3. **`databricks-gpt-5-4-nano` reachability** — verify the endpoint exists/is permitted in the workspace before wiring; fall back / flag-off if not.
-4. **Self-reflection latency** — every-generation cost mitigated by the nano model + env kill-switch; revisit if load regresses.
+3. **Tailwind Play CDN under CSP** — confirm it renders; add `'unsafe-eval'` narrowly to `script-src` if its runtime compiler needs it.
+4. **Scanner precision** — the navigation/redirect patterns are high-precision, but monitor for any legitimate slide that genuinely needs `window.open` (none known today); CSP + scanner are the authority, so a miss fails closed at runtime.
 5. **Reject-vs-strip (1.3)** — chosen approach is reject + single corrective retry + hard-fail. Revisit if retries prove noisy.

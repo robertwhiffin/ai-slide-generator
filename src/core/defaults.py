@@ -34,12 +34,6 @@ DEFAULT_CONFIG = {
         "top_p": 0.95,
         "timeout": 600,
     },
-    "reflection": {
-        "enabled": True,
-        "endpoint": "databricks-gpt-5-4-nano",
-        "temperature": 0,
-        "max_tokens": 500,
-    },
     # No default Genie space - must be explicitly configured per profile
     "prompts": {
         # Technical system prompt - hidden from regular users (debug mode only)

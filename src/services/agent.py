@@ -40,7 +40,6 @@ from src.core.databricks_client import (
 )
 from src.core.settings_db import get_settings
 from src.domain.slide import Slide
-from src.services.evaluation.self_reflection import reflect_on_output
 from src.services.image_tools import SearchImagesInput, search_images
 from src.services.tools import initialize_genie_conversation, query_genie_space
 from src.utils.html_safety import scan_html_for_unsafe_patterns
@@ -1442,18 +1441,6 @@ class SlideGeneratorAgent:
                     html_output, _regen_corrective, session_id
                 )
 
-                # AISEC-248: secondary LLM safety review (fail-open on errors).
-                safe, reasons = reflect_on_output(html_output, session_id)
-                if not safe:
-                    try:
-                        mlflow.log_param("reflection_block", ",".join(reasons)[:250])
-                    except Exception:
-                        pass
-                    raise AgentError(
-                        "Generated slides were blocked by the safety reviewer "
-                        f"({'; '.join(reasons) or 'policy violation'})."
-                    )
-
                 # Update chat history with this interaction
                 chat_history.add_message(HumanMessage(content=full_question))
                 chat_history.add_message(AIMessage(content=html_output))
@@ -1700,18 +1687,6 @@ class SlideGeneratorAgent:
                 html_output = _run_output_safety_gate(
                     html_output, _regen_corrective, session_id
                 )
-
-                # AISEC-248: secondary LLM safety review (fail-open on errors).
-                safe, reasons = reflect_on_output(html_output, session_id)
-                if not safe:
-                    try:
-                        mlflow.log_param("reflection_block", ",".join(reasons)[:250])
-                    except Exception:
-                        pass
-                    raise AgentError(
-                        "Generated slides were blocked by the safety reviewer "
-                        f"({'; '.join(reasons) or 'policy violation'})."
-                    )
 
                 # Update chat history
                 chat_history.add_message(HumanMessage(content=full_question))
