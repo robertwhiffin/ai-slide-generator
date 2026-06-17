@@ -345,17 +345,6 @@ export const PresentationMode: React.FC<PresentationModeProps> = ({
     if (containerRef.current) {
       containerRef.current.focus();
     }
-    // Force the scaled iframe to recomposite after its content paints. Heavy CSS
-    // animations inside a transform:scale iframe can otherwise stay blank until a
-    // scale change happens *after* the content paints — the "black screen on
-    // Present until you toggle fullscreen" bug. The fullscreen handler is
-    // confirmed to fix it (it recomputes scale on a short timeout); replicate
-    // that here on load. The epsilon guarantees a real transform change even when
-    // the computed scale is otherwise unchanged (windowed mode). Imperceptible
-    // (~0.6px for one frame), runs once per slide load.
-    const target = () => Math.min(window.innerWidth / 1280, window.innerHeight / 720);
-    setTimeout(() => setScale(target() + 0.0005), 16);
-    setTimeout(() => setScale(target()), 80);
   };
 
   return createPortal(
@@ -506,22 +495,16 @@ export const PresentationMode: React.FC<PresentationModeProps> = ({
         ← → Navigate · F Fullscreen · Esc Exit
       </div>
 
-      {/* Wrapper holds the native-size iframe and carries the scale transform.
-          We scale this plain <div> (centered by the parent container's flexbox)
-          rather than the <iframe> itself: a CSS transform on a normal element
-          composites reliably, whereas scaling an iframe full of canvas/CSS-
-          animation layers intermittently fails to paint until a reflow (the
-          "black screen on Present" bug). Same responsive fit-to-window behaviour
-          — `scale` is still min(vw/1280, vh/720), recomputed on resize. */}
+      {/* Iframe wrapper that maintains 16:9 aspect ratio and scales to fit viewport */}
       <div
         ref={wrapperRef}
         style={{
-          width: '1280px',
-          height: '720px',
-          flexShrink: 0,
+          width: '100vw',
+          height: '100vh',
+          display: 'flex',
+          justifyContent: 'center',
+          alignItems: 'center',
           position: 'relative',
-          transform: `scale(${scale})`,
-          transformOrigin: 'center center',
         }}
       >
         <iframe
@@ -536,6 +519,14 @@ export const PresentationMode: React.FC<PresentationModeProps> = ({
             margin: 0,
             padding: 0,
             pointerEvents: 'auto',
+            transform: `scale(${scale})`,
+            // Keep the scaled iframe centered. Truncation of slide CONTENT is
+            // handled inside the iframe via .slide-container overflow:hidden;
+            // transformOrigin here only controls how the unavoidable empty
+            // space (when viewport aspect ratio ≠ 16:9) is distributed.
+            // center-center splits it top+bottom equally — biasing to top
+            // visually pins the slide to the bottom of the viewport.
+            transformOrigin: 'center center',
           }}
           sandbox="allow-scripts"
           title={`Slide ${currentSlideIndex + 1}`}
