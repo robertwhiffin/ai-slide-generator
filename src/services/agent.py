@@ -75,6 +75,15 @@ class ToolExecutionError(AgentError):
     pass
 
 
+# Generic, user-facing notice surfaced as a chat message when the safety gate
+# rejects the first attempt and regenerates. Deliberately non-specific (does not
+# name the exact pattern) — see AISEC-248.
+SAFETY_RETRY_NOTICE = (
+    "Generated slides contained disallowed content (external network/resource "
+    "access). Attempting to build again."
+)
+
+
 def _run_output_safety_gate(html_output, regenerate, session_id):
     """Reject unsafe LLM HTML, retry once with a corrective instruction, then fail.
 
@@ -85,14 +94,16 @@ def _run_output_safety_gate(html_output, regenerate, session_id):
         session_id: for logging.
 
     Returns:
-        Safe HTML output.
+        Tuple of (safe_html, retried) where ``retried`` is True if the first
+        attempt was rejected and a (successful) regeneration was performed. The
+        caller surfaces SAFETY_RETRY_NOTICE to the user when ``retried`` is True.
 
     Raises:
         AgentError: if the regenerated output is still unsafe.
     """
     findings = scan_html_for_unsafe_patterns(html_output)
     if not findings:
-        return html_output
+        return html_output, False
 
     logger.warning(
         "Unsafe patterns in LLM output; retrying once",
@@ -106,7 +117,7 @@ def _run_output_safety_gate(html_output, regenerate, session_id):
     retried = regenerate()
     retry_findings = scan_html_for_unsafe_patterns(retried)
     if not retry_findings:
-        return retried
+        return retried, True
 
     logger.error(
         "LLM output still unsafe after corrective retry",
@@ -1437,9 +1448,10 @@ class SlideGeneratorAgent:
                     )
                     return r["output"]
 
-                html_output = _run_output_safety_gate(
+                html_output, _safety_retried = _run_output_safety_gate(
                     html_output, _regen_corrective, session_id
                 )
+                _safety_notice = SAFETY_RETRY_NOTICE if _safety_retried else None
 
                 # Update chat history with this interaction
                 chat_history.add_message(HumanMessage(content=full_question))
@@ -1484,6 +1496,8 @@ class SlideGeneratorAgent:
                     "message_count": session["message_count"],
                     "mode": "edit" if editing_mode else "generate",
                 }
+                if _safety_notice:
+                    metadata["safety_notice"] = _safety_notice
 
                 # Set span attributes
                 span.set_attribute("output_length", len(html_output))
@@ -1684,9 +1698,10 @@ class SlideGeneratorAgent:
                     )
                     return r["output"]
 
-                html_output = _run_output_safety_gate(
+                html_output, _safety_retried = _run_output_safety_gate(
                     html_output, _regen_corrective, session_id
                 )
+                _safety_notice = SAFETY_RETRY_NOTICE if _safety_retried else None
 
                 # Update chat history
                 chat_history.add_message(HumanMessage(content=full_question))
@@ -1722,6 +1737,8 @@ class SlideGeneratorAgent:
                     "mode": "edit" if editing_mode else "generate",
                     "streaming": True,
                 }
+                if _safety_notice:
+                    metadata["safety_notice"] = _safety_notice
 
                 span.set_attribute("output_length", len(html_output))
                 span.set_attribute("tool_calls", len(intermediate_steps))
