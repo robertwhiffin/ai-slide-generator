@@ -1,6 +1,7 @@
 import React, { useMemo } from 'react';
 import type { Slide, SlideDeck } from '../../types/slide';
 import { isContiguous } from '../../utils/slideReplacements';
+import { buildSlideDocument } from '../../services/slideDocument';
 import './SlideSelection.css';
 
 interface SlideSelectionProps {
@@ -37,29 +38,14 @@ export const SlideSelection: React.FC<SlideSelectionProps> = ({
   };
 
   const getPreviewDocument = useMemo(() => {
-    const cssBlock = slideDeck?.css ? `<style>${slideDeck.css}</style>` : '';
-    const externalScripts =
-      slideDeck?.external_scripts
-        ?.map(src => `<script src="${src}"></script>`)
-        .join('\n    ') ?? '';
-
     const inlineScripts = slideDeck?.scripts ? `
-    <script>
       try {
         ${slideDeck.scripts}
       } catch (error) {
         console.debug('Chart initialization skipped for missing canvas:', error.message);
-      }
-    </script>` : '';
+      }` : '';
 
-    return (slideHtml: string) => `<!DOCTYPE html>
-<html lang="en">
-  <head>
-    <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    ${cssBlock}
-    ${externalScripts}
-    <style>
+    const resetStyle = `
       * {
         box-sizing: border-box;
       }
@@ -69,14 +55,15 @@ export const SlideSelection: React.FC<SlideSelectionProps> = ({
         height: 720px;
         background: #ffffff;
         font-family: 'Inter', 'Segoe UI', system-ui, -apple-system, sans-serif;
-      }
-    </style>
-  </head>
-  <body>
-    ${slideHtml}
-    ${inlineScripts}
-  </body>
-</html>`;
+      }`;
+
+    return (slideHtml: string) =>
+      buildSlideDocument(slideHtml, {
+        css: slideDeck?.css,
+        externalScripts: slideDeck?.external_scripts ?? undefined,
+        extraHeadStyle: resetStyle,
+        scripts: inlineScripts,
+      });
   }, [slideDeck?.css, slideDeck?.external_scripts, slideDeck?.scripts]);
 
   const handleCardClick = (index: number) => {

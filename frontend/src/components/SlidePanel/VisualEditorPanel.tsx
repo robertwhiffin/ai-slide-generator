@@ -1,8 +1,9 @@
 import React, { useState, useMemo, useEffect } from 'react';
 import type { SlideDeck, Slide } from '../../types/slide';
 import type { EditableNode } from './visualEditor.types';
-import { buildEditableTree, applyTextChange, buildPreviewHtml, getDefaultExpandedIds } from './treeParser';
+import { buildEditableTree, applyTextChange, getDefaultExpandedIds } from './treeParser';
 import { ElementTreeView } from './ElementTreeView';
+import { buildSlideDocument } from '../../services/slideDocument';
 
 interface VisualEditorPanelProps {
   html: string;
@@ -35,8 +36,12 @@ export const VisualEditorPanel: React.FC<VisualEditorPanelProps> = ({
   }, [nodes]);
   
   // Build preview HTML
-  const previewHtml = useMemo(() => 
-    buildPreviewHtml(html, slideDeck.css, slideDeck.external_scripts, slide.scripts),
+  const previewHtml = useMemo(() =>
+    buildSlideDocument(html, {
+      css: slideDeck.css,
+      externalScripts: slideDeck.external_scripts,
+      scripts: slide.scripts,
+    }),
     [html, slideDeck.css, slideDeck.external_scripts, slide.scripts]
   );
   
