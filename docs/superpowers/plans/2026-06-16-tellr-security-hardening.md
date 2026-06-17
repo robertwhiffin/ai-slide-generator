@@ -969,6 +969,11 @@ Co-authored-by: Isaac"
 
 ## Task 10: Output self-reflection gate (nano model)
 
+> **SUPERSEDED — this task was implemented then reverted.** The LLM self-reflection
+> judge was removed in favour of deterministic enforcement (CSP hardening +
+> `html_safety.py` navigation/redirect patterns). See spec §2.4. The steps below are
+> retained only as a record of the original plan; do not re-implement.
+
 **Files:**
 - Modify: `src/core/defaults.py` (add `reflection` block to `DEFAULT_CONFIG`)
 - Create: `src/services/evaluation/self_reflection.py`

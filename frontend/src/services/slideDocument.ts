@@ -1,16 +1,20 @@
 // frontend/src/services/slideDocument.ts
 // AISEC-248 PR1: single source of truth for slide iframe documents.
 // Injects a Content-Security-Policy <meta> so LLM-generated slide JS cannot
-// exfiltrate data (connect-src 'none' blocks fetch/XHR; img-src data: blocks
-// image beacons; scripts only from the Chart.js / Tailwind CDNs).
-
+// exfiltrate data (connect-src 'none' blocks fetch/XHR/WebSocket/beacon;
+// img-src data: blocks image beacons; scripts only from the Chart.js / Tailwind
+// CDNs; form-action 'none' blocks form-POST exfil — form-action does NOT fall
+// back to default-src, so it must be set explicitly; base-uri 'none' stops a
+// rewritten <base> from re-pointing relative URLs).
 export const SLIDE_CSP =
   "default-src 'none'; " +
   "script-src 'unsafe-inline' https://cdn.jsdelivr.net https://cdn.tailwindcss.com; " +
   "style-src 'unsafe-inline'; " +
   "img-src data:; " +
   "font-src data: https://cdn.jsdelivr.net; " +
-  "connect-src 'none';";
+  "connect-src 'none'; " +
+  "form-action 'none'; " +
+  "base-uri 'none';";
 
 const CSP_META = `<meta http-equiv="Content-Security-Policy" content="${SLIDE_CSP}">`;
 
