@@ -341,6 +341,17 @@ async def _create_deck_impl(
         raise MCPToolError("prompt must be a non-empty string")
     if num_slides is not None and not (1 <= num_slides <= 50):
         raise MCPToolError("num_slides must be between 1 and 50")
+    # Same inbound prompt-injection guard as the browser chat endpoints (AISEC-248).
+    from src.utils.pi_filter import scan_for_injection
+    injection_matches = scan_for_injection(prompt)
+    if injection_matches:
+        logger.warning(
+            "Blocked MCP create_deck prompt (injection patterns)",
+            extra={"patterns": injection_matches},
+        )
+        raise MCPToolError(
+            "prompt was blocked because it resembles a prompt-injection attempt"
+        )
 
     try:
         with mcp_auth_scope(request) as identity:

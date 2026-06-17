@@ -467,6 +467,7 @@ async def submit_chat_async(
 
     # Check permission before processing
     _check_chat_permission(request.session_id, db)
+    _reject_if_injection(request.message)
 
     session_manager = get_session_manager()
     current_user = get_current_user()
