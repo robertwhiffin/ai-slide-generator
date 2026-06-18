@@ -22,6 +22,7 @@ from pydantic import BaseModel, Field
 
 from src.api.schemas.agent_config import AgentBricksTool
 from src.core.databricks_client import get_user_client
+from src.utils.spotlight import spotlight
 
 logger = logging.getLogger(__name__)
 
@@ -154,10 +155,8 @@ def build_agent_bricks_tool(
     endpoint_name = config.endpoint_name
 
     def _wrapper(query: str) -> str:
-        return _query_agent_bricks(
-            endpoint_name=endpoint_name,
-            query=query,
-        )
+        result = _query_agent_bricks(endpoint_name=endpoint_name, query=query)
+        return spotlight("agent_bricks", result)
 
     tool_name = "query_agent" if index == 1 else f"query_agent_{index}"
 
