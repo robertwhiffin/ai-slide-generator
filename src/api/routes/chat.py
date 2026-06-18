@@ -33,6 +33,7 @@ from src.core.permission_context import get_permission_context
 from src.core.settings_db import get_default_slide_style_id
 from src.core.user_context import get_current_user
 from src.database.models.profile_contributor import PermissionLevel
+from src.services.agent import UnsafeContentError
 from src.services.permission_service import get_permission_service, PERMISSION_PRIORITY
 from src.utils.pi_filter import scan_for_injection
 
@@ -260,6 +261,12 @@ async def send_message(
         )
     except PermissionError as e:
         raise HTTPException(status_code=423, detail=str(e))
+    except UnsafeContentError:
+        raise HTTPException(
+            status_code=422,
+            detail="The generated slides were blocked for containing disallowed "
+                   "content (external network/resource access). Try rephrasing.",
+        )
     except Exception as e:
         logger.error(f"Chat request failed: {e}", exc_info=True)
         raise HTTPException(
@@ -387,7 +394,13 @@ async def send_message_streaming(
             # Check for errors after completion
             if error_holder:
                 error = error_holder[0]
-                if isinstance(error, SessionNotFoundError):
+                if isinstance(error, UnsafeContentError):
+                    error_event = StreamEvent(
+                        type=StreamEventType.ERROR,
+                        error="The generated slides were blocked for containing "
+                              "disallowed content (external network/resource access).",
+                    )
+                elif isinstance(error, SessionNotFoundError):
                     error_event = StreamEvent(
                         type=StreamEventType.ERROR,
                         error=f"Session not found: {request.session_id}",

@@ -75,6 +75,16 @@ class ToolExecutionError(AgentError):
     pass
 
 
+class UnsafeContentError(AgentError):
+    """Raised when generated HTML is unsafe after the corrective retry.
+
+    Carries no payload detail; routes map it to a clean 4xx so the failure
+    mode is not info-leaky (review finding #10).
+    """
+
+    pass
+
+
 # Generic, user-facing notice surfaced as a chat message when the safety gate
 # rejects the first attempt and regenerates. Deliberately non-specific (does not
 # name the exact pattern) — see AISEC-248.
@@ -133,7 +143,7 @@ def _run_output_safety_gate(html_output, regenerate, session_id, on_retry=None):
         "LLM output still unsafe after corrective retry",
         extra={"session_id": session_id, "findings": retry_findings},
     )
-    raise AgentError(
+    raise UnsafeContentError(
         "Generated slides contained disallowed content (external network/resource "
         "access) and could not be regenerated safely."
     )
