@@ -116,6 +116,7 @@ export const SlideSelection: React.FC<SlideSelectionProps> = ({
                 srcDoc={getPreviewDocument(slide.html)}
                 className="slide-preview-frame"
                 scrolling="no"
+                sandbox="allow-scripts"
               />
               <div className="slide-preview-overlay" aria-hidden="true" />
             </div>
