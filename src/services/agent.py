@@ -1550,6 +1550,11 @@ class SlideGeneratorAgent:
                     "parsed_output": parsed_output,
                 }
 
+        except UnsafeContentError:
+            # AISEC-248 (finding #10): let the typed safety-gate hard-fail
+            # propagate untouched so the route maps it to a clean 422 with a
+            # generic message, instead of re-wrapping it as a generic AgentError.
+            raise
         except TimeoutError as e:
             logger.error(f"LLM request timed out: {e}")
             raise LLMInvocationError(f"LLM request timed out: {e}") from e
@@ -1788,6 +1793,11 @@ class SlideGeneratorAgent:
                     "replacement_info": replacement_info,
                 }
 
+        except UnsafeContentError:
+            # AISEC-248 (finding #10): let the typed safety-gate hard-fail
+            # propagate untouched so the route maps it to a clean 422 with a
+            # generic message, instead of re-wrapping it as a generic AgentError.
+            raise
         except TimeoutError as e:
             logger.error(f"LLM request timed out (streaming): {e}")
             raise LLMInvocationError(f"LLM request timed out: {e}") from e
