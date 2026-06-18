@@ -4,6 +4,7 @@
  */
 
 import type { SlideDeck } from '../types/slide';
+import { SLIDE_CSP } from './slideDocument';
 
 const SLIDE_WIDTH = 1280;
 const SLIDE_HEIGHT = 720;
@@ -17,9 +18,14 @@ function buildSlideHTML(slideDeck: SlideDeck, slideIndex: number): string {
     .map((src) => `    <script src="${src}"></script>`)
     .join('\n');
 
+  // AISEC-248 #3: same-origin is required for html2canvas to read contentDocument,
+  // so we cannot sandbox these capture frames. CSP is the egress containment.
+  const cspMeta = `<meta http-equiv="Content-Security-Policy" content="${SLIDE_CSP}">`;
+
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
+  ${cspMeta}
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>${slideDeck.title || 'Slide Deck'} - Slide ${slideIndex + 1}</title>
