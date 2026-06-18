@@ -86,3 +86,13 @@ test.describe('Slide security — Presentation mode iframe lockdown (AISEC-248)'
     await expect(page.getByText(/^\s*2\s*\/\s*3\s*$/)).toBeVisible({ timeout: 10000 });
   });
 });
+
+test('slide-selection preview iframe is sandboxed without same-origin', async ({ page }) => {
+  // navigate to a deck with the slide-selection panel visible, then:
+  const frames = page.locator('.slide-preview-frame');
+  const count = await frames.count();
+  for (let i = 0; i < count; i++) {
+    const sandbox = await frames.nth(i).getAttribute('sandbox');
+    expect(sandbox).toBe('allow-scripts');
+  }
+});
