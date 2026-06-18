@@ -354,11 +354,8 @@ def build_mcp_tools(config: MCPTool) -> list[StructuredTool]:
                     tool_name=tool_name,
                     arguments=args,
                 )
-                from src.utils.text_caps import cap_tool_output
-                return (
-                    f'<untrusted-data source="mcp:{conn_name}">\n'
-                    f'{cap_tool_output(str(result))}\n</untrusted-data>'
-                )
+                from src.utils.spotlight import spotlight
+                return spotlight(f"mcp:{conn_name}", str(result))
 
             return _wrapper
 
