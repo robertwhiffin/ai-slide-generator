@@ -93,6 +93,10 @@ Chosen depth: **Step 1 (spotlighting + heuristic blocklist + length caps)** plus
 
 This is the highest-value / lowest-cost layer.
 
+**Live-path note (post-implementation).** Spotlighting is applied in the **factory** tool builders (`src/services/agent_factory.py` + `src/services/tools/*` — Genie, image-search, vector, model-endpoint, agent-bricks, MCP) via the shared `spotlight()` helper in `src/utils/spotlight.py`, not only the legacy `_create_tools_for_session` path. Because the factory is what serves the live `/chat` request flow, every tool's return value is wrapped in `<untrusted-data source="...">…</untrusted-data>` (and length-capped + delimiter-neutralized) on the live path, not just the MCP path. The `UNTRUSTED_DATA_NOTICE` prompt block is added by `build_generation_system_prompt` / `build_editing_system_prompt`.
+
+**Known residual (tracked follow-up).** When a config supplies a custom `agent_config.system_prompt`, `agent_factory.py` takes the legacy concatenation branch and uses that prompt verbatim — so the modular `UNTRUSTED_DATA_NOTICE` is **not** appended (the spotlight *wrappers* on tool output still apply; only the system-prompt notice is dropped). Fix deferred.
+
 ### 2.2 Heuristic injection blocklist
 
 - New module `src/utils/pi_filter.py`: `scan_for_injection(text) -> list[str]` over a **high-precision** pattern set (e.g. `ignore (all )?(previous|prior|above) instructions`, `you are now (a|an)`, `disregard the (above|previous)`, line-start `system:`, `### INSTRUCTION`). Patterns are tuned to avoid blocking normal editing phrasing ("ignore the previous layout").
