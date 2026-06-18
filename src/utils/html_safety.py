@@ -9,8 +9,15 @@ data: URIs), so any hit is off-path.
 import re
 from typing import List
 
-# Script sources allowed in slides (Chart.js + Tailwind Play CDN).
-_ALLOWED_SCRIPT_HOSTS = ("https://cdn.jsdelivr.net", "https://cdn.tailwindcss.com")
+# Script sources allowed in slides (Chart.js + Tailwind Play CDN + Google Fonts).
+# Google Fonts <link>s are allowed by the slide CSP `style-src`/`font-src` at
+# runtime, so the scanner must not flag them as external resources.
+_ALLOWED_SCRIPT_HOSTS = (
+    "https://cdn.jsdelivr.net",
+    "https://cdn.tailwindcss.com",
+    "https://fonts.googleapis.com",
+    "https://fonts.gstatic.com",
+)
 
 # (label, compiled regex). Order is stable for predictable reporting.
 #
@@ -39,10 +46,25 @@ _PATTERNS = [
     # redirect: <meta http-equiv="refresh" ...>
     ("meta refresh redirect",
      re.compile(r"<meta\b[^>]*http-equiv\s*=\s*['\"]?\s*refresh", re.IGNORECASE)),
+    # inline event handlers inside a tag (onclick=, onload=, onerror=, ...).
+    # INTENTIONAL POLICY: slides render under SLIDE_CSP with no 'unsafe-hashes',
+    # so inline handlers do not execute at runtime anyway; flagging them turns a
+    # silent no-op into a corrective-retry signal. Do not soften.
+    ("inline event handler", re.compile(r"<[^>]+\son[a-z]+\s*=", re.IGNORECASE)),
+    # javascript: scheme in any attribute value
+    ("javascript: URI", re.compile(r"=\s*['\"]?\s*javascript:", re.IGNORECASE)),
+    # image-beacon constructor
+    ("new Image beacon", re.compile(r"\bnew\s+Image\s*\(")),
 ]
 
-# External resource references (img/script src to an http(s) URL).
-_EXTERNAL_SRC = re.compile(r"<(?:img|script)\b[^>]*\bsrc\s*=\s*['\"](https?://[^'\"]+)", re.IGNORECASE)
+# External resource references: img/script/iframe `src` or link `href` to an
+# http(s) URL. Two capture groups (the src form and the link-href form); the
+# loop reads whichever matched.
+_EXTERNAL_SRC = re.compile(
+    r"<(?:img|script|iframe)\b[^>]*\bsrc\s*=\s*['\"](https?://[^'\"]+)"
+    r"|<link\b[^>]*\bhref\s*=\s*['\"](https?://[^'\"]+)",
+    re.IGNORECASE,
+)
 
 
 def scan_html_for_unsafe_patterns(html: str) -> List[str]:
@@ -57,8 +79,8 @@ def scan_html_for_unsafe_patterns(html: str) -> List[str]:
             findings.append(f"unsafe pattern: {label}")
 
     for match in _EXTERNAL_SRC.finditer(html):
-        url = match.group(1)
-        if not url.lower().startswith(_ALLOWED_SCRIPT_HOSTS):
+        url = match.group(1) or match.group(2)
+        if url and not url.lower().startswith(_ALLOWED_SCRIPT_HOSTS):
             findings.append(f"external resource src: {url}")
 
     return findings

