@@ -1637,20 +1637,26 @@ class ChatService:
             return 0
 
         count = 0
+        # Hydrate only real conversation turns. clarification IS kept — it is an
+        # assistant turn the user answers; dropping it regresses "add or replace?"
+        # flows. reasoning/info/tool_* are agent-internal noise and must not be
+        # replayed to the LLM as turns. (Security note: after the on_llm_end guard
+        # above, no *unsafe* HTML is ever persisted as llm_response.)
+        HUMAN_TYPES = {"user_query", "user_input", "chat"}
+        AI_TYPES = {"llm_response", "clarification"}
         for msg in db_messages:
             role = msg.get("role", "")
             content = msg.get("content", "")
-
+            mtype = msg.get("message_type", "")
             if not content:
                 continue
-
-            if role == "user":
+            if role == "user" and mtype in HUMAN_TYPES:
                 chat_history.add_message(HumanMessage(content=content))
                 count += 1
-            elif role == "assistant":
+            elif role == "assistant" and mtype in AI_TYPES:
                 chat_history.add_message(AIMessage(content=content))
                 count += 1
-            # Skip tool messages for history (they're included via intermediate steps)
+            # Skip reasoning / info / tool_call / tool_result — agent-internal noise.
 
         logger.info(
             "Hydrated chat history from database",

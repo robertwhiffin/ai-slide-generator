@@ -15,6 +15,7 @@ from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.outputs import LLMResult
 
 from src.api.schemas.streaming import StreamEvent, StreamEventType
+from src.utils.html_safety import scan_html_for_unsafe_patterns
 
 if TYPE_CHECKING:
     from src.api.services.session_manager import SessionManager
@@ -81,6 +82,16 @@ class StreamingCallbackHandler(BaseCallbackHandler):
         logger.info("LLM response text", extra={"text_length": len(text) if text else 0})
 
         if not text or not text.strip():
+            return
+
+        # Do not persist/emit HTML that the output safety gate will reject and
+        # regenerate — otherwise the unsafe attempt-1 reaches the client/DB and
+        # re-enters LLM context on the next turn (review finding #6).
+        if scan_html_for_unsafe_patterns(text):
+            logger.warning(
+                "Skipping persist/emit of unsafe pre-gate LLM output",
+                extra={"session_id": self.session_id},
+            )
             return
 
         # Persist to database
