@@ -12,6 +12,7 @@ import logging
 import queue
 import re
 import threading
+from datetime import datetime
 from typing import Any, Dict, Generator, List, Optional
 
 from langchain_community.chat_message_histories import ChatMessageHistory
@@ -678,10 +679,15 @@ class ChatService:
             # Substitute image placeholders before sending to client
             slide_deck_dict, raw_html = self._substitute_images_for_response(slide_deck_dict, raw_html)
 
-            # Build response
+            # Build response. Appended notices need a timestamp — MessageResponse
+            # requires it, and omitting it raises a Pydantic ValidationError that
+            # surfaces as a 500 with internal detail (AISEC-248 finding #10).
             messages = result["messages"]
+            notice_ts = (result.get("metadata") or {}).get("timestamp") or datetime.utcnow().isoformat()
             if conflict_note:
-                messages = messages + [{"role": "assistant", "content": conflict_note}]
+                messages = messages + [
+                    {"role": "assistant", "content": conflict_note, "timestamp": notice_ts}
+                ]
 
             # AISEC-248: surface a chat message if the safety gate rebuilt the deck.
             safety_notice = (result.get("metadata") or {}).get("safety_notice")
@@ -692,7 +698,9 @@ class ChatService:
                     content=safety_notice,
                     message_type="info",
                 )
-                messages = messages + [{"role": "assistant", "content": safety_notice}]
+                messages = messages + [
+                    {"role": "assistant", "content": safety_notice, "timestamp": notice_ts}
+                ]
 
             response = {
                 "messages": messages,

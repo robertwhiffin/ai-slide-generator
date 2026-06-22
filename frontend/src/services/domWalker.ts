@@ -13,6 +13,7 @@
  */
 
 import type { SlideDeck } from '../types/slide';
+import { SLIDE_CSP } from './slideDocument';
 
 /** Font strategy for the editable export. */
 export type EditableFontMode =
@@ -92,9 +93,15 @@ function buildCompositeHtml(deck: SlideDeck): string {
     slides.map((s: any) => (s.speaker_notes || s.notes || ''))
   );
 
+  // AISEC-248 #3: this walker mounts a same-origin iframe and eval()s slide
+  // scripts to read layout, so it cannot be sandboxed. CSP is the egress
+  // containment — same restrictive policy as the pdf/pptx/screenshot exports.
+  const cspMeta = `<meta http-equiv="Content-Security-Policy" content="${SLIDE_CSP}">`;
+
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
+${cspMeta}
 <meta charset="UTF-8">
 <title>${deck.title || 'Presentation'}</title>
 ${ext}
