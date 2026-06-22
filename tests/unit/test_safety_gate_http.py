@@ -75,3 +75,65 @@ def test_unsafe_content_error_message_is_generic():
     except UnsafeContentError as e:
         assert "disallowed content" in str(e)
         assert "evil" not in str(e)  # no payload echoed back
+
+
+def test_safety_rebuild_notice_message_has_timestamp():
+    """Regression (AISEC-248 #10, rebuild path): when the gate blocks attempt 1
+    then rebuilds successfully, send_message appends a SAFETY_RETRY_NOTICE chat
+    message. That appended message must carry a `timestamp` — MessageResponse
+    requires it, and omitting it raised a Pydantic ValidationError that surfaced
+    as a 500 with internal detail. Every returned message must validate.
+    """
+    from unittest.mock import MagicMock, patch
+
+    from src.api.schemas.responses import MessageResponse
+    from src.api.services.chat_service import ChatService
+
+    with patch("src.api.services.chat_service.get_session_manager") as mock_get_sm, \
+         patch("src.api.services.chat_service.build_agent_for_request") as mock_build, \
+         patch("src.api.services.chat_service.resolve_agent_config"), \
+         patch("src.api.services.chat_service.get_current_username", return_value="u@x.com"):
+        mock_sm = MagicMock()
+        mock_get_sm.return_value = mock_sm
+        mock_sm.get_session.return_value = {
+            "session_id": "s1",
+            "genie_conversation_id": "g1",
+            "experiment_id": "e1",
+            "agent_config": {"tools": []},
+            "message_count": 1,
+        }
+
+        mock_agent = MagicMock()
+        mock_agent.sessions = {}
+        # The gate rebuilt the deck: metadata carries a safety_notice + timestamp.
+        mock_agent.generate_slides.return_value = {
+            "html": "<div class='slide'>ok</div>",
+            "replacement_info": None,
+            "messages": [
+                {"role": "assistant", "content": "Here are slides",
+                 "timestamp": "2026-06-22T00:00:00"}
+            ],
+            "metadata": {
+                "timestamp": "2026-06-22T00:00:01",
+                "safety_notice": "Generated slides contained disallowed content "
+                                 "(external network/resource access). Attempting to build again.",
+            },
+        }
+        mock_build.return_value = mock_agent
+
+        service = ChatService()
+        with patch.object(service, "_get_or_load_deck", return_value=None), \
+             patch.object(service, "_ensure_user_experiment", return_value=(None, None)), \
+             patch.object(service, "_hydrate_chat_history", return_value=0), \
+             patch.object(service, "_substitute_images_for_response",
+                          side_effect=lambda d, h: (d, h)), \
+             patch("src.core.settings_db.get_settings") as mock_settings:
+            mock_settings.return_value = MagicMock(profile_id=1, profile_name="test")
+            result = service.send_message("s1", "create slides")
+
+    # The notice message is present...
+    contents = [m["content"] for m in result["messages"]]
+    assert any("disallowed content" in c for c in contents)
+    # ...and every message validates against MessageResponse (timestamp required).
+    for m in result["messages"]:
+        MessageResponse(**m)  # raises ValidationError if timestamp is missing
