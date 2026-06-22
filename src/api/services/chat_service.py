@@ -347,14 +347,18 @@ class ChatService:
                         message_type="clarification",
                     )
                     return {
-                        "messages": [{"role": "assistant", "content": clarification_msg}],
+                        "messages": [{
+                            "role": "assistant",
+                            "content": clarification_msg,
+                            "timestamp": datetime.utcnow().isoformat(),
+                        }],
                         "slide_deck": existing_deck.to_dict(),
                         "raw_html": existing_deck.knit(),
                         "metadata": {"clarification_needed": True},
                         "replacement_info": None,
                         "session_id": session_id,
                     }
-                
+
                 # RC10: Edit intent without clear target - ask for clarification
                 if _is_edit and not _slide_refs and not _is_generation:
                     logger.info(
@@ -374,7 +378,11 @@ class ChatService:
                         message_type="clarification",
                     )
                     return {
-                        "messages": [{"role": "assistant", "content": clarification_msg}],
+                        "messages": [{
+                            "role": "assistant",
+                            "content": clarification_msg,
+                            "timestamp": datetime.utcnow().isoformat(),
+                        }],
                         "slide_deck": existing_deck.to_dict(),
                         "raw_html": existing_deck.knit(),
                         "metadata": {"clarification_needed": True},
