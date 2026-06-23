@@ -364,6 +364,58 @@ class TestChatEndpoints:
         assert "status" in data
         assert data["status"] == "completed"
 
+    def test_chat_poll_does_not_echo_user_message(self, client, mock_session_manager):
+        """Poll must not return the user's own message back as an assistant event.
+
+        Regression test: the user message is persisted under the request_id, so it is
+        returned by get_messages_for_request. Previously msg_to_stream_event mapped
+        role=='user' to event type 'assistant', which the frontend rendered as an AI
+        response — an instant echo of the user's own message. The poll should only
+        stream assistant/tool activity generated during processing.
+        """
+        from src.api.services.session_manager import SessionManager
+
+        mock_session_manager.get_chat_request.return_value = {
+            "status": "processing",
+            "result": None,
+        }
+        mock_session_manager.get_messages_for_request.return_value = [
+            {
+                "id": 1,
+                "role": "user",
+                "content": "Make the title slide blue",
+                "message_type": "user_query",
+                "created_at": "2026-01-01T00:00:00Z",
+                "metadata": None,
+            },
+            {
+                "id": 2,
+                "role": "assistant",
+                "content": "<div class=\"slide content\">updated</div>",
+                "message_type": "llm_response",
+                "created_at": "2026-01-01T00:00:01Z",
+                "metadata": None,
+            },
+        ]
+        # Use the real conversion so we exercise the actual mapping logic.
+        mock_session_manager.msg_to_stream_event.side_effect = (
+            SessionManager.msg_to_stream_event.__get__(
+                mock_session_manager, SessionManager
+            )
+        )
+
+        response = client.get("/api/chat/poll/req-123")
+        assert response.status_code == 200
+        data = response.json()
+
+        contents = [event.get("content") for event in data["events"]]
+        # The user's own message must never be echoed back as a chat event.
+        assert "Make the title slide blue" not in contents
+        # The genuine assistant message still flows through.
+        assert "<div class=\"slide content\">updated</div>" in contents
+        # last_message_id still advances past the user message so it is not refetched.
+        assert data["last_message_id"] == 2
+
 
 # ============================================
 # Slide Endpoint Tests
