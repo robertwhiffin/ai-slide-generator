@@ -329,9 +329,7 @@ class TestParallelCodegen:
             for _ in range(4)
         ]
 
-        codes = asyncio.get_event_loop().run_until_complete(
-            converter._generate_all_codes(slide_inputs)
-        )
+        codes = asyncio.run(converter._generate_all_codes(slide_inputs))
 
         assert len(codes) == 4
         assert all(c is not None for c in codes)
