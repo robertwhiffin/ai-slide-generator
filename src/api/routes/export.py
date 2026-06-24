@@ -11,6 +11,7 @@ from pydantic import BaseModel
 
 from src.api.services.chat_service import get_chat_service
 from src.services.html_to_pptx import HtmlToPptxConverterV3, PPTXConversionError
+from src.utils.html_safety import SLIDE_CSP_META, scan_html_for_unsafe_patterns
 
 logger = logging.getLogger(__name__)
 
@@ -92,13 +93,31 @@ def build_slide_html(slide: dict, slide_deck: dict) -> str:
     )
     
     scripts_html = "\n".join([
-        f'    <script src="{src}" crossorigin="anonymous"></script>' 
+        f'    <script src="{src}" crossorigin="anonymous"></script>'
         for src in external_scripts
     ])
-    
+
+    # AISEC-248: detection-layer parity with the generation gate. The CSP below
+    # is the runtime enforcement (it contains the huashu/Playwright render and
+    # the standalone HTML download); this scan logs anything the gate should
+    # already have rejected at generation time, so an off-path construct that
+    # reached export is still observable. We scan the slide body, deck scripts
+    # AND the external-script tags so a non-allowlisted <script src> host (which
+    # CSP silently blocks at runtime) is still surfaced. Non-blocking: the deck
+    # is already persisted, and the frontend render contains it the same way.
+    findings = scan_html_for_unsafe_patterns(
+        f"{raw_slide_html}\n{deck_scripts}\n{scripts_html}"
+    )
+    if findings:
+        logger.warning(
+            "Unsafe patterns in exported slide HTML (contained by CSP, not blocked)",
+            extra={"slide_id": slide_id, "patterns": findings},
+        )
+
     complete_html = f"""<!DOCTYPE html>
 <html lang="en">
 <head>
+  {SLIDE_CSP_META}
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>{slide_deck.get("title", "Slide")} - Slide {slide.get("slide_id", "")}</title>

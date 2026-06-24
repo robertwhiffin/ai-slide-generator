@@ -9,6 +9,31 @@ data: URIs), so any hit is off-path.
 import re
 from typing import List
 
+# Content-Security-Policy for rendered slide documents. MUST stay in sync with
+# the frontend builder's SLIDE_CSP (frontend/src/services/slideDocument.ts):
+# both render the same LLM-authored slide HTML — the frontend in an in-app
+# iframe, the backend in the server-side export (huashu/Playwright render and
+# the standalone HTML download). `connect-src 'none'` blocks fetch/XHR/
+# WebSocket/beacon exfil; `img-src data:` blocks image beacons; scripts only
+# from the Chart.js/Tailwind CDNs; `form-action 'none'` blocks form-POST exfil
+# (it does NOT fall back to default-src); `base-uri 'none'` stops a rewritten
+# <base>. No 'unsafe-eval' — the export path must not depend on eval().
+# tests/unit/test_export_csp.py asserts this equals the frontend constant.
+SLIDE_CSP = (
+    "default-src 'none'; "
+    "script-src 'unsafe-inline' https://cdn.jsdelivr.net https://cdn.tailwindcss.com; "
+    "style-src 'unsafe-inline' https://fonts.googleapis.com; "
+    "img-src data:; "
+    "font-src data: https://cdn.jsdelivr.net https://fonts.gstatic.com; "
+    "connect-src 'none'; "
+    "form-action 'none'; "
+    "base-uri 'none';"
+)
+
+SLIDE_CSP_META = (
+    f'<meta http-equiv="Content-Security-Policy" content="{SLIDE_CSP}">'
+)
+
 # Script sources allowed in slides (Chart.js + Tailwind Play CDN + Google Fonts).
 # Google Fonts <link>s are allowed by the slide CSP `style-src`/`font-src` at
 # runtime, so the scanner must not flag them as external resources.
