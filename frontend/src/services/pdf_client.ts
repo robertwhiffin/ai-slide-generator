@@ -4,7 +4,7 @@
  */
 
 import html2canvas from 'html2canvas';
-import jsPDF from 'jspdf';
+import jsPDF from '../vendor/jspdf-stub';
 import type { SlideDeck } from '../types/slide';
 
 const SLIDE_WIDTH = 1280;

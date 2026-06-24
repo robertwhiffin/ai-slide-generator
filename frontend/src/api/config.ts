@@ -18,6 +18,9 @@ const SESSIONS_API_BASE = `${API_BASE_URL}/api/sessions`;
 
 export type PermissionLevel = 'CAN_MANAGE' | 'CAN_EDIT' | 'CAN_VIEW' | 'CAN_USE';
 
+/** Workspace-wide deck sharing — CAN_MANAGE is not allowed */
+export type DeckWorkspacePermission = 'CAN_VIEW' | 'CAN_EDIT';
+
 export interface Profile {
   id: number;
   name: string;
@@ -234,6 +237,7 @@ export interface ContributorUpdate {
 export interface ContributorListResponse {
   contributors: Contributor[];
   total: number;
+  global_permission?: DeckWorkspacePermission | null;
 }
 
 export class ConfigApiError extends Error {
@@ -592,5 +596,17 @@ export const configApi = {
     fetchJson(`${SESSIONS_API_BASE}/${sessionId}/contributors/${contributorId}`, {
       method: 'DELETE',
     }),
+
+  /**
+   * Set or clear workspace-wide sharing for a deck (All workspace users).
+   */
+  setDeckGlobal: (
+    sessionId: string,
+    permission: DeckWorkspacePermission | null,
+  ): Promise<{ session_id: string; global_permission: DeckWorkspacePermission | null }> =>
+    fetchJson(
+      `${SESSIONS_API_BASE}/${sessionId}/global${permission ? `?permission=${permission}` : ''}`,
+      { method: 'PATCH' },
+    ),
 };
 

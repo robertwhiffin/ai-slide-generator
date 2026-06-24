@@ -71,12 +71,6 @@ class _PermissionServiceFacade:
             )
             if session is None:
                 return False
-            # Creator always has view access (mirrors PermissionService's
-            # get_deck_permission creator check, done here on the string-id
-            # fast path so a brand-new session the caller just created is
-            # viewable even before any DeckContributor row exists).
-            if session.created_by and session.created_by == ctx.user_name:
-                return True
             return svc.can_view_deck(
                 db,
                 session.id,
@@ -111,8 +105,6 @@ class _PermissionServiceFacade:
             )
             if session is None:
                 return False
-            if session.created_by and session.created_by == ctx.user_name:
-                return True
             return svc.can_edit_deck(
                 db,
                 session.id,

@@ -29,7 +29,11 @@ from src.core.database import get_db, get_db_session
 from src.core.permission_context import get_permission_context
 from src.core.user_context import get_current_user
 from src.database.models.profile_contributor import PermissionLevel
-from src.services.permission_service import get_permission_service
+from src.database.models.session import UserSession
+from src.services.permission_service import (
+    VALID_DECK_GLOBAL_PERMISSIONS,
+    get_permission_service,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -235,7 +239,7 @@ async def list_shared_presentations(
     limit: int = Query(50, ge=1, le=100, description="Maximum presentations to return"),
     db: Session = Depends(get_db),
 ):
-    """List presentations (slide decks) shared with the current user via deck_contributors.
+    """List presentations shared with the current user via deck_contributors or workspace global_permission.
 
     Returns presentation-only data from decks where the user has CAN_VIEW, CAN_EDIT,
     or CAN_MANAGE permission. Conversations (chat messages) are never exposed —
@@ -312,6 +316,62 @@ async def list_shared_presentations(
             status_code=500,
             detail=f"Failed to list shared presentations: {str(e)}",
         ) from e
+
+
+class DeckGlobalPermissionResponse(BaseModel):
+    session_id: str
+    global_permission: Optional[str] = None
+
+
+@router.patch("/{session_id}/global", response_model=DeckGlobalPermissionResponse)
+async def set_deck_global_permission(
+    session_id: str,
+    permission: Optional[str] = Query(
+        None,
+        description="CAN_VIEW, CAN_EDIT, or omit/null to clear workspace sharing",
+    ),
+    db: Session = Depends(get_db),
+):
+    """Set or clear workspace-wide sharing for a deck. Requires CAN_MANAGE."""
+    from src.api.routes.deck_contributors import _get_root_session_or_400, _require_manage
+
+    session = _get_root_session_or_400(db, session_id)
+    perm_service = get_permission_service()
+    _require_manage(perm_service, db, session)
+
+    if permission is not None:
+        try:
+            level = PermissionLevel(permission)
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid permission level: {permission}",
+            ) from exc
+        if level not in VALID_DECK_GLOBAL_PERMISSIONS:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Workspace sharing supports CAN_VIEW or CAN_EDIT only. "
+                    "Use individual contributors for CAN_MANAGE."
+                ),
+            )
+        session.global_permission = level.value
+    else:
+        session.global_permission = None
+
+    db.commit()
+    db.refresh(session)
+
+    logger.info(
+        "Updated workspace sharing for session %s: global_permission=%s",
+        session_id,
+        session.global_permission,
+    )
+
+    return DeckGlobalPermissionResponse(
+        session_id=session.session_id,
+        global_permission=session.global_permission,
+    )
 
 
 @router.post("/{session_id}/contribute")

@@ -59,7 +59,12 @@ export const SessionHistory: React.FC<SessionHistoryProps> = ({
       onSessionSelect(result.session_id);
     } catch (err) {
       console.error('Failed to open shared presentation:', err);
-      setError('Failed to open shared presentation');
+      if (err && typeof err === 'object' && 'status' in err && (err as { status: number }).status === 403) {
+        setError('You no longer have access to this presentation');
+        loadSessions();
+      } else {
+        setError('Failed to open shared presentation');
+      }
     } finally {
       setContributorLoading(null);
     }
@@ -216,11 +221,26 @@ export const SessionHistory: React.FC<SessionHistoryProps> = ({
                           <button onClick={() => setEditingId(null)} className="text-gray-400 hover:text-gray-600 flex-shrink-0">✕</button>
                         </div>
                       ) : (
-                        <span className="block text-sm font-medium text-gray-900 truncate" title={session.title}>{session.title}</span>
+                        <div className="flex items-center gap-2 min-w-0">
+                          <span className="block text-sm font-medium text-gray-900 truncate" title={session.title}>
+                            {session.title}
+                          </span>
+                          {session.global_permission && (
+                            <span
+                              className="flex-shrink-0 inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-green-100 text-green-800"
+                              title="Shared with all workspace users"
+                            >
+                              Workspace
+                            </span>
+                          )}
+                        </div>
                       )}
                     </td>
                     <td className="px-3 py-3 text-xs text-gray-500">{formatDate(session.created_at)}</td>
                     <td className="px-3 py-3 text-xs text-gray-500">{session.last_activity ? formatDate(session.last_activity) : '-'}</td>
+                    <td className="px-3 py-3 text-center text-sm text-gray-700">
+                      {session.slide_count ?? 0}
+                    </td>
                     <td className="px-3 py-3 text-center text-sm font-medium">
                       <div className="flex items-center justify-center gap-2">
                         <button onClick={() => handleRestore(session.session_id)} className="text-blue-600 hover:text-blue-900 text-xs">Open</button>
@@ -246,7 +266,7 @@ export const SessionHistory: React.FC<SessionHistoryProps> = ({
             </svg>
             <h3 className="mt-4 text-lg font-medium text-gray-900">No shared presentations</h3>
             <p className="mt-2 text-sm text-gray-500">
-              When someone shares a profile with you, their presentations will appear here.
+              When someone shares a deck with you or shares with all workspace users, it will appear here.
             </p>
           </div>
         ) : (

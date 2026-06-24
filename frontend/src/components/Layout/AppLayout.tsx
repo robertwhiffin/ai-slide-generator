@@ -386,10 +386,20 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
           setViewMode('main');
         }
       } catch (err: unknown) {
-        if (!cancelled && err && typeof err === 'object' && 'status' in err && (err as { status: number }).status === 404) {
-          showToast('Session not found', 'error');
-          navigate('/help');
-          return;
+        if (!cancelled && err && typeof err === 'object' && 'status' in err) {
+          const status = (err as { status: number }).status;
+          if (status === 404) {
+            showToast('Session not found', 'error');
+            navigate('/help');
+            return;
+          }
+          if (status === 403) {
+            showToast('You no longer have access to this presentation', 'error');
+            setSlideDeck(null);
+            setRawHtml(null);
+            navigate('/history', { replace: true });
+            return;
+          }
         }
         console.error('Failed to restore session from URL:', err);
       }
@@ -932,14 +942,20 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
             <div className="flex items-center justify-between border-b border-border px-6 py-4">
               <h2 className="text-lg font-semibold text-foreground">Share Deck</h2>
               <button
-                onClick={() => setShowShareDialog(false)}
+                onClick={() => {
+                  setShowShareDialog(false);
+                  setSessionsRefreshKey((k) => k + 1);
+                }}
                 className="text-muted-foreground hover:text-foreground transition-colors"
               >
                 ✕
               </button>
             </div>
             <div className="flex-1 overflow-y-auto px-6 py-4">
-              <DeckContributorsManager sessionId={sessionId} />
+              <DeckContributorsManager
+                sessionId={sessionId}
+                onSharingChange={() => setSessionsRefreshKey((k) => k + 1)}
+              />
             </div>
           </div>
         </div>

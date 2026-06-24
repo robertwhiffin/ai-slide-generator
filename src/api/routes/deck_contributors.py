@@ -64,6 +64,7 @@ class DeckContributorResponse(BaseModel):
 class DeckContributorListResponse(BaseModel):
     contributors: list[DeckContributorResponse]
     total: int
+    global_permission: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------
@@ -153,7 +154,11 @@ def list_deck_contributors(
         )
         for c in contributors
     ]
-    return DeckContributorListResponse(contributors=items, total=len(items))
+    return DeckContributorListResponse(
+        contributors=items,
+        total=len(items),
+        global_permission=session.global_permission,
+    )
 
 
 @router.post("", response_model=DeckContributorResponse, status_code=status.HTTP_201_CREATED)

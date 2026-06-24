@@ -131,6 +131,11 @@ echo -e "${GREEN}  Built: $(basename "$TELLR_WHEEL")${NC}"
 # This requires copying src/ to the app package directory first
 # (find_packages runs at import time, before any custom build steps)
 echo -e "${BLUE}Building databricks-tellr-app...${NC}"
+if [[ "${TELLR_INCLUDE_SIDECARS:-}" == "1" ]]; then
+    echo -e "${YELLOW}Including PPTX sidecars in app wheel (TELLR_INCLUDE_SIDECARS=1)${NC}"
+else
+    echo -e "${YELLOW}Omitting PPTX sidecars (set TELLR_INCLUDE_SIDECARS=1 to include)${NC}"
+fi
 
 # Copy src/ to APP_DIR before building
 cp -r "$ROOT_DIR/src" "$APP_DIR/src"
