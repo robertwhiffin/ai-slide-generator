@@ -552,7 +552,16 @@ async def poll_chat(
         session_manager.get_messages_for_request, request_id, after_message_id
     )
 
-    events = [session_manager.msg_to_stream_event(m) for m in messages]
+    # Exclude the user's own message from the streamed events. It is persisted
+    # under this request_id (so it appears here), but the frontend already shows
+    # it optimistically when sent. Echoing it back would render the user's own
+    # text as an instant "AI Assistant" response. Only stream assistant/tool
+    # activity generated during processing.
+    events = [
+        session_manager.msg_to_stream_event(m)
+        for m in messages
+        if m["role"] != "user"
+    ]
 
     return {
         "status": chat_request["status"],

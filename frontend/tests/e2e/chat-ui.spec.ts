@@ -357,6 +357,58 @@ test.describe('MessageList', () => {
 });
 
 // ============================================
+// HTML Collapsing Tests
+// ============================================
+
+/**
+ * Build an SSE stream that emits a single assistant message containing raw
+ * slide HTML (as returned when revising slides), then completes.
+ */
+function createAssistantHtmlResponse(html: string): string {
+  const events: string[] = [];
+  events.push('data: {"type": "start", "message": "Working..."}\n\n');
+  events.push(`data: ${JSON.stringify({ type: 'assistant', content: html })}\n\n`);
+  events.push('data: {"type": "complete", "message": "Done"}\n\n');
+  return events.join('');
+}
+
+test.describe('HTML Collapsing', () => {
+  test.beforeEach(async ({ page }) => {
+    await setupMocks(page);
+  });
+
+  // Revision responses return raw slide divs (no <!DOCTYPE html>) and real slides
+  // use compound classes like `class="slide content"`. The assistant message must
+  // still collapse into the "(HTML)" block rather than leak raw markup into the chat.
+  test('collapses revised slide HTML with a compound slide class', async ({ page }) => {
+    const revisedSlide = [
+      '<div class="slide content">',
+      '<p class="eyebrow">Governance</p>',
+      '<h1>Unity AI Gateway budgets give full spend control</h1>',
+      '</div>',
+    ].join('\n');
+
+    await page.route('http://127.0.0.1:8000/api/chat/stream', (route) => {
+      route.fulfill({
+        status: 200,
+        contentType: 'text/event-stream',
+        body: createAssistantHtmlResponse(revisedSlide),
+      });
+    });
+
+    await goToGenerator(page);
+    await page.getByRole('textbox').fill('remove the subtitle from this slide');
+    await page.getByRole('button', { name: 'Send' }).click();
+
+    // The assistant HTML must be collapsed into the labelled block...
+    await expect(page.getByText('AI Assistant (HTML)')).toBeVisible({ timeout: 10000 });
+    await expect(page.getByText('Generated slide HTML')).toBeVisible();
+    // ...and the raw markup must not leak into the chat as plain text.
+    await expect(page.getByText('Unity AI Gateway budgets give full spend control')).not.toBeVisible();
+  });
+});
+
+// ============================================
 // LoadingStates Tests
 // ============================================
 
