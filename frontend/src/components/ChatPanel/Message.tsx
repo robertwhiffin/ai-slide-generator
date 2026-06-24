@@ -67,11 +67,17 @@ export const Message: React.FC<MessageProps> = ({ message }) => {
   }
 
   const trimmedContent = message.content.trimStart();
+  // Slide HTML arrives in two shapes: a full document on initial creation
+  // (starts with <!DOCTYPE html>) and bare slide divs on revisions. Real slides
+  // use compound classes like `class="slide content"`, so match the `slide`
+  // class token anywhere in a div's class list — not just an exact
+  // `class="slide"` substring — to mirror the backend's `class_="slide"` parsing.
+  const SLIDE_DIV_PATTERN =
+    /<div\b[^>]*\bclass\s*=\s*["'](?:[^"']*\s)?slide(?:\s[^"']*)?["']/i;
   const isHtmlContent =
     message.role === 'assistant' &&
     (trimmedContent.includes('<!DOCTYPE html') ||
-      trimmedContent.includes('<div class="slide"') ||
-      trimmedContent.includes("<div class='slide'"));
+      SLIDE_DIV_PATTERN.test(trimmedContent));
 
   if (isHtmlContent) {
     return renderCollapsibleContent(
