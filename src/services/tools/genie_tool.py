@@ -16,6 +16,7 @@ from pydantic import BaseModel, Field
 from src.api.schemas.agent_config import GenieTool
 from src.core.databricks_client import get_user_client
 from src.core.settings_db import get_settings
+from src.utils.spotlight import spotlight
 
 logger = logging.getLogger(__name__)
 
@@ -292,7 +293,8 @@ def build_genie_tool(
             response_parts.append(f"Data retrieved:\n\n{result['data']}")
         if not response_parts:
             return "Query completed but no data or message was returned."
-        return "\n\n".join(response_parts)
+        joined = "\n\n".join(response_parts)
+        return spotlight("genie", joined, session_id=session_data.get("session_id"))
 
     description = (
         "Query Databricks Genie for data using natural language questions. "

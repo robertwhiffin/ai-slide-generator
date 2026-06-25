@@ -12,6 +12,7 @@ import logging
 import queue
 import re
 import threading
+from datetime import datetime
 from typing import Any, Dict, Generator, List, Optional
 
 from langchain_community.chat_message_histories import ChatMessageHistory
@@ -346,14 +347,18 @@ class ChatService:
                         message_type="clarification",
                     )
                     return {
-                        "messages": [{"role": "assistant", "content": clarification_msg}],
+                        "messages": [{
+                            "role": "assistant",
+                            "content": clarification_msg,
+                            "timestamp": datetime.utcnow().isoformat(),
+                        }],
                         "slide_deck": existing_deck.to_dict(),
                         "raw_html": existing_deck.knit(),
                         "metadata": {"clarification_needed": True},
                         "replacement_info": None,
                         "session_id": session_id,
                     }
-                
+
                 # RC10: Edit intent without clear target - ask for clarification
                 if _is_edit and not _slide_refs and not _is_generation:
                     logger.info(
@@ -373,7 +378,11 @@ class ChatService:
                         message_type="clarification",
                     )
                     return {
-                        "messages": [{"role": "assistant", "content": clarification_msg}],
+                        "messages": [{
+                            "role": "assistant",
+                            "content": clarification_msg,
+                            "timestamp": datetime.utcnow().isoformat(),
+                        }],
                         "slide_deck": existing_deck.to_dict(),
                         "raw_html": existing_deck.knit(),
                         "metadata": {"clarification_needed": True},
@@ -678,10 +687,28 @@ class ChatService:
             # Substitute image placeholders before sending to client
             slide_deck_dict, raw_html = self._substitute_images_for_response(slide_deck_dict, raw_html)
 
-            # Build response
+            # Build response. Appended notices need a timestamp — MessageResponse
+            # requires it, and omitting it raises a Pydantic ValidationError that
+            # surfaces as a 500 with internal detail (AISEC-248 finding #10).
             messages = result["messages"]
+            notice_ts = (result.get("metadata") or {}).get("timestamp") or datetime.utcnow().isoformat()
             if conflict_note:
-                messages = messages + [{"role": "assistant", "content": conflict_note}]
+                messages = messages + [
+                    {"role": "assistant", "content": conflict_note, "timestamp": notice_ts}
+                ]
+
+            # AISEC-248: surface a chat message if the safety gate rebuilt the deck.
+            safety_notice = (result.get("metadata") or {}).get("safety_notice")
+            if safety_notice:
+                session_manager.add_message(
+                    session_id=session_id,
+                    role="assistant",
+                    content=safety_notice,
+                    message_type="info",
+                )
+                messages = messages + [
+                    {"role": "assistant", "content": safety_notice, "timestamp": notice_ts}
+                ]
 
             response = {
                 "messages": messages,
@@ -1406,6 +1433,10 @@ class ChatService:
         if conflict_note:
             complete_metadata["conflict_note"] = conflict_note
 
+        # AISEC-248: the safety-gate retry notice is emitted live (mid-stream) via
+        # callback_handler.emit_notice during agent execution, so it appears in the
+        # correct chat order (HTML attempt 1 → notice → rebuild). Nothing to do here.
+
         # Yield final complete event with slides and optional conflict note
         yield StreamEvent(
             type=StreamEventType.COMPLETE,
@@ -1622,20 +1653,26 @@ class ChatService:
             return 0
 
         count = 0
+        # Hydrate only real conversation turns. clarification IS kept — it is an
+        # assistant turn the user answers; dropping it regresses "add or replace?"
+        # flows. reasoning/info/tool_* are agent-internal noise and must not be
+        # replayed to the LLM as turns. (Security note: after the on_llm_end guard
+        # above, no *unsafe* HTML is ever persisted as llm_response.)
+        HUMAN_TYPES = {"user_query", "user_input", "chat"}
+        AI_TYPES = {"llm_response", "clarification"}
         for msg in db_messages:
             role = msg.get("role", "")
             content = msg.get("content", "")
-
+            mtype = msg.get("message_type", "")
             if not content:
                 continue
-
-            if role == "user":
+            if role == "user" and mtype in HUMAN_TYPES:
                 chat_history.add_message(HumanMessage(content=content))
                 count += 1
-            elif role == "assistant":
+            elif role == "assistant" and mtype in AI_TYPES:
                 chat_history.add_message(AIMessage(content=content))
                 count += 1
-            # Skip tool messages for history (they're included via intermediate steps)
+            # Skip reasoning / info / tool_call / tool_result — agent-internal noise.
 
         logger.info(
             "Hydrated chat history from database",

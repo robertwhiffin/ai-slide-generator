@@ -13,6 +13,7 @@
  */
 
 import type { SlideDeck } from '../types/slide';
+import { SLIDE_CSP } from './slideDocument';
 
 /** Font strategy for the editable export. */
 export type EditableFontMode =
@@ -92,9 +93,18 @@ function buildCompositeHtml(deck: SlideDeck): string {
     slides.map((s: any) => (s.speaker_notes || s.notes || ''))
   );
 
+  // AISEC-248 #3: this walker mounts a same-origin iframe and reads its
+  // contentDocument to measure layout, so it cannot be sandboxed. CSP is the
+  // egress containment — same restrictive policy as the pdf/pptx/screenshot
+  // exports. The slide scripts run as native inline <script> under
+  // 'unsafe-inline'; extraction is driven by direct same-origin calls (no
+  // eval), so 'unsafe-eval' is intentionally NOT granted.
+  const cspMeta = `<meta http-equiv="Content-Security-Policy" content="${SLIDE_CSP}">`;
+
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
+${cspMeta}
 <meta charset="UTF-8">
 <title>${deck.title || 'Presentation'}</title>
 ${ext}
@@ -632,9 +642,13 @@ export async function extractSlideRecordsForExport(
     }
 
     // Force brand fonts → fallback on every element (inline style = max specificity).
+    // Injected as a <script> (runs under CSP 'unsafe-inline') rather than eval()
+    // so the slide CSP need not allow 'unsafe-eval' (AISEC-248).
     if (fontMode === 'universal') {
       try {
-        (w as any).eval(FONT_REWRITE_SRC);
+        const fontScript = d.createElement('script');
+        fontScript.textContent = FONT_REWRITE_SRC;
+        d.head.appendChild(fontScript);
       } catch (e) {
         console.error('[walker] font rewrite failed:', e);
       }
@@ -648,12 +662,12 @@ export async function extractSlideRecordsForExport(
 
     const out: SlideExtract[] = [];
     for (let i = 0; i < slides.length; i++) {
+      // Same-origin frame (no sandbox) → drive it via direct DOM/function calls
+      // instead of eval(), so the CSP need not allow 'unsafe-eval' (AISEC-248).
       try {
-        (w as any).eval(`
-          document.querySelectorAll('section.slide-container').forEach(function (s, j) {
-            s.style.display = j === ${i} ? 'block' : 'none';
-          });
-        `);
+        d.querySelectorAll('section.slide-container').forEach((s, j) => {
+          (s as HTMLElement).style.display = j === i ? 'block' : 'none';
+        });
       } catch (e) {
         console.error(`[walker] toggle display failed on slide ${i}:`, e);
       }
@@ -662,12 +676,10 @@ export async function extractSlideRecordsForExport(
 
       let extract;
       try {
-        extract = (w as any).eval(`
-          (function () {
-            const root = document.querySelector('section.slide-container[data-slide-index="${i}"]');
-            return root ? window.__extractSlide(root) : null;
-          })();
-        `);
+        const root = d.querySelector(
+          `section.slide-container[data-slide-index="${i}"]`
+        );
+        extract = root ? (w as any).__extractSlide(root) : null;
       } catch (e) {
         console.error(`[walker] extract failed on slide ${i}:`, e);
         throw e;
@@ -678,13 +690,13 @@ export async function extractSlideRecordsForExport(
       }
       console.log(`[walker] slide ${i} records:`, extract.records.length);
 
-      const notes = (w as any).eval(`
-        (function () {
-          const t = document.getElementById('speaker-notes');
-          if (!t) return '';
-          try { return JSON.parse(t.textContent)[${i}] || ''; } catch (e) { return ''; }
-        })();
-      `) as string;
+      let notes = '';
+      try {
+        const t = d.getElementById('speaker-notes');
+        if (t) notes = JSON.parse(t.textContent || '[]')[i] || '';
+      } catch (_) {
+        notes = '';
+      }
 
       out.push({
         width: extract.width,

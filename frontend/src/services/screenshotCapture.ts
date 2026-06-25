@@ -12,20 +12,25 @@
 
 import html2canvas from 'html2canvas';
 import type { SlideDeck } from '../types/slide';
+import { SLIDE_CSP } from './slideDocument';
 
 const SLIDE_WIDTH = 1280;
 const SLIDE_HEIGHT = 720;
 
-function buildSlideHtml(deck: SlideDeck, slideIndex: number): string {
+export function buildSlideHtml(deck: SlideDeck, slideIndex: number): string {
   const slide = deck.slides[slideIndex];
   const externalScripts = (deck.external_scripts || [])
     .map(s => `<script src="${s}"></script>`).join('\n');
   const slideScripts = slide.scripts || '';
   const deckScripts = deck.scripts || '';
   const css = deck.css || '';
+  // AISEC-248 #3: same-origin is required for html2canvas to read contentDocument,
+  // so we cannot sandbox these capture frames. CSP is the egress containment.
+  const cspMeta = `<meta http-equiv="Content-Security-Policy" content="${SLIDE_CSP}">`;
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
+${cspMeta}
 <meta charset="UTF-8">
 <title>${deck.title || 'Slide'}</title>
 ${externalScripts}

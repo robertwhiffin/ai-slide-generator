@@ -62,6 +62,7 @@ class ChatRequest(BaseModel):
         ...,
         description="Natural language message to the AI agent",
         min_length=1,
+        max_length=8192,
     )
     slide_context: Optional[SlideContext] = Field(
         default=None,

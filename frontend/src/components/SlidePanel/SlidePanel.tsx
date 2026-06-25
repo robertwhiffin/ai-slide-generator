@@ -23,6 +23,7 @@ import { useSelection } from '../../contexts/SelectionContext';
 import { exportSlideDeckToPDF } from '../../services/pdf_client';
 import { useSession } from '../../contexts/SessionContext';
 import { useToast } from '../../contexts/ToastContext';
+import { buildSlideDocument } from '../../services/slideDocument';
 
 interface SlideContext {
   indices: number[];
@@ -368,18 +369,8 @@ function SlidePanelComponent(props: SlidePanelProps, ref: React.Ref<SlidePanelHa
       })
       .join('\n');
 
-    const externalScriptsHtml = slideDeck.external_scripts
-      .map((src: string) => `<script src="${src}"></script>`)
-      .join('\n');
-
-    const html = `<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>${slideDeck.title || 'Presentation'}</title>
-  ${externalScriptsHtml}
-  <style>
+    // Multi-slide wrapper/reset layout for the standalone export document.
+    const wrapperStyle = `
     * {
       margin: 0;
       padding: 0;
@@ -425,13 +416,9 @@ function SlidePanelComponent(props: SlidePanelProps, ref: React.Ref<SlidePanelHa
     canvas {
       max-width: 100%;
       height: auto;
-    }
-    ${slideDeck.css}
-  </style>
-</head>
-<body>
-  ${slidesHtml}
-  <script>
+    }`;
+
+    const bootstrapScripts = `
     function waitForChartJs(callback, maxAttempts = 50) {
       let attempts = 0;
       const check = () => {
@@ -461,10 +448,17 @@ function SlidePanelComponent(props: SlidePanelProps, ref: React.Ref<SlidePanelHa
       });
     } else {
       waitForChartJs(initializeCharts);
-    }
-  </script>
-</body>
-</html>`;
+    }`;
+
+    const html = buildSlideDocument(
+      `<title>${slideDeck.title || 'Presentation'}</title>\n${slidesHtml}`,
+      {
+        css: slideDeck.css,
+        externalScripts: slideDeck.external_scripts,
+        extraHeadStyle: wrapperStyle,
+        scripts: bootstrapScripts,
+      }
+    );
 
     const blob = new Blob([html], { type: 'text/html' });
     const url = URL.createObjectURL(blob);
