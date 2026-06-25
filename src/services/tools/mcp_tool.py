@@ -349,11 +349,13 @@ def build_mcp_tools(config: MCPTool) -> list[StructuredTool]:
         def _create_wrapper(tool_name: str, conn_name: str):
             def _wrapper(**kwargs) -> str:
                 args = {k: v for k, v in kwargs.items() if v is not None}
-                return call_mcp_tool(
+                result = call_mcp_tool(
                     connection_name=conn_name,
                     tool_name=tool_name,
                     arguments=args,
                 )
+                from src.utils.spotlight import spotlight
+                return spotlight(f"mcp:{conn_name}", str(result))
 
             return _wrapper
 
