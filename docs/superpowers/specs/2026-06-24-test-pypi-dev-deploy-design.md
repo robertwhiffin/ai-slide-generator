@@ -114,24 +114,6 @@ Plumbing:
   **skips the wheel build step** (Step 1) when present, and forwards the flag to
   `python -m scripts.deploy_local`.
 
-### D. Revert the AISEC-248 tarball exclusion (prerequisite)
-
-Commit `34c7d8d` (on `security/aisec-248-hardening`) did two things; this work keeps
-one and reverts the other:
-
-- **Keep:** the `scripts/build_wheels.sh` change that cleans `build/` + `*.egg-info`
-  before building. This genuinely prevents stale content-hashed frontend bundles
-  from accumulating into the wheel. Orthogonal and beneficial — leave it in place.
-- **Revert:** the `packages/databricks-tellr-app/setup.py` change that added
-  `node_modules.tar.gz` and `sys-libs-bullseye.tar.gz` to `_SIDECAR_IGNORE`. Restore
-  the original comment explaining the tarballs DO ship. Once reverted, the built app
-  wheel is ~31MB with huashu intact again.
-
-This is a **prerequisite for Component A**: the workflow's verify gate requires the
-tarballs to be present, so a build from code that still excludes them would fail.
-It also removes a latent regression — without the revert, the next `v*` release via
-`publish.yml` would publish a huashu-less wheel and break prod.
-
 ### C. Agent orchestration loop (documented, no new script)
 
 The agent, on request, runs:

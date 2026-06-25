@@ -33,7 +33,7 @@ jobs:
       - name: Install build tools
         run: pip install build
 
-      - name: Stamp version into databricks-tellr-app pyproject.toml
+      - name: Stamp version into both pyproject.toml files
         env:
           INPUT_VERSION: ${{ inputs.version }}
         run: |
@@ -41,27 +41,33 @@ jobs:
           import os
           import pathlib
           import re
+          import tomllib
 
           version = os.environ["INPUT_VERSION"]
-          path = pathlib.Path("packages/databricks-tellr-app/pyproject.toml")
-          text = path.read_text()
-
-          # Replace the first `version = "..."` line (the [project] version).
-          new_text, count = re.subn(
-              r'(?m)^version\s*=\s*".*"$',
-              f'version = "{version}"',
-              text,
-              count=1,
-          )
-          if count != 1:
-              raise SystemExit(
-                  f"ERROR: expected exactly one version line to replace, replaced {count}"
+          paths = [
+              pathlib.Path("packages/databricks-tellr/pyproject.toml"),
+              pathlib.Path("packages/databricks-tellr-app/pyproject.toml"),
+          ]
+          for path in paths:
+              text = path.read_text()
+              # Replace the first `version = "..."` line (the [project] version).
+              new_text, count = re.subn(
+                  r'(?m)^version\s*=\s*".*"$',
+                  f'version = "{version}"',
+                  text,
+                  count=1,
               )
-          path.write_text(new_text)
-          print(f"Stamped version = {version} into {path}")
+              if count != 1:
+                  raise SystemExit(
+                      f"ERROR: expected exactly one version line in {path}, replaced {count}"
+                  )
+              path.write_text(new_text)
+              stamped = tomllib.loads(path.read_text())["project"]["version"]
+              print(f"Stamped version = {stamped} into {path}")
           PY
-          echo "Confirming stamped version:"
-          python3 -c "import tomllib, pathlib; print(tomllib.loads(pathlib.Path('packages/databricks-tellr-app/pyproject.toml').read_text())['project']['version'])"
+
+      - name: Build databricks-tellr
+        run: python -m build --sdist --wheel packages/databricks-tellr
 
       - name: Build databricks-tellr-app
         run: |
@@ -112,11 +118,36 @@ jobs:
           print("Verify gate passed: both huashu tarballs present and wheel >= 25MB.")
           PY
 
+      - name: Upload tellr dist
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist-tellr
+          path: packages/databricks-tellr/dist/
+
       - name: Upload tellr-app dist
         uses: actions/upload-artifact@v4
         with:
           name: dist-tellr-app
           path: packages/databricks-tellr-app/dist/
+
+  publish-tellr:
+    name: Publish databricks-tellr to Test PyPI
+    runs-on: ubuntu-latest
+    needs: build
+    environment: testpypi
+    permissions:
+      id-token: write
+    steps:
+      - name: Download dist
+        uses: actions/download-artifact@v4
+        with:
+          name: dist-tellr
+          path: dist/
+
+      - name: Publish to Test PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          repository-url: https://test.pypi.org/legacy/
 
   publish-tellr-app:
     name: Publish databricks-tellr-app to Test PyPI
