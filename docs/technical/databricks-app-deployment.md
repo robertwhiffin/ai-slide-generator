@@ -2,6 +2,9 @@
 
 **One-line summary**: Two-package pip distribution enabling one-command deployment of Tellr to Databricks Apps with bundled frontend and runtime dependencies.
 
+> **Deploying a dev/test build?** See [dev-deploy.md](dev-deploy.md) for the dev
+> loop (publish a `.devN` to real PyPI, then `deploy_local --from-pypi`).
+
 ---
 
 ## Stack / Entry Points
