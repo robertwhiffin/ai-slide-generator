@@ -340,9 +340,7 @@ def create(
     client: WorkspaceClient | None = None,
     profile: str | None = None,
     config_yaml_path: str | None = None,  # Load config from YAML (mutually exclusive with other args)
-    encryption_key: str | None = None,    # Fernet key for Google OAuth; auto-generated if omitted
-    use_test_pypi: bool = False,          # Install from Test PyPI
-) -> dict[str, Any]
+    encryption_key: str | None = None,    # Fernet key for Google OAuth; auto-generated if omitted) -> dict[str, Any]
 
 def update(
     app_name: str,
@@ -353,9 +351,7 @@ def update(
     reset_database: bool = False,         # Drop and recreate schema
     client: WorkspaceClient | None = None,
     profile: str | None = None,
-    encryption_key: str | None = None,    # Fernet key; reads existing key from app.yaml if omitted
-    use_test_pypi: bool = False,          # Install from Test PyPI
-) -> dict[str, Any]
+    encryption_key: str | None = None,    # Fernet key; reads existing key from app.yaml if omitted) -> dict[str, Any]
 
 def delete(
     app_name: str,
@@ -505,13 +501,6 @@ credentials stored in the database. Behavior:
   preserving encrypted data across redeployments
 
 The key is written to the `GOOGLE_OAUTH_ENCRYPTION_KEY` environment variable in `app.yaml`.
-
-### Test PyPI
-
-Set `use_test_pypi=True` to install `databricks-tellr-app` from Test PyPI instead of
-the production PyPI index. The generated `requirements.txt` pip command adds
-`--index-url https://test.pypi.org/simple/ --extra-index-url https://pypi.org/simple/`
-so that non-app dependencies still resolve from the real index.
 
 ### Autoscaling Lakebase
 
