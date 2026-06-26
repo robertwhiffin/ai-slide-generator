@@ -7,7 +7,7 @@ command:
   - "-c"
   - |
     set -e
-    pip install --upgrade --no-cache-dir ${PIP_INDEX_ARGS}-r requirements.txt
+    pip install --upgrade --no-cache-dir -r requirements.txt
     python -c "from databricks_tellr_app.run import init_database; ${INIT_DATABASE_CALL}"
     # Backgrounded huashu (Claude Design path) bootstrap. Extracts the
     # bundled node_modules + sys-libs tarballs and runs `playwright install
