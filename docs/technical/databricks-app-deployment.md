@@ -340,7 +340,8 @@ def create(
     client: WorkspaceClient | None = None,
     profile: str | None = None,
     config_yaml_path: str | None = None,  # Load config from YAML (mutually exclusive with other args)
-    encryption_key: str | None = None,    # Fernet key for Google OAuth; auto-generated if omitted) -> dict[str, Any]
+    encryption_key: str | None = None,    # Fernet key for Google OAuth; auto-generated if omitted
+) -> dict[str, Any]
 
 def update(
     app_name: str,
@@ -351,7 +352,8 @@ def update(
     reset_database: bool = False,         # Drop and recreate schema
     client: WorkspaceClient | None = None,
     profile: str | None = None,
-    encryption_key: str | None = None,    # Fernet key; reads existing key from app.yaml if omitted) -> dict[str, Any]
+    encryption_key: str | None = None,    # Fernet key; reads existing key from app.yaml if omitted
+) -> dict[str, Any]
 
 def delete(
     app_name: str,
