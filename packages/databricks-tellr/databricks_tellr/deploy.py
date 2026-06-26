@@ -196,7 +196,6 @@ def create(
     profile: str | None = None,
     config_yaml_path: str | None = None,
     encryption_key: str | None = None,
-    use_test_pypi: bool = False,
     mlflow_tracing: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Deploy Tellr to Databricks Apps.
@@ -227,7 +226,6 @@ def create(
         profile: Databricks CLI profile name (optional)
         config_yaml_path: Path to deployment config YAML (mutually exclusive with other args)
         encryption_key: Fernet key for Google OAuth encryption. Auto-generated if not provided.
-        use_test_pypi: If True, install app package from Test PyPI instead of real PyPI.
         mlflow_tracing: Optional overrides for UC tracing env vars in generated ``app.yaml``.
             Keys: ``MLFLOW_TRACING_SQL_WAREHOUSE_ID``, ``TELLR_MLFLOW_UC_CATALOG``,
             ``TELLR_MLFLOW_UC_SCHEMA``, ``TELLR_MLFLOW_UC_TABLE_PREFIX``. With
@@ -261,7 +259,6 @@ def create(
         config_yaml_path=config_yaml_path,
         seed_databricks_defaults=False,
         encryption_key=encryption_key,
-        use_test_pypi=use_test_pypi,
         mlflow_tracing=mlflow_tracing,
     )
 
@@ -276,7 +273,6 @@ def update(
     client: WorkspaceClient | None = None,
     profile: str | None = None,
     encryption_key: str | None = None,
-    use_test_pypi: bool = False,
     mlflow_tracing: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Deploy a new version of an existing Tellr app.
@@ -294,7 +290,6 @@ def update(
         profile: Databricks CLI profile name (optional)
         encryption_key: Fernet key for Google OAuth encryption. If not provided, the
             existing key is read from the deployed app.yaml to preserve encrypted data.
-        use_test_pypi: If True, install app package from Test PyPI instead of real PyPI.
         mlflow_tracing: Optional overrides for UC tracing env vars (same keys as ``create``).
             Values from deployment YAML are not loaded on update; use this argument or
             ``TELLR_DEPLOY_MLFLOW_*`` environment variables.
@@ -316,7 +311,6 @@ def update(
         profile=profile,
         seed_databricks_defaults=False,
         encryption_key=encryption_key,
-        use_test_pypi=use_test_pypi,
         mlflow_tracing=mlflow_tracing,
     )
 
@@ -340,7 +334,6 @@ def _create_databricks(
     config_yaml_path: str | None = None,
     seed_databricks_defaults: bool = True,
     encryption_key: str | None = None,
-    use_test_pypi: bool = False,
     mlflow_tracing: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Deploy Tellr to Databricks Apps with configurable seeding.
@@ -361,7 +354,6 @@ def _create_databricks(
         config_yaml_path: Path to deployment config YAML (mutually exclusive with other args)
         seed_databricks_defaults: If True, seed Databricks-specific content on startup
         encryption_key: Fernet key for Google OAuth encryption. Auto-generated if not provided.
-        use_test_pypi: If True, install app package from Test PyPI instead of real PyPI.
         mlflow_tracing: Optional overrides for UC tracing placeholders in ``app.yaml``.
 
     Returns:
@@ -427,7 +419,6 @@ def _create_databricks(
                 seed_databricks_defaults=seed_databricks_defaults,
                 encryption_key=encryption_key,
                 lakebase_result=lakebase_result,
-                use_test_pypi=use_test_pypi,
                 mlflow_tracing=mlflow_subs,
             )
             print("   Generated app.yaml (with encryption key)")
@@ -500,7 +491,6 @@ def _update_databricks(
     profile: str | None = None,
     seed_databricks_defaults: bool = True,
     encryption_key: str | None = None,
-    use_test_pypi: bool = False,
     mlflow_tracing: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Deploy a new version of an existing Tellr app with configurable seeding.
@@ -519,7 +509,6 @@ def _update_databricks(
         seed_databricks_defaults: If True, seed Databricks-specific content on startup
         encryption_key: Fernet key for Google OAuth encryption. If not provided, reads
             the existing key from the deployed app.yaml to preserve encrypted data.
-        use_test_pypi: If True, install app package from Test PyPI instead of real PyPI.
         mlflow_tracing: Optional overrides for UC tracing placeholders in ``app.yaml``.
 
     Returns:
@@ -568,7 +557,6 @@ def _update_databricks(
                 seed_databricks_defaults=seed_databricks_defaults,
                 encryption_key=encryption_key,
                 lakebase_result=lakebase_result,
-                use_test_pypi=use_test_pypi,
                 mlflow_tracing=mlflow_subs,
             )
             _upload_files(ws, staging, app_file_workspace_path)
@@ -1294,7 +1282,6 @@ def _write_app_yaml(
     seed_databricks_defaults: bool = False,
     encryption_key: str | None = None,
     lakebase_result: dict[str, Any] | None = None,
-    use_test_pypi: bool = False,
     mlflow_tracing: dict[str, str] | None = None,
 ) -> None:
     """Generate app.yaml with environment variables.
@@ -1307,7 +1294,6 @@ def _write_app_yaml(
         encryption_key: Fernet encryption key for Google OAuth credentials/tokens.
             Auto-generated if not provided.
         lakebase_result: Result dict from _get_or_create_lakebase() with type info.
-        use_test_pypi: If True, install from Test PyPI instead of real PyPI.
         mlflow_tracing: Resolved template keys for UC tracing (four entries). If
             omitted, values are taken only from ``TELLR_DEPLOY_MLFLOW_*`` env vars.
     """
@@ -1329,11 +1315,6 @@ def _write_app_yaml(
     lakebase_project_id = (lakebase_result or {}).get("project_id", "")
     lakebase_endpoint_name = (lakebase_result or {}).get("endpoint_name", "")
 
-    pip_index_args = (
-        "--index-url https://test.pypi.org/simple/ --extra-index-url https://pypi.org/simple/ "
-        if use_test_pypi else ""
-    )
-
     if mlflow_tracing is None:
         mlflow_tracing = _mlflow_substitutions_for_app_yaml()
 
@@ -1347,7 +1328,6 @@ def _write_app_yaml(
         LAKEBASE_PG_HOST=lakebase_pg_host,
         LAKEBASE_PROJECT_ID=lakebase_project_id,
         LAKEBASE_ENDPOINT_NAME=lakebase_endpoint_name,
-        PIP_INDEX_ARGS=pip_index_args,
         MLFLOW_TRACING_SQL_WAREHOUSE_ID=mlflow_tracing.get(
             "MLFLOW_TRACING_SQL_WAREHOUSE_ID", ""
         ),

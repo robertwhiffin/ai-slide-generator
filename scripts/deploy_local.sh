@@ -35,6 +35,8 @@ usage() {
     echo "  --reset-db                   Drop and recreate database tables (WARNING: deletes all data)"
     echo "  --include-databricks-prompts Include Databricks-specific deck prompts and brand style"
     echo "  --skip-build                 Skip wheel build (use existing wheels in dist/)"
+    echo "  --from-pypi <version>        Deploy by pinning databricks-tellr-app==<version>"
+    echo "                               from PyPI (skips the local wheel build/upload)"
     echo "  -h, --help                   Show this help message"
     echo ""
     echo "Examples:"
@@ -42,6 +44,7 @@ usage() {
     echo "  $0 update --env development --profile my-profile"
     echo "  $0 update --env development --profile my-profile --reset-db"
     echo "  $0 update --env staging --profile my-profile --skip-build"
+    echo "  $0 update --env development --profile my-profile --from-pypi 0.3.9.dev3"
     echo "  $0 delete --env development --profile my-profile"
     exit 1
 }
@@ -53,6 +56,7 @@ PROFILE=""
 RESET_DB=""
 INCLUDE_DB_PROMPTS=""
 SKIP_BUILD=""
+FROM_PYPI=""
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -79,6 +83,10 @@ while [[ $# -gt 0 ]]; do
         --skip-build)
             SKIP_BUILD="true"
             shift
+            ;;
+        --from-pypi)
+            FROM_PYPI="$2"
+            shift 2
             ;;
         -h|--help)
             usage
@@ -144,6 +152,9 @@ fi
 if [ -n "$SKIP_BUILD" ]; then
     echo "  Skip Build:  yes"
 fi
+if [ -n "$FROM_PYPI" ]; then
+    echo "  PyPI:        $FROM_PYPI"
+fi
 echo ""
 
 # Check if .venv exists
@@ -162,15 +173,18 @@ source .venv/bin/activate
 echo -e "${GREEN}Virtual environment activated${NC}"
 echo ""
 
-# Step 1: Build wheels (unless skipped or deleting)
-if [[ "$ACTION" != "delete" && -z "$SKIP_BUILD" ]]; then
+# Step 1: Build wheels (unless skipped, deleting, or deploying from PyPI)
+if [[ "$ACTION" != "delete" && -z "$SKIP_BUILD" && -z "$FROM_PYPI" ]]; then
     echo -e "${BLUE}Step 1: Building wheels...${NC}"
     echo ""
-    
+
     "$SCRIPT_DIR/build_wheels.sh"
-    
+
     echo ""
 else
+    if [[ -n "$FROM_PYPI" ]]; then
+        echo -e "${YELLOW}Skipping wheel build (--from-pypi: app installs from PyPI)${NC}"
+    fi
     if [[ -n "$SKIP_BUILD" ]]; then
         echo -e "${YELLOW}Skipping wheel build (--skip-build)${NC}"
     fi
@@ -184,12 +198,18 @@ fi
 echo -e "${BLUE}Step 2: Running deployment...${NC}"
 echo ""
 
+FROM_PYPI_ARG=()
+if [ -n "$FROM_PYPI" ]; then
+    FROM_PYPI_ARG=(--from-pypi "$FROM_PYPI")
+fi
+
 python -m scripts.deploy_local \
     --$ACTION \
     --env "$ENV" \
     --profile "$PROFILE" \
     $RESET_DB \
-    $INCLUDE_DB_PROMPTS
+    $INCLUDE_DB_PROMPTS \
+    "${FROM_PYPI_ARG[@]}"
 
 echo ""
 echo -e "${GREEN}Done!${NC}"
