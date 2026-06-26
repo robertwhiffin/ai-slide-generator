@@ -264,7 +264,7 @@ def create_local(
     env: str,
     profile: str,
     seed_databricks_defaults: bool = True,
-    from_test_pypi: Optional[str] = None,
+    from_pypi: Optional[str] = None,
 ) -> dict[str, Any]:
     """Create a new Databricks App using locally-built wheels.
 
@@ -272,9 +272,9 @@ def create_local(
         env: Environment name (development, staging, production)
         profile: Databricks CLI profile name
         seed_databricks_defaults: If True, seed Databricks-specific content
-        from_test_pypi: If set (a version string), skip building/uploading a
+        from_pypi: If set (a version string), skip building/uploading a
             local wheel and instead pin ``databricks-tellr-app==<version>``
-            from Test PyPI.
+            from PyPI.
 
     Returns:
         Dictionary with deployment info
@@ -298,11 +298,11 @@ def create_local(
     print()
 
     try:
-        # Resolve the app package source: local wheel (default) or Test PyPI.
+        # Resolve the app package source: local wheel (default) or PyPI.
         wheel_path = None
         local_wheel_ref = None
-        if from_test_pypi:
-            print(f"Using Test PyPI version: databricks-tellr-app=={from_test_pypi}")
+        if from_pypi:
+            print(f"Using PyPI version: databricks-tellr-app=={from_pypi}")
             print("   Skipping local wheel build/upload")
             print()
         else:
@@ -347,9 +347,9 @@ def create_local(
         print("Preparing deployment files...")
         staging_dir = Path(tempfile.mkdtemp(prefix="tellr_local_staging_"))
         try:
-            if from_test_pypi:
-                _write_requirements(staging_dir, from_test_pypi)
-                print(f"   Generated requirements.txt (Test PyPI: {from_test_pypi})")
+            if from_pypi:
+                _write_requirements(staging_dir, from_pypi)
+                print(f"   Generated requirements.txt (PyPI: {from_pypi})")
             else:
                 _write_requirements(
                     staging_dir, None, local_wheel_path=local_wheel_ref
@@ -367,7 +367,6 @@ def create_local(
                 seed_databricks_defaults=seed_databricks_defaults,
                 encryption_key=encryption_key,  # None → _write_app_yaml generates one
                 lakebase_result=lakebase_result,
-                use_test_pypi=bool(from_test_pypi),
                 mlflow_tracing=mlflow_subs,
             )
             print("   Generated app.yaml")
@@ -434,7 +433,7 @@ def create_local(
             "lakebase_name": lakebase_name,
             "schema_name": schema_name,
             "wheel": wheel_path.name if wheel_path else None,
-            "test_pypi_version": from_test_pypi,
+            "pypi_version": from_pypi,
             "branch": env if branch_from_env else None,
             "status": "created",
         }
@@ -448,12 +447,12 @@ def update_local(
     profile: str,
     reset_database: bool = False,
     seed_databricks_defaults: bool = True,
-    from_test_pypi: Optional[str] = None,
+    from_pypi: Optional[str] = None,
 ) -> dict[str, Any]:
     """Update an existing Databricks App using locally-built wheels.
 
-    When ``from_test_pypi`` is set (a version string), skip building/uploading a
-    local wheel and instead pin ``databricks-tellr-app==<version>`` from Test PyPI.
+    When ``from_pypi`` is set (a version string), skip building/uploading a
+    local wheel and instead pin ``databricks-tellr-app==<version>`` from PyPI.
     """
     config = load_deployment_config(env)
     ws = _get_workspace_client(profile=profile)
@@ -546,11 +545,11 @@ def update_local(
             print(f"   Schema '{schema_name}' reset")
             print()
 
-        # Resolve the app package source: local wheel (default) or Test PyPI.
+        # Resolve the app package source: local wheel (default) or PyPI.
         wheel_path = None
         local_wheel_ref = None
-        if from_test_pypi:
-            print(f"Using Test PyPI version: databricks-tellr-app=={from_test_pypi}")
+        if from_pypi:
+            print(f"Using PyPI version: databricks-tellr-app=={from_pypi}")
             print("   Skipping local wheel build/upload")
             print()
         else:
@@ -568,9 +567,9 @@ def update_local(
         print("Preparing deployment files...")
         staging_dir = Path(tempfile.mkdtemp(prefix="tellr_local_staging_"))
         try:
-            if from_test_pypi:
-                _write_requirements(staging_dir, from_test_pypi)
-                print(f"   Generated requirements.txt (Test PyPI: {from_test_pypi})")
+            if from_pypi:
+                _write_requirements(staging_dir, from_pypi)
+                print(f"   Generated requirements.txt (PyPI: {from_pypi})")
             else:
                 _write_requirements(
                     staging_dir, None, local_wheel_path=local_wheel_ref
@@ -588,7 +587,6 @@ def update_local(
                 seed_databricks_defaults=seed_databricks_defaults,
                 encryption_key=encryption_key,
                 lakebase_result=lakebase_result,
-                use_test_pypi=bool(from_test_pypi),
                 mlflow_tracing=mlflow_subs,
             )
             print("   Generated app.yaml")
@@ -613,7 +611,7 @@ def update_local(
             "app_name": app_name,
             "deployment_id": result.deployment_id,
             "wheel": wheel_path.name if wheel_path else None,
-            "test_pypi_version": from_test_pypi,
+            "pypi_version": from_pypi,
             "status": "updated",
             "branch": env if branch_from_env else None,
             "database_reset": reset_database,
@@ -716,22 +714,22 @@ def main() -> None:
     )
 
     parser.add_argument(
-        "--from-test-pypi",
-        dest="from_test_pypi",
+        "--from-pypi",
+        dest="from_pypi",
         type=str,
         default=None,
         metavar="VERSION",
         help=(
-            "Deploy by pinning databricks-tellr-app==VERSION from Test PyPI "
+            "Deploy by pinning databricks-tellr-app==VERSION from PyPI "
             "instead of building/uploading a local wheel"
         ),
     )
 
     args = parser.parse_args()
 
-    if args.from_test_pypi and not _is_valid_version(args.from_test_pypi):
+    if args.from_pypi and not _is_valid_version(args.from_pypi):
         parser.error(
-            f"--from-test-pypi value '{args.from_test_pypi}' is not a valid "
+            f"--from-pypi value '{args.from_pypi}' is not a valid "
             "PEP 440 version"
         )
 
@@ -753,7 +751,7 @@ def main() -> None:
                 env=args.env,
                 profile=args.profile,
                 seed_databricks_defaults=args.include_databricks_prompts,
-                from_test_pypi=args.from_test_pypi,
+                from_pypi=args.from_pypi,
             )
         elif args.action == "update":
             result = update_local(
@@ -761,7 +759,7 @@ def main() -> None:
                 profile=args.profile,
                 reset_database=args.reset_db,
                 seed_databricks_defaults=args.include_databricks_prompts,
-                from_test_pypi=args.from_test_pypi,
+                from_pypi=args.from_pypi,
             )
         elif args.action == "delete":
             result = delete_local(
