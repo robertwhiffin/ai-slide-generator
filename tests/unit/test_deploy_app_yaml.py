@@ -1,6 +1,10 @@
 import inspect
 from pathlib import Path
 
+import pytest
+
+pytest.importorskip("databricks_tellr", reason="databricks-tellr package not installed")
+
 from databricks_tellr import deploy
 
 
