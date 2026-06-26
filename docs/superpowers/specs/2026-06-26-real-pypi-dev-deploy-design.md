@@ -2,7 +2,7 @@
 
 **Date:** 2026-06-26
 **Status:** Approved (design); ready for implementation plan
-**Supersedes:** `2026-06-24-test-pypi-dev-deploy-design.md` (test-PyPI approach — proven unworkable on Databricks Apps; see Root cause. Removed as part of this change — see Cleanup).
+**Supersedes:** `2026-06-24-test-pypi-dev-deploy-design.md` (test-PyPI approach — proven unworkable on Databricks Apps; see Root cause. That spec has been deleted; this document replaces it).
 
 ## Problem
 
@@ -102,7 +102,12 @@ Repurposes the publish-testpypi workflow; `publish-testpypi.yml` is **deleted**.
   `pypa/gh-action-pypi-publish@release/v1` with the **default `repository-url`**
   (real PyPI). Reuses the existing real-PyPI trusted publisher that `publish.yml`
   already uses — **no new PyPI setup.**
-- **Summary:** print the resolved version and the consume command.
+- **`settle` job:** `needs: [publish-tellr, publish-tellr-app]`, runs
+  `sleep 10`. This gates overall run success on a 10-second wait *after* both
+  uploads, giving real PyPI time to process the upload before any deploy is
+  kicked off (the agent loop waits for run success, so the gap is guaranteed
+  without relying on a manual sleep). Also emits the run **summary** — the
+  resolved version and the consume command.
 - **`publish.yml` (tagged final releases) is untouched.** Tags → finals,
   dispatch → devs.
 
@@ -163,8 +168,8 @@ The agent loop:
   target.
 - Update the two project memory notes (huashu wheel-size; test-PyPI auto-increment)
   to record the BUILD-phase finding and the real-PyPI decision.
-- **Delete the superseded spec** `docs/superpowers/specs/2026-06-24-test-pypi-dev-deploy-design.md`
-  (this document replaces it; no test-PyPI design left floating).
+- The superseded spec `2026-06-24-test-pypi-dev-deploy-design.md` has already
+  been deleted alongside this design; no test-PyPI design is left floating.
 
 ## Validation
 
@@ -172,8 +177,10 @@ The agent loop:
   `0.3.10.dev1`), then `deploy_local --from-pypi 0.3.10.dev1 --env devtest`.
   Success = the app reaches the **`[APP]`/RUN phase**, installs from the proxy,
   and the URL loads. That single success validates the whole pivot.
-- **Mirror lag:** if the proxy has not yet mirrored the just-published version,
-  the deploy's BUILD phase fails transiently → re-run the deploy step.
+- **Mirror lag:** the workflow's 10-second `settle` job covers PyPI's
+  upload-processing time before a deploy can start. If the proxy still has not
+  mirrored the just-published version, the deploy's BUILD phase fails
+  transiently → re-run the deploy step.
 - The workflow verify gate guards build shape; auto-increment avoids immutability
   collisions.
 - No meaningful unit-test surface (workflow YAML + a flag rename) — validation is
