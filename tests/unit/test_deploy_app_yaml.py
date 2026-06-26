@@ -1,0 +1,22 @@
+import inspect
+from pathlib import Path
+
+from databricks_tellr import deploy
+
+
+def test_write_app_yaml_has_no_use_test_pypi_param():
+    sig = inspect.signature(deploy._write_app_yaml)
+    assert "use_test_pypi" not in sig.parameters
+
+
+def test_generated_app_yaml_has_no_custom_index_url(tmp_path: Path):
+    deploy._write_app_yaml(
+        tmp_path,
+        lakebase_name="db-tellr",
+        schema_name="devtest_app_data",
+        lakebase_result={"type": "provisioned"},
+    )
+    content = (tmp_path / "app.yaml").read_text()
+    assert "--index-url" not in content
+    assert "test.pypi.org" not in content
+    assert "pip install --upgrade --no-cache-dir -r requirements.txt" in content
