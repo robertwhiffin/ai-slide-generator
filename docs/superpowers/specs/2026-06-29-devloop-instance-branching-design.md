@@ -3,6 +3,17 @@
 **Status:** Approved design (2026-06-29)
 **Author:** robert.whiffin@databricks.com
 
+> **Dependency / blocker for the migration story.** Live probing (2026-06-29)
+> found that a forked branch inherits prod's objects *owned by the prod app's
+> service principal*, and a *different* (dev) SP cannot `ALTER`/`DROP` those
+> inherited tables — so the app's `ALTER`-heavy migrations fail on a fork. The
+> branch mechanism in this spec is proven and independent, but **full
+> prod-fidelity migrations require a separate "Lakebase table ownership
+> (shared-owner)" workstream** — see [Dependency: Lakebase table ownership](#dependency-lakebase-table-ownership-shared-owner-model)
+> below. Until that lands, a `devloop` instance supports new-table creation +
+> DML against prod data, but **not** migrations that alter inherited prod
+> tables.
+
 ## Problem
 
 The dev pipeline publishes dev `.devN` builds to real PyPI and deploys them to a
@@ -35,9 +46,10 @@ an isolated copy-on-write branch of production Lakebase.
 
 Because the branch is forked from `branches/production` and the app inherits
 prod's schema (`app_data_prod`) and prod's `GOOGLE_OAUTH_ENCRYPTION_KEY`, each
-dev instance is a full mirror of prod: it reads prod-shaped data, runs its
-migrations against a byte-identical copy of prod, and decrypts prod-encrypted
-fields. Dev ≈ prod for testing purposes.
+dev instance is a full mirror of prod: it reads prod-shaped data and decrypts
+prod-encrypted fields. Dev ≈ prod for testing purposes. (Running *migrations*
+against that mirror additionally requires the ownership dependency — see the
+callout above and the dependency section below.)
 
 The deploy loop is unchanged in shape (manual, from a laptop):
 
@@ -63,6 +75,7 @@ gh workflow run publish-dev.yml                 # publishes the next .devN
 | 6 | Cleanup | Manual `delete --instance <id>`; branch TTL as orphan backstop | No reaper/cron for now (YAGNI). TTL auto-GCs instances nobody tears down, softening the manual-only risk. |
 | 7 | Data + encryption | Full mirror (prod schema, prod key) | The point is prod-fidelity testing; rotating secrets defeats it and makes OAuth credentials un-decryptable. |
 | 8 | Implementation shape | Reuse existing `branch_from` machinery, parameterized by `--instance` | The staging design already built `_branch_exists`/`_create_branch_from`/`_recreate_ephemeral_branch` and a `branch_from`-aware config loader. This change parameterizes them, it does not rebuild them. |
+| 9 | Migration support | Deferred to the ownership dependency | The dev SP can't `ALTER` inherited prod-SP-owned tables (proven). Shipping order: branch mechanism first (new-table + DML works), then the shared-owner workstream unblocks `ALTER` migrations. |
 
 ## Empirical findings (live `db-tellr` probes, 2026-06-29)
 
@@ -80,6 +93,106 @@ mutated) settled the branch mechanism:
    comment claiming fixed-name reuse "collides for many minutes after delete"
    **does not reproduce**. The timestamp-suffix + TTL workaround it justifies is
    therefore unnecessary and is removed.
+
+## Dependency: Lakebase table ownership (shared-owner model)
+
+This is a **separate, prod-touching workstream** that gates the migration story
+of this feature. It is documented in full here so a fresh agent can pick it up
+and drive it independently. (Companion notes:
+`memory/lakebase_branch_permissions.md`; Databricks runbook ES-1783639,
+Confluence "Change table ownership to a group", page `6095568937`.)
+
+### The problem
+
+Each Databricks App gets its **own** managed service principal (SP). Lakebase
+objects are owned by **whichever SP created them**. On `db-tellr`, the entire
+`app_data_prod` schema and all ~20 tables are owned by the **prod app's SP**
+(`161834b3-c54d-4b24-82c4-8f0166c191f4`). A forked branch inherits that
+ownership. The new dev app's SP is a *different* identity, and in Postgres only
+the **owner** (or a true superuser) may `ALTER`/`DROP` a table.
+
+The app's migrations (`src/core/database.py`, `_run_migrations`) are
+`ALTER`-heavy — `ADD COLUMN`, `ALTER COLUMN ... TYPE`, `DROP COLUMN`,
+`RENAME` against existing tables. So a dev build whose schema has moved since the
+fork point fails on first startup with `must be owner of table`. New-table
+`CREATE` and DML succeed (the existing `GRANT CREATE/USAGE` + DML grants cover
+them); altering inherited tables does not.
+
+### What was proven (live probes, 2026-06-29)
+
+- **The deployer cannot fix it.** Run as the human deployer (`robert.whiffin`),
+  `ALTER ... OWNER`, `ALTER SCHEMA OWNER`, and `REASSIGN OWNED BY <prod_sp>` all
+  fail. Only the **current owner** (the prod SP) or a true superuser can move
+  ownership.
+- **`databricks_superuser` is a red herring.** It has `rolsuper = false`; you
+  cannot `SET ROLE` to it, and membership does not grant ownership-bypass. Only
+  `databricks_control_plane` is a true superuser (`rolsuper = true`, unusable).
+- **`generate_database_credential` cannot impersonate** another SP; the `claims`
+  param scopes permissions *down*, it does not switch identity.
+- **The fix works: a member of the owning role can `ALTER` via `INHERIT`.** A
+  real login identity that is a *member* of a normal shared owning role can
+  `ALTER`/`DROP` that role's tables **as itself, without `SET ROLE`**, including
+  on a fork. This is the mechanism the dev SP will use. `REASSIGN OWNED BY <self>
+  TO <shared_role>` also works for moving one's own objects into the shared role.
+
+### Required end state
+
+All of `app_data_prod`'s objects are owned by a **shared owner** that *every*
+app SP (prod + each dev) is a member of. Then any member SP can migrate the
+inherited tables on its fork.
+
+### Two implementation routes (pick one in the dependency's own spec)
+
+1. **Permanent shared Postgres role** (recommended — built only from proven
+   mechanisms, no unsolved steps):
+   - Create a permanent `NOLOGIN` role, e.g. `tellr_app_owners`.
+   - **One-time prod transfer**, run *as the prod SP* (the current owner): grant
+     the prod SP membership in `tellr_app_owners`, then
+     `REASSIGN OWNED BY <prod_sp> TO tellr_app_owners` for `app_data_prod`.
+   - **Keep new objects shared-owned:** the app's migration step ends with
+     `REASSIGN OWNED BY CURRENT_USER TO tellr_app_owners` (the SP owns anything
+     it just created and is a member of the shared role, so this is allowed) — or
+     the app `SET ROLE`s the shared role before DDL if SET membership is granted.
+   - **Per dev deploy:** `GRANT tellr_app_owners TO "<dev_sp_client_id>"` on the
+     branch (run by a role with admin on `tellr_app_owners`). The dev SP then
+     inherits owner rights on the inherited tables.
+2. **Native Databricks group** (more native membership management via the
+   Databricks UI/API; matches the runbook):
+   - Group is created in Settings → Identity and access → Groups; made a
+     connectable Postgres role via `ws.postgres.create_role(identity_type=GROUP,
+     auth_method=LAKEBASE_OAUTH_V1)`.
+   - Ownership transferred with the runbook's temp-role bridge, finishing by
+     **connecting *as* the group** and `REASSIGN OWNED BY temp_table_owners TO
+     "<group>"`.
+   - **Open issue:** connecting as the group via the SDK
+     (`generate_database_credential` token + `-U <group>`) failed with
+     "Malformed OAuth token"; the runbook uses a **UI-issued** OAuth token. The
+     SDK path for connect-as-group is unsolved and must be figured out before
+     this route is viable.
+
+### What a fresh agent should do next
+
+1. Write a dedicated spec `…/specs/<date>-lakebase-shared-owner-design.md`,
+   choosing route 1 or 2 (recommend route 1).
+2. Decide who/what runs the one-time prod ownership transfer *as the prod SP*
+   (the deploy runs as the human, which can't — needs the app/SP to do it, e.g.
+   a guarded one-shot path in `init_database`, or a manual maintenance script run
+   with prod-SP creds).
+3. Add the per-deploy "grant new SP into the shared owner" step to the `devloop`
+   create flow (`scripts/deploy_local.py`), alongside `_ensure_sp_autoscaling_role`.
+4. Add the "keep new objects shared-owned" step to the app's migration path.
+5. Validate end-to-end on a throwaway project with a **real** member SP
+   (authenticate as the SP, not via `SET ROLE`) — confirm it can `ALTER` a
+   shared-owned table on a fork.
+
+### Interaction with this spec
+
+- `_setup_database_schema` / `_grant_schema_permissions` stay (they cover
+  USAGE/CREATE/DML and are still needed).
+- The `devloop` create flow gains the "add SP to shared owner" call once the
+  dependency lands.
+- Until then, `devloop` is usable for non-migrating builds; document the
+  limitation (see Out of scope).
 
 ## Feasibility (verified)
 
@@ -152,10 +265,15 @@ non-conforming id fails fast with an actionable error.
    `_ensure_sp_autoscaling_role(..., branch_name="dev-<id>")`.
 6. **Setup schema = grant-only.** The branch already carries `app_data_prod`;
    `CREATE SCHEMA IF NOT EXISTS` is a no-op, then grant the SP access.
+   *(Ownership dependency: once the shared-owner workstream lands, this step also
+   adds the new SP to the shared owner — `GRANT tellr_app_owners TO "<sp>"` — so
+   the SP can `ALTER` inherited tables.)*
 7. **Generate app.yaml** with the branch's `host`/`endpoint_name`, prod's schema
    (`app_data_prod`), and prod's encryption key (read from `production`
    app.yaml).
 8. **Deploy.** First startup runs migrations against the fresh prod copy.
+   New-table + DML migrations work today; `ALTER`s on inherited prod tables fail
+   until the ownership dependency lands (see the dependency section).
 
 ### `deploy_local.sh update --env devloop --instance <id> [--from-pypi <ver>]`
 
@@ -277,9 +395,18 @@ rollback machinery.
    gone; `branches/production` and instance `b` untouched.
 5. **Precondition failure:** invalid `--instance FOO` fails fast with the slug
    message and makes no `ws.postgres` call.
+6. **Migration limitation (pre-dependency):** a build that only adds a *new*
+   table or writes data deploys cleanly; a build that `ALTER`s an inherited prod
+   table fails at startup with `must be owner of table`. This is expected until
+   the ownership dependency lands — verifying this failure mode is part of
+   confirming the dependency is still needed.
 
 ## Out of scope
 
+- **The shared-owner ownership workstream itself** — tracked as a dependency
+  (see [Dependency: Lakebase table ownership](#dependency-lakebase-table-ownership-shared-owner-model));
+  it gets its own spec. This spec ships the branch mechanism; migrations that
+  alter inherited tables are unblocked by that separate work.
 - CI-run deploys — the deploy stays a manual laptop step; `publish-dev.yml`
   still only publishes and prints the command.
 - Auto-reaper / cron cleanup — manual delete + branch TTL only.
