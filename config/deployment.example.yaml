@@ -79,6 +79,30 @@ environments:
       schema: "app_data"
       capacity: "CU_1"  # Options: CU_1, CU_2, CU_4, CU_8
 
+  devloop:
+    # Per-instance dev loop. Like staging, devloop deploys against an ephemeral
+    # Lakebase branch forked from production, but the app_name and workspace_path
+    # are per-instance: `--instance <id>` appends `-<id>` to app_name and `/<id>`
+    # to workspace_path so multiple isolated dev instances can coexist.
+    app_name: "ai-slide-generator-dev"            # base; --instance appended -> ...-<id>
+    description: "AI Slide Generator - Dev loop (prod branch)"
+    workspace_path: "/Workspace/Users/{username}/.apps/devloop"  # base; /<id> appended
+    permissions:
+      - user_name: "{username}"
+        permission_level: "CAN_MANAGE"
+    compute_size: "MEDIUM"  # Options: MEDIUM, LARGE, LIQUID
+    env_vars:
+      ENVIRONMENT: "development"
+      LOG_LEVEL: "DEBUG"
+      LAKEBASE_INSTANCE: "ai-slide-generator-db"  # must match production
+      # LAKEBASE_SCHEMA inherited from branch_from (prod schema) — not set here
+    lakebase:
+      # Must match production's database_name (same Lakebase autoscaling project).
+      database_name: "ai-slide-generator-db"      # MUST equal the production env's
+      branch_from: "production"                    # fresh ephemeral branch per deploy
+      capacity: "CU_1"  # Options: CU_1, CU_2, CU_4, CU_8
+      # schema omitted — inherited from the branch_from env (production)
+
 # Common settings across all environments
 common:
   build:

@@ -65,3 +65,31 @@ publishing, that's proxy mirror lag — wait a moment and re-run the deploy step
 - `publish.yml` — tagged (`v*`) final releases to real PyPI. Unchanged; not for dev.
 
 See also the `deploy-tellr-dev` skill (`.claude/skills/deploy-tellr-dev/`).
+
+## Per-instance dev loop (`devloop`) — branch off prod
+
+For agentic dev loops that run multiple deployments at once, use the `devloop`
+env with an `--instance <id>`. Each instance gets its own app
+(`db-tellr-dev-<id>`) and a fresh copy-on-write branch of production Lakebase
+(`branches/dev-<id>`), recreated on every deploy:
+
+```bash
+gh workflow run publish-dev.yml          # publish the next .devN
+./scripts/deploy_local.sh create --env devloop --instance agent-7f3a \
+    --profile tellr-dev --from-pypi <version>    # first deploy
+./scripts/deploy_local.sh update --env devloop --instance agent-7f3a \
+    --profile tellr-dev --from-pypi <version>    # iterate (reuses app, refreshes branch)
+./scripts/deploy_local.sh delete --env devloop --instance agent-7f3a \
+    --profile tellr-dev                          # teardown (app + branch)
+```
+
+`--instance` must match `^[a-z][a-z0-9-]*$` and be ≤59 chars. Concurrent
+instances are fully isolated. The app compute is created once and reused; the
+branch is deleted and re-forked from prod on every deploy (fresh prod data each
+time — anything written to an instance is wiped on its next deploy).
+
+**Migration limitation:** an instance can create new tables and read/write prod
+data, but a build that `ALTER`s an *inherited* prod table fails at startup with
+`must be owner of table`. Fixing that needs the Lakebase table-ownership
+(shared-owner) workstream — see
+`docs/superpowers/specs/2026-06-29-devloop-instance-branching-design.md`.

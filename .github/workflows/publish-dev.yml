@@ -201,6 +201,10 @@ jobs:
             echo ""
             echo "### Deploy it"
             echo '```bash'
-            echo "./scripts/deploy_local.sh update --env devtest --profile tellr-dev --from-pypi ${RESOLVED_VERSION}"
+            echo "Static devtest:"
+            echo "  ./scripts/deploy_local.sh update --env devtest --profile tellr-dev --from-pypi ${RESOLVED_VERSION}"
+            echo "Per-instance dev loop (prod branch):"
+            echo "  ./scripts/deploy_local.sh create --env devloop --instance <id> --profile tellr-dev --from-pypi ${RESOLVED_VERSION}"
+            echo "  ./scripts/deploy_local.sh update --env devloop --instance <id> --profile tellr-dev --from-pypi ${RESOLVED_VERSION}"
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"

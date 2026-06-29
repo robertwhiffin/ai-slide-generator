@@ -1117,12 +1117,12 @@ def _delete_branch(
         raise
 
 
-# Lakebase branch TTL: 1 day. Branches auto-expire and are garbage-collected
-# after this window. The deploy flow relies on this for cleanup — we never
-# explicitly delete old branches, because Lakebase's delete is async and its
-# purge window is unpredictable (fixed-name reuse hits "branch id already
-# exists" for many minutes after delete). Unique-per-deploy IDs + TTL sidesteps
-# the whole issue.
+# Lakebase branch TTL: 1 day. This is now only an orphan backstop — if a deploy
+# crashes between create and cleanup, the TTL eventually garbage-collects the
+# stranded branch. The normal flow no longer relies on it: branches use fixed
+# names and are explicitly deleted and recreated (_recreate_ephemeral_branch,
+# delete_local) via _delete_branch, whose delete is idempotent and was verified
+# to leave the name immediately reusable.
 _BRANCH_TTL_SECONDS = 86400
 
 
@@ -1130,26 +1130,19 @@ def _create_branch_from(
     ws: WorkspaceClient,
     project_name: str,
     source_branch: str,
-    target_branch_prefix: str,
+    branch_id: str,
 ) -> dict[str, Any]:
-    """Create a new Lakebase branch as a child of `source_branch`.
+    """Create a new Lakebase branch named ``branch_id`` as a child of
+    ``source_branch``.
 
-    The branch ID is `{target_branch_prefix}-{unix_timestamp}` so that every
-    deploy gets a fresh unique ID. This avoids the "branch id already exists"
-    collision we hit when trying to reuse a fixed ID right after a delete —
-    Lakebase's delete is async and its purge window is unpredictable.
-
-    Branch is created with a 1-day TTL so Lakebase garbage-collects it for us.
-    The staging app the branch backs will break after ~1 day; re-deploy to get
-    a fresh branch. This trade is intentional: no cleanup code, no stale state.
+    The branch id is used verbatim (a fixed per-instance name). A 1-day TTL is
+    attached purely as an orphan backstop so abandoned instances get
+    garbage-collected; freshness comes from delete-then-create (see
+    _recreate_ephemeral_branch), not from the TTL.
 
     Waits on the create operation, then polls list_endpoints on the new branch
-    until an endpoint with a populated host appears (up to
-    _BRANCH_ENDPOINT_TIMEOUT_S). Raises DeploymentError on timeout.
-
-    Returns a lakebase_result-shaped dict pointing at the new branch, with an
-    added `branch_id` field so callers can reference the unique name (e.g.,
-    for SP role registration).
+    until an endpoint with a populated host appears. Raises DeploymentError on
+    timeout. Returns a lakebase_result-shaped dict with an added ``branch_id``.
     """
     if not HAS_AUTOSCALING_SDK:
         raise DeploymentError(
@@ -1157,7 +1150,6 @@ def _create_branch_from(
             "Upgrade databricks-sdk."
         )
 
-    branch_id = f"{target_branch_prefix}-{int(time.time())}"
     source_path = f"projects/{project_name}/branches/{source_branch}"
     target_parent = f"projects/{project_name}"
     target_path = f"projects/{project_name}/branches/{branch_id}"
@@ -1214,17 +1206,17 @@ def _recreate_ephemeral_branch(
     ws: WorkspaceClient,
     project_name: str,
     source_branch: str,
-    target_branch_prefix: str,
+    branch_id: str,
 ) -> dict[str, Any]:
-    """Create a fresh ephemeral Lakebase branch for this deploy.
+    """Refresh an ephemeral Lakebase branch to a fresh copy of source_branch.
 
-    Thin wrapper around _create_branch_from for call-site readability. Does
-    NOT delete any prior branch — we rely on Lakebase's TTL-driven garbage
-    collection (see _BRANCH_TTL_SECONDS) to clean up old branches, because
-    explicit delete has an async purge window that causes fixed-ID reuse to
-    collide for many minutes.
+    Deletes ``branch_id`` (idempotent — no-op if absent) then recreates it from
+    ``source_branch``. Delete-then-create on a fixed name was verified clean
+    (~6s, no collision); the older "skip delete and rely on TTL" workaround is
+    no longer needed.
     """
-    return _create_branch_from(ws, project_name, source_branch, target_branch_prefix)
+    _delete_branch(ws, project_name, branch_id)
+    return _create_branch_from(ws, project_name, source_branch, branch_id)
 
 
 def _write_requirements(
