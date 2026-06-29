@@ -1117,12 +1117,12 @@ def _delete_branch(
         raise
 
 
-# Lakebase branch TTL: 1 day. Branches auto-expire and are garbage-collected
-# after this window. The deploy flow relies on this for cleanup — we never
-# explicitly delete old branches, because Lakebase's delete is async and its
-# purge window is unpredictable (fixed-name reuse hits "branch id already
-# exists" for many minutes after delete). Unique-per-deploy IDs + TTL sidesteps
-# the whole issue.
+# Lakebase branch TTL: 1 day. This is now only an orphan backstop — if a deploy
+# crashes between create and cleanup, the TTL eventually garbage-collects the
+# stranded branch. The normal flow no longer relies on it: branches use fixed
+# names and are explicitly deleted and recreated (_recreate_ephemeral_branch,
+# delete_local) via _delete_branch, whose delete is idempotent and was verified
+# to leave the name immediately reusable.
 _BRANCH_TTL_SECONDS = 86400
 
 

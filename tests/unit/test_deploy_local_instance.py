@@ -17,7 +17,7 @@ NON_BRANCHING = {
 
 
 class TestValidateInstance:
-    @pytest.mark.parametrize("good", ["agent-7f3a", "a", "spike01", "x-1-2-3"])
+    @pytest.mark.parametrize("good", ["agent-7f3a", "a", "spike01", "x-1-2-3", "a" * 59])
     def test_accepts_valid(self, good):
         _validate_instance(good)  # no raise
 
@@ -50,7 +50,7 @@ class TestResolveTarget:
             _resolve_target(BRANCHING, "devloop", "Bad_Id")
 
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 
 class TestDeleteLocalBranch:

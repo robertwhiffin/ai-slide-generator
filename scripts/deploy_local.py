@@ -475,7 +475,7 @@ def create_local(
             "schema_name": schema_name,
             "wheel": wheel_path.name if wheel_path else None,
             "pypi_version": from_pypi,
-            "branch": env if branch_from_env else None,
+            "branch": target_branch if branch_from_env else None,
             "status": "created",
         }
 
@@ -654,7 +654,7 @@ def update_local(
             "wheel": wheel_path.name if wheel_path else None,
             "pypi_version": from_pypi,
             "status": "updated",
-            "branch": env if branch_from_env else None,
+            "branch": target_branch if branch_from_env else None,
             "database_reset": reset_database,
         }
 

@@ -37,6 +37,8 @@ usage() {
     echo "  --skip-build                 Skip wheel build (use existing wheels in dist/)"
     echo "  --from-pypi <version>        Deploy by pinning databricks-tellr-app==<version>"
     echo "                               from PyPI (skips the local wheel build/upload)"
+    echo "  --instance <id>              Ephemeral instance id for a branching env (e.g. devloop);"
+    echo "                               each gets its own app + prod branch"
     echo "  -h, --help                   Show this help message"
     echo ""
     echo "Examples:"
@@ -45,6 +47,8 @@ usage() {
     echo "  $0 update --env development --profile my-profile --reset-db"
     echo "  $0 update --env staging --profile my-profile --skip-build"
     echo "  $0 update --env development --profile my-profile --from-pypi 0.3.9.dev3"
+    echo "  $0 update --env devtest --profile my-profile --from-pypi 0.3.10.dev1"
+    echo "  $0 create --env devloop --instance agent-7f3a --profile my-profile --from-pypi 0.3.10.dev1"
     echo "  $0 delete --env development --profile my-profile"
     exit 1
 }
