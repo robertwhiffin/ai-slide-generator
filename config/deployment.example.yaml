@@ -79,27 +79,6 @@ environments:
       schema: "app_data"
       capacity: "CU_1"  # Options: CU_1, CU_2, CU_4, CU_8
 
-  # Isolated feature-test app (e.g. workspace deck sharing on feature/share-all).
-  # Copy to config/deployment.yaml and deploy with:
-  #   ./scripts/deploy_local.sh create --env azure_demo_share_all --profile azure_demo
-  azure_demo_share_all:
-    app_name: "tellr-share-all"
-    description: "Tellr - workspace sharing feature test"
-    workspace_path: "/Workspace/Users/YOU@example.com/.apps/tellr-share-all"
-    permissions:
-      - user_name: "YOU@example.com"
-        permission_level: "CAN_MANAGE"
-    compute_size: "MEDIUM"
-    env_vars:
-      ENVIRONMENT: "development"
-      LOG_LEVEL: "DEBUG"
-      LAKEBASE_INSTANCE: "tellr-share-all-db"
-      LAKEBASE_SCHEMA: "app_data"
-    lakebase:
-      database_name: "tellr-share-all-db"
-      schema: "app_data"
-      capacity: "CU_1"
-
 # Common settings across all environments
 common:
   build:
