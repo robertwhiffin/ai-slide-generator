@@ -771,6 +771,18 @@ def main() -> None:
             "instead of building/uploading a local wheel"
         ),
     )
+    parser.add_argument(
+        "--instance",
+        dest="instance",
+        type=str,
+        default=None,
+        metavar="ID",
+        help=(
+            "Ephemeral instance id for a branching env (e.g. devloop). "
+            "Derives app name db-<base>-<id>, branch dev-<id>, and a per-instance "
+            "workspace path. Required for concurrent dev-loop deploys."
+        ),
+    )
 
     args = parser.parse_args()
 
@@ -799,6 +811,7 @@ def main() -> None:
                 profile=args.profile,
                 seed_databricks_defaults=args.include_databricks_prompts,
                 from_pypi=args.from_pypi,
+                instance=args.instance,
             )
         elif args.action == "update":
             result = update_local(
@@ -807,12 +820,14 @@ def main() -> None:
                 reset_database=args.reset_db,
                 seed_databricks_defaults=args.include_databricks_prompts,
                 from_pypi=args.from_pypi,
+                instance=args.instance,
             )
         elif args.action == "delete":
             result = delete_local(
                 env=args.env,
                 profile=args.profile,
                 reset_database=args.reset_db,
+                instance=args.instance,
             )
         else:
             raise ValueError(f"Unknown action: {args.action}")
