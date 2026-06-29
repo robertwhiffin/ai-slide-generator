@@ -135,17 +135,17 @@ from databricks_tellr.deploy import _recreate_ephemeral_branch
 
 
 class TestRecreateEphemeralBranch:
-    def test_delegates_to_create_without_deleting(self, mock_ws, monkeypatch):
-        """Delete step removed — TTL handles cleanup. Verify we ONLY create."""
+    def test_deletes_then_creates_fixed_name(self, mock_ws, monkeypatch):
+        """Fresh copy each deploy = delete the fixed branch, then recreate it."""
         calls = []
 
         def fake_delete(ws, project, branch):
             calls.append(("delete", branch))
 
-        def fake_create(ws, project, source, prefix):
-            calls.append(("create", source, prefix))
+        def fake_create(ws, project, source, branch_id):
+            calls.append(("create", source, branch_id))
             return {"host": "x", "endpoint_name": "e", "type": "autoscaling",
-                    "branch_id": f"{prefix}-12345"}
+                    "branch_id": branch_id}
 
         monkeypatch.setattr("databricks_tellr.deploy._delete_branch", fake_delete)
         monkeypatch.setattr("databricks_tellr.deploy._create_branch_from", fake_create)
@@ -154,10 +154,12 @@ class TestRecreateEphemeralBranch:
             mock_ws,
             project_name="db-tellr",
             source_branch="production",
-            target_branch_prefix="staging",
+            branch_id="dev-agent-7f3a",
         )
 
-        # No delete — only create.
-        assert calls == [("create", "production", "staging")]
+        assert calls == [
+            ("delete", "dev-agent-7f3a"),
+            ("create", "production", "dev-agent-7f3a"),
+        ]
         assert result["host"] == "x"
-        assert result["branch_id"] == "staging-12345"
+        assert result["branch_id"] == "dev-agent-7f3a"

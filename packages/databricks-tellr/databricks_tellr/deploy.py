@@ -1206,17 +1206,17 @@ def _recreate_ephemeral_branch(
     ws: WorkspaceClient,
     project_name: str,
     source_branch: str,
-    target_branch_prefix: str,
+    branch_id: str,
 ) -> dict[str, Any]:
-    """Create a fresh ephemeral Lakebase branch for this deploy.
+    """Refresh an ephemeral Lakebase branch to a fresh copy of source_branch.
 
-    Thin wrapper around _create_branch_from for call-site readability. Does
-    NOT delete any prior branch — we rely on Lakebase's TTL-driven garbage
-    collection (see _BRANCH_TTL_SECONDS) to clean up old branches, because
-    explicit delete has an async purge window that causes fixed-ID reuse to
-    collide for many minutes.
+    Deletes ``branch_id`` (idempotent — no-op if absent) then recreates it from
+    ``source_branch``. Delete-then-create on a fixed name was verified clean
+    (~6s, no collision); the older "skip delete and rely on TTL" workaround is
+    no longer needed.
     """
-    return _create_branch_from(ws, project_name, source_branch, target_branch_prefix)
+    _delete_branch(ws, project_name, branch_id)
+    return _create_branch_from(ws, project_name, source_branch, branch_id)
 
 
 def _write_requirements(
