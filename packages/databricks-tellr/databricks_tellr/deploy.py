@@ -1130,26 +1130,19 @@ def _create_branch_from(
     ws: WorkspaceClient,
     project_name: str,
     source_branch: str,
-    target_branch_prefix: str,
+    branch_id: str,
 ) -> dict[str, Any]:
-    """Create a new Lakebase branch as a child of `source_branch`.
+    """Create a new Lakebase branch named ``branch_id`` as a child of
+    ``source_branch``.
 
-    The branch ID is `{target_branch_prefix}-{unix_timestamp}` so that every
-    deploy gets a fresh unique ID. This avoids the "branch id already exists"
-    collision we hit when trying to reuse a fixed ID right after a delete —
-    Lakebase's delete is async and its purge window is unpredictable.
-
-    Branch is created with a 1-day TTL so Lakebase garbage-collects it for us.
-    The staging app the branch backs will break after ~1 day; re-deploy to get
-    a fresh branch. This trade is intentional: no cleanup code, no stale state.
+    The branch id is used verbatim (a fixed per-instance name). A 1-day TTL is
+    attached purely as an orphan backstop so abandoned instances get
+    garbage-collected; freshness comes from delete-then-create (see
+    _recreate_ephemeral_branch), not from the TTL.
 
     Waits on the create operation, then polls list_endpoints on the new branch
-    until an endpoint with a populated host appears (up to
-    _BRANCH_ENDPOINT_TIMEOUT_S). Raises DeploymentError on timeout.
-
-    Returns a lakebase_result-shaped dict pointing at the new branch, with an
-    added `branch_id` field so callers can reference the unique name (e.g.,
-    for SP role registration).
+    until an endpoint with a populated host appears. Raises DeploymentError on
+    timeout. Returns a lakebase_result-shaped dict with an added ``branch_id``.
     """
     if not HAS_AUTOSCALING_SDK:
         raise DeploymentError(
@@ -1157,7 +1150,6 @@ def _create_branch_from(
             "Upgrade databricks-sdk."
         )
 
-    branch_id = f"{target_branch_prefix}-{int(time.time())}"
     source_path = f"projects/{project_name}/branches/{source_branch}"
     target_parent = f"projects/{project_name}"
     target_path = f"projects/{project_name}/branches/{branch_id}"

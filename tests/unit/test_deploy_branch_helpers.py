@@ -68,22 +68,19 @@ from databricks_tellr.deploy import _create_branch_from
 
 
 class TestCreateBranchFrom:
-    def test_creates_branch_with_correct_source(self, mock_ws, monkeypatch):
-        # Freeze time so the generated branch_id is deterministic.
-        monkeypatch.setattr("databricks_tellr.deploy.time.time", lambda: 1777000000)
-        expected_branch_id = "staging-1777000000"
+    def test_creates_branch_with_correct_source(self, mock_ws):
+        branch_id = "dev-agent-7f3a"
 
         create_op = MagicMock()
         mock_ws.postgres.create_branch.return_value = create_op
 
         endpoint_ready = MagicMock()
         endpoint_ready.name = (
-            f"projects/db-tellr/branches/{expected_branch_id}/endpoints/ep1"
+            f"projects/db-tellr/branches/{branch_id}/endpoints/ep1"
         )
         endpoint_ready.status = MagicMock(
-            hosts=MagicMock(host="staging-ep1.example.com")
+            hosts=MagicMock(host="dev-ep1.example.com")
         )
-        # Fresh iterator per call — avoids one-shot iter() exhaustion if polling loops.
         mock_ws.postgres.list_endpoints.side_effect = (
             lambda **kw: iter([endpoint_ready])
         )
@@ -92,38 +89,32 @@ class TestCreateBranchFrom:
             mock_ws,
             project_name="db-tellr",
             source_branch="production",
-            target_branch_prefix="staging",
+            branch_id=branch_id,
         )
 
-        # Verify create_branch call shape
         call_kwargs = mock_ws.postgres.create_branch.call_args.kwargs
         assert call_kwargs["parent"] == "projects/db-tellr"
-        # branch_id is {prefix}-{timestamp} — a fresh unique ID per deploy.
-        assert call_kwargs["branch_id"] == expected_branch_id
+        # branch_id is used verbatim — no timestamp suffix.
+        assert call_kwargs["branch_id"] == branch_id
         branch_arg = call_kwargs["branch"]
         assert branch_arg.spec.source_branch == "projects/db-tellr/branches/production"
-        # Databricks API requires an expiration policy. We use ttl=1 day and
-        # rely on TTL-driven auto-cleanup rather than explicit delete.
+        # TTL remains as an orphan backstop (not the freshness mechanism).
         assert branch_arg.spec.ttl is not None
         assert branch_arg.spec.ttl.seconds == 86400
-        # no_expiry MUST NOT be set when ttl is — they're mutually exclusive.
         assert not branch_arg.spec.no_expiry
 
         create_op.wait.assert_called_once()
 
-        # Verify returned lakebase_result shape
         assert result["type"] == "autoscaling"
         assert result["name"] == "db-tellr"
-        assert result["host"] == "staging-ep1.example.com"
+        assert result["host"] == "dev-ep1.example.com"
         assert (
             result["endpoint_name"]
-            == f"projects/db-tellr/branches/{expected_branch_id}/endpoints/ep1"
+            == f"projects/db-tellr/branches/{branch_id}/endpoints/ep1"
         )
         assert result["project_id"] == "db-tellr"
         assert result["instance_name"] is None
-        # New field: callers (SP role registration, schema grants) use this
-        # to reference the unique branch name.
-        assert result["branch_id"] == expected_branch_id
+        assert result["branch_id"] == branch_id
 
     def test_raises_when_no_endpoint_after_timeout(self, mock_ws, monkeypatch):
         """If list_endpoints never returns a ready endpoint, raise DeploymentError."""
@@ -137,7 +128,7 @@ class TestCreateBranchFrom:
         monkeypatch.setattr("databricks_tellr.deploy._BRANCH_ENDPOINT_TIMEOUT_S", 0.1)
 
         with pytest.raises(DeploymentError, match="no endpoint ready"):
-            _create_branch_from(mock_ws, "db-tellr", "production", "staging")
+            _create_branch_from(mock_ws, "db-tellr", "production", "dev-x")
 
 
 from databricks_tellr.deploy import _recreate_ephemeral_branch
