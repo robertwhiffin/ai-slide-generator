@@ -86,7 +86,7 @@ jobs:
       - name: Build databricks-tellr-app
         run: |
           cp -r src packages/databricks-tellr-app/src
-          python -m build --sdist --wheel packages/databricks-tellr-app
+          TELLR_INCLUDE_HUASHU_SIDECAR=1 python -m build --sdist --wheel packages/databricks-tellr-app
           rm -rf packages/databricks-tellr-app/src
 
       - name: Verify built artifacts

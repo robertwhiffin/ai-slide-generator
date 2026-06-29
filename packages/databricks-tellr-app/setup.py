@@ -1,8 +1,8 @@
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
-import os
 from pathlib import Path
 
 from setuptools import find_packages, setup
@@ -63,29 +63,30 @@ class BuildWithFrontend(build_py):
                 shutil.copytree(src_dir, src_target)
 
             sidecars_root.mkdir(parents=True, exist_ok=True)
-            # Sidecars are large (~30MB); omit unless TELLR_INCLUDE_SIDECARS=1 (e.g. PyPI release).
-            include_sidecars = os.environ.get("TELLR_INCLUDE_SIDECARS", "").lower() in (
+            # pptx-emit (~1MB) is required for editable PPTX export in deployed apps.
+            if records_sidecar_src.exists():
+                if records_sidecar_target.exists():
+                    shutil.rmtree(records_sidecar_target)
+                shutil.copytree(
+                    records_sidecar_src,
+                    records_sidecar_target,
+                    ignore=_SIDECAR_IGNORE,
+                )
+            # huashu sidecar tarballs (~30MB) exceed Databricks Apps workspace
+            # file limits for deploy_local; include for PyPI/CI via TELLR_INCLUDE_HUASHU_SIDECAR=1.
+            include_huashu = os.environ.get("TELLR_INCLUDE_HUASHU_SIDECAR", "").lower() in (
                 "1",
                 "true",
                 "yes",
             )
-            if include_sidecars:
-                if records_sidecar_src.exists():
-                    if records_sidecar_target.exists():
-                        shutil.rmtree(records_sidecar_target)
-                    shutil.copytree(
-                        records_sidecar_src,
-                        records_sidecar_target,
-                        ignore=_SIDECAR_IGNORE,
-                    )
-                if huashu_sidecar_src.exists():
-                    if huashu_sidecar_target.exists():
-                        shutil.rmtree(huashu_sidecar_target)
-                    shutil.copytree(
-                        huashu_sidecar_src,
-                        huashu_sidecar_target,
-                        ignore=_SIDECAR_IGNORE,
-                    )
+            if include_huashu and huashu_sidecar_src.exists():
+                if huashu_sidecar_target.exists():
+                    shutil.rmtree(huashu_sidecar_target)
+                shutil.copytree(
+                    huashu_sidecar_src,
+                    huashu_sidecar_target,
+                    ignore=_SIDECAR_IGNORE,
+                )
 
             super().run()
         finally:

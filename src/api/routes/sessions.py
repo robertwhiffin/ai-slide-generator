@@ -294,6 +294,8 @@ async def list_shared_presentations(
                 user_name=ctx.user_name,
                 group_ids=ctx.group_ids,
             )
+            if permission is None:
+                continue
 
             presentations.append({
                 "session_id": s.session_id,
@@ -305,7 +307,7 @@ async def list_shared_presentations(
                 "slide_count": deck.slide_count if deck else 0,
                 "modified_by": getattr(deck, "modified_by", None) or s.created_by,
                 "modified_at": deck.updated_at.isoformat() if deck and deck.updated_at else None,
-                "my_permission": permission.value if permission else "CAN_VIEW",
+                "my_permission": permission.value,
             })
 
         return {"presentations": presentations, "count": len(presentations)}

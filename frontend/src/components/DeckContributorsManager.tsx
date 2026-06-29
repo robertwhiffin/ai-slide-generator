@@ -17,6 +17,7 @@ import {
   type Identity,
   type PermissionLevel,
 } from '../api/config';
+import { matchesWorkspaceShareSearch } from '../utils/workspaceShareSearch';
 
 const DECK_PERMISSION_OPTIONS: { value: PermissionLevel; label: string; description: string }[] = [
   { value: 'CAN_VIEW', label: 'Can View', description: 'View the deck and its slides' },
@@ -264,7 +265,7 @@ export const DeckContributorsManager: React.FC<DeckContributorsManagerProps> = (
 
           {(searchResults.length > 0 || (searchQuery.length >= 1 && !globalPermission && canManage)) && (
             <div className="mt-2 border border-gray-200 rounded-md shadow-sm max-h-48 overflow-y-auto bg-white">
-              {!globalPermission && canManage && 'all workspace'.includes(searchQuery.toLowerCase()) && (
+              {!globalPermission && canManage && matchesWorkspaceShareSearch(searchQuery) && (
                 <button
                   onClick={() => handleSetGlobalPermission(workspacePermissionFromSelection())}
                   disabled={updatingGlobal}
@@ -302,7 +303,7 @@ export const DeckContributorsManager: React.FC<DeckContributorsManagerProps> = (
             </div>
           )}
 
-          {searchQuery.length >= 2 && !searching && searchResults.length === 0 && !('all workspace'.includes(searchQuery.toLowerCase()) && !globalPermission) && (
+          {searchQuery.length >= 2 && !searching && searchResults.length === 0 && !(matchesWorkspaceShareSearch(searchQuery) && !globalPermission) && (
             <p className="mt-2 text-sm text-gray-500 text-center py-2">
               No users found matching "{searchQuery}"
             </p>

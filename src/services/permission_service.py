@@ -457,10 +457,11 @@ class PermissionService:
             ).all()
             shared_session_ids.update(r.user_session_id for r in rows)
 
-        # Workspace-wide shared root sessions
+        # Workspace-wide shared root sessions (valid levels only)
+        valid_global = [p.value for p in VALID_DECK_GLOBAL_PERMISSIONS]
         global_rows = db.query(UserSession.id).filter(
             UserSession.parent_session_id.is_(None),
-            UserSession.global_permission.isnot(None),
+            UserSession.global_permission.in_(valid_global),
         ).all()
         shared_session_ids.update(r.id for r in global_rows)
 

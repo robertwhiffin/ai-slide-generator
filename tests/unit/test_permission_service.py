@@ -449,6 +449,43 @@ class TestGetSharedSessionIds:
         )
         assert session_other.id in ids
 
+    def test_invalid_global_not_in_shared_session_ids(self, db, session_other):
+        from src.services.permission_service import PermissionService
+
+        session_other.global_permission = PermissionLevel.CAN_MANAGE.value
+        db.commit()
+
+        svc = PermissionService()
+        ids = svc.get_shared_session_ids(
+            db,
+            user_id="uid-stranger",
+            user_name="stranger@test.com",
+            group_ids=[],
+        )
+        assert session_other.id not in ids
+
+    def test_explicit_contributor_remains_after_workspace_revoke(self, db, session_other):
+        from src.services.permission_service import PermissionService
+
+        session_other.global_permission = None
+        db.add(DeckContributor(
+            user_session_id=session_other.id,
+            identity_type="USER",
+            identity_id="uid-viewer",
+            identity_name="viewer@test.com",
+            permission_level=PermissionLevel.CAN_VIEW.value,
+        ))
+        db.commit()
+
+        svc = PermissionService()
+        ids = svc.get_shared_session_ids(
+            db,
+            user_id="uid-viewer",
+            user_name="viewer@test.com",
+            group_ids=[],
+        )
+        assert session_other.id in ids
+
 
 # ---------------------------------------------------------------------------
 # TestProfilePermissionRenamed
