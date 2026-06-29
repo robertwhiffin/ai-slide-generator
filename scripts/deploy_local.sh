@@ -37,6 +37,8 @@ usage() {
     echo "  --skip-build                 Skip wheel build (use existing wheels in dist/)"
     echo "  --from-pypi <version>        Deploy by pinning databricks-tellr-app==<version>"
     echo "                               from PyPI (skips the local wheel build/upload)"
+    echo "  --instance <id>              Ephemeral instance id for a branching env (e.g. devloop);"
+    echo "                               each gets its own app + prod branch"
     echo "  -h, --help                   Show this help message"
     echo ""
     echo "Examples:"
@@ -45,6 +47,8 @@ usage() {
     echo "  $0 update --env development --profile my-profile --reset-db"
     echo "  $0 update --env staging --profile my-profile --skip-build"
     echo "  $0 update --env development --profile my-profile --from-pypi 0.3.9.dev3"
+    echo "  $0 update --env devtest --profile my-profile --from-pypi 0.3.10.dev1"
+    echo "  $0 create --env devloop --instance agent-7f3a --profile my-profile --from-pypi 0.3.10.dev1"
     echo "  $0 delete --env development --profile my-profile"
     exit 1
 }
@@ -57,6 +61,7 @@ RESET_DB=""
 INCLUDE_DB_PROMPTS=""
 SKIP_BUILD=""
 FROM_PYPI=""
+INSTANCE=""
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -86,6 +91,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --from-pypi)
             FROM_PYPI="$2"
+            shift 2
+            ;;
+        --instance)
+            INSTANCE="$2"
             shift 2
             ;;
         -h|--help)
@@ -120,7 +129,7 @@ fi
 
 # Note: Environment names must match keys in config/deployment.yaml
 # Add new environments to the regex below when adding to deployment.yaml
-if [[ ! "$ENV" =~ ^(development|staging|production|test)$ ]]; then
+if [[ ! "$ENV" =~ ^(development|staging|production|test|devtest|devloop)$ ]]; then
     echo -e "${RED}Invalid environment: $ENV${NC}"
     echo "   Check config/deployment.yaml for valid environment names"
     exit 1
@@ -154,6 +163,9 @@ if [ -n "$SKIP_BUILD" ]; then
 fi
 if [ -n "$FROM_PYPI" ]; then
     echo "  PyPI:        $FROM_PYPI"
+fi
+if [ -n "$INSTANCE" ]; then
+    echo "  Instance:    $INSTANCE"
 fi
 echo ""
 
@@ -203,13 +215,19 @@ if [ -n "$FROM_PYPI" ]; then
     FROM_PYPI_ARG=(--from-pypi "$FROM_PYPI")
 fi
 
+INSTANCE_ARG=()
+if [ -n "$INSTANCE" ]; then
+    INSTANCE_ARG=(--instance "$INSTANCE")
+fi
+
 python -m scripts.deploy_local \
     --$ACTION \
     --env "$ENV" \
     --profile "$PROFILE" \
     $RESET_DB \
     $INCLUDE_DB_PROMPTS \
-    "${FROM_PYPI_ARG[@]}"
+    "${FROM_PYPI_ARG[@]}" \
+    "${INSTANCE_ARG[@]}"
 
 echo ""
 echo -e "${GREEN}Done!${NC}"
