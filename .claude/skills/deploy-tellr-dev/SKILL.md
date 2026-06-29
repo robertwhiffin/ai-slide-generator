@@ -43,6 +43,30 @@ Prod is unaffected: `pip` ignores pre-releases by default, so a bare
 
 3. Open the app URL and verify it loads.
 
+## Per-instance dev loop (`devloop`)
+
+For parallel/agentic loops, use `--env devloop --instance <id>` instead of
+`devtest`. Each instance gets its own app (`db-tellr-dev-<id>`) and a fresh
+copy-on-write branch of prod Lakebase (`branches/dev-<id>`), so concurrent
+instances stay isolated:
+
+```bash
+./scripts/deploy_local.sh create --env devloop --instance agent-7f3a \
+    --profile tellr-dev --from-pypi <version>    # first deploy
+./scripts/deploy_local.sh update --env devloop --instance agent-7f3a \
+    --profile tellr-dev --from-pypi <version>    # iterate (app reused, branch refreshed)
+./scripts/deploy_local.sh delete --env devloop --instance agent-7f3a \
+    --profile tellr-dev                          # teardown (app + branch)
+```
+
+`--instance` must match `^[a-z][a-z0-9-]*$` and be ≤59 chars. The branch is
+re-forked from prod on every deploy, so anything written to an instance is wiped
+on its next deploy.
+
+**Migration limitation:** a build that `ALTER`s an *inherited* prod table fails
+at startup with `must be owner of table` (creating new tables is fine). See
+`docs/technical/dev-deploy.md` for details.
+
 ## Reading deploy logs
 
 App logs require OAuth (not PAT):
