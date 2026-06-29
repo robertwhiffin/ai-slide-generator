@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import shutil
 import sys
 import tempfile
@@ -137,6 +138,45 @@ def load_deployment_config(env: str) -> dict[str, Any]:
         "branch_from_workspace_path": branch_from_workspace_path,
         **ml_flat,
     }
+
+
+_INSTANCE_RE = re.compile(r"^[a-z][a-z0-9-]*$")
+
+
+def _validate_instance(instance: str) -> None:
+    """Validate a deploy instance id. Raises DeploymentError if invalid."""
+    if not _INSTANCE_RE.match(instance) or len(instance) > 59:
+        raise DeploymentError(
+            "--instance must match ^[a-z][a-z0-9-]*$ and be <=59 chars "
+            f"(got '{instance}')"
+        )
+
+
+def _resolve_target(
+    config: dict[str, Any], env: str, instance: Optional[str]
+) -> tuple[str, str, str]:
+    """Resolve (app_name, workspace_path, target_branch) for a deploy.
+
+    Without an instance: names come straight from config and the branch is named
+    after the env. With an instance: the env must be a branching env; the app
+    name and workspace path are suffixed with the instance and the branch is
+    ``dev-<instance>``.
+    """
+    app_name = config["app_name"]
+    workspace_path = config["workspace_path"]
+    if instance is None:
+        return app_name, workspace_path, env
+    if not config.get("branch_from_env"):
+        raise DeploymentError(
+            f"--instance requires a branch_from env; '{env}' is not a "
+            "branching env"
+        )
+    _validate_instance(instance)
+    return (
+        f"{app_name}-{instance}",
+        f"{workspace_path}/{instance}",
+        f"dev-{instance}",
+    )
 
 
 def find_app_wheel() -> Path:
