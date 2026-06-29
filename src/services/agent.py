@@ -39,7 +39,7 @@ from src.core.databricks_client import (
     get_system_client,
 )
 from src.core.settings_db import get_settings
-from src.domain.slide import Slide
+from src.domain.slide import Slide, has_slide_wrapper
 from src.services.image_tools import SearchImagesInput, search_images
 from src.services.tools import initialize_genie_conversation, query_genie_space
 from src.utils.html_safety import scan_html_for_unsafe_patterns
@@ -966,7 +966,7 @@ class SlideGeneratorAgent:
         for pattern in confusion_patterns:
             if (
                 pattern.lower() in lower_response
-                and '<div class="slide"' not in llm_response
+                and not has_slide_wrapper(llm_response)
             ):
                 return (
                     False,

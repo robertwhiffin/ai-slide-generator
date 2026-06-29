@@ -1,8 +1,32 @@
 """Slide class for representing individual slides as raw HTML."""
 
 import copy
+import re
 from datetime import datetime
 from typing import Optional
+
+
+# Matches a <div> carrying the `slide` class token, regardless of quote style,
+# attribute order, or compound classes (e.g. `class="slide title-slide"`).
+# This mirrors BeautifulSoup's `find_all("div", class_="slide")` parsing used to
+# extract slides from LLM output, and the frontend's SLIDE_DIV_PATTERN in
+# Message.tsx — keep the three in sync. A naive `'<div class="slide"' in html`
+# substring check breaks on single quotes, reordered attributes, and compound
+# classes (all of which the browser's DOMParser round-trip in the visual editor
+# can produce), so use this token-aware regex instead.
+_SLIDE_DIV_RE = re.compile(
+    r'<div\b[^>]*\bclass\s*=\s*["\'](?:[^"\']*\s)?slide(?:\s[^"\']*)?["\']',
+    re.IGNORECASE,
+)
+
+
+def has_slide_wrapper(html: str) -> bool:
+    """Return True if the HTML contains a <div> with the `slide` class token.
+
+    Accepts every legitimate wrapper variant (single/double quotes, compound
+    classes, attributes before `class`) that the backend slide parser accepts.
+    """
+    return bool(html) and _SLIDE_DIV_RE.search(html) is not None
 
 
 class Slide:
