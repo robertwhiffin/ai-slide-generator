@@ -1,7 +1,7 @@
 """Unit tests for Slide class."""
 
 import pytest
-from src.domain.slide import Slide
+from src.domain.slide import Slide, has_slide_wrapper
 
 
 class TestSlideCreation:
@@ -127,7 +127,54 @@ class TestSlideEdgeCases:
     <p>Content</p>
 </div>"""
         slide = Slide(html=html)
-        
+
         assert slide.html == html
         assert '\n' in slide.to_html()
+
+
+class TestHasSlideWrapper:
+    """Tests for has_slide_wrapper (issue #201 regression).
+
+    The visual editor round-trips slide HTML through the browser's DOMParser,
+    which can reorder attributes, switch quote style, or emit compound classes.
+    A naive `'<div class="slide"' in html` substring check rejected those valid
+    slides on save; has_slide_wrapper must accept every variant the backend
+    slide parser (BeautifulSoup find_all(class_="slide")) accepts.
+    """
+
+    @pytest.mark.parametrize(
+        "html",
+        [
+            '<div class="slide">ok</div>',
+            "<div class='slide'>single quotes</div>",
+            '<div class="slide title-slide">compound class</div>',
+            '<div class="title-slide slide">token at end</div>',
+            '<div class="a slide b">token in middle</div>',
+            '<div data-slide-index="3" class="slide">attr before class</div>',
+            '<DIV CLASS="SLIDE">uppercase tag/attr</DIV>',
+            '<div  class = "slide" >loose whitespace</div>',
+            '<section><div class="slide">nested</div></section>',
+            '<div class="slide">a</div>\n<div class="slide">b</div>',
+        ],
+    )
+    def test_accepts_valid_wrappers(self, html):
+        assert has_slide_wrapper(html) is True
+
+    @pytest.mark.parametrize(
+        "html",
+        [
+            "",
+            "<div>no class</div>",
+            '<div class="slides">plural is not the token</div>',
+            '<div class="slideshow">substring is not the token</div>',
+            '<div class="myslide">prefixed is not the token</div>',
+            "<p>just some text, no slide div at all</p>",
+            "I'm sorry, there are no slides to display.",
+        ],
+    )
+    def test_rejects_without_wrapper(self, html):
+        assert has_slide_wrapper(html) is False
+
+    def test_none_is_safe(self):
+        assert has_slide_wrapper(None) is False
 
