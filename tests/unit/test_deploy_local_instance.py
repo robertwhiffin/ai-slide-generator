@@ -48,3 +48,51 @@ class TestResolveTarget:
     def test_instance_invalid_slug_raises(self):
         with pytest.raises(DeploymentError):
             _resolve_target(BRANCHING, "devloop", "Bad_Id")
+
+
+from unittest.mock import MagicMock, patch
+
+
+class TestDeleteLocalBranch:
+    def test_deletes_app_and_instance_branch(self, monkeypatch):
+        import scripts.deploy_local as dl
+
+        cfg = {
+            "app_name": "db-tellr-dev",
+            "workspace_path": "/Workspace/Users/x/.apps/devloop",
+            "lakebase_name": "db-tellr",
+            "schema_name": "app_data_prod",
+            "branch_from_env": "production",
+        }
+        monkeypatch.setattr(dl, "load_deployment_config", lambda env: cfg)
+        fake_ws = MagicMock()
+        monkeypatch.setattr(dl, "_get_workspace_client", lambda profile: fake_ws)
+        delete_calls = {}
+        monkeypatch.setattr(dl, "delete", lambda **kw: delete_calls.update(kw) or {"status": "deleted"})
+        branch_calls = []
+        monkeypatch.setattr(dl, "_delete_branch", lambda ws, proj, br: branch_calls.append((proj, br)))
+
+        dl.delete_local(env="devloop", profile="p", instance="agent-7f3a")
+
+        # App deleted under the instance-suffixed name
+        assert delete_calls["app_name"] == "db-tellr-dev-agent-7f3a"
+        # Branch deleted with the fixed dev-<instance> name
+        assert branch_calls == [("db-tellr", "dev-agent-7f3a")]
+
+    def test_non_branching_delete_does_not_touch_branches(self, monkeypatch):
+        import scripts.deploy_local as dl
+
+        cfg = {
+            "app_name": "db-tellr-dev",
+            "workspace_path": "/Workspace/Users/x/.apps/dev",
+            "lakebase_name": "db-tellr",
+            "schema_name": "tellr_app_data_dev",
+            "branch_from_env": None,
+        }
+        monkeypatch.setattr(dl, "load_deployment_config", lambda env: cfg)
+        monkeypatch.setattr(dl, "delete", lambda **kw: {"status": "deleted"})
+        branch_calls = []
+        monkeypatch.setattr(dl, "_delete_branch", lambda ws, proj, br: branch_calls.append((proj, br)))
+
+        dl.delete_local(env="development", profile="p")
+        assert branch_calls == []
