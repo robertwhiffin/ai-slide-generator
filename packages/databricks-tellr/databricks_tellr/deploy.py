@@ -1474,6 +1474,36 @@ def _get_app_client_id(app: App) -> str | None:
     return None
 
 
+def _resolve_production_endpoint(
+    ws: WorkspaceClient, project_name: str, branch_name: str = "production",
+) -> dict[str, Any]:
+    """Resolve an autoscaling branch's host + endpoint_name for a psycopg2 connect.
+
+    Returns a dict shaped like _get_or_create_lakebase()'s autoscaling result so
+    it can be passed straight to _get_lakebase_connection(..., lakebase_result=...).
+    """
+    branch_path = f"projects/{project_name}/branches/{branch_name}"
+    endpoints = list(ws.postgres.list_endpoints(parent=branch_path))
+    ready = next(
+        (
+            e for e in endpoints
+            if getattr(e, "status", None)
+            and getattr(e.status, "hosts", None)
+            and getattr(e.status.hosts, "host", None)
+        ),
+        None,
+    )
+    if not ready:
+        raise DeploymentError(
+            f"no ready endpoint for {branch_path} in project {project_name}"
+        )
+    return {
+        "type": "autoscaling",
+        "host": ready.status.hosts.host,
+        "endpoint_name": ready.name,
+    }
+
+
 def _get_lakebase_connection(
     ws: WorkspaceClient, lakebase_name: str, lakebase_result: dict[str, Any] | None = None,
 ) -> tuple[Any, str]:
