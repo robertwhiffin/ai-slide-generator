@@ -137,6 +137,7 @@ def load_deployment_config(env: str) -> dict[str, Any]:
         "schema_name": schema_name,
         "branch_from_env": branch_from,
         "branch_from_workspace_path": branch_from_workspace_path,
+        "owner_grant_job_id": lakebase_config.get("owner_grant_job_id"),
         **ml_flat,
     }
 
@@ -301,6 +302,28 @@ def _check_branching_preconditions(
     return encryption_key
 
 
+def _trigger_owner_grant_job(ws, job_id, new_sp_id, host, endpoint_name) -> None:
+    """Run the serverless grant job (as the granter SP) to add new_sp_id to the
+    shared owning role on this branch, and wait for it. Raises on failure so a
+    deploy never proceeds with an SP that cannot migrate its fork."""
+    print(f"   Granting SP {new_sp_id} into shared owning role via job {job_id}...")
+    run = ws.jobs.run_now(
+        job_id=job_id,
+        python_params=[
+            "--new-sp-id", new_sp_id,
+            "--host", host,
+            "--endpoint-name", endpoint_name,
+        ],
+    ).result()
+    state = run.state.result_state if run.state else None
+    if str(state) != "SUCCESS" and getattr(state, "value", None) != "SUCCESS":
+        raise DeploymentError(
+            f"owner-grant job {job_id} did not succeed (state={state}); "
+            f"SP {new_sp_id} cannot migrate its fork"
+        )
+    print("   SP granted into shared owning role")
+
+
 def create_local(
     env: str,
     profile: str,
@@ -447,6 +470,12 @@ def create_local(
                 _ensure_sp_autoscaling_role(
                     ws, lakebase_name, client_id, branch_name=sp_branch
                 )
+                grant_job_id = config.get("owner_grant_job_id")
+                if branch_from_env and grant_job_id and client_id:
+                    _trigger_owner_grant_job(
+                        ws, grant_job_id, client_id,
+                        lakebase_result["host"], lakebase_result["endpoint_name"],
+                    )
             else:
                 print("   Warning: Could not get SP client ID — role setup skipped")
 
