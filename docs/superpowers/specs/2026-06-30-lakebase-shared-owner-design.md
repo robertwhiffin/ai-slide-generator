@@ -116,9 +116,11 @@ only. Authenticates **two ways** in a single run:
 **As the operator** (ambient SDK/profile creds; the operator has `CREATEROLE`):
 1. `CREATE ROLE tellr_app_owners NOLOGIN` if absent.
 2. `GRANT tellr_app_owners TO "<granter-sp-id>" WITH ADMIN OPTION, INHERIT FALSE`.
-3. `GRANT tellr_app_owners TO "<owner-sp-id>" WITH INHERIT TRUE` (so the prod SP
-   can reassign to the role, and — once it no longer *owns* the tables — can still
-   `ALTER` them via `INHERIT` when running prod migrations).
+3. `GRANT tellr_app_owners TO "<owner-sp-id>" WITH INHERIT TRUE, SET TRUE` (so the
+   prod SP can reassign to the role and run `ALTER SCHEMA ... OWNER TO` it — which
+   requires the `SET` option — and, once it no longer *owns* the tables, can still
+   `ALTER` them via `INHERIT` when running prod migrations). `SET TRUE` is made
+   explicit rather than relying on PG16's default; validated live 2026-07-01.
 
 **As the prod SP** (pasted UI-issued OAuth token):
 4. `REASSIGN OWNED BY CURRENT_USER TO tellr_app_owners` (moves all tables/sequences

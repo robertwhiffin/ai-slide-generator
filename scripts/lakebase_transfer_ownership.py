@@ -39,7 +39,9 @@ def operator_setup(cur, owning_role: str, granter_sp_id: str, owner_sp_id: str) 
     if not owning_role_exists(cur, owning_role):
         cur.execute(sql_create_owning_role(owning_role))
     cur.execute(sql_grant_admin(owning_role, granter_sp_id))
-    cur.execute(sql_grant_member(owning_role, owner_sp_id))
+    # prod SP needs SET (not just INHERIT) so it can ALTER ... OWNER TO the role
+    # during the reassign phase; validated live on db-tellr-280426 (2026-07-01).
+    cur.execute(sql_grant_member(owning_role, owner_sp_id, with_set=True))
 
 
 def reassign_as_owner(cur, owning_role: str, schema: str) -> None:

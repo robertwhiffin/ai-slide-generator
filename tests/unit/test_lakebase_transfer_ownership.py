@@ -16,7 +16,7 @@ def test_operator_setup_emits_create_and_grants():
     executed = [c.args[0] for c in cur.execute.call_args_list]
     assert 'CREATE ROLE "tellr_app_owners" NOLOGIN' in executed
     assert 'GRANT "tellr_app_owners" TO "gid" WITH ADMIN OPTION, INHERIT FALSE' in executed
-    assert 'GRANT "tellr_app_owners" TO "oid" WITH INHERIT TRUE' in executed
+    assert 'GRANT "tellr_app_owners" TO "oid" WITH INHERIT TRUE, SET TRUE' in executed
 
 
 def test_operator_setup_skips_create_when_role_exists():

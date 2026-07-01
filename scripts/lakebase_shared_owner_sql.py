@@ -17,8 +17,15 @@ def sql_grant_admin(role: str, granter_sp_id: str) -> str:
     return f'GRANT "{role}" TO "{granter_sp_id}" WITH ADMIN OPTION, INHERIT FALSE'
 
 
-def sql_grant_member(role: str, sp_id: str) -> str:
-    return f'GRANT "{role}" TO "{sp_id}" WITH INHERIT TRUE'
+def sql_grant_member(role: str, sp_id: str, with_set: bool = False) -> str:
+    # INHERIT TRUE gives the member owner rights on the role's tables. SET TRUE
+    # (needed only by the prod SP during the one-off transfer, to run
+    # ALTER ... OWNER TO the role) is off by default so per-deploy dev-SP grants
+    # stay least-privilege. PG16 already defaults SET to TRUE for an explicit
+    # membership grant; making it explicit removes reliance on that default for
+    # the irreversible prod transfer.
+    opts = "INHERIT TRUE, SET TRUE" if with_set else "INHERIT TRUE"
+    return f'GRANT "{role}" TO "{sp_id}" WITH {opts}'
 
 
 def sql_reassign_owned(role: str = OWNING_ROLE) -> str:

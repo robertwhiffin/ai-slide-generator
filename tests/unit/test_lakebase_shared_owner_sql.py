@@ -14,6 +14,10 @@ def test_sql_builders_exact_strings():
         m.sql_grant_member("tellr_app_owners", "sid")
         == 'GRANT "tellr_app_owners" TO "sid" WITH INHERIT TRUE'
     )
+    assert (
+        m.sql_grant_member("tellr_app_owners", "sid", with_set=True)
+        == 'GRANT "tellr_app_owners" TO "sid" WITH INHERIT TRUE, SET TRUE'
+    )
     assert m.sql_reassign_owned("tellr_app_owners") == 'REASSIGN OWNED BY CURRENT_USER TO "tellr_app_owners"'
     assert (
         m.sql_alter_schema_owner("app_data_prod", "tellr_app_owners")
