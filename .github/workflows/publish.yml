@@ -89,13 +89,32 @@ jobs:
           TELLR_INCLUDE_HUASHU_SIDECAR=1 python -m build --sdist --wheel packages/databricks-tellr-app
           rm -rf packages/databricks-tellr-app/src
 
-      - name: Verify built artifacts
+      - name: Verify built artifacts (huashu tarballs present, wheel >= 25MB)
         run: |
           echo "databricks-tellr:"
           ls -lh packages/databricks-tellr/dist/
           echo ""
           echo "databricks-tellr-app:"
           ls -lh packages/databricks-tellr-app/dist/
+          python - <<'PY'
+          import glob, os, sys, zipfile
+          wheels = glob.glob("packages/databricks-tellr-app/dist/*.whl")
+          if len(wheels) != 1:
+              sys.exit(f"ERROR: expected exactly one wheel, found: {wheels}")
+          wheel = wheels[0]
+          size_mb = os.path.getsize(wheel) / (1024 * 1024)
+          print(f"Wheel: {wheel} ({size_mb:.1f} MB)")
+          base = "databricks_tellr_app/_assets/sidecars/pptx-emit-huashu"
+          required = [f"{base}/node_modules.tar.gz", f"{base}/sys-libs-bullseye.tar.gz"]
+          with zipfile.ZipFile(wheel) as zf:
+              names = set(zf.namelist())
+          missing = [n for n in required if n not in names]
+          if missing:
+              sys.exit("ERROR: wheel missing huashu tarball(s): " + ", ".join(missing))
+          if size_mb < 25:
+              sys.exit(f"ERROR: wheel is {size_mb:.1f} MB, under the 25MB floor")
+          print("Verify gate passed.")
+          PY
 
       - name: Upload tellr dist
         uses: actions/upload-artifact@v4
