@@ -14,11 +14,12 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import shutil
 import sys
 import tempfile
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 import yaml
 from databricks.sdk import WorkspaceClient
@@ -32,6 +33,7 @@ sys.path.insert(0, str(PROJECT_ROOT / "packages" / "databricks-tellr"))
 from databricks_tellr.deploy import (
     DeploymentError,
     _branch_exists,
+    _delete_branch,
     _get_workspace_client,
     _get_or_create_lakebase,
     _mlflow_flat_from_env_section,
@@ -41,6 +43,7 @@ from databricks_tellr.deploy import (
     _recreate_ephemeral_branch,
     _write_requirements,
     _write_app_yaml,
+    _is_valid_version,
     _upload_files,
     _create_app,
     _deploy_app,
@@ -134,8 +137,48 @@ def load_deployment_config(env: str) -> dict[str, Any]:
         "schema_name": schema_name,
         "branch_from_env": branch_from,
         "branch_from_workspace_path": branch_from_workspace_path,
+        "owner_grant_job_id": lakebase_config.get("owner_grant_job_id"),
         **ml_flat,
     }
+
+
+_INSTANCE_RE = re.compile(r"^[a-z][a-z0-9-]*$")
+
+
+def _validate_instance(instance: str) -> None:
+    """Validate a deploy instance id. Raises DeploymentError if invalid."""
+    if not _INSTANCE_RE.match(instance) or len(instance) > 59:
+        raise DeploymentError(
+            "--instance must match ^[a-z][a-z0-9-]*$ and be <=59 chars "
+            f"(got '{instance}')"
+        )
+
+
+def _resolve_target(
+    config: dict[str, Any], env: str, instance: Optional[str]
+) -> tuple[str, str, str]:
+    """Resolve (app_name, workspace_path, target_branch) for a deploy.
+
+    Without an instance: names come straight from config and the branch is named
+    after the env. With an instance: the env must be a branching env; the app
+    name and workspace path are suffixed with the instance and the branch is
+    ``dev-<instance>``.
+    """
+    app_name = config["app_name"]
+    workspace_path = config["workspace_path"]
+    if instance is None:
+        return app_name, workspace_path, env
+    if not config.get("branch_from_env"):
+        raise DeploymentError(
+            f"--instance requires a branch_from env; '{env}' is not a "
+            "branching env"
+        )
+    _validate_instance(instance)
+    return (
+        f"{app_name}-{instance}",
+        f"{workspace_path}/{instance}",
+        f"dev-{instance}",
+    )
 
 
 def find_app_wheel() -> Path:
@@ -259,10 +302,34 @@ def _check_branching_preconditions(
     return encryption_key
 
 
+def _trigger_owner_grant_job(ws, job_id, new_sp_id, host, endpoint_name) -> None:
+    """Run the serverless grant job (as the granter SP) to add new_sp_id to the
+    shared owning role on this branch, and wait for it. Raises on failure so a
+    deploy never proceeds with an SP that cannot migrate its fork."""
+    print(f"   Granting SP {new_sp_id} into shared owning role via job {job_id}...")
+    run = ws.jobs.run_now(
+        job_id=job_id,
+        python_params=[
+            "--new-sp-id", new_sp_id,
+            "--host", host,
+            "--endpoint-name", endpoint_name,
+        ],
+    ).result()
+    state = run.state.result_state if run.state else None
+    if str(state) != "SUCCESS" and getattr(state, "value", None) != "SUCCESS":
+        raise DeploymentError(
+            f"owner-grant job {job_id} did not succeed (state={state}); "
+            f"SP {new_sp_id} cannot migrate its fork"
+        )
+    print("   SP granted into shared owning role")
+
+
 def create_local(
     env: str,
     profile: str,
     seed_databricks_defaults: bool = True,
+    from_pypi: Optional[str] = None,
+    instance: Optional[str] = None,
 ) -> dict[str, Any]:
     """Create a new Databricks App using locally-built wheels.
 
@@ -270,6 +337,9 @@ def create_local(
         env: Environment name (development, staging, production)
         profile: Databricks CLI profile name
         seed_databricks_defaults: If True, seed Databricks-specific content
+        from_pypi: If set (a version string), skip building/uploading a
+            local wheel and instead pin ``databricks-tellr-app==<version>``
+            from PyPI.
 
     Returns:
         Dictionary with deployment info
@@ -277,8 +347,7 @@ def create_local(
     config = load_deployment_config(env)
     ws = _get_workspace_client(profile=profile)
 
-    app_name = config["app_name"]
-    workspace_path = config["workspace_path"]
+    app_name, workspace_path, target_branch = _resolve_target(config, env, instance)
     lakebase_name = config["lakebase_name"]
     schema_name = config["schema_name"]
     branch_from_env = config.get("branch_from_env")
@@ -289,19 +358,27 @@ def create_local(
     print(f"   Lakebase: {lakebase_name}")
     print(f"   Schema: {schema_name}")
     if branch_from_env:
-        print(f"   Branching from: {branch_from_env} (ephemeral branch '{env}')")
+        print(f"   Branching from: {branch_from_env} (ephemeral branch '{target_branch}')")
     print()
 
     try:
-        # Find and upload wheel
-        print("Finding built wheel...")
-        wheel_path = find_app_wheel()
-        print(f"   Found: {wheel_path.name}")
+        # Resolve the app package source: local wheel (default) or PyPI.
+        wheel_path = None
+        local_wheel_ref = None
+        if from_pypi:
+            print(f"Using PyPI version: databricks-tellr-app=={from_pypi}")
+            print("   Skipping local wheel build/upload")
+            print()
+        else:
+            # Find and upload wheel
+            print("Finding built wheel...")
+            wheel_path = find_app_wheel()
+            print(f"   Found: {wheel_path.name}")
 
-        print("Uploading wheel to workspace...")
-        local_wheel_ref = upload_wheel(ws, wheel_path, workspace_path)
-        print(f"   Uploaded: {local_wheel_ref}")
-        print()
+            print("Uploading wheel to workspace...")
+            local_wheel_ref = upload_wheel(ws, wheel_path, workspace_path)
+            print(f"   Uploaded: {local_wheel_ref}")
+            print()
 
         # Branching mode: preflight + recreate branch
         encryption_key = None
@@ -310,9 +387,9 @@ def create_local(
             encryption_key = _check_branching_preconditions(ws, config)
             print(f"   Preflight OK (source: {branch_from_env})")
 
-            print(f"Creating ephemeral branch off '{branch_from_env}'...")
+            print(f"Creating ephemeral branch '{target_branch}' off '{branch_from_env}'...")
             lakebase_result = _recreate_ephemeral_branch(
-                ws, lakebase_name, branch_from_env, env
+                ws, lakebase_name, branch_from_env, target_branch
             )
             print(
                 f"   Branch '{lakebase_result['branch_id']}' ready "
@@ -334,8 +411,14 @@ def create_local(
         print("Preparing deployment files...")
         staging_dir = Path(tempfile.mkdtemp(prefix="tellr_local_staging_"))
         try:
-            _write_requirements(staging_dir, None, local_wheel_path=local_wheel_ref)
-            print("   Generated requirements.txt (local wheel)")
+            if from_pypi:
+                _write_requirements(staging_dir, from_pypi)
+                print(f"   Generated requirements.txt (PyPI: {from_pypi})")
+            else:
+                _write_requirements(
+                    staging_dir, None, local_wheel_path=local_wheel_ref
+                )
+                print("   Generated requirements.txt (local wheel)")
 
             mlflow_subs = _mlflow_substitutions_for_app_yaml(
                 deployment_flat=config,
@@ -387,6 +470,12 @@ def create_local(
                 _ensure_sp_autoscaling_role(
                     ws, lakebase_name, client_id, branch_name=sp_branch
                 )
+                grant_job_id = config.get("owner_grant_job_id")
+                if branch_from_env and grant_job_id and client_id:
+                    _trigger_owner_grant_job(
+                        ws, grant_job_id, client_id,
+                        lakebase_result["host"], lakebase_result["endpoint_name"],
+                    )
             else:
                 print("   Warning: Could not get SP client ID — role setup skipped")
 
@@ -413,8 +502,9 @@ def create_local(
             "app_name": app_name,
             "lakebase_name": lakebase_name,
             "schema_name": schema_name,
-            "wheel": wheel_path.name,
-            "branch": env if branch_from_env else None,
+            "wheel": wheel_path.name if wheel_path else None,
+            "pypi_version": from_pypi,
+            "branch": target_branch if branch_from_env else None,
             "status": "created",
         }
 
@@ -427,13 +517,18 @@ def update_local(
     profile: str,
     reset_database: bool = False,
     seed_databricks_defaults: bool = True,
+    from_pypi: Optional[str] = None,
+    instance: Optional[str] = None,
 ) -> dict[str, Any]:
-    """Update an existing Databricks App using locally-built wheels."""
+    """Update an existing Databricks App using locally-built wheels.
+
+    When ``from_pypi`` is set (a version string), skip building/uploading a
+    local wheel and instead pin ``databricks-tellr-app==<version>`` from PyPI.
+    """
     config = load_deployment_config(env)
     ws = _get_workspace_client(profile=profile)
 
-    app_name = config["app_name"]
-    workspace_path = config["workspace_path"]
+    app_name, workspace_path, target_branch = _resolve_target(config, env, instance)
     lakebase_name = config["lakebase_name"]
     schema_name = config["schema_name"]
     branch_from_env = config.get("branch_from_env")
@@ -447,7 +542,7 @@ def update_local(
 
     print(f"Updating AI Slide Generator (local wheels): {app_name}")
     if branch_from_env:
-        print(f"   Branching from: {branch_from_env} (ephemeral branch '{env}')")
+        print(f"   Branching from: {branch_from_env} (ephemeral branch '{target_branch}')")
     print()
 
     try:
@@ -467,9 +562,9 @@ def update_local(
                     f"run 'deploy_local.sh create --env {env}' first"
                 ) from e
 
-            print(f"Recreating ephemeral branch '{env}' from '{branch_from_env}'...")
+            print(f"Recreating ephemeral branch '{target_branch}' from '{branch_from_env}'...")
             lakebase_result = _recreate_ephemeral_branch(
-                ws, lakebase_name, branch_from_env, env
+                ws, lakebase_name, branch_from_env, target_branch
             )
             print(
                 f"   Branch '{lakebase_result['branch_id']}' ready "
@@ -485,6 +580,15 @@ def update_local(
                     ws, lakebase_name, client_id,
                     branch_name=lakebase_result["branch_id"],
                 )
+                # update re-forks the branch (fresh prod copy), so the SP's
+                # fork-scoped tellr_app_owners membership from the previous
+                # deploy is gone — re-grant it on the new branch, same as create.
+                grant_job_id = config.get("owner_grant_job_id")
+                if branch_from_env and grant_job_id and client_id:
+                    _trigger_owner_grant_job(
+                        ws, grant_job_id, client_id,
+                        lakebase_result["host"], lakebase_result["endpoint_name"],
+                    )
             else:
                 print(
                     "   Warning: Could not get SP client ID — role setup skipped"
@@ -520,22 +624,36 @@ def update_local(
             print(f"   Schema '{schema_name}' reset")
             print()
 
-        # Find and upload wheel
-        print("Finding built wheel...")
-        wheel_path = find_app_wheel()
-        print(f"   Found: {wheel_path.name}")
+        # Resolve the app package source: local wheel (default) or PyPI.
+        wheel_path = None
+        local_wheel_ref = None
+        if from_pypi:
+            print(f"Using PyPI version: databricks-tellr-app=={from_pypi}")
+            print("   Skipping local wheel build/upload")
+            print()
+        else:
+            # Find and upload wheel
+            print("Finding built wheel...")
+            wheel_path = find_app_wheel()
+            print(f"   Found: {wheel_path.name}")
 
-        print("Uploading wheel to workspace...")
-        local_wheel_ref = upload_wheel(ws, wheel_path, workspace_path)
-        print(f"   Uploaded: {local_wheel_ref}")
-        print()
+            print("Uploading wheel to workspace...")
+            local_wheel_ref = upload_wheel(ws, wheel_path, workspace_path)
+            print(f"   Uploaded: {local_wheel_ref}")
+            print()
 
         # Generate and upload deployment files
         print("Preparing deployment files...")
         staging_dir = Path(tempfile.mkdtemp(prefix="tellr_local_staging_"))
         try:
-            _write_requirements(staging_dir, None, local_wheel_path=local_wheel_ref)
-            print("   Generated requirements.txt (local wheel)")
+            if from_pypi:
+                _write_requirements(staging_dir, from_pypi)
+                print(f"   Generated requirements.txt (PyPI: {from_pypi})")
+            else:
+                _write_requirements(
+                    staging_dir, None, local_wheel_path=local_wheel_ref
+                )
+                print("   Generated requirements.txt (local wheel)")
 
             mlflow_subs = _mlflow_substitutions_for_app_yaml(
                 deployment_flat=config,
@@ -571,9 +689,10 @@ def update_local(
             "url": app.url,
             "app_name": app_name,
             "deployment_id": result.deployment_id,
-            "wheel": wheel_path.name,
+            "wheel": wheel_path.name if wheel_path else None,
+            "pypi_version": from_pypi,
             "status": "updated",
-            "branch": env if branch_from_env else None,
+            "branch": target_branch if branch_from_env else None,
             "database_reset": reset_database,
         }
 
@@ -581,10 +700,14 @@ def update_local(
         raise DeploymentError(f"Update failed: {e}") from e
 
 
-def delete_local(env: str, profile: str, reset_database: bool = False) -> dict[str, Any]:
+def delete_local(
+    env: str, profile: str, reset_database: bool = False,
+    instance: Optional[str] = None,
+) -> dict[str, Any]:
     """Delete a Databricks App (and its ephemeral branch, if branching)."""
     config = load_deployment_config(env)
     branch_from_env = config.get("branch_from_env")
+    app_name, _workspace_path, target_branch = _resolve_target(config, env, instance)
 
     if branch_from_env and reset_database:
         print(
@@ -594,17 +717,19 @@ def delete_local(env: str, profile: str, reset_database: bool = False) -> dict[s
         reset_database = False
 
     result = delete(
-        app_name=config["app_name"],
+        app_name=app_name,
         lakebase_name=config["lakebase_name"],
         schema_name=config["schema_name"],
         reset_database=reset_database,
         profile=profile,
     )
 
-    # Intentionally do NOT delete ephemeral branches here. Lakebase's delete
-    # is async and its purge window causes fixed-ID reuse to collide. We rely
-    # on the branch TTL (_BRANCH_TTL_SECONDS in databricks_tellr.deploy) to
-    # garbage-collect. Leftover branches are harmless and auto-expire.
+    # For branching envs, also delete the ephemeral branch (fixed name, so this
+    # is now safe and re-runnable — idempotent on not-found).
+    if branch_from_env:
+        ws = _get_workspace_client(profile=profile)
+        _delete_branch(ws, config["lakebase_name"], target_branch)
+        print(f"   Deleted branch '{target_branch}'")
 
     return result
 
@@ -673,7 +798,37 @@ def main() -> None:
         help="Include Databricks-specific content when seeding (for internal use)",
     )
 
+    parser.add_argument(
+        "--from-pypi",
+        dest="from_pypi",
+        type=str,
+        default=None,
+        metavar="VERSION",
+        help=(
+            "Deploy by pinning databricks-tellr-app==VERSION from PyPI "
+            "instead of building/uploading a local wheel"
+        ),
+    )
+    parser.add_argument(
+        "--instance",
+        dest="instance",
+        type=str,
+        default=None,
+        metavar="ID",
+        help=(
+            "Ephemeral instance id for a branching env (e.g. devloop). "
+            "Derives app name db-<base>-<id>, branch dev-<id>, and a per-instance "
+            "workspace path. Required for concurrent dev-loop deploys."
+        ),
+    )
+
     args = parser.parse_args()
+
+    if args.from_pypi and not _is_valid_version(args.from_pypi):
+        parser.error(
+            f"--from-pypi value '{args.from_pypi}' is not a valid "
+            "PEP 440 version"
+        )
 
     # Clear environment variables that would override profile settings
     env_vars_to_clear = [
@@ -693,6 +848,8 @@ def main() -> None:
                 env=args.env,
                 profile=args.profile,
                 seed_databricks_defaults=args.include_databricks_prompts,
+                from_pypi=args.from_pypi,
+                instance=args.instance,
             )
         elif args.action == "update":
             result = update_local(
@@ -700,12 +857,15 @@ def main() -> None:
                 profile=args.profile,
                 reset_database=args.reset_db,
                 seed_databricks_defaults=args.include_databricks_prompts,
+                from_pypi=args.from_pypi,
+                instance=args.instance,
             )
         elif args.action == "delete":
             result = delete_local(
                 env=args.env,
                 profile=args.profile,
                 reset_database=args.reset_db,
+                instance=args.instance,
             )
         else:
             raise ValueError(f"Unknown action: {args.action}")

@@ -15,6 +15,7 @@ from pydantic import BaseModel, Field
 
 from src.api.schemas.agent_config import VectorIndexTool
 from src.core.databricks_client import get_user_client
+from src.utils.spotlight import spotlight
 
 logger = logging.getLogger(__name__)
 
@@ -171,12 +172,13 @@ def build_vector_tool(config: VectorIndexTool, index: int = 1) -> StructuredTool
     )
 
     def _search_wrapper(query: str, num_results: int = default_num_results) -> str:
-        return _search_vector_index(
+        result = _search_vector_index(
             index_name=index_name,
             query=query,
             columns=columns,
             num_results=num_results,
         )
+        return spotlight("vector", result)
 
     tool_name = "search_vector_index" if index == 1 else f"search_vector_index_{index}"
 

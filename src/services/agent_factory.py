@@ -215,8 +215,13 @@ def _build_tools(
     tools: list[StructuredTool] = []
 
     # Image search tool is always available
+    def _search_images_spotlighted(query=None, category=None, tags=None) -> str:
+        from src.utils.spotlight import spotlight
+        result = search_images(query=query, category=category, tags=tags)
+        return spotlight("image_search", str(result))
+
     image_search_tool = StructuredTool.from_function(
-        func=search_images,
+        func=_search_images_spotlighted,
         name="search_images",
         description=(
             "Search for uploaded images to include in slides. "

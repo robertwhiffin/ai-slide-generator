@@ -474,16 +474,10 @@ def _run_migrations(engine, schema: str | None = None):
                 f"ALTER TABLE {qualified_table} ADD COLUMN llm_judge_backend VARCHAR(32) "
                 "DEFAULT 'mlflow' NOT NULL"
             ))
-        elif not is_sqlite:
-            try:
-                conn.execute(text(
-                    f"ALTER TABLE {qualified_table} ALTER COLUMN llm_judge_backend "
-                    "SET DEFAULT 'mlflow'"
-                ))
-            except Exception as ex:
-                logger.debug(
-                    "Migration: skip llm_judge_backend server default alter: %s", ex
-                )
+        else:
+            _ensure_llm_judge_backend_default(
+                conn, table_name, qualified_table, schema, is_sqlite
+            )
         # --- config_profiles: migrate is_global bool to global_permission ---
         if "is_global" in columns:
             logger.info(f"Migration: migrating is_global to global_permission")
@@ -529,6 +523,83 @@ def _run_migrations(engine, schema: str | None = None):
 
         # --- image_assets.tags: json → jsonb (PostgreSQL) for native @> queries ---
         _migrate_image_assets_tags_json_to_jsonb(conn, schema, _qual, is_sqlite)
+
+        # --- keep newly created objects owned by the shared role (prod forks) ---
+        _reassign_new_objects_to_shared_owner(conn, is_sqlite)
+
+
+def _reassign_new_objects_to_shared_owner(
+    conn, is_sqlite: bool, owning_role: str = "tellr_app_owners"
+) -> None:
+    """Re-home objects this connection's role just created onto the shared owner.
+
+    No-op on SQLite and when the owning role is absent (static-schema envs).
+    Wrapped in a SAVEPOINT so a failure cannot poison the outer migration
+    transaction. Idempotent: REASSIGN OWNED is a no-op when nothing is owned.
+    """
+    from sqlalchemy import text
+
+    if is_sqlite:
+        return
+    exists = conn.execute(
+        text("SELECT 1 FROM pg_roles WHERE rolname = :r"), {"r": owning_role}
+    ).scalar()
+    if not exists:
+        return
+    logger.info(f"Migration: reassigning new objects to shared owner {owning_role}")
+    with conn.begin_nested():
+        conn.execute(text(f'REASSIGN OWNED BY CURRENT_USER TO "{owning_role}"'))
+
+
+def _ensure_llm_judge_backend_default(
+    conn, table_name, qualified_table, schema, is_sqlite
+) -> None:
+    """Ensure config_profiles.llm_judge_backend has server default 'mlflow'.
+
+    Idempotent and fork-safe. SQLite sets the default at column creation, so
+    there is nothing to do there. On PostgreSQL, only issue the ALTER when the
+    current default is NOT already 'mlflow' — re-issuing it on every startup is
+    needless ownership-gated DDL that fails on a copy-on-write branch where the
+    app's service principal does not own the inherited table, and (because the
+    whole migration runs in one transaction) a swallowed failure would poison
+    every later migration statement. Skipping when already-correct makes a
+    same-schema branch a true no-op; the rare real backfill runs inside a
+    SAVEPOINT so its failure is contained rather than aborting the outer
+    transaction.
+    """
+    from sqlalchemy import text
+
+    if is_sqlite:
+        return
+
+    current_default = None
+    try:
+        sql = (
+            "SELECT column_default FROM information_schema.columns "
+            "WHERE table_name = :t AND column_name = 'llm_judge_backend'"
+        )
+        params = {"t": table_name}
+        if schema:
+            sql += " AND table_schema = :s"
+            params["s"] = schema
+        current_default = conn.execute(text(sql), params).scalar()
+    except Exception:
+        current_default = None
+
+    if current_default is not None and "mlflow" in str(current_default):
+        return  # already correct — no DDL needed
+
+    logger.info("Migration: setting llm_judge_backend server default to 'mlflow'")
+    try:
+        with conn.begin_nested():
+            conn.execute(text(
+                f"ALTER TABLE {qualified_table} ALTER COLUMN llm_judge_backend "
+                "SET DEFAULT 'mlflow'"
+            ))
+    except Exception as ex:
+        logger.debug(
+            "Migration: skip llm_judge_backend server default alter: %s", ex
+        )
 
 
 def _migrate_image_assets_tags_json_to_jsonb(conn, schema, _qual, is_sqlite) -> None:

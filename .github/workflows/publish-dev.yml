@@ -1,0 +1,210 @@
+name: Publish Dev to PyPI
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Optional explicit PEP 440 dev version (e.g. 0.4.0.dev1). Leave blank to auto-increment the next patch .devN."
+        required: false
+        type: string
+
+env:
+  PYTHON_VERSION: "3.12"
+  NODE_VERSION: "20"
+
+jobs:
+  build:
+    name: Build Packages
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.resolve.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: "pip"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: "npm"
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install build tools
+        run: pip install build packaging
+
+      - name: Resolve dev version
+        id: resolve
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          python - <<'PY' >> "$GITHUB_OUTPUT"
+          import json
+          import os
+          import urllib.error
+          import urllib.request
+          from packaging.version import Version
+
+          explicit = os.environ.get("INPUT_VERSION", "").strip()
+          if explicit:
+              v = Version(explicit)  # raises if not PEP 440
+              if not v.is_prerelease or v.dev is None:
+                  raise SystemExit(
+                      f"ERROR: explicit version '{explicit}' must be a .devN pre-release"
+                  )
+              print(f"version={explicit}")
+              raise SystemExit(0)
+
+          url = "https://pypi.org/pypi/databricks-tellr-app/json"
+          try:
+              with urllib.request.urlopen(url, timeout=30) as resp:
+                  data = json.load(resp)
+              releases = [Version(v) for v in data.get("releases", {})]
+          except urllib.error.HTTPError as e:
+              if e.code == 404:
+                  releases = []
+              else:
+                  raise
+
+          finals = [v for v in releases if not v.is_prerelease]
+          highest_final = max(finals) if finals else Version("0.0.0")
+          base = f"{highest_final.major}.{highest_final.minor}.{highest_final.micro + 1}"
+
+          devs = [
+              v.dev for v in releases
+              if v.dev is not None
+              and (v.major, v.minor, v.micro) == tuple(int(x) for x in base.split("."))
+          ]
+          next_n = (max(devs) + 1) if devs else 1
+          print(f"version={base}.dev{next_n}")
+          PY
+          echo "Resolved version: $(grep '^version=' "$GITHUB_OUTPUT" | tail -1)"
+
+      - name: Stamp version into both pyproject.toml files
+        env:
+          RESOLVED_VERSION: ${{ steps.resolve.outputs.version }}
+        run: |
+          python - <<'PY'
+          import os
+          import pathlib
+          import re
+          import tomllib
+
+          version = os.environ["RESOLVED_VERSION"]
+          for path in (
+              pathlib.Path("packages/databricks-tellr/pyproject.toml"),
+              pathlib.Path("packages/databricks-tellr-app/pyproject.toml"),
+          ):
+              text = path.read_text()
+              new_text, count = re.subn(
+                  r'(?m)^version\s*=\s*".*"$', f'version = "{version}"', text, count=1
+              )
+              if count != 1:
+                  raise SystemExit(f"ERROR: expected one version line in {path}, replaced {count}")
+              path.write_text(new_text)
+              stamped = tomllib.loads(path.read_text())["project"]["version"]
+              print(f"Stamped {stamped} into {path}")
+          PY
+
+      - name: Build databricks-tellr
+        run: python -m build --sdist --wheel packages/databricks-tellr
+
+      - name: Build databricks-tellr-app
+        run: |
+          cp -r src packages/databricks-tellr-app/src
+          python -m build --sdist --wheel packages/databricks-tellr-app
+          rm -rf packages/databricks-tellr-app/src
+
+      - name: Verify built artifacts (huashu tarballs present, wheel >= 25MB)
+        run: |
+          python - <<'PY'
+          import glob, os, sys, zipfile
+          wheels = glob.glob("packages/databricks-tellr-app/dist/*.whl")
+          if len(wheels) != 1:
+              sys.exit(f"ERROR: expected exactly one wheel, found: {wheels}")
+          wheel = wheels[0]
+          size_mb = os.path.getsize(wheel) / (1024 * 1024)
+          print(f"Wheel: {wheel} ({size_mb:.1f} MB)")
+          base = "databricks_tellr_app/_assets/sidecars/pptx-emit-huashu"
+          required = [f"{base}/node_modules.tar.gz", f"{base}/sys-libs-bullseye.tar.gz"]
+          with zipfile.ZipFile(wheel) as zf:
+              names = set(zf.namelist())
+          missing = [n for n in required if n not in names]
+          if missing:
+              sys.exit("ERROR: wheel missing huashu tarball(s): " + ", ".join(missing))
+          if size_mb < 25:
+              sys.exit(f"ERROR: wheel is {size_mb:.1f} MB, under the 25MB floor")
+          print("Verify gate passed.")
+          PY
+
+      - name: Upload tellr dist
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist-tellr
+          path: packages/databricks-tellr/dist/
+
+      - name: Upload tellr-app dist
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist-tellr-app
+          path: packages/databricks-tellr-app/dist/
+
+  publish-tellr:
+    name: Publish databricks-tellr to PyPI
+    runs-on: ubuntu-latest
+    needs: build
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      - name: Download dist
+        uses: actions/download-artifact@v4
+        with:
+          name: dist-tellr
+          path: dist/
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+
+  publish-tellr-app:
+    name: Publish databricks-tellr-app to PyPI
+    runs-on: ubuntu-latest
+    needs: build
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      - name: Download dist
+        uses: actions/download-artifact@v4
+        with:
+          name: dist-tellr-app
+          path: dist/
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+
+  settle:
+    name: Settle (let PyPI process the upload)
+    runs-on: ubuntu-latest
+    needs: [build, publish-tellr, publish-tellr-app]
+    steps:
+      - name: Wait 10s for PyPI to process the upload
+        run: sleep 10
+      - name: Write deploy summary
+        env:
+          RESOLVED_VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          {
+            echo "## Published dev build to PyPI"
+            echo ""
+            echo "**Version:** \`${RESOLVED_VERSION}\` (databricks-tellr + databricks-tellr-app)"
+            echo ""
+            echo "### Deploy it"
+            echo '```bash'
+            echo "Static devtest:"
+            echo "  ./scripts/deploy_local.sh update --env devtest --profile tellr-dev --from-pypi ${RESOLVED_VERSION}"
+            echo "Per-instance dev loop (prod branch):"
+            echo "  ./scripts/deploy_local.sh create --env devloop --instance <id> --profile tellr-dev --from-pypi ${RESOLVED_VERSION}"
+            echo "  ./scripts/deploy_local.sh update --env devloop --instance <id> --profile tellr-dev --from-pypi ${RESOLVED_VERSION}"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

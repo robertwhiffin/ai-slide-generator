@@ -196,7 +196,6 @@ def create(
     profile: str | None = None,
     config_yaml_path: str | None = None,
     encryption_key: str | None = None,
-    use_test_pypi: bool = False,
     mlflow_tracing: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Deploy Tellr to Databricks Apps.
@@ -227,7 +226,6 @@ def create(
         profile: Databricks CLI profile name (optional)
         config_yaml_path: Path to deployment config YAML (mutually exclusive with other args)
         encryption_key: Fernet key for Google OAuth encryption. Auto-generated if not provided.
-        use_test_pypi: If True, install app package from Test PyPI instead of real PyPI.
         mlflow_tracing: Optional overrides for UC tracing env vars in generated ``app.yaml``.
             Keys: ``MLFLOW_TRACING_SQL_WAREHOUSE_ID``, ``TELLR_MLFLOW_UC_CATALOG``,
             ``TELLR_MLFLOW_UC_SCHEMA``, ``TELLR_MLFLOW_UC_TABLE_PREFIX``. With
@@ -261,7 +259,6 @@ def create(
         config_yaml_path=config_yaml_path,
         seed_databricks_defaults=False,
         encryption_key=encryption_key,
-        use_test_pypi=use_test_pypi,
         mlflow_tracing=mlflow_tracing,
     )
 
@@ -276,7 +273,6 @@ def update(
     client: WorkspaceClient | None = None,
     profile: str | None = None,
     encryption_key: str | None = None,
-    use_test_pypi: bool = False,
     mlflow_tracing: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Deploy a new version of an existing Tellr app.
@@ -294,7 +290,6 @@ def update(
         profile: Databricks CLI profile name (optional)
         encryption_key: Fernet key for Google OAuth encryption. If not provided, the
             existing key is read from the deployed app.yaml to preserve encrypted data.
-        use_test_pypi: If True, install app package from Test PyPI instead of real PyPI.
         mlflow_tracing: Optional overrides for UC tracing env vars (same keys as ``create``).
             Values from deployment YAML are not loaded on update; use this argument or
             ``TELLR_DEPLOY_MLFLOW_*`` environment variables.
@@ -316,7 +311,6 @@ def update(
         profile=profile,
         seed_databricks_defaults=False,
         encryption_key=encryption_key,
-        use_test_pypi=use_test_pypi,
         mlflow_tracing=mlflow_tracing,
     )
 
@@ -340,7 +334,6 @@ def _create_databricks(
     config_yaml_path: str | None = None,
     seed_databricks_defaults: bool = True,
     encryption_key: str | None = None,
-    use_test_pypi: bool = False,
     mlflow_tracing: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Deploy Tellr to Databricks Apps with configurable seeding.
@@ -361,7 +354,6 @@ def _create_databricks(
         config_yaml_path: Path to deployment config YAML (mutually exclusive with other args)
         seed_databricks_defaults: If True, seed Databricks-specific content on startup
         encryption_key: Fernet key for Google OAuth encryption. Auto-generated if not provided.
-        use_test_pypi: If True, install app package from Test PyPI instead of real PyPI.
         mlflow_tracing: Optional overrides for UC tracing placeholders in ``app.yaml``.
 
     Returns:
@@ -427,7 +419,6 @@ def _create_databricks(
                 seed_databricks_defaults=seed_databricks_defaults,
                 encryption_key=encryption_key,
                 lakebase_result=lakebase_result,
-                use_test_pypi=use_test_pypi,
                 mlflow_tracing=mlflow_subs,
             )
             print("   Generated app.yaml (with encryption key)")
@@ -500,7 +491,6 @@ def _update_databricks(
     profile: str | None = None,
     seed_databricks_defaults: bool = True,
     encryption_key: str | None = None,
-    use_test_pypi: bool = False,
     mlflow_tracing: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Deploy a new version of an existing Tellr app with configurable seeding.
@@ -519,7 +509,6 @@ def _update_databricks(
         seed_databricks_defaults: If True, seed Databricks-specific content on startup
         encryption_key: Fernet key for Google OAuth encryption. If not provided, reads
             the existing key from the deployed app.yaml to preserve encrypted data.
-        use_test_pypi: If True, install app package from Test PyPI instead of real PyPI.
         mlflow_tracing: Optional overrides for UC tracing placeholders in ``app.yaml``.
 
     Returns:
@@ -568,7 +557,6 @@ def _update_databricks(
                 seed_databricks_defaults=seed_databricks_defaults,
                 encryption_key=encryption_key,
                 lakebase_result=lakebase_result,
-                use_test_pypi=use_test_pypi,
                 mlflow_tracing=mlflow_subs,
             )
             _upload_files(ws, staging, app_file_workspace_path)
@@ -1129,12 +1117,12 @@ def _delete_branch(
         raise
 
 
-# Lakebase branch TTL: 1 day. Branches auto-expire and are garbage-collected
-# after this window. The deploy flow relies on this for cleanup — we never
-# explicitly delete old branches, because Lakebase's delete is async and its
-# purge window is unpredictable (fixed-name reuse hits "branch id already
-# exists" for many minutes after delete). Unique-per-deploy IDs + TTL sidesteps
-# the whole issue.
+# Lakebase branch TTL: 1 day. This is now only an orphan backstop — if a deploy
+# crashes between create and cleanup, the TTL eventually garbage-collects the
+# stranded branch. The normal flow no longer relies on it: branches use fixed
+# names and are explicitly deleted and recreated (_recreate_ephemeral_branch,
+# delete_local) via _delete_branch, whose delete is idempotent and was verified
+# to leave the name immediately reusable.
 _BRANCH_TTL_SECONDS = 86400
 
 
@@ -1142,26 +1130,19 @@ def _create_branch_from(
     ws: WorkspaceClient,
     project_name: str,
     source_branch: str,
-    target_branch_prefix: str,
+    branch_id: str,
 ) -> dict[str, Any]:
-    """Create a new Lakebase branch as a child of `source_branch`.
+    """Create a new Lakebase branch named ``branch_id`` as a child of
+    ``source_branch``.
 
-    The branch ID is `{target_branch_prefix}-{unix_timestamp}` so that every
-    deploy gets a fresh unique ID. This avoids the "branch id already exists"
-    collision we hit when trying to reuse a fixed ID right after a delete —
-    Lakebase's delete is async and its purge window is unpredictable.
-
-    Branch is created with a 1-day TTL so Lakebase garbage-collects it for us.
-    The staging app the branch backs will break after ~1 day; re-deploy to get
-    a fresh branch. This trade is intentional: no cleanup code, no stale state.
+    The branch id is used verbatim (a fixed per-instance name). A 1-day TTL is
+    attached purely as an orphan backstop so abandoned instances get
+    garbage-collected; freshness comes from delete-then-create (see
+    _recreate_ephemeral_branch), not from the TTL.
 
     Waits on the create operation, then polls list_endpoints on the new branch
-    until an endpoint with a populated host appears (up to
-    _BRANCH_ENDPOINT_TIMEOUT_S). Raises DeploymentError on timeout.
-
-    Returns a lakebase_result-shaped dict pointing at the new branch, with an
-    added `branch_id` field so callers can reference the unique name (e.g.,
-    for SP role registration).
+    until an endpoint with a populated host appears. Raises DeploymentError on
+    timeout. Returns a lakebase_result-shaped dict with an added ``branch_id``.
     """
     if not HAS_AUTOSCALING_SDK:
         raise DeploymentError(
@@ -1169,7 +1150,6 @@ def _create_branch_from(
             "Upgrade databricks-sdk."
         )
 
-    branch_id = f"{target_branch_prefix}-{int(time.time())}"
     source_path = f"projects/{project_name}/branches/{source_branch}"
     target_parent = f"projects/{project_name}"
     target_path = f"projects/{project_name}/branches/{branch_id}"
@@ -1226,17 +1206,17 @@ def _recreate_ephemeral_branch(
     ws: WorkspaceClient,
     project_name: str,
     source_branch: str,
-    target_branch_prefix: str,
+    branch_id: str,
 ) -> dict[str, Any]:
-    """Create a fresh ephemeral Lakebase branch for this deploy.
+    """Refresh an ephemeral Lakebase branch to a fresh copy of source_branch.
 
-    Thin wrapper around _create_branch_from for call-site readability. Does
-    NOT delete any prior branch — we rely on Lakebase's TTL-driven garbage
-    collection (see _BRANCH_TTL_SECONDS) to clean up old branches, because
-    explicit delete has an async purge window that causes fixed-ID reuse to
-    collide for many minutes.
+    Deletes ``branch_id`` (idempotent — no-op if absent) then recreates it from
+    ``source_branch``. Delete-then-create on a fixed name was verified clean
+    (~6s, no collision); the older "skip delete and rely on TTL" workaround is
+    no longer needed.
     """
-    return _create_branch_from(ws, project_name, source_branch, target_branch_prefix)
+    _delete_branch(ws, project_name, branch_id)
+    return _create_branch_from(ws, project_name, source_branch, branch_id)
 
 
 def _write_requirements(
@@ -1294,7 +1274,6 @@ def _write_app_yaml(
     seed_databricks_defaults: bool = False,
     encryption_key: str | None = None,
     lakebase_result: dict[str, Any] | None = None,
-    use_test_pypi: bool = False,
     mlflow_tracing: dict[str, str] | None = None,
 ) -> None:
     """Generate app.yaml with environment variables.
@@ -1307,7 +1286,6 @@ def _write_app_yaml(
         encryption_key: Fernet encryption key for Google OAuth credentials/tokens.
             Auto-generated if not provided.
         lakebase_result: Result dict from _get_or_create_lakebase() with type info.
-        use_test_pypi: If True, install from Test PyPI instead of real PyPI.
         mlflow_tracing: Resolved template keys for UC tracing (four entries). If
             omitted, values are taken only from ``TELLR_DEPLOY_MLFLOW_*`` env vars.
     """
@@ -1329,11 +1307,6 @@ def _write_app_yaml(
     lakebase_project_id = (lakebase_result or {}).get("project_id", "")
     lakebase_endpoint_name = (lakebase_result or {}).get("endpoint_name", "")
 
-    pip_index_args = (
-        "--index-url https://test.pypi.org/simple/ --extra-index-url https://pypi.org/simple/ "
-        if use_test_pypi else ""
-    )
-
     if mlflow_tracing is None:
         mlflow_tracing = _mlflow_substitutions_for_app_yaml()
 
@@ -1347,7 +1320,6 @@ def _write_app_yaml(
         LAKEBASE_PG_HOST=lakebase_pg_host,
         LAKEBASE_PROJECT_ID=lakebase_project_id,
         LAKEBASE_ENDPOINT_NAME=lakebase_endpoint_name,
-        PIP_INDEX_ARGS=pip_index_args,
         MLFLOW_TRACING_SQL_WAREHOUSE_ID=mlflow_tracing.get(
             "MLFLOW_TRACING_SQL_WAREHOUSE_ID", ""
         ),
@@ -1500,6 +1472,36 @@ def _get_app_client_id(app: App) -> str | None:
     if hasattr(app, "service_principal_id") and app.service_principal_id:
         return str(app.service_principal_id)
     return None
+
+
+def _resolve_production_endpoint(
+    ws: WorkspaceClient, project_name: str, branch_name: str = "production",
+) -> dict[str, Any]:
+    """Resolve an autoscaling branch's host + endpoint_name for a psycopg2 connect.
+
+    Returns a dict shaped like _get_or_create_lakebase()'s autoscaling result so
+    it can be passed straight to _get_lakebase_connection(..., lakebase_result=...).
+    """
+    branch_path = f"projects/{project_name}/branches/{branch_name}"
+    endpoints = list(ws.postgres.list_endpoints(parent=branch_path))
+    ready = next(
+        (
+            e for e in endpoints
+            if getattr(e, "status", None)
+            and getattr(e.status, "hosts", None)
+            and getattr(e.status.hosts, "host", None)
+        ),
+        None,
+    )
+    if not ready:
+        raise DeploymentError(
+            f"no ready endpoint for {branch_path} in project {project_name}"
+        )
+    return {
+        "type": "autoscaling",
+        "host": ready.status.hosts.host,
+        "endpoint_name": ready.name,
+    }
 
 
 def _get_lakebase_connection(
