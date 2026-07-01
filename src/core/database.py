@@ -524,8 +524,45 @@ def _run_migrations(engine, schema: str | None = None):
         # --- image_assets.tags: json → jsonb (PostgreSQL) for native @> queries ---
         _migrate_image_assets_tags_json_to_jsonb(conn, schema, _qual, is_sqlite)
 
+        # --- design system library: additive design_system(+asset/+token) tables ---
+        _migrate_design_system_tables(conn, schema)
+
         # --- keep newly created objects owned by the shared role (prod forks) ---
         _reassign_new_objects_to_shared_owner(conn, is_sqlite)
+
+
+def _migrate_design_system_tables(conn, schema: str | None = None) -> None:
+    """Create the additive design-system tables (idempotent, dialect-safe).
+
+    Phase 1 of the Design System Library. Adds three NEW tables — ``design_system``,
+    ``design_system_asset``, ``design_system_token`` — without touching
+    ``slide_style_library`` or any existing table, so the current slide-style
+    prompt path is unaffected.
+
+    ``Base.metadata.create_all()`` (run first in ``init_db``) already creates these
+    on fresh installs; this hand-rolled step guarantees they also exist on
+    already-provisioned Lakebase/Postgres databases and lets the migration be
+    exercised on its own. Creation is driven from the ORM metadata via
+    ``Table.create(checkfirst=True)`` — a single source of truth for the schema,
+    idempotent (a no-op when the table exists) and correctly compiled for both
+    PostgreSQL/Lakebase and the SQLite used in tests. Parent table is created
+    first so the child foreign keys resolve.
+    """
+    from src.database.models.design_system import (
+        DesignSystem,
+        DesignSystemAsset,
+        DesignSystemToken,
+    )
+
+    for model in (DesignSystem, DesignSystemAsset, DesignSystemToken):
+        table = model.__table__
+        # Match init_db()'s schema handling so a qualified deployment creates the
+        # tables in the Lakebase schema; guarded so it stays a no-op on repeat.
+        if schema and table.schema is None:
+            table.schema = schema
+        table.create(bind=conn, checkfirst=True)
+
+    logger.info("Migration: design_system tables ensured")
 
 
 def _reassign_new_objects_to_shared_owner(
