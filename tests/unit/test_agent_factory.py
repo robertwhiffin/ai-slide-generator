@@ -273,6 +273,158 @@ def test_get_prompt_content_resolves_deck_prompt_id():
     assert "Quarterly review deck template" in result["system_prompt"]
 
 
+# ---------------------------------------------------------------------------
+# Design System wiring (Phase 2): design_system_id resolves compiled_style_content
+# through the SAME build_generation_system_prompt seam, with precedence
+# design_system_id -> slide_style_id -> default. The legacy slide_style_id path
+# must remain byte-for-byte unchanged when no design system is selected.
+# ---------------------------------------------------------------------------
+
+
+def _dispatching_db(*, design_system=None, slide_style=None, deck_prompt=None):
+    """MagicMock DB whose query(Model).filter_by(...).first() dispatches by model.
+
+    Lets a single test control what each of the DesignSystem / SlideStyleLibrary /
+    SlideDeckPromptLibrary lookups returns, so precedence can be asserted.
+    """
+    from src.database.models import (
+        DesignSystem,
+        SlideDeckPromptLibrary,
+        SlideStyleLibrary,
+    )
+
+    mapping = {
+        DesignSystem: design_system,
+        SlideStyleLibrary: slide_style,
+        SlideDeckPromptLibrary: deck_prompt,
+    }
+    queried_models = []
+    db = MagicMock()
+
+    def _query(model):
+        queried_models.append(model)
+        q = MagicMock()
+        q.filter_by.return_value.first.return_value = mapping.get(model)
+        return q
+
+    db.query.side_effect = _query
+    db.queried_models = queried_models
+    return db
+
+
+def _run_with_db(config, db, mode="generate"):
+    from src.services.agent_factory import _get_prompt_content
+
+    with patch("src.core.database.get_db_session") as mock_get_db:
+        mock_get_db.return_value.__enter__ = MagicMock(return_value=db)
+        mock_get_db.return_value.__exit__ = MagicMock(return_value=False)
+        return _get_prompt_content(config, mode=mode)
+
+
+def test_design_system_id_resolves_compiled_style_content():
+    """A selected design system's compiled_style_content reaches the pre-assembled
+    system prompt via the existing seam."""
+    from src.api.schemas.agent_config import AgentConfig
+
+    config = AgentConfig(design_system_id=99)
+    ds = MagicMock()
+    ds.compiled_style_content = "ACME-DS-COMPILED :root { --brand-core-primary: #123456; }"
+    db = _dispatching_db(design_system=ds)
+
+    result = _run_with_db(config, db)
+
+    assert result["pre_assembled"] is True
+    assert "ACME-DS-COMPILED" in result["system_prompt"]
+    assert "--brand-core-primary" in result["system_prompt"]
+
+
+def test_design_system_takes_precedence_over_slide_style():
+    """When both are set, the design system wins and the slide style is not used."""
+    from src.api.schemas.agent_config import AgentConfig
+
+    config = AgentConfig(design_system_id=99, slide_style_id=42)
+    ds = MagicMock()
+    ds.compiled_style_content = "DS-MARKER"
+    style = MagicMock()
+    style.style_content = "LEGACY-STYLE-MARKER"
+    style.image_guidelines = None
+    db = _dispatching_db(design_system=ds, slide_style=style)
+
+    result = _run_with_db(config, db)
+
+    assert "DS-MARKER" in result["system_prompt"]
+    assert "LEGACY-STYLE-MARKER" not in result["system_prompt"]
+
+
+def test_design_system_missing_falls_back_to_default():
+    """A dangling design_system_id degrades to the default style, not a crash."""
+    from src.api.schemas.agent_config import AgentConfig
+
+    config = AgentConfig(design_system_id=99)
+    db = _dispatching_db(design_system=None)
+
+    result = _run_with_db(config, db)
+
+    assert result["pre_assembled"] is True
+    # DEFAULT_SLIDE_STYLE marker present.
+    assert "Modern sans-serif font" in result["system_prompt"]
+
+
+def test_design_system_empty_compiled_content_falls_back_to_default():
+    """A design system with no compiled artifact yet also degrades to default."""
+    from src.api.schemas.agent_config import AgentConfig
+
+    config = AgentConfig(design_system_id=99)
+    ds = MagicMock()
+    ds.compiled_style_content = None
+    db = _dispatching_db(design_system=ds)
+
+    result = _run_with_db(config, db)
+
+    assert "Modern sans-serif font" in result["system_prompt"]
+
+
+def test_slide_style_path_injects_identically_when_no_design_system():
+    """BACKWARD COMPAT: with only slide_style_id set, the resolved prompt is
+    byte-identical to feeding style_content straight into the seam — the design
+    system code path does not alter the legacy result at all."""
+    from src.api.schemas.agent_config import AgentConfig
+    from src.core.prompt_modules import build_generation_system_prompt
+
+    config = AgentConfig(slide_style_id=42)
+    style = MagicMock()
+    style.style_content = "LEGACY-STYLE-MARKER"
+    style.image_guidelines = "Use logo.png"
+    db = _dispatching_db(slide_style=style)
+
+    result = _run_with_db(config, db)
+
+    expected = build_generation_system_prompt(
+        slide_style="LEGACY-STYLE-MARKER",
+        deck_prompt=None,
+        image_guidelines="Use logo.png",
+    )
+    assert result["system_prompt"] == expected
+    assert result["pre_assembled"] is True
+
+
+def test_design_system_not_queried_when_unset():
+    """BACKWARD COMPAT: with design_system_id unset, DesignSystem is never queried
+    — the new branch cannot interfere with the legacy slide_style path."""
+    from src.api.schemas.agent_config import AgentConfig
+    from src.database.models import DesignSystem
+
+    config = AgentConfig(slide_style_id=42)
+    style = MagicMock()
+    style.style_content = "LEGACY-STYLE-MARKER"
+    style.image_guidelines = None
+    db = _dispatching_db(slide_style=style)
+
+    _run_with_db(config, db)
+
+    assert DesignSystem not in db.queried_models
+
+
 def test_multiple_genie_tools(default_prompts):
     """Multiple Genie tools in config each produce a tool (though only last wins name)."""
     from src.api.schemas.agent_config import AgentConfig, GenieTool

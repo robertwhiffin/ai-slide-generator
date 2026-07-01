@@ -9,8 +9,19 @@ def test_empty_config_is_valid():
     assert config.tools == []
     assert config.slide_style_id is None
     assert config.deck_prompt_id is None
+    assert config.design_system_id is None
     assert config.system_prompt is None
     assert config.slide_editing_instructions is None
+
+
+def test_design_system_id_optional_field():
+    """AgentConfig carries an optional design_system_id (Phase 2 wiring)."""
+    from src.api.schemas.agent_config import AgentConfig, resolve_agent_config
+    config = AgentConfig(design_system_id=5)
+    assert config.design_system_id == 5
+    # Round-trips through dict form used to persist config on sessions/profiles.
+    assert config.model_dump()["design_system_id"] == 5
+    assert resolve_agent_config({"design_system_id": 9}).design_system_id == 9
 
 
 def test_genie_tool_requires_space_id_and_name():

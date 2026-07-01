@@ -89,9 +89,17 @@ def _get_prompt_content(
 
     Resolution order for each prompt field:
     1. Explicit value in config (system_prompt, slide_editing_instructions)
-    2. Library lookup by ID (slide_style_id, deck_prompt_id)
+    2. Library lookup by ID (design_system_id / slide_style_id, deck_prompt_id)
     3. Modular assembly via prompt_modules (mode-aware)
     4. Backend defaults from DEFAULT_CONFIG / DEFAULT_SLIDE_STYLE (legacy)
+
+    Slide-style source precedence (Design System Library, spec §8):
+        design_system_id (if set) -> slide_style_id -> DEFAULT_SLIDE_STYLE.
+    A selected design system contributes its ``compiled_style_content`` — the
+    serialized artifact produced by ``design_system_compiler`` — which flows
+    through the identical ``build_generation_system_prompt`` seam as a legacy
+    ``style_content`` blob. When no design system is selected the legacy
+    slide_style_id path is used unchanged, so the feature is backward compatible.
 
     Args:
         config: The AgentConfig for this request
@@ -105,8 +113,38 @@ def _get_prompt_content(
     deck_prompt: Optional[str] = None
     image_guidelines: Optional[str] = None
 
-    # Resolve slide_style_id from library
-    if config.slide_style_id is not None:
+    # Resolve the slide-style source. A design system (if selected) takes
+    # precedence over a legacy slide style; each degrades to DEFAULT_SLIDE_STYLE
+    # on lookup failure rather than crashing generation.
+    if config.design_system_id is not None:
+        try:
+            from src.core.database import get_db_session
+            from src.database.models import DesignSystem
+
+            with get_db_session() as db:
+                design_system = (
+                    db.query(DesignSystem)
+                    .filter_by(id=config.design_system_id)
+                    .first()
+                )
+                if (
+                    design_system
+                    and design_system.compiled_style_content
+                    and design_system.compiled_style_content.strip()
+                ):
+                    # compiled_style_content is the design system's drop-in
+                    # equivalent of slide_style_library.style_content.
+                    slide_style = design_system.compiled_style_content
+                else:
+                    logger.warning(
+                        "Design system not found or not compiled, using default",
+                        extra={"design_system_id": config.design_system_id},
+                    )
+        except Exception as e:
+            logger.error(f"Failed to resolve design_system_id: {e}")
+    # Resolve slide_style_id from library (legacy path — unchanged; used only when
+    # no design system is selected).
+    elif config.slide_style_id is not None:
         try:
             from src.core.database import get_db_session
             from src.database.models import SlideStyleLibrary
@@ -331,6 +369,7 @@ def build_agent_for_request(
             "has_custom_system_prompt": config.system_prompt is not None,
             "has_custom_editing_instructions": config.slide_editing_instructions is not None,
             "slide_style_id": config.slide_style_id,
+            "design_system_id": config.design_system_id,
             "deck_prompt_id": config.deck_prompt_id,
             "mode": mode,
         },
