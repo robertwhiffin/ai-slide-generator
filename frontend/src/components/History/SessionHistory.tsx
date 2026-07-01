@@ -132,10 +132,11 @@ export const SessionHistory: React.FC<SessionHistoryProps> = ({
     try {
       setDuplicateLoading(presentation.session_id);
       setError(null);
-      await api.duplicateSession(presentation.session_id);
+      const result = await api.duplicateSession(presentation.session_id);
       setActiveTab('my');
       await loadSessions();
       onSessionsChange?.();
+      onSessionSelect(result.session_id);
     } catch (err) {
       console.error('Failed to duplicate shared presentation:', err);
       if (err && typeof err === 'object' && 'status' in err && (err as { status: number }).status === 403) {

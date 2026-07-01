@@ -1,6 +1,7 @@
 """Unit tests for SessionManager.duplicate_session and agent config sanitization."""
 
 from contextlib import contextmanager
+from datetime import datetime, timedelta
 
 import pytest
 from sqlalchemy import create_engine
@@ -229,6 +230,21 @@ class TestDuplicateSessionValidScenarios:
 
         assert result["title"] == "Copy of Annual"
 
+    def test_default_title_truncated_when_source_title_too_long(self, db, session_manager):
+        long_title = "A" * 255
+        owner = _make_root_session(
+            db, session_id="src-long", created_by="owner@test.com", title=long_title
+        )
+        _add_deck(db, owner)
+
+        result = session_manager.duplicate_session("src-long", created_by="owner@test.com")
+
+        assert result["title"].startswith("Copy of ")
+        assert len(result["title"]) == 255
+        copy = db.query(UserSession).filter(UserSession.session_id == result["session_id"]).one()
+        assert copy.title == result["title"]
+        assert copy.slide_deck.title == result["title"]
+
 
 class TestDuplicateSessionErrorHandling:
     def test_missing_session_raises_not_found(self, db, session_manager):
@@ -256,3 +272,43 @@ class TestListSessionsIncludesDuplicatedDeck:
         assert copy_row["has_slide_deck"] is True
         assert copy_row["slide_count"] == 2
         assert copy_row["message_count"] == 0
+
+
+class TestListDeckOnlySessions:
+    def test_deck_only_returns_recent_decks_not_chat_sessions(self, db, session_manager):
+        deck_old = _make_root_session(
+            db, session_id="deck-old", created_by="owner@test.com", title="Old Deck"
+        )
+        _add_deck(db, deck_old)
+
+        chat_new = _make_root_session(
+            db, session_id="chat-new", created_by="owner@test.com", title="Recent Chat"
+        )
+        db.add(
+            SessionMessage(
+                session_id=chat_new.id,
+                role="user",
+                content="hello",
+            )
+        )
+
+        deck_new = _make_root_session(
+            db, session_id="deck-new", created_by="owner@test.com", title="New Deck"
+        )
+        _add_deck(db, deck_new)
+
+        # Explicit last_activity ordering: deck-new > chat-new > deck-old
+        now = datetime.utcnow()
+        chat_new.last_activity = now
+        deck_new.last_activity = now + timedelta(minutes=2)
+        deck_old.last_activity = now - timedelta(minutes=2)
+        db.commit()
+
+        listed = session_manager.list_sessions(
+            created_by="owner@test.com",
+            limit=10,
+            deck_only=True,
+        )
+
+        assert [s["session_id"] for s in listed] == ["deck-new", "deck-old"]
+        assert all(s["has_slide_deck"] for s in listed)

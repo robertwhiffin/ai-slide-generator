@@ -173,8 +173,12 @@ async def save_from_session(session_id: str, body: SaveProfileRequest):
             )
 
     # Prefer client-side config (has resolved defaults) over session's stored config
-    raw_config = body.agent_config if body.agent_config else session.get("agent_config")
-    config_dict = sanitize_agent_config_for_persist(raw_config)
+    if body.agent_config:
+        config_dict = sanitize_agent_config_for_persist(body.agent_config)
+    else:
+        config_dict = sanitize_agent_config_for_persist(
+            resolve_agent_config(session.get("agent_config"))
+        )
 
     with get_db_session() as db:
         # Check for duplicate agent_config among non-deleted profiles

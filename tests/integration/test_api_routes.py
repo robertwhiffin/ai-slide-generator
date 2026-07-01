@@ -647,7 +647,7 @@ class TestSessionEndpoints:
         assert data["count"] == 2
         # Verify the route passed the user identity to session_manager
         mock_session_manager.list_sessions.assert_called_once_with(
-            created_by="dev@local.dev", limit=50
+            created_by="dev@local.dev", limit=50, deck_only=False
         )
 
     def test_list_sessions_with_limit(self, client, mock_session_manager):
@@ -657,6 +657,19 @@ class TestSessionEndpoints:
         with patch("src.api.routes.sessions.get_current_user", return_value="dev@local.dev"):
             response = client.get("/api/sessions?limit=10")
         assert response.status_code == 200
+
+    def test_list_sessions_deck_only(self, client, mock_session_manager):
+        """GET /api/sessions?deck_only=true requests deck-only sessions."""
+        mock_session_manager.list_sessions.return_value = [
+            {"session_id": "deck-1", "title": "Deck 1", "has_slide_deck": True},
+        ]
+
+        with patch("src.api.routes.sessions.get_current_user", return_value="dev@local.dev"):
+            response = client.get("/api/sessions?limit=10&deck_only=true")
+        assert response.status_code == 200
+        mock_session_manager.list_sessions.assert_called_once_with(
+            created_by="dev@local.dev", limit=10, deck_only=True
+        )
 
     def test_list_sessions_limit_validation(self, client):
         """GET /api/sessions validates limit range."""
@@ -716,7 +729,7 @@ class TestSessionEndpoints:
             response = client.get("/api/sessions")
         assert response.status_code == 200
         mock_session_manager.list_sessions.assert_called_once_with(
-            created_by="bob@example.com", limit=50
+            created_by="bob@example.com", limit=50, deck_only=False
         )
 
     def test_get_session_success(self, client, mock_session_manager):

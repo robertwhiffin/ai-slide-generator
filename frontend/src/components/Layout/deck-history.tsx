@@ -40,13 +40,11 @@ export function DeckHistory({
   const { isMobile } = useSidebar()
   const [sessions, setSessions] = useState<Session[]>([])
   const [deleteTarget, setDeleteTarget] = useState<string | null>(null)
+  const recentDeckLimit = 10
 
   useEffect(() => {
-    api.listSessions(50)
-      .then(result => {
-        const decks = result.sessions.filter(s => s.has_slide_deck).slice(0, 5);
-        setSessions(decks);
-      })
+    api.listSessions(recentDeckLimit, { deckOnly: true })
+      .then(result => setSessions(result.sessions))
       .catch(err => console.error('Failed to load sessions:', err))
   }, [refreshKey])
 
@@ -62,8 +60,8 @@ export function DeckHistory({
     setDeleteTarget(null)
     try {
       await api.deleteSession(id)
-      const result = await api.listSessions(50)
-      setSessions(result.sessions.filter(s => s.has_slide_deck).slice(0, 5))
+      const result = await api.listSessions(recentDeckLimit, { deckOnly: true })
+      setSessions(result.sessions)
       if (wasActive) onNewSession?.()
     } catch (err) {
       console.error('Failed to delete session:', err)

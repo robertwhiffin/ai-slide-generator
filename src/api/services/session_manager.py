@@ -25,6 +25,23 @@ from src.database.models.session import (
 
 logger = logging.getLogger(__name__)
 
+_MAX_SESSION_TITLE_LEN = 255
+_DUPLICATE_TITLE_PREFIX = "Copy of "
+
+
+def _truncate_session_title(title: str, max_len: int = _MAX_SESSION_TITLE_LEN) -> str:
+    """Truncate a title to fit the user_sessions.title column."""
+    return title[:max_len] if len(title) > max_len else title
+
+
+def _default_duplicate_title(base_title: str, max_len: int = _MAX_SESSION_TITLE_LEN) -> str:
+    """Build a default duplicate title, preserving the ``Copy of `` prefix when truncating."""
+    full = f"{_DUPLICATE_TITLE_PREFIX}{base_title or 'Untitled'}"
+    if len(full) <= max_len:
+        return full
+    max_base_len = max_len - len(_DUPLICATE_TITLE_PREFIX)
+    return f"{_DUPLICATE_TITLE_PREFIX}{base_title[:max_base_len]}"
+
 
 class SessionNotFoundError(Exception):
     """Raised when a session is not found."""
@@ -276,6 +293,7 @@ class SessionManager:
         created_by: Optional[str] = None,
         user_id: Optional[str] = None,
         limit: int = 50,
+        deck_only: bool = False,
     ) -> List[Dict[str, Any]]:
         """List sessions, optionally filtered by creator.
 
@@ -283,20 +301,27 @@ class SessionManager:
             created_by: Filter sessions to those created by this username
             user_id: Legacy user filter (kept for backward compat)
             limit: Maximum number of sessions to return
+            deck_only: When True, return only root sessions that have a slide deck
 
         Returns:
             List of session info dictionaries
         """
         with get_db_session() as db:
-            # Include sessions with a slide deck (e.g. duplicated decks) even when
-            # they have no chat messages yet; also include chat-only sessions.
-            query = db.query(UserSession).filter(
-                or_(
-                    UserSession.messages.any(),
+            if deck_only:
+                query = db.query(UserSession).filter(
                     UserSession.slide_deck.has(),
-                ),
-                UserSession.parent_session_id.is_(None),  # Exclude contributor sessions
-            )
+                    UserSession.parent_session_id.is_(None),  # Exclude contributor sessions
+                )
+            else:
+                # Include sessions with a slide deck (e.g. duplicated decks) even when
+                # they have no chat messages yet; also include chat-only sessions.
+                query = db.query(UserSession).filter(
+                    or_(
+                        UserSession.messages.any(),
+                        UserSession.slide_deck.has(),
+                    ),
+                    UserSession.parent_session_id.is_(None),  # Exclude contributor sessions
+                )
 
             if created_by:
                 query = query.filter(UserSession.created_by == created_by)
@@ -444,7 +469,10 @@ class SessionManager:
 
             source_deck = deck_owner.slide_deck
             base_title = deck_owner.title or "Untitled"
-            new_title = title.strip() if title and title.strip() else f"Copy of {base_title}"
+            if title and title.strip():
+                new_title = _truncate_session_title(title.strip())
+            else:
+                new_title = _default_duplicate_title(base_title)
 
             new_session = UserSession(
                 session_id=secrets.token_urlsafe(32),

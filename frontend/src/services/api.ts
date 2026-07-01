@@ -320,8 +320,15 @@ export const api = {
   /**
    * List user's own sessions (My Sessions)
    */
-  async listSessions(limit = 50): Promise<{ sessions: Session[]; count: number }> {
-    const response = await fetch(`${API_BASE_URL}/api/sessions?limit=${limit}`);
+  async listSessions(
+    limit = 50,
+    options?: { deckOnly?: boolean },
+  ): Promise<{ sessions: Session[]; count: number }> {
+    const params = new URLSearchParams({ limit: String(limit) });
+    if (options?.deckOnly) {
+      params.set('deck_only', 'true');
+    }
+    const response = await fetch(`${API_BASE_URL}/api/sessions?${params.toString()}`);
 
     if (!response.ok) {
       throw new ApiError(response.status, 'Failed to list sessions');

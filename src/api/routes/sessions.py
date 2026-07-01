@@ -198,6 +198,10 @@ async def create_session(request: CreateSessionRequest = None):
 @router.get("")
 async def list_sessions(
     limit: int = Query(50, ge=1, le=100, description="Maximum sessions to return"),
+    deck_only: bool = Query(
+        False,
+        description="When true, return only sessions that have a slide deck",
+    ),
 ):
     """List sessions created by the current user (My Sessions).
 
@@ -206,6 +210,7 @@ async def list_sessions(
 
     Args:
         limit: Maximum number of sessions to return
+        deck_only: When true, return only sessions with a slide deck
 
     Returns:
         List of session summaries with my_permission = CAN_MANAGE
@@ -218,6 +223,7 @@ async def list_sessions(
             session_manager.list_sessions,
             created_by=current_user,
             limit=limit,
+            deck_only=deck_only,
         )
         
         # Add permission info (creator always has CAN_MANAGE)
