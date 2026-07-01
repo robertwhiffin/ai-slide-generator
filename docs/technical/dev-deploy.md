@@ -88,8 +88,9 @@ instances are fully isolated. The app compute is created once and reused; the
 branch is deleted and re-forked from prod on every deploy (fresh prod data each
 time — anything written to an instance is wiped on its next deploy).
 
-**Migration limitation:** an instance can create new tables and read/write prod
-data, but a build that `ALTER`s an *inherited* prod table fails at startup with
-`must be owner of table`. Fixing that needs the Lakebase table-ownership
-(shared-owner) workstream — see
-`docs/superpowers/specs/2026-06-29-devloop-instance-branching-design.md`.
+Each instance is a full prod mirror: it can create tables, read/write prod data,
+and run `ALTER`-bearing migrations against inherited prod tables. Ownership of
+`app_data_prod` lives on the shared `tellr_app_owners` role; on `create` the
+deploy triggers a serverless job (running as a dedicated granter SP) that grants
+the instance's service principal into that role, so its migrations can alter the
+inherited tables. See `docs/technical/lakebase-table-ownership.md`.
