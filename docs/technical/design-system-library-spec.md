@@ -185,3 +185,53 @@ gh workflow run publish-dev.yml                                  # publish .devN
 - Frontend: `frontend/src/components/config/SlideStyleList.tsx`, `SlideStyleForm.tsx`, `frontend/src/components/AgentConfigBar/AgentConfigBar.tsx`, `frontend/src/contexts/AgentConfigContext.tsx`
 - huashu render: `services/pptx-emit-huashu` (vendored `html2pptx`)
 - Dev loop: `docs/technical/dev-deploy.md`, `.claude/skills/deploy-tellr-dev/`, `scripts/deploy_local.sh`, `.github/workflows/publish-dev.yml`
+
+---
+
+## 17. Confirmed bundle format & importer (reference: an exported design-system project archive)
+
+> Abstract STRUCTURE / SCHEMA only — **no brand content**. All token names/values below are **generic placeholders**.
+
+A reference design-system export is a **Project archive `.zip`** — which confirms the **skill-with-files** model. Abstract layout:
+```
+_ds_manifest.json          # manifest / index of everything (the importer reads this)
+SKILL.md                   # skill frontmatter (name, description, user-invocable) -> packages the bundle as a skill
+README.md                  # brand / usage guide
+colors_and_type.css        # design tokens as :root CSS vars + @font-face
+fonts/                     # font files (.ttf/.woff2)
+assets/brand/ , assets/... # SVG/PNG brand assets
+preview/                   # specimen HTML cards, one per token/component group
+slides/                    # index.html + deck-runtime js + slide-*.html
+templates/<name>/          # index.html + base js + deck-runtime js, per template
+ui_kits/website/           # UI kit (NON-slide -> out of scope)
+uploads/                   # original sources (pptx/svg/png/pdf)
+_adherence.*.json          # optional lint rules enforcing token/brand adherence
+```
+
+### `_ds_manifest.json` schema (importer target — field names only)
+```
+namespace       : string
+cards[]         : { path, group, viewport?, subtitle?, name? }   # group in Brand|Colors|Components|Slides|Spacing|Type|UI Kit
+templates[]     : { name, description, folder, entryPath }
+globalCssPaths  : [ css paths ]
+tokens[]        : { name, value, kind, definedIn, annotation? }  # kind in color|font|spacing|shadow; value may be var(--other)
+fonts[]         : { family, weight, style, cssPath, files[] }
+brandFonts[]    : { family, status, tokens[], path }
+components[], startingPoints[], themes[] : (reserved)
+source          : string
+```
+Parallel representation: inline HTML annotations (e.g. `<!-- @dsCard group="..." -->`, `<!-- @template name="..." -->`) — an importer can read either the manifest or the annotations.
+
+### Importer mapping (external `.zip` -> Tellr design system, Phase 5)
+- `_ds_manifest.json` -> `design_system.manifest_json`
+- `tokens[]` -> `design_system_token` rows (name/value/kind/group)
+- `fonts/` + `assets/**` -> `design_system_asset` (bytes in Lakebase; kind = font/logo/icon/...)
+- `templates[]` + `slides/` -> template records (layout HTML + screenshots)
+- `colors_and_type.css` (:root vars) -> token source for compile-to-prompt (reuse the CSS :root var convention)
+- non-slide surfaces (`ui_kits/website/`) -> ignored (slides only)
+
+### Create flow (reference, for the later in-app create phase)
+Two paths observed: "Create here" (upload slides/assets + fonts/logos, optional external links, freeform notes) and a Claude-Code / React-components path. For Tellr v1 (upload-first, NO external connectors): keep the **upload-a-bundle** path + a minimal **create form** subset (name/blurb + upload fonts/logos/assets + notes). No GitHub/Figma/Claude-Code paths.
+
+### Org sharing model (reference)
+A design system is owned by an individual; a **Published** flag makes it appear in the org picker; a **Default** flag sets the org default; access is org-scoped. Matches our org-shared + published + is_default design.
