@@ -113,8 +113,8 @@ export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ child
 
         return { slideDeck, rawHtml };
       } catch (err) {
-        // Let 404 (session not found) propagate so caller can redirect to /help
-        if (err instanceof ApiError && err.status === 404) {
+        // Let 404 (session not found) and 403 (access revoked) propagate to caller
+        if (err instanceof ApiError && (err.status === 404 || err.status === 403)) {
           throw err;
         }
         console.error('Failed to switch session:', err);

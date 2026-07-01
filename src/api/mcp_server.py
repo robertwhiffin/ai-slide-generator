@@ -73,12 +73,6 @@ class _PermissionServiceFacade:
             )
             if session is None:
                 return False
-            # Creator always has view access (mirrors PermissionService's
-            # get_deck_permission creator check, done here on the string-id
-            # fast path so a brand-new session the caller just created is
-            # viewable even before any DeckContributor row exists).
-            if session.created_by and session.created_by == ctx.user_name:
-                return True
             return svc.can_view_deck(
                 db,
                 session.id,
@@ -93,11 +87,10 @@ class _PermissionServiceFacade:
         Mirrors ``can_view_deck`` but gates on CAN_EDIT (or higher) rather
         than any access. Resolves the string ``session_id`` to the
         underlying ``UserSession.id`` (integer PK) and delegates to the
-        shared ``PermissionService``. The session creator is short-
-        circuited to True — creators implicitly hold CAN_MANAGE, which
-        includes edit — on the string-id fast path so a session the
-        caller just created is editable before any DeckContributor row
-        exists.
+        shared ``PermissionService``. Creator access is resolved by the
+        service via the root session's ``created_by`` (creators implicitly
+        hold CAN_MANAGE, which includes edit), so a session the caller just
+        created is editable before any DeckContributor row exists.
         """
         ctx = get_permission_context()
         if ctx is None:
@@ -113,8 +106,6 @@ class _PermissionServiceFacade:
             )
             if session is None:
                 return False
-            if session.created_by and session.created_by == ctx.user_name:
-                return True
             return svc.can_edit_deck(
                 db,
                 session.id,

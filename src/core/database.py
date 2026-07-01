@@ -518,6 +518,9 @@ def _run_migrations(engine, schema: str | None = None):
         # --- deck-centric permissions: drop profile_id, migrate CAN_VIEW → CAN_USE ---
         _migrate_deck_permissions_model(conn, inspector, schema, _qual, is_sqlite)
 
+        # --- deck workspace sharing: global_permission on user_sessions ---
+        _migrate_deck_workspace_sharing(conn, inspector, schema, _qual)
+
         # --- image_assets.tags: json → jsonb (PostgreSQL) for native @> queries ---
         _migrate_image_assets_tags_json_to_jsonb(conn, schema, _qual, is_sqlite)
 
@@ -928,6 +931,29 @@ def _migrate_permissions_columns(conn, inspector, schema, _qual, is_sqlite):
             ))
 
     logger.info("Migration: permissions columns migration complete")
+
+
+def _migrate_deck_workspace_sharing(conn, inspector, schema, _qual) -> None:
+    """Add global_permission to user_sessions for workspace-wide deck sharing.
+
+    NULL = private deck. CAN_VIEW or CAN_EDIT when shared with all workspace users.
+    Idempotent.
+    """
+    from sqlalchemy import text
+
+    try:
+        sessions_cols = {c["name"] for c in inspector.get_columns("user_sessions", schema=schema)}
+    except Exception:
+        sessions_cols = set()
+
+    if sessions_cols and "global_permission" not in sessions_cols:
+        qualified = _qual("user_sessions")
+        logger.info("Migration: adding global_permission column to user_sessions")
+        conn.execute(text(
+            f"ALTER TABLE {qualified} ADD COLUMN global_permission VARCHAR(20) NULL"
+        ))
+
+    logger.info("Migration: deck workspace sharing columns complete")
 
 
 def _migrate_deck_permissions_model(conn, inspector, schema, _qual, is_sqlite):

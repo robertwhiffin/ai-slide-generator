@@ -14,6 +14,7 @@ import {
   type Identity,
   type PermissionLevel,
 } from '../../api/config';
+import { matchesWorkspaceShareSearch } from '../../utils/workspaceShareSearch';
 
 const PERMISSION_OPTIONS: { value: PermissionLevel; label: string; description: string }[] = [
   { value: 'CAN_USE', label: 'Can Use', description: 'Use profile for generating presentations' },
@@ -244,7 +245,7 @@ export const ContributorsManager: React.FC<ContributorsManagerProps> = ({
         {(searchResults.length > 0 || (searchQuery.length >= 1 && !globalPermission && canManage)) && (
           <div className="mt-2 border border-gray-200 rounded-md shadow-sm max-h-48 overflow-y-auto bg-white">
             {/* "All workspace users" suggestion when not already global */}
-            {!globalPermission && canManage && 'all workspace'.includes(searchQuery.toLowerCase()) && (
+            {!globalPermission && canManage && matchesWorkspaceShareSearch(searchQuery) && (
               <button
                 onClick={() => handleSetGlobalPermission(selectedPermission)}
                 disabled={updatingGlobal}
@@ -283,7 +284,8 @@ export const ContributorsManager: React.FC<ContributorsManagerProps> = ({
         )}
 
         {/* No results */}
-        {searchQuery.length >= 2 && !searching && searchResults.length === 0 && (
+        {searchQuery.length >= 2 && !searching && searchResults.length === 0
+          && !(matchesWorkspaceShareSearch(searchQuery) && !globalPermission) && (
           <p className="mt-2 text-sm text-gray-500 text-center py-2">
             No users found matching "{searchQuery}"
           </p>

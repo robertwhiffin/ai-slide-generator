@@ -21,6 +21,21 @@ Sharing a profile does **not** grant access to any deck. Sharing a deck does **n
 
 To share a link directly, click the **Copy Link** button to copy a shareable URL to your clipboard.
 
+### Sharing with All Workspace Users
+
+Decks can optionally be shared with all Tellr users in the workspace at **Can View** or **Can Edit**. This is separate from individual contributor rows.
+
+1. Open the deck and click **Share**
+2. In the search box, type a phrase such as `workspace` or `all` and select **All workspace users**
+3. Choose **Can View** or **Can Edit** using the permission dropdown, then add
+4. The deck appears in every workspace user's **Shared with Me** tab (except the owner)
+
+To change the workspace level, use the dropdown on the **All workspace users** row. To revoke workspace access, click the remove (trash) icon on that row.
+
+**Revocation behavior:** Removing workspace sharing denies access to users who only had the global grant. Users listed individually as contributors keep their explicit permission.
+
+**Note:** Workspace sharing supports **Can View** and **Can Edit** only. For administrators who can manage sharing, add them as individual contributors at **Can Manage**.
+
 ### Deck Permission Levels
 
 | Level | Summary |
@@ -141,8 +156,8 @@ Your session history is divided into two tabs in **View All Decks**:
 
 | Tab | Description |
 |-----|-------------|
-| **My Sessions** | Sessions you created (full control) |
-| **Shared with Me** | Decks that have been shared with you directly |
+| **My Sessions** | Sessions you created (full control). Workspace-shared decks show a **Workspace** badge. |
+| **Shared with Me** | Decks shared with you directly or via workspace-wide sharing |
 
 Each shared deck card shows your permission level.
 
@@ -251,6 +266,18 @@ Multiple people need to update a shared configuration template.
 ### Scenario 6: Company-Wide Template
 Everyone in the workspace should be able to use a profile.
 -> Set "All workspace users" to **CAN USE** on the profile
+
+### Scenario 7: Company-Wide Deck Review
+Everyone in the workspace should be able to view a published deck.
+-> Set **All workspace users** to **Can View** on the deck
+
+### Scenario 8: Workspace Collaboration Deck
+Any Tellr user should be able to edit a shared working deck.
+-> Set **All workspace users** to **Can Edit** on the deck, or share with specific groups at **CAN EDIT**
+
+### Scenario 9: Revoke Workspace Access, Keep Key Contributors
+You previously shared a deck with the whole workspace but want to restrict it again.
+-> Remove **All workspace users** from the deck share panel. Users with individual contributor entries retain access.
 
 ---
 

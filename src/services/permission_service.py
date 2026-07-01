@@ -11,7 +11,8 @@ Users can have permissions through:
 1. Direct USER-type contributor entry (by identity_id)
 2. Fallback USER-type contributor entry (by identity_name)
 3. GROUP-type contributor entry (if user is member of that group)
-4. Being the creator (implicit CAN_MANAGE)
+4. Workspace-wide global_permission on the root user_sessions row (CAN_VIEW/CAN_EDIT)
+5. Being the creator (implicit CAN_MANAGE)
 """
 
 import logging
@@ -37,6 +38,12 @@ PERMISSION_PRIORITY = {
     PermissionLevel.CAN_EDIT: 2,
     PermissionLevel.CAN_MANAGE: 3,
 }
+
+# Workspace-wide deck sharing — CAN_MANAGE is not valid for global_permission
+VALID_DECK_GLOBAL_PERMISSIONS = frozenset({
+    PermissionLevel.CAN_VIEW,
+    PermissionLevel.CAN_EDIT,
+})
 
 
 class PermissionService:
@@ -206,6 +213,23 @@ class PermissionService:
     # Deck permission methods (new)
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _resolve_root_session(db: Session, session: UserSession) -> UserSession:
+        """Return the deck-owning root session (walk parent_session_id chain)."""
+        current = session
+        seen = {current.id}
+        while current.parent_session_id is not None:
+            parent = (
+                db.query(UserSession)
+                .filter(UserSession.id == current.parent_session_id)
+                .first()
+            )
+            if parent is None or parent.id in seen:
+                break
+            seen.add(parent.id)
+            current = parent
+        return current
+
     def get_deck_permission(
         self,
         db: Session,
@@ -217,16 +241,21 @@ class PermissionService:
         """
         Get the user's permission level on a deck (UserSession).
 
-        Resolution order:
-        1. Creator check — session.created_by == user_name → CAN_MANAGE
-        2. Direct user by identity_id
-        3. Fallback by identity_name
-        4. Group matches (highest wins)
-        5. None
+        Always resolves contributor (child) sessions to the root deck session
+        before evaluating grants. Contributor session creators must not inherit
+        CAN_MANAGE on the shared deck.
+
+        Resolution order (highest level wins):
+        1. Creator check — root.created_by == user_name → CAN_MANAGE
+        2. Direct user by identity_id (on root deck)
+        3. Fallback by identity_name (on root deck)
+        4. Group matches (on root deck)
+        5. Workspace global_permission on root session (CAN_VIEW/CAN_EDIT only)
+        6. None if no grants match
 
         Args:
             db: Database session
-            session_id: UserSession.id (integer PK)
+            session_id: UserSession.id (integer PK), root or contributor
             user_id: Databricks user ID
             user_name: Username/email
             group_ids: List of group IDs the user belongs to
@@ -238,48 +267,72 @@ class PermissionService:
         if not session:
             return None
 
+        root = self._resolve_root_session(db, session)
+        deck_id = root.id
+
         permissions_found: List[PermissionLevel] = []
 
-        # Check 1: Is user the session creator? (implicit CAN_MANAGE)
-        if user_name and session.created_by == user_name:
-            logger.debug(f"User {user_name} is creator of session {session_id}")
+        # Check 1: Is user the deck owner? (implicit CAN_MANAGE on root only)
+        if user_name and root.created_by == user_name:
+            logger.debug(f"User {user_name} is creator of deck session {deck_id}")
             permissions_found.append(PermissionLevel.CAN_MANAGE)
 
         # Check 2: Direct user permission (by identity_id)
         if user_id:
             direct_match = db.query(DeckContributor).filter(
-                DeckContributor.user_session_id == session_id,
+                DeckContributor.user_session_id == deck_id,
                 DeckContributor.identity_type == "USER",
                 DeckContributor.identity_id == user_id,
             ).first()
 
             if direct_match:
-                logger.debug(f"Found direct deck permission for user {user_id} on session {session_id}: {direct_match.permission_level}")
+                logger.debug(
+                    f"Found direct deck permission for user {user_id} on deck {deck_id}: "
+                    f"{direct_match.permission_level}"
+                )
                 permissions_found.append(PermissionLevel(direct_match.permission_level))
 
         # Check 3: Fallback - Direct user permission (by identity_name)
-        if user_name and not permissions_found:
+        if user_name:
             name_match = db.query(DeckContributor).filter(
-                DeckContributor.user_session_id == session_id,
+                DeckContributor.user_session_id == deck_id,
                 DeckContributor.identity_type == "USER",
                 DeckContributor.identity_name == user_name,
             ).first()
 
             if name_match:
-                logger.debug(f"Found deck permission by name for {user_name} on session {session_id}: {name_match.permission_level}")
+                logger.debug(
+                    f"Found deck permission by name for {user_name} on deck {deck_id}: "
+                    f"{name_match.permission_level}"
+                )
                 permissions_found.append(PermissionLevel(name_match.permission_level))
 
         # Check 4: Group-based permission
         if group_ids:
             group_matches = db.query(DeckContributor).filter(
-                DeckContributor.user_session_id == session_id,
+                DeckContributor.user_session_id == deck_id,
                 DeckContributor.identity_type == "GROUP",
                 DeckContributor.identity_id.in_(group_ids),
             ).all()
 
             for match in group_matches:
-                logger.debug(f"Found group deck permission on session {session_id}: {match.identity_name} -> {match.permission_level}")
+                logger.debug(
+                    f"Found group deck permission on deck {deck_id}: "
+                    f"{match.identity_name} -> {match.permission_level}"
+                )
                 permissions_found.append(PermissionLevel(match.permission_level))
+
+        # Check 5: Workspace-wide sharing (root sessions only)
+        if root.global_permission:
+            try:
+                global_perm = PermissionLevel(root.global_permission)
+            except ValueError:
+                global_perm = None
+            if global_perm in VALID_DECK_GLOBAL_PERMISSIONS:
+                logger.debug(
+                    f"Found workspace global permission on deck {deck_id}: {global_perm}"
+                )
+                permissions_found.append(global_perm)
 
         if not permissions_found:
             return None
@@ -366,8 +419,8 @@ class PermissionService:
         group_ids: Optional[List[str]] = None,
     ) -> Set[int]:
         """
-        Return set of UserSession.id values shared with this user via deck_contributors,
-        excluding sessions where the user is the creator.
+        Return set of UserSession.id values shared with this user via deck_contributors
+        or workspace global_permission, excluding sessions where the user is the creator.
 
         Args:
             db: Database session
@@ -403,6 +456,14 @@ class PermissionService:
                 DeckContributor.identity_id.in_(group_ids),
             ).all()
             shared_session_ids.update(r.user_session_id for r in rows)
+
+        # Workspace-wide shared root sessions (valid levels only)
+        valid_global = [p.value for p in VALID_DECK_GLOBAL_PERMISSIONS]
+        global_rows = db.query(UserSession.id).filter(
+            UserSession.parent_session_id.is_(None),
+            UserSession.global_permission.in_(valid_global),
+        ).all()
+        shared_session_ids.update(r.id for r in global_rows)
 
         if not shared_session_ids:
             return set()
