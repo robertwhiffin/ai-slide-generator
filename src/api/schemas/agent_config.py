@@ -59,6 +59,9 @@ class AgentConfig(BaseModel):
     """Agent configuration stored as JSON on sessions and profiles."""
     tools: list[ToolEntry] = Field(default_factory=list)
     slide_style_id: Optional[int] = None
+    # A selected design system compiles to prompt text and, when set, takes
+    # precedence over slide_style_id (see agent_factory._get_prompt_content).
+    design_system_id: Optional[int] = None
     deck_prompt_id: Optional[int] = None
     system_prompt: Optional[str] = None
     slide_editing_instructions: Optional[str] = None
