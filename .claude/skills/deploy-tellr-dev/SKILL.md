@@ -63,9 +63,13 @@ instances stay isolated:
 re-forked from prod on every deploy, so anything written to an instance is wiped
 on its next deploy.
 
-**Migration limitation:** a build that `ALTER`s an *inherited* prod table fails
-at startup with `must be owner of table` (creating new tables is fine). See
-`docs/technical/dev-deploy.md` for details.
+**Migrations run as code on the fork.** A build can `ALTER`/`DROP` inherited prod
+tables *and* create new ones — `app_data_prod` is owned by the shared
+`tellr_app_owners` role, and `devloop create` grants each instance's SP into that
+role (via a serverless granter job) so its migrations run as owner through
+`INHERIT`. New objects a migration creates are reassigned back to the shared role
+so the next fork inherits them too. See
+`docs/technical/lakebase-table-ownership.md` for the ownership model.
 
 ## Reading deploy logs
 
