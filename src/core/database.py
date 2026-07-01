@@ -558,6 +558,8 @@ def _migrate_design_system_tables(conn, schema: str | None = None) -> None:
         table = model.__table__
         # Match init_db()'s schema handling so a qualified deployment creates the
         # tables in the Lakebase schema; guarded so it stays a no-op on repeat.
+        # NOTE: this mutates the module-global Table.schema on the shared ORM
+        # metadata — intentional, and identical to what init_db() already does.
         if schema and table.schema is None:
             table.schema = schema
         table.create(bind=conn, checkfirst=True)
