@@ -6,6 +6,10 @@ Phase 1 of the Design System Library feature (see
 Coverage:
 - The hand-rolled migration ``_migrate_design_system_tables`` creates the three
   additive tables idempotently and is dialect-safe on the SQLite used in tests.
+- The schema-qualified / Postgres path (the migration's production purpose):
+  tables are created inside a named schema and the child->parent FK cascades,
+  and the models compile to the expected PostgreSQL DDL (JSONB/BYTEA/SERIAL,
+  quoted ``group``, schema-qualified FK).
 - ORM create/read round-trips for ``DesignSystem`` + its assets + its tokens.
 - Byte-storage guardrails: binary bytes live ONLY in the dedicated asset table,
   and per-asset / per-bundle size-limit constants exist.
@@ -21,10 +25,12 @@ import tempfile
 from unittest.mock import patch
 
 import pytest
-from sqlalchemy import LargeBinary, create_engine, inspect
+from sqlalchemy import LargeBinary, create_engine, inspect, text
+from sqlalchemy.dialects import postgresql
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
+from sqlalchemy.schema import CreateTable
 
 import src.database.models  # noqa: F401 - register models with Base.metadata
 from src.core.database import Base, _run_migrations, init_db
@@ -350,3 +356,135 @@ class TestBackwardCompatibility:
             "version",
         ):
             assert design_system_only not in cols
+
+
+# ---------------------------------------------------------------------------
+# Schema-qualified / PostgreSQL path (the migration's production purpose)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def restore_ds_table_schema():
+    """Restore the module-global ``Table.schema`` after a schema-qualified test.
+
+    ``_migrate_design_system_tables`` sets ``Table.schema`` on the SHARED ORM
+    metadata (mirroring ``init_db``). Left mutated, ``schema='app_data'`` would
+    leak onto every later test's ``create_all`` and break the suite, so capture
+    and restore the original values regardless of test outcome.
+    """
+    from src.database.models.design_system import (
+        DesignSystem,
+        DesignSystemAsset,
+        DesignSystemToken,
+    )
+
+    tables = [
+        DesignSystem.__table__,
+        DesignSystemAsset.__table__,
+        DesignSystemToken.__table__,
+    ]
+    original = [t.schema for t in tables]
+    try:
+        yield
+    finally:
+        for table, schema in zip(tables, original):
+            table.schema = schema
+
+
+class TestSchemaQualifiedMigration:
+    SCHEMA = "app_data"  # matches the default LAKEBASE_SCHEMA
+
+    def test_migration_creates_tables_in_named_schema(self, sqlite_engine, restore_ds_table_schema):
+        """With ``schema=`` set, the tables are created inside that named schema
+        and the child->parent FK cascades on delete.
+
+        SQLite models the Lakebase schema via ``ATTACH DATABASE ... AS <schema>``.
+        Everything runs on one connection because the attach alias, the
+        ``PRAGMA foreign_keys`` setting, and the ``:memory:`` attached DB are all
+        per-connection.
+        """
+        from src.core.database import _migrate_design_system_tables
+
+        with sqlite_engine.connect() as conn:
+            conn.execute(text(f"ATTACH DATABASE ':memory:' AS {self.SCHEMA}"))
+            conn.execute(text("PRAGMA foreign_keys=ON"))
+            assert conn.execute(text("PRAGMA foreign_keys")).scalar() == 1
+
+            _migrate_design_system_tables(conn, schema=self.SCHEMA)
+            # Idempotent: a second run must not raise.
+            _migrate_design_system_tables(conn, schema=self.SCHEMA)
+
+            insp = inspect(conn)
+            assert DESIGN_SYSTEM_TABLES <= set(insp.get_table_names(schema=self.SCHEMA))
+            # Nothing leaked into the default (main) schema.
+            assert not (DESIGN_SYSTEM_TABLES & set(insp.get_table_names()))
+
+            # The reflected child FK is wired to the parent with ON DELETE CASCADE.
+            (fk,) = insp.get_foreign_keys("design_system_asset", schema=self.SCHEMA)
+            assert fk["referred_table"] == "design_system"
+            assert fk["referred_schema"] == self.SCHEMA
+            assert fk["options"].get("ondelete") == "CASCADE"
+
+            # Runtime cascade: deleting the parent removes its assets.
+            conn.execute(
+                text(
+                    f"INSERT INTO {self.SCHEMA}.design_system "
+                    "(name, published, is_default, version, created_at, updated_at) "
+                    "VALUES ('Acme DS', 0, 0, 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+                )
+            )
+            ds_id = conn.execute(text(f"SELECT id FROM {self.SCHEMA}.design_system")).scalar()
+            conn.execute(
+                text(
+                    f"INSERT INTO {self.SCHEMA}.design_system_asset "
+                    "(design_system_id, kind, filename, mime, bytes, size_bytes) "
+                    "VALUES (:ds_id, 'logo', 'acme-logo.svg', 'image/svg+xml', :data, 4)"
+                ),
+                {"ds_id": ds_id, "data": b"svg!"},
+            )
+            assert (
+                conn.execute(
+                    text(f"SELECT COUNT(*) FROM {self.SCHEMA}.design_system_asset")
+                ).scalar()
+                == 1
+            )
+            conn.execute(
+                text(f"DELETE FROM {self.SCHEMA}.design_system WHERE id = :ds_id"),
+                {"ds_id": ds_id},
+            )
+            assert (
+                conn.execute(
+                    text(f"SELECT COUNT(*) FROM {self.SCHEMA}.design_system_asset")
+                ).scalar()
+                == 0
+            )
+
+    def test_postgres_dialect_ddl(self, restore_ds_table_schema):
+        """The models compile to the intended PostgreSQL/Lakebase DDL when the
+        schema is set: schema-qualified FK, JSONB/BYTEA/SERIAL types, quoted
+        ``group`` reserved word."""
+        from src.database.models.design_system import (
+            DesignSystem,
+            DesignSystemAsset,
+            DesignSystemToken,
+        )
+
+        for model in (DesignSystem, DesignSystemAsset, DesignSystemToken):
+            model.__table__.schema = self.SCHEMA
+
+        pg = postgresql.dialect()
+        ds_ddl = str(CreateTable(DesignSystem.__table__).compile(dialect=pg))
+        asset_ddl = str(CreateTable(DesignSystemAsset.__table__).compile(dialect=pg))
+        token_ddl = str(CreateTable(DesignSystemToken.__table__).compile(dialect=pg))
+
+        # Child FKs are schema-qualified back to the parent, cascading on delete.
+        assert f"REFERENCES {self.SCHEMA}.design_system (id) ON DELETE CASCADE" in asset_ddl
+        assert f"REFERENCES {self.SCHEMA}.design_system (id) ON DELETE CASCADE" in token_ddl
+
+        # Dialect-specific types render as expected.
+        assert "manifest_json JSONB" in ds_ddl
+        assert "bytes BYTEA" in asset_ddl
+        assert "id SERIAL" in ds_ddl
+
+        # `group` is a reserved word and must be double-quoted.
+        assert '"group" VARCHAR' in token_ddl
