@@ -111,10 +111,16 @@ jobs:
       - name: Build databricks-tellr
         run: python -m build --sdist --wheel packages/databricks-tellr
 
+      - name: Build huashu bootstrap artifacts
+        # Produces services/pptx-emit-huashu/{node_modules,sys-libs-bullseye}.tar.gz
+        # which setup.py copies into the wheel's _assets/sidecars/pptx-emit-huashu/
+        # when TELLR_INCLUDE_HUASHU_SIDECAR=1. Mirrors publish.yml (prod).
+        run: bash services/pptx-emit-huashu/build-artifacts.sh
+
       - name: Build databricks-tellr-app
         run: |
           cp -r src packages/databricks-tellr-app/src
-          python -m build --sdist --wheel packages/databricks-tellr-app
+          TELLR_INCLUDE_HUASHU_SIDECAR=1 python -m build --sdist --wheel packages/databricks-tellr-app
           rm -rf packages/databricks-tellr-app/src
 
       - name: Verify built artifacts (huashu tarballs present, wheel >= 25MB)
