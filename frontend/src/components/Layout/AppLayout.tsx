@@ -52,6 +52,7 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
   const [sessionsRefreshKey, setSessionsRefreshKey] = useState<number>(0);
   const [scrollTarget, setScrollTarget] = useState<{ index: number; key: number } | null>(null);
   const [exportStatus, setExportStatus] = useState<string | null>(null);
+  const [isDuplicating, setIsDuplicating] = useState(false);
   // Save Points / versioning
   const [versions, setVersions] = useState<SavePointVersion[]>([]);
   const [currentVersion, setCurrentVersion] = useState<number | null>(null);
@@ -510,6 +511,25 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
     );
   }, [sessionId, showToast]);
 
+  const handleDuplicate = useCallback(async () => {
+    if (!sessionId || !slideDeck) return;
+    try {
+      setIsDuplicating(true);
+      const result = await api.duplicateSession(sessionId);
+      setSessionsRefreshKey((k) => k + 1);
+      showToast(`Created "${result.title}"`, 'success');
+      navigate(`/sessions/${result.session_id}/edit`);
+    } catch (err) {
+      console.error('Failed to duplicate deck:', err);
+      const message = err && typeof err === 'object' && 'message' in err
+        ? String((err as { message: string }).message)
+        : 'Failed to duplicate deck';
+      showToast(message, 'error');
+    } finally {
+      setIsDuplicating(false);
+    }
+  }, [sessionId, slideDeck, navigate, showToast]);
+
   // Save Points: preview a version
   const handlePreviewVersion = useCallback(async (versionNumber: number) => {
     if (!sessionId) return;
@@ -726,6 +746,8 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
                 onSave={() => setShowSaveDialog(true)}
                 onShare={!viewOnly && sessionId ? handleShare : undefined}
                 onCopyLink={!viewOnly && sessionId ? handleCopyLink : undefined}
+                onDuplicate={sessionId && slideDeck ? handleDuplicate : undefined}
+                isDuplicating={isDuplicating}
                 onExportPPTX={slideDeck ? handleExportPPTX : undefined}
                 onExportPDF={slideDeck ? handleExportPDF : undefined}
                 onExportHTML={slideDeck ? handleExportHTML : undefined}
@@ -842,6 +864,7 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
                   onSessionSelect={handleSessionRestore}
                   onBack={() => setViewMode('main')}
                   refreshKey={sessionsRefreshKey}
+                  onSessionsChange={() => setSessionsRefreshKey((k) => k + 1)}
                 />
               </div>
             </div>

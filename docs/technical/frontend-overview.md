@@ -31,7 +31,7 @@ Each page has a dedicated URL. Navigation buttons use `useNavigate()` to change 
 
 - **New Session** (`/sessions/:id/edit`): The primary slide generation interface
 - **Viewer** (`/sessions/:id/view`): Read-only presentation viewer (chat disabled, editing disabled)
-- **My Sessions** (`/history`): Session list and restore functionality
+- **My Sessions** (`/history`): Session list, restore, rename, delete, and **duplicate** deck
 - **Profiles** (`/profiles`): Saved configuration snapshots
 - **Deck Prompts** (`/deck-prompts`): Presentation template library management
 - **Slide Styles** (`/slide-styles`): Visual style library management (typography, colors, layout)

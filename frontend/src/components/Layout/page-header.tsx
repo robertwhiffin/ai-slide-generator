@@ -1,6 +1,6 @@
 // @ts-nocheck
 import { useState, useRef, useEffect, type ReactNode } from "react"
-import { Save, Download, Play, Share2, Link, ChevronDown, FileDown, FileText, Presentation, Code } from "lucide-react"
+import { Save, Download, Play, Share2, Link, ChevronDown, FileDown, FileText, Presentation, Code, CopyPlus } from "lucide-react"
 import { Button } from "@/ui/button"
 import { SidebarTrigger } from "@/ui/sidebar"
 import { Separator } from "@/ui/separator"
@@ -17,6 +17,8 @@ interface PageHeaderProps {
   onSave?: () => void
   onShare?: () => void
   onCopyLink?: () => void
+  onDuplicate?: () => void
+  isDuplicating?: boolean
   /** Single export action (legacy); ignored if export menu items are provided */
   onExport?: () => void
   onExportPPTX?: () => void
@@ -41,6 +43,8 @@ export function PageHeader({
   onSave,
   onShare,
   onCopyLink,
+  onDuplicate,
+  isDuplicating = false,
   onExport,
   onExportPPTX,
   onExportPDF,
@@ -205,6 +209,19 @@ export function PageHeader({
               Export
             </Button>
           )
+        )}
+        {onDuplicate && (
+          <Button
+            variant="outline"
+            size="sm"
+            className="gap-1.5"
+            onClick={onDuplicate}
+            disabled={isGenerating || isDuplicating}
+            title="Create a private copy in My Sessions"
+          >
+            <CopyPlus className="size-3.5" />
+            {isDuplicating ? 'Duplicating…' : 'Duplicate'}
+          </Button>
         )}
         {onCopyLink && (
           <Button

@@ -10,8 +10,10 @@ import secrets
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 
+from sqlalchemy import or_
 from sqlalchemy.orm import Session, joinedload
 
+from src.api.schemas.agent_config import sanitize_agent_config_for_persist
 from src.core.database import get_db_session
 from src.database.models.session import (
     ChatRequest,
@@ -286,8 +288,13 @@ class SessionManager:
             List of session info dictionaries
         """
         with get_db_session() as db:
+            # Include sessions with a slide deck (e.g. duplicated decks) even when
+            # they have no chat messages yet; also include chat-only sessions.
             query = db.query(UserSession).filter(
-                UserSession.messages.any(),
+                or_(
+                    UserSession.messages.any(),
+                    UserSession.slide_deck.has(),
+                ),
                 UserSession.parent_session_id.is_(None),  # Exclude contributor sessions
             )
 
@@ -402,6 +409,91 @@ class SessionManager:
                 "session_id": session.session_id,
                 "title": session.title,
                 "updated_at": session.last_activity.isoformat(),
+            }
+
+    def duplicate_session(
+        self,
+        source_session_id: str,
+        created_by: str,
+        title: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Duplicate a slide deck into a new root session owned by ``created_by``.
+
+        Copies the current slide deck snapshot from the source (resolving
+        contributor sessions to the parent deck owner). Chat history, save
+        points, sharing grants, and session-specific IDs are not copied.
+
+        Args:
+            source_session_id: Session to duplicate (root or contributor)
+            created_by: Username of the user creating the copy
+            title: Optional title (default: ``Copy of {source title}``)
+
+        Returns:
+            New session info including ``source_session_id``
+
+        Raises:
+            SessionNotFoundError: If source session does not exist
+            ValueError: If source has no slide deck
+        """
+        with get_db_session() as db:
+            source = self._get_session_or_raise(db, source_session_id)
+            deck_owner = self._get_deck_owner_session(db, source)
+
+            if deck_owner.slide_deck is None:
+                raise ValueError("Source session has no slide deck to duplicate")
+
+            source_deck = deck_owner.slide_deck
+            base_title = deck_owner.title or "Untitled"
+            new_title = title.strip() if title and title.strip() else f"Copy of {base_title}"
+
+            new_session = UserSession(
+                session_id=secrets.token_urlsafe(32),
+                created_by=created_by,
+                title=new_title,
+                agent_config=sanitize_agent_config_for_persist(deck_owner.agent_config),
+                global_permission=None,
+                parent_session_id=None,
+                genie_conversation_id=None,
+                experiment_id=None,
+                google_slides_presentation_id=None,
+                google_slides_url=None,
+            )
+            db.add(new_session)
+            db.flush()
+
+            new_deck = SessionSlideDeck(
+                session_id=new_session.id,
+                title=new_title,
+                html_content=source_deck.html_content,
+                scripts_content=source_deck.scripts_content,
+                slide_count=source_deck.slide_count,
+                deck_json=source_deck.deck_json,
+                verification_map=source_deck.verification_map,
+                version=1,
+                modified_by=created_by,
+                locked_by=None,
+                locked_at=None,
+            )
+            db.add(new_deck)
+            db.flush()
+
+            logger.info(
+                "Duplicated session",
+                extra={
+                    "source_session_id": deck_owner.session_id,
+                    "new_session_id": new_session.session_id,
+                    "created_by": created_by,
+                    "slide_count": source_deck.slide_count,
+                },
+            )
+
+            return {
+                "session_id": new_session.session_id,
+                "title": new_title,
+                "created_by": created_by,
+                "created_at": new_session.created_at.isoformat(),
+                "slide_count": source_deck.slide_count,
+                "source_session_id": deck_owner.session_id,
             }
 
     def update_last_activity(self, session_id: str) -> None:

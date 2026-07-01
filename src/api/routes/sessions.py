@@ -20,7 +20,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
-from src.api.schemas.requests import CreateSessionRequest
+from src.api.schemas.requests import CreateSessionRequest, DuplicateSessionRequest
 from src.api.services.session_manager import (
     SessionNotFoundError,
     get_session_manager,
@@ -556,6 +556,71 @@ async def update_session(
         raise HTTPException(
             status_code=500,
             detail=f"Failed to update session: {str(e)}",
+        ) from e
+
+
+@router.post("/{session_id}/duplicate", status_code=201)
+async def duplicate_session(
+    session_id: str,
+    request: DuplicateSessionRequest = None,
+    db: Session = Depends(get_db),
+):
+    """Duplicate a slide deck into a new private session for the current user.
+
+    Requires at least CAN_VIEW on the source deck. The copy includes slide
+    content and agent configuration but not chat history, save points, or
+    sharing settings.
+
+    Args:
+        session_id: Source session ID (root or contributor session)
+        request: Optional title override for the copy
+
+    Returns:
+        New session info with ``source_session_id``
+    """
+    request = request or DuplicateSessionRequest()
+    current_user = get_current_user()
+
+    if not current_user:
+        raise HTTPException(status_code=401, detail="Authentication required")
+
+    try:
+        session_manager = get_session_manager()
+        session_info = await asyncio.to_thread(session_manager.get_session, session_id)
+        _require_session_access(session_info, db, PermissionLevel.CAN_VIEW)
+
+        result = await asyncio.to_thread(
+            session_manager.duplicate_session,
+            session_id,
+            current_user,
+            request.title,
+        )
+
+        logger.info(
+            "Session duplicated via API",
+            extra={
+                "source_session_id": session_id,
+                "new_session_id": result["session_id"],
+                "created_by": current_user,
+            },
+        )
+        return result
+
+    except SessionNotFoundError:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Session not found: {session_id}",
+        )
+    except HTTPException:
+        raise
+    except ValueError as e:
+        logger.warning(f"Validation error in duplicate_session: {e}")
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(f"Failed to duplicate session: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to duplicate session: {str(e)}",
         ) from e
 
 

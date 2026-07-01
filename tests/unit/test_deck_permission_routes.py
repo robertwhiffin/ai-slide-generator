@@ -486,3 +486,30 @@ class TestCreateChatRequestNoProfile:
 
         assert request_id is not None
         assert isinstance(request_id, str)
+
+
+# ---------------------------------------------------------------------------
+# Duplicate deck permission (CAN_VIEW minimum)
+# ---------------------------------------------------------------------------
+
+
+class TestDuplicateDeckPermission:
+    """Duplicate deck requires CAN_VIEW; CAN_VIEW contributors are allowed."""
+
+    def test_can_view_contributor_passes_view_gate(self, db, owner_session, deck_contributor_view):
+        from src.api.routes.sessions import _require_session_access
+
+        session_info = {
+            "id": owner_session.id,
+            "session_id": owner_session.session_id,
+            "created_by": "owner@test.com",
+            "is_contributor_session": False,
+            "parent_session_internal_id": None,
+        }
+
+        ctx = PermissionContext(user_id="viewer-uid", user_name="viewer@test.com")
+        with patch("src.api.routes.sessions.get_permission_context", return_value=ctx), \
+             patch("src.api.routes.sessions.get_current_user", return_value="viewer@test.com"):
+            perm = _require_session_access(session_info, db, PermissionLevel.CAN_VIEW)
+
+        assert perm == PermissionLevel.CAN_VIEW

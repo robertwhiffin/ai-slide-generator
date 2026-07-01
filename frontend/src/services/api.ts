@@ -113,6 +113,15 @@ export interface Session {
   global_permission?: 'CAN_VIEW' | 'CAN_EDIT' | null;
 }
 
+export interface DuplicateSessionResult {
+  session_id: string;
+  title: string;
+  created_by: string;
+  created_at: string;
+  slide_count: number;
+  source_session_id: string;
+}
+
 export interface SharedPresentation {
   session_id: string;
   title: string | null;
@@ -430,6 +439,32 @@ export const api = {
     if (currentSessionId === sessionId) {
       currentSessionId = null;
     }
+  },
+
+  /**
+   * Duplicate a slide deck into a new private session for the current user.
+   */
+  async duplicateSession(
+    sessionId: string,
+    title?: string,
+  ): Promise<DuplicateSessionResult> {
+    const body = title ? { title } : {};
+    const response = await fetch(`${API_BASE_URL}/api/sessions/${sessionId}/duplicate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+
+    if (!response.ok) {
+      const detail = response.status === 403
+        ? 'You do not have permission to duplicate this deck'
+        : response.status === 400
+          ? 'This session has no slide deck to duplicate'
+          : 'Failed to duplicate session';
+      throw new ApiError(response.status, detail);
+    }
+
+    return response.json();
   },
 
   /**

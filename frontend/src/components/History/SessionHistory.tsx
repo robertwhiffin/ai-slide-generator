@@ -7,6 +7,7 @@ interface SessionHistoryProps {
   onSessionSelect: (sessionId: string) => void;
   onBack?: () => void;
   refreshKey?: number;
+  onSessionsChange?: () => void;
 }
 
 type TabType = 'my' | 'shared';
@@ -14,6 +15,7 @@ type TabType = 'my' | 'shared';
 export const SessionHistory: React.FC<SessionHistoryProps> = ({
   onSessionSelect,
   refreshKey,
+  onSessionsChange,
 }) => {
   const [mySessions, setMySessions] = useState<Session[]>([]);
   const [sharedPresentations, setSharedPresentations] = useState<SharedPresentation[]>([]);
@@ -23,6 +25,7 @@ export const SessionHistory: React.FC<SessionHistoryProps> = ({
   const [editTitle, setEditTitle] = useState('');
   const [activeTab, setActiveTab] = useState<TabType>('my');
   const [contributorLoading, setContributorLoading] = useState<string | null>(null);
+  const [duplicateLoading, setDuplicateLoading] = useState<string | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<string | null>(null);
 
   const isFirstLoad = useRef(true);
@@ -78,6 +81,7 @@ export const SessionHistory: React.FC<SessionHistoryProps> = ({
       setEditingId(null);
       setEditTitle('');
       loadSessions();
+      onSessionsChange?.();
     } catch (err) {
       console.error('Failed to rename session:', err);
     }
@@ -94,6 +98,7 @@ export const SessionHistory: React.FC<SessionHistoryProps> = ({
     try {
       await api.deleteSession(id);
       loadSessions();
+      onSessionsChange?.();
     } catch (err) {
       console.error('Failed to delete session:', err);
     }
@@ -101,6 +106,49 @@ export const SessionHistory: React.FC<SessionHistoryProps> = ({
 
   const handleRestore = (sessionId: string) => {
     onSessionSelect(sessionId);
+  };
+
+  const handleDuplicate = async (sessionId: string) => {
+    try {
+      setDuplicateLoading(sessionId);
+      setError(null);
+      const result = await api.duplicateSession(sessionId);
+      await loadSessions();
+      onSessionsChange?.();
+      onSessionSelect(result.session_id);
+    } catch (err) {
+      console.error('Failed to duplicate session:', err);
+      if (err && typeof err === 'object' && 'message' in err) {
+        setError(String((err as { message: string }).message));
+      } else {
+        setError('Failed to duplicate session');
+      }
+    } finally {
+      setDuplicateLoading(null);
+    }
+  };
+
+  const handleDuplicateShared = async (presentation: SharedPresentation) => {
+    try {
+      setDuplicateLoading(presentation.session_id);
+      setError(null);
+      await api.duplicateSession(presentation.session_id);
+      setActiveTab('my');
+      await loadSessions();
+      onSessionsChange?.();
+    } catch (err) {
+      console.error('Failed to duplicate shared presentation:', err);
+      if (err && typeof err === 'object' && 'status' in err && (err as { status: number }).status === 403) {
+        setError('You no longer have access to duplicate this presentation');
+        loadSessions();
+      } else if (err && typeof err === 'object' && 'message' in err) {
+        setError(String((err as { message: string }).message));
+      } else {
+        setError('Failed to duplicate presentation');
+      }
+    } finally {
+      setDuplicateLoading(null);
+    }
   };
 
   const formatDate = (dateStr: string) => {
@@ -242,8 +290,15 @@ export const SessionHistory: React.FC<SessionHistoryProps> = ({
                       {session.slide_count ?? 0}
                     </td>
                     <td className="px-3 py-3 text-center text-sm font-medium">
-                      <div className="flex items-center justify-center gap-2">
+                      <div className="flex items-center justify-center gap-2 flex-wrap">
                         <button onClick={() => handleRestore(session.session_id)} className="text-blue-600 hover:text-blue-900 text-xs">Open</button>
+                        <button
+                          onClick={() => handleDuplicate(session.session_id)}
+                          disabled={duplicateLoading === session.session_id}
+                          className="text-indigo-600 hover:text-indigo-900 text-xs disabled:opacity-50"
+                        >
+                          {duplicateLoading === session.session_id ? 'Duplicating...' : 'Duplicate'}
+                        </button>
                         <button
                           onClick={() => { setEditingId(session.session_id); setEditTitle(session.title); }}
                           className="text-gray-600 hover:text-gray-900 text-xs"
@@ -316,15 +371,24 @@ export const SessionHistory: React.FC<SessionHistoryProps> = ({
                       </span>
                     </td>
                     <td className="px-3 py-3 text-center text-sm font-medium">
-                      <button
-                        onClick={() => handleOpenPresentation(pres)}
-                        disabled={contributorLoading === pres.session_id}
-                        className="text-blue-600 hover:text-blue-900 text-xs disabled:opacity-50"
-                      >
-                        {contributorLoading === pres.session_id
-                          ? 'Opening...'
-                          : pres.my_permission === 'CAN_VIEW' ? 'View' : 'Open'}
-                      </button>
+                      <div className="flex items-center justify-center gap-2 flex-wrap">
+                        <button
+                          onClick={() => handleOpenPresentation(pres)}
+                          disabled={contributorLoading === pres.session_id}
+                          className="text-blue-600 hover:text-blue-900 text-xs disabled:opacity-50"
+                        >
+                          {contributorLoading === pres.session_id
+                            ? 'Opening...'
+                            : pres.my_permission === 'CAN_VIEW' ? 'View' : 'Open'}
+                        </button>
+                        <button
+                          onClick={() => handleDuplicateShared(pres)}
+                          disabled={duplicateLoading === pres.session_id}
+                          className="text-indigo-600 hover:text-indigo-900 text-xs disabled:opacity-50"
+                        >
+                          {duplicateLoading === pres.session_id ? 'Duplicating...' : 'Duplicate'}
+                        </button>
+                      </div>
                     </td>
                   </tr>
                 ))}
