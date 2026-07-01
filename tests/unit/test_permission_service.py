@@ -217,6 +217,148 @@ class TestDeckPermission:
         )
         assert perm is None
 
+    def test_workspace_global_can_view(self, db, session_other):
+        from src.services.permission_service import PermissionService
+
+        session_other.global_permission = PermissionLevel.CAN_VIEW.value
+        db.commit()
+
+        svc = PermissionService()
+        perm = svc.get_deck_permission(
+            db,
+            session_id=session_other.id,
+            user_id="uid-stranger",
+            user_name="stranger@test.com",
+            group_ids=[],
+        )
+        assert perm == PermissionLevel.CAN_VIEW
+
+    def test_workspace_global_can_edit(self, db, session_other):
+        from src.services.permission_service import PermissionService
+
+        session_other.global_permission = PermissionLevel.CAN_EDIT.value
+        db.commit()
+
+        svc = PermissionService()
+        perm = svc.get_deck_permission(
+            db,
+            session_id=session_other.id,
+            user_id="uid-stranger",
+            user_name="stranger@test.com",
+            group_ids=[],
+        )
+        assert perm == PermissionLevel.CAN_EDIT
+
+    def test_explicit_contributor_beats_global_view(self, db, session_other):
+        from src.services.permission_service import PermissionService
+
+        session_other.global_permission = PermissionLevel.CAN_VIEW.value
+        db.add(DeckContributor(
+            user_session_id=session_other.id,
+            identity_type="USER",
+            identity_id="uid-editor",
+            identity_name="editor@test.com",
+            permission_level=PermissionLevel.CAN_EDIT.value,
+        ))
+        db.commit()
+
+        svc = PermissionService()
+        perm = svc.get_deck_permission(
+            db,
+            session_id=session_other.id,
+            user_id="uid-editor",
+            user_name="editor@test.com",
+            group_ids=[],
+        )
+        assert perm == PermissionLevel.CAN_EDIT
+
+    def test_invalid_global_manage_ignored(self, db, session_other):
+        from src.services.permission_service import PermissionService
+
+        session_other.global_permission = PermissionLevel.CAN_MANAGE.value
+        db.commit()
+
+        svc = PermissionService()
+        perm = svc.get_deck_permission(
+            db,
+            session_id=session_other.id,
+            user_id="uid-stranger",
+            user_name="stranger@test.com",
+            group_ids=[],
+        )
+        assert perm is None
+
+    def test_workspace_global_revoked_denies_stranger(self, db, session_other):
+        from src.services.permission_service import PermissionService
+
+        session_other.global_permission = PermissionLevel.CAN_VIEW.value
+        db.commit()
+
+        svc = PermissionService()
+        assert svc.get_deck_permission(
+            db,
+            session_id=session_other.id,
+            user_id="uid-stranger",
+            user_name="stranger@test.com",
+            group_ids=[],
+        ) == PermissionLevel.CAN_VIEW
+
+        session_other.global_permission = None
+        db.commit()
+
+        assert svc.get_deck_permission(
+            db,
+            session_id=session_other.id,
+            user_id="uid-stranger",
+            user_name="stranger@test.com",
+            group_ids=[],
+        ) is None
+
+    def test_contributor_session_id_no_creator_bypass_after_revoke(self, db, session_other):
+        """Contributor session creators must not get CAN_MANAGE when workspace share is off."""
+        from src.services.permission_service import PermissionService
+
+        session_other.global_permission = None
+        contrib = UserSession(
+            session_id="contrib-viewer-1",
+            created_by="viewer@test.com",
+            parent_session_id=session_other.id,
+        )
+        db.add(contrib)
+        db.commit()
+        db.refresh(contrib)
+
+        svc = PermissionService()
+        assert svc.get_deck_permission(
+            db,
+            session_id=contrib.id,
+            user_id="uid-viewer",
+            user_name="viewer@test.com",
+            group_ids=[],
+        ) is None
+
+    def test_contributor_session_id_honors_workspace_global(self, db, session_other):
+        from src.services.permission_service import PermissionService
+
+        session_other.global_permission = PermissionLevel.CAN_VIEW.value
+        contrib = UserSession(
+            session_id="contrib-viewer-2",
+            created_by="viewer@test.com",
+            parent_session_id=session_other.id,
+        )
+        db.add(contrib)
+        db.commit()
+        db.refresh(contrib)
+
+        svc = PermissionService()
+        assert svc.get_deck_permission(
+            db,
+            session_id=contrib.id,
+            user_id="uid-viewer",
+            user_name="viewer@test.com",
+            group_ids=[],
+        ) == PermissionLevel.CAN_VIEW
+
 
 # ---------------------------------------------------------------------------
 # TestGetSharedSessionIds
@@ -289,6 +431,58 @@ class TestGetSharedSessionIds:
             user_id="uid-member",
             user_name="member@test.com",
             group_ids=["grp-team"],
+        )
+        assert session_other.id in ids
+
+    def test_workspace_global_shared_sessions(self, db, session_other):
+        from src.services.permission_service import PermissionService
+
+        session_other.global_permission = PermissionLevel.CAN_VIEW.value
+        db.commit()
+
+        svc = PermissionService()
+        ids = svc.get_shared_session_ids(
+            db,
+            user_id="uid-stranger",
+            user_name="stranger@test.com",
+            group_ids=[],
+        )
+        assert session_other.id in ids
+
+    def test_invalid_global_not_in_shared_session_ids(self, db, session_other):
+        from src.services.permission_service import PermissionService
+
+        session_other.global_permission = PermissionLevel.CAN_MANAGE.value
+        db.commit()
+
+        svc = PermissionService()
+        ids = svc.get_shared_session_ids(
+            db,
+            user_id="uid-stranger",
+            user_name="stranger@test.com",
+            group_ids=[],
+        )
+        assert session_other.id not in ids
+
+    def test_explicit_contributor_remains_after_workspace_revoke(self, db, session_other):
+        from src.services.permission_service import PermissionService
+
+        session_other.global_permission = None
+        db.add(DeckContributor(
+            user_session_id=session_other.id,
+            identity_type="USER",
+            identity_id="uid-viewer",
+            identity_name="viewer@test.com",
+            permission_level=PermissionLevel.CAN_VIEW.value,
+        ))
+        db.commit()
+
+        svc = PermissionService()
+        ids = svc.get_shared_session_ids(
+            db,
+            user_id="uid-viewer",
+            user_name="viewer@test.com",
+            group_ids=[],
         )
         assert session_other.id in ids
 

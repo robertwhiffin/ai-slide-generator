@@ -49,7 +49,7 @@ Frontend fetch -> FastAPI router ->   │ ChatService            │
 | --- | --- | --- | --- |
 | `POST` | `/api/sessions` | Create new session | `routes/sessions.create_session` |
 | `GET` | `/api/sessions` | List sessions (filtered by authenticated user via `created_by`) | `routes/sessions.list_sessions` |
-| `GET` | `/api/sessions/shared` | List presentations shared with user via deck_contributors | `routes/sessions.list_shared_presentations` |
+| `GET` | `/api/sessions/shared` | List presentations shared via deck_contributors or workspace `global_permission` | `routes/sessions.list_shared_presentations` |
 | `GET` | `/api/sessions/{id}` | Get session details (slides + messages if creator) | `routes/sessions.get_session` |
 | `PATCH` | `/api/sessions/{id}` | Update session metadata (title, slide_count) | `routes/sessions.update_session` |
 | `DELETE` | `/api/sessions/{id}` | Delete session | `routes/sessions.delete_session` |
@@ -167,10 +167,11 @@ Save points are created on the backend immediately after deck persistence (in `C
 
 | Method | Path | Purpose | Backend handler |
 | --- | --- | --- | --- |
-| `GET` | `/api/sessions/{id}/contributors` | List deck contributors | `routes/deck_contributors.list_deck_contributors` |
+| `GET` | `/api/sessions/{id}/contributors` | List deck contributors and workspace `global_permission` | `routes/deck_contributors.list_deck_contributors` |
 | `POST` | `/api/sessions/{id}/contributors` | Add deck contributor | `routes/deck_contributors.add_deck_contributor` |
 | `PUT` | `/api/sessions/{id}/contributors/{cid}` | Update contributor permission | `routes/deck_contributors.update_deck_contributor` |
 | `DELETE` | `/api/sessions/{id}/contributors/{cid}` | Remove deck contributor | `routes/deck_contributors.delete_deck_contributor` |
+| `PATCH` | `/api/sessions/{id}/global` | Set or clear workspace-wide deck sharing (CAN_VIEW / CAN_EDIT) | `routes/sessions.set_deck_global_permission` |
 
 ### Export Endpoints (PPTX & Google Slides)
 
@@ -307,7 +308,7 @@ Mutation endpoints return **409 Conflict** if the session is already processing 
 | `src/api/routes/version.py` | PyPI version check | Checks for newer versions on PyPI (Databricks App deployments). |
 | `src/api/routes/local_version.py` | GitHub version check | Checks for newer GitHub releases (local/Homebrew installs). |
 | `src/api/routes/setup.py` | First-run setup | WelcomeSetup flow: configure workspace URL, test connection. |
-| `src/api/routes/deck_contributors.py` | Deck sharing | CRUD for deck-level contributors (CAN_VIEW, CAN_EDIT, CAN_MANAGE). |
+| `src/api/routes/deck_contributors.py` | Deck sharing | CRUD for deck-level contributors; list includes workspace `global_permission`. |
 | `src/api/routes/tools.py` | Tool discovery | Per-type discovery endpoints for Genie, Vector, MCP, Model Endpoint, Agent Bricks. |
 | `src/services/agent_factory.py` | Per-request agent builder | Reads session `agent_config`, constructs `SlideGeneratorAgent`. |
 | `src/api/services/chat_service.py` | Stateful orchestration | Deck cache, streaming generator, history hydration. |
@@ -412,7 +413,7 @@ Key helpers in `src/core/databricks_client.py`:
 
 ## Contributor Sessions Architecture
 
-Decks can be shared with other users or groups via **deck contributors** (stored in the `deck_contributors` table). Permission levels are CAN_VIEW, CAN_EDIT, and CAN_MANAGE.
+Decks can be shared with other users or groups via **deck contributors** (stored in the `deck_contributors` table), or with all Tellr workspace users via **`user_sessions.global_permission`** on the root session (CAN_VIEW or CAN_EDIT only). Individual contributor grants use CAN_VIEW, CAN_EDIT, and CAN_MANAGE.
 
 When a contributor opens a shared deck:
 1. The frontend calls `POST /api/sessions/{id}/contribute` to get or create a **contributor session** -- a private child session linked to the parent via `parent_session_id`.
@@ -421,8 +422,9 @@ When a contributor opens a shared deck:
 4. Lock heartbeats (`PUT /api/sessions/{id}/lock/heartbeat`) keep the lock alive while the session is open.
 
 The `PermissionService` (`src/services/permission_service.py`) evaluates permissions by checking:
-- Session ownership (creator always has CAN_MANAGE)
+- Session ownership (creator always has CAN_MANAGE on the root deck)
 - Deck contributor records (direct user grants or group membership)
+- Workspace-wide `global_permission` on the root session (CAN_VIEW / CAN_EDIT)
 
 ---
 

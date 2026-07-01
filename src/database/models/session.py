@@ -101,6 +101,10 @@ class UserSession(Base):
     user_id = Column(String(255), nullable=True, index=True)  # Legacy — kept for backward compat
     created_by = Column(String(255), nullable=True, index=True)  # Username of session creator
 
+    # Workspace-wide deck sharing (root sessions only). NULL = private.
+    # CAN_VIEW or CAN_EDIT — CAN_MANAGE is not valid for workspace share.
+    global_permission = Column(String(20), nullable=True)
+
     # Contributor session support: links to the owner's session whose slide
     # deck this contributor reads/writes. NULL = owner (root) session.
     parent_session_id = Column(

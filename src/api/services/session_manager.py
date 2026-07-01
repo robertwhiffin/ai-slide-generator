@@ -169,6 +169,7 @@ class SessionManager:
                 "is_contributor_session": session.is_contributor_session,
                 "parent_session_id": parent_session_id_str,
                 "parent_session_internal_id": session.parent_session_id,
+                "global_permission": deck_owner.global_permission,
             }
 
     def get_or_create_contributor_session(
@@ -313,6 +314,7 @@ class SessionManager:
                     "message_count": len(s.messages),
                     "has_slide_deck": s.slide_deck is not None,
                     "slide_count": s.slide_deck.slide_count if s.slide_deck is not None else 0,
+                    "global_permission": s.global_permission,
                 }
                 for s in sessions
             ]

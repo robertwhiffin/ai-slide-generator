@@ -281,6 +281,7 @@ class UserSession(Base):
     user_id: str | None          # Optional user identification (legacy)
     created_by: str | None       # Username of session creator (used for user-scoped filtering)
     parent_session_id: int | None # FK to user_sessions.id — contributor session support
+    global_permission: str | None # Root sessions only: NULL, "CAN_VIEW", or "CAN_EDIT" (workspace-wide deck sharing)
     title: str                   # Session title
     created_at: datetime
     last_activity: datetime
@@ -294,6 +295,8 @@ class UserSession(Base):
 ```
 
 **`parent_session_id` column:** When set, this session is a contributor session that shares the parent's slide deck but has its own private chat history. `NULL` means this is an owner (root) session.
+
+**`global_permission` column:** On root sessions only. When set to `CAN_VIEW` or `CAN_EDIT`, grants that deck permission to all authenticated Tellr users in the workspace. `NULL` means the deck is private unless individual `deck_contributors` rows exist. Independent from `config_profiles.global_permission` (profile template visibility).
 
 **`agent_config` column:** Stores the session's complete agent configuration as JSON. The agent is built per-request from this config via `build_agent_for_request()`. Each Genie space tool tracks its own `conversation_id` within the config. See [Agent Config Flow](profile-switch-genie-flow.md) for details.
 
@@ -631,6 +634,7 @@ For adding columns to existing tables in production, a private `_run_migrations(
 7. Adds `is_default` to `slide_style_library` and seeds system style as default
 8. Adds `parent_session_id` to `user_sessions` with FK and composite index for contributor sessions
 9. Drops legacy `profile_id`/`profile_name` from `user_sessions`; migrates `CAN_VIEW` to `CAN_USE` in contributor tables
+10. Adds `global_permission` to `user_sessions` for workspace-wide deck sharing (`_migrate_deck_workspace_sharing()`)
 
 ```python
 # src/core/database.py

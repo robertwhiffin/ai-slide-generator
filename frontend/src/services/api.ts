@@ -109,6 +109,8 @@ export interface Session {
   is_contributor_session?: boolean;
   /** Parent session ID for contributor sessions */
   parent_session_id?: string | null;
+  /** Workspace-wide share level (root sessions only); null = private */
+  global_permission?: 'CAN_VIEW' | 'CAN_EDIT' | null;
 }
 
 export interface SharedPresentation {

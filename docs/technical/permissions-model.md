@@ -1,7 +1,7 @@
 # Permissions Model Architecture
 
 **Status:** Complete
-**Last Updated:** April 2026
+**Last Updated:** June 2026
 
 ## Overview
 
@@ -77,9 +77,14 @@ Conversations (chat messages) are **always private** to the session creator.
 
 ## Deck Sharing
 
-Decks are shared directly via the `DeckContributor` table. There is no global/workspace-wide sharing on decks — decks are always explicitly shared with specific users or groups.
+Decks are shared in two ways:
 
-### Sharing Flow
+1. **Individual contributors** — explicit grants to users or groups via the `DeckContributor` table
+2. **Workspace-wide sharing** — optional broadcast to all Tellr users in the workspace via `user_sessions.global_permission` on the root session
+
+Both mechanisms are independent. Revoking workspace-wide sharing removes access for users who only had the global grant; users with an explicit `DeckContributor` row retain their assigned level.
+
+### Individual Contributor Sharing
 
 1. Open a deck and click the **Share** button to open the permissions manager
 2. Search for a user or group by name/email
@@ -87,14 +92,30 @@ Decks are shared directly via the `DeckContributor` table. There is no global/wo
 4. Click Add — the contributor now sees the deck in their "Shared with Me" tab
 5. Use the **Copy Link** button to share a direct URL to the deck
 
+### Workspace-Wide Deck Sharing
+
+Root sessions (owner sessions only) may set `global_permission` to **CAN_VIEW** or **CAN_EDIT**. This grants every authenticated Tellr user in the workspace that level on the deck. **CAN_MANAGE** is not valid for workspace sharing — use individual contributors for administrators.
+
+**Grant or change workspace access:**
+- In the Share panel, search for **All workspace users** (or type a matching phrase such as `workspace`)
+- Choose **Can View** or **Can Edit**, then add
+- Or change the level / remove access from the **All workspace users** row in the current access list
+
+**API:** `PATCH /api/sessions/{session_id}/global?permission=CAN_VIEW|CAN_EDIT` sets the level; omit `permission` to revoke workspace access. Requires **CAN_MANAGE** on the deck.
+
+**Revocation:** Clearing `global_permission` (set to `NULL`) denies workspace-wide access. Users who also appear in `deck_contributors` keep access at their explicit level. The highest grant from any source wins.
+
+**Scope note:** "Workspace users" means principals who can authenticate to the Tellr app. Users without app access cannot open the deck regardless of this setting.
+
 ### Permission Resolution
 
-`PermissionService.get_deck_permission(db, session_id, user_id, user_name, group_ids)`:
+`PermissionService.get_deck_permission(db, session_id, user_id, user_name, group_ids)` resolves contributor (child) sessions to the root deck before evaluating grants. The **highest** matching level wins:
 
-1. Is user the session creator (`user_sessions.created_by`)? → CAN_MANAGE
+1. Is user the root session creator (`user_sessions.created_by`)? → CAN_MANAGE
 2. Direct user entry in `deck_contributors` (match by `identity_id`, fallback by `identity_name`)? → Use that level
 3. Any group the user belongs to in `deck_contributors`? → Use highest level
-4. No match → No access
+4. Root session has `global_permission` set to CAN_VIEW or CAN_EDIT? → Use that level
+5. No match → No access
 
 ---
 
@@ -232,11 +253,14 @@ class UserSession(Base):
 
     # ... existing fields ...
     parent_session_id: int | None    # FK to self — NULL = owner, set = contributor
+    global_permission: str | None    # Root sessions only: NULL, "CAN_VIEW", or "CAN_EDIT"
 ```
+
+`global_permission` on a root session grants workspace-wide deck access at the given level. Contributor (child) sessions do not store workspace sharing; permission checks always resolve to the root session.
 
 ### ConfigProfile
 
-`global_permission` controls profile visibility only (CAN_USE / CAN_EDIT / CAN_MANAGE). It has no bearing on deck access.
+Profile `global_permission` controls profile template visibility only (CAN_USE / CAN_EDIT / CAN_MANAGE). It has no bearing on deck access.
 
 ```python
 class ConfigProfile(Base):
@@ -322,6 +346,7 @@ class PermissionService:
     def require_edit_deck(self, db, session_id, user_id, user_name, group_ids) -> None
     def require_manage_deck(self, db, session_id, user_id, user_name, group_ids) -> None
     def get_shared_session_ids(self, db, user_id, user_name, group_ids) -> Set[int]
+        # Decks shared via deck_contributors or root-session global_permission (excludes creator-owned)
 ```
 
 **Profile methods:**
@@ -382,9 +407,10 @@ GET    /api/sessions/{session_id}/contributors
 POST   /api/sessions/{session_id}/contributors
 PUT    /api/sessions/{session_id}/contributors/{contributor_id}
 DELETE /api/sessions/{session_id}/contributors/{contributor_id}
+PATCH  /api/sessions/{session_id}/global?permission=CAN_VIEW|CAN_EDIT
 ```
 
-All require CAN_MANAGE on the deck.
+Contributor list/mutate endpoints require CAN_MANAGE on the deck. `GET .../contributors` includes `global_permission` on the response. `PATCH .../global` sets or clears workspace-wide sharing (omit `permission` to revoke).
 
 ### Deck Contributor Sessions
 
@@ -393,7 +419,7 @@ POST   /api/sessions/{session_id}/contribute    # Create/get contributor session
 GET    /api/sessions/shared                      # List decks shared with current user
 ```
 
-`GET /api/sessions/shared` resolves via `deck_contributors` joined to `user_sessions` and `session_slide_decks`.
+`GET /api/sessions/shared` includes decks shared via `deck_contributors` **or** root-session `global_permission`, joined to `session_slide_decks`. Creator-owned sessions are excluded.
 
 ### Profile Contributors
 
@@ -500,7 +526,7 @@ When a user's permission is checked:
 1. **Creator protection:** Session creators get CAN_MANAGE automatically via the resolution algorithm (step 1 checks `created_by`). Creators are not stored in `deck_contributors` — protection is at the resolution layer.
 2. **Profile creator protection:** Profile creators get CAN_MANAGE automatically and cannot be removed.
 3. **No cross-pollination:** Deck and profile permissions are completely independent. Sharing a profile never grants deck access. Sharing a deck never grants profile access.
-4. **No global deck sharing:** Decks have no `global_permission` equivalent — always explicitly shared with specific users/groups.
+4. **Workspace deck sharing:** Root sessions may set `user_sessions.global_permission` to CAN_VIEW or CAN_EDIT for all Tellr users. Revoking clears only the global grant; explicit `deck_contributors` rows are unchanged. Only CAN_MANAGE holders can change workspace sharing.
 5. **App identity:** User and group lookups use the app's service principal — no admin PATs.
 6. **Group cache:** 5-minute TTL balances API efficiency with permission propagation.
 7. **Exclusive lock:** One editor at a time; 45-second server expiry; 5-minute idle release.
