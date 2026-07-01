@@ -580,6 +580,15 @@ def update_local(
                     ws, lakebase_name, client_id,
                     branch_name=lakebase_result["branch_id"],
                 )
+                # update re-forks the branch (fresh prod copy), so the SP's
+                # fork-scoped tellr_app_owners membership from the previous
+                # deploy is gone — re-grant it on the new branch, same as create.
+                grant_job_id = config.get("owner_grant_job_id")
+                if branch_from_env and grant_job_id and client_id:
+                    _trigger_owner_grant_job(
+                        ws, grant_job_id, client_id,
+                        lakebase_result["host"], lakebase_result["endpoint_name"],
+                    )
             else:
                 print(
                     "   Warning: Could not get SP client ID — role setup skipped"

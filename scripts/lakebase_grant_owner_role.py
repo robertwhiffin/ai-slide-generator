@@ -64,4 +64,10 @@ def main(argv=None) -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    # Only raise SystemExit on a non-zero code. `raise SystemExit(0)` is a
+    # normal clean exit for a CLI, but a Databricks python task treats ANY
+    # SystemExit as an uncaught exception and marks the run FAILED — so on
+    # success we simply fall through.
+    _rc = main()
+    if _rc:
+        raise SystemExit(_rc)
