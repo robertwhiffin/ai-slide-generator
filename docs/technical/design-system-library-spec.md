@@ -235,3 +235,24 @@ Two paths observed: "Create here" (upload slides/assets + fonts/logos, optional 
 
 ### Org sharing model (reference)
 A design system is owned by an individual; a **Published** flag makes it appear in the org picker; a **Default** flag sets the org default; access is org-scoped. Matches our org-shared + published + is_default design.
+
+---
+
+## 18. huashu deep-scan — reuse map (reference: an open-source skill-with-files design tool)
+
+> Abstract findings only — no brand content. huashu is **MIT** (commercial reuse OK; keep the notice). It is an *agent skill* (SKILL.md + references + scripts + assets) with **no UI / DB / server** — it validates our model but leaves the user-facing product unbuilt.
+
+**Confirms our approach:** a design system IS a skill-with-files, brand-first. Its "Core Asset Protocol" ranks **Logo (mandatory) > product shots (physical) > UI shots (digital) > color > fonts**, frozen into a `brand-spec.md` + `assets/<brand>/` bundle. Tokens inject as `:root { --brand-* }`; HTML references assets as real `<img>` (never redrawn) and reads only `var(--brand-*)` — brand consistency becomes structural.
+
+**REUSE (engine):**
+- `html2pptx` (HTML -> editable PPTX) — already vendored in Tellr (`services/pptx-emit-huashu`).
+- Token -> CSS `:root` var injection pattern (feeds compile-to-prompt, Phase 2).
+- Asset-as-real-`<img>` discipline + naming conventions (logo + light/dark variants, product/UI shots).
+- "HTML deck is the base artifact; PDF/PPTX are best-effort derivatives" flow.
+- Content model: which fields a brand actually needs (assets > spec ranking) -> informs our manifest + the create form.
+
+**ADAPT:** the `brand-spec.md` field template -> our `design_system` manifest fields (a superset unifying it with the `_ds_manifest.json` schema in section 17).
+
+**BUILD-NEW (our feature's whole point — huashu has none of this):** the user-facing, persistent, reusable design-system product — create/upload/select CRUD UI, Lakebase persistence, org-sharing + published/default, versioning, multi-brand management. huashu authors a system per-project in prose; it never manages reusable named systems.
+
+**Scope:** reuse only the slide-relevant parts; drop huashu's video / infographic / website surfaces.
