@@ -521,6 +521,32 @@ def _run_migrations(engine, schema: str | None = None):
         # --- image_assets.tags: json → jsonb (PostgreSQL) for native @> queries ---
         _migrate_image_assets_tags_json_to_jsonb(conn, schema, _qual, is_sqlite)
 
+        # --- keep newly created objects owned by the shared role (prod forks) ---
+        _reassign_new_objects_to_shared_owner(conn, is_sqlite)
+
+
+def _reassign_new_objects_to_shared_owner(
+    conn, is_sqlite: bool, owning_role: str = "tellr_app_owners"
+) -> None:
+    """Re-home objects this connection's role just created onto the shared owner.
+
+    No-op on SQLite and when the owning role is absent (static-schema envs).
+    Wrapped in a SAVEPOINT so a failure cannot poison the outer migration
+    transaction. Idempotent: REASSIGN OWNED is a no-op when nothing is owned.
+    """
+    from sqlalchemy import text
+
+    if is_sqlite:
+        return
+    exists = conn.execute(
+        text("SELECT 1 FROM pg_roles WHERE rolname = :r"), {"r": owning_role}
+    ).scalar()
+    if not exists:
+        return
+    logger.info(f"Migration: reassigning new objects to shared owner {owning_role}")
+    with conn.begin_nested():
+        conn.execute(text(f'REASSIGN OWNED BY CURRENT_USER TO "{owning_role}"'))
+
 
 def _ensure_llm_judge_backend_default(
     conn, table_name, qualified_table, schema, is_sqlite
