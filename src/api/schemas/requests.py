@@ -138,3 +138,8 @@ class DuplicateSessionRequest(BaseModel):
         description="Optional title for the duplicated deck (default: Copy of {source title})",
         max_length=255,
     )
+    version_number: Optional[int] = Field(
+        default=None,
+        ge=1,
+        description="Optional save point version to copy instead of the live deck",
+    )

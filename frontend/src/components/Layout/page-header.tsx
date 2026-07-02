@@ -19,6 +19,8 @@ interface PageHeaderProps {
   onCopyLink?: () => void
   onDuplicate?: () => void
   isDuplicating?: boolean
+  duplicateTitle?: string
+  duplicateHint?: string
   /** Single export action (legacy); ignored if export menu items are provided */
   onExport?: () => void
   onExportPPTX?: () => void
@@ -45,6 +47,8 @@ export function PageHeader({
   onCopyLink,
   onDuplicate,
   isDuplicating = false,
+  duplicateTitle,
+  duplicateHint,
   onExport,
   onExportPPTX,
   onExportPDF,
@@ -211,17 +215,24 @@ export function PageHeader({
           )
         )}
         {onDuplicate && (
-          <Button
-            variant="outline"
-            size="sm"
-            className="gap-1.5"
-            onClick={onDuplicate}
-            disabled={isGenerating || isDuplicating}
-            title="Create a private copy in My Sessions"
-          >
-            <CopyPlus className="size-3.5" />
-            {isDuplicating ? 'Duplicating…' : 'Duplicate'}
-          </Button>
+          <div className="flex items-center gap-1.5">
+            <Button
+              variant="outline"
+              size="sm"
+              className="gap-1.5"
+              onClick={onDuplicate}
+              disabled={isGenerating || isDuplicating}
+              title={duplicateTitle ?? 'Create a private copy in My Sessions'}
+            >
+              <CopyPlus className="size-3.5" />
+              {isDuplicating ? 'Duplicating…' : 'Duplicate'}
+            </Button>
+            {duplicateHint && (
+              <span className="hidden max-w-[9rem] text-[10px] leading-tight text-muted-foreground xl:inline">
+                {duplicateHint}
+              </span>
+            )}
+          </div>
         )}
         {onCopyLink && (
           <Button

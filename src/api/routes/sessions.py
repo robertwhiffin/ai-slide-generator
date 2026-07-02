@@ -600,6 +600,7 @@ async def duplicate_session(
             session_id,
             current_user,
             request.title,
+            request.version_number,
         )
 
         logger.info(

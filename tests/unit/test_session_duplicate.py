@@ -246,6 +246,41 @@ class TestDuplicateSessionValidScenarios:
         assert copy.slide_deck.title == result["title"]
 
 
+    def test_duplicate_from_save_point_uses_version_snapshot(self, db, session_manager):
+        owner = _make_root_session(
+            db, session_id="src-ver", created_by="owner@test.com", title="Versioned"
+        )
+        _add_deck(
+            db,
+            owner,
+            slide_count=3,
+            deck_json='{"slides":[{"html":"<div>live</div>"},{"html":"<div>2</div>"},{"html":"<div>3</div>"}]}',
+        )
+        db.add(
+            SlideDeckVersion(
+                session_id=owner.id,
+                version_number=2,
+                description="Older two-slide version",
+                deck_json='{"slides":[{"html":"<div>old-1</div>"},{"html":"<div>old-2</div>"}],"slide_count":2}',
+                verification_map_json='{"old": {"score": 1}}',
+            )
+        )
+        db.commit()
+
+        result = session_manager.duplicate_session(
+            "src-ver",
+            created_by="copier@test.com",
+            version_number=2,
+        )
+
+        assert result["slide_count"] == 2
+        assert result["source_version_number"] == 2
+
+        copy = db.query(UserSession).filter(UserSession.session_id == result["session_id"]).one()
+        assert "old-1" in copy.slide_deck.deck_json
+        assert "live" not in copy.slide_deck.deck_json
+
+
 class TestDuplicateSessionErrorHandling:
     def test_missing_session_raises_not_found(self, db, session_manager):
         with pytest.raises(SessionNotFoundError):
@@ -255,6 +290,16 @@ class TestDuplicateSessionErrorHandling:
         _make_root_session(db, session_id="empty", created_by="owner@test.com")
         with pytest.raises(ValueError, match="no slide deck"):
             session_manager.duplicate_session("empty", created_by="owner@test.com")
+
+    def test_missing_version_raises_value_error(self, db, session_manager):
+        owner = _make_root_session(db, session_id="src-missing-ver", created_by="owner@test.com")
+        _add_deck(db, owner)
+        with pytest.raises(ValueError, match="Version 99 not found"):
+            session_manager.duplicate_session(
+                "src-missing-ver",
+                created_by="owner@test.com",
+                version_number=99,
+            )
 
 
 class TestListSessionsIncludesDuplicatedDeck:

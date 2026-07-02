@@ -816,6 +816,31 @@ class TestSessionEndpoints:
             "test-123",
             "test@local.dev",
             None,
+            None,
+        )
+
+    def test_duplicate_session_with_version_number(self, client, mock_session_manager):
+        """POST /api/sessions/{id}/duplicate accepts optional save point version."""
+        mock_session_manager.duplicate_session.return_value = {
+            "session_id": "copy-v2",
+            "title": "Copy of Test Session",
+            "created_by": "test@local.dev",
+            "created_at": "2024-01-01T12:00:00Z",
+            "slide_count": 2,
+            "source_session_id": "test-123",
+            "source_version_number": 2,
+        }
+
+        response = client.post(
+            "/api/sessions/test-123/duplicate",
+            json={"version_number": 2},
+        )
+        assert response.status_code == 201
+        mock_session_manager.duplicate_session.assert_called_once_with(
+            "test-123",
+            "test@local.dev",
+            None,
+            2,
         )
 
     def test_duplicate_session_with_custom_title(self, client, mock_session_manager):
@@ -838,6 +863,7 @@ class TestSessionEndpoints:
             "test-123",
             "test@local.dev",
             "Forked Deck",
+            None,
         )
 
     def test_duplicate_session_not_found(self, client, mock_session_manager):

@@ -120,6 +120,7 @@ export interface DuplicateSessionResult {
   created_at: string;
   slide_count: number;
   source_session_id: string;
+  source_version_number?: number;
 }
 
 export interface SharedPresentation {
@@ -453,9 +454,15 @@ export const api = {
    */
   async duplicateSession(
     sessionId: string,
-    title?: string,
+    options?: { title?: string; versionNumber?: number },
   ): Promise<DuplicateSessionResult> {
-    const body = title ? { title } : {};
+    const body: Record<string, unknown> = {};
+    if (options?.title) {
+      body.title = options.title;
+    }
+    if (options?.versionNumber != null) {
+      body.version_number = options.versionNumber;
+    }
     const response = await fetch(`${API_BASE_URL}/api/sessions/${sessionId}/duplicate`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },

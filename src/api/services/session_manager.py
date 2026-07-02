@@ -43,6 +43,39 @@ def _default_duplicate_title(base_title: str, max_len: int = _MAX_SESSION_TITLE_
     return f"{_DUPLICATE_TITLE_PREFIX}{base_title[:max_base_len]}"
 
 
+def _deck_content_fields_from_dict(deck_dict: Dict[str, Any]) -> tuple[str, Optional[str], int]:
+    """Derive persisted deck columns from a deck JSON snapshot."""
+    from src.domain.slide import Slide
+    from src.domain.slide_deck import SlideDeck
+
+    slides = deck_dict.get("slides") or []
+    slide_count = deck_dict.get("slide_count", len(slides))
+
+    if slides:
+        deck = SlideDeck(
+            slides=[
+                Slide(
+                    html=slide_data.get("html", ""),
+                    slide_id=slide_data.get("slide_id", f"slide_{idx}"),
+                    scripts=slide_data.get("scripts", ""),
+                    created_by=slide_data.get("created_by"),
+                    created_at=slide_data.get("created_at"),
+                    modified_by=slide_data.get("modified_by"),
+                    modified_at=slide_data.get("modified_at"),
+                )
+                for idx, slide_data in enumerate(slides)
+            ],
+            css=deck_dict.get("css", ""),
+            external_scripts=deck_dict.get("external_scripts", []),
+            title=deck_dict.get("title"),
+        )
+        return deck.knit(), deck.scripts or "", slide_count
+
+    html_content = deck_dict.get("html_content") or ""
+    scripts_content = deck_dict.get("scripts_content") or deck_dict.get("scripts") or ""
+    return html_content, scripts_content, slide_count
+
+
 class SessionNotFoundError(Exception):
     """Raised when a session is not found."""
 
@@ -441,24 +474,27 @@ class SessionManager:
         source_session_id: str,
         created_by: str,
         title: Optional[str] = None,
+        version_number: Optional[int] = None,
     ) -> Dict[str, Any]:
         """Duplicate a slide deck into a new root session owned by ``created_by``.
 
-        Copies the current slide deck snapshot from the source (resolving
-        contributor sessions to the parent deck owner). Chat history, save
+        Copies the slide deck snapshot from the source (resolving contributor
+        sessions to the parent deck owner). When ``version_number`` is set,
+        copies that save point instead of the live deck. Chat history, save
         points, sharing grants, and session-specific IDs are not copied.
 
         Args:
             source_session_id: Session to duplicate (root or contributor)
             created_by: Username of the user creating the copy
             title: Optional title (default: ``Copy of {source title}``)
+            version_number: Optional save point to copy instead of live deck
 
         Returns:
             New session info including ``source_session_id``
 
         Raises:
             SessionNotFoundError: If source session does not exist
-            ValueError: If source has no slide deck
+            ValueError: If source has no slide deck or version not found
         """
         with get_db_session() as db:
             source = self._get_session_or_raise(db, source_session_id)
@@ -467,7 +503,32 @@ class SessionManager:
             if deck_owner.slide_deck is None:
                 raise ValueError("Source session has no slide deck to duplicate")
 
-            source_deck = deck_owner.slide_deck
+            if version_number is not None:
+                version = (
+                    db.query(SlideDeckVersion)
+                    .filter(
+                        SlideDeckVersion.session_id == deck_owner.id,
+                        SlideDeckVersion.version_number == version_number,
+                    )
+                    .first()
+                )
+                if not version:
+                    raise ValueError(f"Version {version_number} not found")
+
+                deck_dict = json.loads(version.deck_json) if version.deck_json else {}
+                html_content, scripts_content, slide_count = _deck_content_fields_from_dict(
+                    deck_dict
+                )
+                deck_json = version.deck_json
+                verification_map = version.verification_map_json
+            else:
+                source_deck = deck_owner.slide_deck
+                html_content = source_deck.html_content
+                scripts_content = source_deck.scripts_content
+                slide_count = source_deck.slide_count
+                deck_json = source_deck.deck_json
+                verification_map = source_deck.verification_map
+
             base_title = deck_owner.title or "Untitled"
             if title and title.strip():
                 new_title = _truncate_session_title(title.strip())
@@ -492,11 +553,11 @@ class SessionManager:
             new_deck = SessionSlideDeck(
                 session_id=new_session.id,
                 title=new_title,
-                html_content=source_deck.html_content,
-                scripts_content=source_deck.scripts_content,
-                slide_count=source_deck.slide_count,
-                deck_json=source_deck.deck_json,
-                verification_map=source_deck.verification_map,
+                html_content=html_content,
+                scripts_content=scripts_content,
+                slide_count=slide_count,
+                deck_json=deck_json,
+                verification_map=verification_map,
                 version=1,
                 modified_by=created_by,
                 locked_by=None,
@@ -511,18 +572,22 @@ class SessionManager:
                     "source_session_id": deck_owner.session_id,
                     "new_session_id": new_session.session_id,
                     "created_by": created_by,
-                    "slide_count": source_deck.slide_count,
+                    "slide_count": slide_count,
+                    "source_version_number": version_number,
                 },
             )
 
-            return {
+            result = {
                 "session_id": new_session.session_id,
                 "title": new_title,
                 "created_by": created_by,
                 "created_at": new_session.created_at.isoformat(),
-                "slide_count": source_deck.slide_count,
+                "slide_count": slide_count,
                 "source_session_id": deck_owner.session_id,
             }
+            if version_number is not None:
+                result["source_version_number"] = version_number
+            return result
 
     def update_last_activity(self, session_id: str) -> None:
         """Update session's last activity timestamp.
