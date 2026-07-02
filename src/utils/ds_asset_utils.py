@@ -44,15 +44,33 @@ def substitute_ds_asset_placeholders(html: str, db: Session) -> str:
     return DS_ASSET_PLACEHOLDER_PATTERN.sub(replace_match, html)
 
 
+# Deck-level string fields (siblings of per-slide ``html``) that can carry a
+# ``{{ds-asset:ID}}`` reference. Per the deck_json schema — "slides array, css,
+# external_scripts, scripts" (see ``database/models/session.py``) — these are the
+# only asset-bearing fields: ``css`` holds @font-face ``src: url()`` fonts and
+# ``background-image: url()`` backgrounds, and ``html_content`` is the full
+# knitted HTML. ``scripts``/``external_scripts`` are JavaScript and never
+# reference brand assets, so they are intentionally excluded.
+_DECK_DS_ASSET_FIELDS = ("html_content", "css")
+
+
 def substitute_deck_dict_ds_assets(deck_dict: dict, db: Session) -> dict:
-    """Substitute {{ds-asset:ID}} placeholders in all slides of a deck dict."""
-    if not deck_dict or not deck_dict.get("slides"):
+    """Substitute {{ds-asset:ID}} placeholders across a deck dict.
+
+    Covers every field that can carry the placeholder: each slide's ``html``,
+    the deck's ``html_content`` (full knitted HTML) and its top-level ``css``
+    (fonts + backgrounds). Deck-level fields are resolved independently of the
+    slides array so a deck with no slides still has its ``css``/``html_content``
+    substituted.
+    """
+    if not deck_dict:
         return deck_dict
-    for slide in deck_dict["slides"]:
+    for slide in deck_dict.get("slides") or []:
         html = slide.get("html", "")
         if "{{ds-asset:" in html:
             slide["html"] = substitute_ds_asset_placeholders(html, db)
-    # Also handle html_content if present (full knitted HTML)
-    if deck_dict.get("html_content") and "{{ds-asset:" in deck_dict["html_content"]:
-        deck_dict["html_content"] = substitute_ds_asset_placeholders(deck_dict["html_content"], db)
+    for field in _DECK_DS_ASSET_FIELDS:
+        value = deck_dict.get(field)
+        if value and "{{ds-asset:" in value:
+            deck_dict[field] = substitute_ds_asset_placeholders(value, db)
     return deck_dict

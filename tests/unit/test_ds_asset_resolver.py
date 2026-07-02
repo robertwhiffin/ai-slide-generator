@@ -30,10 +30,10 @@ def session():
     engine.dispose()
 
 
-def _make_asset(session, *, data=b"<svg/>", mime="image/svg+xml", kind="logo"):
+def _make_asset(session, *, data=b"<svg/>", mime="image/svg+xml", kind="logo", name="Acme DS"):
     from src.database.models.design_system import DesignSystem, DesignSystemAsset
 
-    ds = DesignSystem(name="Acme DS")
+    ds = DesignSystem(name=name)  # name is UNIQUE — vary it when a test makes >1
     ds.assets.append(
         DesignSystemAsset(
             kind=kind, filename="logo.svg", mime=mime, data=data, size_bytes=len(data)
@@ -101,6 +101,48 @@ class TestSubstituteDeckDictDsAssets:
         assert "{{ds-asset:" not in out["slides"][0]["html"]
         assert "{{ds-asset:" not in out["html_content"]
         assert out["slides"][1]["html"] == "<p>no placeholder</p>"
+
+    def test_substitutes_deck_top_level_css_font_and_background(self, session):
+        """Deck top-level ``css`` resolves {{ds-asset:ID}} in @font-face src
+        url() (fonts) and background-image url() (backgrounds).
+
+        Regression: slide ``html`` and ``html_content`` were substituted but the
+        deck-level stylesheet was not, so brand fonts/backgrounds referenced via
+        ``@font-face { src: url('{{ds-asset:ID}}') }`` and
+        ``background-image: url('{{ds-asset:ID}}')`` leaked as unresolved
+        placeholders.
+        """
+        from src.utils.ds_asset_utils import substitute_deck_dict_ds_assets
+
+        font = _make_asset(
+            session, data=b"synthetic-font-bytes", mime="font/woff2", kind="font",
+            name="Acme DS Fonts",
+        )
+        bg = _make_asset(
+            session, data=b"synthetic-bg-bytes", mime="image/png", kind="background",
+            name="Acme DS Backgrounds",
+        )
+        # Build placeholders via the compiler's own convention to avoid f-string
+        # brace collisions with the surrounding CSS braces.
+        font_ph = "{{ds-asset:%d}}" % font.id
+        bg_ph = "{{ds-asset:%d}}" % bg.id
+        deck = {
+            "slides": [{"html": "<p>no placeholder</p>"}],
+            "css": (
+                "@font-face { font-family: 'Brand'; "
+                "src: url('" + font_ph + "') format('woff2'); }\n"
+                ".hero { background-image: url('" + bg_ph + "'); }"
+            ),
+        }
+        out = substitute_deck_dict_ds_assets(deck, session)
+
+        font_b64 = base64.b64encode(b"synthetic-font-bytes").decode()
+        bg_b64 = base64.b64encode(b"synthetic-bg-bytes").decode()
+        assert f"data:font/woff2;base64,{font_b64}" in out["css"]
+        assert f"data:image/png;base64,{bg_b64}" in out["css"]
+        assert "{{ds-asset:" not in out["css"]
+        # Slides without placeholders are untouched.
+        assert out["slides"][0]["html"] == "<p>no placeholder</p>"
 
     def test_empty_deck_is_noop(self, session):
         from src.utils.ds_asset_utils import substitute_deck_dict_ds_assets
