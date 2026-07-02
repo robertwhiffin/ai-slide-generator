@@ -479,13 +479,38 @@ def create_local(
             else:
                 print("   Warning: Could not get SP client ID — role setup skipped")
 
-        # Set up database schema
-        print("Setting up database schema...")
-        _setup_database_schema(
-            ws, app, lakebase_name, schema_name,
-            lakebase_result=lakebase_result,
-        )
-        print(f"   Schema '{schema_name}' configured")
+        # Set up database schema.
+        #
+        # On the branching/fork path this step is skipped: it is redundant and
+        # is the ONLY step that requires the deploying human to hold a Postgres
+        # login role on the project, so skipping it keeps dev-loop deploys
+        # SP-only.
+        #   * The fork inherits the schema and tables copy-on-write from the
+        #     source env, owned by the shared `tellr_app_owners` role. The new
+        #     app SP was just granted into that role WITH INHERIT (see
+        #     `_trigger_owner_grant_job` above), so it already owns the
+        #     inherited schema/tables — the GRANTs here would be no-ops.
+        #   * The app (re)creates and migrates its own tables at startup AS the
+        #     app SP (`init_db()` in the FastAPI lifespan), so table setup does
+        #     not need to happen at deploy time.
+        # `_setup_database_schema` connects via `_get_lakebase_connection`,
+        # which authenticates as `ws.current_user.me()` (the deploying human);
+        # a deployer with no login role on the project would fail there with
+        # "password authentication failed". The non-fork (local/prod) path
+        # still needs it — the schema may not exist yet and the SP's grants
+        # come from AppResourceDatabase — so only the fork path is skipped.
+        if branch_from_env:
+            print(
+                "Skipping deploy-time schema setup on fork "
+                "(SP owns inherited schema; app migrates on startup)"
+            )
+        else:
+            print("Setting up database schema...")
+            _setup_database_schema(
+                ws, app, lakebase_name, schema_name,
+                lakebase_result=lakebase_result,
+            )
+            print(f"   Schema '{schema_name}' configured")
         print()
 
         # Deploy the app
@@ -594,13 +619,16 @@ def update_local(
                     "   Warning: Could not get SP client ID — role setup skipped"
                 )
 
-            # Grant schema perms on the new branch
-            print("Granting schema permissions on new branch...")
-            _setup_database_schema(
-                ws, app, lakebase_name, schema_name,
-                lakebase_result=lakebase_result,
+            # Schema setup is intentionally NOT run on the branch (see the
+            # detailed note in `create_local`): the SP was just granted into
+            # `tellr_app_owners` WITH INHERIT above, so it already owns the
+            # inherited schema/tables, and the app migrates them at startup AS
+            # the SP. Running it here would connect as the deploying human via
+            # `_get_lakebase_connection`, breaking SP-only dev-loop deploys.
+            print(
+                "Skipping deploy-time schema setup on fork "
+                "(SP owns inherited schema; app migrates on startup)"
             )
-            print(f"   Schema '{schema_name}' permissions configured")
         else:
             # Standard path (prod/dev): get current Lakebase state
             print("Checking Lakebase database...")
