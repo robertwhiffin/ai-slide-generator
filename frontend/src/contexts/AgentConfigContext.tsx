@@ -35,6 +35,7 @@ interface AgentConfigContextValue {
   updateTool: (spaceId: string, updates: { description?: string }) => Promise<void>;
   updateToolEntry: (tool: ToolEntry) => Promise<void>;
   setStyle: (styleId: number | null) => Promise<void>;
+  setDesignSystem: (designSystemId: number | null) => Promise<void>;
   setDeckPrompt: (promptId: number | null) => Promise<void>;
   saveAsProfile: (name: string, description?: string) => Promise<void>;
   loadProfile: (profileId: number) => Promise<void>;
@@ -350,6 +351,10 @@ export const AgentConfigProvider: React.FC<{ children: React.ReactNode }> = ({ c
     await updateConfig({ ...agentConfig, slide_style_id: styleId });
   }, [agentConfig, updateConfig]);
 
+  const setDesignSystem = useCallback(async (designSystemId: number | null) => {
+    await updateConfig({ ...agentConfig, design_system_id: designSystemId });
+  }, [agentConfig, updateConfig]);
+
   const setDeckPrompt = useCallback(async (promptId: number | null) => {
     await updateConfig({ ...agentConfig, deck_prompt_id: promptId });
   }, [agentConfig, updateConfig]);
@@ -438,6 +443,7 @@ export const AgentConfigProvider: React.FC<{ children: React.ReactNode }> = ({ c
     updateTool,
     updateToolEntry,
     setStyle,
+    setDesignSystem,
     setDeckPrompt,
     saveAsProfile,
     loadProfile,

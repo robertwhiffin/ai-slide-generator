@@ -43,6 +43,12 @@ export type ToolEntry = GenieTool | MCPTool | VectorIndexTool | ModelEndpointToo
 export interface AgentConfig {
   tools: ToolEntry[];
   slide_style_id: number | null;
+  /**
+   * Selected design system. When set, it compiles to prompt text and takes
+   * precedence over slide_style_id (backend precedence:
+   * design_system_id -> slide_style_id -> default).
+   */
+  design_system_id: number | null;
   deck_prompt_id: number | null;
   system_prompt: string | null;
   slide_editing_instructions: string | null;
@@ -94,6 +100,7 @@ export interface ProfileSummary {
 export const DEFAULT_AGENT_CONFIG: AgentConfig = {
   tools: [],
   slide_style_id: null,
+  design_system_id: null,
   deck_prompt_id: null,
   system_prompt: null,
   slide_editing_instructions: null,

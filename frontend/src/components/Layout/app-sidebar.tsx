@@ -8,6 +8,7 @@ import {
   Image,
   Layers,
   Compass,
+  Shapes,
 } from "lucide-react"
 import { NavMain } from "@/components/Layout/nav-main"
 import { NavSecondary } from "@/components/Layout/nav-secondary"
@@ -27,7 +28,7 @@ import {
   SidebarMenuButton,
 } from "@/ui/sidebar"
 
-type ViewMode = 'main' | 'profiles' | 'deck_prompts' | 'slide_styles' | 'images' | 'history' | 'help'
+type ViewMode = 'main' | 'profiles' | 'deck_prompts' | 'design_systems' | 'slide_styles' | 'images' | 'history' | 'help'
 
 interface AppSidebarProps extends React.ComponentProps<typeof Sidebar> {
   currentView: ViewMode
@@ -61,6 +62,11 @@ const navSecondaryItems = [
     title: "Deck prompts",
     viewId: "deck_prompts",
     icon: FileText,
+  },
+  {
+    title: "Design systems",
+    viewId: "design_systems",
+    icon: Shapes,
   },
   {
     title: "Slide styles",
