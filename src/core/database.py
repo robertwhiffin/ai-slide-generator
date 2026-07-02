@@ -578,8 +578,10 @@ def _migrate_design_system_soft_delete(conn, inspector, schema, _qual, is_sqlite
     column on fresh installs, but it does NOT alter an already-provisioned
     ``design_system`` table (created by an earlier Phase 1/2 deploy). This
     hand-rolled ALTER backfills it. Defaults to TRUE so every existing design
-    system remains visible/usable. A fresh inspector read is used so it reflects
-    the table even when created earlier in this same migration transaction.
+    system remains visible/usable. Column existence is probed with the inspector
+    passed from ``_run_migrations`` (or a fresh one when called standalone);
+    ``get_columns`` reflects the live table even when it was created earlier in
+    this same migration transaction.
     """
     from sqlalchemy import inspect, text
 

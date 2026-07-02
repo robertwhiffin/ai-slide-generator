@@ -202,6 +202,50 @@ def _image_dimensions(data: bytes, mime: str) -> tuple[Optional[int], Optional[i
         return (None, None)
 
 
+class _SizeBudget:
+    """Bounds cumulative uncompressed bytes read from a bundle (bomb guard).
+
+    EVERY ``zf.read`` in the importer goes through :meth:`read`/:meth:`read_info`,
+    which check the entry's DECLARED uncompressed size (from the zip header)
+    against the per-entry (``MAX_ASSET_SIZE_BYTES``) and cumulative-bundle
+    (``MAX_BUNDLE_SIZE_BYTES``) limits BEFORE the entry is materialised — so an
+    attacker-declared multi-GB manifest/CSS/asset is rejected rather than OOMing
+    the worker — then re-check the actual decoded length as a backstop. The
+    single running total spans the manifest, CSS sources, and all assets.
+    """
+
+    def __init__(self) -> None:
+        self.total = 0
+
+    def read(self, zf: zipfile.ZipFile, name: str) -> bytes:
+        """Size-checked read by entry name. Raises ``KeyError`` if absent."""
+        return self.read_info(zf, zf.getinfo(name))
+
+    def read_info(self, zf: zipfile.ZipFile, info: zipfile.ZipInfo) -> bytes:
+        """Size-checked read for an already-resolved :class:`zipfile.ZipInfo`."""
+        self._enforce(info.filename, info.file_size)
+        data = zf.read(info)
+        self.total += len(data)
+        self._enforce(info.filename, 0)  # backstop: re-check actual cumulative
+        if len(data) > MAX_ASSET_SIZE_BYTES:
+            raise DesignSystemImportError(
+                f"Bundle entry '{info.filename}' is too large: {len(data)} bytes "
+                f"(max {MAX_ASSET_SIZE_BYTES} per entry)."
+            )
+        return data
+
+    def _enforce(self, name: str, pending: int) -> None:
+        if pending > MAX_ASSET_SIZE_BYTES:
+            raise DesignSystemImportError(
+                f"Bundle entry '{name}' is too large: {pending} bytes "
+                f"(max {MAX_ASSET_SIZE_BYTES} per entry)."
+            )
+        if self.total + pending > MAX_BUNDLE_SIZE_BYTES:
+            raise DesignSystemImportError(
+                f"Bundle exceeds the maximum size of {MAX_BUNDLE_SIZE_BYTES} bytes."
+            )
+
+
 # ---------------------------------------------------------------------------
 # Import
 # ---------------------------------------------------------------------------
@@ -230,8 +274,10 @@ def import_bundle(
         raise DesignSystemImportError(f"Upload is not a valid .zip bundle: {exc}") from exc
 
     with zf:
+        # One cumulative memory budget spanning manifest + CSS + asset reads.
+        budget = _SizeBudget()
         root_prefix = _locate_root_prefix(zf)
-        manifest = _read_manifest(zf, root_prefix)
+        manifest = _read_manifest(zf, root_prefix, budget)
         name = _resolve_name(name_override, manifest, root_prefix)
 
         # Fail fast on a name clash before doing any expensive work.
@@ -242,8 +288,8 @@ def import_bundle(
                 "Choose a different name to import a copy."
             )
 
-        tokens = _collect_tokens(zf, root_prefix, manifest)
-        assets = _collect_assets(zf, root_prefix)
+        tokens = _collect_tokens(zf, root_prefix, manifest, budget)
+        assets = _collect_assets(zf, root_prefix, budget)
 
     raw_description = manifest.get("description")
     description = (
@@ -301,9 +347,9 @@ def _locate_root_prefix(zf: zipfile.ZipFile) -> str:
     )
 
 
-def _read_manifest(zf: zipfile.ZipFile, root_prefix: str) -> dict:
+def _read_manifest(zf: zipfile.ZipFile, root_prefix: str, budget: "_SizeBudget") -> dict:
     try:
-        raw = zf.read(root_prefix + MANIFEST_FILENAME)
+        raw = budget.read(zf, root_prefix + MANIFEST_FILENAME)
     except KeyError as exc:  # pragma: no cover - guarded by _locate_root_prefix
         raise DesignSystemImportError(f"Bundle is missing {MANIFEST_FILENAME}") from exc
     try:
@@ -324,7 +370,7 @@ def _resolve_name(name_override: Optional[str], manifest: dict, root_prefix: str
 
 
 def _collect_tokens(
-    zf: zipfile.ZipFile, root_prefix: str, manifest: dict
+    zf: zipfile.ZipFile, root_prefix: str, manifest: dict, budget: "_SizeBudget"
 ) -> list[DesignSystemToken]:
     """Tokens from ``manifest['tokens']`` plus any ``:root`` CSS vars.
 
@@ -342,7 +388,7 @@ def _collect_tokens(
         group = (entry.get("group") or "core").strip() or "core"
         by_key.setdefault((group, name), str(value).strip())
 
-    for css_text in _read_css_sources(zf, root_prefix, manifest):
+    for css_text in _read_css_sources(zf, root_prefix, manifest, budget):
         for var_name, value in _parse_css_root_vars(css_text):
             group, name = _classify_css_var(var_name, value)
             by_key.setdefault((group, name), value)
@@ -353,8 +399,14 @@ def _collect_tokens(
     ]
 
 
-def _read_css_sources(zf: zipfile.ZipFile, root_prefix: str, manifest: dict) -> list[str]:
-    """Read the CSS token sources: ``globalCssPaths`` + the conventional file."""
+def _read_css_sources(
+    zf: zipfile.ZipFile, root_prefix: str, manifest: dict, budget: "_SizeBudget"
+) -> list[str]:
+    """Read the CSS token sources: ``globalCssPaths`` + the conventional file.
+
+    Reads go through ``budget`` so an oversized (declared) CSS entry is rejected
+    before it is materialised; a genuinely-missing path is skipped.
+    """
     paths: list[str] = []
     for path in manifest.get("globalCssPaths") or []:
         if isinstance(path, str) and path.strip():
@@ -369,9 +421,9 @@ def _read_css_sources(zf: zipfile.ZipFile, root_prefix: str, manifest: dict) -> 
             continue
         seen.add(path)
         try:
-            raw = zf.read(root_prefix + path)
+            raw = budget.read(zf, root_prefix + path)
         except KeyError:
-            continue
+            continue  # optional source not present in this bundle
         try:
             texts.append(raw.decode("utf-8"))
         except UnicodeDecodeError:
@@ -379,10 +431,11 @@ def _read_css_sources(zf: zipfile.ZipFile, root_prefix: str, manifest: dict) -> 
     return texts
 
 
-def _collect_assets(zf: zipfile.ZipFile, root_prefix: str) -> list[DesignSystemAsset]:
+def _collect_assets(
+    zf: zipfile.ZipFile, root_prefix: str, budget: "_SizeBudget"
+) -> list[DesignSystemAsset]:
     """Read + validate ``assets/**`` and ``fonts/**`` files into asset rows."""
     assets: list[DesignSystemAsset] = []
-    total = 0
     for info in zf.infolist():
         name = info.filename
         if not name.startswith(root_prefix):
@@ -391,31 +444,10 @@ def _collect_assets(zf: zipfile.ZipFile, root_prefix: str) -> list[DesignSystemA
         if _should_skip(rel):
             continue
 
-        # Guard against decompression bombs: check the declared uncompressed size
-        # from the zip header BEFORE reading the entry into memory.
-        declared = info.file_size
-        if declared > MAX_ASSET_SIZE_BYTES:
-            raise DesignSystemImportError(
-                f"Asset '{rel}' is too large: {declared} bytes "
-                f"(max {MAX_ASSET_SIZE_BYTES} per asset)."
-            )
-        if total + declared > MAX_BUNDLE_SIZE_BYTES:
-            raise DesignSystemImportError(
-                f"Bundle exceeds the maximum size of {MAX_BUNDLE_SIZE_BYTES} bytes."
-            )
-
-        data = zf.read(info)
+        # Size-checked read: declared size is validated against the per-entry +
+        # cumulative-bundle limits BEFORE the entry is materialised (bomb guard).
+        data = budget.read_info(zf, info)
         size = len(data)
-        if size > MAX_ASSET_SIZE_BYTES:
-            raise DesignSystemImportError(
-                f"Asset '{rel}' is too large: {size} bytes (max {MAX_ASSET_SIZE_BYTES})."
-            )
-        total += size
-        if total > MAX_BUNDLE_SIZE_BYTES:
-            raise DesignSystemImportError(
-                f"Bundle exceeds the maximum size of {MAX_BUNDLE_SIZE_BYTES} bytes."
-            )
-
         mime = _guess_mime(rel)
         kind = _infer_asset_kind(rel)
         width, height = _image_dimensions(data, mime)

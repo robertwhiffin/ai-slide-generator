@@ -265,6 +265,22 @@ class TestServeAsset:
         asset = body["assets"][0]
         assert client.get(f"{BASE}/999999/assets/{asset['id']}").status_code == 404
 
+    def test_svg_asset_forced_to_download(self, client):
+        """SVG can carry inline <script>; the serve endpoint must not render it."""
+        body = _import(client).json()
+        svg = next(a for a in body["assets"] if a["filename"] == "logo.svg")
+        resp = client.get(f"{BASE}/{body['id']}/assets/{svg['id']}")
+        assert resp.status_code == 200
+        assert resp.headers.get("content-disposition") == "attachment"
+        assert resp.headers.get("x-content-type-options") == "nosniff"
+
+    def test_raster_asset_served_inline(self, client):
+        body = _import(client).json()
+        png = next(a for a in body["assets"] if a["filename"] == "hero-bg.png")
+        resp = client.get(f"{BASE}/{body['id']}/assets/{png['id']}")
+        assert resp.status_code == 200
+        assert "content-disposition" not in {k.lower() for k in resp.headers}
+
 
 # ---------------------------------------------------------------------------
 # Reference integrity (design_system_id in agent-config validator)

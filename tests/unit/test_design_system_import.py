@@ -177,6 +177,31 @@ class TestImportValidation:
             import_bundle(session, zip_bytes=zip_bytes, user="u")
         assert "bundle" in str(exc.value).lower()
 
+    def test_oversized_manifest_rejected_before_read(self, session):
+        """Decompression-bomb guard: a manifest whose declared uncompressed size
+        exceeds the per-asset limit is rejected BEFORE zf.read materialises it."""
+        from src.database.models.design_system import MAX_ASSET_SIZE_BYTES
+        from src.services.design_system_service import DesignSystemImportError, import_bundle
+
+        # Oversized (and never even parsed — the size guard fires first).
+        huge_manifest = "{" + (" " * (MAX_ASSET_SIZE_BYTES + 1))
+        zip_bytes = make_bundle_zip(manifest=huge_manifest)
+        with pytest.raises(DesignSystemImportError) as exc:
+            import_bundle(session, zip_bytes=zip_bytes, user="u")
+        assert "too large" in str(exc.value).lower()
+
+    def test_oversized_css_rejected_before_read(self, session):
+        """Decompression-bomb guard: an oversized globalCssPaths/colors_and_type.css
+        entry is rejected BEFORE zf.read materialises it."""
+        from src.database.models.design_system import MAX_ASSET_SIZE_BYTES
+        from src.services.design_system_service import DesignSystemImportError, import_bundle
+
+        huge_css = ":root{}\n/*" + ("a" * (MAX_ASSET_SIZE_BYTES + 1)) + "*/"
+        zip_bytes = make_bundle_zip(css=huge_css)
+        with pytest.raises(DesignSystemImportError) as exc:
+            import_bundle(session, zip_bytes=zip_bytes, user="u")
+        assert "too large" in str(exc.value).lower()
+
     def test_duplicate_name_raises_conflict(self, session):
         from src.services.design_system_service import (
             DesignSystemNameConflictError,

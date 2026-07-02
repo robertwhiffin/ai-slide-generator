@@ -233,8 +233,15 @@ async def import_design_system(
     db: Session = Depends(get_db),
 ):
     """Import a .zip design-system bundle: validate, store assets/tokens, compile."""
+    # Reject an oversized upload from its declared size BEFORE materialising it
+    # (Starlette populates UploadFile.size from the multipart part when known).
+    if file.size is not None and file.size > MAX_BUNDLE_SIZE_BYTES:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Upload exceeds the maximum bundle size of {MAX_BUNDLE_SIZE_BYTES} bytes",
+        )
     content = await file.read()
-    if len(content) > MAX_BUNDLE_SIZE_BYTES:
+    if len(content) > MAX_BUNDLE_SIZE_BYTES:  # backstop when size was unknown
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Upload exceeds the maximum bundle size of {MAX_BUNDLE_SIZE_BYTES} bytes",
@@ -466,9 +473,21 @@ def set_default_design_system(ds_id: int, db: Session = Depends(get_db)):
         )
 
 
+# Raster image types that are safe to render inline. Anything else (notably
+# image/svg+xml, which can carry inline <script>) is served as a download so a
+# directly-navigated asset cannot execute script in the app origin (stored XSS).
+_INLINE_SAFE_MIMES = frozenset({"image/png", "image/jpeg", "image/gif", "image/webp"})
+
+
 @router.get("/{ds_id}/assets/{asset_id}")
 def serve_design_system_asset(ds_id: int, asset_id: int, db: Session = Depends(get_db)):
-    """Serve a design-system asset's raw bytes (for preview + generation)."""
+    """Serve a design-system asset's raw bytes (for preview + generation).
+
+    SVG/non-raster assets are forced to download (``Content-Disposition:
+    attachment``) with ``X-Content-Type-Options: nosniff`` so they cannot execute
+    inline script in the app origin. The generation path is unaffected — it embeds
+    assets as base64 data URIs via the resolver, not through this endpoint.
+    """
     try:
         asset = (
             db.query(DesignSystemAsset)
@@ -483,7 +502,11 @@ def serve_design_system_asset(ds_id: int, asset_id: int, db: Session = Depends(g
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"Asset {asset_id} not found for design system {ds_id}",
             )
-        return Response(content=asset.data, media_type=asset.mime)
+        headers = {"X-Content-Type-Options": "nosniff"}
+        if asset.mime not in _INLINE_SAFE_MIMES:
+            # Static value (no attacker-controlled filename) to avoid header injection.
+            headers["Content-Disposition"] = "attachment"
+        return Response(content=asset.data, media_type=asset.mime, headers=headers)
     except HTTPException:
         raise
     except Exception as e:
