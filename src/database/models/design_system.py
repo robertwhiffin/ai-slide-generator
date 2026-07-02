@@ -45,8 +45,13 @@ from src.core.database import Base
 # analogous to ``image_service.MAX_FILE_SIZE``. Kept here next to the models so
 # every writer shares one source of truth. Bytes are only ever persisted in the
 # dedicated ``design_system_asset`` table.
-MAX_ASSET_SIZE_BYTES = 10 * 1024 * 1024  # 10 MB per individual asset
-MAX_BUNDLE_SIZE_BYTES = 50 * 1024 * 1024  # 50 MB per uploaded design-system bundle
+MAX_ASSET_SIZE_BYTES = 50 * 1024 * 1024  # 50 MB per individual asset
+MAX_BUNDLE_SIZE_BYTES = 200 * 1024 * 1024  # 200 MB per uploaded design-system bundle
+# NOTE: bytes are persisted in-row in ``design_system_asset`` (Lakebase Postgres).
+# Raising the bundle cap to 200 MB means a single import can add up to ~200 MB of
+# BLOB rows; large blobs bloat the row store and every copy-on-write branch fork.
+# This is a deliberate limit bump, not a storage re-architecture — revisit
+# out-of-row/object-store offloading if bundles routinely approach this size.
 
 # JSON on SQLite (tests); JSONB on PostgreSQL/Lakebase so the parsed manifest can
 # later be introspected/indexed natively. Mirrors the ImageAsset.tags convention.
