@@ -149,10 +149,12 @@ def _check_deck_permission_for_session(
 def _substitute_deck_images(deck_dict: dict) -> None:
     """Substitute {{image:ID}} placeholders in a deck dict with base64 data URIs."""
     from src.core.database import get_db_session
+    from src.utils.ds_asset_utils import substitute_deck_dict_ds_assets
     from src.utils.image_utils import substitute_deck_dict_images
 
     with get_db_session() as db:
         substitute_deck_dict_images(deck_dict, db)
+        substitute_deck_dict_ds_assets(deck_dict, db)
 
 
 @router.post("")

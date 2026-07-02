@@ -35,6 +35,10 @@ from src.utils.html_utils import (
     extract_canvas_ids_from_html,
     split_script_by_canvas,
 )
+from src.utils.ds_asset_utils import (
+    substitute_deck_dict_ds_assets,
+    substitute_ds_asset_placeholders,
+)
 from src.utils.image_utils import substitute_deck_dict_images, substitute_image_placeholders
 
 logger = logging.getLogger(__name__)
@@ -83,11 +87,13 @@ class ChatService:
         logger.info("ChatService initialized successfully")
 
     def _substitute_images_for_response(self, deck_dict, raw_html=None):
-        """Apply image placeholder substitution before sending to client.
+        """Apply image + design-system asset substitution before sending to client.
 
-        Converts {{image:ID}} placeholders to base64 data URIs in deck dicts
-        and raw HTML. Called at API response boundaries so that stored/cached
-        HTML keeps lightweight placeholders (avoiding LLM context bloat).
+        Converts {{image:ID}} placeholders (image_assets) and {{ds-asset:ID}}
+        placeholders (design_system_asset) to base64 data URIs in deck dicts and
+        raw HTML. Called at API response boundaries so that stored/cached HTML
+        keeps lightweight placeholders (avoiding LLM context bloat). The two
+        namespaces are resolved independently.
         """
         from src.core.database import get_db_session
 
@@ -97,12 +103,30 @@ class ChatService:
         needs_html = raw_html and "{{image:" in raw_html
         needs_deck_html = deck_dict and deck_dict.get("html_content") and "{{image:" in deck_dict.get("html_content", "")
 
-        if needs_deck or needs_html or needs_deck_html:
+        # Design-system brand assets ({{ds-asset:ID}}) — parallel, orthogonal namespace.
+        ds_needs_deck = deck_dict and any(
+            "{{ds-asset:" in s.get("html", "") for s in deck_dict.get("slides", [])
+        )
+        ds_needs_html = raw_html and "{{ds-asset:" in raw_html
+        ds_needs_deck_html = bool(
+            deck_dict
+            and deck_dict.get("html_content")
+            and "{{ds-asset:" in deck_dict.get("html_content", "")
+        )
+
+        if (
+            needs_deck or needs_html or needs_deck_html
+            or ds_needs_deck or ds_needs_html or ds_needs_deck_html
+        ):
             with get_db_session() as db:
                 if needs_deck or needs_deck_html:
                     substitute_deck_dict_images(deck_dict, db)
                 if needs_html:
                     raw_html = substitute_image_placeholders(raw_html, db)
+                if ds_needs_deck or ds_needs_deck_html:
+                    substitute_deck_dict_ds_assets(deck_dict, db)
+                if ds_needs_html:
+                    raw_html = substitute_ds_asset_placeholders(raw_html, db)
         return deck_dict, raw_html
 
     def _build_agent_for_session(

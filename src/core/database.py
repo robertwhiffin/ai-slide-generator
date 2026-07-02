@@ -527,6 +527,9 @@ def _run_migrations(engine, schema: str | None = None):
         # --- design system library: additive design_system(+asset/+token) tables ---
         _migrate_design_system_tables(conn, schema)
 
+        # --- design system: add is_active (soft-delete) to pre-existing tables ---
+        _migrate_design_system_soft_delete(conn, inspector, schema, _qual, is_sqlite)
+
         # --- keep newly created objects owned by the shared role (prod forks) ---
         _reassign_new_objects_to_shared_owner(conn, is_sqlite)
 
@@ -565,6 +568,33 @@ def _migrate_design_system_tables(conn, schema: str | None = None) -> None:
         table.create(bind=conn, checkfirst=True)
 
     logger.info("Migration: design_system tables ensured")
+
+
+def _migrate_design_system_soft_delete(conn, inspector, schema, _qual, is_sqlite) -> None:
+    """Add ``is_active`` to ``design_system`` for Phase-3 soft-delete (idempotent).
+
+    Phase 3 introduces soft-delete on design systems, mirroring
+    ``slide_style_library.is_active``. ``Base.metadata.create_all()`` adds the
+    column on fresh installs, but it does NOT alter an already-provisioned
+    ``design_system`` table (created by an earlier Phase 1/2 deploy). This
+    hand-rolled ALTER backfills it. Defaults to TRUE so every existing design
+    system remains visible/usable. A fresh inspector read is used so it reflects
+    the table even when created earlier in this same migration transaction.
+    """
+    from sqlalchemy import inspect, text
+
+    insp = inspector or inspect(conn)
+    try:
+        cols = {c["name"] for c in insp.get_columns("design_system", schema=schema)}
+    except Exception:
+        return
+    if not cols or "is_active" in cols:
+        return
+
+    logger.info("Migration: adding is_active column to design_system")
+    conn.execute(text(
+        f"ALTER TABLE {_qual('design_system')} ADD COLUMN is_active BOOLEAN DEFAULT TRUE NOT NULL"
+    ))
 
 
 def _reassign_new_objects_to_shared_owner(

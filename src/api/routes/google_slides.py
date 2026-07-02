@@ -276,11 +276,13 @@ async def start_google_slides_export(
     if not slide_deck or not slide_deck.get("slides"):
         raise HTTPException(status_code=404, detail="No slides available")
 
-    # Substitute {{image:ID}} placeholders with base64 data URIs
+    # Substitute {{image:ID}} + {{ds-asset:ID}} placeholders with base64 data URIs
+    from src.utils.ds_asset_utils import substitute_deck_dict_ds_assets
     from src.utils.image_utils import substitute_deck_dict_images
     from src.core.database import get_db_session
     with get_db_session() as db:
         substitute_deck_dict_images(slide_deck, db)
+        substitute_deck_dict_ds_assets(slide_deck, db)
 
     slides_data = slide_deck.get("slides", [])
     total = len(slides_data)
@@ -502,9 +504,11 @@ async def export_google_slides_from_huashu(
     # legacy /export route). Use a fresh session because the request's `db`
     # is held by the route's transaction context.
     from src.core.database import get_db_session
+    from src.utils.ds_asset_utils import substitute_deck_dict_ds_assets
     from src.utils.image_utils import substitute_deck_dict_images
     with get_db_session() as imdb:
         substitute_deck_dict_images(slide_deck, imdb)
+        substitute_deck_dict_ds_assets(slide_deck, imdb)
 
     title = slide_deck.get("title") or "Presentation"
     slides_data = slide_deck.get("slides") or []

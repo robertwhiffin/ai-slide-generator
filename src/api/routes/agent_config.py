@@ -21,10 +21,25 @@ router = APIRouter(prefix="/api/sessions/{session_id}/agent-config", tags=["agen
 
 
 def _validate_references(config: AgentConfig) -> None:
-    """Validate that slide_style_id and deck_prompt_id reference existing library entries."""
-    from src.database.models import SlideStyleLibrary, SlideDeckPromptLibrary
+    """Validate that design_system_id, slide_style_id and deck_prompt_id reference
+    existing (active) library entries."""
+    from src.database.models import DesignSystem, SlideDeckPromptLibrary, SlideStyleLibrary
 
     with get_db_session() as db:
+        if config.design_system_id is not None:
+            design_system = (
+                db.query(DesignSystem)
+                .filter(
+                    DesignSystem.id == config.design_system_id,
+                    DesignSystem.is_active == True,  # noqa: E712
+                )
+                .first()
+            )
+            if not design_system:
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"design_system_id {config.design_system_id} not found",
+                )
         if config.slide_style_id is not None:
             style = (
                 db.query(SlideStyleLibrary)

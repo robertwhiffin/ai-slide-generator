@@ -332,6 +332,59 @@ class TestDeterminism:
 # ---------------------------------------------------------------------------
 
 
+class TestPhase3ReviewFixes:
+    """Phase-2 review follow-ups folded in during Phase 3."""
+
+    def test_unrecognized_token_group_logs_warning(self, session, caplog):
+        """Tokens in a group the compiler doesn't emit are dropped — but no longer
+        silently: a warning names the dropped groups so authors notice."""
+        import logging
+
+        from src.services.design_system_compiler import compile_design_system
+
+        tokens = [
+            {"group": "core", "name": "primary", "value": "#123456"},
+            {"group": "elevation", "name": "shadow-1", "value": "0 1px 2px"},
+            {"group": "motion", "name": "ease", "value": "ease-in-out"},
+        ]
+        ds = _make_ds(session, tokens=tokens)
+        with caplog.at_level(logging.WARNING, logger="src.services.design_system_compiler"):
+            out = compile_design_system(ds)
+
+        # Recognized group still renders; unrecognized ones are absent from output.
+        assert "#123456" in out
+        assert "shadow-1" not in out
+        assert "ease-in-out" not in out
+        # ...but a single warning names the dropped groups (sorted, deterministic).
+        warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+        assert any("elevation" in m and "motion" in m for m in warnings)
+
+    def test_no_warning_when_all_groups_recognized(self, session, caplog):
+        import logging
+
+        from src.services.design_system_compiler import compile_design_system
+
+        ds = _make_ds(session, tokens=_TOKENS)  # only core/accents/ink/tints/type/spacing
+        with caplog.at_level(logging.WARNING, logger="src.services.design_system_compiler"):
+            compile_design_system(ds)
+        assert not [r for r in caplog.records if r.levelno == logging.WARNING]
+
+    def test_slug_collision_deduped_in_root_block(self, session):
+        """Two color-token names that slugify to the same identifier must not emit
+        duplicate --brand-* custom properties (invalid/ambiguous CSS)."""
+        from src.services.design_system_compiler import compile_design_system
+
+        # "Primary" and "primary" (and "primary!") all slugify to 'primary'.
+        tokens = [
+            {"group": "core", "name": "Primary", "value": "#111111"},
+            {"group": "core", "name": "primary", "value": "#222222"},
+            {"group": "core", "name": "primary!", "value": "#333333"},
+        ]
+        ds = _make_ds(session, tokens=tokens)
+        out = compile_design_system(ds)
+        assert out.count("--brand-core-primary:") == 1
+
+
 class TestRecompute:
     def test_recompute_sets_compiled_style_content(self, session):
         from src.services.design_system_compiler import (
