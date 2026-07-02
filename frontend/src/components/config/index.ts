@@ -8,4 +8,7 @@ export { DeckPromptList } from './DeckPromptList';
 export { DeckPromptForm } from './DeckPromptForm';
 export { SlideStyleList } from './SlideStyleList';
 export { SlideStyleForm } from './SlideStyleForm';
+export { DesignSystemLibrary } from './DesignSystemLibrary';
+export { DesignSystemDetailPanel } from './DesignSystemDetailPanel';
+export { DesignSystemUploadDialog } from './DesignSystemUploadDialog';
 export { GoogleSlidesAuthForm } from './GoogleSlidesAuthForm';

@@ -399,6 +399,139 @@ export const mockDeleteSystemStyleError = {
 };
 
 // ============================================
+// Design System Library Mocks (Phase 4)
+// ============================================
+//
+// Everything here is SYNTHETIC — a fake "Acme" brand, dummy hex, and placeholder
+// assets — mirroring the backend's tests/unit/conftest_design_system.py fixture,
+// per the public-repo hygiene rule (no real brand content ever ships).
+
+// GET /api/settings/design-systems -> { design_systems: [...], total: n }
+export const mockDesignSystems = {
+  design_systems: [
+    {
+      id: 1,
+      name: "Acme Design System",
+      description: "Synthetic fixture brand — not a real design system.",
+      created_by: "system",
+      published: true,
+      is_default: true,
+      is_active: true,
+      version: 1,
+      token_count: 3,
+      asset_count: 3,
+      template_count: 2,
+      created_at: "2026-02-01T10:00:00.000000",
+      updated_at: "2026-02-01T10:00:00.000000",
+    },
+    {
+      id: 2,
+      name: "Nimbus Theme",
+      description: "A second synthetic design system for list rendering.",
+      created_by: "system",
+      published: false,
+      is_default: false,
+      is_active: true,
+      version: 2,
+      token_count: 1,
+      asset_count: 1,
+      template_count: 0,
+      created_at: "2026-02-02T10:00:00.000000",
+      updated_at: "2026-02-02T10:00:00.000000",
+    },
+  ],
+  total: 2,
+};
+
+// GET /api/settings/design-systems/{id} -> DesignSystemDetail
+export const mockDesignSystemDetail = {
+  id: 1,
+  name: "Acme Design System",
+  description: "Synthetic fixture brand — not a real design system.",
+  created_by: "system",
+  published: true,
+  is_default: true,
+  is_active: true,
+  version: 1,
+  token_count: 3,
+  asset_count: 3,
+  template_count: 2,
+  created_at: "2026-02-01T10:00:00.000000",
+  updated_at: "2026-02-01T10:00:00.000000",
+  manifest_json: {
+    name: "Acme Design System",
+    description: "Synthetic fixture brand — not a real design system.",
+    version: "1.0.0",
+    templates: [
+      { name: "Title Slide", description: "Centered hero with logo lockup." },
+      { name: "Two Column", description: "Left text, right chart." },
+    ],
+    cards: [{ name: "Stat Card", description: "Big number + label." }],
+  },
+  compiled_style_content: ":root {\n  --brand-core-primary: #123456;\n}",
+  tokens: [
+    { id: 1, group: "core", name: "primary", value: "#123456" },
+    { id: 2, group: "accents", name: "lava", value: "#EB4A34" },
+    { id: 3, group: "spacing", name: "md", value: "16px" },
+  ],
+  assets: [
+    {
+      id: 10,
+      kind: "logo",
+      filename: "logo.svg",
+      mime: "image/svg+xml",
+      size_bytes: 120,
+      width: 120,
+      height: 40,
+      url: "/api/settings/design-systems/1/assets/10",
+    },
+    {
+      id: 11,
+      kind: "background",
+      filename: "hero-bg.png",
+      mime: "image/png",
+      size_bytes: 512,
+      width: 16,
+      height: 16,
+      url: "/api/settings/design-systems/1/assets/11",
+    },
+    {
+      id: 12,
+      kind: "font",
+      filename: "acme-sans.woff2",
+      mime: "font/woff2",
+      size_bytes: 2048,
+      width: null,
+      height: null,
+      url: "/api/settings/design-systems/1/assets/12",
+    },
+  ],
+};
+
+// POST /api/settings/design-systems/import (success) -> DesignSystemDetail (201)
+export const mockDesignSystemImportResponse = {
+  ...mockDesignSystemDetail,
+  id: 99,
+  name: "Imported Design System",
+  description: "Freshly imported synthetic bundle.",
+  published: false,
+  is_default: false,
+};
+
+// POST /api/settings/design-systems/import (validation failure) -> 400
+export const mockDesignSystemImportError = {
+  detail: "Bundle is missing its manifest (_ds_manifest.json).",
+};
+
+// POST /api/settings/design-systems/{id}/set-default -> DesignSystemDetail
+export const mockDesignSystemSetDefaultResponse = {
+  ...mockDesignSystemDetail,
+  id: 2,
+  name: "Nimbus Theme",
+  is_default: true,
+};
+
+// ============================================
 // Deck Prompt Operation Mocks
 // ============================================
 

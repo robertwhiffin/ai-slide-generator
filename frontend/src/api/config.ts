@@ -14,6 +14,14 @@ const API_BASE = `${API_BASE_URL}/api/settings`;
 const PROFILES_API_BASE = `${API_BASE_URL}/api/profiles`;
 const SESSIONS_API_BASE = `${API_BASE_URL}/api/sessions`;
 
+/**
+ * Resolve a server-relative API path (e.g. a design-system asset URL) to an
+ * absolute URL, honoring VITE_API_URL in dev. Absolute URLs pass through.
+ */
+export function resolveApiUrl(path: string): string {
+  return /^https?:\/\//.test(path) ? path : `${API_BASE_URL}${path}`;
+}
+
 // Types
 
 export type PermissionLevel = 'CAN_MANAGE' | 'CAN_EDIT' | 'CAN_VIEW' | 'CAN_USE';
@@ -156,6 +164,80 @@ export interface SlideStyleUpdate {
 export interface SlideStyleListResponse {
   styles: SlideStyle[];
   total: number;
+}
+
+// Design System Library types (Phase 4).
+// Mirrors the backend schemas in src/api/routes/settings/design_systems.py.
+
+/** A normalized design token (color/type/spacing). */
+export interface DesignSystemToken {
+  id: number;
+  group: string;
+  name: string;
+  value: string;
+}
+
+/** A stored brand asset (logo, icon, background, font, …). */
+export interface DesignSystemAsset {
+  id: number;
+  kind: string;
+  filename: string;
+  mime: string;
+  size_bytes: number;
+  width: number | null;
+  height: number | null;
+  /** Served-asset endpoint; bytes are never inlined in listings. */
+  url: string;
+}
+
+/** List/picker view — counts only, no binary payloads. */
+export interface DesignSystemSummary {
+  id: number;
+  name: string;
+  description: string | null;
+  created_by: string | null;
+  published: boolean;
+  is_default: boolean;
+  is_active: boolean;
+  version: number;
+  token_count: number;
+  asset_count: number;
+  template_count: number;
+  created_at: string;
+  updated_at: string;
+}
+
+/** Detail view — adds manifest, compiled artifact, tokens and assets. */
+export interface DesignSystemDetail extends DesignSystemSummary {
+  manifest_json: Record<string, unknown> | null;
+  compiled_style_content: string | null;
+  tokens: DesignSystemToken[];
+  assets: DesignSystemAsset[];
+}
+
+export interface DesignSystemListResponse {
+  design_systems: DesignSystemSummary[];
+  total: number;
+}
+
+export interface DesignSystemTokenInput {
+  group: string;
+  name: string;
+  value: string;
+}
+
+export interface DesignSystemCreate {
+  name: string;
+  description?: string | null;
+  tokens?: DesignSystemTokenInput[] | null;
+  manifest_json?: Record<string, unknown> | null;
+}
+
+export interface DesignSystemUpdate {
+  name?: string;
+  description?: string | null;
+  tokens?: DesignSystemTokenInput[] | null;
+  manifest_json?: Record<string, unknown> | null;
 }
 
 export interface GenieSpaceDetail {
@@ -417,6 +499,59 @@ export const configApi = {
     fetchJson(`${API_BASE}/slide-styles/${styleId}/set-default`, {
       method: 'POST',
     }),
+
+  // Design Systems Library (Phase 4) — org-shared, mirrors slide styles.
+
+  listDesignSystems: (includeInactive = false): Promise<DesignSystemListResponse> => {
+    const params = includeInactive ? '?include_inactive=true' : '';
+    return fetchJson(`${API_BASE}/design-systems${params}`);
+  },
+
+  getDesignSystem: (dsId: number): Promise<DesignSystemDetail> =>
+    fetchJson(`${API_BASE}/design-systems/${dsId}`),
+
+  createDesignSystem: (data: DesignSystemCreate): Promise<DesignSystemDetail> =>
+    fetchJson(`${API_BASE}/design-systems`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(data),
+    }),
+
+  updateDesignSystem: (dsId: number, data: DesignSystemUpdate): Promise<DesignSystemDetail> =>
+    fetchJson(`${API_BASE}/design-systems/${dsId}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(data),
+    }),
+
+  deleteDesignSystem: (dsId: number, hardDelete = false): Promise<void> =>
+    fetchJson(`${API_BASE}/design-systems/${dsId}${hardDelete ? '?hard_delete=true' : ''}`, {
+      method: 'DELETE',
+    }),
+
+  setDesignSystemDefault: (dsId: number): Promise<DesignSystemDetail> =>
+    fetchJson(`${API_BASE}/design-systems/${dsId}/set-default`, {
+      method: 'POST',
+    }),
+
+  /**
+   * Import a design-system bundle (.zip) via multipart upload.
+   * The browser sets the multipart Content-Type/boundary — do not set it here.
+   */
+  importDesignSystem: async (file: File, name?: string): Promise<DesignSystemDetail> => {
+    const formData = new FormData();
+    formData.append('file', file);
+    if (name && name.trim()) formData.append('name', name.trim());
+    const response = await fetch(`${API_BASE}/design-systems/import`, {
+      method: 'POST',
+      body: formData,
+    });
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({ detail: 'Import failed' }));
+      throw new ConfigApiError(response.status, error.detail || `HTTP ${response.status}`);
+    }
+    return response.json();
+  },
 
 
   // Google OAuth Credentials (global, admin-only)

@@ -27,6 +27,7 @@ function AppRoutes() {
       <Route path="/profiles" element={<AppLayout key={layoutKey} initialView="profiles" />} />
       <Route path="/deck-prompts" element={<AppLayout key={layoutKey} initialView="deck_prompts" />} />
       <Route path="/slide-styles" element={<AppLayout key={layoutKey} initialView="slide_styles" />} />
+      <Route path="/design-systems" element={<AppLayout key={layoutKey} initialView="design_systems" />} />
       <Route path="/images" element={<AppLayout key={layoutKey} initialView="images" />} />
       <Route path="/history" element={<AppLayout key={layoutKey} initialView="history" />} />
       <Route path="/admin" element={<AdminPage />} />

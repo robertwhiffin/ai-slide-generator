@@ -8,6 +8,7 @@ import { AgentConfigBar } from '../AgentConfigBar/AgentConfigBar';
 import { ProfileList } from '../config/ProfileList';
 import { DeckPromptList } from '../config/DeckPromptList';
 import { SlideStyleList } from '../config/SlideStyleList';
+import { DesignSystemLibrary } from '../config/DesignSystemLibrary';
 import { SessionHistory } from '../History/SessionHistory';
 import { SaveAsDialog } from '../History/SaveAsDialog';
 import { ImageLibrary } from '../ImageLibrary/ImageLibrary';
@@ -33,7 +34,7 @@ import { PageHeader } from './page-header';
 import { SimplePageHeader } from './simple-page-header';
 import { GenieDataButton } from './GenieDataButton';
 
-type ViewMode = 'main' | 'profiles' | 'deck_prompts' | 'slide_styles' | 'images' | 'history' | 'help';
+type ViewMode = 'main' | 'profiles' | 'deck_prompts' | 'design_systems' | 'slide_styles' | 'images' | 'history' | 'help';
 
 interface AppLayoutProps {
   initialView?: ViewMode;
@@ -693,6 +694,7 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
       if (view === 'help') navigate('/help');
       else if (view === 'profiles') navigate('/profiles');
       else if (view === 'deck_prompts') navigate('/deck-prompts');
+      else if (view === 'design_systems') navigate('/design-systems');
       else if (view === 'slide_styles') navigate('/slide-styles');
       else if (view === 'images') navigate('/images');
       else if (view === 'history') navigate('/history');
@@ -871,6 +873,19 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
             <div className="flex-1 overflow-y-auto">
               <div className="mx-auto w-full max-w-4xl px-4 py-8">
                 <DeckPromptList />
+              </div>
+            </div>
+          </div>
+        )}
+
+        {viewMode === 'design_systems' && (
+          <div className="flex h-full flex-col" data-tour="page-design-systems">
+            <div className="shrink-0">
+              <SimplePageHeader title="Design Systems" />
+            </div>
+            <div className="flex-1 overflow-y-auto">
+              <div className="mx-auto w-full max-w-5xl px-4 py-8">
+                <DesignSystemLibrary />
               </div>
             </div>
           </div>
