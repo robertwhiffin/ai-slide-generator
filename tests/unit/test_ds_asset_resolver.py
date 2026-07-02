@@ -149,3 +149,46 @@ class TestSubstituteDeckDictDsAssets:
 
         assert substitute_deck_dict_ds_assets({}, session) == {}
         assert substitute_deck_dict_ds_assets({"slides": []}, session) == {"slides": []}
+
+
+class TestChatServiceCallerGate:
+    """Caller-level gate: ``ChatService._substitute_images_for_response`` must
+    invoke the ds-asset resolver when the ONLY ``{{ds-asset:ID}}`` reference is
+    in the deck's top-level ``css``.
+
+    Regression for the caller-gate gap: the utility resolves ``css``, but the
+    caller previously gated the resolver on slide ``html`` / ``html_content``
+    only. A deck whose brand font/background placeholder lived solely in the
+    deck stylesheet therefore skipped substitution and returned
+    ``{{ds-asset:ID}}`` unresolved to the client (all response paths route
+    through this one method).
+    """
+
+    def test_resolves_ds_asset_when_only_in_deck_css(self, session):
+        from contextlib import contextmanager
+        from unittest.mock import patch
+
+        from src.api.services.chat_service import ChatService
+
+        asset = _make_asset(
+            session, data=b"synthetic-bg-bytes", mime="image/png", kind="background"
+        )
+        placeholder = "{{ds-asset:%d}}" % asset.id
+        deck = {
+            "slides": [{"html": "<p>x</p>"}],  # no placeholder in slide html
+            "css": ".hero{background:url('" + placeholder + "')}",
+        }
+
+        @contextmanager
+        def _fake_db():
+            yield session
+
+        service = ChatService()
+        # The method does ``from src.core.database import get_db_session`` at call
+        # time, so patch it at its source module.
+        with patch("src.core.database.get_db_session", _fake_db):
+            out_deck, _ = service._substitute_images_for_response(deck)
+
+        bg_b64 = base64.b64encode(b"synthetic-bg-bytes").decode()
+        assert f"data:image/png;base64,{bg_b64}" in out_deck["css"]
+        assert "{{ds-asset:" not in out_deck["css"]

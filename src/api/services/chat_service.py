@@ -113,17 +113,26 @@ class ChatService:
             and deck_dict.get("html_content")
             and "{{ds-asset:" in deck_dict.get("html_content", "")
         )
+        # @font-face src url() fonts and background-image url() live in the deck's
+        # top-level ``css``, not in slide html — gate on it too, else a deck whose
+        # only brand-asset reference is in css skips the resolver entirely
+        # (substitute_deck_dict_ds_assets covers the css field).
+        ds_needs_deck_css = bool(
+            deck_dict
+            and deck_dict.get("css")
+            and "{{ds-asset:" in deck_dict.get("css", "")
+        )
 
         if (
             needs_deck or needs_html or needs_deck_html
-            or ds_needs_deck or ds_needs_html or ds_needs_deck_html
+            or ds_needs_deck or ds_needs_html or ds_needs_deck_html or ds_needs_deck_css
         ):
             with get_db_session() as db:
                 if needs_deck or needs_deck_html:
                     substitute_deck_dict_images(deck_dict, db)
                 if needs_html:
                     raw_html = substitute_image_placeholders(raw_html, db)
-                if ds_needs_deck or ds_needs_deck_html:
+                if ds_needs_deck or ds_needs_deck_html or ds_needs_deck_css:
                     substitute_deck_dict_ds_assets(deck_dict, db)
                 if ds_needs_html:
                     raw_html = substitute_ds_asset_placeholders(raw_html, db)
