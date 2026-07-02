@@ -33,6 +33,7 @@ from sqlalchemy import (
     LargeBinary,
     String,
     Text,
+    text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import relationship
@@ -74,6 +75,16 @@ class DesignSystem(Base):
     created_by = Column(String(255), nullable=True)
     published = Column(Boolean, default=False, nullable=False)
     is_default = Column(Boolean, default=False, nullable=False)
+
+    # Soft-delete flag, mirroring ``slide_style_library.is_active``: DELETE marks a
+    # design system inactive rather than removing it, so list/lookup/generation
+    # can filter it out while authorship/history are preserved (spec §7). Added in
+    # Phase 3; an idempotent ALTER in ``_run_migrations`` backfills pre-existing
+    # tables that were created before this column existed. A TRUE ``server_default``
+    # (not just the client-side ``default``) means the CREATE TABLE DDL and the
+    # backfill ALTER agree, and any non-ORM insert defaults to active — matching
+    # ``_migrate_design_system_soft_delete``'s ``DEFAULT TRUE``.
+    is_active = Column(Boolean, default=True, server_default=text("true"), nullable=False)
 
     # Monotonic record version (bumped on structural edits). The bundle's own
     # semantic version string, if any, lives inside ``manifest_json``.

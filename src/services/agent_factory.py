@@ -124,7 +124,7 @@ def _get_prompt_content(
             with get_db_session() as db:
                 design_system = (
                     db.query(DesignSystem)
-                    .filter_by(id=config.design_system_id)
+                    .filter_by(id=config.design_system_id, is_active=True)
                     .first()
                 )
                 if (

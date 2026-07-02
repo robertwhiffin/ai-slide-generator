@@ -122,6 +122,40 @@ class TestDesignSystemMigration:
         names = set(inspect(sqlite_engine).get_table_names())
         assert DESIGN_SYSTEM_TABLES <= names
 
+    def test_is_active_column_present_after_run_migrations(self, sqlite_engine):
+        """Phase 3 soft-delete: design_system exposes an is_active column."""
+        Base.metadata.create_all(bind=sqlite_engine)
+        _run_migrations(sqlite_engine, schema=None)
+
+        cols = {c["name"] for c in inspect(sqlite_engine).get_columns("design_system")}
+        assert "is_active" in cols
+
+    def test_soft_delete_migration_backfills_pre_existing_table(self, sqlite_engine):
+        """When design_system predates the is_active column, the idempotent ALTER
+        adds it (simulating a Lakebase table created by an earlier Phase 1/2 build).
+        """
+        from sqlalchemy import inspect as _inspect
+
+        from src.core.database import _migrate_design_system_soft_delete
+
+        # Build a design_system table WITHOUT is_active, mimicking an old deploy.
+        with sqlite_engine.begin() as conn:
+            conn.execute(text(
+                "CREATE TABLE design_system (id INTEGER PRIMARY KEY, name VARCHAR(255))"
+            ))
+
+        with sqlite_engine.begin() as conn:
+            _migrate_design_system_soft_delete(
+                conn, _inspect(conn), schema=None, _qual=lambda t: f'"{t}"', is_sqlite=True
+            )
+            # Idempotent: a second run is a no-op and must not raise.
+            _migrate_design_system_soft_delete(
+                conn, _inspect(conn), schema=None, _qual=lambda t: f'"{t}"', is_sqlite=True
+            )
+
+        cols = {c["name"] for c in inspect(sqlite_engine).get_columns("design_system")}
+        assert "is_active" in cols
+
     def test_asset_and_token_columns_present(self, sqlite_engine):
         """Migration-created tables expose the spec §6 columns."""
         from src.core.database import _migrate_design_system_tables

@@ -405,12 +405,14 @@ async def export_to_pptx(request: ExportPPTXRequest):
         if not slide_deck or not slide_deck.get("slides"):
             raise HTTPException(status_code=404, detail="No slides available")
 
-        # Substitute {{image:ID}} placeholders with base64 data URIs
-        # so the PPTX converter can extract and embed the actual images
+        # Substitute {{image:ID}} + {{ds-asset:ID}} placeholders with base64 data URIs
+        # so the PPTX converter can extract and embed the actual images/brand assets
+        from src.utils.ds_asset_utils import substitute_deck_dict_ds_assets
         from src.utils.image_utils import substitute_deck_dict_images
         from src.core.database import get_db_session
         with get_db_session() as db:
             substitute_deck_dict_images(slide_deck, db)
+            substitute_deck_dict_ds_assets(slide_deck, db)
         
         slide_count = len(slide_deck.get("slides", []))
         log_msg = (

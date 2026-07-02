@@ -27,6 +27,7 @@ from src.core.permission_context import (
 from src.api.routes.settings import (
     contributors_router,
     deck_prompts_router,
+    design_systems_router,
     identities_router,
     slide_styles_router,
 )
@@ -434,6 +435,7 @@ app.include_router(contributors_router, prefix="/api/settings", tags=["settings"
 app.include_router(deck_prompts_router, prefix="/api/settings", tags=["settings"])
 app.include_router(identities_router, prefix="/api/settings", tags=["settings"])
 app.include_router(slide_styles_router, prefix="/api/settings", tags=["settings"])
+app.include_router(design_systems_router, prefix="/api/settings", tags=["settings"])
 
 # MCP server — mount the FastMCP streamable-HTTP ASGI app at /mcp.
 # Must be registered before the SPA catch-all (which is added lazily by

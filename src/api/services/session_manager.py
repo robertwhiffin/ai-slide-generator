@@ -1142,10 +1142,12 @@ class SessionManager:
                     slide["verification"] = verification_map.get(content_hash)
                     slide["content_hash"] = content_hash
 
-            # Substitute {{image:ID}} placeholders with base64 for client
+            # Substitute {{image:ID}} + {{ds-asset:ID}} placeholders with base64 for client
+            from src.utils.ds_asset_utils import substitute_deck_dict_ds_assets
             from src.utils.image_utils import substitute_deck_dict_images
 
             substitute_deck_dict_images(deck_dict, db)
+            substitute_deck_dict_ds_assets(deck_dict, db)
 
             # Parse chat history for preview
             chat_history = (

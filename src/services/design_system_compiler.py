@@ -26,8 +26,11 @@ Design decisions:
 
 from __future__ import annotations
 
+import logging
 import re
 from typing import Any, Optional
+
+logger = logging.getLogger(__name__)
 
 # Placeholder namespace for design-system brand assets (see module docstring).
 # Phase 3 adds the substitution that swaps this for real asset bytes.
@@ -39,6 +42,11 @@ _STYLE_HEADER = "SLIDE VISUAL STYLE"
 
 # Canonical color-group ordering -> deterministic, human-meaningful sections.
 _COLOR_GROUPS = ("core", "accents", "ink", "tints")
+
+# Every token group the compiler knows how to emit (colors as :root vars, type +
+# spacing as rules). Tokens in any other group are dropped from the prompt; Phase 3
+# adds a warning so authors notice rather than losing them silently.
+_RECOGNIZED_GROUPS = frozenset(_COLOR_GROUPS + ("type", "spacing"))
 
 # Asset kinds that are embeddable raster/vector images (referenced via <img> /
 # CSS url()). ``font`` is handled separately (@font-face); ``template_shot`` is
@@ -71,6 +79,12 @@ def _color_sections(grouped: dict[str, list[tuple[str, str]]]) -> list[str]:
     """Build the textual color spec and the ``:root { --brand-* }`` var block."""
     spec_lines: list[str] = []
     css_vars: list[str] = []
+    # Distinct token names can slugify to the same identifier (e.g. "Primary" and
+    # "primary"); emitting both would produce duplicate/ambiguous CSS custom
+    # properties, so a var is written once per (group, slug). The textual spec
+    # still lists every original name. Entries are pre-sorted, so the first
+    # occurrence wins deterministically.
+    seen_vars: set[tuple[str, str]] = set()
     for group in _COLOR_GROUPS:
         entries = grouped.get(group)
         if not entries:
@@ -78,7 +92,11 @@ def _color_sections(grouped: dict[str, list[tuple[str, str]]]) -> list[str]:
         spec_lines.append(f"- {group}:")
         for name, value in entries:
             spec_lines.append(f"  - {name}: {value}")
-            css_vars.append(f"  --brand-{group}-{_slug(name)}: {value};")
+            slug = _slug(name)
+            if (group, slug) in seen_vars:
+                continue
+            seen_vars.add((group, slug))
+            css_vars.append(f"  --brand-{group}-{slug}: {value};")
 
     if not spec_lines:
         return []
@@ -216,6 +234,19 @@ def compile_design_system(design_system: Any) -> str:
         parts.append(description.strip())
 
     grouped = _grouped_tokens(design_system)
+
+    # Surface (don't silently drop) tokens in groups the compiler can't emit.
+    unrecognized = sorted(group for group in grouped if group not in _RECOGNIZED_GROUPS)
+    if unrecognized:
+        logger.warning(
+            "Design system '%s' has token group(s) %s that the compiler does not "
+            "emit; those tokens are omitted from the compiled style. Recognized "
+            "groups: %s.",
+            name,
+            ", ".join(unrecognized),
+            ", ".join(sorted(_RECOGNIZED_GROUPS)),
+        )
+
     parts.extend(_color_sections(grouped))
 
     typography = _scale_section(grouped, "type", "TYPOGRAPHY TOKENS:")

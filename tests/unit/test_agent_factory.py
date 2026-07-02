@@ -338,6 +338,23 @@ def test_design_system_id_resolves_compiled_style_content():
     assert "--brand-core-primary" in result["system_prompt"]
 
 
+def test_design_system_id_resolves_in_edit_mode():
+    """EDIT mode resolves a design system's compiled_style_content through the
+    editing-prompt seam, exactly as generation does — so on-brand styling applies
+    when refining an existing deck, not just when generating a new one."""
+    from src.api.schemas.agent_config import AgentConfig
+
+    config = AgentConfig(design_system_id=99)
+    ds = MagicMock()
+    ds.compiled_style_content = "ACME-DS-EDIT-MARKER :root { --brand-core-primary: #123456; }"
+    db = _dispatching_db(design_system=ds)
+
+    result = _run_with_db(config, db, mode="edit")
+
+    assert result["pre_assembled"] is True
+    assert "ACME-DS-EDIT-MARKER" in result["system_prompt"]
+
+
 def test_design_system_takes_precedence_over_slide_style():
     """When both are set, the design system wins and the slide style is not used."""
     from src.api.schemas.agent_config import AgentConfig
