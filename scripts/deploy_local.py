@@ -324,6 +324,41 @@ def _trigger_owner_grant_job(ws, job_id, new_sp_id, host, endpoint_name) -> None
     print("   SP granted into shared owning role")
 
 
+def _assert_fork_schema_setup_skippable(
+    sp_owner_grant_ran: bool, schema_name: Optional[str]
+) -> None:
+    """Guard the fork-path skip of `_setup_database_schema`; raise if unsafe.
+
+    Skipping deploy-time schema setup on a fork is only safe when the app SP
+    actually owns the inherited schema. That holds only if BOTH:
+      * the owner-grant job ran and succeeded — `_trigger_owner_grant_job`
+        raises on failure, so a True flag here means the app SP is a member of
+        `tellr_app_owners` WITH INHERIT (owner rights on the inherited schema);
+      * the fork inherited a schema at all (copy-on-write from `branch_from_env`).
+
+    The `tellr_app_owners` *ownership* of the inherited schema/tables cannot be
+    re-checked here without a human Postgres connection — the very thing the
+    skip removes — so it is guaranteed by construction: the branching preflight
+    (`_check_branching_preconditions`) requires the source env to be deployed,
+    and the fork is a copy-on-write branch of it. This guard enforces the parts
+    that ARE checkable SP-only, and fails loudly rather than shipping an app
+    that would lack schema ownership (or a schema) at runtime.
+    """
+    if not sp_owner_grant_ran:
+        raise DeploymentError(
+            "cannot skip deploy-time schema setup on the fork: the app SP was "
+            "not granted into tellr_app_owners (missing app SP client id or "
+            "owner_grant_job_id). Refusing to deploy an app that would lack "
+            "schema ownership at runtime."
+        )
+    if not schema_name:
+        raise DeploymentError(
+            "cannot skip deploy-time schema setup on the fork: no schema was "
+            "inherited from the source env (empty schema_name) — check the "
+            "branch_from env's lakebase.schema."
+        )
+
+
 def create_local(
     env: str,
     profile: str,
@@ -457,6 +492,7 @@ def create_local(
         print()
 
         # Register SP role on the target branch (staging branch or production branch)
+        sp_owner_grant_ran = False
         if lakebase_type == "autoscaling":
             client_id = _get_app_client_id(app)
             if client_id:
@@ -476,6 +512,9 @@ def create_local(
                         ws, grant_job_id, client_id,
                         lakebase_result["host"], lakebase_result["endpoint_name"],
                     )
+                    # Grant job raises unless it succeeds, so reaching here means
+                    # the app SP now owns the inherited schema via tellr_app_owners.
+                    sp_owner_grant_ran = True
             else:
                 print("   Warning: Could not get SP client ID — role setup skipped")
 
@@ -499,7 +538,11 @@ def create_local(
         # "password authentication failed". The non-fork (local/prod) path
         # still needs it — the schema may not exist yet and the SP's grants
         # come from AppResourceDatabase — so only the fork path is skipped.
+        # The skip is gated on the owner-grant having actually run (see
+        # `_assert_fork_schema_setup_skippable`): if the SP was never granted
+        # into tellr_app_owners we fail loudly rather than ship a broken app.
         if branch_from_env:
+            _assert_fork_schema_setup_skippable(sp_owner_grant_ran, schema_name)
             print(
                 "Skipping deploy-time schema setup on fork "
                 "(SP owns inherited schema; app migrates on startup)"
@@ -599,6 +642,7 @@ def update_local(
             # Register SP role on the new staging branch.
             # (`app` was fetched above — reuse it; no need to re-GET.)
             client_id = _get_app_client_id(app)
+            sp_owner_grant_ran = False
             if client_id:
                 print("Configuring SP role on new branch...")
                 _ensure_sp_autoscaling_role(
@@ -614,6 +658,9 @@ def update_local(
                         ws, grant_job_id, client_id,
                         lakebase_result["host"], lakebase_result["endpoint_name"],
                     )
+                    # Grant job raises unless it succeeds — reaching here means
+                    # the app SP owns the inherited schema via tellr_app_owners.
+                    sp_owner_grant_ran = True
             else:
                 print(
                     "   Warning: Could not get SP client ID — role setup skipped"
@@ -625,6 +672,8 @@ def update_local(
             # inherited schema/tables, and the app migrates them at startup AS
             # the SP. Running it here would connect as the deploying human via
             # `_get_lakebase_connection`, breaking SP-only dev-loop deploys.
+            # Gated on the grant having run, same as create_local.
+            _assert_fork_schema_setup_skippable(sp_owner_grant_ran, schema_name)
             print(
                 "Skipping deploy-time schema setup on fork "
                 "(SP owns inherited schema; app migrates on startup)"
