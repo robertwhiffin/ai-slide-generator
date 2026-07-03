@@ -358,6 +358,12 @@ def import_bundle(
         raise DesignSystemImportError(f"Upload is not a valid .zip bundle: {exc}") from exc
 
     with zf:
+        # Reject the WHOLE bundle up-front on ANY zip-slip path or symlink entry —
+        # validated globally over every ZipInfo, before/independent of root-prefix
+        # scoping, so a malicious entry outside the bundle root is refused (not
+        # silently skipped) and symlinks are refused before any bytes are read.
+        _assert_bundle_paths_safe(zf)
+
         # One cumulative memory budget spanning manifest + CSS + asset reads.
         budget = _SizeBudget()
         root_prefix = _locate_root_prefix(zf)
@@ -372,8 +378,11 @@ def import_bundle(
                 "Choose a different name to import a copy."
             )
 
-        tokens = _collect_tokens(zf, root_prefix, manifest, budget)
-        assets, files = _collect_assets_and_files(zf, root_prefix, budget)
+        # Read the DECLARED CSS token sources ONCE (budgeted); the same bytes are
+        # reused for both token parsing and source-file retention (no double-charge).
+        css_sources = _read_css_sources(zf, root_prefix, manifest, budget)
+        tokens = _collect_tokens(manifest, _decode_css_texts(css_sources))
+        assets, files = _collect_assets_and_files(zf, root_prefix, budget, css_sources)
 
     raw_description = manifest.get("description")
     description = (
@@ -429,6 +438,15 @@ def _locate_root_prefix(zf: zipfile.ZipFile) -> str:
         if name.lower().startswith("__macosx"):
             continue
         if _basename(name) == MANIFEST_FILENAME:
+            # The manifest's OWN path must be safe before its directory is adopted
+            # as the bundle root — otherwise '../_ds_manifest.json' or an absolute
+            # path would set an escaping root prefix that every other entry is then
+            # resolved against. Reject rather than treat as root.
+            if _safe_relpath(name) is None:
+                raise DesignSystemImportError(
+                    f"Bundle manifest is at an unsafe path '{name}' (absolute path "
+                    "or parent-directory traversal); refusing to import."
+                )
             return name[: -len(MANIFEST_FILENAME)]
     raise DesignSystemImportError(
         f"Bundle is missing its manifest ({MANIFEST_FILENAME}). A design-system "
@@ -458,20 +476,31 @@ def _resolve_name(name_override: Optional[str], manifest: dict, root_prefix: str
     return stem or "Imported Design System"
 
 
-def _collect_tokens(
-    zf: zipfile.ZipFile, root_prefix: str, manifest: dict, budget: "_SizeBudget"
-) -> list[DesignSystemToken]:
-    """Tokens from ``manifest['tokens']`` plus any ``:root`` CSS vars.
+def _collect_tokens(manifest: dict, css_texts: list[str]) -> list[DesignSystemToken]:
+    """Tokens from ``manifest['tokens']`` plus the ``:root`` vars in ``css_texts``.
 
-    Both sources run through :func:`_canonicalize_token`. Manifest tokens are
-    authoritative (they carry ``kind``): each is written once, and its canonical
-    NAME is recorded so the CSS pass — which cannot know a token's ``kind`` — never
-    re-adds the same token under a value-inferred group (that is what used to
-    double 72 tokens to 144 and split spacing/shadow into ``type``). CSS vars the
-    manifest did not define are added with their inferred group.
+    Both sources run through :func:`_canonicalize_token`. Dedup keys on
+    ``(canonical-name, value)``, so:
+
+    - the SAME variable defined in BOTH the manifest and the identical CSS
+      ``:root`` (same name AND value) collapses to one row — and because the
+      manifest is processed first, its authoritative ``kind``-derived group wins
+      (this is what prevents the 72->144 duplication and the spacing/shadow-as-
+      ``type`` split);
+    - genuinely-DISTINCT tokens that merely share a canonical name but differ in
+      value (e.g. a manifest ``--brand-primary`` and a CSS ``--primary`` with a
+      different colour) are ALL kept — keying on name alone used to silently drop
+      one of them.
+
+    ``css_texts`` is pre-decoded by the caller so the CSS bytes are budgeted once
+    and reused for retention (no double-charge).
     """
-    by_key: dict[tuple[str, str], str] = {}
-    manifest_names: set[str] = set()
+    by_key: dict[tuple[str, str], tuple[str, str, str]] = {}
+
+    def _add(group: str, name: str, value: str) -> None:
+        # Manifest is processed first, so setdefault keeps the manifest's group
+        # for a true (name, value) duplicate defined again in the CSS.
+        by_key.setdefault((name, value), (group, name, value))
 
     for entry in manifest.get("tokens") or []:
         if not isinstance(entry, dict):
@@ -480,59 +509,76 @@ def _collect_tokens(
         value = entry.get("value")
         if not raw_name or value is None or str(value).strip() == "":
             continue
+        value_str = str(value).strip()
         resolved = _canonicalize_token(
-            str(raw_name), str(value).strip(), entry.get("kind"), entry.get("group")
+            str(raw_name), value_str, entry.get("kind"), entry.get("group")
         )
         if resolved is None:
             continue
         group, name = resolved
-        by_key.setdefault((group, name), str(value).strip())
-        manifest_names.add(name)
+        _add(group, name, value_str)
 
-    for css_text in _read_css_sources(zf, root_prefix, manifest, budget):
+    for css_text in css_texts:
         for var_name, value in _parse_css_root_vars(css_text):
             resolved = _canonicalize_token(var_name, value)
             if resolved is None:
                 continue
             group, name = resolved
-            # The manifest is authoritative: skip a var it already defined, even
-            # under a different (value-inferred) group — prevents re-adding a
-            # spacing/shadow token as ``type``.
-            if name in manifest_names:
-                continue
-            by_key.setdefault((group, name), value)
+            _add(group, name, value)
 
     return [
         DesignSystemToken(group=group, name=name, value=value)
-        for (group, name), value in sorted(by_key.items())
+        for group, name, value in sorted(by_key.values())
     ]
+
+
+def _declared_css_paths(manifest: dict) -> list[str]:
+    """Ordered, de-duplicated, normalized rel-paths of the DECLARED CSS token
+    sources: ``globalCssPaths`` plus the conventional ``colors_and_type.css``.
+
+    Only these declared sources are treated as token sources / retained — not
+    arbitrary ``.css`` files elsewhere in the bundle. Paths are normalized with
+    :func:`_safe_relpath`; an unsafe declared path is dropped.
+    """
+    raw_paths = list(manifest.get("globalCssPaths") or [])
+    raw_paths.append(DEFAULT_CSS_TOKEN_SOURCE)
+    paths: list[str] = []
+    seen: set[str] = set()
+    for path in raw_paths:
+        if not isinstance(path, str) or not path.strip():
+            continue
+        safe = _safe_relpath(path.strip())
+        if safe is None or safe in seen:
+            continue
+        seen.add(safe)
+        paths.append(safe)
+    return paths
 
 
 def _read_css_sources(
     zf: zipfile.ZipFile, root_prefix: str, manifest: dict, budget: "_SizeBudget"
-) -> list[str]:
-    """Read the CSS token sources: ``globalCssPaths`` + the conventional file.
+) -> "dict[str, bytes]":
+    """Read each DECLARED CSS token source ONCE, keyed by its rel path.
 
-    Reads go through ``budget`` so an oversized (declared) CSS entry is rejected
-    before it is materialised; a genuinely-missing path is skipped.
+    Returns ``{rel_path: raw_bytes}`` for the declared sources actually present in
+    the bundle. Reads go through ``budget`` (oversized entries are rejected before
+    materialisation); a genuinely-missing path is skipped. The same bytes are
+    reused for token parsing AND source-file retention, so a CSS source is charged
+    against the size budget exactly once.
     """
-    paths: list[str] = []
-    for path in manifest.get("globalCssPaths") or []:
-        if isinstance(path, str) and path.strip():
-            paths.append(path.strip())
-    if DEFAULT_CSS_TOKEN_SOURCE not in paths:
-        paths.append(DEFAULT_CSS_TOKEN_SOURCE)
-
-    texts: list[str] = []
-    seen: set[str] = set()
-    for path in paths:
-        if path in seen:
-            continue
-        seen.add(path)
+    result: dict[str, bytes] = {}
+    for path in _declared_css_paths(manifest):
         try:
-            raw = budget.read(zf, root_prefix + path)
+            result[path] = budget.read(zf, root_prefix + path)
         except KeyError:
             continue  # optional source not present in this bundle
+    return result
+
+
+def _decode_css_texts(css_sources: "dict[str, bytes]") -> list[str]:
+    """Decode the pre-read CSS source bytes to UTF-8 text (skip undecodable)."""
+    texts: list[str] = []
+    for path, raw in css_sources.items():
         try:
             texts.append(raw.decode("utf-8"))
         except UnicodeDecodeError:
@@ -562,6 +608,39 @@ def _safe_relpath(rel_path: str) -> Optional[str]:
             return None
         parts.append(segment)
     return "/".join(parts) if parts else None
+
+
+def _is_symlink(info: zipfile.ZipInfo) -> bool:
+    """True if a zip entry is a symlink (Unix mode ``S_IFLNK`` in ``external_attr``).
+
+    A symlink entry stores its link TARGET as content; if we stored it as an asset
+    the bytes would be the target path/data, so such entries are refused outright.
+    Windows-created zips have no Unix mode (``external_attr`` high bits 0), which
+    correctly reads as "not a symlink".
+    """
+    return (info.external_attr >> 16) & 0o170000 == 0o120000
+
+
+def _assert_bundle_paths_safe(zf: zipfile.ZipFile) -> None:
+    """Reject the WHOLE bundle if ANY entry is a symlink or a zip-slip path.
+
+    Validated GLOBALLY over every ``ZipInfo`` — independent of, and before, any
+    root-prefix scoping — so a malicious entry that falls OUTSIDE the bundle root
+    (e.g. ``../evil.png`` when the manifest sits under ``safe/``) is REJECTED, not
+    silently skipped. Absolute paths and ``..`` traversal are refused; symlink
+    entries are refused before any bytes are read.
+    """
+    for info in zf.infolist():
+        name = info.filename
+        if _is_symlink(info):
+            raise DesignSystemImportError(
+                f"Bundle entry '{name}' is a symlink; refusing to import."
+            )
+        if name and _safe_relpath(name) is None:
+            raise DesignSystemImportError(
+                f"Bundle contains an unsafe path '{name}' (absolute path or "
+                "parent-directory traversal); refusing to import."
+            )
 
 
 def _iter_safe_entries(zf: zipfile.ZipFile, root_prefix: str):
@@ -596,9 +675,12 @@ def _iter_safe_entries(zf: zipfile.ZipFile, root_prefix: str):
 def _classify_source_file(rel: str) -> Optional[str]:
     """Return the ``design_system_file.kind`` for a retained SOURCE file, else None.
 
-    Retains the human/authoring layer: README.md, SKILL.md, CSS token sources, and
-    template layout HTML (``templates/*/index.html``). Callers reach here only for
-    entries that are NOT stored as binary assets, so there is no overlap with the
+    Retains the human/authoring layer: README.md, SKILL.md, and template layout
+    HTML (``templates/*/index.html``). CSS token sources are handled separately by
+    the caller (only the DECLARED sources are retained, using bytes already read),
+    so ``.css`` is intentionally NOT matched here — arbitrary ``.css`` files
+    elsewhere in the bundle are not retained. Callers reach here only for entries
+    that are NOT stored as binary assets, so there is no overlap with the
     asset/font reference rows (no double-store).
     """
     low = rel.lower()
@@ -607,8 +689,6 @@ def _classify_source_file(rel: str) -> Optional[str]:
         return "readme"
     if base == "skill.md":
         return "skill"
-    if low.endswith(".css"):
-        return "css"
     if low.startswith("templates/") and base == "index.html":
         return "template"
     return None
@@ -658,8 +738,17 @@ def build_font_mapping(manifest: dict) -> Optional[dict]:
         single_path = entry.get("path")
         if isinstance(single_path, str) and single_path.strip():
             raw_files.append(single_path)
+        # Normalize + zip-slip-validate every font path so an unsafe declared path
+        # (e.g. "../font.woff2") is never persisted; normalized paths line up with
+        # the retained design_system_file.path values.
         files = sorted(
-            {item.strip() for item in raw_files if isinstance(item, str) and item.strip()}
+            {
+                norm
+                for item in raw_files
+                if isinstance(item, str)
+                and item.strip()
+                and (norm := _safe_relpath(item.strip())) is not None
+            }
         )
         variant = {"weight": weight, "style": style, "files": files}
         variants = _family(family)["variants"]
@@ -694,20 +783,26 @@ def build_font_mapping(manifest: dict) -> Optional[dict]:
 
 
 def _collect_assets_and_files(
-    zf: zipfile.ZipFile, root_prefix: str, budget: "_SizeBudget"
+    zf: zipfile.ZipFile,
+    root_prefix: str,
+    budget: "_SizeBudget",
+    css_sources: "dict[str, bytes]",
 ) -> tuple[list[DesignSystemAsset], list[DesignSystemFile]]:
     """Read a bundle into asset rows + file rows in one safety-checked pass.
 
+    - a DECLARED CSS token source (``css_sources``) -> a ``DesignSystemFile``
+      SOURCE row using the bytes ALREADY read for parsing (never re-read/re-charged
+      against the budget), so CSS is not double-counted; only declared sources are
+      retained (not arbitrary ``.css`` files).
     - ``assets/**`` / ``fonts/**`` -> a ``DesignSystemAsset`` (bytes) AND a
       ``DesignSystemFile`` REFERENCE row (``data`` NULL, linked via ``asset``) so
       the file listing is complete without double-storing the bytes.
-    - README / SKILL / CSS / template HTML -> a ``DesignSystemFile`` SOURCE row
-      (bytes in ``data``).
+    - README / SKILL / template HTML -> a ``DesignSystemFile`` SOURCE row (bytes).
     - everything else (previews, template screenshots, slides, ui_kits, uploads,
       bundle scripts) is skipped.
 
-    One shared ``budget`` spans every read, so each stored byte counts once (asset
-    bytes here; reference rows read nothing) and the per-bundle cap holds.
+    One shared ``budget`` spans every read, so each stored byte counts once and the
+    per-bundle cap holds.
     """
     assets: list[DesignSystemAsset] = []
     files: list[DesignSystemFile] = []
@@ -717,6 +812,21 @@ def _collect_assets_and_files(
         if rel in seen_paths:
             continue  # de-dup pathological duplicate arcnames
         seen_paths.add(rel)
+
+        # Declared CSS token source: retain from the already-read (and budgeted)
+        # bytes — no second read, no double-charge, and only declared sources.
+        if rel in css_sources:
+            data = css_sources[rel]
+            files.append(
+                DesignSystemFile(
+                    path=rel,
+                    kind="css",
+                    mime=_guess_mime(rel),
+                    data=data,
+                    size_bytes=len(data),
+                )
+            )
+            continue
 
         if not _should_skip(rel):
             # Storable binary asset (assets/** or fonts/**). Size-checked read:

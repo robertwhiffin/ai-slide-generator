@@ -16,6 +16,10 @@ All fixtures are SYNTHETIC (fake "Acme" brand, dummy hex, placeholder bytes) —
 no real brand content, per the public-repo hygiene rule.
 """
 
+import io
+import json
+import zipfile
+
 import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
@@ -24,11 +28,13 @@ from sqlalchemy.pool import StaticPool
 import src.database.models  # noqa: F401 - register models with Base.metadata
 from src.core.database import Base
 from tests.unit.conftest_design_system import (
+    COLORS_AND_TYPE_CSS,
     REALISTIC_CSS,
     SVG_LOGO,
     SYNTHETIC_README,
     SYNTHETIC_SKILL,
     SYNTHETIC_TEMPLATE_HTML,
+    default_manifest,
     make_bundle_zip,
     png_bytes,
     realistic_manifest,
@@ -393,3 +399,250 @@ class TestFontMapping:
         }
         assert linked <= token_names  # every linked token exists as a token row
         assert {"font-sans", "font-mono"} == linked
+
+
+# ---------------------------------------------------------------------------
+# Cross-vendor review fixes — BLOCKING 1-3: zip-slip + symlink hardening
+# ---------------------------------------------------------------------------
+
+
+def _raw_bundle_zip(entries: dict) -> bytes:
+    """Build a zip verbatim from ``{arcname: bytes|str}`` (no prefixing).
+
+    Lets a test place entries at EXACT paths — including outside a wrapper root or
+    at unsafe paths — that ``make_bundle_zip``'s uniform prefixing cannot express.
+    """
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for arcname, data in entries.items():
+            zf.writestr(arcname, data)
+    return buf.getvalue()
+
+
+class TestZipSlipHardening:
+    def test_manifest_at_parent_traversal_path_rejected(self, session):
+        """BLOCKING 1: a manifest at ../_ds_manifest.json must not be adopted as root."""
+        from src.services.design_system_service import (
+            DesignSystemImportError,
+            import_bundle,
+        )
+
+        zip_bytes = make_bundle_zip(root_prefix="../")
+        with pytest.raises(DesignSystemImportError) as exc:
+            import_bundle(session, zip_bytes=zip_bytes, user="u")
+        assert "unsafe" in str(exc.value).lower()
+
+    def test_manifest_at_absolute_path_rejected(self, session):
+        """BLOCKING 1: an absolute-path manifest must be rejected."""
+        from src.services.design_system_service import (
+            DesignSystemImportError,
+            import_bundle,
+        )
+
+        zip_bytes = make_bundle_zip(root_prefix="/abs/")
+        with pytest.raises(DesignSystemImportError) as exc:
+            import_bundle(session, zip_bytes=zip_bytes, user="u")
+        assert "unsafe" in str(exc.value).lower()
+
+    def test_unsafe_entry_outside_wrapper_root_rejected(self, session):
+        """BLOCKING 2: a wrapper-rooted (safe/) bundle with a sibling ../evil.png
+        entry OUTSIDE the root must be REJECTED, not silently skipped."""
+        from src.services.design_system_service import (
+            DesignSystemImportError,
+            import_bundle,
+        )
+
+        zip_bytes = _raw_bundle_zip({
+            "safe/_ds_manifest.json": json.dumps(default_manifest()),
+            "safe/colors_and_type.css": COLORS_AND_TYPE_CSS,
+            "safe/assets/logo.svg": SVG_LOGO,
+            "../evil.png": b"pwned",  # OUTSIDE the safe/ root -> old code skipped it
+        })
+        with pytest.raises(DesignSystemImportError) as exc:
+            import_bundle(session, zip_bytes=zip_bytes, user="u")
+        assert "unsafe" in str(exc.value).lower()
+
+    def test_absolute_entry_outside_wrapper_root_rejected(self, session):
+        """BLOCKING 2: an absolute-path entry outside the wrapper root is rejected."""
+        from src.services.design_system_service import (
+            DesignSystemImportError,
+            import_bundle,
+        )
+
+        zip_bytes = _raw_bundle_zip({
+            "safe/_ds_manifest.json": json.dumps(default_manifest()),
+            "safe/colors_and_type.css": COLORS_AND_TYPE_CSS,
+            "/etc/abs.png": b"pwned",
+        })
+        with pytest.raises(DesignSystemImportError):
+            import_bundle(session, zip_bytes=zip_bytes, user="u")
+
+    def test_symlink_entry_rejected(self, session):
+        """BLOCKING 3: a symlink entry (stores its link target as bytes) is rejected
+        before any bytes are read."""
+        from src.services.design_system_service import (
+            DesignSystemImportError,
+            import_bundle,
+        )
+
+        buf = io.BytesIO(make_bundle_zip())
+        with zipfile.ZipFile(buf, "a", zipfile.ZIP_DEFLATED) as zf:
+            zi = zipfile.ZipInfo("assets/evil-link.png")
+            zi.external_attr = 0o120777 << 16  # S_IFLNK
+            zf.writestr(zi, b"../../../etc/passwd")
+        with pytest.raises(DesignSystemImportError) as exc:
+            import_bundle(session, zip_bytes=buf.getvalue(), user="u")
+        assert "symlink" in str(exc.value).lower()
+
+    def test_symlink_detector_unit(self):
+        from src.services.design_system_service import _is_symlink
+
+        link = zipfile.ZipInfo("x")
+        link.external_attr = 0o120777 << 16
+        assert _is_symlink(link) is True
+        regular = zipfile.ZipInfo("y")
+        regular.external_attr = 0o100644 << 16
+        assert _is_symlink(regular) is False
+        assert _is_symlink(zipfile.ZipInfo("z")) is False  # default: not a symlink
+
+
+# ---------------------------------------------------------------------------
+# Cross-vendor review fix — BLOCKING 4: dedup keeps genuinely-distinct tokens
+# ---------------------------------------------------------------------------
+
+
+class TestTokenDedupKeepsDistinct:
+    def test_distinct_tokens_sharing_name_both_kept(self, session):
+        """A manifest token and a CSS var that canonicalize to the same NAME but
+        differ in value are BOTH retained (name-only dedup used to drop one)."""
+        from src.database.models.design_system import DesignSystemToken
+        from src.services.design_system_service import import_bundle
+
+        manifest = {
+            "name": "Acme Distinct DS",
+            "tokens": [{"name": "--brand-primary", "value": "#111111", "kind": "color"}],
+            "globalCssPaths": ["colors_and_type.css"],
+        }
+        css = ":root { --primary: #222222; }"
+        zip_bytes = make_bundle_zip(manifest=manifest, css=css, files={})
+        ds = import_bundle(session, zip_bytes=zip_bytes, user="u")
+
+        values = {
+            t.value
+            for t in session.query(DesignSystemToken).filter_by(
+                design_system_id=ds.id, name="primary"
+            )
+        }
+        assert values == {"#111111", "#222222"}  # BOTH kept, neither dropped
+
+    def test_identical_manifest_and_css_token_still_dedups(self, session):
+        """Preserve the correct dedup: the SAME name+value in manifest and CSS
+        collapses to one row (manifest's authoritative group wins)."""
+        from src.database.models.design_system import DesignSystemToken
+        from src.services.design_system_service import import_bundle
+
+        manifest = {
+            "name": "Acme Dedup DS",
+            "tokens": [{"name": "--fs-12", "value": "12px", "kind": "spacing"}],
+            "globalCssPaths": ["colors_and_type.css"],
+        }
+        css = ":root { --fs-12: 12px; }"
+        zip_bytes = make_bundle_zip(manifest=manifest, css=css, files={})
+        ds = import_bundle(session, zip_bytes=zip_bytes, user="u")
+
+        rows = (
+            session.query(DesignSystemToken)
+            .filter_by(design_system_id=ds.id, name="fs-12")
+            .all()
+        )
+        assert len(rows) == 1
+        assert rows[0].group == "spacing"  # manifest kind wins over CSS value-inference
+
+
+# ---------------------------------------------------------------------------
+# Cross-vendor review fix — NON-BLOCKING 6: only DECLARED CSS retained
+# ---------------------------------------------------------------------------
+
+
+class TestCssRetentionScope:
+    def test_only_declared_css_retained(self, session):
+        from src.database.models.design_system import DesignSystemFile
+        from src.services.design_system_service import import_bundle
+
+        files = {
+            "assets/logo.svg": SVG_LOGO,
+            "extra/notes.css": b":root { --nope: #000000; }",  # UNDECLARED extra .css
+        }
+        zip_bytes = make_bundle_zip(files=files)  # default manifest declares colors_and_type.css
+        ds = import_bundle(session, zip_bytes=zip_bytes, user="u")
+
+        css_paths = {
+            f.path
+            for f in session.query(DesignSystemFile).filter_by(
+                design_system_id=ds.id, kind="css"
+            )
+        }
+        assert css_paths == {"colors_and_type.css"}  # only the declared source
+        all_paths = {
+            f.path
+            for f in session.query(DesignSystemFile).filter_by(design_system_id=ds.id)
+        }
+        assert "extra/notes.css" not in all_paths  # undeclared .css not retained
+
+
+# ---------------------------------------------------------------------------
+# Cross-vendor review fix — NON-BLOCKING 5: font path normalization
+# ---------------------------------------------------------------------------
+
+
+class TestFontPathSafety:
+    def test_unsafe_font_paths_dropped_and_normalized(self):
+        from src.services.design_system_service import build_font_mapping
+
+        manifest = {
+            "fonts": [
+                {
+                    "family": "Acme Sans",
+                    "weight": "400",
+                    "style": "normal",
+                    "files": ["../evil.woff2", "fonts\\acme-sans.woff2", "/abs/x.woff2"],
+                }
+            ],
+        }
+        fm = build_font_mapping(manifest)
+        files = [f for fam in fm["families"] for v in fam["variants"] for f in v["files"]]
+        assert "../evil.woff2" not in files  # traversal dropped
+        assert "/abs/x.woff2" not in files  # absolute dropped
+        assert "fonts/acme-sans.woff2" in files  # backslashes normalized, kept
+
+
+# ---------------------------------------------------------------------------
+# Cross-vendor review fix — NON-BLOCKING 7: CSS not double-counted in budget
+# ---------------------------------------------------------------------------
+
+
+class TestCssSizeBudget:
+    def test_css_not_double_counted_against_bundle_cap(self, session, monkeypatch):
+        """A bundle that fits when its CSS is charged ONCE must import — even under
+        a cap it would exceed if the CSS were counted twice (parse + retention)."""
+        from src.database.models.design_system import DesignSystemFile
+        from src.services import design_system_service as svc
+        from src.services.design_system_service import import_bundle
+
+        big_css = ":root { --acme-navy: #0B1F3A; }\n/* pad " + ("a" * 6000) + " */"
+        css_len = len(big_css.encode("utf-8"))
+        cap = css_len + 2000  # above (manifest + css-once), below (css-twice)
+        assert 2 * css_len > cap  # test is only meaningful if double-count would fail
+        monkeypatch.setattr(svc, "MAX_BUNDLE_SIZE_BYTES", cap)
+
+        manifest = {"name": "Acme Budget DS", "globalCssPaths": ["colors_and_type.css"]}
+        zip_bytes = make_bundle_zip(manifest=manifest, css=big_css, files={})
+        ds = import_bundle(session, zip_bytes=zip_bytes, user="u")  # succeeds: CSS charged once
+
+        assert ds.id is not None
+        css_files = (
+            session.query(DesignSystemFile)
+            .filter_by(design_system_id=ds.id, kind="css")
+            .all()
+        )
+        assert len(css_files) == 1  # still retained
