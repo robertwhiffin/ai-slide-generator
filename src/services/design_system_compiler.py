@@ -67,9 +67,12 @@ _RECOGNIZED_GROUPS = frozenset(_COLOR_GROUPS + ("type", "spacing", "shadow"))
 
 # Heading that frames the injected README + SKILL as the authoritative brand
 # operating manual (the huashu / Claude-Design model). Injected FIRST, in FULL.
+# NOTE: cross-cutting precedence over generic styling is stated ONCE — and
+# unconditionally, so token-only design systems get it too — in
+# ``prompt_modules.DESIGN_SYSTEM_PRECEDENCE`` (not here), to avoid a duplicate.
 _BRAND_MANUAL_HEADING = (
     "BRAND MANUAL (the authoritative brand documentation for this design system — "
-    "follow it; it takes precedence over generic styling):"
+    "follow it):"
 )
 
 # Contract for brand IMAGE assets. They are NOT enumerated in the prompt (a real
