@@ -28,6 +28,7 @@ from src.services.tools import (
     build_mcp_tools,
     build_model_endpoint_tool,
     build_agent_bricks_tool,
+    build_ds_asset_tool,
     initialize_genie_conversation,
     query_genie_space,
 )
@@ -240,8 +241,10 @@ def _build_tools(
 ) -> list[StructuredTool]:
     """Build the list of LangChain tools from AgentConfig.
 
-    Always includes search_images. Handles all 5 tool types:
-    GenieTool, MCPTool, VectorIndexTool, ModelEndpointTool, AgentBricksTool.
+    Always includes search_images. Adds search_brand_assets ONLY when a design
+    system is selected (``config.design_system_id`` is not None). Handles all 5
+    config tool types: GenieTool, MCPTool, VectorIndexTool, ModelEndpointTool,
+    AgentBricksTool.
 
     Args:
         config: AgentConfig with tool definitions
@@ -270,6 +273,14 @@ def _build_tools(
         args_schema=SearchImagesInput,
     )
     tools.append(image_search_tool)
+
+    # Brand-asset search tool — ONLY when a design system is selected (state
+    # guard). Bound to the design_system_id via closure so it surfaces only that
+    # system's assets; the compiled style's ASSET CONTRACT tells the model to call
+    # it. Gated on design_system_id alone (no template concept), so a future
+    # template_id can layer on without touching this path.
+    if config.design_system_id is not None:
+        tools.append(build_ds_asset_tool(config.design_system_id))
 
     genie_index = 0
     vector_index = 0

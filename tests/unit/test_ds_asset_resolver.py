@@ -75,6 +75,24 @@ class TestSubstituteDsAssetPlaceholders:
         out = substitute_ds_asset_placeholders(html, session)
         assert out == html  # unresolved placeholder preserved, not crashed
 
+    def test_unknown_asset_id_is_logged_not_silent(self, session, caplog):
+        """Phase-2 reset (section D): with brand images now fetched via the
+        search_brand_assets tool, a model COULD still fabricate an id. Verify the
+        resolver does NOT fail silently — it logs a warning naming the id and
+        leaves the placeholder in place (never raises). The resolver itself is
+        UNCHANGED (section F); this locks in that "at least log it" behavior."""
+        import logging
+
+        from src.utils.ds_asset_utils import substitute_ds_asset_placeholders
+
+        html = '<img src="{{ds-asset:987654}}">'
+        with caplog.at_level(logging.WARNING, logger="src.utils.ds_asset_utils"):
+            out = substitute_ds_asset_placeholders(html, session)
+
+        assert out == html  # left in place, never raises
+        warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+        assert any("987654" in m for m in warnings), "fabricated id must be logged, not silent"
+
     def test_noop_when_no_placeholder(self, session):
         from src.utils.ds_asset_utils import substitute_ds_asset_placeholders
 

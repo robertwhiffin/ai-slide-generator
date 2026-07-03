@@ -53,9 +53,9 @@ import logging
 import mimetypes
 import re
 import zipfile
-from typing import Optional
+from typing import Any, Optional
 
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, defer
 
 from src.database.models.design_system import (
     MAX_ASSET_SIZE_BYTES,
@@ -900,3 +900,77 @@ def get_asset_base64(db: Session, asset_id: int) -> tuple[str, str]:
     if not asset:
         raise ValueError(f"Design system asset {asset_id} not found")
     return base64.b64encode(asset.data).decode("utf-8"), asset.mime
+
+
+# ---------------------------------------------------------------------------
+# Brand-asset search (backs the ``search_brand_assets`` generation tool)
+# ---------------------------------------------------------------------------
+
+# Brand-image importance order for the tool's no-filter fallback (spec §4 Core
+# Asset Protocol: logo first, then lockups, icons, illustrations, backgrounds).
+# Unknown/other image kinds sort AFTER these but are still returned — this is a
+# denylist (below), not an allowlist, so a novel brand-image kind still surfaces.
+# Results are ranked by this order in EVERY case, so the output is deterministic.
+_ASSET_IMPORTANCE_ORDER = ("logo", "lockup", "icon", "illustration", "background")
+
+# Kinds the tool NEVER surfaces: fonts are wired inline via @font-face in the
+# compiled prompt (not fetched on demand), and ``template_shot`` is reference-only
+# preview material tied to templates, never embeddable slide content.
+_TOOL_EXCLUDED_ASSET_KINDS = frozenset(("font", "template_shot"))
+
+
+def _asset_search_sort_key(asset: Any) -> tuple[int, str, int]:
+    """Rank by brand importance, then filename + id for a stable total order.
+
+    ``asset`` is a ``DesignSystemAsset``; it is typed ``Any`` (as the compiler does
+    for ORM records) so attribute reads aren't flagged against the SQLAlchemy
+    ``Column`` descriptors — this repo runs mypy without the SQLAlchemy plugin.
+    """
+    kind = (asset.kind or "").lower()
+    try:
+        rank = _ASSET_IMPORTANCE_ORDER.index(kind)
+    except ValueError:
+        rank = len(_ASSET_IMPORTANCE_ORDER)
+    return (rank, asset.filename or "", asset.id or 0)
+
+
+def search_assets(
+    db: Session,
+    design_system_id: int,
+    query: Optional[str] = None,
+    kind: Optional[str] = None,
+) -> list[DesignSystemAsset]:
+    """Return a design system's brand IMAGE assets, optionally filtered + ranked.
+
+    Backs the ``search_brand_assets`` generation tool. Rows are scoped to
+    ``design_system_id`` and never include fonts (delivered inline via @font-face)
+    or ``template_shot`` (reference-only preview material). Optional filters:
+
+    - ``kind``: case-insensitive exact match on the asset kind.
+    - ``query``: case-insensitive substring match on the filename.
+
+    When NEITHER filter is given, the full brand-image inventory is returned as a
+    sensible RANKED default set (importance order: logo, lockup, icon,
+    illustration, background; unknown image kinds last) so a loose call still
+    yields useful assets. Results are ranked by that same order (then filename,
+    id) in every case, so the output is deterministic. The binary ``data`` column
+    is deferred — a metadata search never loads asset bytes.
+    """
+    rows = (
+        db.query(DesignSystemAsset)
+        .filter(DesignSystemAsset.design_system_id == design_system_id)
+        # Defer the bytea column: a metadata search never needs the asset bytes.
+        # ``# type: ignore`` covers the SQLAlchemy Column-vs-attribute stubs gap
+        # (this repo runs mypy without the SQLAlchemy plugin).
+        .options(defer(DesignSystemAsset.data))  # type: ignore[arg-type]
+        .all()
+    )
+    result = [a for a in rows if (a.kind or "").lower() not in _TOOL_EXCLUDED_ASSET_KINDS]
+    if kind:
+        kind_l = kind.strip().lower()
+        result = [a for a in result if (a.kind or "").lower() == kind_l]
+    if query:
+        query_l = query.strip().lower()
+        result = [a for a in result if query_l in (a.filename or "").lower()]
+    result.sort(key=_asset_search_sort_key)
+    return result

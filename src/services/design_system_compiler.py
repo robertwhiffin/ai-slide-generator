@@ -12,33 +12,32 @@ The serializer is **pure and deterministic**: it reads only the passed record's
 attributes (no DB, no I/O, no clock/randomness) and imposes a fixed ordering, so
 the same design system always compiles to byte-identical output.
 
-Design decisions:
+Design decisions (Phase 2 RESET — README/SKILL-central, agentic, UNCAPPED, to
+match the huashu / Claude-Design "brand operating manual" model):
 - Output opens with ``SLIDE VISUAL STYLE:`` to match the ``DEFAULT_SLIDE_STYLE``
   convention (``src/core/defaults.py``) so it slots into the prompt identically.
-- Color tokens render both as a human/LLM-readable spec grouped by group AND as
-  a ``:root { --brand-* }`` CSS custom-property block (spec §8); shadow tokens
-  render the same way as ``--brand-shadow-*`` vars + a spec list.
-- SKILL.md (in full) + the README's RULE/GUIDANCE sections compile into a
-  BRAND RULES / USAGE block near the top, hard-capped (``MAX_BRAND_RULES_CHARS``)
-  with an explicit truncation marker so the prompt never carries the whole README.
-  ``recompute_compiled_style_content`` reads that text from the retained
-  ``design_system_file`` rows and passes it IN, keeping ``compile_design_system``
-  a pure function of its arguments.
-- Typography is enriched from ``font_mapping_json`` (family -> weight/style
-  variants + the tokens that reference the family), richer than the raw ``type``
-  tokens alone.
-- Brand assets are RANKED (spec §4 Core Asset Protocol: Logo > product shot > UI
-  > …) and CAPPED PER KIND so EVERY present kind is represented — a flat cap +
-  ranking surfaced only logos on a real 408-asset bundle, making every other kind
-  unusable (the LLM is the sole producer of the placeholder). Every count-bearing
-  Phase-2 section is bounded — per-kind asset caps, shadow tokens, and font
-  families / per-family variants / per-family linked tokens — so no single such
-  section can blow up the prompt (the brand-rules block is separately hard-capped
-  in full); any omission is disclosed rather than silent. Assets are
-  referenced with the ``{{ds-asset:ID}}`` placeholder. This mirrors the existing
-  ``{{image:ID}}`` convention (``src/utils/image_utils.py``) but is a DISTINCT
-  namespace: ``design_system_asset`` IDs and ``image_assets`` IDs are independent
-  sequences, so reusing ``{{image:ID}}`` would resolve to an unrelated image.
+- The FULL README then the FULL SKILL.md are injected FIRST as a BRAND MANUAL
+  block — UNFILTERED and UNTRUNCATED (no rule-only keyword filter, no char
+  budget). The README already documents the brand's assets/voice/rules, so there
+  is no separate computed "map". ``recompute_compiled_style_content`` reads that
+  text from the retained ``design_system_file`` rows and passes it IN, keeping
+  ``compile_design_system`` a pure function of its arguments.
+- ALL tokens are emitted UNCAPPED: color tokens as a human/LLM-readable spec
+  grouped by group AND a ``:root { --brand-* }`` block (spec §8); type + spacing
+  as rule lists; shadow tokens as ``--brand-shadow-*`` vars + a spec list.
+- Fonts are emitted UNCAPPED: a @font-face reference list (font files -> their
+  ``{{ds-asset:ID}}`` handles) plus a family listing enriched from
+  ``font_mapping_json`` (family -> weight/style variants + linked tokens). Fonts
+  are the ONE asset kind wired inline, because @font-face must resolve at
+  generation time; there are few of them, so no cap is needed.
+- Brand IMAGE assets are NOT enumerated. Instead the compiled content carries a
+  short CONTRACT instructing the model to fetch them on demand via the
+  ``search_brand_assets`` tool, which returns ``{{ds-asset:ID}}`` handles. This
+  avoids dumping a large brand inventory (hundreds of assets) into every prompt.
+- ``{{ds-asset:ID}}`` mirrors the existing ``{{image:ID}}`` convention
+  (``src/utils/image_utils.py``) but is a DISTINCT namespace:
+  ``design_system_asset`` IDs and ``image_assets`` IDs are independent sequences,
+  so reusing ``{{image:ID}}`` would resolve to an unrelated image.
 """
 
 from __future__ import annotations
@@ -66,121 +65,30 @@ _COLOR_GROUPS = ("core", "accents", "ink", "tints")
 # silently.
 _RECOGNIZED_GROUPS = frozenset(_COLOR_GROUPS + ("type", "spacing", "shadow"))
 
-# Asset kinds that are embeddable raster/vector images (referenced via <img> /
-# CSS url()). ``font`` is handled separately (@font-face); ``template_shot`` is
-# preview/reference material tied to templates and is never embedded as content.
-_IMAGE_ASSET_KINDS = ("logo", "icon", "lockup", "illustration", "background")
-_EXCLUDED_ASSET_KINDS = ("template_shot",)
-
-# --- Phase 2 (v1): brand-rules budget + asset curation --------------------
-
-# Hard cap on the injected BRAND RULES text (SKILL.md + README rule-sections).
-# SKILL is emitted first (prioritized); the overflow — typically the README tail —
-# is truncated with an explicit marker so the prompt never carries an unbounded
-# multi-KB documentation dump. Read at call time so it stays tunable/testable.
-MAX_BRAND_RULES_CHARS = 6000
-_BRAND_RULES_TRUNCATION_MARKER = "\n…[truncated]"
-# Stable heading for the block. The cap counts this against the budget, so the
-# text stays concise to leave room for the actual rules.
-_BRAND_RULES_HEADING = (
-    "BRAND RULES / USAGE (follow these brand rules; they take precedence over "
-    "generic styling):"
+# Heading that frames the injected README + SKILL as the authoritative brand
+# operating manual (the huashu / Claude-Design model). Injected FIRST, in FULL.
+_BRAND_MANUAL_HEADING = (
+    "BRAND MANUAL (the authoritative brand documentation for this design system — "
+    "follow it; it takes precedence over generic styling):"
 )
 
-# Max references emitted per token/asset-driven section. Real bundles ship
-# hundreds of assets, and a pathological manifest could declare arbitrarily many
-# tokens/families, so every such section is ranked/sorted and capped — with the
-# omission disclosed — so no single section can bloat the prompt with a flat dump.
-# Brand-asset IMAGES are capped PER KIND (see ``_IMAGE_KIND_CAPS``), not by one
-# flat number: a flat cap + kind-ranking starves every lower-ranked kind (a real
-# 408-asset bundle surfaced 12 logos and nothing else).
-MAX_FONT_ASSET_REFERENCES = 8
-MAX_SHADOW_TOKENS = 24
-MAX_FONT_FAMILIES = 12
-MAX_FONT_VARIANTS_PER_FAMILY = 12
-MAX_FONT_TOKENS_PER_FAMILY = 12
-
-# Brand-asset kind ranking — spec §4 "Core Asset Protocol": Logo > product shot >
-# UI > icons > … . Lower rank = higher priority; unknown kinds sort after all
-# known ones. The v1 importer (``design_system_service._infer_asset_kind``) only
-# ever produces {logo, lockup, icon, illustration, background, font}, so those are
-# the kinds actually ranked today; the product/ui/screenshot/wordmark aliases are
-# forward-compat for structured/imported systems that carry the spec's own
-# vocabulary (``design_system_asset.kind`` is a free string), each mapped to its
-# spec tier so a cap keeps a product shot over an icon.
-_ASSET_KIND_RANK = {
-    # Logo tier
-    "logo": 0,
-    "wordmark": 0,
-    "lockup": 1,
-    # Product-shot / brand-imagery tier
-    "product": 2,
-    "product_shot": 2,
-    "product-shot": 2,
-    "photo": 2,
-    "illustration": 3,
-    "background": 4,
-    # UI tier (screenshots, then icons)
-    "ui": 5,
-    "ui_screenshot": 5,
-    "screenshot": 5,
-    "icon": 6,
-}
-_UNKNOWN_ASSET_RANK = max(_ASSET_KIND_RANK.values()) + 1
-
-# Per-kind caps for the BRAND ASSETS listing. Each kind gets its OWN budget and is
-# guaranteed representation — a single flat cap + kind-ranking surfaced only the
-# top-ranked kind (12 logos and nothing else on a real 408-asset bundle), and
-# since the LLM is the sole producer of {{ds-asset:ID}} under a "use ONLY the IDs
-# listed" instruction, every un-listed asset becomes unusable. The listing is
-# emitted in kind-rank order; within a kind, assets keep their deterministic
-# (filename, id) order. These numbers are TUNABLE and will be validated against
-# the real Claude-Design bundle at devloop time (the measured workable set for a
-# ~400-asset bundle is ~70 image entries / ~1.1K tokens).
-_IMAGE_KIND_CAPS = {
-    "logo": 8,
-    "wordmark": 8,
-    "lockup": 12,
-    "product": 16,
-    "product_shot": 16,
-    "product-shot": 16,
-    "photo": 16,
-    "illustration": 16,
-    "background": 8,
-    "screenshot": 24,
-    "ui": 24,
-    "ui_screenshot": 24,
-    "icon": 24,
-}
-# Budget for any image kind not listed above (unknown/future kinds).
-_DEFAULT_IMAGE_KIND_CAP = 12
-
-# README headings whose section is a brand RULE / GUIDANCE (do's & don'ts,
-# voice/tone, data-viz, usage/accessibility). Matched case-insensitively as a
-# substring of the heading text; only these sections are injected — never the
-# whole multi-KB README prose.
-_README_RULE_KEYWORDS = (
-    "rule",
-    "guideline",
-    "guidance",
-    "do'",
-    "don'",
-    "dont",
-    "do not",
-    "dos and",
-    "voice",
-    "tone",
-    "usage",
-    "best practice",
-    "avoid",
-    "data viz",
-    "data-viz",
-    "dataviz",
-    "data visual",
-    "visualization",
-    "visualisation",
-    "chart",
-    "accessib",
+# Contract for brand IMAGE assets. They are NOT enumerated in the prompt (a real
+# bundle ships hundreds); the model fetches them on demand via the
+# ``search_brand_assets`` tool, which returns ``{{ds-asset:ID}}`` handles. This
+# literal text is injected verbatim; the ``{{ds-asset:ID}}`` token round-trips
+# through the system-prompt brace-escape (``agent.py``) exactly like
+# ``{{image:ID}}``. Fonts are the ONE exception — wired inline via @font-face
+# (see ``_font_assets_section``).
+_ASSET_CONTRACT = (
+    "BRAND IMAGE ASSETS:\n"
+    "To place any brand image (logo, product icon, lockup, illustration, or "
+    "background) from this design system, you MUST call the `search_brand_assets` "
+    "tool to get its {{ds-asset:ID}} handle, then embed that handle — e.g. "
+    '<img src="{{ds-asset:ID}}" alt="..." /> or '
+    "background-image: url('{{ds-asset:ID}}'). Never invent an ID; only use "
+    "handles the tool returned. Use assets in importance order "
+    "(logo > product/lockup > icon > illustration > background) and never redraw "
+    "them."
 )
 
 
@@ -190,89 +98,21 @@ def _slug(value: str) -> str:
     return slug or "token"
 
 
-_ATX_HEADING_RE = re.compile(r"^(#{1,6})\s+(.*\S)\s*$")
+def _brand_manual_section(skill_md: Optional[str], readme_md: Optional[str]) -> Optional[str]:
+    """Assemble the BRAND MANUAL block: the FULL README then the FULL SKILL.md.
 
-
-def _is_rule_heading(title: str) -> bool:
-    """True if a README heading names a brand RULE/GUIDANCE section."""
-    low = title.lower()
-    return any(keyword in low for keyword in _README_RULE_KEYWORDS)
-
-
-def _extract_readme_rule_sections(readme_md: str) -> str:
-    """Return only the RULE/GUIDANCE sections of a README, in document order.
-
-    Each ATX heading (``#``..``######``) is evaluated independently: a heading is
-    kept when its OWN text matches a rule keyword (:data:`_README_RULE_KEYWORDS`),
-    and only its DIRECT content (the lines up to the NEXT heading of ANY level) is
-    included. So a non-rule subsection nested under a rule heading (e.g.
-    ``### History`` under ``## Usage``) is dropped, while a nested RULE subsection
-    is still kept via its own heading. Overview/history/background prose is
-    excluded — only concise brand rules reach the prompt. Pure and deterministic.
-    """
-    lines = (readme_md or "").splitlines()
-    sections: list[str] = []
-    i, n = 0, len(lines)
-    while i < n:
-        match = _ATX_HEADING_RE.match(lines[i])
-        if not match:
-            i += 1
-            continue
-        keep = _is_rule_heading(match.group(2).strip())
-        block = [lines[i]] if keep else []
-        j = i + 1
-        while j < n and not _ATX_HEADING_RE.match(lines[j]):
-            if keep:
-                block.append(lines[j])
-            j += 1
-        if keep:
-            sections.append("\n".join(block).rstrip())
-        i = j
-    return "\n\n".join(sections).strip()
-
-
-def _brand_rules_section(skill_md: Optional[str], readme_md: Optional[str]) -> Optional[str]:
-    """Assemble the BRAND RULES / USAGE block: SKILL.md in full, then the README
-    rule-sections, hard-capped so the FULL emitted block (heading + body +
-    truncation marker) is <= :data:`MAX_BRAND_RULES_CHARS`.
-
-    SKILL.md is the concise, authoritative rules doc, so it is emitted first and
-    prioritized; when the block exceeds the budget the README tail is truncated
-    with an explicit marker (never an unbounded dump). Returns ``None`` when
+    UNFILTERED and UNTRUNCATED — both documents are injected verbatim (the huashu
+    / Claude-Design "brand operating manual" model). README is the primary
+    operating manual, so it comes first; SKILL.md follows. Returns ``None`` when
     neither source contributes text, so a design system without a SKILL/README
     simply omits the block (backward compatible).
     """
+    readme = (readme_md or "").strip()
     skill = (skill_md or "").strip()
-    readme_rules = _extract_readme_rule_sections(readme_md or "")
-
-    body_parts: list[str] = []
-    if skill:
-        body_parts.append(skill)
-    if readme_rules:
-        body_parts.append(readme_rules)
+    body_parts = [part for part in (readme, skill) if part]
     if not body_parts:
         return None
-    body = "\n\n".join(body_parts)
-
-    cap = MAX_BRAND_RULES_CHARS  # read at call time (tunable/testable)
-    if cap <= 0:
-        return None  # no budget -> omit the block entirely
-
-    prefix = _BRAND_RULES_HEADING + "\n"
-    marker = _BRAND_RULES_TRUNCATION_MARKER
-    full = prefix + body
-
-    # Genuine HARD cap on the FULL block: the returned block is <= cap for EVERY
-    # non-negative cap. Emitted whole when it fits; otherwise reserve the marker
-    # and truncate the body (SKILL is first, so the README tail drops, trimming
-    # into the heading only for very small caps). When the cap is smaller than the
-    # marker itself, the marker is truncated so the total still never exceeds cap.
-    if len(full) <= cap:
-        return full
-    keep = cap - len(marker)
-    if keep <= 0:
-        return marker[:cap]
-    return full[:keep].rstrip() + marker
+    return "\n\n".join([_BRAND_MANUAL_HEADING, *body_parts])
 
 
 def _grouped_tokens(design_system: Any) -> dict[str, list[tuple[str, str]]]:
@@ -332,28 +172,23 @@ def _shadow_sections(grouped: dict[str, list[tuple[str, str]]]) -> list[str]:
     """Render shadow tokens as a spec list + a ``:root { --brand-shadow-* }`` block.
 
     Consistent with how color tokens render (spec §8): a human/LLM-readable list
-    plus CSS custom properties. Entries are pre-sorted (see ``_grouped_tokens``);
-    the per-slug de-dup mirrors the color path so two names that slugify to the
-    same identifier don't emit duplicate/ambiguous custom properties.
+    plus CSS custom properties, emitted UNCAPPED. Entries are pre-sorted (see
+    ``_grouped_tokens``); the per-slug de-dup mirrors the color path so two names
+    that slugify to the same identifier don't emit duplicate/ambiguous properties.
     """
     entries = grouped.get("shadow")
     if not entries:
         return []
-    omitted = max(0, len(entries) - MAX_SHADOW_TOKENS)
     spec_lines = ["BRAND SHADOWS:"]
     css_vars: list[str] = []
     seen: set[str] = set()
-    for name, value in entries[:MAX_SHADOW_TOKENS]:
+    for name, value in entries:
         spec_lines.append(f"- {name}: {value}")
         slug = _slug(name)
         if slug in seen:
             continue
         seen.add(slug)
         css_vars.append(f"  --brand-shadow-{slug}: {value};")
-    if omitted:
-        spec_lines.append(
-            f"(+{omitted} more shadow token(s) omitted to keep the prompt focused.)"
-        )
     spec = "\n".join(spec_lines)
     css = "\n".join(
         [
@@ -385,13 +220,9 @@ def _font_families_section(design_system: Any) -> Optional[str]:
     Richer than the raw ``type`` tokens: each family lists its weight/style
     variants and the tokens that reference it, so generated CSS can wire
     @font-face + font-family correctly. Families/variants/tokens are sorted for
-    output independent of mapping order, and every count is capped with disclosed
-    omission — family count (``MAX_FONT_FAMILIES``), per-family variant count
-    (``MAX_FONT_VARIANTS_PER_FAMILY``), and per-family linked-token count
-    (``MAX_FONT_TOKENS_PER_FAMILY``) — so a pathological manifest can't blow up the
-    section. Reads the scalar ``font_mapping_json`` column (no lazy relationship).
-    Returns ``None`` when the design system carries no font mapping (backward
-    compatible).
+    output independent of mapping order and emitted UNCAPPED. Reads the scalar
+    ``font_mapping_json`` column (no lazy relationship). Returns ``None`` when the
+    design system carries no font mapping (backward compatible).
     """
     mapping = getattr(design_system, "font_mapping_json", None)
     families = mapping.get("families") if isinstance(mapping, dict) else None
@@ -402,50 +233,34 @@ def _font_families_section(design_system: Any) -> Optional[str]:
         (f for f in families if isinstance(f, dict) and f.get("family")),
         key=lambda f: str(f.get("family")),
     )
-    family_omitted = max(0, len(ordered) - MAX_FONT_FAMILIES)
 
     lines: list[str] = []
-    for family in ordered[:MAX_FONT_FAMILIES]:
+    for family in ordered:
         name = str(family.get("family"))
         variants = sorted(
             (v for v in (family.get("variants") or []) if isinstance(v, dict)),
             key=lambda v: (str(v.get("weight", "")), str(v.get("style", ""))),
         )
-        variant_omitted = max(0, len(variants) - MAX_FONT_VARIANTS_PER_FAMILY)
         variant_labels: list[str] = []
-        for variant in variants[:MAX_FONT_VARIANTS_PER_FAMILY]:
+        for variant in variants:
             weight = str(variant.get("weight", "")).strip()
             style = (variant.get("style") or "").strip()
             variant_labels.append(" ".join(p for p in (weight, style) if p) or "regular")
-        tokens_all = sorted(
+        tokens = sorted(
             str(t) for t in (family.get("tokens") or []) if isinstance(t, str) and t.strip()
         )
-        token_omitted = max(0, len(tokens_all) - MAX_FONT_TOKENS_PER_FAMILY)
-        tokens = tokens_all[:MAX_FONT_TOKENS_PER_FAMILY]
         detail = f"- {name}"
         if variant_labels:
-            shown = ", ".join(variant_labels)
-            if variant_omitted:
-                shown += f", +{variant_omitted} more"
-            detail += f": weights {shown}"
+            detail += f": weights {', '.join(variant_labels)}"
         if tokens:
-            shown_tokens = ", ".join(tokens)
-            if token_omitted:
-                shown_tokens += f", +{token_omitted} more"
-            detail += f" (tokens: {shown_tokens})"
+            detail += f" (tokens: {', '.join(tokens)})"
         lines.append(detail)
 
     if not lines:
         return None
-    section = [
-        "BRAND FONT FAMILIES (load these families; apply them to the matching tokens):",
-        *lines,
-    ]
-    if family_omitted:
-        section.append(
-            f"(+{family_omitted} more font families omitted to keep the prompt focused.)"
-        )
-    return "\n".join(section)
+    return "\n".join(
+        ["BRAND FONT FAMILIES (load these families; apply them to the matching tokens):", *lines]
+    )
 
 
 def _template_section(design_system: Any) -> Optional[str]:
@@ -477,95 +292,35 @@ def _template_section(design_system: Any) -> Optional[str]:
     )
 
 
-def _asset_rank_key(asset: Any) -> tuple[int, str, int]:
-    """Rank images by kind priority (spec §4: Logo > product shot > UI > …), then
-    filename + id for a stable total order (so curation/capping is deterministic)."""
-    kind = getattr(asset, "kind", "") or ""
-    return (
-        _ASSET_KIND_RANK.get(kind, _UNKNOWN_ASSET_RANK),
-        getattr(asset, "filename", "") or "",
-        getattr(asset, "id", 0) or 0,
-    )
+def _font_assets_section(design_system: Any) -> Optional[str]:
+    """Render font-kind assets as @font-face src references (``{{ds-asset:ID}}``).
 
-
-def _font_sort_key(asset: Any) -> tuple[str, int]:
-    return (getattr(asset, "filename", "") or "", getattr(asset, "id", 0) or 0)
-
-
-def _asset_sections(design_system: Any) -> list[str]:
-    """Render curated brand-asset references as ``{{ds-asset:ID}}`` instructions.
-
-    Image assets are grouped BY KIND and each kind is capped independently
-    (``_IMAGE_KIND_CAPS``), so EVERY present kind is represented in the listing.
-    A single flat cap + kind-ranking would surface only the top kind (12 logos and
-    nothing else on a real 408-asset bundle); since the LLM is the sole producer of
-    ``{{ds-asset:ID}}`` under a "use ONLY the IDs listed" instruction, those
-    un-listed assets would be unusable. Kinds are emitted in rank order (spec §4:
-    Logo > product shot > UI > …); within a kind, assets keep the deterministic
-    ``(filename, id)`` order (``_asset_rank_key``). Fonts are a separate @font-face
-    section capped at ``MAX_FONT_ASSET_REFERENCES``. Assets without a persisted
-    ``id`` or of an excluded kind (``template_shot``) are skipped; every per-kind
-    omission is disclosed rather than silent.
+    Fonts are the ONE asset kind wired inline (not fetched via the
+    ``search_brand_assets`` tool): @font-face must resolve at generation time, and
+    there are few of them, so the list is UNCAPPED. Each font file is mapped to its
+    ``{{ds-asset:ID}}`` handle; assets without a persisted id are skipped. Sorted
+    by (filename, id) for deterministic output. Returns ``None`` when the design
+    system has no font assets.
     """
-    images_by_kind: dict[str, list[Any]] = {}
-    fonts: list[Any] = []
-    for asset in getattr(design_system, "assets", None) or []:
-        if getattr(asset, "id", None) is None:
-            continue
-        kind = getattr(asset, "kind", "") or "asset"
-        if kind in _EXCLUDED_ASSET_KINDS:
-            continue
-        if kind == "font":
-            fonts.append(asset)
-        else:
-            images_by_kind.setdefault(kind, []).append(asset)
-
-    def _ref(asset: Any) -> str:
-        kind = getattr(asset, "kind", "") or "asset"
+    fonts = [
+        asset
+        for asset in (getattr(design_system, "assets", None) or [])
+        if getattr(asset, "id", None) is not None
+        and (getattr(asset, "kind", "") or "") == "font"
+    ]
+    if not fonts:
+        return None
+    fonts.sort(key=lambda a: (getattr(a, "filename", "") or "", a.id))
+    lines = [
+        "BRAND FONTS:",
+        "Load these font files via @font-face using the {{ds-asset:ID}} placeholder "
+        "as the src url, e.g. @font-face { font-family: 'Brand'; "
+        "src: url('{{ds-asset:1}}'); }:",
+    ]
+    for asset in fonts:
         filename = getattr(asset, "filename", "") or ""
-        return f"- [{kind}] {filename} -> {DS_ASSET_PLACEHOLDER % asset.id}"
-
-    sections: list[str] = []
-    if images_by_kind:
-        lines = [
-            "BRAND ASSETS:",
-            "Embed these brand assets as real images using the "
-            "{{ds-asset:ID}} placeholder (the system replaces it with the "
-            'actual asset), e.g. <img src="{{ds-asset:1}}" alt="logo" /> or '
-            "background-image: url('{{ds-asset:1}}'). Use ONLY the asset "
-            "IDs listed here; never invent IDs:",
-        ]
-        # Emit kinds in rank order; ties (aliases sharing a rank) broken by name so
-        # every present kind gets its own budget and appears in the listing.
-        for kind in sorted(
-            images_by_kind, key=lambda k: (_ASSET_KIND_RANK.get(k, _UNKNOWN_ASSET_RANK), k)
-        ):
-            assets = sorted(images_by_kind[kind], key=_asset_rank_key)
-            cap = _IMAGE_KIND_CAPS.get(kind, _DEFAULT_IMAGE_KIND_CAP)
-            lines.extend(_ref(asset) for asset in assets[:cap])
-            omitted = len(assets) - cap
-            if omitted > 0:
-                lines.append(
-                    f"(+{omitted} more {kind} omitted to keep the prompt focused.)"
-                )
-        sections.append("\n".join(lines))
-    if fonts:
-        fonts.sort(key=_font_sort_key)
-        font_omitted = max(0, len(fonts) - MAX_FONT_ASSET_REFERENCES)
-        lines = [
-            "BRAND FONTS:",
-            "Load these font assets via @font-face using the "
-            "{{ds-asset:ID}} placeholder as the src url, e.g. "
-            "@font-face { font-family: 'Brand'; "
-            "src: url('{{ds-asset:1}}'); }:",
-        ]
-        lines.extend(_ref(asset) for asset in fonts[:MAX_FONT_ASSET_REFERENCES])
-        if font_omitted:
-            lines.append(
-                f"(+{font_omitted} more font(s) omitted to keep the prompt focused.)"
-            )
-        sections.append("\n".join(lines))
-    return sections
+        lines.append(f"- {filename} -> {DS_ASSET_PLACEHOLDER % asset.id}")
+    return "\n".join(lines)
 
 
 def compile_design_system(
@@ -582,9 +337,14 @@ def compile_design_system(
     :class:`~src.database.models.design_system.DesignSystem`).
 
     ``skill_md`` / ``readme_md`` are the retained SKILL.md / README.md text
-    (Phase 1 ``design_system_file`` rows). When provided they compile into a
-    BRAND RULES / USAGE block near the top; both default ``None`` so a design
-    system without them — or the legacy positional call — simply omits the block.
+    (Phase 1 ``design_system_file`` rows). When provided they compile into the
+    BRAND MANUAL block (FULL, first); both default ``None`` so a design system
+    without them — or the legacy positional call — simply omits the block.
+
+    Emitted order: header -> description -> BRAND MANUAL (README + SKILL, full) ->
+    tokens (color, type, spacing, shadow; all uncapped) -> fonts (@font-face refs
+    + family listing; uncapped) -> templates -> the brand IMAGE ASSET CONTRACT
+    (fetch via ``search_brand_assets``). Brand images are NOT enumerated.
     """
     parts: list[str] = []
 
@@ -595,10 +355,10 @@ def compile_design_system(
     if description and description.strip():
         parts.append(description.strip())
 
-    # Brand rules sit near the top so they frame everything that follows.
-    brand_rules = _brand_rules_section(skill_md, readme_md)
-    if brand_rules:
-        parts.append(brand_rules)
+    # The brand manual (FULL README + SKILL) sits FIRST so it frames everything.
+    brand_manual = _brand_manual_section(skill_md, readme_md)
+    if brand_manual:
+        parts.append(brand_manual)
 
     grouped = _grouped_tokens(design_system)
 
@@ -614,30 +374,36 @@ def compile_design_system(
             ", ".join(sorted(_RECOGNIZED_GROUPS)),
         )
 
+    # Tokens: color, type, spacing, shadow — all uncapped.
     parts.extend(_color_sections(grouped))
-
     typography = _scale_section(grouped, "type", "TYPOGRAPHY TOKENS:")
     if typography:
         parts.append(typography)
-    font_families = _font_families_section(design_system)
-    if font_families:
-        parts.append(font_families)
     spacing = _scale_section(grouped, "spacing", "SPACING TOKENS:")
     if spacing:
         parts.append(spacing)
-
     parts.extend(_shadow_sections(grouped))
+
+    # Fonts: inline @font-face references + family listing (both uncapped).
+    font_assets = _font_assets_section(design_system)
+    if font_assets:
+        parts.append(font_assets)
+    font_families = _font_families_section(design_system)
+    if font_families:
+        parts.append(font_families)
 
     template_section = _template_section(design_system)
     if template_section:
         parts.append(template_section)
 
-    parts.extend(_asset_sections(design_system))
+    # Brand IMAGE assets are fetched on demand via search_brand_assets, not
+    # enumerated. The contract is always present when a design system compiles.
+    parts.append(_ASSET_CONTRACT)
 
     return "\n\n".join(parts)
 
 
-def _brand_rules_text_from_files(
+def _brand_manual_text_from_files(
     design_system: Any,
 ) -> tuple[Optional[str], Optional[str]]:
     """Extract SKILL.md / README.md text from the retained ``design_system_file``
@@ -647,7 +413,7 @@ def _brand_rules_text_from_files(
     ``tokens``/``assets`` — decodes the in-DB bytes, and joins same-kind rows in
     path order (deterministic). Reference rows (asset/font; ``data`` is NULL) are
     ignored. Returns ``(skill, readme)``, each ``None`` when absent, so a legacy
-    design system with no source files yields no BRAND RULES block.
+    design system with no source files yields no BRAND MANUAL block.
     """
     skills: list[tuple[str, str]] = []
     readmes: list[tuple[str, str]] = []
@@ -678,12 +444,12 @@ def recompute_compiled_style_content(design_system: Any) -> str:
 
     Pulls the retained SKILL.md/README.md text from the design system's
     ``design_system_file`` rows and passes it to the pure compiler so the compiled
-    artifact carries the BRAND RULES / USAGE block. Sets
+    artifact carries the BRAND MANUAL block. Sets
     ``design_system.compiled_style_content`` and returns the compiled string. The
     signature is unchanged, so every existing call site keeps working; a design
     system with no source files simply compiles without the block.
     """
-    skill_md, readme_md = _brand_rules_text_from_files(design_system)
+    skill_md, readme_md = _brand_manual_text_from_files(design_system)
     compiled = compile_design_system(design_system, skill_md=skill_md, readme_md=readme_md)
     design_system.compiled_style_content = compiled
     return compiled

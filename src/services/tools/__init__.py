@@ -6,6 +6,7 @@ module structure.
 """
 
 from src.services.tools.agent_bricks_tool import build_agent_bricks_tool
+from src.services.tools.ds_asset_tool import SearchBrandAssetsInput, build_ds_asset_tool
 from src.services.tools.genie_tool import (
     GenieQueryInput,
     GenieToolError,
@@ -32,4 +33,7 @@ __all__ = [
     "build_model_endpoint_tool",
     # Agent Bricks
     "build_agent_bricks_tool",
+    # Design-system brand assets
+    "build_ds_asset_tool",
+    "SearchBrandAssetsInput",
 ]

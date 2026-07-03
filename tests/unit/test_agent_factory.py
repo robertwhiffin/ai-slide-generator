@@ -547,6 +547,48 @@ class TestBuildToolsNewTypes:
         assert any(t.name == "mcp_jira_search" for t in tools)
         mock_build.assert_called_once()
 
+
+class TestBrandAssetToolRegistration:
+    """Phase 2 reset: search_brand_assets is registered ONLY when a design system
+    is selected, bound to config.design_system_id; search_images is unaffected."""
+
+    def test_no_design_system_no_brand_asset_tool(self):
+        from src.api.schemas.agent_config import AgentConfig
+        from src.services.agent_factory import _build_tools
+
+        names = [t.name for t in _build_tools(AgentConfig(), {})]
+        assert "search_images" in names
+        assert "search_brand_assets" not in names
+
+    def test_design_system_set_adds_brand_asset_tool(self):
+        from src.api.schemas.agent_config import AgentConfig
+        from src.services.agent_factory import _build_tools
+
+        names = [t.name for t in _build_tools(AgentConfig(design_system_id=7), {})]
+        assert "search_images" in names
+        assert "search_brand_assets" in names
+
+    def test_brand_asset_tool_bound_to_design_system_id(self):
+        from src.api.schemas.agent_config import AgentConfig
+        from src.services import agent_factory
+
+        with patch("src.services.agent_factory.build_ds_asset_tool") as mock_build:
+            marker = MagicMock()
+            marker.name = "search_brand_assets"
+            mock_build.return_value = marker
+            tools = agent_factory._build_tools(AgentConfig(design_system_id=99), {})
+
+        mock_build.assert_called_once_with(99)
+        assert marker in tools
+
+    def test_brand_asset_tool_not_built_without_design_system(self):
+        from src.api.schemas.agent_config import AgentConfig
+        from src.services import agent_factory
+
+        with patch("src.services.agent_factory.build_ds_asset_tool") as mock_build:
+            agent_factory._build_tools(AgentConfig(), {})
+        mock_build.assert_not_called()
+
     @patch("src.services.agent_factory.build_agent_bricks_tool")
     @patch("src.services.agent_factory.build_model_endpoint_tool")
     @patch("src.services.agent_factory.build_vector_tool")
