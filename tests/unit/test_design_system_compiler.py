@@ -597,6 +597,20 @@ class TestBrandRules:
             assert len(block) <= cap, f"block len {len(block)} exceeds cap {cap}"
             assert "…[truncated]" in block
 
+    def test_brand_rules_block_bounded_for_tiny_caps(self, monkeypatch):
+        """The hard cap holds for EVERY non-negative cap, including 0..12 where the
+        13-char truncation marker itself must be truncated (or the block omitted)."""
+        import src.services.design_system_compiler as compiler
+
+        skill = "SK " * 60
+        readme = "## Rules\n" + ("acme-rule " * 400)
+        for cap in (0, 1, 5, 12, 13, 30):
+            monkeypatch.setattr(compiler, "MAX_BRAND_RULES_CHARS", cap)
+            block = compiler._brand_rules_section(skill, readme)
+            assert block is None or len(block) <= cap, (
+                f"cap {cap}: block len {None if block is None else len(block)}"
+            )
+
     def test_only_skill_no_readme(self, session):
         from src.services.design_system_compiler import compile_design_system
 
@@ -780,6 +794,24 @@ class TestFontMapping:
         ds = _make_ds(session, font_mapping_json=mapping)
         out = compiler.compile_design_system(ds)
         assert "+3 more" in out  # 5 variants, cap 2 -> 3 omitted
+
+    def test_font_tokens_capped_per_family(self, session, monkeypatch):
+        """A family linked to many tokens is bounded per section (disclosed)."""
+        import src.services.design_system_compiler as compiler
+
+        monkeypatch.setattr(compiler, "MAX_FONT_TOKENS_PER_FAMILY", 2)
+        mapping = {
+            "families": [{
+                "family": "Fam",
+                "variants": [{"weight": "400", "style": "normal", "files": []}],
+                "tokens": [f"tok{i}" for i in range(5)],
+            }]
+        }
+        ds = _make_ds(session, font_mapping_json=mapping)
+        out = compiler.compile_design_system(ds)
+        assert "tok0" in out and "tok1" in out
+        assert "tok4" not in out  # beyond the cap
+        assert "+3 more" in out   # 5 tokens, cap 2 -> 3 omitted
 
 
 class TestAssetCuration:
