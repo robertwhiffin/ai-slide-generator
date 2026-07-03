@@ -30,8 +30,10 @@ Design decisions:
 - Brand assets are RANKED (spec §4 Core Asset Protocol: Logo > product shot > UI
   > …) and CAPPED per category so a bundle carrying hundreds of assets can't bloat
   the prompt; any omission is disclosed rather than silent. Every count-bearing
-  section is bounded the same way — assets, shadow tokens, and font families /
-  per-family variants — so no single section can blow up the prompt. Assets are
+  Phase-2 section is bounded the same way — assets, shadow tokens, and font
+  families / per-family variants / per-family linked tokens — so no single such
+  section can blow up the prompt (the brand-rules block is separately hard-capped
+  in full). Assets are
   referenced with the ``{{ds-asset:ID}}`` placeholder. This mirrors the existing
   ``{{image:ID}}`` convention (``src/utils/image_utils.py``) but is a DISTINCT
   namespace: ``design_system_asset`` IDs and ``image_assets`` IDs are independent
@@ -93,6 +95,7 @@ MAX_FONT_ASSET_REFERENCES = 8
 MAX_SHADOW_TOKENS = 24
 MAX_FONT_FAMILIES = 12
 MAX_FONT_VARIANTS_PER_FAMILY = 12
+MAX_FONT_TOKENS_PER_FAMILY = 12
 
 # Brand-asset kind ranking — spec §4 "Core Asset Protocol": Logo > product shot >
 # UI > icons > … . Lower rank = higher priority; unknown kinds sort after all
@@ -221,21 +224,25 @@ def _brand_rules_section(skill_md: Optional[str], readme_md: Optional[str]) -> O
         return None
     body = "\n\n".join(body_parts)
 
+    cap = MAX_BRAND_RULES_CHARS  # read at call time (tunable/testable)
+    if cap <= 0:
+        return None  # no budget -> omit the block entirely
+
     prefix = _BRAND_RULES_HEADING + "\n"
     marker = _BRAND_RULES_TRUNCATION_MARKER
-    cap = MAX_BRAND_RULES_CHARS  # read at call time (tunable/testable)
+    full = prefix + body
 
-    # Genuine HARD cap on the FULL block (heading + body + marker), not just the
-    # body. Common case: keep the heading intact and truncate only the body (SKILL
-    # sits first, so the README tail is what drops). Degenerate case (cap too small
-    # for even heading + marker): clamp the whole block. Either way the emitted
-    # block length is <= cap for any cap >= len(marker).
-    if len(prefix) + len(body) <= cap:
-        return prefix + body
-    body_budget = cap - len(prefix) - len(marker)
-    if body_budget > 0:
-        return prefix + body[:body_budget].rstrip() + marker
-    return (prefix + body)[: max(0, cap - len(marker))].rstrip() + marker
+    # Genuine HARD cap on the FULL block: the returned block is <= cap for EVERY
+    # non-negative cap. Emitted whole when it fits; otherwise reserve the marker
+    # and truncate the body (SKILL is first, so the README tail drops, trimming
+    # into the heading only for very small caps). When the cap is smaller than the
+    # marker itself, the marker is truncated so the total still never exceeds cap.
+    if len(full) <= cap:
+        return full
+    keep = cap - len(marker)
+    if keep <= 0:
+        return marker[:cap]
+    return full[:keep].rstrip() + marker
 
 
 def _grouped_tokens(design_system: Any) -> dict[str, list[tuple[str, str]]]:
@@ -348,9 +355,13 @@ def _font_families_section(design_system: Any) -> Optional[str]:
     Richer than the raw ``type`` tokens: each family lists its weight/style
     variants and the tokens that reference it, so generated CSS can wire
     @font-face + font-family correctly. Families/variants/tokens are sorted for
-    output independent of mapping order. Reads the scalar ``font_mapping_json``
-    column (no lazy relationship). Returns ``None`` when the design system carries
-    no font mapping (backward compatible).
+    output independent of mapping order, and every count is capped with disclosed
+    omission — family count (``MAX_FONT_FAMILIES``), per-family variant count
+    (``MAX_FONT_VARIANTS_PER_FAMILY``), and per-family linked-token count
+    (``MAX_FONT_TOKENS_PER_FAMILY``) — so a pathological manifest can't blow up the
+    section. Reads the scalar ``font_mapping_json`` column (no lazy relationship).
+    Returns ``None`` when the design system carries no font mapping (backward
+    compatible).
     """
     mapping = getattr(design_system, "font_mapping_json", None)
     families = mapping.get("families") if isinstance(mapping, dict) else None
@@ -376,9 +387,11 @@ def _font_families_section(design_system: Any) -> Optional[str]:
             weight = str(variant.get("weight", "")).strip()
             style = (variant.get("style") or "").strip()
             variant_labels.append(" ".join(p for p in (weight, style) if p) or "regular")
-        tokens = sorted(
+        tokens_all = sorted(
             str(t) for t in (family.get("tokens") or []) if isinstance(t, str) and t.strip()
         )
+        token_omitted = max(0, len(tokens_all) - MAX_FONT_TOKENS_PER_FAMILY)
+        tokens = tokens_all[:MAX_FONT_TOKENS_PER_FAMILY]
         detail = f"- {name}"
         if variant_labels:
             shown = ", ".join(variant_labels)
@@ -386,7 +399,10 @@ def _font_families_section(design_system: Any) -> Optional[str]:
                 shown += f", +{variant_omitted} more"
             detail += f": weights {shown}"
         if tokens:
-            detail += f" (tokens: {', '.join(tokens)})"
+            shown_tokens = ", ".join(tokens)
+            if token_omitted:
+                shown_tokens += f", +{token_omitted} more"
+            detail += f" (tokens: {shown_tokens})"
         lines.append(detail)
 
     if not lines:
