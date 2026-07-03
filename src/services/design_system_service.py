@@ -479,28 +479,27 @@ def _resolve_name(name_override: Optional[str], manifest: dict, root_prefix: str
 def _collect_tokens(manifest: dict, css_texts: list[str]) -> list[DesignSystemToken]:
     """Tokens from ``manifest['tokens']`` plus the ``:root`` vars in ``css_texts``.
 
-    Both sources run through :func:`_canonicalize_token`. Dedup keys on
-    ``(canonical-name, value)``, so:
+    Both sources run through :func:`_canonicalize_token`; dedup is SOURCE-AWARE so
+    it collapses only genuine restatements, never distinct tokens:
 
-    - the SAME variable defined in BOTH the manifest and the identical CSS
-      ``:root`` (same name AND value) collapses to one row — and because the
-      manifest is processed first, its authoritative ``kind``-derived group wins
-      (this is what prevents the 72->144 duplication and the spacing/shadow-as-
-      ``type`` split);
-    - genuinely-DISTINCT tokens that merely share a canonical name but differ in
-      value (e.g. a manifest ``--brand-primary`` and a CSS ``--primary`` with a
-      different colour) are ALL kept — keying on name alone used to silently drop
-      one of them.
+    - Manifest vs manifest: dedup on EXACT ``(group, canonical-name)``. Two
+      manifest tokens that share a canonical name and value but sit in DIFFERENT
+      groups (legitimate semantic aliases, e.g. ``--brand-core-primary`` and
+      ``--brand-accents-primary``) are BOTH kept.
+    - CSS vs manifest: a CSS ``:root`` var that RESTATES a manifest token — same
+      canonical name AND value — is dropped, so the manifest's authoritative
+      ``kind``-derived group wins (this collapses the 72->144 duplication and the
+      identical fs-12 spacing/type case). A CSS var that shares a name but has a
+      DIFFERENT value is a distinct token and is kept.
+    - CSS vs CSS: identical ``(name, value)`` repeats are collapsed.
 
     ``css_texts`` is pre-decoded by the caller so the CSS bytes are budgeted once
     and reused for retention (no double-charge).
     """
-    by_key: dict[tuple[str, str], tuple[str, str, str]] = {}
-
-    def _add(group: str, name: str, value: str) -> None:
-        # Manifest is processed first, so setdefault keeps the manifest's group
-        # for a true (name, value) duplicate defined again in the CSS.
-        by_key.setdefault((name, value), (group, name, value))
+    tokens_out: list[tuple[str, str, str]] = []
+    manifest_gn: set[tuple[str, str]] = set()  # (group, name) claimed by the manifest
+    manifest_nv: set[tuple[str, str]] = set()  # (name, value) defined by the manifest
+    css_nv: set[tuple[str, str]] = set()  # (name, value) already added from CSS
 
     for entry in manifest.get("tokens") or []:
         if not isinstance(entry, dict):
@@ -516,7 +515,11 @@ def _collect_tokens(manifest: dict, css_texts: list[str]) -> list[DesignSystemTo
         if resolved is None:
             continue
         group, name = resolved
-        _add(group, name, value_str)
+        if (group, name) in manifest_gn:
+            continue  # exact manifest duplicate
+        manifest_gn.add((group, name))
+        manifest_nv.add((name, value_str))
+        tokens_out.append((group, name, value_str))
 
     for css_text in css_texts:
         for var_name, value in _parse_css_root_vars(css_text):
@@ -524,11 +527,16 @@ def _collect_tokens(manifest: dict, css_texts: list[str]) -> list[DesignSystemTo
             if resolved is None:
                 continue
             group, name = resolved
-            _add(group, name, value)
+            if (name, value) in manifest_nv:
+                continue  # restates a manifest token — manifest's group wins
+            if (name, value) in css_nv:
+                continue  # identical CSS repeat
+            css_nv.add((name, value))
+            tokens_out.append((group, name, value))
 
     return [
         DesignSystemToken(group=group, name=name, value=value)
-        for group, name, value in sorted(by_key.values())
+        for group, name, value in sorted(tokens_out)
     ]
 
 
@@ -627,8 +635,9 @@ def _assert_bundle_paths_safe(zf: zipfile.ZipFile) -> None:
     Validated GLOBALLY over every ``ZipInfo`` — independent of, and before, any
     root-prefix scoping — so a malicious entry that falls OUTSIDE the bundle root
     (e.g. ``../evil.png`` when the manifest sits under ``safe/``) is REJECTED, not
-    silently skipped. Absolute paths and ``..`` traversal are refused; symlink
-    entries are refused before any bytes are read.
+    silently skipped. EVERY entry is checked (no exemption for empty or ``.``-only
+    names): absolute paths, ``..`` traversal, and empty/invalid names are refused,
+    and symlink entries are refused before any bytes are read.
     """
     for info in zf.infolist():
         name = info.filename
@@ -636,9 +645,11 @@ def _assert_bundle_paths_safe(zf: zipfile.ZipFile) -> None:
             raise DesignSystemImportError(
                 f"Bundle entry '{name}' is a symlink; refusing to import."
             )
-        if name and _safe_relpath(name) is None:
+        # No ``if name`` guard: an empty (or ``.``-only) name also fails
+        # ``_safe_relpath`` and must be rejected, not skipped.
+        if _safe_relpath(name) is None:
             raise DesignSystemImportError(
-                f"Bundle contains an unsafe path '{name}' (absolute path or "
+                f"Bundle contains an unsafe path '{name}' (empty, absolute, or "
                 "parent-directory traversal); refusing to import."
             )
 

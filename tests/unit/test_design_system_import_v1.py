@@ -505,6 +505,23 @@ class TestZipSlipHardening:
         assert _is_symlink(regular) is False
         assert _is_symlink(zipfile.ZipInfo("z")) is False  # default: not a symlink
 
+    def test_empty_entry_name_rejected(self, session):
+        """BLOCKING 2: an empty ('') ZIP entry name must be validated + rejected,
+        not skipped by an ``if name`` guard."""
+        from src.services.design_system_service import (
+            DesignSystemImportError,
+            import_bundle,
+        )
+
+        buf = io.BytesIO(make_bundle_zip())
+        with zipfile.ZipFile(buf, "a", zipfile.ZIP_DEFLATED) as zf:
+            zf.writestr(zipfile.ZipInfo(""), b"x")  # empty-name entry
+        # Sanity: the crafted bundle really contains an empty-name entry.
+        assert "" in zipfile.ZipFile(io.BytesIO(buf.getvalue())).namelist()
+        with pytest.raises(DesignSystemImportError) as exc:
+            import_bundle(session, zip_bytes=buf.getvalue(), user="u")
+        assert "unsafe" in str(exc.value).lower()
+
 
 # ---------------------------------------------------------------------------
 # Cross-vendor review fix — BLOCKING 4: dedup keeps genuinely-distinct tokens
@@ -557,6 +574,34 @@ class TestTokenDedupKeepsDistinct:
         )
         assert len(rows) == 1
         assert rows[0].group == "spacing"  # manifest kind wins over CSS value-inference
+
+    def test_cross_group_manifest_aliases_both_kept(self, session):
+        """Two manifest tokens with the SAME canonical name AND value but DIFFERENT
+        groups (semantic aliases) are BOTH kept — group-blind (name, value) dedup
+        dropped one; dedup must be source-aware (manifest keyed on group+name)."""
+        from src.database.models.design_system import DesignSystemToken
+        from src.services.design_system_service import import_bundle
+
+        manifest = {
+            "name": "Acme Alias DS",
+            "tokens": [
+                {"name": "--brand-core-primary", "value": "#111111", "kind": "color"},
+                {"name": "--brand-accents-primary", "value": "#111111", "kind": "color"},
+            ],
+            "globalCssPaths": ["colors_and_type.css"],
+        }
+        # The CSS restates both (same name+value) -> must not add duplicates either.
+        css = ":root { --brand-core-primary: #111111; --brand-accents-primary: #111111; }"
+        zip_bytes = make_bundle_zip(manifest=manifest, css=css, files={})
+        ds = import_bundle(session, zip_bytes=zip_bytes, user="u")
+
+        primary = {
+            (t.group, t.value)
+            for t in session.query(DesignSystemToken).filter_by(
+                design_system_id=ds.id, name="primary"
+            )
+        }
+        assert primary == {("core", "#111111"), ("accents", "#111111")}  # BOTH aliases
 
 
 # ---------------------------------------------------------------------------
