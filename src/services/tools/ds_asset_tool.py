@@ -11,6 +11,7 @@ This is a DISTINCT tool from ``search_images`` — that one searches the unrelat
 ``image_assets`` table (user uploads), never design-system assets.
 """
 
+import html
 import json
 import logging
 from typing import Optional
@@ -76,8 +77,11 @@ def build_ds_asset_tool(design_system_id: int) -> StructuredTool:
                     "id": asset.id,
                     "kind": asset.kind,
                     "filename": asset.filename,
+                    # HTML-escape the filename in the alt attribute so a crafted
+                    # bundle filename can't inject markup if the model copies this
+                    # snippet. The "filename" field above stays the raw value (data).
                     "usage": '<img src="{{ds-asset:%d}}" alt="%s"/>'
-                    % (asset.id, asset.filename),
+                    % (asset.id, html.escape(str(asset.filename or ""))),
                 }
                 for asset in assets
             ]

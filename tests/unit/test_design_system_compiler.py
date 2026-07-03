@@ -368,6 +368,18 @@ class TestBrandManual:
         out = compile_design_system(ds)
         assert "BRAND MANUAL" not in out
 
+    def test_manual_precedes_description_and_tokens(self, session):
+        """README-first: the BRAND MANUAL is the first authoritative content block
+        after the header — before BOTH the description and the tokens."""
+        from src.services.design_system_compiler import compile_design_system
+
+        ds = _make_ds(session, description="ACME-DESC-MARKER", tokens=_TOKENS)
+        out = compile_design_system(ds, skill_md=_SKILL_MD, readme_md=_README_MD)
+        assert out.index("SLIDE VISUAL STYLE") < out.index("BRAND MANUAL")
+        assert out.index("BRAND MANUAL") < out.index("ACME-DESC-MARKER")      # before description
+        assert out.index("BRAND MANUAL") < out.index("BRAND COLOR TOKENS")    # before tokens
+        assert out.index("ACME-DESC-MARKER") < out.index("BRAND COLOR TOKENS")  # desc before tokens
+
 
 class TestBrandManualWiring:
     """recompute reads SKILL/README from ``design_system_file`` rows and passes

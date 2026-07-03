@@ -142,6 +142,26 @@ class TestBuildDsAssetTool:
         assert "brand" in tool.description.lower()
         assert "not invent" in tool.description.lower()
 
+    def test_filename_html_escaped_in_usage(self, session):
+        """A crafted filename with HTML metacharacters must be escaped in the
+        returned HTML snippet, so copying it can't inject markup. The raw filename
+        data field is preserved unescaped (it is data, not HTML)."""
+        from src.services.tools import build_ds_asset_tool
+
+        evil = '"><img onerror=alert(1)>.svg'
+        ds = _make_ds(session, name="Acme", assets=[_img("logo", evil)])
+        tool = build_ds_asset_tool(ds.id)
+        with _patched_db(session):
+            out = json.loads(tool.func())
+        row = out["assets"][0]
+        usage = row["usage"]
+        # raw metacharacters do NOT appear unescaped in the HTML snippet
+        assert '"><img onerror=' not in usage
+        assert "&lt;img onerror=" in usage  # '<' escaped
+        assert "&quot;&gt;" in usage         # '">' escaped
+        # the filename DATA field is preserved raw
+        assert row["filename"] == evil
+
 
 def test_contract_and_handles_survive_brace_escape():
     """End-to-end: the compiled ASSET CONTRACT flows in as system-prompt block #2,
