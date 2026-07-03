@@ -344,7 +344,7 @@ def compile_design_system(
     BRAND MANUAL block (FULL, first); both default ``None`` so a design system
     without them — or the legacy positional call — simply omits the block.
 
-    Emitted order: header -> description -> BRAND MANUAL (README + SKILL, full) ->
+    Emitted order: header -> BRAND MANUAL (README + SKILL, full) -> description ->
     tokens (color, type, spacing, shadow; all uncapped) -> fonts (@font-face refs
     + family listing; uncapped) -> templates -> the brand IMAGE ASSET CONTRACT
     (fetch via ``search_brand_assets``). Brand images are NOT enumerated.
@@ -354,14 +354,15 @@ def compile_design_system(
     name = getattr(design_system, "name", None) or "Design System"
     parts.append(f"{_STYLE_HEADER}: {name}")
 
-    description = getattr(design_system, "description", None)
-    if description and description.strip():
-        parts.append(description.strip())
-
-    # The brand manual (FULL README + SKILL) sits FIRST so it frames everything.
+    # The brand manual (FULL README + SKILL) is the FIRST authoritative content
+    # block after the header — README first, before the description and tokens.
     brand_manual = _brand_manual_section(skill_md, readme_md)
     if brand_manual:
         parts.append(brand_manual)
+
+    description = getattr(design_system, "description", None)
+    if description and description.strip():
+        parts.append(description.strip())
 
     grouped = _grouped_tokens(design_system)
 
