@@ -48,11 +48,11 @@ Frontend fetch -> FastAPI router ->   │ ChatService            │
 | Method | Path | Purpose | Backend handler |
 | --- | --- | --- | --- |
 | `POST` | `/api/sessions` | Create new session | `routes/sessions.create_session` |
-| `GET` | `/api/sessions` | List sessions (filtered by authenticated user via `created_by`) | `routes/sessions.list_sessions` |
+| `GET` | `/api/sessions` | List sessions for current user (`created_by`). Query: `limit`, `deck_only` (slide-deck sessions only) | `routes/sessions.list_sessions` |
 | `GET` | `/api/sessions/shared` | List presentations shared via deck_contributors or workspace `global_permission` | `routes/sessions.list_shared_presentations` |
 | `GET` | `/api/sessions/{id}` | Get session details (slides + messages if creator) | `routes/sessions.get_session` |
 | `PATCH` | `/api/sessions/{id}` | Update session metadata (title, slide_count) | `routes/sessions.update_session` |
-| `POST` | `/api/sessions/{id}/duplicate` | Duplicate deck into a new private session (requires CAN_VIEW) | `routes/sessions.duplicate_session` |
+| `POST` | `/api/sessions/{id}/duplicate` | Duplicate deck into a new private session (requires CAN_VIEW). Body: optional `title`, optional `version_number` (save point) | `routes/sessions.duplicate_session` |
 | `DELETE` | `/api/sessions/{id}` | Delete session | `routes/sessions.delete_session` |
 | `GET` | `/api/sessions/{id}/slides` | Get slide deck for session | `routes/sessions.get_session_slides` |
 | `POST` | `/api/sessions/{id}/contribute` | Get or create contributor session for shared deck | `routes/sessions.get_or_create_contributor_session` |

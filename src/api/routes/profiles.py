@@ -64,6 +64,16 @@ def _profile_to_dict(profile: ConfigProfile) -> dict:
     }
 
 
+def _normalized_config_for_compare(raw: Optional[dict | AgentConfig]) -> dict:
+    """Normalize agent_config for duplicate-profile comparison."""
+    if isinstance(raw, AgentConfig):
+        resolved = raw
+    else:
+        resolved = resolve_agent_config(raw)
+    normalized = sanitize_agent_config_for_persist(resolved)
+    return normalized if normalized is not None else AgentConfig().model_dump()
+
+
 def _get_profile(db, profile_id: int) -> ConfigProfile:
     """Load a profile by ID, raising 404 if not found or deleted."""
     profile = (
@@ -120,7 +130,7 @@ async def create_profile(body: CreateProfileRequest):
             .all()
         )
         for existing in existing_profiles:
-            existing_config = sanitize_agent_config_for_persist(existing.agent_config)
+            existing_config = _normalized_config_for_compare(existing.agent_config)
             if existing_config == config_dict:
                 raise HTTPException(
                     status_code=409,
@@ -188,7 +198,7 @@ async def save_from_session(session_id: str, body: SaveProfileRequest):
             .all()
         )
         for existing in existing_profiles:
-            existing_config = sanitize_agent_config_for_persist(existing.agent_config)
+            existing_config = _normalized_config_for_compare(existing.agent_config)
             if existing_config == config_dict:
                 raise HTTPException(
                     status_code=409,
