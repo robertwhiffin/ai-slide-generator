@@ -179,6 +179,26 @@ HTML_OUTPUT_FORMAT = (
     "```"
 )
 
+# Emitted ONLY when a design system is actively selected (see
+# build_generation_system_prompt(design_system_active=...)). A selected design
+# system must win over the generic styling blocks above — chiefly
+# HTML_OUTPUT_FORMAT's "professional modern styling", where 'modern' is a specific
+# aesthetic that could override a non-modern brand. This states, unconditionally
+# for EVERY selected design system, that it is authoritative for ALL visual
+# styling (colors/type/layout/imagery, not just rules text) and takes precedence;
+# the closing "Maintain ... SLIDE VISUAL STYLE" line mirrors the editing-mode
+# defer instruction (EDITING_RULES) so generation defers to the DS the same way.
+DESIGN_SYSTEM_PRECEDENCE = (
+    "DESIGN SYSTEM PRECEDENCE:\n"
+    "A design system is selected (the SLIDE VISUAL STYLE above). It is "
+    "AUTHORITATIVE for ALL visual styling of this deck — colors, typography, "
+    "layout, spacing, shadows, and imagery — and takes precedence over any "
+    "generic styling guidance elsewhere in this prompt. Follow it; do NOT impose "
+    'a competing generic aesthetic (for example a "modern" look) over the brand. '
+    "Maintain brand colors, typography, and styling guidelines from the SLIDE "
+    "VISUAL STYLE."
+)
+
 # ---------------------------------------------------------------------------
 # Editing-only blocks
 # ---------------------------------------------------------------------------
@@ -278,8 +298,18 @@ EDITING_OUTPUT_FORMAT = (
 # Assembly functions
 # ---------------------------------------------------------------------------
 
-def _build_image_section(image_guidelines: Optional[str] = None) -> str:
-    """Build the IMAGE SUPPORT block with optional guidelines."""
+def _build_image_section(
+    image_guidelines: Optional[str] = None,
+    design_system_active: bool = False,
+) -> str:
+    """Build the IMAGE SUPPORT block with optional guidelines.
+
+    When ``design_system_active`` is True, a brand-asset carve-out is appended so
+    the search_images "only when explicitly requested" tone does not discourage
+    proactive placement of the design system's brand assets via
+    ``search_brand_assets``. search_images behavior and the no-DS output are left
+    exactly as-is (byte-identical) — the carve-out only appends when a DS is active.
+    """
     section = IMAGE_SUPPORT
     if image_guidelines and image_guidelines.strip():
         section += (
@@ -290,6 +320,16 @@ def _build_image_section(image_guidelines: Optional[str] = None) -> str:
             "directly without calling search_images.\n\n"
             f"{image_guidelines.strip()}"
         )
+    if design_system_active:
+        section += (
+            "\n\n"
+            "BRAND ASSETS (a design system is selected):\n"
+            "The 'only when the user explicitly requests images' guidance above "
+            "applies to search_images (user uploads). It does NOT limit brand "
+            "assets: you SHOULD proactively place the design system's brand assets "
+            "via the search_brand_assets tool to make slides on-brand, without "
+            "waiting for the user to ask."
+        )
     return section
 
 
@@ -297,10 +337,16 @@ def build_generation_system_prompt(
     slide_style: str,
     deck_prompt: Optional[str] = None,
     image_guidelines: Optional[str] = None,
+    design_system_active: bool = False,
 ) -> str:
     """Assemble a complete system prompt for slide *generation* mode.
 
     Includes full-deck HTML output rules. Excludes editing instructions.
+
+    ``design_system_active`` is True ONLY when a design system is the resolved
+    slide-style source (set by agent_factory._get_prompt_content). It gates the
+    DS-only precedence + brand-asset blocks; when False the assembled prompt is
+    BYTE-IDENTICAL to the legacy/default output (no-DS invariant).
     """
     parts: list[str] = []
 
@@ -316,7 +362,11 @@ def build_generation_system_prompt(
     parts.append(SLIDE_GUIDELINES)
     parts.append(CHART_JS_RULES)
     parts.append(HTML_OUTPUT_FORMAT)
-    parts.append(_build_image_section(image_guidelines))
+    # A selected design system is authoritative — emitted AFTER the generic styling
+    # blocks (esp. HTML_OUTPUT_FORMAT's 'modern') so it overrides them. DS path only.
+    if design_system_active:
+        parts.append(DESIGN_SYSTEM_PRECEDENCE)
+    parts.append(_build_image_section(image_guidelines, design_system_active=design_system_active))
 
     return "\n\n".join(parts)
 

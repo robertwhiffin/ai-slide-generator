@@ -113,6 +113,9 @@ def _get_prompt_content(
     slide_style = DEFAULT_SLIDE_STYLE
     deck_prompt: Optional[str] = None
     image_guidelines: Optional[str] = None
+    # True only when a design system actually resolves to compiled content — gates
+    # the DS-only precedence/brand blocks so the no-DS/legacy path stays identical.
+    design_system_active = False
 
     # Resolve the slide-style source. A design system (if selected) takes
     # precedence over a legacy slide style; each degrades to DEFAULT_SLIDE_STYLE
@@ -136,6 +139,7 @@ def _get_prompt_content(
                     # compiled_style_content is the design system's drop-in
                     # equivalent of slide_style_library.style_content.
                     slide_style = design_system.compiled_style_content
+                    design_system_active = True
                 else:
                     logger.warning(
                         "Design system not found or not compiled, using default",
@@ -223,6 +227,7 @@ def _get_prompt_content(
             slide_style=slide_style,
             deck_prompt=deck_prompt,
             image_guidelines=image_guidelines,
+            design_system_active=design_system_active,
         )
 
     return {
