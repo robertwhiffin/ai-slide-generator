@@ -530,6 +530,9 @@ def _run_migrations(engine, schema: str | None = None):
         # --- design system: add is_active (soft-delete) to pre-existing tables ---
         _migrate_design_system_soft_delete(conn, inspector, schema, _qual, is_sqlite)
 
+        # --- design system (v1): add font_mapping_json to pre-existing tables ---
+        _migrate_design_system_font_mapping(conn, inspector, schema, _qual, is_sqlite)
+
         # --- keep newly created objects owned by the shared role (prod forks) ---
         _reassign_new_objects_to_shared_owner(conn, is_sqlite)
 
@@ -537,10 +540,12 @@ def _run_migrations(engine, schema: str | None = None):
 def _migrate_design_system_tables(conn, schema: str | None = None) -> None:
     """Create the additive design-system tables (idempotent, dialect-safe).
 
-    Phase 1 of the Design System Library. Adds three NEW tables — ``design_system``,
-    ``design_system_asset``, ``design_system_token`` — without touching
-    ``slide_style_library`` or any existing table, so the current slide-style
-    prompt path is unaffected.
+    Design System Library. Adds four NEW tables — ``design_system``,
+    ``design_system_asset``, ``design_system_token``, ``design_system_file`` —
+    without touching ``slide_style_library`` or any existing table, so the current
+    slide-style prompt path is unaffected. ``design_system_file`` (v1 Phase 1)
+    retains bundle source files + path references and is created LAST so its
+    foreign keys to ``design_system`` and ``design_system_asset`` resolve.
 
     ``Base.metadata.create_all()`` (run first in ``init_db``) already creates these
     on fresh installs; this hand-rolled step guarantees they also exist on
@@ -548,16 +553,17 @@ def _migrate_design_system_tables(conn, schema: str | None = None) -> None:
     exercised on its own. Creation is driven from the ORM metadata via
     ``Table.create(checkfirst=True)`` — a single source of truth for the schema,
     idempotent (a no-op when the table exists) and correctly compiled for both
-    PostgreSQL/Lakebase and the SQLite used in tests. Parent table is created
+    PostgreSQL/Lakebase and the SQLite used in tests. Parent tables are created
     first so the child foreign keys resolve.
     """
     from src.database.models.design_system import (
         DesignSystem,
         DesignSystemAsset,
+        DesignSystemFile,
         DesignSystemToken,
     )
 
-    for model in (DesignSystem, DesignSystemAsset, DesignSystemToken):
+    for model in (DesignSystem, DesignSystemAsset, DesignSystemToken, DesignSystemFile):
         table = model.__table__
         # Match init_db()'s schema handling so a qualified deployment creates the
         # tables in the Lakebase schema; guarded so it stays a no-op on repeat.
@@ -596,6 +602,37 @@ def _migrate_design_system_soft_delete(conn, inspector, schema, _qual, is_sqlite
     logger.info("Migration: adding is_active column to design_system")
     conn.execute(text(
         f"ALTER TABLE {_qual('design_system')} ADD COLUMN is_active BOOLEAN DEFAULT TRUE NOT NULL"
+    ))
+
+
+def _migrate_design_system_font_mapping(conn, inspector, schema, _qual, is_sqlite) -> None:
+    """Add ``font_mapping_json`` to ``design_system`` (v1 Phase 1, idempotent).
+
+    v1 Phase 1 stores a normalized font mapping (manifest ``fonts[]`` /
+    ``brandFonts[]`` -> family/weight/style + token linkage) on the parent record.
+    ``Base.metadata.create_all()`` adds the column on fresh installs, but does NOT
+    alter a ``design_system`` table provisioned by an earlier deploy; this
+    hand-rolled ALTER backfills it. The column is nullable (a bundle may declare
+    no fonts) so no default/backfill value is required. Column existence is probed
+    with the inspector passed from ``_run_migrations`` (or a fresh one when called
+    standalone). Dialect-safe: ``JSONB`` on PostgreSQL/Lakebase, ``JSON`` (TEXT
+    affinity) on the SQLite used in tests — matching the model's ``with_variant``
+    column and the existing ``agent_config JSON`` migration.
+    """
+    from sqlalchemy import inspect, text
+
+    insp = inspector or inspect(conn)
+    try:
+        cols = {c["name"] for c in insp.get_columns("design_system", schema=schema)}
+    except Exception:
+        return
+    if not cols or "font_mapping_json" in cols:
+        return
+
+    col_type = "JSON" if is_sqlite else "JSONB"
+    logger.info("Migration: adding font_mapping_json column to design_system")
+    conn.execute(text(
+        f"ALTER TABLE {_qual('design_system')} ADD COLUMN font_mapping_json {col_type} NULL"
     ))
 
 
