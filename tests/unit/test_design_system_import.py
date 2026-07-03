@@ -88,7 +88,7 @@ class TestImportHappyPath:
         assert "title-shot.png" not in by_name
         assert "preview.png" not in by_name
 
-    def test_import_populates_compiled_style_content_with_ds_asset_placeholders(self, session):
+    def test_import_populates_compiled_style_content(self, session):
         from src.database.models.design_system import DesignSystemAsset
         from src.services.design_system_service import import_bundle
 
@@ -97,11 +97,18 @@ class TestImportHappyPath:
         assert ds.compiled_style_content
         assert "SLIDE VISUAL STYLE:" in ds.compiled_style_content
         assert "--brand-core-primary: #123456;" in ds.compiled_style_content
-        # Each stored image/font asset is referenced by its real DB id.
+        # Brand IMAGE assets are fetched on demand via the search_brand_assets tool
+        # (the compiled prompt carries the contract), NOT enumerated by id.
+        assert "search_brand_assets" in ds.compiled_style_content
         logo = session.query(DesignSystemAsset).filter_by(
             design_system_id=ds.id, filename="logo.svg"
         ).one()
-        assert f"{{{{ds-asset:{logo.id}}}}}" in ds.compiled_style_content
+        assert f"{{{{ds-asset:{logo.id}}}}}" not in ds.compiled_style_content
+        # Fonts ARE wired inline via @font-face, referenced by their real DB id.
+        font = session.query(DesignSystemAsset).filter_by(
+            design_system_id=ds.id, filename="acme-sans.woff2"
+        ).one()
+        assert f"{{{{ds-asset:{font.id}}}}}" in ds.compiled_style_content
         # Uses the ds-asset namespace, never the unrelated image namespace.
         assert "{{image:" not in ds.compiled_style_content
 
