@@ -557,19 +557,45 @@ class TestBrandRules:
         assert out.index("SLIDE VISUAL STYLE") < out.index("BRAND RULES")
         assert out.index("BRAND RULES") < out.index("BRAND COLOR TOKENS")
 
-    def test_budget_cap_truncates_with_marker(self, session, monkeypatch):
+    def test_budget_cap_prioritizes_skill_and_truncates_readme(self, session, monkeypatch):
         import src.services.design_system_compiler as compiler
 
-        monkeypatch.setattr(compiler, "MAX_BRAND_RULES_CHARS", 80)
+        monkeypatch.setattr(compiler, "MAX_BRAND_RULES_CHARS", 160)
         skill = "SKILL-HEAD keep me."
-        readme = "## Rules\n" + ("acme-rule " * 200)  # far over the cap
+        readme = "## Rules\n" + ("acme-rule " * 400)  # far over the cap
         ds = _make_ds(session)
         out = compiler.compile_design_system(ds, skill_md=skill, readme_md=readme)
         assert "…[truncated]" in out
-        # SKILL is prioritized: its text survives even though README is truncated.
+        # SKILL sits first, so its text survives while the README tail is dropped.
         assert "SKILL-HEAD keep me." in out
-        # The rules body is bounded near the cap (not an unbounded dump).
-        assert out.count("acme-rule ") < 200
+        assert out.count("acme-rule ") < 400
+
+    def test_brand_rules_block_is_hard_capped(self, monkeypatch):
+        """The FULL emitted block (heading + body + marker) never exceeds the cap —
+        including caps smaller than the heading itself."""
+        import src.services.design_system_compiler as compiler
+
+        skill = "SK " * 60
+        readme = "## Rules\n" + ("acme-rule " * 400)
+        for cap in (30, 64, 200, 1000):
+            monkeypatch.setattr(compiler, "MAX_BRAND_RULES_CHARS", cap)
+            block = compiler._brand_rules_section(skill, readme)
+            assert block is not None
+            assert len(block) <= cap, f"block len {len(block)} exceeds cap {cap}"
+
+    def test_compiled_brand_rules_block_within_cap(self, session, monkeypatch):
+        """Same bound, verified end-to-end by extracting the block from compile output."""
+        import src.services.design_system_compiler as compiler
+
+        ds = _make_ds(session, description=None)  # no other sections follow the block
+        skill = _SKILL_MD
+        readme = _README_MD + "\n\n## Rules\n" + ("acme-rule " * 400)
+        for cap in (160, 500):
+            monkeypatch.setattr(compiler, "MAX_BRAND_RULES_CHARS", cap)
+            out = compiler.compile_design_system(ds, skill_md=skill, readme_md=readme)
+            block = out[out.index(compiler._BRAND_RULES_HEADING):]
+            assert len(block) <= cap, f"block len {len(block)} exceeds cap {cap}"
+            assert "…[truncated]" in block
 
     def test_only_skill_no_readme(self, session):
         from src.services.design_system_compiler import compile_design_system
@@ -586,6 +612,27 @@ class TestBrandRules:
         readme = "# Acme\n\n## Overview\nJust prose, no rule headings here.\n"
         out = compile_design_system(ds, skill_md=None, readme_md=readme)
         assert "BRAND RULES" not in out
+
+    def test_nested_non_rule_subsection_excluded(self, session):
+        """A non-rule subsection nested under a rule heading is dropped, while a
+        nested RULE subsection is kept — extraction scopes to each heading's own
+        direct content, not everything below a matched heading."""
+        from src.services.design_system_compiler import compile_design_system
+
+        readme = (
+            "# Acme\n\n"
+            "## Usage\n"
+            "Use brand assets responsibly.\n\n"
+            "### History\n"
+            "Founded in a fixture in 2020 — narrative, not a rule.\n\n"
+            "### Logo Rules\n"
+            "Keep clear space around the logo.\n"
+        )
+        ds = _make_ds(session)
+        out = compile_design_system(ds, skill_md=None, readme_md=readme)
+        assert "Use brand assets responsibly." in out      # rule heading direct prose
+        assert "Keep clear space around the logo." in out   # nested RULE subsection kept
+        assert "Founded in a fixture in 2020" not in out     # nested NON-rule dropped
 
 
 class TestBrandRulesWiring:
@@ -655,6 +702,22 @@ class TestShadowTokens:
         out = compile_design_system(ds)
         assert out.index("--brand-shadow-lg") < out.index("--brand-shadow-sm")
 
+    def test_shadow_section_capped_with_disclosure(self, session, monkeypatch):
+        """A pathological manifest with many shadow tokens is bounded per section."""
+        import src.services.design_system_compiler as compiler
+
+        monkeypatch.setattr(compiler, "MAX_SHADOW_TOKENS", 2)
+        tokens = [
+            {"group": "shadow", "name": f"s{i}", "value": f"0 {i}px {i}px #000000"}
+            for i in range(5)
+        ]
+        ds = _make_ds(session, tokens=tokens)
+        out = compiler.compile_design_system(ds)
+        assert "--brand-shadow-s0:" in out
+        assert "--brand-shadow-s1:" in out
+        assert "--brand-shadow-s4:" not in out  # beyond the cap
+        assert "shadow token(s) omitted" in out
+
 
 class TestFontMapping:
     """Item 4: font_mapping_json drives a richer TYPOGRAPHY family listing."""
@@ -684,17 +747,94 @@ class TestFontMapping:
         out = compile_design_system(ds)
         assert out.index("Acme Mono") < out.index("Acme Sans")
 
+    def test_font_families_capped_with_disclosure(self, session, monkeypatch):
+        """A pathological manifest with many families is bounded per section."""
+        import src.services.design_system_compiler as compiler
+
+        monkeypatch.setattr(compiler, "MAX_FONT_FAMILIES", 2)
+        mapping = {
+            "families": [
+                {"family": f"Fam{i}", "tokens": [],
+                 "variants": [{"weight": "400", "style": "normal", "files": []}]}
+                for i in range(5)
+            ]
+        }
+        ds = _make_ds(session, font_mapping_json=mapping)
+        out = compiler.compile_design_system(ds)
+        assert "- Fam0" in out and "- Fam1" in out
+        assert "- Fam4" not in out  # beyond the cap
+        assert "font families omitted" in out
+
+    def test_font_variants_capped_per_family(self, session, monkeypatch):
+        """Variants per family are bounded too (one family can't blow up a line)."""
+        import src.services.design_system_compiler as compiler
+
+        monkeypatch.setattr(compiler, "MAX_FONT_VARIANTS_PER_FAMILY", 2)
+        mapping = {
+            "families": [{
+                "family": "Fam", "tokens": [],
+                "variants": [{"weight": str(w), "style": "normal", "files": []}
+                             for w in (100, 200, 300, 400, 500)],
+            }]
+        }
+        ds = _make_ds(session, font_mapping_json=mapping)
+        out = compiler.compile_design_system(ds)
+        assert "+3 more" in out  # 5 variants, cap 2 -> 3 omitted
+
 
 class TestAssetCuration:
     """Item 5: rank (Logo > product shot > UI > …) and cap the asset references."""
 
-    def test_ranked_logo_before_product_shot_before_icon(self, session):
+    def test_ranked_logo_before_imagery_before_icon(self, session):
+        """Real importer kinds: logo > illustration/background imagery > icon (UI).
+        ``design_system_service._infer_asset_kind`` never emits a 'product'/'ui'
+        kind, so illustration is the closest real imagery kind here; the spec's own
+        product/ui vocabulary is exercised in the tests below."""
         from src.services.design_system_compiler import compile_design_system
 
         ds = _make_ds(session, assets=_CURATION_ASSETS)
         out = compile_design_system(ds)
-        assert out.index("logo-a.svg") < out.index("art.png")  # logo > product shot
-        assert out.index("art.png") < out.index("icon-a.svg")  # product shot > UI icon
+        assert out.index("logo-a.svg") < out.index("art.png")  # logo > imagery
+        assert out.index("art.png") < out.index("icon-a.svg")  # imagery > UI icon
+
+    def test_spec_vocabulary_kinds_ranked_logo_product_ui_icon(self, session):
+        """Forward-compat: the spec §4 Core Asset Protocol vocabulary
+        (Logo > product shot > UI > icon) ranks correctly for those kind strings,
+        even though the v1 importer doesn't emit them (``kind`` is a free string)."""
+        from src.services.design_system_compiler import compile_design_system
+
+        assets = [
+            {"kind": "icon", "filename": "i.svg", "mime": "image/svg+xml",
+             "data": b"<svg/>", "size_bytes": 6},
+            {"kind": "ui", "filename": "u.png", "mime": "image/png",
+             "data": b"png", "size_bytes": 3},
+            {"kind": "product", "filename": "p.png", "mime": "image/png",
+             "data": b"png", "size_bytes": 3},
+            {"kind": "logo", "filename": "l.svg", "mime": "image/svg+xml",
+             "data": b"<svg/>", "size_bytes": 6},
+        ]
+        ds = _make_ds(session, assets=assets)
+        out = compile_design_system(ds)
+        assert out.index("l.svg") < out.index("p.png")  # logo > product shot
+        assert out.index("p.png") < out.index("u.png")  # product shot > UI
+        assert out.index("u.png") < out.index("i.svg")  # UI > icon
+
+    def test_cap_keeps_product_shot_over_icon(self, session, monkeypatch):
+        """When a cap forces a drop, a product shot outranks an icon and is kept."""
+        import src.services.design_system_compiler as compiler
+
+        monkeypatch.setattr(compiler, "MAX_IMAGE_ASSET_REFERENCES", 1)
+        assets = [
+            {"kind": "icon", "filename": "i.svg", "mime": "image/svg+xml",
+             "data": b"<svg/>", "size_bytes": 6},
+            {"kind": "product", "filename": "p.png", "mime": "image/png",
+             "data": b"png", "size_bytes": 3},
+        ]
+        ds = _make_ds(session, assets=assets)
+        out = compiler.compile_design_system(ds)
+        assert "p.png" in out       # product shot kept
+        assert "i.svg" not in out   # icon dropped past the cap
+        assert "omitted" in out
 
     def test_cap_limits_count_and_notes_omitted(self, session, monkeypatch):
         import src.services.design_system_compiler as compiler

@@ -29,8 +29,10 @@ Design decisions:
   tokens alone.
 - Brand assets are RANKED (spec §4 Core Asset Protocol: Logo > product shot > UI
   > …) and CAPPED per category so a bundle carrying hundreds of assets can't bloat
-  the prompt; any omission is disclosed rather than silent. They are referenced
-  with the ``{{ds-asset:ID}}`` placeholder. This mirrors the existing
+  the prompt; any omission is disclosed rather than silent. Every count-bearing
+  section is bounded the same way — assets, shadow tokens, and font families /
+  per-family variants — so no single section can blow up the prompt. Assets are
+  referenced with the ``{{ds-asset:ID}}`` placeholder. This mirrors the existing
   ``{{image:ID}}`` convention (``src/utils/image_utils.py``) but is a DISTINCT
   namespace: ``design_system_asset`` IDs and ``image_assets`` IDs are independent
   sequences, so reusing ``{{image:ID}}`` would resolve to an unrelated image.
@@ -75,23 +77,50 @@ _EXCLUDED_ASSET_KINDS = ("template_shot",)
 # multi-KB documentation dump. Read at call time so it stays tunable/testable.
 MAX_BRAND_RULES_CHARS = 6000
 _BRAND_RULES_TRUNCATION_MARKER = "\n…[truncated]"
+# Stable heading for the block. The cap counts this against the budget, so the
+# text stays concise to leave room for the actual rules.
+_BRAND_RULES_HEADING = (
+    "BRAND RULES / USAGE (follow these brand rules; they take precedence over "
+    "generic styling):"
+)
 
-# Max brand-asset references emitted per category. Real bundles ship hundreds of
-# assets; a flat dump would bloat the prompt, so images are ranked (see
-# ``_ASSET_KIND_RANK``) and only the highest-priority ones are kept.
+# Max references emitted per token/asset-driven section. Real bundles ship
+# hundreds of assets, and a pathological manifest could declare arbitrarily many
+# tokens/families, so every such section is ranked/sorted and capped — with the
+# omission disclosed — so no single section can bloat the prompt with a flat dump.
 MAX_IMAGE_ASSET_REFERENCES = 12
 MAX_FONT_ASSET_REFERENCES = 8
+MAX_SHADOW_TOKENS = 24
+MAX_FONT_FAMILIES = 12
+MAX_FONT_VARIANTS_PER_FAMILY = 12
 
 # Brand-asset kind ranking — spec §4 "Core Asset Protocol": Logo > product shot >
-# UI > … . Lower rank = higher priority; unknown kinds sort after known ones.
+# UI > icons > … . Lower rank = higher priority; unknown kinds sort after all
+# known ones. The v1 importer (``design_system_service._infer_asset_kind``) only
+# ever produces {logo, lockup, icon, illustration, background, font}, so those are
+# the kinds actually ranked today; the product/ui/screenshot/wordmark aliases are
+# forward-compat for structured/imported systems that carry the spec's own
+# vocabulary (``design_system_asset.kind`` is a free string), each mapped to its
+# spec tier so a cap keeps a product shot over an icon.
 _ASSET_KIND_RANK = {
+    # Logo tier
     "logo": 0,
+    "wordmark": 0,
     "lockup": 1,
-    "illustration": 2,
-    "background": 3,
-    "icon": 4,
+    # Product-shot / brand-imagery tier
+    "product": 2,
+    "product_shot": 2,
+    "product-shot": 2,
+    "photo": 2,
+    "illustration": 3,
+    "background": 4,
+    # UI tier (screenshots, then icons)
+    "ui": 5,
+    "ui_screenshot": 5,
+    "screenshot": 5,
+    "icon": 6,
 }
-_UNKNOWN_ASSET_RANK = len(_ASSET_KIND_RANK)
+_UNKNOWN_ASSET_RANK = max(_ASSET_KIND_RANK.values()) + 1
 
 # README headings whose section is a brand RULE / GUIDANCE (do's & don'ts,
 # voice/tone, data-viz, usage/accessibility). Matched case-insensitively as a
@@ -140,11 +169,13 @@ def _is_rule_heading(title: str) -> bool:
 def _extract_readme_rule_sections(readme_md: str) -> str:
     """Return only the RULE/GUIDANCE sections of a README, in document order.
 
-    A section is an ATX-heading line (``#``..``######``) plus every line up to the
-    next heading of the same-or-higher level. A section is kept only when its
-    heading matches a rule keyword (:data:`_README_RULE_KEYWORDS`); overview /
-    history / background prose is dropped, so only concise brand rules — not the
-    whole multi-KB README — reach the prompt. Pure and deterministic.
+    Each ATX heading (``#``..``######``) is evaluated independently: a heading is
+    kept when its OWN text matches a rule keyword (:data:`_README_RULE_KEYWORDS`),
+    and only its DIRECT content (the lines up to the NEXT heading of ANY level) is
+    included. So a non-rule subsection nested under a rule heading (e.g.
+    ``### History`` under ``## Usage``) is dropped, while a nested RULE subsection
+    is still kept via its own heading. Overview/history/background prose is
+    excluded — only concise brand rules reach the prompt. Pure and deterministic.
     """
     lines = (readme_md or "").splitlines()
     sections: list[str] = []
@@ -154,31 +185,28 @@ def _extract_readme_rule_sections(readme_md: str) -> str:
         if not match:
             i += 1
             continue
-        level = len(match.group(1))
-        if not _is_rule_heading(match.group(2).strip()):
-            i += 1
-            continue
-        block = [lines[i]]
+        keep = _is_rule_heading(match.group(2).strip())
+        block = [lines[i]] if keep else []
         j = i + 1
-        while j < n:
-            inner = _ATX_HEADING_RE.match(lines[j])
-            if inner and len(inner.group(1)) <= level:
-                break
-            block.append(lines[j])
+        while j < n and not _ATX_HEADING_RE.match(lines[j]):
+            if keep:
+                block.append(lines[j])
             j += 1
-        sections.append("\n".join(block).rstrip())
+        if keep:
+            sections.append("\n".join(block).rstrip())
         i = j
     return "\n\n".join(sections).strip()
 
 
 def _brand_rules_section(skill_md: Optional[str], readme_md: Optional[str]) -> Optional[str]:
     """Assemble the BRAND RULES / USAGE block: SKILL.md in full, then the README
-    rule-sections, hard-capped at :data:`MAX_BRAND_RULES_CHARS`.
+    rule-sections, hard-capped so the FULL emitted block (heading + body +
+    truncation marker) is <= :data:`MAX_BRAND_RULES_CHARS`.
 
     SKILL.md is the concise, authoritative rules doc, so it is emitted first and
-    prioritized; when the combined text exceeds the budget the README tail is
-    truncated with an explicit marker (never an unbounded dump). Returns ``None``
-    when neither source contributes text, so a design system without a SKILL/README
+    prioritized; when the block exceeds the budget the README tail is truncated
+    with an explicit marker (never an unbounded dump). Returns ``None`` when
+    neither source contributes text, so a design system without a SKILL/README
     simply omits the block (backward compatible).
     """
     skill = (skill_md or "").strip()
@@ -191,20 +219,23 @@ def _brand_rules_section(skill_md: Optional[str], readme_md: Optional[str]) -> O
         body_parts.append(readme_rules)
     if not body_parts:
         return None
-
     body = "\n\n".join(body_parts)
-    # Hard budget cap read at call time (tunable/testable). SKILL sits first, so
-    # the README tail is what gets truncated; the marker signals dropped content.
-    if len(body) > MAX_BRAND_RULES_CHARS:
-        body = body[:MAX_BRAND_RULES_CHARS].rstrip() + _BRAND_RULES_TRUNCATION_MARKER
 
-    return "\n".join(
-        [
-            "BRAND RULES / USAGE (follow these brand rules; they take precedence "
-            "over generic styling):",
-            body,
-        ]
-    )
+    prefix = _BRAND_RULES_HEADING + "\n"
+    marker = _BRAND_RULES_TRUNCATION_MARKER
+    cap = MAX_BRAND_RULES_CHARS  # read at call time (tunable/testable)
+
+    # Genuine HARD cap on the FULL block (heading + body + marker), not just the
+    # body. Common case: keep the heading intact and truncate only the body (SKILL
+    # sits first, so the README tail is what drops). Degenerate case (cap too small
+    # for even heading + marker): clamp the whole block. Either way the emitted
+    # block length is <= cap for any cap >= len(marker).
+    if len(prefix) + len(body) <= cap:
+        return prefix + body
+    body_budget = cap - len(prefix) - len(marker)
+    if body_budget > 0:
+        return prefix + body[:body_budget].rstrip() + marker
+    return (prefix + body)[: max(0, cap - len(marker))].rstrip() + marker
 
 
 def _grouped_tokens(design_system: Any) -> dict[str, list[tuple[str, str]]]:
@@ -271,16 +302,21 @@ def _shadow_sections(grouped: dict[str, list[tuple[str, str]]]) -> list[str]:
     entries = grouped.get("shadow")
     if not entries:
         return []
+    omitted = max(0, len(entries) - MAX_SHADOW_TOKENS)
     spec_lines = ["BRAND SHADOWS:"]
     css_vars: list[str] = []
     seen: set[str] = set()
-    for name, value in entries:
+    for name, value in entries[:MAX_SHADOW_TOKENS]:
         spec_lines.append(f"- {name}: {value}")
         slug = _slug(name)
         if slug in seen:
             continue
         seen.add(slug)
         css_vars.append(f"  --brand-shadow-{slug}: {value};")
+    if omitted:
+        spec_lines.append(
+            f"(+{omitted} more shadow token(s) omitted to keep the prompt focused.)"
+        )
     spec = "\n".join(spec_lines)
     css = "\n".join(
         [
@@ -321,17 +357,22 @@ def _font_families_section(design_system: Any) -> Optional[str]:
     if not isinstance(families, list):
         return None
 
-    lines: list[str] = []
-    for family in sorted(
+    ordered = sorted(
         (f for f in families if isinstance(f, dict) and f.get("family")),
         key=lambda f: str(f.get("family")),
-    ):
+    )
+    family_omitted = max(0, len(ordered) - MAX_FONT_FAMILIES)
+
+    lines: list[str] = []
+    for family in ordered[:MAX_FONT_FAMILIES]:
         name = str(family.get("family"))
-        variant_labels: list[str] = []
-        for variant in sorted(
+        variants = sorted(
             (v for v in (family.get("variants") or []) if isinstance(v, dict)),
             key=lambda v: (str(v.get("weight", "")), str(v.get("style", ""))),
-        ):
+        )
+        variant_omitted = max(0, len(variants) - MAX_FONT_VARIANTS_PER_FAMILY)
+        variant_labels: list[str] = []
+        for variant in variants[:MAX_FONT_VARIANTS_PER_FAMILY]:
             weight = str(variant.get("weight", "")).strip()
             style = (variant.get("style") or "").strip()
             variant_labels.append(" ".join(p for p in (weight, style) if p) or "regular")
@@ -340,16 +381,25 @@ def _font_families_section(design_system: Any) -> Optional[str]:
         )
         detail = f"- {name}"
         if variant_labels:
-            detail += f": weights {', '.join(variant_labels)}"
+            shown = ", ".join(variant_labels)
+            if variant_omitted:
+                shown += f", +{variant_omitted} more"
+            detail += f": weights {shown}"
         if tokens:
             detail += f" (tokens: {', '.join(tokens)})"
         lines.append(detail)
 
     if not lines:
         return None
-    return "\n".join(
-        ["BRAND FONT FAMILIES (load these families; apply them to the matching tokens):", *lines]
-    )
+    section = [
+        "BRAND FONT FAMILIES (load these families; apply them to the matching tokens):",
+        *lines,
+    ]
+    if family_omitted:
+        section.append(
+            f"(+{family_omitted} more font families omitted to keep the prompt focused.)"
+        )
+    return "\n".join(section)
 
 
 def _template_section(design_system: Any) -> Optional[str]:
