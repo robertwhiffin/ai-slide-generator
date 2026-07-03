@@ -851,36 +851,88 @@ class TestAssetCuration:
         assert out.index("p.png") < out.index("u.png")  # product shot > UI
         assert out.index("u.png") < out.index("i.svg")  # UI > icon
 
-    def test_cap_keeps_product_shot_over_icon(self, session, monkeypatch):
-        """When a cap forces a drop, a product shot outranks an icon and is kept."""
-        import src.services.design_system_compiler as compiler
+    def test_lower_ranked_kinds_not_starved_by_logos(self, session):
+        """The reported defect: with a flat image cap, many logos crowded out every
+        other kind. Per-kind caps guarantee non-logo kinds still appear."""
+        from src.services.design_system_compiler import compile_design_system
 
-        monkeypatch.setattr(compiler, "MAX_IMAGE_ASSET_REFERENCES", 1)
         assets = [
-            {"kind": "icon", "filename": "i.svg", "mime": "image/svg+xml",
+            {"kind": "logo", "filename": f"logo-{i:02d}.svg", "mime": "image/svg+xml",
+             "data": b"<svg/>", "size_bytes": 6}
+            for i in range(30)
+        ] + [
+            {"kind": "icon", "filename": "icon-x.svg", "mime": "image/svg+xml",
              "data": b"<svg/>", "size_bytes": 6},
-            {"kind": "product", "filename": "p.png", "mime": "image/png",
+            {"kind": "illustration", "filename": "art-x.png", "mime": "image/png",
+             "data": b"png", "size_bytes": 3},
+            {"kind": "background", "filename": "bg-x.png", "mime": "image/png",
              "data": b"png", "size_bytes": 3},
         ]
         ds = _make_ds(session, assets=assets)
-        out = compiler.compile_design_system(ds)
-        assert "p.png" in out       # product shot kept
-        assert "i.svg" not in out   # icon dropped past the cap
-        assert "omitted" in out
+        out = compile_design_system(ds)
+        # Non-logo kinds are represented despite 30 logos.
+        assert "[icon]" in out and "icon-x.svg" in out
+        assert "[illustration]" in out and "art-x.png" in out
+        assert "[background]" in out and "bg-x.png" in out
 
-    def test_cap_limits_count_and_notes_omitted(self, session, monkeypatch):
+    def test_per_kind_cap_bounds_and_discloses(self, session, monkeypatch):
+        """Each kind is bounded by ITS OWN cap; exceeding it discloses the omission
+        without affecting other kinds."""
         import src.services.design_system_compiler as compiler
 
-        monkeypatch.setattr(compiler, "MAX_IMAGE_ASSET_REFERENCES", 3)
-        ds = _make_ds(session, assets=_CURATION_ASSETS)  # 5 images: 2 logo,1 illus,2 icon
+        monkeypatch.setitem(compiler._IMAGE_KIND_CAPS, "icon", 2)
+        assets = [
+            {"kind": "icon", "filename": f"i{i}.svg", "mime": "image/svg+xml",
+             "data": b"<svg/>", "size_bytes": 6}
+            for i in range(5)
+        ] + [
+            {"kind": "logo", "filename": "l.svg", "mime": "image/svg+xml",
+             "data": b"<svg/>", "size_bytes": 6},
+        ]
+        ds = _make_ds(session, assets=assets)
         out = compiler.compile_design_system(ds)
-        # Top-3 by rank kept: both logos + the illustration.
-        assert "logo-a.svg" in out and "logo-b.svg" in out
-        assert "art.png" in out
-        # Lowest-priority icons dropped past the cap.
-        assert "icon-a.svg" not in out and "icon-b.svg" not in out
-        # ...and the omission is disclosed rather than silent.
-        assert "omitted" in out
+        assert out.count("[icon]") == 2       # bounded by icon's own cap
+        assert "+3 more icon" in out          # 5 icons, cap 2 -> 3 disclosed
+        assert "[logo]" in out                # a different kind is unaffected
+
+    def test_every_present_kind_represented_and_bounded(self, session):
+        """Many assets across ALL kinds: every present kind appears, each bounded by
+        its per-kind cap, per-kind omission disclosed, and the total equals the sum
+        of the per-kind caps (every kind here exceeds its cap)."""
+        import src.services.design_system_compiler as compiler
+        from src.services.design_system_compiler import compile_design_system
+
+        counts = {"logo": 20, "lockup": 200, "icon": 90, "illustration": 40, "background": 10}
+        assets: list[dict] = []
+        for kind, n in counts.items():
+            mime = "image/svg+xml" if kind in ("logo", "lockup", "icon") else "image/png"
+            assets += [
+                {"kind": kind, "filename": f"{kind}-{i:03d}.x", "mime": mime,
+                 "data": b"x", "size_bytes": 1}
+                for i in range(n)
+            ]
+        assets += [
+            {"kind": "font", "filename": f"font-{i}.woff2", "mime": "font/woff2",
+             "data": b"x", "size_bytes": 1}
+            for i in range(10)
+        ]
+        ds = _make_ds(session, assets=assets)
+        out = compile_design_system(ds)
+
+        caps = compiler._IMAGE_KIND_CAPS
+        # (1) every present kind is represented (including the non-logo kinds).
+        for kind in counts:
+            assert f"[{kind}]" in out, f"{kind} missing from listing"
+        assert "[font]" in out
+        # (2) each kind bounded by its cap; (3) per-kind omission disclosed.
+        for kind, n in counts.items():
+            assert out.count(f"[{kind}]") == min(n, caps[kind])
+            assert f"more {kind} omitted" in out  # every kind here exceeds its cap
+        assert out.count("[font]") == min(10, compiler.MAX_FONT_ASSET_REFERENCES)
+        # (4) total entry count == sum of the per-kind caps.
+        total_refs = out.count(" -> {{ds-asset:")
+        expected = sum(caps[k] for k in counts) + compiler.MAX_FONT_ASSET_REFERENCES
+        assert total_refs == expected
 
     def test_ds_asset_placeholder_kept(self, session):
         from src.services.design_system_compiler import compile_design_system

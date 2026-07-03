@@ -28,12 +28,13 @@ Design decisions:
   variants + the tokens that reference the family), richer than the raw ``type``
   tokens alone.
 - Brand assets are RANKED (spec §4 Core Asset Protocol: Logo > product shot > UI
-  > …) and CAPPED per category so a bundle carrying hundreds of assets can't bloat
-  the prompt; any omission is disclosed rather than silent. Every count-bearing
-  Phase-2 section is bounded the same way — assets, shadow tokens, and font
+  > …) and CAPPED PER KIND so EVERY present kind is represented — a flat cap +
+  ranking surfaced only logos on a real 408-asset bundle, making every other kind
+  unusable (the LLM is the sole producer of the placeholder). Every count-bearing
+  Phase-2 section is bounded — per-kind asset caps, shadow tokens, and font
   families / per-family variants / per-family linked tokens — so no single such
   section can blow up the prompt (the brand-rules block is separately hard-capped
-  in full). Assets are
+  in full); any omission is disclosed rather than silent. Assets are
   referenced with the ``{{ds-asset:ID}}`` placeholder. This mirrors the existing
   ``{{image:ID}}`` convention (``src/utils/image_utils.py``) but is a DISTINCT
   namespace: ``design_system_asset`` IDs and ``image_assets`` IDs are independent
@@ -90,7 +91,9 @@ _BRAND_RULES_HEADING = (
 # hundreds of assets, and a pathological manifest could declare arbitrarily many
 # tokens/families, so every such section is ranked/sorted and capped — with the
 # omission disclosed — so no single section can bloat the prompt with a flat dump.
-MAX_IMAGE_ASSET_REFERENCES = 12
+# Brand-asset IMAGES are capped PER KIND (see ``_IMAGE_KIND_CAPS``), not by one
+# flat number: a flat cap + kind-ranking starves every lower-ranked kind (a real
+# 408-asset bundle surfaced 12 logos and nothing else).
 MAX_FONT_ASSET_REFERENCES = 8
 MAX_SHADOW_TOKENS = 24
 MAX_FONT_FAMILIES = 12
@@ -124,6 +127,33 @@ _ASSET_KIND_RANK = {
     "icon": 6,
 }
 _UNKNOWN_ASSET_RANK = max(_ASSET_KIND_RANK.values()) + 1
+
+# Per-kind caps for the BRAND ASSETS listing. Each kind gets its OWN budget and is
+# guaranteed representation — a single flat cap + kind-ranking surfaced only the
+# top-ranked kind (12 logos and nothing else on a real 408-asset bundle), and
+# since the LLM is the sole producer of {{ds-asset:ID}} under a "use ONLY the IDs
+# listed" instruction, every un-listed asset becomes unusable. The listing is
+# emitted in kind-rank order; within a kind, assets keep their deterministic
+# (filename, id) order. These numbers are TUNABLE and will be validated against
+# the real Claude-Design bundle at devloop time (the measured workable set for a
+# ~400-asset bundle is ~70 image entries / ~1.1K tokens).
+_IMAGE_KIND_CAPS = {
+    "logo": 8,
+    "wordmark": 8,
+    "lockup": 12,
+    "product": 16,
+    "product_shot": 16,
+    "product-shot": 16,
+    "photo": 16,
+    "illustration": 16,
+    "background": 8,
+    "screenshot": 24,
+    "ui": 24,
+    "ui_screenshot": 24,
+    "icon": 24,
+}
+# Budget for any image kind not listed above (unknown/future kinds).
+_DEFAULT_IMAGE_KIND_CAP = 12
 
 # README headings whose section is a brand RULE / GUIDANCE (do's & don'ts,
 # voice/tone, data-viz, usage/accessibility). Matched case-insensitively as a
@@ -465,16 +495,19 @@ def _font_sort_key(asset: Any) -> tuple[str, int]:
 def _asset_sections(design_system: Any) -> list[str]:
     """Render curated brand-asset references as ``{{ds-asset:ID}}`` instructions.
 
-    Images are RANKED by kind priority (spec §4 Core Asset Protocol:
-    Logo > product shot > UI icons > …) and CAPPED at
-    ``MAX_IMAGE_ASSET_REFERENCES``; fonts are capped at
-    ``MAX_FONT_ASSET_REFERENCES``. This keeps a bundle that ships hundreds of
-    assets from bloating the prompt with a flat dump. Assets without a persisted
-    ``id`` or of an excluded kind (``template_shot``) are skipped. Order + capping
-    are deterministic (``_asset_rank_key`` / ``_font_sort_key``); any omission is
-    disclosed rather than silent.
+    Image assets are grouped BY KIND and each kind is capped independently
+    (``_IMAGE_KIND_CAPS``), so EVERY present kind is represented in the listing.
+    A single flat cap + kind-ranking would surface only the top kind (12 logos and
+    nothing else on a real 408-asset bundle); since the LLM is the sole producer of
+    ``{{ds-asset:ID}}`` under a "use ONLY the IDs listed" instruction, those
+    un-listed assets would be unusable. Kinds are emitted in rank order (spec §4:
+    Logo > product shot > UI > …); within a kind, assets keep the deterministic
+    ``(filename, id)`` order (``_asset_rank_key``). Fonts are a separate @font-face
+    section capped at ``MAX_FONT_ASSET_REFERENCES``. Assets without a persisted
+    ``id`` or of an excluded kind (``template_shot``) are skipped; every per-kind
+    omission is disclosed rather than silent.
     """
-    images: list[Any] = []
+    images_by_kind: dict[str, list[Any]] = {}
     fonts: list[Any] = []
     for asset in getattr(design_system, "assets", None) or []:
         if getattr(asset, "id", None) is None:
@@ -482,12 +515,10 @@ def _asset_sections(design_system: Any) -> list[str]:
         kind = getattr(asset, "kind", "") or "asset"
         if kind in _EXCLUDED_ASSET_KINDS:
             continue
-        (fonts if kind == "font" else images).append(asset)
-
-    images.sort(key=_asset_rank_key)
-    fonts.sort(key=_font_sort_key)
-    image_omitted = max(0, len(images) - MAX_IMAGE_ASSET_REFERENCES)
-    font_omitted = max(0, len(fonts) - MAX_FONT_ASSET_REFERENCES)
+        if kind == "font":
+            fonts.append(asset)
+        else:
+            images_by_kind.setdefault(kind, []).append(asset)
 
     def _ref(asset: Any) -> str:
         kind = getattr(asset, "kind", "") or "asset"
@@ -495,7 +526,7 @@ def _asset_sections(design_system: Any) -> list[str]:
         return f"- [{kind}] {filename} -> {DS_ASSET_PLACEHOLDER % asset.id}"
 
     sections: list[str] = []
-    if images:
+    if images_by_kind:
         lines = [
             "BRAND ASSETS:",
             "Embed these brand assets as real images using the "
@@ -504,14 +535,23 @@ def _asset_sections(design_system: Any) -> list[str]:
             "background-image: url('{{ds-asset:1}}'). Use ONLY the asset "
             "IDs listed here; never invent IDs:",
         ]
-        lines.extend(_ref(asset) for asset in images[:MAX_IMAGE_ASSET_REFERENCES])
-        if image_omitted:
-            lines.append(
-                f"(+{image_omitted} more brand asset(s) omitted to keep the prompt "
-                "focused; the most important assets are listed above.)"
-            )
+        # Emit kinds in rank order; ties (aliases sharing a rank) broken by name so
+        # every present kind gets its own budget and appears in the listing.
+        for kind in sorted(
+            images_by_kind, key=lambda k: (_ASSET_KIND_RANK.get(k, _UNKNOWN_ASSET_RANK), k)
+        ):
+            assets = sorted(images_by_kind[kind], key=_asset_rank_key)
+            cap = _IMAGE_KIND_CAPS.get(kind, _DEFAULT_IMAGE_KIND_CAP)
+            lines.extend(_ref(asset) for asset in assets[:cap])
+            omitted = len(assets) - cap
+            if omitted > 0:
+                lines.append(
+                    f"(+{omitted} more {kind} omitted to keep the prompt focused.)"
+                )
         sections.append("\n".join(lines))
     if fonts:
+        fonts.sort(key=_font_sort_key)
+        font_omitted = max(0, len(fonts) - MAX_FONT_ASSET_REFERENCES)
         lines = [
             "BRAND FONTS:",
             "Load these font assets via @font-face using the "
