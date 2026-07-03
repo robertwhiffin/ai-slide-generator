@@ -4,6 +4,7 @@ from src.database.models.deck_contributor import DeckContributor
 from src.database.models.design_system import (
     DesignSystem,
     DesignSystemAsset,
+    DesignSystemFile,
     DesignSystemToken,
 )
 from src.database.models.feedback import FeedbackConversation, SurveyResponse
@@ -43,6 +44,7 @@ __all__ = [
     "ConfigPrompts",
     "DesignSystem",
     "DesignSystemAsset",
+    "DesignSystemFile",
     "DesignSystemToken",
     "ExportJob",
     "FeedbackConversation",

@@ -13,6 +13,25 @@ Lakebase rows:
   rows (bytes in-DB, following the ``image_assets`` pattern). Template screenshots
   and ``preview*`` files are reference-only and skipped.
 
+v1 Phase 1 ("import foundation") extends the importer WITHOUT changing the
+generation seam:
+
+- Bundle SOURCE files (README.md / SKILL.md / CSS token sources / ``templates/*/
+  index.html``) are RETAINED as ``design_system_file`` rows (bytes in-DB). Files
+  already stored as ``design_system_asset`` (assets/fonts) get a path-only
+  REFERENCE row (``asset_id`` set, ``data`` NULL) — their bytes are never
+  double-stored. Every path is normalized and zip-slip (absolute / ``..``) is
+  rejected.
+- Tokens run through ONE canonical parser: the real manifest carries grouping in
+  ``kind`` (color/font/spacing/shadow), names are stripped of leading ``--`` /
+  ``brand-`` so manifest tokens dedup against the identical CSS ``:root`` vars,
+  and shadow tokens are emitted. (Previously grouping was read from a ``group``
+  key the real manifest lacks, so ~34 non-color tokens mis-bucketed as colors,
+  tokens double-counted 72->144, and spacing came out empty.)
+- The manifest ``fonts[]`` / ``brandFonts[]`` are normalized into a
+  family -> variants + token-linkage mapping on ``DesignSystem.font_mapping_json``
+  so typography is usable downstream without re-parsing the manifest.
+
 After the rows are flushed (so assets have real ids), the Phase-2
 ``recompute_compiled_style_content`` produces the prompt artifact — the same
 ``compiled_style_content`` the generation seam already consumes. Brand assets are
@@ -43,6 +62,7 @@ from src.database.models.design_system import (
     MAX_BUNDLE_SIZE_BYTES,
     DesignSystem,
     DesignSystemAsset,
+    DesignSystemFile,
     DesignSystemToken,
 )
 from src.services.design_system_compiler import recompute_compiled_style_content
@@ -52,8 +72,24 @@ logger = logging.getLogger(__name__)
 MANIFEST_FILENAME = "_ds_manifest.json"
 DEFAULT_CSS_TOKEN_SOURCE = "colors_and_type.css"
 
-# Token groups the compiler understands (colors + type + spacing).
-_KNOWN_GROUPS = frozenset(("core", "accents", "ink", "tints", "type", "spacing"))
+# Color sub-groups the compiler renders as :root vars. A token name whose first
+# segment is one of these carries its group in the name (e.g. --brand-accents-lava).
+_COLOR_SUBGROUPS = frozenset(("core", "accents", "ink", "tints"))
+
+# Every token group the canonical parser may emit — also the set honored when a
+# (legacy/backward-compatible) manifest token carries an explicit ``group`` key.
+_TOKEN_GROUPS = frozenset(("core", "accents", "ink", "tints", "type", "spacing", "shadow"))
+
+# Manifest token ``kind`` -> canonical token group. ``color`` resolves to a color
+# sub-group via the name (default ``core``); the compiler renders ``type`` +
+# ``spacing`` as rules and (for now) surfaces ``shadow`` with a warning.
+_KIND_TO_GROUP = {
+    "color": "core",
+    "colour": "core",
+    "font": "type",
+    "spacing": "spacing",
+    "shadow": "shadow",
+}
 
 # Font file extensions -> stored as kind="font".
 _FONT_EXTS = frozenset(("woff2", "woff", "ttf", "otf"))
@@ -163,21 +199,69 @@ def _should_skip(rel_path: str) -> bool:
     return False
 
 
-def _classify_css_var(var_name: str, value: str) -> tuple[str, str]:
-    """Map a CSS custom property to a ``(group, name)`` token key.
+def _strip_token_ident(raw_name: str) -> str:
+    """Normalize a token identifier: drop a leading ``--`` and a ``brand-`` namespace.
 
-    Recognises the ``--brand-<group>-<name>`` / ``--<group>-<name>`` conventions;
-    otherwise infers ``core`` for color-like values and ``type`` for the rest, so
-    CSS-sourced tokens land in groups the compiler actually emits.
+    So the manifest name ``--brand-core-primary`` and the CSS var ``primary`` (or
+    ``--primary``) reduce to the same identifier and dedup to a single token.
     """
-    parts = var_name.split("-")
-    if parts and parts[0] == "brand":
-        parts = parts[1:]
-    if parts and parts[0] in _KNOWN_GROUPS:
-        group = parts[0]
-        name = "-".join(parts[1:]) or group
-        return group, name
-    return ("core" if _looks_like_color(value) else "type"), var_name
+    ident = (raw_name or "").strip().lstrip("-")
+    if ident.startswith("brand-"):
+        ident = ident[len("brand-"):]
+    return ident
+
+
+def _canonicalize_token(
+    raw_name: str,
+    value: str,
+    kind: Optional[str] = None,
+    group: Optional[str] = None,
+) -> Optional[tuple[str, str]]:
+    """Resolve a token to a canonical ``(group, name)`` key, or ``None`` if unusable.
+
+    The ONE canonical parser shared by the manifest-token and CSS ``:root`` paths,
+    so the same underlying token dedups regardless of source. Group precedence:
+
+    1. An explicit, recognized legacy ``group`` key (kept for backward-compatible
+       bundles that carry one; the real Claude-Design manifest does not).
+    2. A color sub-group encoded in the name (core/accents/ink/tints).
+    3. The manifest ``kind`` (color -> core, font -> type, spacing -> spacing,
+       shadow -> shadow).
+    4. Inference from the value (CSS-only vars with no ``kind``): color-like ->
+       core, otherwise type.
+
+    The name is the stripped identifier, minus a leading color sub-group segment
+    when that segment determined the group.
+    """
+    ident = _strip_token_ident(raw_name)
+    if not ident:
+        return None
+
+    head, _, rest = ident.partition("-")
+
+    # 1. Explicit, recognized legacy group.
+    if group:
+        normalized_group = group.strip().lower()
+        if normalized_group in _TOKEN_GROUPS:
+            name = (
+                rest
+                if (normalized_group in _COLOR_SUBGROUPS and head == normalized_group and rest)
+                else ident
+            )
+            return normalized_group, name
+
+    # 2. Color sub-group encoded in the name.
+    if head in _COLOR_SUBGROUPS:
+        return head, (rest or head)
+
+    # 3. Manifest kind.
+    if kind:
+        mapped = _KIND_TO_GROUP.get(kind.strip().lower())
+        if mapped:
+            return mapped, ident
+
+    # 4. Infer from the value.
+    return ("core" if _looks_like_color(value) else "type"), ident
 
 
 def _parse_css_root_vars(css_text: str) -> list[tuple[str, str]]:
@@ -289,7 +373,7 @@ def import_bundle(
             )
 
         tokens = _collect_tokens(zf, root_prefix, manifest, budget)
-        assets = _collect_assets(zf, root_prefix, budget)
+        assets, files = _collect_assets_and_files(zf, root_prefix, budget)
 
     raw_description = manifest.get("description")
     description = (
@@ -303,6 +387,7 @@ def import_bundle(
         created_by=user,
         updated_by=user,
         manifest_json=manifest,
+        font_mapping_json=build_font_mapping(manifest),
         version=1,
         published=False,
         is_default=False,
@@ -312,20 +397,24 @@ def import_bundle(
         design_system.tokens.append(token)
     for asset in assets:
         design_system.assets.append(asset)
+    for ds_file in files:
+        design_system.files.append(ds_file)
 
     db.add(design_system)
-    # Flush assigns primary keys so {{ds-asset:ID}} placeholders point at real ids.
+    # Flush assigns primary keys so {{ds-asset:ID}} placeholders point at real ids
+    # and each asset-reference file row resolves its asset_id.
     db.flush()
     recompute_compiled_style_content(design_system)
     db.commit()
     db.refresh(design_system)
 
     logger.info(
-        "Imported design system '%s' (id=%s): %d token(s), %d asset(s)",
+        "Imported design system '%s' (id=%s): %d token(s), %d asset(s), %d file(s)",
         design_system.name,
         design_system.id,
         len(tokens),
         len(assets),
+        len(files),
     )
     return design_system
 
@@ -374,23 +463,43 @@ def _collect_tokens(
 ) -> list[DesignSystemToken]:
     """Tokens from ``manifest['tokens']`` plus any ``:root`` CSS vars.
 
-    Manifest tokens take precedence; a ``(group, name)`` is written once.
+    Both sources run through :func:`_canonicalize_token`. Manifest tokens are
+    authoritative (they carry ``kind``): each is written once, and its canonical
+    NAME is recorded so the CSS pass — which cannot know a token's ``kind`` — never
+    re-adds the same token under a value-inferred group (that is what used to
+    double 72 tokens to 144 and split spacing/shadow into ``type``). CSS vars the
+    manifest did not define are added with their inferred group.
     """
     by_key: dict[tuple[str, str], str] = {}
+    manifest_names: set[str] = set()
 
     for entry in manifest.get("tokens") or []:
         if not isinstance(entry, dict):
             continue
-        name = (entry.get("name") or "").strip()
+        raw_name = entry.get("name")
         value = entry.get("value")
-        if not name or value is None or str(value).strip() == "":
+        if not raw_name or value is None or str(value).strip() == "":
             continue
-        group = (entry.get("group") or "core").strip() or "core"
+        resolved = _canonicalize_token(
+            str(raw_name), str(value).strip(), entry.get("kind"), entry.get("group")
+        )
+        if resolved is None:
+            continue
+        group, name = resolved
         by_key.setdefault((group, name), str(value).strip())
+        manifest_names.add(name)
 
     for css_text in _read_css_sources(zf, root_prefix, manifest, budget):
         for var_name, value in _parse_css_root_vars(css_text):
-            group, name = _classify_css_var(var_name, value)
+            resolved = _canonicalize_token(var_name, value)
+            if resolved is None:
+                continue
+            group, name = resolved
+            # The manifest is authoritative: skip a var it already defined, even
+            # under a different (value-inferred) group — prevents re-adding a
+            # spacing/shadow token as ``type``.
+            if name in manifest_names:
+                continue
             by_key.setdefault((group, name), value)
 
     return [
@@ -431,38 +540,228 @@ def _read_css_sources(
     return texts
 
 
-def _collect_assets(
-    zf: zipfile.ZipFile, root_prefix: str, budget: "_SizeBudget"
-) -> list[DesignSystemAsset]:
-    """Read + validate ``assets/**`` and ``fonts/**`` files into asset rows."""
-    assets: list[DesignSystemAsset] = []
+def _safe_relpath(rel_path: str) -> Optional[str]:
+    """Normalize a bundle-relative path; return ``None`` if it is unsafe (zip-slip).
+
+    Rejects absolute paths (POSIX ``/`` or a Windows drive) and any path that
+    escapes the bundle root via a ``..`` segment. Backslashes are normalized to
+    ``/`` and ``.``/empty segments are collapsed. Assets are stored as DB bytes
+    (never written to disk), so this is defence-in-depth — and it keeps the
+    persisted ``design_system_file.path`` values safe for the later file browser.
+    """
+    if not rel_path:
+        return None
+    normalized = rel_path.replace("\\", "/")
+    if normalized.startswith("/") or re.match(r"^[A-Za-z]:", normalized):
+        return None
+    parts: list[str] = []
+    for segment in normalized.split("/"):
+        if segment in ("", "."):
+            continue
+        if segment == "..":
+            return None
+        parts.append(segment)
+    return "/".join(parts) if parts else None
+
+
+def _iter_safe_entries(zf: zipfile.ZipFile, root_prefix: str):
+    """Yield ``(ZipInfo, safe_rel_path)`` for every in-scope bundle FILE entry.
+
+    Skips directories, OS junk (``__MACOSX``, ``.DS_Store``) and dotfiles. Raises
+    :class:`DesignSystemImportError` on a zip-slip path (absolute or ``..``) so a
+    malicious bundle is rejected rather than silently stored.
+    """
     for info in zf.infolist():
         name = info.filename
         if not name.startswith(root_prefix):
             continue
-        rel = name[len(root_prefix):]
-        if _should_skip(rel):
+        rel_raw = name[len(root_prefix):]
+        if not rel_raw or rel_raw.endswith("/"):
+            continue  # directory entry
+        low = rel_raw.lower()
+        if low.startswith("__macosx/") or "/__macosx/" in low:
             continue
+        base = _basename(low)
+        if base == ".ds_store" or base.startswith("."):
+            continue
+        safe = _safe_relpath(rel_raw)
+        if safe is None:
+            raise DesignSystemImportError(
+                f"Bundle contains an unsafe path '{rel_raw}' (absolute path or "
+                "parent-directory traversal); refusing to import."
+            )
+        yield info, safe
 
-        # Size-checked read: declared size is validated against the per-entry +
-        # cumulative-bundle limits BEFORE the entry is materialised (bomb guard).
-        data = budget.read_info(zf, info)
-        size = len(data)
-        mime = _guess_mime(rel)
-        kind = _infer_asset_kind(rel)
-        width, height = _image_dimensions(data, mime)
-        assets.append(
-            DesignSystemAsset(
+
+def _classify_source_file(rel: str) -> Optional[str]:
+    """Return the ``design_system_file.kind`` for a retained SOURCE file, else None.
+
+    Retains the human/authoring layer: README.md, SKILL.md, CSS token sources, and
+    template layout HTML (``templates/*/index.html``). Callers reach here only for
+    entries that are NOT stored as binary assets, so there is no overlap with the
+    asset/font reference rows (no double-store).
+    """
+    low = rel.lower()
+    base = _basename(low)
+    if base == "readme.md":
+        return "readme"
+    if base == "skill.md":
+        return "skill"
+    if low.endswith(".css"):
+        return "css"
+    if low.startswith("templates/") and base == "index.html":
+        return "template"
+    return None
+
+
+def build_font_mapping(manifest: dict) -> Optional[dict]:
+    """Normalize manifest ``fonts[]`` / ``brandFonts[]`` into a family-keyed mapping.
+
+    Joins the flat ``fonts[]`` variant rows (family + weight/style + files) with the
+    ``brandFonts[]`` token linkage (family -> tokens) into one structure so
+    downstream typography use never re-parses the manifest::
+
+        {"families": [
+            {"family": "Acme Sans",
+             "variants": [{"weight": "400", "style": "normal",
+                           "files": ["fonts/acme-sans-regular.woff2"]}, ...],
+             "tokens": ["font-sans"]},   # canonical token names (--/brand- stripped)
+            ...
+        ]}
+
+    Families are de-duplicated and everything is sorted for deterministic output.
+    Token names are canonicalized with :func:`_strip_token_ident` so they line up
+    with ``design_system_token.name``. Returns ``None`` when the manifest declares
+    no fonts.
+    """
+    if not isinstance(manifest, dict):
+        return None
+
+    families: dict[str, dict] = {}
+
+    def _family(family_name: str) -> dict:
+        return families.setdefault(family_name, {"variants": [], "tokens": set()})
+
+    for entry in manifest.get("fonts") or []:
+        if not isinstance(entry, dict):
+            continue
+        family = (entry.get("family") or "").strip()
+        if not family:
+            continue
+        weight = "" if entry.get("weight") is None else str(entry.get("weight")).strip()
+        style = (entry.get("style") or "").strip()
+        raw_files = entry.get("files")
+        if isinstance(raw_files, str):
+            raw_files = [raw_files]
+        raw_files = list(raw_files or [])
+        # Some manifests carry a single ``path`` instead of a ``files`` list.
+        single_path = entry.get("path")
+        if isinstance(single_path, str) and single_path.strip():
+            raw_files.append(single_path)
+        files = sorted(
+            {item.strip() for item in raw_files if isinstance(item, str) and item.strip()}
+        )
+        variant = {"weight": weight, "style": style, "files": files}
+        variants = _family(family)["variants"]
+        if variant not in variants:
+            variants.append(variant)
+
+    for entry in manifest.get("brandFonts") or []:
+        if not isinstance(entry, dict):
+            continue
+        family = (entry.get("family") or "").strip()
+        if not family:
+            continue
+        for token in entry.get("tokens") or []:
+            if isinstance(token, str) and token.strip():
+                _family(family)["tokens"].add(_strip_token_ident(token))
+
+    if not families:
+        return None
+
+    return {
+        "families": [
+            {
+                "family": family,
+                "variants": sorted(
+                    data["variants"], key=lambda v: (v["weight"], v["style"])
+                ),
+                "tokens": sorted(data["tokens"]),
+            }
+            for family, data in sorted(families.items())
+        ]
+    }
+
+
+def _collect_assets_and_files(
+    zf: zipfile.ZipFile, root_prefix: str, budget: "_SizeBudget"
+) -> tuple[list[DesignSystemAsset], list[DesignSystemFile]]:
+    """Read a bundle into asset rows + file rows in one safety-checked pass.
+
+    - ``assets/**`` / ``fonts/**`` -> a ``DesignSystemAsset`` (bytes) AND a
+      ``DesignSystemFile`` REFERENCE row (``data`` NULL, linked via ``asset``) so
+      the file listing is complete without double-storing the bytes.
+    - README / SKILL / CSS / template HTML -> a ``DesignSystemFile`` SOURCE row
+      (bytes in ``data``).
+    - everything else (previews, template screenshots, slides, ui_kits, uploads,
+      bundle scripts) is skipped.
+
+    One shared ``budget`` spans every read, so each stored byte counts once (asset
+    bytes here; reference rows read nothing) and the per-bundle cap holds.
+    """
+    assets: list[DesignSystemAsset] = []
+    files: list[DesignSystemFile] = []
+    seen_paths: set[str] = set()
+
+    for info, rel in _iter_safe_entries(zf, root_prefix):
+        if rel in seen_paths:
+            continue  # de-dup pathological duplicate arcnames
+        seen_paths.add(rel)
+
+        if not _should_skip(rel):
+            # Storable binary asset (assets/** or fonts/**). Size-checked read:
+            # the declared size is validated BEFORE materialisation (bomb guard).
+            data = budget.read_info(zf, info)
+            mime = _guess_mime(rel)
+            kind = _infer_asset_kind(rel)
+            width, height = _image_dimensions(data, mime)
+            asset = DesignSystemAsset(
                 kind=kind,
                 filename=_basename(rel),
                 mime=mime,
                 data=data,
                 width=width,
                 height=height,
-                size_bytes=size,
+                size_bytes=len(data),
             )
-        )
-    return assets
+            assets.append(asset)
+            # Path-only reference — the bytes are NOT re-stored (no double-store).
+            files.append(
+                DesignSystemFile(
+                    path=rel,
+                    kind="font" if kind == "font" else "asset",
+                    mime=mime,
+                    data=None,
+                    size_bytes=len(data),
+                    asset=asset,
+                )
+            )
+            continue
+
+        source_kind = _classify_source_file(rel)
+        if source_kind:
+            data = budget.read_info(zf, info)
+            files.append(
+                DesignSystemFile(
+                    path=rel,
+                    kind=source_kind,
+                    mime=_guess_mime(rel),
+                    data=data,
+                    size_bytes=len(data),
+                )
+            )
+
+    return assets, files
 
 
 # ---------------------------------------------------------------------------

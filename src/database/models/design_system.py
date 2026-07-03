@@ -9,16 +9,23 @@ A design system is an org-shared company asset (everyone can view/use, matching
 how slide styles work today); ``created_by`` records authorship, ``published`` +
 ``is_default`` mark the org default.
 
-Three tables:
+Four tables:
 - ``design_system``        — the parent record: metadata + parsed manifest +
-                             the compiled prompt artifact.
-- ``design_system_asset``  — binary blobs (logo/font/…), bytes stored in-DB
-                             following the existing ``image_assets`` pattern.
-- ``design_system_token``  — normalized tokens (colors/type/spacing) for
+                             the normalized font mapping + the compiled prompt
+                             artifact.
+- ``design_system_asset``  — binary brand blobs (logo/font/…), bytes stored
+                             in-DB following the existing ``image_assets`` pattern.
+- ``design_system_token``  — normalized tokens (colors/type/spacing/shadow) for
                              cheap query/preview without parsing the manifest.
+- ``design_system_file``   — retained bundle SOURCE files (README/SKILL/CSS/
+                             template layout HTML) plus path-metadata REFERENCES
+                             back to ``design_system_asset`` rows (v1 Phase 1).
 
-Binary bytes live ONLY in ``design_system_asset``; the parent and token tables
-hold metadata/text so a bundle listing never drags large blobs along.
+Binary brand bytes live ONLY in ``design_system_asset``; ``design_system_file``
+stores the (text) bytes of genuinely-new source files and, for assets/fonts,
+only a path reference (``asset_id``, ``data`` NULL) so a bundle's binary payload
+is never double-stored. The parent and token tables stay blob-free so a bundle
+listing never drags large payloads along.
 """
 
 from datetime import datetime
@@ -101,6 +108,13 @@ class DesignSystem(Base):
     # Auto-compiled prompt artifact — maps to today's slide_style_library.style_content.
     compiled_style_content = Column(Text, nullable=True)
 
+    # Normalized font mapping derived from the manifest ``fonts[]`` / ``brandFonts[]``
+    # at import (family -> weight/style variants + the tokens that reference the
+    # family). A flattened projection — like ``DesignSystemToken`` — so downstream
+    # typography use never re-parses the raw manifest. JSON on SQLite, JSONB on
+    # PostgreSQL/Lakebase. Nullable: a bundle may declare no fonts.
+    font_mapping_json = Column(_ManifestColumn, nullable=True)
+
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     updated_by = Column(String(255), nullable=True)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
@@ -113,6 +127,12 @@ class DesignSystem(Base):
     )
     tokens = relationship(
         "DesignSystemToken",
+        back_populates="design_system",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
+    files = relationship(
+        "DesignSystemFile",
         back_populates="design_system",
         cascade="all, delete-orphan",
         passive_deletes=True,
@@ -195,4 +215,65 @@ class DesignSystemToken(Base):
         return (
             f"<DesignSystemToken(id={self.id}, design_system_id={self.design_system_id}, "
             f"group='{self.group}', name='{self.name}')>"
+        )
+
+
+class DesignSystemFile(Base):
+    """A retained bundle source file — the authoring/documentation layer (v1 Phase 1).
+
+    The importer previously discarded everything except ``assets/**`` and
+    ``fonts/**``. This table retains the bundle's SOURCE files so a design system
+    carries its own docs and layout sources (surfaced by the later file browser).
+    Two row shapes share the table:
+
+    - SOURCE files (``kind`` in ``readme``/``skill``/``css``/``template``): text
+      whose bytes live in ``data`` — genuinely-new content not stored elsewhere.
+    - REFERENCE rows (``kind`` in ``asset``/``font``): a path-metadata pointer to
+      a ``design_system_asset`` row (``asset_id``) whose bytes are ALREADY stored
+      there; ``data`` is NULL. The bundle's binary payload is never double-stored
+      (a 200 MB bundle must not be duplicated); resolve their bytes via ``asset``.
+
+    ``path`` is the normalized, bundle-relative path. Zip-slip is rejected at
+    import time: no absolute paths and no ``..`` parent-directory traversal.
+    """
+
+    __tablename__ = "design_system_file"
+
+    id = Column(Integer, primary_key=True)
+    design_system_id = Column(
+        Integer,
+        ForeignKey("design_system.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+
+    # Normalized bundle-relative path, e.g. "README.md", "templates/x/index.html".
+    path = Column(String(1024), nullable=False)
+
+    # readme | skill | css | template | asset | font
+    kind = Column(String(50), nullable=False)
+    mime = Column(String(100), nullable=False)
+
+    # Bytes for genuinely-new SOURCE files; NULL for asset/font REFERENCE rows
+    # (their bytes live in design_system_asset — never double-stored). The DB
+    # column is named "bytes" to match design_system_asset; the Python attribute
+    # is ``data`` to avoid shadowing the ``bytes`` builtin.
+    data = Column("bytes", LargeBinary, nullable=True)
+    size_bytes = Column(Integer, nullable=False)
+
+    # For asset/font reference rows: the design_system_asset holding the bytes.
+    asset_id = Column(
+        Integer,
+        ForeignKey("design_system_asset.id", ondelete="CASCADE"),
+        nullable=True,
+        index=True,
+    )
+
+    design_system = relationship("DesignSystem", back_populates="files")
+    asset = relationship("DesignSystemAsset")
+
+    def __repr__(self):
+        return (
+            f"<DesignSystemFile(id={self.id}, design_system_id={self.design_system_id}, "
+            f"kind='{self.kind}', path='{self.path}')>"
         )

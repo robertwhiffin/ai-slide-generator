@@ -35,7 +35,12 @@ from sqlalchemy.schema import CreateTable
 import src.database.models  # noqa: F401 - register models with Base.metadata
 from src.core.database import Base, _run_migrations, init_db
 
-DESIGN_SYSTEM_TABLES = {"design_system", "design_system_asset", "design_system_token"}
+DESIGN_SYSTEM_TABLES = {
+    "design_system",
+    "design_system_asset",
+    "design_system_token",
+    "design_system_file",
+}
 
 
 @pytest.fixture
@@ -193,6 +198,60 @@ class TestDesignSystemMigration:
             "manifest_json",
             "compiled_style_content",
         } <= ds_cols
+
+    def test_file_table_created_with_expected_columns(self, sqlite_engine):
+        """v1 Phase 1: the migration creates design_system_file with its columns."""
+        from src.core.database import _migrate_design_system_tables
+
+        with sqlite_engine.begin() as conn:
+            _migrate_design_system_tables(conn, schema=None)
+
+        insp = inspect(sqlite_engine)
+        assert "design_system_file" in set(insp.get_table_names())
+        file_cols = {c["name"] for c in insp.get_columns("design_system_file")}
+        assert {
+            "id",
+            "design_system_id",
+            "path",
+            "kind",
+            "mime",
+            "bytes",
+            "size_bytes",
+            "asset_id",
+        } <= file_cols
+
+    def test_font_mapping_column_present_after_run_migrations(self, sqlite_engine):
+        """v1 Phase 1: design_system exposes a font_mapping_json column."""
+        Base.metadata.create_all(bind=sqlite_engine)
+        _run_migrations(sqlite_engine, schema=None)
+
+        cols = {c["name"] for c in inspect(sqlite_engine).get_columns("design_system")}
+        assert "font_mapping_json" in cols
+
+    def test_font_mapping_migration_backfills_pre_existing_table(self, sqlite_engine):
+        """When design_system predates font_mapping_json, the idempotent ALTER adds
+        it (simulating a table created by an earlier deploy)."""
+        from sqlalchemy import inspect as _inspect
+
+        from src.core.database import _migrate_design_system_font_mapping
+
+        # Build a design_system table WITHOUT font_mapping_json, mimicking an old deploy.
+        with sqlite_engine.begin() as conn:
+            conn.execute(text(
+                "CREATE TABLE design_system (id INTEGER PRIMARY KEY, name VARCHAR(255))"
+            ))
+
+        with sqlite_engine.begin() as conn:
+            _migrate_design_system_font_mapping(
+                conn, _inspect(conn), schema=None, _qual=lambda t: f'"{t}"', is_sqlite=True
+            )
+            # Idempotent: a second run is a no-op and must not raise.
+            _migrate_design_system_font_mapping(
+                conn, _inspect(conn), schema=None, _qual=lambda t: f'"{t}"', is_sqlite=True
+            )
+
+        cols = {c["name"] for c in inspect(sqlite_engine).get_columns("design_system")}
+        assert "font_mapping_json" in cols
 
 
 # ---------------------------------------------------------------------------
@@ -412,6 +471,7 @@ def restore_ds_table_schema():
     from src.database.models.design_system import (
         DesignSystem,
         DesignSystemAsset,
+        DesignSystemFile,
         DesignSystemToken,
     )
 
@@ -419,6 +479,7 @@ def restore_ds_table_schema():
         DesignSystem.__table__,
         DesignSystemAsset.__table__,
         DesignSystemToken.__table__,
+        DesignSystemFile.__table__,
     ]
     original = [t.schema for t in tables]
     try:
@@ -503,24 +564,34 @@ class TestSchemaQualifiedMigration:
         from src.database.models.design_system import (
             DesignSystem,
             DesignSystemAsset,
+            DesignSystemFile,
             DesignSystemToken,
         )
 
-        for model in (DesignSystem, DesignSystemAsset, DesignSystemToken):
+        for model in (DesignSystem, DesignSystemAsset, DesignSystemToken, DesignSystemFile):
             model.__table__.schema = self.SCHEMA
 
         pg = postgresql.dialect()
         ds_ddl = str(CreateTable(DesignSystem.__table__).compile(dialect=pg))
         asset_ddl = str(CreateTable(DesignSystemAsset.__table__).compile(dialect=pg))
         token_ddl = str(CreateTable(DesignSystemToken.__table__).compile(dialect=pg))
+        file_ddl = str(CreateTable(DesignSystemFile.__table__).compile(dialect=pg))
 
         # Child FKs are schema-qualified back to the parent, cascading on delete.
         assert f"REFERENCES {self.SCHEMA}.design_system (id) ON DELETE CASCADE" in asset_ddl
         assert f"REFERENCES {self.SCHEMA}.design_system (id) ON DELETE CASCADE" in token_ddl
+        # design_system_file references BOTH parent tables, schema-qualified.
+        assert f"REFERENCES {self.SCHEMA}.design_system (id) ON DELETE CASCADE" in file_ddl
+        assert (
+            f"REFERENCES {self.SCHEMA}.design_system_asset (id) ON DELETE CASCADE" in file_ddl
+        )
 
         # Dialect-specific types render as expected.
         assert "manifest_json JSONB" in ds_ddl
+        assert "font_mapping_json JSONB" in ds_ddl
         assert "bytes BYTEA" in asset_ddl
+        # design_system_file.bytes is BYTEA and nullable (NULL for asset/font refs).
+        assert "bytes BYTEA" in file_ddl
         assert "id SERIAL" in ds_ddl
 
         # `group` is a reserved word and must be double-quoted.
