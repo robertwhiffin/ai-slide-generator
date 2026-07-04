@@ -150,7 +150,7 @@ cd frontend && npx playwright test tests/e2e/history-ui.spec.ts -g "SessionHisto
 
 ## 8. Cross-References
 
-- [Duplicate Deck Design Spec](../superpowers/specs/2026-06-30-duplicate-deck-design.md)
+- Duplicate Deck Design Spec — `docs/superpowers/specs/2026-06-30-duplicate-deck-design.md` (repo only; not published on the docs site)
 - [Permissions Model](./permissions-model.md)
 - [Backend Overview](./backend-overview.md)
 - [Frontend Overview](./frontend-overview.md)
