@@ -1,60 +1,63 @@
 {
-  "width": 1280,
-  "height": 720,
-  "records": [
-    {
-      "kind": "rect",
-      "x": 0,
-      "y": 0,
-      "w": 1280,
-      "h": 720,
-      "fill": "FFFFFF",
-      "stroke": null,
-      "strokeW": 0,
-      "radius": 0,
-      "_depth": 0
-    },
-    {
-      "kind": "image",
-      "x": 88,
-      "y": 72,
-      "w": 240,
-      "h": 80,
-      "src": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABgAAAAQCAIAAACDRijCAAAAGklEQVR42mPgtk2jCmIYNWjUoFGDRg2iDAEABu0FEHVYOK4AAAAASUVORK5CYII=",
-      "_depth": 1
-    },
-    {
-      "kind": "rect",
-      "x": 88,
-      "y": 200,
-      "w": 424,
-      "h": 224,
-      "fill": "F2E8DA",
-      "stroke": "0B3D66",
-      "strokeW": 2,
-      "radius": 12,
-      "_depth": 1
-    },
-    {
-      "kind": "text",
-      "x": 480,
-      "y": 220,
-      "w": 600,
-      "h": 45,
-      "runs": [
-        {
-          "text": "Quarterly Report",
-          "family": "Arial",
-          "size": 40,
-          "bold": true,
-          "italic": false,
-          "color": "0B3D66",
-          "underline": false
-        }
-      ],
-      "align": "left",
-      "valign": "top",
-      "_depth": 1
-    }
-  ]
+  "capturedOn": "darwin",
+  "extract": {
+    "width": 1280,
+    "height": 720,
+    "records": [
+      {
+        "kind": "rect",
+        "x": 0,
+        "y": 0,
+        "w": 1280,
+        "h": 720,
+        "fill": "FFFFFF",
+        "stroke": null,
+        "strokeW": 0,
+        "radius": 0,
+        "_depth": 0
+      },
+      {
+        "kind": "image",
+        "x": 88,
+        "y": 72,
+        "w": 240,
+        "h": 80,
+        "src": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABgAAAAQCAIAAACDRijCAAAAGklEQVR42mPgtk2jCmIYNWjUoFGDRg2iDAEABu0FEHVYOK4AAAAASUVORK5CYII=",
+        "_depth": 1
+      },
+      {
+        "kind": "rect",
+        "x": 88,
+        "y": 200,
+        "w": 424,
+        "h": 224,
+        "fill": "F2E8DA",
+        "stroke": "0B3D66",
+        "strokeW": 2,
+        "radius": 12,
+        "_depth": 1
+      },
+      {
+        "kind": "text",
+        "x": 480,
+        "y": 220,
+        "w": 600,
+        "h": 45,
+        "runs": [
+          {
+            "text": "Quarterly Report",
+            "family": "Arial",
+            "size": 40,
+            "bold": true,
+            "italic": false,
+            "color": "0B3D66",
+            "underline": false
+          }
+        ],
+        "align": "left",
+        "valign": "top",
+        "_depth": 1
+      }
+    ]
+  }
 }

@@ -490,6 +490,7 @@ jobs:
           - slide-operations-ui
           - slide-styles-integration
           - slide-styles-ui
+          - svg-raster-export
     
     # Use PostgreSQL for E2E tests - matches production and handles concurrency well
     services:
