@@ -21,13 +21,18 @@ router = APIRouter(prefix="/api/sessions/{session_id}/agent-config", tags=["agen
 
 
 def _validate_references(config: AgentConfig) -> None:
-    """Validate that design_system_id, template_id, slide_style_id and
-    deck_prompt_id reference existing (active) library entries.
+    """Validate the library references and SANITIZE the template pin, in place.
 
-    A template must belong to the SELECTED design system (a pin without a design
-    system, or against another system's template, is rejected). This save-time
-    strictness complements the deliberately lenient generation path, which
-    IGNORES a pin that has gone stale after saving (deleted template, re-import).
+    ``design_system_id``, ``slide_style_id`` and ``deck_prompt_id`` stay STRICT
+    (422 on a missing/inactive entry — the existing convention). The template
+    pin is SELF-HEALING instead: template ids are re-minted by the sanctioned
+    delete+re-upload workflow, so a persisted config can legitimately hold a
+    stale pin — rejecting it would wedge EVERY later config update. When
+    ``template_id`` does not resolve to a template belonging to the selected
+    design system (pin with no design system, another system's template, or a
+    missing/re-materialized template), it is cleared in place with a warning;
+    the caller persists and returns the sanitized config so the frontend state
+    syncs. This mirrors the deliberately lenient generation path.
     """
     from src.database.models import (
         DesignSystem,
@@ -52,27 +57,25 @@ def _validate_references(config: AgentConfig) -> None:
                     detail=f"design_system_id {config.design_system_id} not found",
                 )
         if config.template_id is not None:
-            if config.design_system_id is None:
-                raise HTTPException(
-                    status_code=422,
-                    detail="template_id requires a design_system_id",
+            template = None
+            if config.design_system_id is not None:
+                template = (
+                    db.query(DesignSystemTemplate)
+                    .filter(
+                        DesignSystemTemplate.id == config.template_id,
+                        DesignSystemTemplate.design_system_id == config.design_system_id,
+                    )
+                    .first()
                 )
-            template = (
-                db.query(DesignSystemTemplate)
-                .filter(
-                    DesignSystemTemplate.id == config.template_id,
-                    DesignSystemTemplate.design_system_id == config.design_system_id,
+            if template is None:
+                logger.warning(
+                    "Clearing stale template pin %s (design_system_id=%s): the "
+                    "template does not exist or does not belong to the selected "
+                    "design system; saving the config without it",
+                    config.template_id,
+                    config.design_system_id,
                 )
-                .first()
-            )
-            if not template:
-                raise HTTPException(
-                    status_code=422,
-                    detail=(
-                        f"template_id {config.template_id} not found for "
-                        f"design_system_id {config.design_system_id}"
-                    ),
-                )
+                config.template_id = None
         if config.slide_style_id is not None:
             style = (
                 db.query(SlideStyleLibrary)
@@ -148,7 +151,9 @@ async def get_agent_config(session_id: str):
 async def put_agent_config(session_id: str, config: AgentConfig):
     """Replace the full agent config for a session."""
     # Pydantic already validated duplicates via model_validator.
-    # Now validate foreign-key references.
+    # Now validate foreign-key references; a stale template pin is sanitized
+    # (cleared in place) rather than rejected, so what is persisted and
+    # returned below is the effective config.
     _validate_references(config)
 
     try:

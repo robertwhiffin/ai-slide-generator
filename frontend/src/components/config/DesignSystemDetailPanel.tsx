@@ -86,12 +86,15 @@ export const DesignSystemDetailPanel: React.FC<DesignSystemDetailPanelProps> = (
     if (detailId == null) return;
     // One atomic config update: selecting a template also selects its design
     // system (the same selection the AgentConfigBar dropdowns drive).
-    await updateConfig({
+    const applied = await updateConfig({
       ...agentConfig,
       design_system_id: detailId,
       template_id: template.id,
     });
-    showToast(`Template "${template.name}" selected for generation`, 'success');
+    // On failure the context has already reverted and shown the error toast.
+    if (applied) {
+      showToast(`Template "${template.name}" selected for generation`, 'success');
+    }
   };
 
   if (loading) {

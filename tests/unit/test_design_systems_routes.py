@@ -443,55 +443,122 @@ class TestReferenceValidation:
             user="u",
         )
 
-    def test_accepts_template_belonging_to_selected_design_system(self, db_session):
+    def test_valid_template_pin_is_preserved(self, db_session):
         from src.api.routes.agent_config import _validate_references
         from src.api.schemas.agent_config import AgentConfig
 
         ds = self._templated_ds(db_session)
+        config = AgentConfig(design_system_id=ds.id, template_id=ds.templates[0].id)
         with self._patched_db(db_session):
-            _validate_references(
-                AgentConfig(design_system_id=ds.id, template_id=ds.templates[0].id)
-            )  # no raise
+            _validate_references(config)  # no raise
+        assert config.template_id == ds.templates[0].id  # kept
 
-    def test_rejects_template_of_another_design_system(self, db_session):
-        from fastapi import HTTPException
+    def test_foreign_template_pin_is_cleared_not_rejected(self, db_session, caplog):
+        """The template pin is SELF-HEALING at save time (unlike the strict
+        library ids): a pin that doesn't belong to the selected design system is
+        nulled out + logged, never a 422 — a stale pin must not wedge the
+        config."""
+        import logging
 
         from src.api.routes.agent_config import _validate_references
         from src.api.schemas.agent_config import AgentConfig
 
         ds_a = self._templated_ds(db_session, name="Acme Validator A")
         ds_b = self._templated_ds(db_session, name="Acme Validator B")
+        config = AgentConfig(design_system_id=ds_a.id, template_id=ds_b.templates[0].id)
         with self._patched_db(db_session):
-            with pytest.raises(HTTPException) as exc:
-                _validate_references(
-                    AgentConfig(design_system_id=ds_a.id, template_id=ds_b.templates[0].id)
-                )
-        assert exc.value.status_code == 422
+            with caplog.at_level(logging.WARNING, logger="src.api.routes.agent_config"):
+                _validate_references(config)  # no raise
+        assert config.template_id is None
+        assert "template" in caplog.text.lower()
 
-    def test_rejects_template_without_design_system(self, db_session):
-        from fastapi import HTTPException
+    def test_template_pin_without_design_system_is_cleared(self, db_session, caplog):
+        import logging
 
         from src.api.routes.agent_config import _validate_references
         from src.api.schemas.agent_config import AgentConfig
 
         ds = self._templated_ds(db_session)
+        config = AgentConfig(template_id=ds.templates[0].id)
         with self._patched_db(db_session):
-            with pytest.raises(HTTPException) as exc:
-                _validate_references(AgentConfig(template_id=ds.templates[0].id))
-        assert exc.value.status_code == 422
+            with caplog.at_level(logging.WARNING, logger="src.api.routes.agent_config"):
+                _validate_references(config)  # no raise
+        assert config.template_id is None
+        assert "template" in caplog.text.lower()
 
-    def test_rejects_unknown_template_id(self, db_session):
-        from fastapi import HTTPException
+    def test_unknown_template_pin_is_cleared(self, db_session, caplog):
+        import logging
 
         from src.api.routes.agent_config import _validate_references
         from src.api.schemas.agent_config import AgentConfig
 
         ds = self._templated_ds(db_session)
+        config = AgentConfig(design_system_id=ds.id, template_id=424242)
         with self._patched_db(db_session):
-            with pytest.raises(HTTPException) as exc:
-                _validate_references(AgentConfig(design_system_id=ds.id, template_id=424242))
-        assert exc.value.status_code == 422
-        assert "424242" in exc.value.detail
+            with caplog.at_level(logging.WARNING, logger="src.api.routes.agent_config"):
+                _validate_references(config)  # no raise
+        assert config.template_id is None
+        assert "424242" in caplog.text
+
+    def test_reupload_scenario_stale_pin_autoclears_and_put_succeeds(self, db_session):
+        """Regression for the wedged-config failure: delete+re-upload of a
+        design system re-materializes templates with NEW ids, so a persisted
+        config can hold a stale pin. Every later PUT must still succeed, with
+        the stale pin auto-cleared, the sanitized config persisted, and the
+        effective config returned so the frontend state syncs."""
+        from src.database.models import DesignSystemTemplate, UserSession
+        from src.services.design_system_templates import materialize_templates
+
+        ds = self._templated_ds(db_session)
+        old_template_id = ds.templates[0].id
+        db_session.add(UserSession(session_id="sess-reupload"))
+        db_session.commit()
+
+        from src.api.main import app  # client fixture app — reuse for clarity
+
+        client = TestClient(app)
+        base = "/api/sessions/sess-reupload/agent-config"
+        with self._patched_db(db_session):
+            # Valid pin round-trips.
+            resp = client.put(
+                base, json={"design_system_id": ds.id, "template_id": old_template_id}
+            )
+            assert resp.status_code == 200, resp.text
+            assert resp.json()["template_id"] == old_template_id
+
+            # Simulate the sanctioned delete+re-upload workflow: template rows
+            # are re-materialized with NEW ids. A second (surviving) system
+            # keeps the SQLite rowid watermark high so the re-materialized rows
+            # genuinely get fresh ids rather than reusing the deleted ones.
+            self._templated_ds(db_session, name="Acme Reupload Filler")
+            db_session.query(DesignSystemTemplate).filter(
+                DesignSystemTemplate.design_system_id == ds.id
+            ).delete()
+            db_session.commit()
+            materialize_templates(ds)
+            db_session.commit()
+            assert ds.templates[0].id != old_template_id
+
+            # The next PUT (still carrying the stale pin) SUCCEEDS: the pin is
+            # auto-cleared in the response AND in the persisted row.
+            resp = client.put(
+                base, json={"design_system_id": ds.id, "template_id": old_template_id}
+            )
+            assert resp.status_code == 200, resp.text
+            assert resp.json()["template_id"] is None
+            session_row = (
+                db_session.query(UserSession)
+                .filter(UserSession.session_id == "sess-reupload")
+                .first()
+            )
+            assert session_row.agent_config["template_id"] is None
+
+            # And a fresh, valid pin still saves normally afterwards.
+            resp = client.put(
+                base, json={"design_system_id": ds.id, "template_id": ds.templates[0].id}
+            )
+            assert resp.status_code == 200, resp.text
+            assert resp.json()["template_id"] == ds.templates[0].id
 
 
 # ---------------------------------------------------------------------------

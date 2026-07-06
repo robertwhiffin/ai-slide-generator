@@ -29,7 +29,12 @@ import { DEFAULT_AGENT_CONFIG } from '../types/agentConfig';
 
 interface AgentConfigContextValue {
   agentConfig: AgentConfig;
-  updateConfig: (config: AgentConfig) => Promise<void>;
+  /**
+   * Apply a full config. Resolves true on success and false when the backend
+   * sync failed (the update is reverted and an error toast is shown here) —
+   * callers that report success themselves must check the flag.
+   */
+  updateConfig: (config: AgentConfig) => Promise<boolean>;
   addTool: (tool: ToolEntry) => Promise<void>;
   removeTool: (tool: ToolEntry) => Promise<void>;
   updateTool: (spaceId: string, updates: { description?: string }) => Promise<void>;
@@ -250,7 +255,7 @@ export const AgentConfigProvider: React.FC<{ children: React.ReactNode }> = ({ c
   // ------------------------------------------------------------------
   // updateConfig — optimistic update with revert on failure
   // ------------------------------------------------------------------
-  const updateConfig = useCallback(async (config: AgentConfig) => {
+  const updateConfig = useCallback(async (config: AgentConfig): Promise<boolean> => {
     const previous = agentConfig;
     setAgentConfig(config);
 
@@ -260,13 +265,16 @@ export const AgentConfigProvider: React.FC<{ children: React.ReactNode }> = ({ c
         const confirmed = await api.updateAgentConfig(urlSessionId, config);
         console.log('[AgentConfigContext] Backend confirmed:', JSON.stringify(confirmed));
         setAgentConfig(confirmed);
+        return true;
       } catch (err) {
         console.error('[AgentConfigContext] Failed to update agent config:', err);
         setAgentConfig(previous);
         showToast('Failed to update configuration', 'error');
+        return false;
       }
     } else {
       console.log('[AgentConfigContext] Pre-session mode, config saved locally only. isPreSession:', isPreSession, 'urlSessionId:', urlSessionId);
+      return true;
     }
   }, [agentConfig, isPreSession, urlSessionId, showToast]);
 
