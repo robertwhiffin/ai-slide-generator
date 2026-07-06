@@ -38,6 +38,11 @@ match the huashu / Claude-Design "brand operating manual" model):
   (``src/utils/image_utils.py``) but is a DISTINCT namespace:
   ``design_system_asset`` IDs and ``image_assets`` IDs are independent sequences,
   so reusing ``{{image:ID}}`` would resolve to an unrelated image.
+- SLIDE FRAME CONSTRAINTS (Phase 3) are always appended (just before the asset
+  contract): a DS deck bypasses ``DEFAULT_SLIDE_STYLE``, so the compiled content
+  must itself carry the fixed 1280x720 frame rules + soft safe-area guidance to
+  keep the model frame-aware. Compiler-emitted (not ``prompt_modules``) so the
+  no-DS / legacy prompts stay byte-identical.
 """
 
 from __future__ import annotations
@@ -92,6 +97,34 @@ _ASSET_CONTRACT = (
     "handles the tool returned. Use assets in importance order "
     "(logo > product/lockup > icon > illustration > background) and never redraw "
     "them."
+)
+
+# Frame guardrails (Phase 3). A design-system deck injects this compiled content
+# and BYPASSES ``DEFAULT_SLIDE_STYLE`` (``src/core/defaults.py``) — the only place
+# the slide frame + content limits used to live — so without this block the model
+# generates blind to the 1280x720 ceiling and the export clips it (the "cut off" /
+# "massive long slide" symptom). Emitting it here (in ``compiled_style_content``,
+# NOT ``prompt_modules``) keeps the legacy custom-system-prompt path and the no-DS
+# golden prompts BYTE-IDENTICAL. Always present when a design system compiles (like
+# the asset contract). The hard frame rules are stated as instructions; the safe
+# area is SOFT prose ONLY — no injected padding CSS or ``.slide`` wrapper, which
+# would break full-bleed backgrounds (structural safe-area is Phase 4 template CSS).
+# "no in-slide scrolling" is deliberately per-slide so it does not contradict
+# ``prompt_modules.HTML_OUTPUT_FORMAT``'s vertically-stacked-slides deck page.
+_SLIDE_FRAME_CONSTRAINTS = (
+    "SLIDE FRAME CONSTRAINTS:\n"
+    "- Every slide renders into a FIXED 1280x720px frame (16:9). The frame never "
+    "grows to fit content.\n"
+    "- Give each slide a 1280x720 box that clips its own overflow (e.g. "
+    "body/.slide { width:1280px; height:720px; overflow:hidden; }) so anything past "
+    "the frame is CLIPPED on export, never scrolled.\n"
+    "- One slide per frame: fit ALL of that slide's content inside its single "
+    "1280x720 frame, with no in-slide scrolling. If content would overflow, trim "
+    "it, scale it down, or split it across additional slides until it fits.\n"
+    "- Safe area (soft guidance): keep primary content (titles, body text, charts, "
+    "tables) roughly 72px clear of the top and bottom edges and 88px clear of the "
+    "left and right edges; let only full-bleed backgrounds or images reach the "
+    "slide edges."
 )
 
 
@@ -346,8 +379,9 @@ def compile_design_system(
 
     Emitted order: header -> description -> BRAND MANUAL (README + SKILL, full) ->
     tokens (color, type, spacing, shadow; all uncapped) -> fonts (@font-face refs
-    + family listing; uncapped) -> templates -> the brand IMAGE ASSET CONTRACT
-    (fetch via ``search_brand_assets``). Brand images are NOT enumerated.
+    + family listing; uncapped) -> templates -> SLIDE FRAME CONSTRAINTS (frame
+    guardrails, always present) -> the brand IMAGE ASSET CONTRACT (fetch via
+    ``search_brand_assets``). Brand images are NOT enumerated.
     """
     parts: list[str] = []
 
@@ -400,6 +434,11 @@ def compile_design_system(
     template_section = _template_section(design_system)
     if template_section:
         parts.append(template_section)
+
+    # Frame guardrails: re-assert the fixed 1280x720 frame awareness a DS deck
+    # loses by bypassing DEFAULT_SLIDE_STYLE. Always present; emitted before the
+    # asset contract so the contract stays the last block.
+    parts.append(_SLIDE_FRAME_CONSTRAINTS)
 
     # Brand IMAGE assets are fetched on demand via search_brand_assets, not
     # enumerated. The contract is always present when a design system compiles.
