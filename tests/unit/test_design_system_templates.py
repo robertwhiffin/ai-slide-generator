@@ -172,14 +172,88 @@ class TestRewriteTemplateAssetRefs:
         assert "ds-base.js" not in out
         assert "<section>keep me</section>" in out
 
-    def test_href_resolving_to_asset_rewritten_unresolvable_href_left(self):
-        html = (
-            '<link rel="icon" href="../assets/logo.svg" />'
-            '<link rel="stylesheet" href="./deck.css" />'
-        )
-        out = self._rewrite(html)
+    def test_href_resolving_to_asset_rewritten(self):
+        out = self._rewrite('<link rel="icon" href="../assets/logo.svg" />')
         assert '<link rel="icon" href="{{ds-asset:7}}" />' in out
-        assert 'href="./deck.css"' in out  # not an asset: left as-is (harmless)
+
+    def test_unresolvable_relative_href_neutralized_like_src(self, caplog):
+        """Cross-review Blocking 2: an unresolvable RELATIVE href is an asset
+        ref we claimed to cover — it must become the inert placeholder with a
+        warning, exactly like src/poster (not silently left dangling)."""
+        with caplog.at_level(logging.WARNING, logger="src.services.design_system_templates"):
+            out = self._rewrite('<link rel="stylesheet" href="./deck.css" />')
+        assert 'href="data:,"' in out
+        assert "deck.css" not in out
+        assert "deck.css" in caplog.text
+
+    def test_absolute_href_anchors_left_untouched(self):
+        html = (
+            '<a href="https://example.invalid/docs">docs</a>'
+            '<a href="mailto:brand@example.invalid">mail</a>'
+            '<a href="#section">jump</a>'
+        )
+        assert self._rewrite(html) == html
+
+    # --- hardening: org-trusted surface, belt-and-braces (no full sanitizer) ---
+
+    def test_inline_event_handler_attributes_stripped(self):
+        out = self._rewrite(
+            '<img src="../assets/logo.svg" onerror="alert(1)" alt="Acme" />'
+            "<section onclick='doThing()' class=\"slide\">keep</section>"
+        )
+        assert "onerror" not in out
+        assert "onclick" not in out
+        assert "alert(1)" not in out
+        assert '<img src="{{ds-asset:7}}"' in out
+        assert 'class="slide">keep</section>' in out
+
+    def test_javascript_urls_neutralized(self, caplog):
+        with caplog.at_level(logging.WARNING, logger="src.services.design_system_templates"):
+            out = self._rewrite(
+                '<a href="javascript:alert(1)">x</a>'
+                '<img src="JaVaScRiPt:alert(2)" />'
+                '<a href="java\nscript:alert(3)">y</a>'
+            )
+        assert "alert(1)" not in out
+        assert "alert(2)" not in out
+        assert "alert(3)" not in out
+        assert out.count("data:,") == 3
+        assert "javascript" in caplog.text.lower()
+
+    def test_object_embed_iframe_stripped_like_script(self):
+        out = self._rewrite(
+            '<object data="../assets/logo.svg"><param name="x" /></object>'
+            '<embed src="movie.swf">'
+            '<iframe src="https://example.invalid/frame"></iframe>'
+            "<section>keep me</section>"
+        )
+        assert "<object" not in out
+        assert "<embed" not in out
+        assert "<iframe" not in out
+        assert "<section>keep me</section>" in out
+
+    def test_srcset_resolvable_entries_rewritten(self):
+        out = self._rewrite(
+            '<img src="../assets/logo.svg" '
+            'srcset="../assets/logo.svg 1x, assets/backgrounds/hero-bg.png 2x" />'
+        )
+        assert 'srcset="{{ds-asset:7}} 1x, {{ds-asset:9}} 2x"' in out
+
+    def test_srcset_with_unresolvable_relative_entry_dropped(self, caplog):
+        with caplog.at_level(logging.WARNING, logger="src.services.design_system_templates"):
+            out = self._rewrite(
+                '<img src="../assets/logo.svg" '
+                'srcset="../assets/logo.svg 1x, ../assets/missing-art.png 2x" />'
+            )
+        assert "srcset" not in out
+        assert "missing-art.png" not in out
+        assert '<img src="{{ds-asset:7}}"' in out  # the src itself still rewrites
+        assert "srcset" in caplog.text.lower()
+
+    def test_srcset_with_only_absolute_entries_kept(self):
+        html = '<img src="../assets/logo.svg" srcset="https://example.invalid/a.png 1x" />'
+        out = self._rewrite(html)
+        assert 'srcset="https://example.invalid/a.png 1x"' in out
 
 
 # ---------------------------------------------------------------------------

@@ -14,15 +14,18 @@ consumable by generation:
 
 - **Asset-ref rewriting**: a template's entry HTML references bundle assets by
   relative path (``../assets/brand/x.svg`` from its folder, or bundle-root
-  ``assets/…``) in both ``<img src>``/``href`` attributes AND CSS ``url()``.
-  :func:`rewrite_template_asset_refs` maps those to the design system's stored
-  assets and rewrites them to ``{{ds-asset:ID}}`` so the existing resolver
-  (``src.utils.ds_asset_utils``) renders them. Unresolvable image refs become an
-  inert ``data:,`` placeholder (logged, never a crash); preview-chrome
-  ``<script>`` tags (``ds-base.js``/``deck-stage.js``) are stripped — they are
-  picker chrome, never model input. Rewriting happens ONCE, at materialization,
-  into the stored ``layout_html``/``token_css`` (deterministic; re-derivable by
-  deleting the rows).
+  ``assets/…``) in ``src``/``href``/``poster``/``srcset`` attributes AND CSS
+  ``url()``. :func:`rewrite_template_asset_refs` maps those to the design
+  system's stored assets and rewrites them to ``{{ds-asset:ID}}`` so the
+  existing resolver (``src.utils.ds_asset_utils``) renders them. Unresolvable
+  RELATIVE refs become an inert ``data:,`` placeholder (logged, never a crash;
+  an unresolvable ``srcset`` entry drops the whole attribute); absolute
+  URLs/anchors are left untouched. Hardening on the same pass: preview-chrome
+  ``<script>``/``<object>``/``<embed>``/``<iframe>`` elements and inline
+  ``on*=`` handlers are stripped and ``javascript:`` URLs neutralized — picker
+  chrome and active content never reach the model. Rewriting happens ONCE, at
+  materialization, into the stored ``layout_html``/``token_css`` (deterministic;
+  re-derivable by deleting the rows).
 
 - **Consumption**: :func:`build_selected_template_block` renders ONE pinned
   template as a clearly-delimited SELECTED-TEMPLATE prompt block — the layout
@@ -69,14 +72,42 @@ _ABSOLUTE_URI_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.\-]*:")
 
 _SCRIPT_TAG_RE = re.compile(r"<script\b[^>]*>.*?</script\s*>", re.IGNORECASE | re.DOTALL)
 
+# Active embedded content stripped like <script> (hardening on the org-trusted
+# surface — belt-and-braces, not a full sanitizer): paired object/iframe first,
+# then any stragglers (void <embed>, unclosed tags, orphan closers).
+_EMBEDDED_CONTENT_TAG_RE = re.compile(
+    r"<(object|iframe)\b[^>]*>.*?</\1\s*>", re.IGNORECASE | re.DOTALL
+)
+_LONE_EMBEDDED_TAG_RE = re.compile(r"</?(?:object|embed|iframe)\b[^>]*>", re.IGNORECASE)
+
+# Inline event-handler attributes (onclick=/onerror=/…), quoted or bare.
+_EVENT_HANDLER_ATTR_RE = re.compile(
+    r"\son[a-z0-9]+\s*=\s*(?:\"[^\"]*\"|'[^']*'|[^\s>]+)", re.IGNORECASE
+)
+
+# script-scheme URLs (javascript:/vbscript:), matched after stripping the
+# whitespace/control characters attackers use to split the scheme.
+_SCRIPT_SCHEME_RE = re.compile(r"^(?:javascript|vbscript):", re.IGNORECASE)
+
 # src/href/poster attribute refs in the entry HTML.
 _ATTR_REF_RE = re.compile(
     r"(?P<prefix>\b(?P<name>src|href|poster)\s*=\s*(?P<q>[\"']))(?P<ref>[^\"']*)(?P=q)",
     re.IGNORECASE,
 )
 
+# srcset carries a comma-separated list of "url [descriptor]" entries — handled
+# by a dedicated pass because the generic attr pattern rewrites single refs.
+_SRCSET_ATTR_RE = re.compile(
+    r"\ssrcset\s*=\s*(?P<q>[\"'])(?P<val>[^\"']*)(?P=q)", re.IGNORECASE
+)
+
 # CSS url() refs — both in <style> blocks and inline style="" attributes.
 _CSS_URL_RE = re.compile(r"url\(\s*(?P<q>[\"']?)(?P<ref>[^\"')]+)(?P=q)\s*\)", re.IGNORECASE)
+
+
+def _is_script_scheme_url(ref: str) -> bool:
+    """True for javascript:/vbscript: URLs, including whitespace-split forms."""
+    return bool(_SCRIPT_SCHEME_RE.match(re.sub(r"[\s\x00-\x1f]+", "", ref or "")))
 
 
 def _slug(value: str) -> str:
@@ -146,29 +177,74 @@ def rewrite_template_asset_refs(
 ) -> str:
     """Rewrite a template source's asset refs to ``{{ds-asset:ID}}`` handles.
 
-    Covers ``src``/``href``/``poster`` attributes and CSS ``url()`` refs (the
-    real export uses both). Refs that resolve to a stored asset become handles
-    the existing resolver renders; unresolvable ``src``/``poster``/``url()``
-    refs become the inert ``data:,`` placeholder (logged — never a crash), while
-    an unresolvable ``href`` is left as-is (a dead link is already harmless).
-    ``<script>`` tags are stripped first: template folders ship preview chrome
-    (``ds-base.js``/``deck-stage.js``) that must never reach the model.
+    Covers ``src``/``href``/``poster``/``srcset`` attributes and CSS ``url()``
+    refs (the real export uses both). Refs that resolve to a stored asset
+    become handles the existing resolver renders; an unresolvable RELATIVE ref
+    becomes the inert ``data:,`` placeholder (logged — never a crash) — href
+    included, since a relative href is an asset ref this rewrite claims to
+    cover. Absolute URLs, ``mailto:``, and ``#`` anchors are not asset refs and
+    are left untouched. An unresolvable relative ``srcset`` entry drops the
+    whole attribute instead (a ``data:,`` srcset is useless).
+
+    Hardening (org-trusted surface, belt-and-braces — no sanitizer dependency):
+    ``<script>``/``<object>``/``<embed>``/``<iframe>`` elements and inline
+    ``on*=`` event-handler attributes are stripped (template folders ship
+    preview chrome that must never reach the model), and ``javascript:`` URLs
+    in the covered attributes are neutralized to the placeholder.
     """
     if not text:
         return text
 
     text = _SCRIPT_TAG_RE.sub("", text)
+    text = _EMBEDDED_CONTENT_TAG_RE.sub("", text)
+    text = _LONE_EMBEDDED_TAG_RE.sub("", text)
+    text = _EVENT_HANDLER_ATTR_RE.sub("", text)
+
+    def _replace_srcset(match: "re.Match[str]") -> str:
+        entries = [e.strip() for e in match.group("val").split(",") if e.strip()]
+        if not entries:
+            return match.group(0)
+        rewritten: list[str] = []
+        for entry in entries:
+            pieces = entry.split(None, 1)
+            url = pieces[0]
+            descriptor = f" {pieces[1].strip()}" if len(pieces) > 1 else ""
+            if _is_script_scheme_url(url):
+                logger.warning(
+                    "Template srcset entry '%s' uses a script-scheme URL; dropping "
+                    "the srcset attribute",
+                    url,
+                )
+                return ""
+            if not _looks_rewritable(url):
+                rewritten.append(f"{url}{descriptor}")
+                continue
+            asset_id = _resolve_asset_id(url, base_dir, asset_ids_by_path)
+            if asset_id is None:
+                logger.warning(
+                    "Template srcset entry '%s' does not match any stored "
+                    "design-system asset; dropping the srcset attribute",
+                    url,
+                )
+                return ""
+            rewritten.append(f"{{{{ds-asset:{asset_id}}}}}{descriptor}")
+        quote = match.group("q")
+        return f" srcset={quote}{', '.join(rewritten)}{quote}"
 
     def _replace_attr(match: "re.Match[str]") -> str:
         ref = match.group("ref")
+        if _is_script_scheme_url(ref):
+            logger.warning(
+                "Template %s ref uses a javascript:-style URL; replaced with an "
+                "inert placeholder",
+                match.group("name").lower(),
+            )
+            return f"{match.group('prefix')}{_UNRESOLVED_PLACEHOLDER}{match.group('q')}"
         if not _looks_rewritable(ref):
             return match.group(0)
         asset_id = _resolve_asset_id(ref, base_dir, asset_ids_by_path)
         if asset_id is not None:
             return f"{match.group('prefix')}{{{{ds-asset:{asset_id}}}}}{match.group('q')}"
-        if match.group("name").lower() == "href":
-            logger.debug("Template href '%s' does not match a stored asset; left as-is", ref)
-            return match.group(0)
         logger.warning(
             "Template asset ref '%s' does not match any stored design-system asset; "
             "replaced with an inert placeholder",
@@ -191,6 +267,7 @@ def rewrite_template_asset_refs(
         )
         return f"url({quote}{_UNRESOLVED_PLACEHOLDER}{quote})"
 
+    text = _SRCSET_ATTR_RE.sub(_replace_srcset, text)
     text = _ATTR_REF_RE.sub(_replace_attr, text)
     return _CSS_URL_RE.sub(_replace_url, text)
 
