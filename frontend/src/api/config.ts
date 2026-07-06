@@ -220,6 +220,21 @@ export interface DesignSystemListResponse {
   total: number;
 }
 
+/** An addressable slide template of a design system (picker view). */
+export interface DesignSystemTemplate {
+  id: number;
+  name: string;
+  description: string | null;
+  entry_path: string;
+  /** Template-scoped thumbnail endpoint, or null when no preview was retained. */
+  thumbnail_url: string | null;
+}
+
+export interface DesignSystemTemplateListResponse {
+  templates: DesignSystemTemplate[];
+  total: number;
+}
+
 export interface DesignSystemTokenInput {
   group: string;
   name: string;
@@ -509,6 +524,9 @@ export const configApi = {
 
   getDesignSystem: (dsId: number): Promise<DesignSystemDetail> =>
     fetchJson(`${API_BASE}/design-systems/${dsId}`),
+
+  listDesignSystemTemplates: (dsId: number): Promise<DesignSystemTemplateListResponse> =>
+    fetchJson(`${API_BASE}/design-systems/${dsId}/templates`),
 
   createDesignSystem: (data: DesignSystemCreate): Promise<DesignSystemDetail> =>
     fetchJson(`${API_BASE}/design-systems`, {

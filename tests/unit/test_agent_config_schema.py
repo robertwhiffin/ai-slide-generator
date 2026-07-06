@@ -24,6 +24,20 @@ def test_design_system_id_optional_field():
     assert resolve_agent_config({"design_system_id": 9}).design_system_id == 9
 
 
+def test_template_id_optional_field():
+    """AgentConfig carries an optional template_id pinning one of the selected
+    design system's templates (Phase 4 wiring); default None = no-template."""
+    from src.api.schemas.agent_config import AgentConfig, resolve_agent_config
+    assert AgentConfig().template_id is None
+    config = AgentConfig(design_system_id=5, template_id=7)
+    assert config.template_id == 7
+    # Round-trips through dict form used to persist config on sessions/profiles.
+    assert config.model_dump()["template_id"] == 7
+    assert resolve_agent_config({"design_system_id": 5, "template_id": 7}).template_id == 7
+    # Pre-Phase-4 persisted configs lack the key entirely and must still parse.
+    assert resolve_agent_config({"design_system_id": 5}).template_id is None
+
+
 def test_genie_tool_requires_space_id_and_name():
     from src.api.schemas.agent_config import AgentConfig, GenieTool
     with pytest.raises(ValidationError):

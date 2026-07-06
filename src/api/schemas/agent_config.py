@@ -62,6 +62,11 @@ class AgentConfig(BaseModel):
     # A selected design system compiles to prompt text and, when set, takes
     # precedence over slide_style_id (see agent_factory._get_prompt_content).
     design_system_id: Optional[int] = None
+    # Optionally pins ONE of the selected design system's templates
+    # (design_system_template.id). Meaningful only alongside design_system_id;
+    # generation IGNORES it (with a log) unless the template exists and belongs
+    # to that design system, so a stale pin can never fail a request.
+    template_id: Optional[int] = None
     deck_prompt_id: Optional[int] = None
     system_prompt: Optional[str] = None
     slide_editing_instructions: Optional[str] = None

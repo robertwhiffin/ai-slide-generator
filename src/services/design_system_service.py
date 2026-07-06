@@ -10,8 +10,10 @@ Lakebase rows:
 - ``colors_and_type.css`` (and any ``globalCssPaths``) — its ``:root { --x: y }``
   custom properties are parsed as an ADDITIONAL token source.
 - ``fonts/**`` and ``assets/**`` — binary files stored as ``design_system_asset``
-  rows (bytes in-DB, following the ``image_assets`` pattern). Template screenshots
-  and ``preview*`` files are reference-only and skipped.
+  rows (bytes in-DB, following the ``image_assets`` pattern). ``preview*`` files
+  under ``assets/`` are reference-only and skipped; a template folder's
+  ``templates/<folder>/preview.*`` screenshot IS stored (kind ``template_shot``,
+  v1 Phase 4) so the template picker can serve thumbnails.
 
 v1 Phase 1 ("import foundation") extends the importer WITHOUT changing the
 generation seam:
@@ -176,11 +178,25 @@ def _infer_asset_kind(rel_path: str) -> str:
     return "illustration"
 
 
+# A template folder's preview screenshot (``templates/<folder>/preview.*`` with a
+# raster-image extension) — stored as a ``template_shot`` asset so the Phase 4
+# template picker can serve thumbnails. Checked BEFORE ``_should_skip`` (which
+# excludes ``templates/**`` from generic asset storage).
+_TEMPLATE_PREVIEW_RE = re.compile(
+    r"^templates/[^/]+/preview[^/]*\.(png|jpe?g|gif|webp)$", re.IGNORECASE
+)
+
+
+def _is_template_preview(rel_path: str) -> bool:
+    return bool(_TEMPLATE_PREVIEW_RE.match(rel_path.lower()))
+
+
 def _should_skip(rel_path: str) -> bool:
     """Only ``assets/**`` and ``fonts/**`` files are stored; skip everything else.
 
     Directories, OS junk, dotfiles, template screenshots and ``preview*`` files
-    (reference-only material) are excluded.
+    (reference-only material) are excluded. Template-folder preview thumbnails
+    are the exception — the caller checks :func:`_is_template_preview` first.
     """
     low = rel_path.lower()
     base = _basename(low)
@@ -413,17 +429,26 @@ def import_bundle(
     # Flush assigns primary keys so {{ds-asset:ID}} placeholders point at real ids
     # and each asset-reference file row resolves its asset_id.
     db.flush()
+    # Materialize addressable template entities (v1 Phase 4) AFTER the flush so
+    # the rewritten layout's {{ds-asset:ID}} refs point at real asset ids. Local
+    # import: design_system_templates imports this module for nothing, but the
+    # deferred import keeps the module graph acyclic-by-construction.
+    from src.services.design_system_templates import materialize_templates
+
+    materialize_templates(design_system)
     recompute_compiled_style_content(design_system)
     db.commit()
     db.refresh(design_system)
 
     logger.info(
-        "Imported design system '%s' (id=%s): %d token(s), %d asset(s), %d file(s)",
+        "Imported design system '%s' (id=%s): %d token(s), %d asset(s), %d file(s), "
+        "%d template(s)",
         design_system.name,
         design_system.id,
         len(tokens),
         len(assets),
         len(files),
+        len(design_system.templates),
     )
     return design_system
 
@@ -839,12 +864,15 @@ def _collect_assets_and_files(
             )
             continue
 
-        if not _should_skip(rel):
-            # Storable binary asset (assets/** or fonts/**). Size-checked read:
-            # the declared size is validated BEFORE materialisation (bomb guard).
+        if not _should_skip(rel) or _is_template_preview(rel):
+            # Storable binary asset: assets/**, fonts/**, or a template folder's
+            # preview screenshot (kind ``template_shot`` — thumbnail material for
+            # the Phase 4 template picker, excluded from brand-asset search).
+            # Size-checked read: the declared size is validated BEFORE
+            # materialisation (bomb guard).
             data = budget.read_info(zf, info)
             mime = _guess_mime(rel)
-            kind = _infer_asset_kind(rel)
+            kind = "template_shot" if _is_template_preview(rel) else _infer_asset_kind(rel)
             width, height = _image_dimensions(data, mime)
             asset = DesignSystemAsset(
                 kind=kind,

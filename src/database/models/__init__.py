@@ -5,6 +5,7 @@ from src.database.models.design_system import (
     DesignSystem,
     DesignSystemAsset,
     DesignSystemFile,
+    DesignSystemTemplate,
     DesignSystemToken,
 )
 from src.database.models.feedback import FeedbackConversation, SurveyResponse
@@ -45,6 +46,7 @@ __all__ = [
     "DesignSystem",
     "DesignSystemAsset",
     "DesignSystemFile",
+    "DesignSystemTemplate",
     "DesignSystemToken",
     "ExportJob",
     "FeedbackConversation",

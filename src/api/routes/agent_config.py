@@ -21,9 +21,20 @@ router = APIRouter(prefix="/api/sessions/{session_id}/agent-config", tags=["agen
 
 
 def _validate_references(config: AgentConfig) -> None:
-    """Validate that design_system_id, slide_style_id and deck_prompt_id reference
-    existing (active) library entries."""
-    from src.database.models import DesignSystem, SlideDeckPromptLibrary, SlideStyleLibrary
+    """Validate that design_system_id, template_id, slide_style_id and
+    deck_prompt_id reference existing (active) library entries.
+
+    A template must belong to the SELECTED design system (a pin without a design
+    system, or against another system's template, is rejected). This save-time
+    strictness complements the deliberately lenient generation path, which
+    IGNORES a pin that has gone stale after saving (deleted template, re-import).
+    """
+    from src.database.models import (
+        DesignSystem,
+        DesignSystemTemplate,
+        SlideDeckPromptLibrary,
+        SlideStyleLibrary,
+    )
 
     with get_db_session() as db:
         if config.design_system_id is not None:
@@ -39,6 +50,28 @@ def _validate_references(config: AgentConfig) -> None:
                 raise HTTPException(
                     status_code=422,
                     detail=f"design_system_id {config.design_system_id} not found",
+                )
+        if config.template_id is not None:
+            if config.design_system_id is None:
+                raise HTTPException(
+                    status_code=422,
+                    detail="template_id requires a design_system_id",
+                )
+            template = (
+                db.query(DesignSystemTemplate)
+                .filter(
+                    DesignSystemTemplate.id == config.template_id,
+                    DesignSystemTemplate.design_system_id == config.design_system_id,
+                )
+                .first()
+            )
+            if not template:
+                raise HTTPException(
+                    status_code=422,
+                    detail=(
+                        f"template_id {config.template_id} not found for "
+                        f"design_system_id {config.design_system_id}"
+                    ),
                 )
         if config.slide_style_id is not None:
             style = (

@@ -9,17 +9,22 @@ A design system is an org-shared company asset (everyone can view/use, matching
 how slide styles work today); ``created_by`` records authorship, ``published`` +
 ``is_default`` mark the org default.
 
-Four tables:
-- ``design_system``        — the parent record: metadata + parsed manifest +
-                             the normalized font mapping + the compiled prompt
-                             artifact.
-- ``design_system_asset``  — binary brand blobs (logo/font/…), bytes stored
-                             in-DB following the existing ``image_assets`` pattern.
-- ``design_system_token``  — normalized tokens (colors/type/spacing/shadow) for
-                             cheap query/preview without parsing the manifest.
-- ``design_system_file``   — retained bundle SOURCE files (README/SKILL/CSS/
-                             template layout HTML) plus path-metadata REFERENCES
-                             back to ``design_system_asset`` rows (v1 Phase 1).
+Five tables:
+- ``design_system``          — the parent record: metadata + parsed manifest +
+                               the normalized font mapping + the compiled prompt
+                               artifact.
+- ``design_system_asset``    — binary brand blobs (logo/font/…), bytes stored
+                               in-DB following the existing ``image_assets`` pattern.
+- ``design_system_token``    — normalized tokens (colors/type/spacing/shadow) for
+                               cheap query/preview without parsing the manifest.
+- ``design_system_file``     — retained bundle SOURCE files (README/SKILL/CSS/
+                               template layout HTML) plus path-metadata REFERENCES
+                               back to ``design_system_asset`` rows (v1 Phase 1).
+- ``design_system_template`` — addressable slide templates (v1 Phase 4): a
+                               flattened projection of the manifest ``templates[]``
+                               joined to the retained entry HTML, with asset refs
+                               rewritten to ``{{ds-asset:ID}}`` — the same
+                               projection pattern as ``design_system_token``.
 
 Binary brand bytes live ONLY in ``design_system_asset``; ``design_system_file``
 stores the (text) bytes of genuinely-new source files and, for assets/fonts,
@@ -133,6 +138,12 @@ class DesignSystem(Base):
     )
     files = relationship(
         "DesignSystemFile",
+        back_populates="design_system",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
+    templates = relationship(
+        "DesignSystemTemplate",
         back_populates="design_system",
         cascade="all, delete-orphan",
         passive_deletes=True,
@@ -276,4 +287,71 @@ class DesignSystemFile(Base):
         return (
             f"<DesignSystemFile(id={self.id}, design_system_id={self.design_system_id}, "
             f"kind='{self.kind}', path='{self.path}')>"
+        )
+
+
+class DesignSystemTemplate(Base):
+    """An addressable slide template of a design system (v1 Phase 4).
+
+    A flattened projection — like ``DesignSystemToken`` — of the manifest
+    ``templates[]`` entries joined to the retained ``design_system_file`` entry
+    HTML, so templates are individually addressable (stable id) without
+    re-parsing the manifest or re-walking file rows on every read:
+
+    - ``entry_path``     — the retained entry file's bundle-relative path
+                           (``templates/<folder>/index.html``).
+    - ``layout_html``    — the entry HTML rewritten at materialization time:
+                           relative asset refs (``<img src>``/``href``/CSS
+                           ``url()``) become ``{{ds-asset:ID}}`` handles the
+                           existing resolver renders, and preview-chrome
+                           ``<script>`` tags are stripped.
+    - ``token_css``      — the design system's retained CSS token sources
+                           (rewritten the same way), carried per template so the
+                           SELECTED-TEMPLATE prompt block is a pure function of
+                           this row (the layout's ``var(--…)`` refs depend on it).
+    - ``thumbnail_asset_id`` — the template folder's ``preview*`` screenshot,
+                           stored as a ``template_shot`` ``design_system_asset``.
+
+    Rows are populated at import and derived lazily (from ``manifest_json`` +
+    retained file rows) for systems imported before this table existed; pre-Phase-1
+    systems retained no files and simply have no templates.
+    """
+
+    __tablename__ = "design_system_template"
+
+    id = Column(Integer, primary_key=True)
+    design_system_id = Column(
+        Integer,
+        ForeignKey("design_system.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+
+    name = Column(String(255), nullable=False)
+    description = Column(Text, nullable=True)
+
+    # Normalized bundle-relative path of the entry file, e.g. "templates/x/index.html".
+    entry_path = Column(String(1024), nullable=False)
+
+    # Rewritten layout HTML ({{ds-asset:ID}} refs, scripts stripped) + the token
+    # stylesheet its var(--…) references depend on.
+    layout_html = Column(Text, nullable=False)
+    token_css = Column(Text, nullable=True)
+
+    # Preview screenshot (template_shot asset). SET NULL so deleting/replacing a
+    # thumbnail asset never deletes the template itself.
+    thumbnail_asset_id = Column(
+        Integer,
+        ForeignKey("design_system_asset.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+
+    design_system = relationship("DesignSystem", back_populates="templates")
+    thumbnail_asset = relationship("DesignSystemAsset")
+
+    def __repr__(self):
+        return (
+            f"<DesignSystemTemplate(id={self.id}, "
+            f"design_system_id={self.design_system_id}, name='{self.name}')>"
         )

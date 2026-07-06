@@ -9,11 +9,17 @@
  * All content is RUNTIME data from the API — nothing brand-specific is hardcoded.
  */
 
-import React from 'react';
-import { Layers, Palette, Image as ImageIcon, FileText } from 'lucide-react';
+import React, { useEffect, useState } from 'react';
+import { Check, Layers, Palette, Image as ImageIcon, FileText } from 'lucide-react';
 import { Badge } from '@/ui/badge';
-import { resolveApiUrl } from '../../api/config';
-import type { DesignSystemDetail, DesignSystemToken } from '../../api/config';
+import { configApi, resolveApiUrl } from '../../api/config';
+import type {
+  DesignSystemDetail,
+  DesignSystemTemplate,
+  DesignSystemToken,
+} from '../../api/config';
+import { useAgentConfig } from '../../contexts/AgentConfigContext';
+import { useToast } from '../../contexts/ToastContext';
 
 interface DesignSystemDetailPanelProps {
   detail: DesignSystemDetail | null;
@@ -49,6 +55,45 @@ export const DesignSystemDetailPanel: React.FC<DesignSystemDetailPanelProps> = (
   loading,
   error,
 }) => {
+  const { agentConfig, updateConfig } = useAgentConfig();
+  const { showToast } = useToast();
+
+  // Addressable template entities (thumbnail + "Use"). Systems imported before
+  // source files were retained have none — the manifest listing is the fallback.
+  const [entityTemplates, setEntityTemplates] = useState<DesignSystemTemplate[]>([]);
+  const [templatesLoading, setTemplatesLoading] = useState(false);
+  const detailId = detail?.id ?? null;
+
+  useEffect(() => {
+    if (detailId == null) {
+      setEntityTemplates([]);
+      return;
+    }
+    let cancelled = false;
+    setTemplatesLoading(true);
+    configApi.listDesignSystemTemplates(detailId)
+      .then(res => { if (!cancelled) setEntityTemplates(res.templates); })
+      .catch(err => {
+        console.error('Failed to load design system templates:', err);
+        if (!cancelled) setEntityTemplates([]);
+      })
+      .finally(() => { if (!cancelled) setTemplatesLoading(false); });
+
+    return () => { cancelled = true; };
+  }, [detailId]);
+
+  const handleUseTemplate = async (template: DesignSystemTemplate) => {
+    if (detailId == null) return;
+    // One atomic config update: selecting a template also selects its design
+    // system (the same selection the AgentConfigBar dropdowns drive).
+    await updateConfig({
+      ...agentConfig,
+      design_system_id: detailId,
+      template_id: template.id,
+    });
+    showToast(`Template "${template.name}" selected for generation`, 'success');
+  };
+
   if (loading) {
     return (
       <div className="flex items-center justify-center rounded-lg border border-border bg-card p-8 text-sm text-muted-foreground">
@@ -115,9 +160,63 @@ export const DesignSystemDetailPanel: React.FC<DesignSystemDetailPanelProps> = (
           <Layers className="size-4 text-muted-foreground" />
           <h3 className="text-sm font-medium text-foreground">Templates</h3>
         </div>
-        {templates.length === 0 ? (
+        {templatesLoading ? (
+          <p className="text-xs text-muted-foreground">Loading templates…</p>
+        ) : entityTemplates.length > 0 ? (
+          <div className="grid grid-cols-1 gap-2 sm:grid-cols-2" data-testid="template-cards">
+            {entityTemplates.map((tmpl) => {
+              const isSelected =
+                agentConfig.design_system_id === detail.id &&
+                agentConfig.template_id === tmpl.id;
+              return (
+                <div
+                  key={tmpl.id}
+                  className="flex flex-col overflow-hidden rounded-md border border-border bg-muted/20"
+                  data-testid="template-card"
+                >
+                  {tmpl.thumbnail_url ? (
+                    <img
+                      src={resolveApiUrl(tmpl.thumbnail_url)}
+                      alt={`${tmpl.name} preview`}
+                      className="aspect-video w-full border-b border-border bg-background object-cover"
+                      onError={(e) => { (e.currentTarget as HTMLImageElement).style.display = 'none'; }}
+                    />
+                  ) : (
+                    <div className="flex aspect-video w-full items-center justify-center border-b border-border bg-background text-muted-foreground/40">
+                      <Layers className="size-6" />
+                    </div>
+                  )}
+                  <div className="flex flex-1 flex-col gap-1 p-3">
+                    <div className="text-sm font-medium text-foreground">{tmpl.name}</div>
+                    {tmpl.description && (
+                      <div className="text-xs text-muted-foreground">{tmpl.description}</div>
+                    )}
+                    <div className="mt-auto pt-2">
+                      <button
+                        onClick={() => handleUseTemplate(tmpl)}
+                        disabled={isSelected}
+                        className="inline-flex items-center gap-1 rounded border border-border bg-background px-2 py-1 text-xs font-medium text-foreground transition-colors hover:bg-muted disabled:cursor-default disabled:opacity-70"
+                        data-testid="use-template-button"
+                      >
+                        {isSelected ? (
+                          <>
+                            <Check className="size-3" /> Selected
+                          </>
+                        ) : (
+                          'Use'
+                        )}
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        ) : templates.length === 0 ? (
           <p className="text-xs text-muted-foreground">No templates in this design system.</p>
         ) : (
+          /* Manifest-only fallback: systems imported before template sources
+             were retained list names/descriptions but are not selectable. */
           <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
             {templates.map((tmpl, idx) => (
               <div

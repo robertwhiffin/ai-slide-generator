@@ -16,11 +16,12 @@ Design decisions (Phase 2 RESET — README/SKILL-central, agentic, UNCAPPED, to
 match the huashu / Claude-Design "brand operating manual" model):
 - Output opens with ``SLIDE VISUAL STYLE:`` to match the ``DEFAULT_SLIDE_STYLE``
   convention (``src/core/defaults.py``) so it slots into the prompt identically.
-- The FULL README then the FULL SKILL.md are injected FIRST as a BRAND MANUAL
-  block — UNFILTERED and UNTRUNCATED (no rule-only keyword filter, no char
-  budget). The README already documents the brand's assets/voice/rules, so there
-  is no separate computed "map". ``recompute_compiled_style_content`` reads that
-  text from the retained ``design_system_file`` rows and passes it IN, keeping
+- A short description caption comes first; the FULL README then the FULL
+  SKILL.md follow as the first SUBSTANTIVE block — a BRAND MANUAL, UNFILTERED
+  and UNTRUNCATED (no rule-only keyword filter, no char budget). The README
+  already documents the brand's assets/voice/rules, so there is no separate
+  computed "map". ``recompute_compiled_style_content`` reads that text from the
+  retained ``design_system_file`` rows and passes it IN, keeping
   ``compile_design_system`` a pure function of its arguments.
 - ALL tokens are emitted UNCAPPED: color tokens as a human/LLM-readable spec
   grouped by group AND a ``:root { --brand-* }`` block (spec §8); type + spacing
@@ -89,7 +90,8 @@ _COLOR_GROUPS = ("core", "accents", "ink", "tints")
 _RECOGNIZED_GROUPS = frozenset(_COLOR_GROUPS + ("type", "spacing", "shadow"))
 
 # Heading that frames the injected README + SKILL as the authoritative brand
-# operating manual (the huashu / Claude-Design model). Injected FIRST, in FULL.
+# operating manual (the huashu / Claude-Design model). Injected in FULL as the
+# first substantive block (right after the short description caption).
 # NOTE: cross-cutting precedence over generic styling is stated ONCE — and
 # unconditionally, so token-only design systems get it too — in
 # ``prompt_modules.DESIGN_SYSTEM_PRECEDENCE`` (not here), to avoid a duplicate.
@@ -532,8 +534,14 @@ def compiled_style_content_is_current(compiled: Optional[str]) -> bool:
     compiler — e.g. rows compiled before the frame guardrails / before version
     markers existed — and must be recomputed from the row's persisted data via
     ``recompute_compiled_style_content`` before being injected into a prompt.
+
+    The marker is matched on the HEADER LINE ONLY: the artifact body embeds
+    arbitrary README/SKILL prose, and body text that quotes (or collides with)
+    ``[ds-compiler vN]`` must not pin a stale artifact as current.
     """
-    return compiled is not None and _COMPILER_VERSION_MARKER in compiled
+    if not compiled:
+        return False
+    return _COMPILER_VERSION_MARKER in compiled.split("\n", 1)[0]
 
 
 def ensure_compiled_style_content_current(design_system: Any) -> str:

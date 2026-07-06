@@ -27,6 +27,7 @@ from src.database.models.design_system import (
     MAX_BUNDLE_SIZE_BYTES,
     DesignSystem,
     DesignSystemAsset,
+    DesignSystemTemplate,
     DesignSystemToken,
 )
 from src.services import design_system_service
@@ -63,6 +64,21 @@ class AssetOut(BaseModel):
     width: Optional[int]
     height: Optional[int]
     url: str  # served-asset endpoint (bytes are never inlined in listings)
+
+
+class TemplateOut(BaseModel):
+    """Picker view of one addressable template (Phase 4). The layout HTML is
+    deliberately NOT exposed here — source viewing is a later phase."""
+    id: int
+    name: str
+    description: Optional[str]
+    entry_path: str
+    thumbnail_url: Optional[str]  # template-scoped thumbnail endpoint, or None
+
+
+class DesignSystemTemplateListResponse(BaseModel):
+    templates: List[TemplateOut]
+    total: int
 
 
 class DesignSystemSummary(BaseModel):
@@ -473,10 +489,121 @@ def set_default_design_system(ds_id: int, db: Session = Depends(get_db)):
         )
 
 
+def _template_thumbnail_url(ds_id: int, template_id: int) -> str:
+    return f"/api/settings/design-systems/{ds_id}/templates/{template_id}/thumbnail"
+
+
+@router.get("/{ds_id}/templates", response_model=DesignSystemTemplateListResponse)
+def list_design_system_templates(ds_id: int, db: Session = Depends(get_db)):
+    """List a design system's addressable templates for the picker.
+
+    Rows are materialized lazily (from the manifest + retained bundle files) for
+    systems imported before templates were addressable entities, then persisted;
+    a system without retained template files simply lists zero templates.
+    """
+    try:
+        ds = db.query(DesignSystem).filter(DesignSystem.id == ds_id).first()
+        if not ds:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Design system {ds_id} not found",
+            )
+        from src.services.design_system_templates import materialize_templates
+
+        if materialize_templates(ds):
+            db.commit()  # persist lazily-derived rows (and assign their ids)
+
+        templates = sorted(ds.templates, key=lambda t: t.id)
+        return DesignSystemTemplateListResponse(
+            templates=[
+                TemplateOut(
+                    id=t.id,
+                    name=t.name,
+                    description=t.description,
+                    entry_path=t.entry_path,
+                    thumbnail_url=(
+                        _template_thumbnail_url(ds_id, t.id)
+                        if t.thumbnail_asset_id is not None
+                        else None
+                    ),
+                )
+                for t in templates
+            ],
+            total=len(templates),
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Error listing templates for design system {ds_id}: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to list design system templates",
+        )
+
+
 # Raster image types that are safe to render inline. Anything else (notably
 # image/svg+xml, which can carry inline <script>) is served as a download so a
 # directly-navigated asset cannot execute script in the app origin (stored XSS).
 _INLINE_SAFE_MIMES = frozenset({"image/png", "image/jpeg", "image/gif", "image/webp"})
+
+
+@router.get("/{ds_id}/templates/{template_id}/thumbnail")
+def serve_design_system_template_thumbnail(
+    ds_id: int, template_id: int, db: Session = Depends(get_db)
+):
+    """Serve a template's preview-screenshot bytes for the picker.
+
+    Ownership-validated end to end: the template must belong to the design
+    system in the path AND its thumbnail asset must belong to the same system —
+    404 otherwise. Served with ``X-Content-Type-Options: nosniff`` (and forced
+    to download for non-raster types), mirroring the asset endpoint.
+    """
+    try:
+        template = (
+            db.query(DesignSystemTemplate)
+            .filter(
+                DesignSystemTemplate.id == template_id,
+                DesignSystemTemplate.design_system_id == ds_id,
+            )
+            .first()
+        )
+        if not template or template.thumbnail_asset_id is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Thumbnail not found for template {template_id} "
+                f"of design system {ds_id}",
+            )
+        asset = (
+            db.query(DesignSystemAsset)
+            .filter(
+                DesignSystemAsset.id == template.thumbnail_asset_id,
+                DesignSystemAsset.design_system_id == ds_id,
+            )
+            .first()
+        )
+        if not asset:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Thumbnail not found for template {template_id} "
+                f"of design system {ds_id}",
+            )
+        mime = str(asset.mime)
+        headers = {"X-Content-Type-Options": "nosniff"}
+        if mime not in _INLINE_SAFE_MIMES:
+            # Static value (no attacker-controlled filename) to avoid header injection.
+            headers["Content-Disposition"] = "attachment"
+        return Response(content=asset.data, media_type=mime, headers=headers)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(
+            f"Error serving thumbnail for template {template_id}: {e}", exc_info=True
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to serve design system template thumbnail",
+        )
 
 
 @router.get("/{ds_id}/assets/{asset_id}")

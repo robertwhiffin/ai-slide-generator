@@ -992,6 +992,27 @@ class TestCompilerVersionMarker:
             "BRAND COLOR TOKENS:\n- core:\n  - primary: #123456"
         )
 
+    def test_marker_only_matches_on_the_header_line(self):
+        """A marker string that appears in the BODY (e.g. a README that quotes
+        or collides with '[ds-compiler vN]') must NOT make a stale artifact read
+        as current — the check is pinned to the header line only."""
+        from src.services.design_system_compiler import (
+            _COMPILER_VERSION_MARKER,
+            compiled_style_content_is_current,
+        )
+
+        stale_with_body_collision = (
+            "SLIDE VISUAL STYLE: Acme Design System\n\n"
+            "BRAND MANUAL (the authoritative brand documentation for this design "
+            "system — follow it):\n\n"
+            f"This synthetic readme mentions {_COMPILER_VERSION_MARKER} in prose."
+        )
+        assert not compiled_style_content_is_current(stale_with_body_collision)
+        # And a marker genuinely on the header line still reads current.
+        assert compiled_style_content_is_current(
+            f"SLIDE VISUAL STYLE: Acme Design System {_COMPILER_VERSION_MARKER}\n\nbody"
+        )
+
 
 class TestEnsureCompiledStyleContentCurrent:
     """Read-through seam for consumers of the PERSISTED artifact: returns the

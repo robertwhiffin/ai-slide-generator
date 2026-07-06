@@ -36,6 +36,7 @@ interface AgentConfigContextValue {
   updateToolEntry: (tool: ToolEntry) => Promise<void>;
   setStyle: (styleId: number | null) => Promise<void>;
   setDesignSystem: (designSystemId: number | null) => Promise<void>;
+  setTemplate: (templateId: number | null) => Promise<void>;
   setDeckPrompt: (promptId: number | null) => Promise<void>;
   saveAsProfile: (name: string, description?: string) => Promise<void>;
   loadProfile: (profileId: number) => Promise<void>;
@@ -352,7 +353,21 @@ export const AgentConfigProvider: React.FC<{ children: React.ReactNode }> = ({ c
   }, [agentConfig, updateConfig]);
 
   const setDesignSystem = useCallback(async (designSystemId: number | null) => {
-    await updateConfig({ ...agentConfig, design_system_id: designSystemId });
+    // Templates belong to a design system: changing (or clearing) the design
+    // system invalidates a pinned template, so reset it to None.
+    const templateId =
+      designSystemId === agentConfig.design_system_id
+        ? agentConfig.template_id ?? null
+        : null;
+    await updateConfig({
+      ...agentConfig,
+      design_system_id: designSystemId,
+      template_id: templateId,
+    });
+  }, [agentConfig, updateConfig]);
+
+  const setTemplate = useCallback(async (templateId: number | null) => {
+    await updateConfig({ ...agentConfig, template_id: templateId });
   }, [agentConfig, updateConfig]);
 
   const setDeckPrompt = useCallback(async (promptId: number | null) => {
@@ -444,6 +459,7 @@ export const AgentConfigProvider: React.FC<{ children: React.ReactNode }> = ({ c
     updateToolEntry,
     setStyle,
     setDesignSystem,
+    setTemplate,
     setDeckPrompt,
     saveAsProfile,
     loadProfile,

@@ -49,6 +49,13 @@ export interface AgentConfig {
    * design_system_id -> slide_style_id -> default).
    */
   design_system_id: number | null;
+  /**
+   * Optional pinned template of the selected design system. Only meaningful
+   * alongside design_system_id; changing the design system resets it. The
+   * backend ignores (with a log) a pin that no longer resolves, so a stale
+   * value degrades to no-template behavior.
+   */
+  template_id: number | null;
   deck_prompt_id: number | null;
   system_prompt: string | null;
   slide_editing_instructions: string | null;
@@ -101,6 +108,7 @@ export const DEFAULT_AGENT_CONFIG: AgentConfig = {
   tools: [],
   slide_style_id: null,
   design_system_id: null,
+  template_id: null,
   deck_prompt_id: null,
   system_prompt: null,
   slide_editing_instructions: null,

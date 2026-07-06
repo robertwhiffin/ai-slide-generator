@@ -40,6 +40,7 @@ DESIGN_SYSTEM_TABLES = {
     "design_system_asset",
     "design_system_token",
     "design_system_file",
+    "design_system_template",
 }
 
 
@@ -472,6 +473,7 @@ def restore_ds_table_schema():
         DesignSystem,
         DesignSystemAsset,
         DesignSystemFile,
+        DesignSystemTemplate,
         DesignSystemToken,
     )
 
@@ -480,6 +482,7 @@ def restore_ds_table_schema():
         DesignSystemAsset.__table__,
         DesignSystemToken.__table__,
         DesignSystemFile.__table__,
+        DesignSystemTemplate.__table__,
     ]
     original = [t.schema for t in tables]
     try:

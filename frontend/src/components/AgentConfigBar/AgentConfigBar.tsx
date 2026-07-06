@@ -14,7 +14,7 @@ import { X, Save, FolderOpen, Loader2, ChevronDown, ChevronUp, ExternalLink } fr
 import { useAgentConfig } from '../../contexts/AgentConfigContext';
 import { useSession } from '../../contexts/SessionContext';
 import { configApi } from '../../api/config';
-import type { SlideStyle, DeckPrompt, DesignSystemSummary } from '../../api/config';
+import type { SlideStyle, DeckPrompt, DesignSystemSummary, DesignSystemTemplate } from '../../api/config';
 import type { AvailableTool, GenieTool, ProfileSummary, ToolEntry, MCPTool, VectorIndexTool, ModelEndpointTool, AgentBricksTool } from '../../types/agentConfig';
 import { TOOL_TYPE_BADGE_LABELS, TOOL_TYPE_COLORS } from '../../types/agentConfig';
 import { api } from '../../services/api';
@@ -435,6 +435,7 @@ export const AgentConfigBar: React.FC = () => {
     updateToolEntry,
     setStyle,
     setDesignSystem,
+    setTemplate,
     setDeckPrompt,
     saveAsProfile,
     loadProfile,
@@ -465,6 +466,10 @@ export const AgentConfigBar: React.FC = () => {
   const [designSystemsLoading, setDesignSystemsLoading] = useState(false);
   const [promptsLoading, setPromptsLoading] = useState(false);
 
+  // Templates of the SELECTED design system (dependent selector)
+  const [templates, setTemplates] = useState<DesignSystemTemplate[]>([]);
+  const [templatesLoading, setTemplatesLoading] = useState(false);
+
   // Fetch style/design-system/prompt options eagerly so the collapsed summary can show names
   useEffect(() => {
     let cancelled = false;
@@ -489,6 +494,26 @@ export const AgentConfigBar: React.FC = () => {
 
     return () => { cancelled = true; };
   }, []);
+
+  // Fetch the selected design system's templates for the dependent selector.
+  useEffect(() => {
+    const dsId = agentConfig.design_system_id;
+    if (dsId == null) {
+      setTemplates([]);
+      return;
+    }
+    let cancelled = false;
+    setTemplatesLoading(true);
+    configApi.listDesignSystemTemplates(dsId)
+      .then(res => { if (!cancelled) setTemplates(res.templates); })
+      .catch(err => {
+        console.error('Failed to load design system templates:', err);
+        if (!cancelled) setTemplates([]);
+      })
+      .finally(() => { if (!cancelled) setTemplatesLoading(false); });
+
+    return () => { cancelled = true; };
+  }, [agentConfig.design_system_id]);
 
   // Handlers
   const handleSaveProfile = useCallback(async (name: string, description?: string) => {
@@ -516,6 +541,11 @@ export const AgentConfigBar: React.FC = () => {
     const value = e.target.value;
     await setDesignSystem(value === '' ? null : Number(value));
   }, [setDesignSystem]);
+
+  const handleTemplateChange = useCallback(async (e: React.ChangeEvent<HTMLSelectElement>) => {
+    const value = e.target.value;
+    await setTemplate(value === '' ? null : Number(value));
+  }, [setTemplate]);
 
   const handleDeckPromptChange = useCallback(async (e: React.ChangeEvent<HTMLSelectElement>) => {
     const value = e.target.value;
@@ -688,6 +718,26 @@ export const AgentConfigBar: React.FC = () => {
                 </p>
               )}
             </div>
+
+            {/* Template selector — dependent on the selected design system;
+                hidden when no design system is selected or it has no templates */}
+            {agentConfig.design_system_id != null && templates.length > 0 && (
+              <div className="flex-1 min-w-[140px]" data-tour="agent-template-selector">
+                <label className="block text-xs font-medium text-gray-500 mb-1">Template</label>
+                <select
+                  value={agentConfig.template_id ?? ''}
+                  onChange={handleTemplateChange}
+                  disabled={templatesLoading}
+                  className="w-full px-2 py-1.5 border border-gray-300 rounded text-sm bg-white focus:outline-none focus:ring-1 focus:ring-blue-500 disabled:opacity-50"
+                  data-testid="template-selector"
+                >
+                  <option value="">None</option>
+                  {templates.map(t => (
+                    <option key={t.id} value={t.id}>{t.name}</option>
+                  ))}
+                </select>
+              </div>
+            )}
 
             {/* Style selector */}
             <div className="flex-1 min-w-[140px]" data-tour="agent-style-selector">
