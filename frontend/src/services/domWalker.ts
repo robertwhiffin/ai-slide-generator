@@ -137,8 +137,11 @@ ${sections}
  * scaffold reference (walker.js), with the font-mode override pass added so
  * iframe measurements reflect the fallback font's metrics when font_mode is
  * "universal".
+ *
+ * Exported so tests/svg-raster-export.spec.ts can drive the exact shipped
+ * walker string in a Playwright page.
  */
-const WALKER_SOURCE = `
+export const WALKER_SOURCE = `
 (function () {
   const PX_PER_IN = 96;
 
@@ -337,6 +340,31 @@ const WALKER_SOURCE = `
     }
   }
 
+  // ─── SVG-image rasterization ────────────────────────────────────────
+  // pptxgenjs in Node emits data:image/svg+xml images with a hardcoded
+  // broken-image placeholder PNG as the primary <a:blip>; the vector only
+  // survives in the <asvg:svgBlip> extension, which Google Slides' PPTX
+  // conversion and LibreOffice ignore. Rasterize here instead — this
+  // browser already decoded the SVG. 2x the layout box keeps it crisp.
+  // Returns a PNG data URI, or null so the caller keeps the raw SVG src
+  // (exactly the pre-fix payload).
+  function rasterizeSvgImage(el) {
+    try {
+      if (!el.complete || !el.naturalWidth) return null;
+      const r = el.getBoundingClientRect();
+      const w = Math.max(1, Math.round(r.width * 2));
+      const h = Math.max(1, Math.round(r.height * 2));
+      const c = document.createElement('canvas');
+      c.width = w; c.height = h;
+      const ctx = c.getContext('2d');
+      if (!ctx) return null;
+      ctx.drawImage(el, 0, 0, w, h);
+      return c.toDataURL('image/png');
+    } catch (e) {
+      return null;
+    }
+  }
+
   // ─── text-run extraction ────────────────────────────────────────────
   function runStyle(cs) {
     const color = parseColor(cs.color);
@@ -510,8 +538,17 @@ const WALKER_SOURCE = `
       // 3. <img>.
       if (el.tagName === 'IMG' && el.src) {
         const ibox = rotation !== null ? getRotatedBox(el, box, rotation) : box;
+        let src = el.currentSrc || el.src;
+        if (/^data:image\\/svg\\+xml/i.test(src)) {
+          const png = rasterizeSvgImage(el);
+          if (png) {
+            src = png;
+          } else {
+            console.warn('[walker] svg raster failed, keeping raw SVG data URI');
+          }
+        }
         const rec = Object.assign({ kind: 'image' }, ibox, {
-          src: el.currentSrc || el.src,
+          src: src,
           _depth: depth,
         });
         if (rotation !== null) rec.rotate = rotation;
