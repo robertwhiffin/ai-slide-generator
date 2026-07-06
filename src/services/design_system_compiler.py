@@ -42,7 +42,14 @@ match the huashu / Claude-Design "brand operating manual" model):
   contract): a DS deck bypasses ``DEFAULT_SLIDE_STYLE``, so the compiled content
   must itself carry the fixed 1280x720 frame rules + soft safe-area guidance to
   keep the model frame-aware. Compiler-emitted (not ``prompt_modules``) so the
-  no-DS / legacy prompts stay byte-identical.
+  no-DS / legacy prompts stay byte-identical. The block is PROSE ONLY — it states
+  outcomes, never CSS rule prescriptions or a wrapper-class assumption (the model
+  writes freehand HTML).
+- The header line is stamped with a compiler-version marker so consumers of the
+  PERSISTED artifact can detect rows compiled by an OLDER compiler (e.g. rows
+  compiled before the frame guardrails existed) via
+  ``compiled_style_content_is_current`` and lazily recompute them on read
+  (``agent_factory._get_prompt_content``). Deliberately NO batch backfill.
 """
 
 from __future__ import annotations
@@ -60,6 +67,17 @@ DS_ASSET_PLACEHOLDER = "{{ds-asset:%d}}"
 # Opening marker — matches src/core/defaults.py::DEFAULT_SLIDE_STYLE so the
 # compiled text is indistinguishable from a legacy style block in the prompt.
 _STYLE_HEADER = "SLIDE VISUAL STYLE"
+
+# Version of the compiled-artifact format, stamped into the header line of every
+# compiled output. Consumers of the PERSISTED ``compiled_style_content``
+# (``agent_factory._get_prompt_content``) treat a row whose text lacks the
+# CURRENT marker as stale — which covers rows compiled before versioning existed
+# (implicitly v1: the pre-frame-guardrail Phase 2/3 artifacts carry no marker) —
+# and lazily recompute it from the row's persisted tokens/files/assets via
+# ``recompute_compiled_style_content``. Bump the version whenever the compiled
+# output changes in a way persisted rows must pick up (new/changed blocks).
+COMPILER_VERSION = 2
+_COMPILER_VERSION_MARKER = f"[ds-compiler v{COMPILER_VERSION}]"
 
 # Canonical color-group ordering -> deterministic, human-meaningful sections.
 _COLOR_GROUPS = ("core", "accents", "ink", "tints")
@@ -106,18 +124,21 @@ _ASSET_CONTRACT = (
 # "massive long slide" symptom). Emitting it here (in ``compiled_style_content``,
 # NOT ``prompt_modules``) keeps the legacy custom-system-prompt path and the no-DS
 # golden prompts BYTE-IDENTICAL. Always present when a design system compiles (like
-# the asset contract). The hard frame rules are stated as instructions; the safe
-# area is SOFT prose ONLY — no injected padding CSS or ``.slide`` wrapper, which
-# would break full-bleed backgrounds (structural safe-area is Phase 4 template CSS).
+# the asset contract). The WHOLE block is PROSE ONLY: the model writes freehand
+# HTML, so the block states outcomes (exact frame size, clipped overflow) without
+# prescribing CSS rules or assuming any wrapper class such as ``.slide`` — and the
+# safe area stays SOFT prose with no injected padding CSS, which would break
+# full-bleed backgrounds (structural safe-area is Phase 4 template CSS).
 # "no in-slide scrolling" is deliberately per-slide so it does not contradict
 # ``prompt_modules.HTML_OUTPUT_FORMAT``'s vertically-stacked-slides deck page.
 _SLIDE_FRAME_CONSTRAINTS = (
     "SLIDE FRAME CONSTRAINTS:\n"
     "- Every slide renders into a FIXED 1280x720px frame (16:9). The frame never "
     "grows to fit content.\n"
-    "- Give each slide a 1280x720 box that clips its own overflow (e.g. "
-    "body/.slide { width:1280px; height:720px; overflow:hidden; }) so anything past "
-    "the frame is CLIPPED on export, never scrolled.\n"
+    "- Size each slide's root element to exactly 1280 by 720 pixels and make it "
+    "clip its own overflow — do not rely on any particular class name or wrapper "
+    "structure; whatever the slide's outermost element is, anything past its frame "
+    "must be CLIPPED on export, never scrolled.\n"
     "- One slide per frame: fit ALL of that slide's content inside its single "
     "1280x720 frame, with no in-slide scrolling. If content would overflow, trim "
     "it, scale it down, or split it across additional slides until it fits.\n"
@@ -377,16 +398,20 @@ def compile_design_system(
     BRAND MANUAL block (FULL, first); both default ``None`` so a design system
     without them — or the legacy positional call — simply omits the block.
 
-    Emitted order: header -> description -> BRAND MANUAL (README + SKILL, full) ->
-    tokens (color, type, spacing, shadow; all uncapped) -> fonts (@font-face refs
-    + family listing; uncapped) -> templates -> SLIDE FRAME CONSTRAINTS (frame
-    guardrails, always present) -> the brand IMAGE ASSET CONTRACT (fetch via
+    Emitted order: header (stamped with the compiler-version marker) ->
+    description -> BRAND MANUAL (README + SKILL, full) -> tokens (color, type,
+    spacing, shadow; all uncapped) -> fonts (@font-face refs + family listing;
+    uncapped) -> templates -> SLIDE FRAME CONSTRAINTS (frame guardrails, always
+    present) -> the brand IMAGE ASSET CONTRACT (fetch via
     ``search_brand_assets``). Brand images are NOT enumerated.
     """
     parts: list[str] = []
 
     name = getattr(design_system, "name", None) or "Design System"
-    parts.append(f"{_STYLE_HEADER}: {name}")
+    # The version marker rides on the header line (no schema change) so persisted
+    # artifacts self-describe which compiler produced them — see
+    # ``compiled_style_content_is_current``.
+    parts.append(f"{_STYLE_HEADER}: {name} {_COMPILER_VERSION_MARKER}")
 
     # A short frontmatter-style description/identity caption comes FIRST (huashu /
     # Claude Code skill convention: blurb -> manual); the full brand manual below
@@ -497,3 +522,39 @@ def recompute_compiled_style_content(design_system: Any) -> str:
     compiled = compile_design_system(design_system, skill_md=skill_md, readme_md=readme_md)
     design_system.compiled_style_content = compiled
     return compiled
+
+
+def compiled_style_content_is_current(compiled: Optional[str]) -> bool:
+    """True when a persisted ``compiled_style_content`` was produced by the
+    CURRENT compiler version (its header carries the version marker).
+
+    ``False`` means the artifact is missing, empty, or predates the current
+    compiler — e.g. rows compiled before the frame guardrails / before version
+    markers existed — and must be recomputed from the row's persisted data via
+    ``recompute_compiled_style_content`` before being injected into a prompt.
+    """
+    return compiled is not None and _COMPILER_VERSION_MARKER in compiled
+
+
+def ensure_compiled_style_content_current(design_system: Any) -> str:
+    """Return the record's ``compiled_style_content``, recomputing it first when
+    it is stale or missing (lazy backfill-on-read for prompt consumers).
+
+    The persisted artifact is stale when it predates the current compiler
+    (``compiled_style_content_is_current``) — covering rows compiled before the
+    frame guardrails / version markers existed and rows never compiled at all.
+    The recompute rebuilds from the record's persisted tokens/files/assets and
+    degrades gracefully (e.g. no BRAND MANUAL block) when no source files were
+    retained (pre-Phase-1 imports). It refreshes the record IN PLACE; persisting
+    that refresh is the caller's session's business — inside ``get_db_session``
+    it commits on exit, making this a lazy per-row backfill with deliberately NO
+    batch machinery.
+    """
+    compiled = getattr(design_system, "compiled_style_content", None)
+    if compiled is not None and compiled_style_content_is_current(compiled):
+        return compiled
+    logger.info(
+        "Design system compiled content stale or missing; recompiling",
+        extra={"design_system_id": getattr(design_system, "id", None)},
+    )
+    return recompute_compiled_style_content(design_system)

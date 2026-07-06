@@ -325,10 +325,16 @@ def test_design_system_id_resolves_compiled_style_content():
     """A selected design system's compiled_style_content reaches the pre-assembled
     system prompt via the existing seam."""
     from src.api.schemas.agent_config import AgentConfig
+    from src.services.design_system_compiler import _COMPILER_VERSION_MARKER
 
     config = AgentConfig(design_system_id=99)
     ds = MagicMock()
-    ds.compiled_style_content = "ACME-DS-COMPILED :root { --brand-core-primary: #123456; }"
+    # Marker-current artifact -> injected verbatim (stale-artifact recompute is
+    # covered by the state matrix in test_ds_generation_state_matrix.py).
+    ds.compiled_style_content = (
+        "ACME-DS-COMPILED " + _COMPILER_VERSION_MARKER
+        + " :root { --brand-core-primary: #123456; }"
+    )
     db = _dispatching_db(design_system=ds)
 
     result = _run_with_db(config, db)
@@ -343,10 +349,14 @@ def test_design_system_id_resolves_in_edit_mode():
     editing-prompt seam, exactly as generation does — so on-brand styling applies
     when refining an existing deck, not just when generating a new one."""
     from src.api.schemas.agent_config import AgentConfig
+    from src.services.design_system_compiler import _COMPILER_VERSION_MARKER
 
     config = AgentConfig(design_system_id=99)
     ds = MagicMock()
-    ds.compiled_style_content = "ACME-DS-EDIT-MARKER :root { --brand-core-primary: #123456; }"
+    ds.compiled_style_content = (
+        "ACME-DS-EDIT-MARKER " + _COMPILER_VERSION_MARKER
+        + " :root { --brand-core-primary: #123456; }"
+    )
     db = _dispatching_db(design_system=ds)
 
     result = _run_with_db(config, db, mode="edit")
@@ -358,10 +368,11 @@ def test_design_system_id_resolves_in_edit_mode():
 def test_design_system_takes_precedence_over_slide_style():
     """When both are set, the design system wins and the slide style is not used."""
     from src.api.schemas.agent_config import AgentConfig
+    from src.services.design_system_compiler import _COMPILER_VERSION_MARKER
 
     config = AgentConfig(design_system_id=99, slide_style_id=42)
     ds = MagicMock()
-    ds.compiled_style_content = "DS-MARKER"
+    ds.compiled_style_content = "DS-MARKER " + _COMPILER_VERSION_MARKER
     style = MagicMock()
     style.style_content = "LEGACY-STYLE-MARKER"
     style.image_guidelines = None
@@ -387,13 +398,17 @@ def test_design_system_missing_falls_back_to_default():
     assert "Modern sans-serif font" in result["system_prompt"]
 
 
-def test_design_system_empty_compiled_content_falls_back_to_default():
-    """A design system with no compiled artifact yet also degrades to default."""
+def test_design_system_recompute_failure_falls_back_to_default():
+    """A design system with no compiled artifact triggers the lazy recompute; when
+    that recompute fails (here: a record whose token/file relationships cannot be
+    walked), resolution degrades to the default style rather than crashing.
+    Successful lazy recompute of real records is covered by the state matrix in
+    test_ds_generation_state_matrix.py."""
     from src.api.schemas.agent_config import AgentConfig
 
     config = AgentConfig(design_system_id=99)
     ds = MagicMock()
-    ds.compiled_style_content = None
+    ds.compiled_style_content = None  # stale/missing -> recompute path
     db = _dispatching_db(design_system=ds)
 
     result = _run_with_db(config, db)
