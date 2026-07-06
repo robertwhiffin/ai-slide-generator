@@ -19,8 +19,11 @@
 // LLM prompt change affects every future deck and requires re-validating
 // all existing slide-style outputs.
 
+// The IIFE is async (rasterizeSvgDataUriImages awaits image decodes), so the
+// source expression evaluates to a Promise — page.evaluate() awaits promise
+// results, string-expression or not (html2pptx.js:1026 needs no change).
 export const PREPROCESS_SOURCE = `
-(function () {
+(async function () {
   // ─── Monospace code blocks → single text frame ─────────────────────
   // Tellr renders SQL/code as: parent <div style="font-family: monospace">
   // containing N child <div>s (one per code line) and <br>s between
@@ -578,20 +581,67 @@ export const PREPROCESS_SOURCE = `
     return count;
   }
 
+  // ─── SVG data-URI <img> → rasterized PNG ───────────────────────────
+  // pptxgenjs in Node writes data:image/svg+xml images with a hardcoded
+  // broken-image placeholder PNG as the primary <a:blip>; the real vector
+  // survives only in the <asvg:svgBlip> extension, which PowerPoint reads
+  // but Google Slides' Drive conversion and LibreOffice ignore. This page
+  // already rendered the SVG, so draw it to a canvas at 2x the layout box
+  // (crispness) and swap the src to a PNG data URI. The decode() await
+  // covers the <img>s replaceBackgroundImageWithImg minted moments ago —
+  // those may not have finished loading. Per-image try/catch: an
+  // undecodable SVG keeps its raw src, which is exactly the pre-existing
+  // pipeline behavior.
+  async function rasterizeSvgDataUriImages() {
+    let count = 0;
+    const imgs = Array.from(document.querySelectorAll('img')).filter((img) =>
+      /^data:image\\/svg\\+xml/i.test(img.src || '')
+    );
+    for (const img of imgs) {
+      try {
+        await img.decode();
+        const rect = img.getBoundingClientRect();
+        const w = Math.max(1, Math.round((rect.width || img.naturalWidth || 1) * 2));
+        const h = Math.max(1, Math.round((rect.height || img.naturalHeight || 1) * 2));
+        const c = document.createElement('canvas');
+        c.width = w;
+        c.height = h;
+        const ctx = c.getContext('2d');
+        ctx.drawImage(img, 0, 0, w, h);
+        const dataUrl = c.toDataURL('image/png');
+        // Pin the rendered size before the swap: an <img> sized by its
+        // intrinsic dimensions would otherwise reflow when the 2x PNG
+        // lands. Same-value inline px for explicitly-sized images.
+        if (rect.width && rect.height) {
+          img.style.width = rect.width + 'px';
+          img.style.height = rect.height + 'px';
+        }
+        img.src = dataUrl;
+        count++;
+      } catch (e) {
+        // decode/raster failed — keep the raw SVG src (pre-existing behavior)
+      }
+    }
+    return count;
+  }
+
   // ─── orchestrator ──────────────────────────────────────────────────
   // Order matters: bg transfer first (cheap, mutates body only); flatten
   // code blocks BEFORE wrapBareTextInDivs (so the per-line <div>s become
   // a single <p> with <br>s before the inline-content wrapper sees them);
-  // other structural mutations next; canvas raster + inline-bg LAST so
-  // they read final post-mutation positions.
+  // SVG raster right after replaceBackgroundImageWithImg so it covers the
+  // <img>s that pass just minted from CSS backgrounds; other structural
+  // mutations next; canvas raster + inline-bg LAST so they read final
+  // post-mutation positions.
   const bgTransferred = transferSlideRootBackground();
   const codeBlocks = flattenMonospaceCodeBlocks();
   const wrapped = wrapBareTextInDivs();
   const replacedImgs = replaceBackgroundImageWithImg();
+  const svgImgsRasterized = await rasterizeSvgDataUriImages();
   const peeledTextTags = peelBackgroundsOffTextTags();
   const tableCells = flattenTables();
   const canvasImgs = rasterizeCanvases();
   const inlineBgs = emitInlineBackgrounds();
-  return { bgTransferred, codeBlocks, wrapped, replacedImgs, peeledTextTags, tableCells, canvasImgs, inlineBgs };
+  return { bgTransferred, codeBlocks, wrapped, replacedImgs, svgImgsRasterized, peeledTextTags, tableCells, canvasImgs, inlineBgs };
 })();
 `;
