@@ -834,3 +834,91 @@ class TestFullDeterminism:
         ds.files.reverse()
         out_rev = compile_design_system(ds, skill_md=_SKILL_MD, readme_md=_README_MD)
         assert out == out_rev
+
+
+# ---------------------------------------------------------------------------
+# Phase 3: SLIDE FRAME CONSTRAINTS + soft safe-area (frame guardrails)
+# ---------------------------------------------------------------------------
+
+
+class TestSlideFrameConstraints:
+    """A DS deck bypasses ``DEFAULT_SLIDE_STYLE`` (the only place the slide frame +
+    content limits used to live), so the compiler must re-assert frame awareness.
+
+    The block is emitted into ``compiled_style_content`` itself (NOT prompt_modules)
+    so the legacy custom-system-prompt path and the no-DS golden prompts stay
+    byte-identical. It is ALWAYS present when a design system compiles (like the
+    asset contract). It states a fixed 1280x720 (16:9) frame with overflow clipped,
+    one slide per frame with no in-slide scrolling, and adds SOFT safe-area prose
+    (no injected padding CSS / .slide wrapper). All fixtures are SYNTHETIC.
+    """
+
+    def test_frame_block_present_with_hard_frame_facts(self, session):
+        from src.services.design_system_compiler import compile_design_system
+
+        out = compile_design_system(_make_ds(session, tokens=_TOKENS))
+        assert "SLIDE FRAME CONSTRAINTS" in out
+        assert "1280x720" in out
+        assert "16:9" in out
+        assert "overflow:hidden" in out  # instruct the model to clip, not scroll
+
+    def test_frame_block_states_one_slide_per_frame_fit_all(self, session):
+        from src.services.design_system_compiler import compile_design_system
+
+        out = compile_design_system(_make_ds(session, tokens=_TOKENS)).lower()
+        assert "one slide per frame" in out
+        assert "fit all" in out
+        # per-slide, so it does not contradict the deck's vertically-stacked page
+        assert "no in-slide scrolling" in out
+
+    def test_frame_block_has_soft_safe_area_guidance(self, session):
+        from src.services.design_system_compiler import compile_design_system
+
+        out = compile_design_system(_make_ds(session, tokens=_TOKENS))
+        assert "72px" in out and "88px" in out
+        assert "safe area" in out.lower()
+        assert "full-bleed" in out.lower()
+
+    def test_safe_area_is_soft_prose_not_injected_css(self, session):
+        """Deliverable #2 is SOFT prose ONLY — the compiler must NOT force-inject a
+        padding rule or a .slide wrapper (that would break full-bleed backgrounds)."""
+        from src.services.design_system_compiler import compile_design_system
+
+        out = compile_design_system(_make_ds(session, tokens=_TOKENS))
+        squished = out.replace(" ", "")
+        assert "padding:72px88px" not in squished  # no forced safe-area padding CSS
+        assert "padding:72px" not in squished
+
+    def test_frame_block_always_present_even_for_empty_ds(self, session):
+        from src.services.design_system_compiler import compile_design_system
+
+        ds = _make_ds(session, description=None, tokens=None, assets=None, manifest_json=None)
+        out = compile_design_system(ds)
+        assert "SLIDE FRAME CONSTRAINTS" in out  # always on, like the asset contract
+
+    def test_frame_block_after_templates_before_asset_contract(self, session):
+        from src.services.design_system_compiler import compile_design_system
+
+        ds = _make_ds(session, tokens=_TOKENS, assets=_IMAGE_ASSETS, manifest_json=_MANIFEST)
+        out = compile_design_system(ds, skill_md=_SKILL_MD, readme_md=_README_MD)
+        assert out.index("SLIDE TEMPLATES") < out.index("SLIDE FRAME CONSTRAINTS")
+        assert out.index("SLIDE FRAME CONSTRAINTS") < out.index("BRAND IMAGE ASSETS")
+
+    def test_asset_contract_remains_last(self, session):
+        """Frame block must not displace the asset contract from its last position."""
+        from src.services.design_system_compiler import compile_design_system
+
+        ds = _make_ds(session, tokens=_TOKENS, assets=_IMAGE_ASSETS, manifest_json=_MANIFEST)
+        out = compile_design_system(ds, skill_md=_SKILL_MD, readme_md=_README_MD)
+        assert out.index("BRAND IMAGE ASSETS") > out.index("SLIDE FRAME CONSTRAINTS")
+
+    def test_frame_block_is_deterministic_static_text(self, session):
+        from src.services.design_system_compiler import compile_design_system
+
+        a = compile_design_system(_make_ds(session, tokens=_TOKENS))
+        b = compile_design_system(_make_ds(session, tokens=_TOKENS, name="Other Brand"))
+        frame_a = a[a.index("SLIDE FRAME CONSTRAINTS"):]
+        frame_b = b[b.index("SLIDE FRAME CONSTRAINTS"):]
+        # the frame block carries no per-DS data, so it is identical across systems
+        # (compare from the frame heading to the shared trailing asset contract)
+        assert frame_a == frame_b

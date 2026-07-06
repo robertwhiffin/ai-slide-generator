@@ -270,3 +270,81 @@ class TestImageCarveOut:
         out = build_generation_system_prompt(slide_style="X", design_system_active=True)
         assert "search_brand_assets" in out
         assert "on-brand" in out.lower()
+
+
+# ---------------------------------------------------------------------------
+# Phase 3 — frame guardrails: frame awareness reaches the DS-active prompt only
+# ---------------------------------------------------------------------------
+
+
+_FRAME_MARKER = "SLIDE FRAME CONSTRAINTS"
+
+
+class TestSlideFrameGuardrails:
+    """Frame awareness (fixed 1280x720 frame + soft safe-area) reaches the
+    DS-active generation prompt via ``compiled_style_content``, and is ABSENT from
+    the no-DS / legacy / default / editing prompts, which bypass the compiler and
+    stay BYTE-IDENTICAL. All fixtures SYNTHETIC."""
+
+    def test_ds_active_generation_prompt_carries_frame_and_safe_area(self, session):
+        from src.api.schemas.agent_config import AgentConfig
+
+        ds = _token_only_ds(session)  # even a minimal DS gets the frame block
+        sp = _prompts_with_db(
+            AgentConfig(design_system_id=ds.id), _dispatching_db(design_system=ds)
+        )["system_prompt"]
+        assert _FRAME_MARKER in sp
+        assert "1280x720" in sp
+        assert "72px" in sp and "88px" in sp  # soft safe area
+        assert "full-bleed" in sp.lower()
+
+    def test_frame_block_absent_from_no_ds_default_generation(self):
+        from src.core.defaults import DEFAULT_SLIDE_STYLE
+        from src.core.prompt_modules import build_generation_system_prompt
+
+        assert _FRAME_MARKER not in build_generation_system_prompt(slide_style=DEFAULT_SLIDE_STYLE)
+
+    def test_frame_block_absent_from_legacy_generation(self):
+        from src.core.prompt_modules import build_generation_system_prompt
+
+        out = build_generation_system_prompt(
+            slide_style="LEGACY-STYLE-MARKER", image_guidelines="Use logo.png"
+        )
+        assert _FRAME_MARKER not in out
+
+    def test_frame_block_absent_from_editing_default_and_legacy(self):
+        from src.core.defaults import DEFAULT_SLIDE_STYLE
+        from src.core.prompt_modules import build_editing_system_prompt
+
+        assert _FRAME_MARKER not in build_editing_system_prompt(slide_style=DEFAULT_SLIDE_STYLE)
+        assert _FRAME_MARKER not in build_editing_system_prompt(slide_style="LEGACY-STYLE-MARKER")
+
+    def test_no_ds_and_editing_prompts_byte_identical_after_frame_guardrails(self):
+        """(b) The golden no-DS / legacy / default / editing prompts are unperturbed
+        by the frame guardrails — frame text lives only in compiled DS content."""
+        from src.core.defaults import DEFAULT_SLIDE_STYLE
+        from src.core.prompt_modules import (
+            build_editing_system_prompt,
+            build_generation_system_prompt,
+        )
+
+        assert (
+            build_generation_system_prompt(slide_style=DEFAULT_SLIDE_STYLE)
+            == _GOLDEN["gen_default"]
+        )
+        assert (
+            build_generation_system_prompt(
+                slide_style="LEGACY-STYLE-MARKER", deck_prompt=None, image_guidelines="Use logo.png"
+            )
+            == _GOLDEN["gen_legacy_img"]
+        )
+        assert (
+            build_editing_system_prompt(slide_style=DEFAULT_SLIDE_STYLE)
+            == _GOLDEN["edit_default"]
+        )
+        assert (
+            build_editing_system_prompt(
+                slide_style="LEGACY-STYLE-MARKER", image_guidelines="Use logo.png"
+            )
+            == _GOLDEN["edit_legacy_img"]
+        )
