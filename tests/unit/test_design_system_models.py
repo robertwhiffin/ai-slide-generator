@@ -4,8 +4,9 @@ Phase 1 of the Design System Library feature (see
 ``docs/technical/design-system-library-spec.md`` §6).
 
 Coverage:
-- The hand-rolled migration ``_migrate_design_system_tables`` creates the three
-  additive tables idempotently and is dialect-safe on the SQLite used in tests.
+- The hand-rolled migration ``_migrate_design_system_tables`` creates the
+  design-system tables (``DESIGN_SYSTEM_TABLES``) idempotently and is
+  dialect-safe on the SQLite used in tests.
 - The schema-qualified / Postgres path (the migration's production purpose):
   tables are created inside a named schema and the child->parent FK cascades,
   and the models compile to the expected PostgreSQL DDL (JSONB/BYTEA/SERIAL,
@@ -90,7 +91,7 @@ def _make_design_system(**overrides):
 
 class TestDesignSystemMigration:
     def test_migration_creates_tables_on_bare_db(self, sqlite_engine):
-        """The hand-rolled migration creates all three tables on an empty DB."""
+        """The hand-rolled migration creates every design-system table on an empty DB."""
         from src.core.database import _migrate_design_system_tables
 
         with sqlite_engine.begin() as conn:

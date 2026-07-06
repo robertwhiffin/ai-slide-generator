@@ -220,6 +220,44 @@ class TestRewriteTemplateAssetRefs:
         assert out.count("data:,") == 3
         assert "javascript" in caplog.text.lower()
 
+    def test_unquoted_script_scheme_attrs_neutralized(self, caplog):
+        """Unquoted attribute values bypass the quoted-attr pattern — a bare
+        ``href=javascript:...`` must be neutralized just like the quoted form
+        (benign unquoted refs are out of scope; only script schemes)."""
+        with caplog.at_level(logging.WARNING, logger="src.services.design_system_templates"):
+            out = self._rewrite(
+                "<a href=javascript:alert(1)>x</a>"
+                "<img src=VbScRiPt:msgbox(2) />"
+                '<a href=unquoted-plain.css rel="x">keep-ref</a>'
+            )
+        assert "alert(1)" not in out
+        assert "msgbox(2)" not in out
+        assert out.count("data:,") == 2
+        # Non-script unquoted refs are left alone (this pass only defangs).
+        assert "unquoted-plain.css" in out
+        assert "script-scheme" in caplog.text.lower()
+
+    def test_css_url_script_scheme_neutralized(self, caplog):
+        """CSS ``url(javascript:...)`` is not an asset ref (absolute URI), so
+        the rewrite used to leave it untouched — it must become the inert
+        placeholder, in both <style> blocks and inline style attributes."""
+        with caplog.at_level(logging.WARNING, logger="src.services.design_system_templates"):
+            out = self._rewrite(
+                "<style>.a { background: url(javascript:alert(1)); }\n"
+                '.b { background-image: url("vbscript:Evil"); }</style>'
+                '<div style="background: url(JAVASCRIPT:alert(2))"></div>'
+            )
+        assert "alert(1" not in out
+        assert "alert(2" not in out
+        assert "Evil" not in out
+        assert out.count("data:,") == 3
+        assert "script-scheme" in caplog.text.lower()
+
+    def test_css_url_data_uri_left_untouched(self):
+        """data: URIs in CSS url() are absolute non-script refs — unchanged."""
+        css = ".a { background: url(data:image/png;base64,AAAA); }"
+        assert self._rewrite(css) == css
+
     def test_object_embed_iframe_stripped_like_script(self):
         out = self._rewrite(
             '<object data="../assets/logo.svg"><param name="x" /></object>'

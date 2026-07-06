@@ -95,6 +95,15 @@ _ATTR_REF_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Unquoted src/href/poster values (``href=javascript:...``) bypass
+# _ATTR_REF_RE. This narrower companion exists only to NEUTRALIZE
+# script-scheme values — benign unquoted refs are left untouched (rewriting
+# them to handles is not worth the regex ambiguity on this trusted surface).
+_UNQUOTED_ATTR_REF_RE = re.compile(
+    r"\b(?P<name>src|href|poster)\s*=\s*(?P<ref>[^\s\"'>][^\s>]*)",
+    re.IGNORECASE,
+)
+
 # srcset carries a comma-separated list of "url [descriptor]" entries — handled
 # by a dedicated pass because the generic attr pattern rewrites single refs.
 _SRCSET_ATTR_RE = re.compile(
@@ -190,7 +199,8 @@ def rewrite_template_asset_refs(
     ``<script>``/``<object>``/``<embed>``/``<iframe>`` elements and inline
     ``on*=`` event-handler attributes are stripped (template folders ship
     preview chrome that must never reach the model), and ``javascript:`` URLs
-    in the covered attributes are neutralized to the placeholder.
+    are neutralized to the placeholder in the covered attributes (quoted or
+    unquoted) and in CSS ``url()`` refs.
     """
     if not text:
         return text
@@ -199,6 +209,18 @@ def rewrite_template_asset_refs(
     text = _EMBEDDED_CONTENT_TAG_RE.sub("", text)
     text = _LONE_EMBEDDED_TAG_RE.sub("", text)
     text = _EVENT_HANDLER_ATTR_RE.sub("", text)
+
+    def _replace_unquoted_attr(match: "re.Match[str]") -> str:
+        if not _is_script_scheme_url(match.group("ref")):
+            return match.group(0)
+        logger.warning(
+            "Template %s ref uses an unquoted script-scheme URL; replaced with "
+            "an inert placeholder",
+            match.group("name").lower(),
+        )
+        return f'{match.group("name")}="{_UNRESOLVED_PLACEHOLDER}"'
+
+    text = _UNQUOTED_ATTR_REF_RE.sub(_replace_unquoted_attr, text)
 
     def _replace_srcset(match: "re.Match[str]") -> str:
         entries = [e.strip() for e in match.group("val").split(",") if e.strip()]
@@ -254,9 +276,15 @@ def rewrite_template_asset_refs(
 
     def _replace_url(match: "re.Match[str]") -> str:
         ref = match.group("ref").strip()
+        quote = match.group("q")
+        if _is_script_scheme_url(ref):
+            logger.warning(
+                "Template CSS url() ref uses a script-scheme URL; replaced "
+                "with an inert placeholder"
+            )
+            return f"url({quote}{_UNRESOLVED_PLACEHOLDER}{quote})"
         if not _looks_rewritable(ref):
             return match.group(0)
-        quote = match.group("q")
         asset_id = _resolve_asset_id(ref, base_dir, asset_ids_by_path)
         if asset_id is not None:
             return f"url({quote}{{{{ds-asset:{asset_id}}}}}{quote})"
