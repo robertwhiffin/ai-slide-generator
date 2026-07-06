@@ -294,6 +294,22 @@ class TestStateTemplatePinned:
         assert "SELECTED SLIDE TEMPLATE" not in sp
         assert "BRAND MANUAL" in sp
 
+    def test_scope_firewall_once_per_placement(self, session):
+        """Round 2: the content/style scope firewall rides ONCE in the compiled
+        artifact (every DS prompt) and a second time inside the pinned-template
+        block — so a pinned prompt carries exactly two copies, a template-less
+        DS prompt exactly one."""
+        from src.services.design_system_compiler import DESIGN_SYSTEM_SCOPE_FIREWALL
+
+        ds = self._templated_ds(session)
+        assert self._prompt(ds, template_id=None).count(DESIGN_SYSTEM_SCOPE_FIREWALL) == 1
+        assert (
+            self._prompt(ds, template_id=ds.templates[0].id).count(
+                DESIGN_SYSTEM_SCOPE_FIREWALL
+            )
+            == 2
+        )
+
     def test_template_id_never_changes_tool_registration(self, session):
         from src.api.schemas.agent_config import AgentConfig
         from src.services.agent_factory import _build_tools

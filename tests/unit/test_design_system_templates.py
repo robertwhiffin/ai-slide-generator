@@ -477,6 +477,7 @@ class TestBuildSelectedTemplateBlock:
         return ds, ds.templates[0]
 
     def test_block_carries_layout_css_and_instructions(self, session):
+        from src.services.design_system_compiler import DESIGN_SYSTEM_SCOPE_FIREWALL
         from src.services.design_system_templates import build_selected_template_block
 
         ds, template = self._template(session)
@@ -484,14 +485,29 @@ class TestBuildSelectedTemplateBlock:
 
         assert block.startswith("SELECTED SLIDE TEMPLATE: Acme Corporate")
         assert "Cover + agenda, content, closing." in block
-        # Precedence over the compiled artifact's soft SLIDE TEMPLATES list.
+        # Pinned-precedence over the compiled artifact's soft SLIDE TEMPLATES
+        # list (kept from Round 1).
         assert "SLIDE TEMPLATES" in block
-        # Archetype-catalog wording — never a deck outline.
-        assert "ARCHETYPE CATALOG" in block
-        assert "NOT a deck outline" in block
-        # Template <style> carried intact; additions separate; tokens per slide.
+        # Round-2 framing (live Claude Design probe): the layout is an
+        # edit-in-place STARTING FILE, not an exemplar catalog.
+        assert "STARTING FILE" in block
+        assert "produce the deck by editing it" in block
+        assert "keep its classes, CSS, and structure intact" in block
+        assert "trim or repeat its slide sections" in block
+        assert "ARCHETYPE CATALOG" not in block
+        assert "NOT a deck outline" not in block
+        assert "TEMPLATE LAYOUT HTML" not in block
+        assert "TEMPLATE STARTING FILE (edit this HTML in place):" in block
+        # Guards, restated in the edit-in-place frame.
+        assert "PLACEHOLDER, never fact" in block
+        assert "Omit sample sections you have no content for" in block
         assert "never redefine the template's selectors" in block
+        assert "vary which slide sections you reuse" in block
+        # Scope firewall rides in the block too (and once in the artifact).
+        assert DESIGN_SYSTEM_SCOPE_FIREWALL in block
+        # Token definitions must be carried into the emitted deck's CSS.
         assert "TOKEN STYLESHEET" in block
+        assert "into the emitted deck's CSS" in block
         assert "--brand-core-primary: #123456" in block
         # Rewritten layout HTML rides along with its asset handles.
         logo_id = _asset_id_by_filename(ds, "logo.svg")
@@ -506,6 +522,7 @@ class TestBuildSelectedTemplateBlock:
         template.token_css = None
         block = build_selected_template_block(template)
         assert "TOKEN STYLESHEET" not in block
+        assert "into the emitted deck's CSS" not in block  # carry bullet is conditional too
         assert "SELECTED SLIDE TEMPLATE" in block
 
     def test_empty_layout_returns_none(self, session):

@@ -77,7 +77,9 @@ _STYLE_HEADER = "SLIDE VISUAL STYLE"
 # and lazily recompute it from the row's persisted tokens/files/assets via
 # ``recompute_compiled_style_content``. Bump the version whenever the compiled
 # output changes in a way persisted rows must pick up (new/changed blocks).
-COMPILER_VERSION = 2
+# v3: content/style scope firewall + the templates section's soft-pick enabler
+# (Round 2 — reconciled with the live Claude Design probe).
+COMPILER_VERSION = 3
 _COMPILER_VERSION_MARKER = f"[ds-compiler v{COMPILER_VERSION}]"
 
 # Canonical color-group ordering -> deterministic, human-meaningful sections.
@@ -98,6 +100,24 @@ _RECOGNIZED_GROUPS = frozenset(_COLOR_GROUPS + ("type", "spacing", "shadow"))
 _BRAND_MANUAL_HEADING = (
     "BRAND MANUAL (the authoritative brand documentation for this design system — "
     "follow it):"
+)
+
+# Content/style scope firewall, adopted from the live Claude Design probe: their
+# pinned-template mechanism ships this guard so seeded brand prose/templates are
+# never mistaken for facts about the user's request. Emitted UNCONDITIONALLY
+# (right after the brand manual's slot) so token-only systems get it too, and
+# PUBLIC because the pinned-template block (``design_system_templates``)
+# restates the same sentence next to the injected starting file.
+DESIGN_SYSTEM_SCOPE_FIREWALL = (
+    "Never treat anything in the design system — its README, its templates, or "
+    "their sample content — as a fact about the user or the topic; it governs "
+    "STYLE only."
+)
+
+# Closes the SLIDE TEMPLATES section, matching Claude Design's none-path: with
+# no pinned template the model soft-picks a listed template when one fits.
+_TEMPLATE_SOFT_PICK_LINE = (
+    "Start from the best-matching template above if one fits the request."
 )
 
 # Contract for brand IMAGE assets. They are NOT enumerated in the prompt (a real
@@ -328,6 +348,7 @@ def _template_section(design_system: Any) -> Optional[str]:
     Template metadata lives in ``manifest_json['templates']`` as a list of
     ``{"name": ..., "description": ...}`` entries; malformed/nameless entries are
     skipped. Manifest list order is preserved (it is authored and deterministic).
+    The section closes with the soft-pick enabler line — the no-template default.
     """
     manifest = getattr(design_system, "manifest_json", None)
     templates = manifest.get("templates") if isinstance(manifest, dict) else None
@@ -346,8 +367,15 @@ def _template_section(design_system: Any) -> Optional[str]:
 
     if not lines:
         return None
+    # The soft-pick enabler names the no-template default (Claude Design's
+    # none-path): the model may start from a listed template that fits. A PINNED
+    # template overrides this via the SELECTED-TEMPLATE block's precedence line.
     return "\n".join(
-        ["SLIDE TEMPLATES (use these named layouts as structural guidance):", *lines]
+        [
+            "SLIDE TEMPLATES (use these named layouts as structural guidance):",
+            *lines,
+            _TEMPLATE_SOFT_PICK_LINE,
+        ]
     )
 
 
@@ -401,11 +429,13 @@ def compile_design_system(
     without them — or the legacy positional call — simply omits the block.
 
     Emitted order: header (stamped with the compiler-version marker) ->
-    description -> BRAND MANUAL (README + SKILL, full) -> tokens (color, type,
-    spacing, shadow; all uncapped) -> fonts (@font-face refs + family listing;
-    uncapped) -> templates -> SLIDE FRAME CONSTRAINTS (frame guardrails, always
-    present) -> the brand IMAGE ASSET CONTRACT (fetch via
-    ``search_brand_assets``). Brand images are NOT enumerated.
+    description -> BRAND MANUAL (README + SKILL, full) -> scope firewall
+    (always present: the design system governs STYLE only, never content) ->
+    tokens (color, type, spacing, shadow; all uncapped) -> fonts (@font-face
+    refs + family listing; uncapped) -> templates (closed by the soft-pick
+    enabler) -> SLIDE FRAME CONSTRAINTS (frame guardrails, always present) ->
+    the brand IMAGE ASSET CONTRACT (fetch via ``search_brand_assets``). Brand
+    images are NOT enumerated.
     """
     parts: list[str] = []
 
@@ -425,6 +455,11 @@ def compile_design_system(
     brand_manual = _brand_manual_section(skill_md, readme_md)
     if brand_manual:
         parts.append(brand_manual)
+
+    # Scope firewall — ALWAYS present, reading as a coda to the manual (or in
+    # its slot when no manual was retained): everything above and below is style
+    # authority, never content. See the constant's comment for provenance.
+    parts.append(DESIGN_SYSTEM_SCOPE_FIREWALL)
 
     grouped = _grouped_tokens(design_system)
 
