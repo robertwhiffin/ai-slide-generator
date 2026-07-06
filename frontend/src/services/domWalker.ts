@@ -138,8 +138,8 @@ ${sections}
  * iframe measurements reflect the fallback font's metrics when font_mode is
  * "universal".
  *
- * Exported so tests/svg-raster-export.spec.ts can drive the exact shipped
- * walker string in a Playwright page.
+ * Exported so tests/e2e/svg-raster-export.spec.ts can drive the exact
+ * shipped walker string in a Playwright page.
  */
 export const WALKER_SOURCE = `
 (function () {

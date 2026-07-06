@@ -20,9 +20,10 @@
  *  4. end-to-end — walker records piped through the actual sidecar bundle
  *     yield a pptx with no .svg media, no svgBlip, no IMG_BROKEN bytes.
  *
- * Run with: npx playwright test tests/svg-raster-export.spec.ts
+ * Run with: npx playwright test tests/e2e/svg-raster-export.spec.ts
+ * (also wired into the CI e2e matrix in .github/workflows/test.yml).
  * Regenerate the walker golden (same machine/browser class) with:
- *   TELLR_REGEN_EXPORT_GOLDENS=1 npx playwright test tests/svg-raster-export.spec.ts
+ *   TELLR_REGEN_EXPORT_GOLDENS=1 npx playwright test tests/e2e/svg-raster-export.spec.ts
  */
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
@@ -31,8 +32,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { test, expect, type Page } from '@playwright/test';
-import { WALKER_SOURCE } from '../src/services/domWalker';
-import { pngDimensions, readZipEntries } from './helpers/pptxZip';
+import { WALKER_SOURCE } from '../../src/services/domWalker';
+import { pngDimensions, readZipEntries } from '../helpers/pptxZip';
 
 // Synthetic assets — mirror tests/fixtures/export_svg_raster/ on the Python
 // side (duplicated because the two runtimes cannot share fixture loaders).
@@ -45,10 +46,10 @@ const SVG_BROKEN = 'data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My
 
 const REGEN = process.env.TELLR_REGEN_EXPORT_GOLDENS === '1';
 const WALKER_GOLDEN = fileURLToPath(
-  new URL('./fixtures/svg-raster-walker-records.golden.json', import.meta.url),
+  new URL('../fixtures/svg-raster-walker-records.golden.json', import.meta.url),
 );
 const SIDECAR_BUNDLE = fileURLToPath(
-  new URL('../../services/pptx-emit/emit.bundle.mjs', import.meta.url),
+  new URL('../../../services/pptx-emit/emit.bundle.mjs', import.meta.url),
 );
 
 function slidePage(inner: string): string {
@@ -131,16 +132,30 @@ function dataUriPng(src: string): Buffer {
 test('walker records for an SVG-free page match the pre-fix golden (payload identity)', async ({ page }) => {
   const extract = roundNumbers(await extractRecords(page, PNG_CONTROL_PAGE));
   if (REGEN) {
-    writeFileSync(WALKER_GOLDEN, JSON.stringify(extract, null, 2) + '\n');
+    writeFileSync(
+      WALKER_GOLDEN,
+      JSON.stringify({ capturedOn: process.platform, extract }, null, 2) + '\n',
+    );
     test.skip(true, `regenerated ${WALKER_GOLDEN}`);
   }
-  const golden = JSON.parse(readFileSync(WALKER_GOLDEN, 'utf8'));
-  // Deep equality over the full extract = the from-records POST body (and so
-  // the sidecar stdin payload) is identical before/after the SVG fix.
-  expect(extract).toEqual(golden);
-  // Belt-and-braces beyond the golden: the PNG src survives byte-for-byte.
+  // Runs on EVERY platform: the PNG src survives byte-for-byte — the payload
+  // property the SVG raster branch could have broken.
   const images = extract.records.filter((r) => r.kind === 'image') as unknown as WalkerImageRecord[];
   expect(images.map((r) => r.src)).toEqual([PNG_NAVY_24x16]);
+
+  const golden = JSON.parse(readFileSync(WALKER_GOLDEN, 'utf8'));
+  expect(golden.capturedOn).toBeTruthy();
+  // Text-record geometry depends on platform font metrics, so the full
+  // deep-equal is pinned to the platform that captured the golden (re-pin
+  // with TELLR_REGEN_EXPORT_GOLDENS=1). The raster-behavior tests below are
+  // geometry-explicit and run everywhere, CI included.
+  test.skip(
+    process.platform !== golden.capturedOn,
+    `walker golden captured on ${golden.capturedOn}; font metrics differ on ${process.platform}`,
+  );
+  // Deep equality over the full extract = the from-records POST body (and so
+  // the sidecar stdin payload) is identical before/after the SVG fix.
+  expect(extract).toEqual(golden.extract);
 });
 
 test('SVG <img> extracts as a 2x PNG record; sibling PNG passes through unchanged', async ({ page }) => {

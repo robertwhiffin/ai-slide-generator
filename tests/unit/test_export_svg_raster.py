@@ -34,8 +34,8 @@ This module protects two invariants:
    must contain no ``.svg`` media, no ``svgBlip`` references, no media blob
    matching the IMG_BROKEN placeholder, and real PNGs at 2x the source
    layout box. (The records-path equivalent lives in the frontend runner —
-   ``frontend/tests/svg-raster-export.spec.ts`` — because the walker needs a
-   real browser.)
+   ``frontend/tests/e2e/svg-raster-export.spec.ts`` — because the walker
+   needs a real browser.)
 
 Gating: records tests need ``node`` + the checked-in sidecar bundle; huashu
 tests additionally need the extracted sidecar ``node_modules`` and a local
