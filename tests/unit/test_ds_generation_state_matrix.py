@@ -1,13 +1,15 @@
-"""End-to-end state-matrix tests for design-system-driven generation (Phase 2 reset).
+"""End-to-end state-matrix tests for design-system-driven generation.
 
-The three states, None/empty-safe (no exotic edge cases):
+The states, None/empty-safe (no exotic edge cases):
 
 1. NO design_system_id       -> no search_brand_assets tool, no DS injection, the
                                 legacy slide_style path is byte-for-byte unchanged.
 2. design_system_id set       -> FULL brand manual + tokens + fonts + asset CONTRACT
                                 in the prompt, AND the search_brand_assets tool.
-3. design_system_id + (future) template_id -> a CLEAN None-safe hook: registration
-   is gated on design_system_id ALONE, with no template coupling to break later.
+3. design_system_id + template_id (Phase 4) -> a valid pin appends the
+   SELECTED-TEMPLATE block at prompt-assembly time; an absent/invalid pin is
+   byte-identical to the no-template path (ignored + logged, never a 500); tool
+   registration stays gated on design_system_id ALONE.
 4. design_system_id set, but the PERSISTED ``compiled_style_content`` predates the
    current compiler (stale/missing version marker) or was never compiled -> the
    factory recompiles it lazily from the row's persisted tokens/files/assets at
@@ -180,9 +182,9 @@ class TestStateDesignSystemSelected:
 
 class TestStateTemplateHook:
     def test_registration_gated_on_design_system_id_alone(self):
-        """State 3 hook: the tool builder takes ONLY a design_system_id (no template
-        arg), and registration keys on design_system_id ALONE — so a future
-        template_id is a clean, None-safe addition, not a breaking change."""
+        """The tool builder takes ONLY a design_system_id (no template arg), and
+        registration keys on design_system_id ALONE — a pinned template_id
+        (Phase 4) shapes prompt assembly, never tool registration."""
         from src.api.schemas.agent_config import AgentConfig
         from src.services.agent_factory import _build_tools
         from src.services.tools import build_ds_asset_tool
@@ -191,6 +193,118 @@ class TestStateTemplateHook:
 
         config = AgentConfig(design_system_id=5)
         assert "search_brand_assets" in [t.name for t in _build_tools(config, {})]
+
+
+class TestStateTemplatePinned:
+    """Phase 4 states: an optional ``template_id`` pins ONE of the design
+    system's templates. Pinned + valid -> a SELECTED-TEMPLATE block is appended
+    at prompt-assembly time (never into the stored artifact). Absent/invalid ->
+    byte-identical no-template behavior, ignored + logged, never a 500."""
+
+    def _templated_ds(self, session):
+        from src.database.models.design_system import DesignSystemTemplate
+
+        ds = _full_ds(session)
+        logo_id = next(a.id for a in ds.assets if a.kind == "logo")
+        ds.templates.append(DesignSystemTemplate(
+            name="Acme Corporate",
+            description="Cover + agenda, content, closing.",
+            entry_path="templates/corporate/index.html",
+            layout_html=(
+                '<section class="slide"><img src="{{ds-asset:%d}}" alt="Acme logo" />'
+                "<h1>Sample title</h1></section>" % logo_id
+            ),
+            token_css=":root { --acme-navy: #0B1F3A; }",
+        ))
+        session.commit()
+        session.refresh(ds)
+        return ds
+
+    def _prompt(self, ds, template_id=None):
+        from src.api.schemas.agent_config import AgentConfig
+
+        config = AgentConfig(design_system_id=ds.id, template_id=template_id)
+        return _prompts_with_db(config, _dispatching_db(design_system=ds))["system_prompt"]
+
+    def test_pinned_template_appends_block_after_compiled_artifact(self, session):
+        from src.core.prompt_modules import build_generation_system_prompt
+        from src.services.design_system_templates import build_selected_template_block
+
+        ds = self._templated_ds(session)
+        template = ds.templates[0]
+        sp = self._prompt(ds, template_id=template.id)
+
+        block = build_selected_template_block(template)
+        expected = build_generation_system_prompt(
+            slide_style=f"{ds.compiled_style_content}\n\n{block}",
+            deck_prompt=None,
+            image_guidelines=None,
+            design_system_active=True,
+        )
+        assert sp == expected  # block appended at assembly, byte-exact
+        assert "SELECTED SLIDE TEMPLATE: Acme Corporate" in sp
+        logo_id = next(a.id for a in ds.assets if a.kind == "logo")
+        assert f"{{{{ds-asset:{logo_id}}}}}" in sp  # rewritten refs ride into the prompt
+
+    def test_no_template_id_is_byte_identical_to_ds_only_path(self, session):
+        from src.core.prompt_modules import build_generation_system_prompt
+
+        ds = self._templated_ds(session)
+        sp = self._prompt(ds, template_id=None)
+        expected = build_generation_system_prompt(
+            slide_style=ds.compiled_style_content,
+            deck_prompt=None,
+            image_guidelines=None,
+            design_system_active=True,
+        )
+        assert sp == expected
+        assert "SELECTED SLIDE TEMPLATE" not in sp
+
+    def test_stored_artifact_never_carries_the_template_block(self, session):
+        ds = self._templated_ds(session)
+        self._prompt(ds, template_id=ds.templates[0].id)
+        assert "SELECTED SLIDE TEMPLATE" not in ds.compiled_style_content
+
+    def test_template_of_other_design_system_ignored_and_logged(self, session, caplog):
+        import logging
+
+        from src.database.models.design_system import DesignSystem, DesignSystemTemplate
+
+        ds_a = self._templated_ds(session)
+        ds_b = DesignSystem(name="Acme Second DS")
+        ds_b.templates.append(DesignSystemTemplate(
+            name="Acme Other",
+            entry_path="templates/other/index.html",
+            layout_html="<section>other</section>",
+        ))
+        session.add(ds_b)
+        session.commit()
+
+        with caplog.at_level(logging.WARNING):
+            sp = self._prompt(ds_a, template_id=ds_b.templates[0].id)
+        assert "SELECTED SLIDE TEMPLATE" not in sp
+        assert "BRAND MANUAL" in sp  # design system itself still fully applied
+
+    def test_missing_template_falls_back_gracefully(self, session, caplog):
+        import logging
+
+        ds = self._templated_ds(session)
+        with caplog.at_level(logging.WARNING):
+            sp = self._prompt(ds, template_id=424242)
+        assert "SELECTED SLIDE TEMPLATE" not in sp
+        assert "BRAND MANUAL" in sp
+
+    def test_template_id_never_changes_tool_registration(self, session):
+        from src.api.schemas.agent_config import AgentConfig
+        from src.services.agent_factory import _build_tools
+
+        ds = self._templated_ds(session)
+        with_template = AgentConfig(design_system_id=ds.id, template_id=ds.templates[0].id)
+        without = AgentConfig(design_system_id=ds.id)
+        assert (
+            [t.name for t in _build_tools(with_template, {})]
+            == [t.name for t in _build_tools(without, {})]
+        )
 
 
 class TestStateStaleCompiledContent:

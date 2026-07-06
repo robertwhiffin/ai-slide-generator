@@ -540,11 +540,13 @@ def _run_migrations(engine, schema: str | None = None):
 def _migrate_design_system_tables(conn, schema: str | None = None) -> None:
     """Create the additive design-system tables (idempotent, dialect-safe).
 
-    Design System Library. Adds four NEW tables — ``design_system``,
-    ``design_system_asset``, ``design_system_token``, ``design_system_file`` —
-    without touching ``slide_style_library`` or any existing table, so the current
-    slide-style prompt path is unaffected. ``design_system_file`` (v1 Phase 1)
-    retains bundle source files + path references and is created LAST so its
+    Design System Library. Adds five NEW tables — ``design_system``,
+    ``design_system_asset``, ``design_system_token``, ``design_system_file``,
+    ``design_system_template`` — without touching ``slide_style_library`` or any
+    existing table, so the current slide-style prompt path is unaffected.
+    ``design_system_file`` (v1 Phase 1) retains bundle source files + path
+    references, and ``design_system_template`` (v1 Phase 4) makes templates
+    individually addressable; both are created AFTER their parents so their
     foreign keys to ``design_system`` and ``design_system_asset`` resolve.
 
     ``Base.metadata.create_all()`` (run first in ``init_db``) already creates these
@@ -560,10 +562,17 @@ def _migrate_design_system_tables(conn, schema: str | None = None) -> None:
         DesignSystem,
         DesignSystemAsset,
         DesignSystemFile,
+        DesignSystemTemplate,
         DesignSystemToken,
     )
 
-    for model in (DesignSystem, DesignSystemAsset, DesignSystemToken, DesignSystemFile):
+    for model in (
+        DesignSystem,
+        DesignSystemAsset,
+        DesignSystemToken,
+        DesignSystemFile,
+        DesignSystemTemplate,
+    ):
         table = model.__table__
         # Match init_db()'s schema handling so a qualified deployment creates the
         # tables in the Lakebase schema; guarded so it stays a no-op on repeat.

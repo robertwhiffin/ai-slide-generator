@@ -135,6 +135,68 @@ def realistic_manifest() -> dict:
     }
 
 
+# A synthetic template entry file (archetype-catalog shape): one inline <style>
+# using var(--…) tokens + a CSS url() background, brand-asset <img> refs in both
+# parent-relative and bundle-root-relative form, one unresolvable ref, and
+# preview-chrome <script> tags. All fake — no real brand content.
+TEMPLATED_TEMPLATE_HTML = b"""<!doctype html>
+<html><head>
+<script src="./ds-base.js"></script>
+<style>
+.slide { width: 1280px; height: 720px; padding: 72px 88px; color: var(--acme-navy); }
+.hero { background-image: url("../assets/backgrounds/hero-bg.png"); }
+</style>
+</head><body>
+<section class="slide cover">
+  <img src="../assets/logo.svg" alt="Acme logo" />
+  <h1>Sample cover title</h1>
+</section>
+<section class="slide content">
+  <img src="assets/logo.svg" alt="Acme logo root-relative" />
+  <img src="../assets/missing-art.png" alt="Ghost asset" />
+</section>
+<script>window.__acmePreviewChrome = true;</script>
+</body></html>
+"""
+
+
+def template_preview_png() -> bytes:
+    """Tiny synthetic preview screenshot for the template fixture."""
+    return png_bytes(6, 4, color=(18, 52, 86))
+
+
+def templated_manifest() -> dict:
+    """The default manifest plus addressable templates (folder + entryPath),
+    mirroring the Claude-Design export shape ``templates[]{name, description,
+    folder, entryPath}``. Still fully SYNTHETIC."""
+    manifest = default_manifest()
+    manifest["templates"] = [
+        {
+            "name": "Acme Corporate",
+            "description": "Cover + agenda, content, closing.",
+            "folder": "templates/corporate",
+            "entryPath": "templates/corporate/index.html",
+        },
+    ]
+    return manifest
+
+
+def templated_bundle_files() -> dict:
+    """Bundle files for a template-bearing synthetic bundle: the default file set
+    with the corporate template's entry HTML replaced by the ref-rich fixture and
+    a preview screenshot added."""
+    return {
+        "fonts/acme-sans.woff2": b"OTTO synthetic-font-bytes",
+        "assets/logo.svg": SVG_LOGO,
+        "assets/backgrounds/hero-bg.png": png_bytes(16, 16),
+        "README.md": SYNTHETIC_README,
+        "SKILL.md": SYNTHETIC_SKILL,
+        "templates/corporate/index.html": TEMPLATED_TEMPLATE_HTML,
+        "templates/corporate/preview.png": template_preview_png(),
+        "templates/corporate/ds-base.js": b"// synthetic - not retained",
+    }
+
+
 def make_bundle_zip(
     *,
     manifest: Optional[dict] = "__default__",

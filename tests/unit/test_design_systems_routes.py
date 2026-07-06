@@ -283,6 +283,102 @@ class TestServeAsset:
 
 
 # ---------------------------------------------------------------------------
+# Templates (Phase 4): list + thumbnail endpoints
+# ---------------------------------------------------------------------------
+
+
+def _import_templated(client, name=None):
+    from tests.unit.conftest_design_system import templated_bundle_files, templated_manifest
+
+    manifest = templated_manifest()
+    if name:
+        manifest["name"] = name
+    resp = _import(
+        client,
+        bundle_kwargs={"manifest": manifest, "files": templated_bundle_files()},
+    )
+    assert resp.status_code == 201, resp.text
+    return resp.json()
+
+
+class TestTemplateEndpoints:
+    def test_list_templates_returns_entities_with_thumbnail_url(self, client):
+        body = _import_templated(client)
+        resp = client.get(f"{BASE}/{body['id']}/templates")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["total"] == 1
+        template = data["templates"][0]
+        assert template["name"] == "Acme Corporate"
+        assert template["description"] == "Cover + agenda, content, closing."
+        assert template["entry_path"] == "templates/corporate/index.html"
+        assert template["thumbnail_url"] == (
+            f"/api/settings/design-systems/{body['id']}/templates/"
+            f"{template['id']}/thumbnail"
+        )
+        # No endpoint serves template HTML — the listing must not carry it either.
+        assert "layout_html" not in template
+
+    def test_list_templates_404_for_unknown_design_system(self, client):
+        assert client.get(f"{BASE}/999999/templates").status_code == 404
+
+    def test_list_templates_empty_for_system_without_templates(self, client):
+        body = _import(client).json()  # default bundle: no folder/entryPath templates
+        resp = client.get(f"{BASE}/{body['id']}/templates")
+        assert resp.status_code == 200
+        assert resp.json() == {"templates": [], "total": 0}
+
+    def test_list_templates_materializes_lazily_for_pre_phase4_rows(self, client, db_session):
+        from src.database.models import DesignSystemTemplate
+
+        body = _import_templated(client)
+        # Simulate a system imported between Phase 1 and Phase 4: retained file
+        # rows exist, but no template entities were materialized.
+        db_session.query(DesignSystemTemplate).delete()
+        db_session.commit()
+
+        resp = client.get(f"{BASE}/{body['id']}/templates")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["total"] == 1
+        assert data["templates"][0]["name"] == "Acme Corporate"
+
+    def test_thumbnail_served_with_image_type_and_nosniff(self, client):
+        body = _import_templated(client)
+        template = client.get(f"{BASE}/{body['id']}/templates").json()["templates"][0]
+        resp = client.get(f"{BASE}/{body['id']}/templates/{template['id']}/thumbnail")
+        assert resp.status_code == 200
+        assert resp.headers["content-type"].startswith("image/png")
+        assert resp.headers.get("x-content-type-options") == "nosniff"
+        assert resp.content.startswith(b"\x89PNG")
+
+    def test_thumbnail_404_when_template_belongs_to_other_design_system(self, client):
+        body_a = _import_templated(client, name="Acme Templated A")
+        body_b = _import_templated(client, name="Acme Templated B")
+        template_b = client.get(f"{BASE}/{body_b['id']}/templates").json()["templates"][0]
+        resp = client.get(f"{BASE}/{body_a['id']}/templates/{template_b['id']}/thumbnail")
+        assert resp.status_code == 404
+
+    def test_thumbnail_404_when_template_has_no_preview(self, client):
+        from tests.unit.conftest_design_system import templated_bundle_files
+
+        files = templated_bundle_files()
+        files.pop("templates/corporate/preview.png")
+        from tests.unit.conftest_design_system import templated_manifest
+
+        resp = _import(
+            client,
+            bundle_kwargs={"manifest": templated_manifest(), "files": files},
+        )
+        body = resp.json()
+        listing = client.get(f"{BASE}/{body['id']}/templates").json()
+        template = listing["templates"][0]
+        assert template["thumbnail_url"] is None
+        resp = client.get(f"{BASE}/{body['id']}/templates/{template['id']}/thumbnail")
+        assert resp.status_code == 404
+
+
+# ---------------------------------------------------------------------------
 # Reference integrity (design_system_id in agent-config validator)
 # ---------------------------------------------------------------------------
 
@@ -330,6 +426,72 @@ class TestReferenceValidation:
             with pytest.raises(HTTPException) as exc:
                 _validate_references(AgentConfig(design_system_id=ds.id))
         assert exc.value.status_code == 422
+
+    def _templated_ds(self, db_session, name=None):
+        from src.services.design_system_service import import_bundle
+        from tests.unit.conftest_design_system import (
+            templated_bundle_files,
+            templated_manifest,
+        )
+
+        manifest = templated_manifest()
+        if name:
+            manifest["name"] = name
+        return import_bundle(
+            db_session,
+            zip_bytes=make_bundle_zip(manifest=manifest, files=templated_bundle_files()),
+            user="u",
+        )
+
+    def test_accepts_template_belonging_to_selected_design_system(self, db_session):
+        from src.api.routes.agent_config import _validate_references
+        from src.api.schemas.agent_config import AgentConfig
+
+        ds = self._templated_ds(db_session)
+        with self._patched_db(db_session):
+            _validate_references(
+                AgentConfig(design_system_id=ds.id, template_id=ds.templates[0].id)
+            )  # no raise
+
+    def test_rejects_template_of_another_design_system(self, db_session):
+        from fastapi import HTTPException
+
+        from src.api.routes.agent_config import _validate_references
+        from src.api.schemas.agent_config import AgentConfig
+
+        ds_a = self._templated_ds(db_session, name="Acme Validator A")
+        ds_b = self._templated_ds(db_session, name="Acme Validator B")
+        with self._patched_db(db_session):
+            with pytest.raises(HTTPException) as exc:
+                _validate_references(
+                    AgentConfig(design_system_id=ds_a.id, template_id=ds_b.templates[0].id)
+                )
+        assert exc.value.status_code == 422
+
+    def test_rejects_template_without_design_system(self, db_session):
+        from fastapi import HTTPException
+
+        from src.api.routes.agent_config import _validate_references
+        from src.api.schemas.agent_config import AgentConfig
+
+        ds = self._templated_ds(db_session)
+        with self._patched_db(db_session):
+            with pytest.raises(HTTPException) as exc:
+                _validate_references(AgentConfig(template_id=ds.templates[0].id))
+        assert exc.value.status_code == 422
+
+    def test_rejects_unknown_template_id(self, db_session):
+        from fastapi import HTTPException
+
+        from src.api.routes.agent_config import _validate_references
+        from src.api.schemas.agent_config import AgentConfig
+
+        ds = self._templated_ds(db_session)
+        with self._patched_db(db_session):
+            with pytest.raises(HTTPException) as exc:
+                _validate_references(AgentConfig(design_system_id=ds.id, template_id=424242))
+        assert exc.value.status_code == 422
+        assert "424242" in exc.value.detail
 
 
 # ---------------------------------------------------------------------------

@@ -103,9 +103,12 @@ def _get_prompt_content(
     compiler (missing/stale version marker — e.g. rows compiled before the frame
     guardrails existed) or was never compiled is lazily recompiled here from the
     row's persisted tokens/files/assets, so an active design system ALWAYS
-    injects the current compiler's blocks (no batch backfill). When no design
-    system is selected the legacy slide_style_id path is used unchanged, so the
-    feature is backward compatible.
+    injects the current compiler's blocks (no batch backfill). A pinned
+    ``template_id`` (Phase 4) appends its SELECTED-TEMPLATE block to the injected
+    text at assembly time only — an invalid pin is ignored with a log, and the
+    persisted compiled artifact never carries it. When no design system is
+    selected the legacy slide_style_id path is used unchanged, so the feature is
+    backward compatible.
 
     Args:
         config: The AgentConfig for this request
@@ -150,6 +153,28 @@ def _get_prompt_content(
                     # (lazy backfill-on-read, no batch machinery).
                     slide_style = ensure_compiled_style_content_current(design_system)
                     design_system_active = True
+                    if config.template_id is not None:
+                        # A pinned template appends its SELECTED-TEMPLATE block
+                        # here, at prompt-assembly time — the persisted per-DS
+                        # compiled artifact stays template-agnostic. An invalid
+                        # pin (deleted, or another design system's template)
+                        # resolves to None inside the helpers (logged) and the
+                        # prompt is byte-identical to the no-template path.
+                        from src.services.design_system_templates import (
+                            build_selected_template_block,
+                            get_template_for_generation,
+                        )
+
+                        template = get_template_for_generation(
+                            design_system, config.template_id
+                        )
+                        block = (
+                            build_selected_template_block(template)
+                            if template is not None
+                            else None
+                        )
+                        if block:
+                            slide_style = f"{slide_style}\n\n{block}"
                 else:
                     logger.warning(
                         "Design system not found, using default",
@@ -292,8 +317,8 @@ def _build_tools(
     # Brand-asset search tool — ONLY when a design system is selected (state
     # guard). Bound to the design_system_id via closure so it surfaces only that
     # system's assets; the compiled style's ASSET CONTRACT tells the model to call
-    # it. Gated on design_system_id alone (no template concept), so a future
-    # template_id can layer on without touching this path.
+    # it. Gated on design_system_id alone — a pinned template_id (Phase 4) shapes
+    # prompt assembly only and never changes tool registration.
     if config.design_system_id is not None:
         tools.append(build_ds_asset_tool(config.design_system_id))
 
