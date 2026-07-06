@@ -849,8 +849,10 @@ class TestSlideFrameConstraints:
     so the legacy custom-system-prompt path and the no-DS golden prompts stay
     byte-identical. It is ALWAYS present when a design system compiles (like the
     asset contract). It states a fixed 1280x720 (16:9) frame with overflow clipped,
-    one slide per frame with no in-slide scrolling, and adds SOFT safe-area prose
-    (no injected padding CSS / .slide wrapper). All fixtures are SYNTHETIC.
+    one slide per frame with no in-slide scrolling, and adds SOFT safe-area prose.
+    The WHOLE block is PROSE ONLY: the model writes freehand HTML, so the block
+    must state outcomes without prescribing CSS rules or assuming any wrapper
+    class (``.slide``), and without injected padding CSS. All fixtures SYNTHETIC.
     """
 
     def test_frame_block_present_with_hard_frame_facts(self, session):
@@ -860,7 +862,9 @@ class TestSlideFrameConstraints:
         assert "SLIDE FRAME CONSTRAINTS" in out
         assert "1280x720" in out
         assert "16:9" in out
-        assert "overflow:hidden" in out  # instruct the model to clip, not scroll
+        # clip-not-scroll is stated as prose (no CSS rule — see the prose-only test)
+        assert "CLIPPED" in out
+        assert "never scrolled" in out
 
     def test_frame_block_states_one_slide_per_frame_fit_all(self, session):
         from src.services.design_system_compiler import compile_design_system
@@ -888,6 +892,23 @@ class TestSlideFrameConstraints:
         squished = out.replace(" ", "")
         assert "padding:72px88px" not in squished  # no forced safe-area padding CSS
         assert "padding:72px" not in squished
+
+    def test_frame_block_is_pure_prose_no_css_prescriptions(self, session):
+        """The frame block is a PROSE contract: the model writes freehand HTML, so
+        the block must not prescribe concrete CSS rules (e.g. ``{ width:1280px``)
+        or assume any particular wrapper class (``.slide``) — it states the
+        outcome and leaves the markup to the model."""
+        from src.services.design_system_compiler import compile_design_system
+
+        out = compile_design_system(_make_ds(session, tokens=_TOKENS))
+        block = out[out.index("SLIDE FRAME CONSTRAINTS"):out.index("BRAND IMAGE ASSETS")]
+        assert ".slide" not in block  # no wrapper-class assumption
+        assert "{" not in block and "}" not in block  # no CSS rule prescriptions
+        squished = block.replace(" ", "").lower()
+        for css_property_form in ("width:", "height:", "overflow:", "padding:"):
+            assert css_property_form not in squished
+        # the class-name independence is stated explicitly, not just implied
+        assert "class name" in block
 
     def test_frame_block_always_present_even_for_empty_ds(self, session):
         from src.services.design_system_compiler import compile_design_system
@@ -922,3 +943,80 @@ class TestSlideFrameConstraints:
         # the frame block carries no per-DS data, so it is identical across systems
         # (compare from the frame heading to the shared trailing asset contract)
         assert frame_a == frame_b
+
+
+# ---------------------------------------------------------------------------
+# Compiled-artifact version marker (staleness detection for persisted rows)
+# ---------------------------------------------------------------------------
+
+
+class TestCompilerVersionMarker:
+    """The compiler stamps a version marker into the header line so consumers of
+    the PERSISTED ``compiled_style_content`` (``agent_factory``) can detect rows
+    compiled by an OLDER compiler (e.g. before the frame guardrails existed) and
+    lazily recompute them via ``recompute_compiled_style_content``."""
+
+    def test_compiled_output_carries_marker_in_header_line(self, session):
+        from src.services.design_system_compiler import (
+            _COMPILER_VERSION_MARKER,
+            compile_design_system,
+        )
+
+        out = compile_design_system(_make_ds(session, tokens=_TOKENS))
+        header = out.splitlines()[0]
+        assert header.startswith("SLIDE VISUAL STYLE: Acme Design System")
+        assert _COMPILER_VERSION_MARKER in header
+
+    def test_fresh_compile_and_recompute_are_current(self, session):
+        from src.services.design_system_compiler import (
+            compile_design_system,
+            compiled_style_content_is_current,
+            recompute_compiled_style_content,
+        )
+
+        ds = _make_ds(session, tokens=_TOKENS)
+        assert compiled_style_content_is_current(compile_design_system(ds))
+        recompute_compiled_style_content(ds)
+        assert compiled_style_content_is_current(ds.compiled_style_content)
+
+    def test_missing_empty_and_pre_marker_artifacts_are_stale(self):
+        from src.services.design_system_compiler import compiled_style_content_is_current
+
+        assert not compiled_style_content_is_current(None)
+        assert not compiled_style_content_is_current("")
+        assert not compiled_style_content_is_current("   \n")
+        # A row compiled before version markers existed (the pre-guardrail
+        # Phase 2/3 artifact shape) carries no marker and must read as stale.
+        assert not compiled_style_content_is_current(
+            "SLIDE VISUAL STYLE: Acme Design System\n\n"
+            "BRAND COLOR TOKENS:\n- core:\n  - primary: #123456"
+        )
+
+
+class TestEnsureCompiledStyleContentCurrent:
+    """Read-through seam for consumers of the PERSISTED artifact: returns the
+    stored text when it is current, recomputes it in place when stale/missing."""
+
+    def test_returns_stored_artifact_verbatim_when_current(self, session):
+        from src.services.design_system_compiler import (
+            ensure_compiled_style_content_current,
+            recompute_compiled_style_content,
+        )
+
+        ds = _make_ds(session, tokens=_TOKENS)
+        recompute_compiled_style_content(ds)
+        stored = ds.compiled_style_content
+        assert ensure_compiled_style_content_current(ds) == stored
+
+    def test_recomputes_and_refreshes_record_when_stale(self, session):
+        from src.services.design_system_compiler import (
+            compiled_style_content_is_current,
+            ensure_compiled_style_content_current,
+        )
+
+        ds = _make_ds(session, tokens=_TOKENS)
+        ds.compiled_style_content = "SLIDE VISUAL STYLE: Acme Design System\n\n(old artifact)"
+        out = ensure_compiled_style_content_current(ds)
+        assert "SLIDE FRAME CONSTRAINTS" in out
+        assert ds.compiled_style_content == out  # refreshed in place for persistence
+        assert compiled_style_content_is_current(ds.compiled_style_content)

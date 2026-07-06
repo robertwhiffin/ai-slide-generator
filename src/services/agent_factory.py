@@ -99,8 +99,13 @@ def _get_prompt_content(
     A selected design system contributes its ``compiled_style_content`` — the
     serialized artifact produced by ``design_system_compiler`` — which flows
     through the identical ``build_generation_system_prompt`` seam as a legacy
-    ``style_content`` blob. When no design system is selected the legacy
-    slide_style_id path is used unchanged, so the feature is backward compatible.
+    ``style_content`` blob. A persisted artifact that predates the current
+    compiler (missing/stale version marker — e.g. rows compiled before the frame
+    guardrails existed) or was never compiled is lazily recompiled here from the
+    row's persisted tokens/files/assets, so an active design system ALWAYS
+    injects the current compiler's blocks (no batch backfill). When no design
+    system is selected the legacy slide_style_id path is used unchanged, so the
+    feature is backward compatible.
 
     Args:
         config: The AgentConfig for this request
@@ -124,6 +129,9 @@ def _get_prompt_content(
         try:
             from src.core.database import get_db_session
             from src.database.models import DesignSystem
+            from src.services.design_system_compiler import (
+                ensure_compiled_style_content_current,
+            )
 
             with get_db_session() as db:
                 design_system = (
@@ -131,18 +139,20 @@ def _get_prompt_content(
                     .filter_by(id=config.design_system_id, is_active=True)
                     .first()
                 )
-                if (
-                    design_system
-                    and design_system.compiled_style_content
-                    and design_system.compiled_style_content.strip()
-                ):
+                if design_system is not None:
                     # compiled_style_content is the design system's drop-in
-                    # equivalent of slide_style_library.style_content.
-                    slide_style = design_system.compiled_style_content
+                    # equivalent of slide_style_library.style_content. A stale or
+                    # missing artifact (persisted before the current compiler,
+                    # e.g. pre-frame-guardrail rows) is recompiled in place from
+                    # the row's persisted tokens/files/assets, so an ACTIVE
+                    # design system always injects the current compiler's blocks;
+                    # get_db_session commits on exit, persisting the refresh
+                    # (lazy backfill-on-read, no batch machinery).
+                    slide_style = ensure_compiled_style_content_current(design_system)
                     design_system_active = True
                 else:
                     logger.warning(
-                        "Design system not found or not compiled, using default",
+                        "Design system not found, using default",
                         extra={"design_system_id": config.design_system_id},
                     )
         except Exception as e:

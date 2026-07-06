@@ -8,6 +8,11 @@ The three states, None/empty-safe (no exotic edge cases):
                                 in the prompt, AND the search_brand_assets tool.
 3. design_system_id + (future) template_id -> a CLEAN None-safe hook: registration
    is gated on design_system_id ALONE, with no template coupling to break later.
+4. design_system_id set, but the PERSISTED ``compiled_style_content`` predates the
+   current compiler (stale/missing version marker) or was never compiled -> the
+   factory recompiles it lazily from the row's persisted tokens/files/assets at
+   consumption time (no batch backfill), so an active DS ALWAYS injects the
+   current guardrail blocks.
 
 All fixtures are SYNTHETIC.
 """
@@ -186,3 +191,92 @@ class TestStateTemplateHook:
 
         config = AgentConfig(design_system_id=5)
         assert "search_brand_assets" in [t.name for t in _build_tools(config, {})]
+
+
+class TestStateStaleCompiledContent:
+    """State 4: a PERSISTED row whose ``compiled_style_content`` was produced by an
+    OLDER compiler (no version marker — e.g. compiled before the SLIDE FRAME
+    CONSTRAINTS block existed) or never compiled at all. The factory must NOT
+    inject the stale artifact verbatim: it recompiles from the row's persisted
+    tokens/files/assets so the active DS always carries the current blocks.
+    All fixtures SYNTHETIC."""
+
+    # A pre-guardrail artifact shape: header without a version marker, no frame block.
+    _STALE_ARTIFACT = (
+        "SLIDE VISUAL STYLE: Acme DS\n\n"
+        "BRAND COLOR TOKENS:\n- core:\n  - primary: #123456"
+    )
+
+    def _prompt_for(self, ds):
+        from src.api.schemas.agent_config import AgentConfig
+
+        return _prompts_with_db(
+            AgentConfig(design_system_id=ds.id), _dispatching_db(design_system=ds)
+        )["system_prompt"]
+
+    def test_stale_row_recompiles_and_prompt_carries_frame_constraints(self, session):
+        ds = _full_ds(session)
+        ds.compiled_style_content = self._STALE_ARTIFACT  # simulate a pre-guardrail row
+        session.commit()
+
+        sp = self._prompt_for(ds)
+        assert "SLIDE FRAME CONSTRAINTS" in sp
+        assert "1280x720" in sp
+        assert "BRAND IMAGE ASSETS" in sp        # asset contract restored too
+        assert "Brand manual prose here." in sp  # rebuilt from the persisted files
+
+    def test_stale_row_is_refreshed_in_place_for_persistence(self, session):
+        from src.services.design_system_compiler import compiled_style_content_is_current
+
+        ds = _full_ds(session)
+        ds.compiled_style_content = self._STALE_ARTIFACT
+        session.commit()
+
+        self._prompt_for(ds)
+        # The factory refreshed the record in place; in production get_db_session
+        # commits on exit, persisting the recompute (lazy backfill-on-read).
+        assert compiled_style_content_is_current(ds.compiled_style_content)
+        assert "SLIDE FRAME CONSTRAINTS" in ds.compiled_style_content
+
+    def test_never_compiled_row_compiles_at_consumption(self, session):
+        from src.database.models.design_system import DesignSystem, DesignSystemToken
+
+        ds = DesignSystem(name="Uncompiled DS")
+        ds.tokens.append(DesignSystemToken(group="core", name="primary", value="#123456"))
+        session.add(ds)
+        session.commit()
+        session.refresh(ds)
+        assert ds.compiled_style_content is None
+
+        sp = self._prompt_for(ds)
+        assert "SLIDE FRAME CONSTRAINTS" in sp
+        assert "--brand-core-primary: #123456;" in sp
+
+    def test_stale_row_without_retained_files_recompiles_degraded(self, session):
+        """Pre-Phase-1 imports retained NO ``design_system_file`` rows: the lazy
+        recompute must still yield a valid artifact (no BRAND MANUAL, no crash)."""
+        from src.database.models.design_system import DesignSystem, DesignSystemToken
+
+        ds = DesignSystem(name="Legacy Import DS", compiled_style_content=self._STALE_ARTIFACT)
+        ds.tokens.append(DesignSystemToken(group="core", name="primary", value="#123456"))
+        session.add(ds)
+        session.commit()
+        session.refresh(ds)
+
+        sp = self._prompt_for(ds)
+        assert "SLIDE FRAME CONSTRAINTS" in sp
+        assert "--brand-core-primary: #123456;" in sp
+        assert "BRAND MANUAL" not in sp  # degraded (no retained README/SKILL) but valid
+
+    def test_current_row_injected_verbatim_without_recompute(self, session):
+        from src.api.schemas.agent_config import AgentConfig
+
+        ds = _full_ds(session)  # freshly compiled -> carries the current marker
+        with patch(
+            "src.services.design_system_compiler.recompute_compiled_style_content"
+        ) as recompute_spy:
+            sp = _prompts_with_db(
+                AgentConfig(design_system_id=ds.id), _dispatching_db(design_system=ds)
+            )["system_prompt"]
+        recompute_spy.assert_not_called()
+        assert ds.compiled_style_content in sp  # stored artifact injected verbatim
