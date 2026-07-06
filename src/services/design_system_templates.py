@@ -113,6 +113,17 @@ _SRCSET_ATTR_RE = re.compile(
 # CSS url() refs — both in <style> blocks and inline style="" attributes.
 _CSS_URL_RE = re.compile(r"url\(\s*(?P<q>[\"']?)(?P<ref>[^\"')]+)(?P=q)\s*\)", re.IGNORECASE)
 
+# QUOTED CSS url() refs whose value may contain ``)`` — invisible to
+# _CSS_URL_RE (its ref class excludes the paren), which let
+# ``url("javascript:alert(1)")`` bypass neutralization. Used by a
+# defang-only pre-pass: script-scheme matches are neutralized, everything
+# else keeps whatever treatment _CSS_URL_RE gives it (no rewriting here —
+# widening the main pattern would change behavior for benign parenthesized
+# refs, which is beyond this trusted surface's needs).
+_QUOTED_CSS_URL_RE = re.compile(
+    r"url\(\s*(?P<q>[\"'])(?P<ref>[^\"']*)(?P=q)\s*\)", re.IGNORECASE
+)
+
 
 def _is_script_scheme_url(ref: str) -> bool:
     """True for javascript:/vbscript: URLs, including whitespace-split forms."""
@@ -274,6 +285,16 @@ def rewrite_template_asset_refs(
         )
         return f"{match.group('prefix')}{_UNRESOLVED_PLACEHOLDER}{match.group('q')}"
 
+    def _defang_quoted_css_url(match: "re.Match[str]") -> str:
+        if not _is_script_scheme_url(match.group("ref").strip()):
+            return match.group(0)
+        logger.warning(
+            "Template CSS url() ref uses a script-scheme URL; replaced "
+            "with an inert placeholder"
+        )
+        quote = match.group("q")
+        return f"url({quote}{_UNRESOLVED_PLACEHOLDER}{quote})"
+
     def _replace_url(match: "re.Match[str]") -> str:
         ref = match.group("ref").strip()
         quote = match.group("q")
@@ -297,6 +318,7 @@ def rewrite_template_asset_refs(
 
     text = _SRCSET_ATTR_RE.sub(_replace_srcset, text)
     text = _ATTR_REF_RE.sub(_replace_attr, text)
+    text = _QUOTED_CSS_URL_RE.sub(_defang_quoted_css_url, text)
     return _CSS_URL_RE.sub(_replace_url, text)
 
 

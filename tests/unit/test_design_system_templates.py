@@ -258,6 +258,32 @@ class TestRewriteTemplateAssetRefs:
         css = ".a { background: url(data:image/png;base64,AAAA); }"
         assert self._rewrite(css) == css
 
+    def test_css_url_quoted_script_scheme_with_parens_neutralized(self, caplog):
+        """QUOTED script-scheme url() refs containing parentheses never match
+        _CSS_URL_RE (its ref class excludes ``)``), so ``url("javascript:
+        alert(1)")`` bypassed the neutralization branch entirely. Both quote
+        forms must be defanged like the bare form."""
+        with caplog.at_level(logging.WARNING, logger="src.services.design_system_templates"):
+            out = self._rewrite(
+                '<style>.a { background: url("javascript:alert(1)"); }\n'
+                ".b { background-image: url('JaVaScRiPt:alert(2)'); }</style>"
+                "<div style=\"background: url('vbscript:MsgBox(3)')\"></div>"
+            )
+        assert "alert(1" not in out
+        assert "alert(2" not in out
+        assert "MsgBox(3" not in out
+        assert out.count("data:,") == 3
+        assert "script-scheme" in caplog.text.lower()
+
+    def test_css_url_quoted_benign_refs_keep_existing_treatment(self):
+        """Defang-only scope control: a quoted benign ref still rewrites to its
+        asset handle, and a quoted benign ref WITH parentheses (which the main
+        pattern cannot represent) passes through untouched exactly as before."""
+        out = self._rewrite('.hero { background: url("../assets/backgrounds/hero-bg.png"); }')
+        assert 'url("{{ds-asset:9}}")' in out
+        parens_css = '.odd { background: url("../assets/lo(go).png"); }'
+        assert self._rewrite(parens_css) == parens_css
+
     def test_object_embed_iframe_stripped_like_script(self):
         out = self._rewrite(
             '<object data="../assets/logo.svg"><param name="x" /></object>'
