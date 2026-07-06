@@ -946,6 +946,62 @@ class TestSlideFrameConstraints:
 
 
 # ---------------------------------------------------------------------------
+# Scope firewall + soft-pick enabler (Round 2 — live Claude Design probe)
+# ---------------------------------------------------------------------------
+
+
+class TestScopeFirewallAndSoftPick:
+    """Round-2 reconciliation with the live Claude Design probe: the compiled
+    artifact carries a content/style SCOPE FIREWALL (a design system governs
+    STYLE only — its README/templates/sample content are never facts about the
+    user or the topic), and the SLIDE TEMPLATES section names the soft-pick
+    default for the no-template path."""
+
+    def test_firewall_always_present_exactly_once(self, session):
+        from src.services.design_system_compiler import (
+            DESIGN_SYSTEM_SCOPE_FIREWALL,
+            compile_design_system,
+        )
+
+        assert "governs STYLE only" in DESIGN_SYSTEM_SCOPE_FIREWALL
+        ds = _make_ds(session, tokens=_TOKENS, manifest_json=_MANIFEST)
+        out = compile_design_system(ds, skill_md=_SKILL_MD, readme_md=_README_MD)
+        assert out.count(DESIGN_SYSTEM_SCOPE_FIREWALL) == 1
+        # Reads as a coda to the manual, ahead of the token blocks.
+        assert out.index("BRAND MANUAL") < out.index(DESIGN_SYSTEM_SCOPE_FIREWALL)
+        assert out.index(DESIGN_SYSTEM_SCOPE_FIREWALL) < out.index("BRAND COLOR TOKENS")
+
+    def test_firewall_present_even_without_manual_or_templates(self, session):
+        """A token-only (or empty) design system still ships the firewall — the
+        template descriptions and future prose need it just as much."""
+        from src.services.design_system_compiler import (
+            DESIGN_SYSTEM_SCOPE_FIREWALL,
+            compile_design_system,
+        )
+
+        ds = _make_ds(session, description=None, tokens=None, assets=None, manifest_json=None)
+        assert compile_design_system(ds).count(DESIGN_SYSTEM_SCOPE_FIREWALL) == 1
+
+    def test_soft_pick_enabler_closes_templates_section(self, session):
+        from src.services.design_system_compiler import compile_design_system
+
+        ds = _make_ds(session, tokens=_TOKENS, manifest_json=_MANIFEST)
+        out = compile_design_system(ds)
+        enabler = "Start from the best-matching template above if one fits the request."
+        assert enabler in out
+        # It closes the templates section: after the list, before the frame block.
+        templates_block = out.split("SLIDE TEMPLATES", 1)[1].split("SLIDE FRAME CONSTRAINTS", 1)[0]
+        assert enabler in templates_block
+        assert templates_block.index("Title Slide") < templates_block.index(enabler)
+
+    def test_no_soft_pick_line_without_templates(self, session):
+        from src.services.design_system_compiler import compile_design_system
+
+        ds = _make_ds(session, tokens=_TOKENS, manifest_json=None)
+        assert "Start from the best-matching template" not in compile_design_system(ds)
+
+
+# ---------------------------------------------------------------------------
 # Compiled-artifact version marker (staleness detection for persisted rows)
 # ---------------------------------------------------------------------------
 
@@ -991,6 +1047,33 @@ class TestCompilerVersionMarker:
             "SLIDE VISUAL STYLE: Acme Design System\n\n"
             "BRAND COLOR TOKENS:\n- core:\n  - primary: #123456"
         )
+
+    def test_v2_artifact_reads_stale_after_v3_bump(self):
+        """Round 2 (scope firewall + soft-pick enabler) bumped the compiler to
+        v3: rows stamped by the v2 compiler must read stale so the lazy
+        recompute self-heals them on read — exactly what the marker is for."""
+        from src.services.design_system_compiler import compiled_style_content_is_current
+
+        assert not compiled_style_content_is_current(
+            "SLIDE VISUAL STYLE: Acme Design System [ds-compiler v2]\n\n"
+            "BRAND COLOR TOKENS:\n- core:\n  - primary: #123456"
+        )
+
+    def test_stale_v2_row_recompiles_with_round2_lines(self, session):
+        from src.services.design_system_compiler import (
+            DESIGN_SYSTEM_SCOPE_FIREWALL,
+            compiled_style_content_is_current,
+            ensure_compiled_style_content_current,
+        )
+
+        ds = _make_ds(session, tokens=_TOKENS, manifest_json=_MANIFEST)
+        ds.compiled_style_content = (
+            "SLIDE VISUAL STYLE: Acme Design System [ds-compiler v2]\n\n(v2 artifact)"
+        )
+        out = ensure_compiled_style_content_current(ds)
+        assert compiled_style_content_is_current(ds.compiled_style_content)
+        assert DESIGN_SYSTEM_SCOPE_FIREWALL in out
+        assert "Start from the best-matching template above if one fits the request." in out
 
     def test_marker_only_matches_on_the_header_line(self):
         """A marker string that appears in the BODY (e.g. a README that quotes

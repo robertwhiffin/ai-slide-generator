@@ -26,12 +26,16 @@ consumable by generation:
 
 - **Consumption**: :func:`build_selected_template_block` renders ONE pinned
   template as a clearly-delimited SELECTED-TEMPLATE prompt block — the layout
-  HTML as an archetype catalog plus the token stylesheet its ``var(--…)`` refs
-  depend on. It is appended at PROMPT-ASSEMBLY time by
-  ``agent_factory._get_prompt_content``; the persisted per-design-system
-  ``compiled_style_content`` stays template-agnostic (no COMPILER_VERSION bump).
-  The block is deliberately ONE function so its wording/shape can be swapped
-  without touching the plumbing around it.
+  HTML as an edit-in-place STARTING FILE plus the token stylesheet its
+  ``var(--…)`` refs depend on. The framing mirrors the live Claude Design
+  probe: their platform seeds the template files into the project and directs
+  the model to EDIT THE COPY IN PLACE (which measurably produced literal
+  structural reuse); our one-shot injection plays the role of that file-seeding
+  (there is no project FS here), so the directive flips accordingly. It is
+  appended at PROMPT-ASSEMBLY time by ``agent_factory._get_prompt_content``;
+  the persisted per-design-system ``compiled_style_content`` stays
+  template-agnostic. The block is deliberately ONE function so its
+  wording/shape can be swapped without touching the plumbing around it.
 
 Everything here is brand-neutral engine code; no brand content is embedded.
 """
@@ -44,6 +48,7 @@ from typing import Any, Optional
 from urllib.parse import unquote
 
 from src.database.models.design_system import DesignSystemTemplate
+from src.services.design_system_compiler import DESIGN_SYSTEM_SCOPE_FIREWALL
 
 logger = logging.getLogger(__name__)
 
@@ -421,8 +426,19 @@ def build_selected_template_block(template: Any) -> Optional[str]:
     fall back to no-template behavior, logged) when the template has no usable
     layout or the layout exceeds :data:`MAX_TEMPLATE_LAYOUT_CHARS`.
 
+    Framing (Round 2, reconciled with the live Claude Design probe): the layout
+    is an edit-in-place STARTING FILE. Their platform seeds the template files
+    into the project and directs the model to EDIT THE COPY IN PLACE — a frame
+    that measurably produced literal structural reuse (byte-identical style
+    block, class-subset, sample content treated as placeholder). Our one-shot
+    injection stands in for that file-seeding (no project FS here), so the
+    primary directive says exactly that; the Round-1 guards survive, restated
+    in this frame. The content/style scope firewall
+    (``DESIGN_SYSTEM_SCOPE_FIREWALL``) rides here AND once in the compiled
+    artifact.
+
     Deliberately a single function so a follow-up investigation can refine the
-    wording/shape (archetype framing, trimming strategy, …) in one place.
+    wording/shape (framing, trimming strategy, …) in one place.
     """
     layout_html = (getattr(template, "layout_html", None) or "").strip()
     name = (getattr(template, "name", None) or "").strip() or "Untitled template"
@@ -451,30 +467,38 @@ def build_selected_template_block(template: Any) -> Optional[str]:
         "SLIDE TEMPLATES list above — build every slide from THIS template's layout "
         "system."
     )
+
+    parts.append(
+        f"The user chose the {name} template. The HTML below is your STARTING FILE "
+        "— produce the deck by editing it: replace its placeholder content with "
+        "the requested content, keep its classes, CSS, and structure intact, and "
+        "trim or repeat its slide sections to fit the requested slide count."
+    )
+
     token_css = (getattr(template, "token_css", None) or "").strip()
 
     instructions = [
-        "HOW TO APPLY THE TEMPLATE:",
-        "- The layout HTML below is an ARCHETYPE CATALOG (one sample slide per "
-        "layout archetype), NOT a deck outline: for each slide you generate, pick "
-        "the best-fitting archetype and slot the deck's ACTUAL content into its "
-        "structure. Never copy the sample's text, slide order, or slide count.",
-        "- Reproduce the template's structure, type scale, and component patterns: "
-        "carry its <style> rules into every slide unchanged, put any additions in a "
-        "separate <style> block after them, and never redefine the template's "
+        "HOW TO EDIT THE STARTING FILE:",
+        "- Everything the template ships as content — sample text, numbers, names, "
+        "data — is PLACEHOLDER, never fact: replace it with the requested content.",
+        "- Omit sample sections you have no content for rather than inventing "
+        "filler.",
+        "- Keep the template's <style> rules intact; put any additional CSS in a "
+        "separate <style> block below it and never redefine the template's "
         "selectors.",
     ]
     if token_css:
         instructions.append(
-            "- The template CSS reads design tokens via var(--...); include the TOKEN "
-            "STYLESHEET definitions below in every slide so those references resolve."
+            "- Carry the TOKEN STYLESHEET definitions below into the emitted deck's "
+            "CSS on every slide so every var(--...) reference resolves."
         )
     instructions.extend(
         [
             "- Brand assets are referenced as {{ds-asset:ID}} handles — keep them "
             "exactly as written wherever you reuse them.",
-            "- Vary archetypes across the deck to fit each slide's content; do not "
-            "force every slide into the same archetype.",
+            "- When the deck has more slides than the template has sections, vary "
+            "which slide sections you reuse rather than repeating one.",
+            f"- {DESIGN_SYSTEM_SCOPE_FIREWALL}",
         ]
     )
     parts.append("\n".join(instructions))
@@ -485,6 +509,6 @@ def build_selected_template_block(template: Any) -> Optional[str]:
             f"{token_css}"
         )
 
-    parts.append(f"TEMPLATE LAYOUT HTML (archetype catalog):\n{layout_html}")
+    parts.append(f"TEMPLATE STARTING FILE (edit this HTML in place):\n{layout_html}")
     parts.append("END OF SELECTED SLIDE TEMPLATE.")
     return "\n\n".join(parts)
