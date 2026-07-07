@@ -531,6 +531,49 @@ export const mockDesignSystemSetDefaultResponse = {
   is_default: true,
 };
 
+// GET /api/settings/design-systems/{id}/templates -> addressable templates (Phase 4)
+export const mockDesignSystemTemplates = {
+  templates: [
+    {
+      id: 1,
+      name: "Acme Cover",
+      description: "Centered hero with logo lockup.",
+      entry_path: "templates/cover/index.html",
+      thumbnail_url: "/api/settings/design-systems/1/templates/1/thumbnail",
+    },
+  ],
+  total: 1,
+};
+
+// GET /api/settings/design-systems/{id}/files -> retained source-file tree (Phase 6)
+export const mockDesignSystemFiles = {
+  files: [
+    { path: "README.md", kind: "readme", mime: "text/markdown", size_bytes: 62 },
+    { path: "SKILL.md", kind: "skill", mime: "text/markdown", size_bytes: 48 },
+    { path: "assets/backgrounds/hero-bg.png", kind: "asset", mime: "image/png", size_bytes: 512 },
+    { path: "assets/logo.svg", kind: "asset", mime: "image/svg+xml", size_bytes: 120 },
+    { path: "colors_and_type.css", kind: "css", mime: "text/css", size_bytes: 96 },
+    { path: "fonts/acme-sans.woff2", kind: "font", mime: "font/woff2", size_bytes: 2048 },
+    { path: "templates/cover/index.html", kind: "template", mime: "text/html", size_bytes: 84 },
+    { path: "templates/cover/preview.png", kind: "asset", mime: "image/png", size_bytes: 256 },
+  ],
+  total: 8,
+};
+
+// GET /api/settings/design-systems/{id}/files/{path} -> text/plain source bodies.
+// Keys are the un-encoded stored paths; all content is SYNTHETIC (fake Acme).
+export const mockDesignSystemFileContents: Record<string, string> = {
+  "README.md": "# Acme Design System\n\nSynthetic readme for tests. Not a real brand.",
+  "SKILL.md": "---\nname: acme-design\n---\n\nSynthetic SKILL doc for tests.",
+  "colors_and_type.css": ":root {\n  --brand-core-primary: #123456;\n}",
+  "templates/cover/index.html":
+    "<!doctype html><html><body><section>Acme synthetic layout</section></body></html>",
+};
+
+// A 1x1 transparent PNG for thumbnail responses (synthetic placeholder art).
+export const TINY_PNG_BASE64 =
+  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+
 // ============================================
 // Deck Prompt Operation Mocks
 // ============================================
