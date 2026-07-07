@@ -53,6 +53,14 @@ export const SessionHistory: React.FC<SessionHistoryProps> = ({
     loadSessions();
   }, [refreshKey]);
 
+  const refreshSessions = () => {
+    if (onSessionsChange) {
+      onSessionsChange();
+    } else {
+      void loadSessions();
+    }
+  };
+
   const sessions = mySessions.filter(s => s.has_slide_deck);
 
   const handleOpenPresentation = async (presentation: SharedPresentation) => {
@@ -80,8 +88,7 @@ export const SessionHistory: React.FC<SessionHistoryProps> = ({
       await api.renameSession(sessionId, editTitle.trim());
       setEditingId(null);
       setEditTitle('');
-      loadSessions();
-      onSessionsChange?.();
+      refreshSessions();
     } catch (err) {
       console.error('Failed to rename session:', err);
     }
@@ -97,8 +104,7 @@ export const SessionHistory: React.FC<SessionHistoryProps> = ({
     setDeleteTarget(null);
     try {
       await api.deleteSession(id);
-      loadSessions();
-      onSessionsChange?.();
+      refreshSessions();
     } catch (err) {
       console.error('Failed to delete session:', err);
     }
@@ -108,48 +114,53 @@ export const SessionHistory: React.FC<SessionHistoryProps> = ({
     onSessionSelect(sessionId);
   };
 
-  const handleDuplicate = async (sessionId: string) => {
+  const duplicateAndOpen = async (
+    sessionId: string,
+    options?: { switchToMyTab?: boolean },
+  ) => {
+    if (duplicateLoading === sessionId) return;
     try {
       setDuplicateLoading(sessionId);
       setError(null);
       const result = await api.duplicateSession(sessionId);
+      if (options?.switchToMyTab) {
+        setActiveTab('my');
+      }
       await loadSessions();
       onSessionsChange?.();
       onSessionSelect(result.session_id);
     } catch (err) {
       console.error('Failed to duplicate session:', err);
-      if (err && typeof err === 'object' && 'message' in err) {
+      if (
+        options?.switchToMyTab
+        && err
+        && typeof err === 'object'
+        && 'status' in err
+        && (err as { status: number }).status === 403
+      ) {
+        setError('You no longer have access to duplicate this presentation');
+        await loadSessions();
+        onSessionsChange?.();
+      } else if (err && typeof err === 'object' && 'message' in err) {
         setError(String((err as { message: string }).message));
       } else {
-        setError('Failed to duplicate session');
+        setError(
+          options?.switchToMyTab
+            ? 'Failed to duplicate presentation'
+            : 'Failed to duplicate session',
+        );
       }
     } finally {
       setDuplicateLoading(null);
     }
   };
 
-  const handleDuplicateShared = async (presentation: SharedPresentation) => {
-    try {
-      setDuplicateLoading(presentation.session_id);
-      setError(null);
-      const result = await api.duplicateSession(presentation.session_id);
-      setActiveTab('my');
-      await loadSessions();
-      onSessionsChange?.();
-      onSessionSelect(result.session_id);
-    } catch (err) {
-      console.error('Failed to duplicate shared presentation:', err);
-      if (err && typeof err === 'object' && 'status' in err && (err as { status: number }).status === 403) {
-        setError('You no longer have access to duplicate this presentation');
-        loadSessions();
-      } else if (err && typeof err === 'object' && 'message' in err) {
-        setError(String((err as { message: string }).message));
-      } else {
-        setError('Failed to duplicate presentation');
-      }
-    } finally {
-      setDuplicateLoading(null);
-    }
+  const handleDuplicate = (sessionId: string) => {
+    void duplicateAndOpen(sessionId);
+  };
+
+  const handleDuplicateShared = (presentation: SharedPresentation) => {
+    void duplicateAndOpen(presentation.session_id, { switchToMyTab: true });
   };
 
   const formatDate = (dateStr: string) => {

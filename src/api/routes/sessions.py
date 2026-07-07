@@ -22,6 +22,7 @@ from sqlalchemy.orm import Session
 
 from src.api.schemas.requests import CreateSessionRequest, DuplicateSessionRequest
 from src.api.services.session_manager import (
+    SessionAccessDeniedError,
     SessionNotFoundError,
     get_session_manager,
 )
@@ -171,6 +172,9 @@ async def create_session(request: CreateSessionRequest = None):
     request = request or CreateSessionRequest()
     current_user = get_current_user()
 
+    if not current_user:
+        raise HTTPException(status_code=401, detail="Authentication required")
+
     try:
         session_manager = get_session_manager()
         result = await asyncio.to_thread(
@@ -216,6 +220,9 @@ async def list_sessions(
         List of session summaries with my_permission = CAN_MANAGE
     """
     current_user = get_current_user()
+
+    if not current_user:
+        raise HTTPException(status_code=401, detail="Authentication required")
 
     try:
         session_manager = get_session_manager()
@@ -569,7 +576,6 @@ async def update_session(
 async def duplicate_session(
     session_id: str,
     request: DuplicateSessionRequest = None,
-    db: Session = Depends(get_db),
 ):
     """Duplicate a slide deck into a new private session for the current user.
 
@@ -592,15 +598,13 @@ async def duplicate_session(
 
     try:
         session_manager = get_session_manager()
-        session_info = await asyncio.to_thread(session_manager.get_session, session_id)
-        _require_session_access(session_info, db, PermissionLevel.CAN_VIEW)
-
         result = await asyncio.to_thread(
             session_manager.duplicate_session,
             session_id,
             current_user,
             request.title,
             request.version_number,
+            min_permission=PermissionLevel.CAN_VIEW,
         )
 
         logger.info(
@@ -618,6 +622,8 @@ async def duplicate_session(
             status_code=404,
             detail=f"Session not found: {session_id}",
         )
+    except SessionAccessDeniedError as e:
+        raise HTTPException(status_code=403, detail=e.message) from e
     except HTTPException:
         raise
     except ValueError as e:

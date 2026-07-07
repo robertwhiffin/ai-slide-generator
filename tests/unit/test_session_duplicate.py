@@ -1,7 +1,9 @@
 """Unit tests for SessionManager.duplicate_session and agent config sanitization."""
 
+import json
 from contextlib import contextmanager
 from datetime import datetime, timedelta
+from unittest.mock import patch
 
 import pytest
 from sqlalchemy import create_engine
@@ -10,7 +12,11 @@ from sqlalchemy.pool import StaticPool
 
 import src.database.models  # noqa: F401 — register all models with Base
 from src.api.schemas.agent_config import sanitize_agent_config_for_persist
-from src.api.services.session_manager import SessionManager, SessionNotFoundError
+from src.api.services.session_manager import (
+    SessionAccessDeniedError,
+    SessionManager,
+    SessionNotFoundError,
+)
 from src.core.database import Base
 from src.database.models.deck_contributor import DeckContributor
 from src.database.models.profile_contributor import PermissionLevel
@@ -280,6 +286,41 @@ class TestDuplicateSessionValidScenarios:
         assert "old-1" in copy.slide_deck.deck_json
         assert "live" not in copy.slide_deck.deck_json
 
+    def test_duplicate_from_save_point_knits_html_with_head_meta(self, db, session_manager):
+        owner = _make_root_session(
+            db, session_id="src-head", created_by="owner@test.com", title="Head Meta"
+        )
+        _add_deck(db, owner, slide_count=1)
+        version_deck_json = json.dumps(
+            {
+                "slides": [{"html": "<div>slide</div>", "slide_id": "slide_0"}],
+                "slide_count": 1,
+                "css": "body { color: red; }",
+                "external_scripts": ["https://cdn.example.com/lib.js"],
+                "head_meta": {"charset": "utf-8", "viewport": "width=device-width"},
+            }
+        )
+        db.add(
+            SlideDeckVersion(
+                session_id=owner.id,
+                version_number=1,
+                description="With head meta",
+                deck_json=version_deck_json,
+            )
+        )
+        db.commit()
+
+        result = session_manager.duplicate_session(
+            "src-head",
+            created_by="copier@test.com",
+            version_number=1,
+        )
+
+        copy = db.query(UserSession).filter(UserSession.session_id == result["session_id"]).one()
+        assert '<meta charset="utf-8">' in copy.slide_deck.html_content
+        assert 'name="viewport"' in copy.slide_deck.html_content
+        assert copy.slide_deck.deck_json == version_deck_json
+
 
 class TestDuplicateSessionErrorHandling:
     def test_missing_session_raises_not_found(self, db, session_manager):
@@ -300,6 +341,125 @@ class TestDuplicateSessionErrorHandling:
                 created_by="owner@test.com",
                 version_number=99,
             )
+
+
+class TestDuplicateSessionPermission:
+    def test_requires_deck_permission_when_requested(self, db, session_manager):
+        owner = _make_root_session(
+            db, session_id="src-private", created_by="owner@test.com", title="Private"
+        )
+        _add_deck(db, owner)
+
+        with pytest.raises(SessionAccessDeniedError):
+            session_manager.duplicate_session(
+                "src-private",
+                created_by="stranger@test.com",
+                min_permission=PermissionLevel.CAN_VIEW,
+            )
+
+    def test_can_view_contributor_may_duplicate(self, db, session_manager):
+        owner = _make_root_session(
+            db, session_id="src-shared", created_by="owner@test.com", title="Shared"
+        )
+        _add_deck(db, owner)
+        db.add(
+            DeckContributor(
+                user_session_id=owner.id,
+                identity_type="USER",
+                identity_id="viewer-uid",
+                identity_name="viewer@test.com",
+                permission_level=PermissionLevel.CAN_VIEW.value,
+            )
+        )
+        db.commit()
+
+        from src.core.permission_context import PermissionContext
+
+        ctx = PermissionContext(user_id="viewer-uid", user_name="viewer@test.com")
+        with patch("src.core.permission_context.get_permission_context", return_value=ctx):
+            result = session_manager.duplicate_session(
+                "src-shared",
+                created_by="viewer@test.com",
+                min_permission=PermissionLevel.CAN_VIEW,
+            )
+
+        assert result["created_by"] == "viewer@test.com"
+
+    def test_workspace_global_can_view_may_duplicate(self, db, session_manager):
+        owner = _make_root_session(
+            db,
+            session_id="src-workspace",
+            created_by="owner@test.com",
+            title="Workspace Shared",
+            global_permission=PermissionLevel.CAN_VIEW.value,
+        )
+        _add_deck(db, owner)
+
+        from src.core.permission_context import PermissionContext
+
+        ctx = PermissionContext(user_id="stranger-uid", user_name="stranger@test.com")
+        with patch("src.core.permission_context.get_permission_context", return_value=ctx):
+            result = session_manager.duplicate_session(
+                "src-workspace",
+                created_by="stranger@test.com",
+                min_permission=PermissionLevel.CAN_VIEW,
+            )
+
+        assert result["created_by"] == "stranger@test.com"
+
+    def test_workspace_global_revoked_denies_duplicate(self, db, session_manager):
+        owner = _make_root_session(
+            db,
+            session_id="src-revoked",
+            created_by="owner@test.com",
+            title="Was Shared",
+            global_permission=PermissionLevel.CAN_VIEW.value,
+        )
+        _add_deck(db, owner)
+        owner.global_permission = None
+        db.commit()
+
+        from src.core.permission_context import PermissionContext
+
+        ctx = PermissionContext(user_id="stranger-uid", user_name="stranger@test.com")
+        with patch("src.core.permission_context.get_permission_context", return_value=ctx):
+            with pytest.raises(SessionAccessDeniedError):
+                session_manager.duplicate_session(
+                    "src-revoked",
+                    created_by="stranger@test.com",
+                    min_permission=PermissionLevel.CAN_VIEW,
+                )
+
+    def test_contributor_session_id_with_min_permission(self, db, session_manager):
+        owner = _make_root_session(
+            db,
+            session_id="parent-perm",
+            created_by="owner@test.com",
+            title="Shared Deck",
+            global_permission=PermissionLevel.CAN_VIEW.value,
+        )
+        _add_deck(db, owner)
+        contributor = UserSession(
+            session_id="contrib-perm",
+            created_by="viewer@test.com",
+            title="Shared Deck",
+            parent_session_id=owner.id,
+        )
+        db.add(contributor)
+        db.commit()
+
+        from src.core.permission_context import PermissionContext
+
+        ctx = PermissionContext(user_id="viewer-uid", user_name="viewer@test.com")
+        with patch("src.core.permission_context.get_permission_context", return_value=ctx):
+            result = session_manager.duplicate_session(
+                "contrib-perm",
+                created_by="viewer@test.com",
+                min_permission=PermissionLevel.CAN_VIEW,
+            )
+
+        assert result["source_session_id"] == "parent-perm"
+        assert result["created_by"] == "viewer@test.com"
 
 
 class TestListSessionsIncludesDuplicatedDeck:

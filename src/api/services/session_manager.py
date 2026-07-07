@@ -10,11 +10,12 @@ import secrets
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 
-from sqlalchemy import or_
+from sqlalchemy import func, or_
 from sqlalchemy.orm import Session, joinedload
 
 from src.api.schemas.agent_config import sanitize_agent_config_for_persist
 from src.core.database import get_db_session
+from src.database.models.profile_contributor import PermissionLevel
 from src.database.models.session import (
     ChatRequest,
     SessionMessage,
@@ -45,30 +46,13 @@ def _default_duplicate_title(base_title: str, max_len: int = _MAX_SESSION_TITLE_
 
 def _deck_content_fields_from_dict(deck_dict: Dict[str, Any]) -> tuple[str, Optional[str], int]:
     """Derive persisted deck columns from a deck JSON snapshot."""
-    from src.domain.slide import Slide
     from src.domain.slide_deck import SlideDeck
 
     slides = deck_dict.get("slides") or []
     slide_count = deck_dict.get("slide_count", len(slides))
 
     if slides:
-        deck = SlideDeck(
-            slides=[
-                Slide(
-                    html=slide_data.get("html", ""),
-                    slide_id=slide_data.get("slide_id", f"slide_{idx}"),
-                    scripts=slide_data.get("scripts", ""),
-                    created_by=slide_data.get("created_by"),
-                    created_at=slide_data.get("created_at"),
-                    modified_by=slide_data.get("modified_by"),
-                    modified_at=slide_data.get("modified_at"),
-                )
-                for idx, slide_data in enumerate(slides)
-            ],
-            css=deck_dict.get("css", ""),
-            external_scripts=deck_dict.get("external_scripts", []),
-            title=deck_dict.get("title"),
-        )
+        deck = SlideDeck.from_dict(deck_dict)
         return deck.knit(), deck.scripts or "", slide_count
 
     html_content = deck_dict.get("html_content") or ""
@@ -80,6 +64,17 @@ class SessionNotFoundError(Exception):
     """Raised when a session is not found."""
 
     pass
+
+
+class SessionAccessDeniedError(Exception):
+    """Raised when the current user lacks permission on a session."""
+
+    def __init__(
+        self,
+        message: str = "You don't have permission to access this session",
+    ):
+        self.message = message
+        super().__init__(message)
 
 
 class VersionConflictError(Exception):
@@ -202,6 +197,13 @@ class SessionManager:
                 if parent:
                     deck_owner = parent
 
+            message_count = (
+                db.query(func.count(SessionMessage.id))
+                .filter(SessionMessage.session_id == session.id)
+                .scalar()
+                or 0
+            )
+
             return {
                 "id": session.id,
                 "session_id": session.session_id,
@@ -214,7 +216,7 @@ class SessionManager:
                 "experiment_id": session.experiment_id,
                 "experiment_url": self._build_experiment_url(session.experiment_id),
                 "agent_config": session.agent_config,
-                "message_count": len(session.messages),
+                "message_count": message_count,
                 "has_slide_deck": deck_owner.slide_deck is not None,
                 "google_slides_url": deck_owner.google_slides_url,
                 "google_slides_presentation_id": deck_owner.google_slides_presentation_id,
@@ -321,6 +323,33 @@ class SessionManager:
             )
         return parent
 
+    def _require_deck_permission(
+        self,
+        db: Session,
+        session: UserSession,
+        min_permission: PermissionLevel,
+    ) -> PermissionLevel:
+        """Require the current user has deck permission on a loaded session row."""
+        from src.core.permission_context import get_permission_context
+        from src.services.permission_service import PERMISSION_PRIORITY, get_permission_service
+
+        perm_ctx = get_permission_context()
+        perm_service = get_permission_service()
+        perm = perm_service.get_deck_permission(
+            db,
+            session.id,
+            user_id=perm_ctx.user_id if perm_ctx else None,
+            user_name=perm_ctx.user_name if perm_ctx else None,
+            group_ids=perm_ctx.group_ids if perm_ctx else None,
+        )
+        if perm is None:
+            raise SessionAccessDeniedError()
+        if PERMISSION_PRIORITY[perm] < PERMISSION_PRIORITY[min_permission]:
+            raise SessionAccessDeniedError(
+                f"This action requires {min_permission.value} permission"
+            )
+        return perm
+
     def list_sessions(
         self,
         created_by: Optional[str] = None,
@@ -340,6 +369,15 @@ class SessionManager:
             List of session info dictionaries
         """
         with get_db_session() as db:
+            message_count_subq = (
+                db.query(
+                    SessionMessage.session_id.label("session_id"),
+                    func.count(SessionMessage.id).label("message_count"),
+                )
+                .group_by(SessionMessage.session_id)
+                .subquery()
+            )
+
             if deck_only:
                 query = db.query(UserSession).filter(
                     UserSession.slide_deck.has(),
@@ -362,7 +400,17 @@ class SessionManager:
                 query = query.filter(UserSession.user_id == user_id)
 
             sessions = (
-                query.options(joinedload(UserSession.slide_deck))
+                query.outerjoin(
+                    message_count_subq,
+                    UserSession.id == message_count_subq.c.session_id,
+                )
+                .with_entities(
+                    UserSession,
+                    func.coalesce(message_count_subq.c.message_count, 0).label(
+                        "message_count"
+                    ),
+                )
+                .options(joinedload(UserSession.slide_deck))
                 .order_by(UserSession.last_activity.desc())
                 .limit(limit)
                 .all()
@@ -376,12 +424,12 @@ class SessionManager:
                     "title": s.title,
                     "created_at": s.created_at.isoformat(),
                     "last_activity": s.last_activity.isoformat(),
-                    "message_count": len(s.messages),
+                    "message_count": int(message_count),
                     "has_slide_deck": s.slide_deck is not None,
                     "slide_count": s.slide_deck.slide_count if s.slide_deck is not None else 0,
                     "global_permission": s.global_permission,
                 }
-                for s in sessions
+                for s, message_count in sessions
             ]
 
     def list_user_sessions(
@@ -475,6 +523,8 @@ class SessionManager:
         created_by: str,
         title: Optional[str] = None,
         version_number: Optional[int] = None,
+        *,
+        min_permission: Optional[PermissionLevel] = None,
     ) -> Dict[str, Any]:
         """Duplicate a slide deck into a new root session owned by ``created_by``.
 
@@ -488,16 +538,20 @@ class SessionManager:
             created_by: Username of the user creating the copy
             title: Optional title (default: ``Copy of {source title}``)
             version_number: Optional save point to copy instead of live deck
+            min_permission: When set, enforce deck permission before copying
 
         Returns:
             New session info including ``source_session_id``
 
         Raises:
             SessionNotFoundError: If source session does not exist
+            SessionAccessDeniedError: If ``min_permission`` is not satisfied
             ValueError: If source has no slide deck or version not found
         """
         with get_db_session() as db:
             source = self._get_session_or_raise(db, source_session_id)
+            if min_permission is not None:
+                self._require_deck_permission(db, source, min_permission)
             deck_owner = self._get_deck_owner_session(db, source)
 
             if deck_owner.slide_deck is None:

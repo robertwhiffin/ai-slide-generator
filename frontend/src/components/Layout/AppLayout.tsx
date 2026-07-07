@@ -54,6 +54,7 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
   const [scrollTarget, setScrollTarget] = useState<{ index: number; key: number } | null>(null);
   const [exportStatus, setExportStatus] = useState<string | null>(null);
   const [isDuplicating, setIsDuplicating] = useState(false);
+  const isDuplicatingRef = useRef(false);
   // Save Points / versioning
   const [versions, setVersions] = useState<SavePointVersion[]>([]);
   const [currentVersion, setCurrentVersion] = useState<number | null>(null);
@@ -515,6 +516,8 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
 
   const performDuplicate = useCallback(async () => {
     if (!sessionId || !slideDeck) return;
+    if (isDuplicatingRef.current) return;
+    isDuplicatingRef.current = true;
     try {
       setIsDuplicating(true);
       const result = await api.duplicateSession(sessionId, {
@@ -530,6 +533,7 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
         : 'Failed to duplicate deck';
       showToast(message, 'error');
     } finally {
+      isDuplicatingRef.current = false;
       setIsDuplicating(false);
     }
   }, [sessionId, slideDeck, previewVersion, navigate, showToast]);

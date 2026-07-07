@@ -15,6 +15,7 @@ from unittest.mock import MagicMock, patch, AsyncMock
 
 from src.api.main import app
 from src.core.database import Base, get_db
+from src.database.models.profile_contributor import PermissionLevel
 from src.database.models import (  # noqa: F401
     ConfigGenieSpace,
     ConfigProfile,
@@ -719,6 +720,13 @@ class TestSessionEndpoints:
             response = client.post("/api/sessions", json={})
         assert response.status_code == 500
 
+    def test_create_session_unauthenticated_returns_401(self, client, mock_session_manager):
+        """POST /api/sessions requires authentication."""
+        with patch("src.api.routes.sessions.get_current_user", return_value=None):
+            response = client.post("/api/sessions", json={})
+        assert response.status_code == 401
+        mock_session_manager.create_session.assert_not_called()
+
     def test_list_sessions_filters_by_current_user(self, client, mock_session_manager):
         """GET /api/sessions only returns sessions for the authenticated user."""
         mock_session_manager.list_sessions.return_value = [
@@ -731,6 +739,13 @@ class TestSessionEndpoints:
         mock_session_manager.list_sessions.assert_called_once_with(
             created_by="bob@example.com", limit=50, deck_only=False
         )
+
+    def test_list_sessions_unauthenticated_returns_401(self, client, mock_session_manager):
+        """GET /api/sessions requires authentication."""
+        with patch("src.api.routes.sessions.get_current_user", return_value=None):
+            response = client.get("/api/sessions")
+        assert response.status_code == 401
+        mock_session_manager.list_sessions.assert_not_called()
 
     def test_get_session_success(self, client, mock_session_manager):
         """GET /api/sessions/{id} returns session details."""
@@ -817,6 +832,7 @@ class TestSessionEndpoints:
             "test@local.dev",
             None,
             None,
+            min_permission=PermissionLevel.CAN_VIEW,
         )
 
     def test_duplicate_session_with_version_number(self, client, mock_session_manager):
@@ -841,6 +857,7 @@ class TestSessionEndpoints:
             "test@local.dev",
             None,
             2,
+            min_permission=PermissionLevel.CAN_VIEW,
         )
 
     def test_duplicate_session_with_custom_title(self, client, mock_session_manager):
@@ -864,15 +881,17 @@ class TestSessionEndpoints:
             "test@local.dev",
             "Forked Deck",
             None,
+            min_permission=PermissionLevel.CAN_VIEW,
         )
 
     def test_duplicate_session_not_found(self, client, mock_session_manager):
         """POST /api/sessions/{id}/duplicate returns 404 for missing session."""
         from src.api.services.session_manager import SessionNotFoundError
-        mock_session_manager.get_session.side_effect = SessionNotFoundError("missing")
+        mock_session_manager.duplicate_session.side_effect = SessionNotFoundError("missing")
 
         response = client.post("/api/sessions/missing/duplicate", json={})
         assert response.status_code == 404
+        mock_session_manager.get_session.assert_not_called()
 
     def test_duplicate_session_no_deck(self, client, mock_session_manager):
         """POST /api/sessions/{id}/duplicate returns 400 when source has no deck."""
@@ -886,16 +905,12 @@ class TestSessionEndpoints:
 
     def test_duplicate_session_forbidden(self, client, mock_session_manager):
         """POST /api/sessions/{id}/duplicate returns 403 without deck access."""
-        mock_session_manager.get_session.return_value = {
-            "id": 99,
-            "session_id": "other-123",
-            "created_by": "other@test.com",
-            "is_contributor_session": False,
-            "parent_session_internal_id": None,
-        }
+        from src.api.services.session_manager import SessionAccessDeniedError
+        mock_session_manager.duplicate_session.side_effect = SessionAccessDeniedError()
 
         response = client.post("/api/sessions/other-123/duplicate", json={})
         assert response.status_code == 403
+        mock_session_manager.get_session.assert_not_called()
 
     def test_get_session_messages_success(self, client, mock_session_manager):
         """GET /api/sessions/{id}/messages returns messages."""
