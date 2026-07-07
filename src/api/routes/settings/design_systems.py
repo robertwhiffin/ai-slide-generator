@@ -15,6 +15,7 @@ silently overwritten; the caller supplies a different name (import accepts a
 """
 import logging
 import os
+import re
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Response, UploadFile, status
@@ -27,6 +28,7 @@ from src.database.models.design_system import (
     MAX_BUNDLE_SIZE_BYTES,
     DesignSystem,
     DesignSystemAsset,
+    DesignSystemFile,
     DesignSystemTemplate,
     DesignSystemToken,
 )
@@ -78,6 +80,19 @@ class TemplateOut(BaseModel):
 
 class DesignSystemTemplateListResponse(BaseModel):
     templates: List[TemplateOut]
+    total: int
+
+
+class FileEntryOut(BaseModel):
+    """One node of the source-file tree (Phase 6) — metadata only, never bytes."""
+    path: str
+    kind: str
+    mime: str
+    size_bytes: int
+
+
+class DesignSystemFileListResponse(BaseModel):
+    files: List[FileEntryOut]
     total: int
 
 
@@ -641,4 +656,186 @@ def serve_design_system_asset(ds_id: int, asset_id: int, db: Session = Depends(g
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to serve design system asset",
+        )
+
+
+# --- Source-file browser (v1 Phase 6) ----------------------------------------
+
+# Extensions/MIMEs that are TEXT SOURCE material in the file browser. Anything
+# matched here is served as ``text/plain`` so user-uploaded markup (HTML, SVG,
+# JS, …) can never render or execute in the app origin — the browser is a SOURCE
+# viewer, never a preview surface (template previews go through the thumbnail
+# endpoint instead). The extension fallback covers rows whose stored MIME was
+# unguessable at import time.
+_TEXT_SOURCE_EXTENSIONS = frozenset(
+    ("md", "markdown", "css", "json", "html", "htm", "js", "mjs", "svg", "txt", "xml")
+)
+_TEXT_SOURCE_MIMES = frozenset(
+    (
+        "application/json",
+        "application/javascript",
+        "application/ecmascript",
+        "application/xml",
+    )
+)
+
+# Percent-encoded '.', '/' or '\' still present AFTER the framework's one decode
+# pass — only ever seen in double-encoding smuggling attempts, so reject outright.
+_ENCODED_TRAVERSAL_RE = re.compile(r"%(2e|2f|5c)", re.IGNORECASE)
+
+
+def _validated_file_path(raw: str) -> Optional[str]:
+    """Return ``raw`` when it is a canonical bundle-relative path, else ``None``.
+
+    Stored ``design_system_file.path`` values are canonical by construction (the
+    importer normalizes them via ``_safe_relpath``), so the browser REJECTS any
+    non-canonical request instead of normalizing it into an accepted form:
+    backslashes, absolute/drive paths, empty/``.``/``..`` segments, and lingering
+    percent-encoded traversal bytes all fail. Lookups are DB-exact within one
+    design system (no filesystem involved), so this is defence-in-depth.
+    """
+    if not raw or "\\" in raw:
+        return None
+    if _ENCODED_TRAVERSAL_RE.search(raw):
+        return None
+    if raw.startswith("/") or re.match(r"^[A-Za-z]:", raw):
+        return None
+    if any(segment in ("", ".", "..") for segment in raw.split("/")):
+        return None
+    return raw
+
+
+def _is_text_source(path: str, mime: str) -> bool:
+    """True when a stored file is text source material (served as text/plain)."""
+    mime_l = (mime or "").lower()
+    if mime_l.startswith("text/"):
+        return True
+    if mime_l in _TEXT_SOURCE_MIMES or mime_l.endswith("+json") or mime_l.endswith("+xml"):
+        return True
+    base = path.rsplit("/", 1)[-1]
+    ext = base.rsplit(".", 1)[-1].lower() if "." in base else ""
+    return ext in _TEXT_SOURCE_EXTENSIONS
+
+
+@router.get("/{ds_id}/files", response_model=DesignSystemFileListResponse)
+def list_design_system_files(ds_id: int, db: Session = Depends(get_db)):
+    """List a design system's retained bundle file tree — metadata only.
+
+    ``design_system_file`` carries the COMPLETE tree for any system imported
+    since source retention (v1 Phase 1): SOURCE rows (readme/skill/css/template
+    HTML) plus path-only REFERENCE rows for every asset/font (their bytes live in
+    ``design_system_asset``). The listing is a column projection — byte payloads
+    are never loaded, mirroring the blob-free list conventions above.
+    """
+    try:
+        exists = db.query(DesignSystem.id).filter(DesignSystem.id == ds_id).first()
+        if not exists:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Design system {ds_id} not found",
+            )
+        rows = (
+            db.query(
+                DesignSystemFile.path,
+                DesignSystemFile.kind,
+                DesignSystemFile.mime,
+                DesignSystemFile.size_bytes,
+            )
+            .filter(DesignSystemFile.design_system_id == ds_id)
+            .all()
+        )
+        # Sort in Python: deterministic byte order on every backend (SQL ORDER BY
+        # is collation-dependent on PostgreSQL).
+        rows = sorted(rows, key=lambda r: str(r[0]))
+        return DesignSystemFileListResponse(
+            files=[
+                FileEntryOut(path=path, kind=kind, mime=mime, size_bytes=size_bytes)
+                for path, kind, mime, size_bytes in rows
+            ],
+            total=len(rows),
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error listing files for design system {ds_id}: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to list design system files",
+        )
+
+
+@router.get("/{ds_id}/files/{file_path:path}")
+def serve_design_system_file(ds_id: int, file_path: str, db: Session = Depends(get_db)):
+    """Serve ONE stored bundle file's content — the "Open source file" endpoint.
+
+    Security posture for user-uploaded content (mirrors the thumbnail/asset
+    endpoints, hardened further because this endpoint serves markup sources):
+
+    - The requested path must be canonical (:func:`_validated_file_path` rejects
+      traversal, absolute, backslash and percent-encoded forms) and is looked up
+      by EXACT match scoped to this design system; reference rows resolve their
+      bytes through an ownership-checked ``design_system_asset`` lookup. Every
+      failure is the same opaque 404.
+    - Text sources (md/css/html/js/json/svg/…) are served as
+      ``text/plain; charset=utf-8`` — uploaded markup never gets a renderable or
+      executable content type.
+    - EVERY response is ``Content-Disposition: attachment`` (static value — no
+      attacker-controlled filename, no header injection) with
+      ``X-Content-Type-Options: nosniff``; nothing is served inline.
+    """
+    not_found = HTTPException(
+        status_code=status.HTTP_404_NOT_FOUND,
+        detail=f"File not found for design system {ds_id}",
+    )
+    try:
+        validated = _validated_file_path(file_path)
+        if validated is None:
+            raise not_found
+        row = (
+            db.query(DesignSystemFile)
+            .filter(
+                DesignSystemFile.design_system_id == ds_id,
+                DesignSystemFile.path == validated,
+            )
+            .first()
+        )
+        if not row:
+            raise not_found
+        content = row.data
+        if content is None:
+            # Asset/font reference row: bytes live in design_system_asset. The
+            # asset must belong to the SAME design system — 404 otherwise.
+            if row.asset_id is None:
+                raise not_found
+            asset = (
+                db.query(DesignSystemAsset)
+                .filter(
+                    DesignSystemAsset.id == row.asset_id,
+                    DesignSystemAsset.design_system_id == ds_id,
+                )
+                .first()
+            )
+            if not asset:
+                raise not_found
+            content = asset.data
+        media_type = (
+            "text/plain; charset=utf-8"
+            if _is_text_source(str(row.path), str(row.mime))
+            else str(row.mime)
+        )
+        return Response(
+            content=content,
+            media_type=media_type,
+            headers={
+                "X-Content-Type-Options": "nosniff",
+                "Content-Disposition": "attachment",
+            },
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error serving file for design system {ds_id}: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to serve design system file",
         )

@@ -235,6 +235,19 @@ export interface DesignSystemTemplateListResponse {
   total: number;
 }
 
+/** One node of a design system's retained source-file tree — metadata only. */
+export interface DesignSystemFileEntry {
+  path: string;
+  kind: string;
+  mime: string;
+  size_bytes: number;
+}
+
+export interface DesignSystemFileListResponse {
+  files: DesignSystemFileEntry[];
+  total: number;
+}
+
 export interface DesignSystemTokenInput {
   group: string;
   name: string;
@@ -527,6 +540,24 @@ export const configApi = {
 
   listDesignSystemTemplates: (dsId: number): Promise<DesignSystemTemplateListResponse> =>
     fetchJson(`${API_BASE}/design-systems/${dsId}/templates`),
+
+  listDesignSystemFiles: (dsId: number): Promise<DesignSystemFileListResponse> =>
+    fetchJson(`${API_BASE}/design-systems/${dsId}/files`),
+
+  /**
+   * Fetch ONE retained bundle file's content as plain text (source view).
+   * The server serves every text source as text/plain — never renderable
+   * markup — so the result is only ever displayed via text nodes.
+   */
+  getDesignSystemFileText: async (dsId: number, path: string): Promise<string> => {
+    const encoded = path.split('/').map(encodeURIComponent).join('/');
+    const response = await fetch(`${API_BASE}/design-systems/${dsId}/files/${encoded}`);
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({ detail: 'Request failed' }));
+      throw new ConfigApiError(response.status, error.detail || `HTTP ${response.status}`);
+    }
+    return response.text();
+  },
 
   createDesignSystem: (data: DesignSystemCreate): Promise<DesignSystemDetail> =>
     fetchJson(`${API_BASE}/design-systems`, {

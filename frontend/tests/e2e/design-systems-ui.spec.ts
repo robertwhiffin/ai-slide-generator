@@ -11,6 +11,10 @@ import {
   mockDesignSystemImportResponse,
   mockDesignSystemImportError,
   mockDesignSystemSetDefaultResponse,
+  mockDesignSystemTemplates,
+  mockDesignSystemFiles,
+  mockDesignSystemFileContents,
+  TINY_PNG_BASE64,
 } from '../fixtures/mocks';
 
 /**
@@ -111,6 +115,45 @@ async function setupDesignSystemMocks(page: Page) {
   });
 }
 
+/** Source-file browser endpoints (Phase 6) + template entities/thumbnails. */
+async function setupFileBrowserMocks(page: Page) {
+  // Addressable templates (Phase 4) — the browser joins these for name/desc/thumb.
+  await page.route(/\/api\/settings\/design-systems\/\d+\/templates$/, (route) => {
+    route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(mockDesignSystemTemplates) });
+  });
+  await page.route(/\/api\/settings\/design-systems\/\d+\/templates\/\d+\/thumbnail$/, (route) => {
+    route.fulfill({
+      status: 200,
+      contentType: 'image/png',
+      headers: { 'X-Content-Type-Options': 'nosniff' },
+      body: Buffer.from(TINY_PNG_BASE64, 'base64'),
+    });
+  });
+
+  // File tree listing (metadata only).
+  await page.route(/\/api\/settings\/design-systems\/\d+\/files$/, (route) => {
+    route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(mockDesignSystemFiles) });
+  });
+
+  // Single-file serving: text sources ship as text/plain + attachment + nosniff,
+  // exactly like the real endpoint's security posture.
+  await page.route(/\/api\/settings\/design-systems\/\d+\/files\/.+$/, (route, request) => {
+    const rawPath = new URL(request.url()).pathname.split('/files/')[1] ?? '';
+    const filePath = rawPath.split('/').map(decodeURIComponent).join('/');
+    const body = mockDesignSystemFileContents[filePath];
+    if (body === undefined) {
+      route.fulfill({ status: 404, contentType: 'application/json', body: JSON.stringify({ detail: 'File not found' }) });
+      return;
+    }
+    route.fulfill({
+      status: 200,
+      contentType: 'text/plain; charset=utf-8',
+      headers: { 'Content-Disposition': 'attachment', 'X-Content-Type-Options': 'nosniff' },
+      body,
+    });
+  });
+}
+
 async function goToLibrary(page: Page) {
   await page.goto('/design-systems');
   await expect(page.getByRole('heading', { name: 'Design System Library' })).toBeVisible({ timeout: 10000 });
@@ -205,6 +248,77 @@ test.describe('Design System Library — detail panel', () => {
     const detail = page.getByTestId('design-system-detail');
     await expect(detail.getByText('logo.svg')).toBeVisible();
     await expect(detail.getByText('hero-bg.png')).toBeVisible();
+  });
+});
+
+// ============================================
+// Source-File Browser (Phase 6)
+// ============================================
+
+test.describe('Design System Library — source files', () => {
+  test.beforeEach(async ({ page }) => {
+    await setupShellMocks(page);
+    await setupDesignSystemMocks(page);
+    await setupFileBrowserMocks(page);
+  });
+
+  async function openAcme(page: Page) {
+    await goToLibrary(page);
+    await page.locator('[data-testid="design-system-card"]').filter({ hasText: 'Acme Design System' }).click();
+    await expect(page.getByTestId('ds-file-browser')).toBeVisible();
+  }
+
+  test('renders the grouped source-file tree', async ({ page }) => {
+    await openAcme(page);
+    const browser = page.getByTestId('ds-file-browser');
+    // Role-scoped: a bare text match would also hit the transient
+    // "Loading source files…" paragraph (strict-mode violation).
+    await expect(browser.getByRole('heading', { name: 'Source files' })).toBeVisible();
+    for (const section of ['readme', 'templates', 'brand', 'colors', 'fonts', 'other']) {
+      await expect(browser.getByTestId(`ds-file-section-${section}`)).toBeVisible();
+    }
+    // This bundle retains no component files — the section is omitted entirely.
+    await expect(browser.getByTestId('ds-file-section-components')).toHaveCount(0);
+
+    await browser.getByTestId('ds-file-section-brand').click();
+    await expect(browser.getByText('assets/logo.svg')).toBeVisible();
+    await browser.getByTestId('ds-file-section-colors').click();
+    await expect(browser.getByText('colors_and_type.css')).toBeVisible();
+  });
+
+  test('shows the README as safe plain text', async ({ page }) => {
+    await openAcme(page);
+    const readme = page.getByTestId('ds-readme-content');
+    // The literal markdown source is shown (leading '#') — NOT a rendered heading.
+    await expect(readme).toContainText('# Acme Design System');
+    await expect(readme).toContainText('Synthetic readme for tests');
+  });
+
+  test('clicking a file opens its source in the read-only text viewer', async ({ page }) => {
+    await openAcme(page);
+    const browser = page.getByTestId('ds-file-browser');
+    await browser.getByTestId('ds-file-section-colors').click();
+    await browser.getByText('colors_and_type.css').click();
+
+    const viewer = page.getByTestId('ds-file-viewer');
+    await expect(viewer).toContainText('colors_and_type.css');
+    // Source is rendered inside a read-only <pre> as text nodes.
+    await expect(viewer.locator('pre')).toContainText('--brand-core-primary: #123456');
+  });
+
+  test('template entries show the Phase-4 thumbnail with name and description', async ({ page }) => {
+    await openAcme(page);
+    const browser = page.getByTestId('ds-file-browser');
+    await browser.getByTestId('ds-file-section-templates').click();
+
+    const card = browser.getByTestId('ds-file-template-card');
+    await expect(card).toContainText('Acme Cover');
+    await expect(card).toContainText('Centered hero with logo lockup.');
+    await expect(card.locator('img')).toHaveAttribute('src', /\/templates\/1\/thumbnail$/);
+
+    // Opening a template shows its HTML *source* as text in the viewer.
+    await card.click();
+    await expect(page.getByTestId('ds-file-viewer').locator('pre')).toContainText('<!doctype html>');
   });
 });
 

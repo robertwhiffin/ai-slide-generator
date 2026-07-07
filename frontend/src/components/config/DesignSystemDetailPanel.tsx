@@ -20,6 +20,7 @@ import type {
 } from '../../api/config';
 import { useAgentConfig } from '../../contexts/AgentConfigContext';
 import { useToast } from '../../contexts/ToastContext';
+import { DesignSystemFileBrowser } from './DesignSystemFileBrowser';
 
 interface DesignSystemDetailPanelProps {
   detail: DesignSystemDetail | null;
@@ -330,6 +331,9 @@ export const DesignSystemDetailPanel: React.FC<DesignSystemDetailPanelProps> = (
           </div>
         )}
       </section>
+
+      {/* Source files — the "Open source file" browser (Phase 6) */}
+      <DesignSystemFileBrowser dsId={detail.id} templates={entityTemplates} />
     </div>
   );
 };
