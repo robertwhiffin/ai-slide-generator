@@ -321,6 +321,12 @@ class TestServeFile:
             "%2fetc%2fpasswd",  # decodes to /etc/passwd (absolute)
             "assets//logo.svg",  # empty segment
             "%252e%252e%2fREADME.md",  # double-encoded: lingering %2e after decode
+            # NUL must be rejected BEFORE the DB lookup: SQLite would mask it as
+            # a no-match 404, but PostgreSQL/psycopg2 refuses NUL in a bound
+            # parameter (ValueError -> generic 500), breaking the uniform-404
+            # contract in production.
+            "foo%00bar.md",  # decodes to foo\x00bar.md (embedded NUL)
+            "%00README.md",  # decodes to \x00README.md (leading NUL)
         ],
     )
     def test_traversal_attempts_rejected(self, client, encoded_path):
@@ -396,6 +402,12 @@ class TestValidatedFilePath:
             "a%2fb.css",  # lingering percent-encoded slash
             "a%5cb.css",  # lingering percent-encoded backslash
             "a%2E%2e/b.css",  # mixed-case percent-encoding
+            # NUL / C0 control characters: never in a legitimate path, and NUL
+            # in particular breaks psycopg2 parameter adaptation (500, not 404).
+            "foo\x00bar.md",  # embedded NUL
+            "\x00README.md",  # leading NUL
+            "foo\x1fbar.md",  # other C0 control
+            "a\tb.css",  # tab (C0)
         ],
     )
     def test_rejects_traversal_and_non_canonical_paths(self, path):

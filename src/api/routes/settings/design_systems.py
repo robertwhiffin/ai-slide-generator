@@ -696,6 +696,12 @@ def _validated_file_path(raw: str) -> Optional[str]:
     """
     if not raw or "\\" in raw:
         return None
+    # NUL / C0 control characters never appear in a legitimate stored path, and
+    # NUL in particular must be rejected BEFORE the DB lookup: psycopg2 refuses
+    # NUL in a bound parameter (ValueError), which would surface as a 500
+    # instead of the uniform opaque 404 (SQLite masks this as a no-match 404).
+    if any(ord(ch) < 0x20 for ch in raw):
+        return None
     if _ENCODED_TRAVERSAL_RE.search(raw):
         return None
     if raw.startswith("/") or re.match(r"^[A-Za-z]:", raw):
