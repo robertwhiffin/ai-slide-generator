@@ -1,6 +1,6 @@
 """Unit tests for /api/admin/usage routes."""
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 from fastapi.testclient import TestClient

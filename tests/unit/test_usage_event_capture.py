@@ -64,14 +64,13 @@ class TestDeckRetrievedCapture:
 class TestDeckCreatedCapture:
     def test_save_new_deck_records_creation(self):
         """save_slide_deck's create branch emits deck_created."""
-        from src.api.services import session_manager as sm_module
-
         # Behavioral check via direct call with an in-memory DB:
         from sqlalchemy import create_engine
         from sqlalchemy.orm import sessionmaker
 
-        from src.core.database import Base
         import src.database.models  # noqa: F401 - register all models
+        from src.api.services import session_manager as sm_module
+        from src.core.database import Base
 
         engine = create_engine("sqlite:///:memory:")
         Base.metadata.create_all(bind=engine)
