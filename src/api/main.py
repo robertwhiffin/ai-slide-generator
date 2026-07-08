@@ -16,7 +16,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from src.api.routes import admin, agent_config, chat, export, feedback, images, profiles, sessions, slides, tools, tour, verification, version, google_slides, setup, local_version
+from src.api.routes import admin, admin_usage, agent_config, chat, export, feedback, images, profiles, sessions, slides, tools, tour, verification, version, google_slides, setup, local_version
 from src.api.routes.deck_contributors import router as deck_contributors_router
 from src.core.databricks_client import get_or_create_user_client, set_user_client
 from src.core.user_context import get_current_user as get_ctx_user, set_current_user
@@ -419,6 +419,7 @@ app.add_middleware(RequestLoggingMiddleware)
 
 # Include API routers
 app.include_router(admin.router)
+app.include_router(admin_usage.router)
 app.include_router(agent_config.router)
 app.include_router(chat.router)
 app.include_router(feedback.router)
