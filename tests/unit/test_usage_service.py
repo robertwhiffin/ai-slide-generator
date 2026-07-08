@@ -229,6 +229,30 @@ class TestFunnel:
         assert result["proxy"] is False
 
 
+class TestVisitCollapse:
+    def test_duplicate_worker_rows_count_as_one_visit(self, db_session):
+        """Per-worker dedup caches can write several login rows for one visit;
+        aggregations must collapse them to distinct (username, 30-min bucket)."""
+        from src.api.services.usage_service import UsageService
+
+        base = TODAY.replace(minute=5)
+        _seed(
+            db_session,
+            events=[
+                ("alice@x.com", "login", base, None),
+                ("alice@x.com", "login", base + timedelta(seconds=10), None),
+                ("alice@x.com", "login", base + timedelta(seconds=20), None),
+            ],
+        )
+        svc = UsageService()
+        assert svc.get_summary(db_session, days=7)["window"]["logins"] == 1
+        assert svc.get_daily(db_session, days=7)["days"][-1]["logins"] == 1
+        top = svc.get_top_users(db_session, days=7)
+        assert top[0]["username"] == "alice@x.com"
+        assert top[0]["logins"] == 1
+        assert svc.get_funnel(db_session, days=7)["logins"] == 1
+
+
 class TestRetention:
     def test_retained_users_counted(self, db_session):
         from src.api.services.usage_service import UsageService

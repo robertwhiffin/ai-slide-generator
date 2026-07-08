@@ -77,12 +77,23 @@ must never block or fail a user request.
 
 | Event | Write site | Semantics / dedup |
 |---|---|---|
-| `login` | Identity middleware in `src/api/main.py` (alongside `record_user_login`), all environments | One event per "visit": first authenticated request from a username after **≥ 30 minutes** without one, tracked in an in-process `{username: last_seen_monotonic}` cache. Process restart resets the cache (occasional extra login events are acceptable). |
+| `login` | Identity middleware in `src/api/main.py` (alongside `record_user_login`), all environments | One event per "visit": the first authenticated request from a username after **≥ 30 minutes** without *any* authenticated request. The window is **sliding** — every authenticated request refreshes the in-process `{username: last_seen_monotonic}` cache, so continuous activity never re-emits a login. Process restart resets the cache (occasional extra login events are acceptable). |
 | `deck_created` | `SessionManager.save_slide_deck` create branch (`src/api/services/session_manager.py`, where `SessionSlideDeck(...)` is instantiated) | One per deck creation; never deduped. `session_id` = the deck-owner session's id. |
 | `deck_retrieved` | `GET /api/sessions/{session_id}` route (deck open, `src/api/routes/sessions.py`) | Deduped per `(username, session_id)` with the same in-process 30-minute window, so repeated polling within a visit counts once. |
 
 `src/api/services/usage_events.py` owns both dedup caches and the non-blocking write.
 `reset_dedup_caches()` is a test helper.
+
+### Read-time visit collapse
+
+Dedup caches are **per worker process** and the app runs multiple uvicorn workers
+(`UVICORN_WORKERS=4`), so one visit can still write several `login` rows — up to one
+per worker. All login *counts* therefore collapse raw rows at read time:
+`_login_visit_count()` in `usage_service.py` counts **distinct
+`(username, 30-minute bucket)`** pairs instead of raw rows, which reconstructs visit
+counts from duplicated rows, including historical ones. This applies to the summary,
+daily, top-users, and funnel login counts; distinct-user metrics are unaffected
+(already set-based).
 
 ---
 
@@ -186,7 +197,15 @@ including today). Aggregation failures return 500.
 
 ```json
 // GET /api/admin/usage/heatmap?days=7
-{ "matrix": [[0, 1, "... 24 hour columns ..."], "... 7 weekday rows (Mon..Sun) ..."], "max": 9 }
+// matrix: 7 weekday rows (Mon..Sun), each with 24 UTC-hour columns.
+// Excerpt — first two rows (Mon, Tue) shown; real responses have all 7:
+{
+  "matrix": [
+    [0, 0, 0, 0, 0, 0, 0, 0, 1, 4, 9, 6, 3, 5, 7, 2, 1, 0, 0, 0, 0, 0, 0, 0],
+    [0, 0, 0, 0, 0, 0, 0, 1, 2, 5, 8, 7, 4, 6, 5, 3, 0, 1, 0, 0, 0, 0, 0, 0]
+  ],
+  "max": 9
+}
 ```
 
 ---
@@ -200,9 +219,11 @@ including today). Aggregation failures return 500.
 - **Total decks ever** = `COUNT(*)` from `session_slide_decks` **plus** count of
   `deck_created` usage-events whose `session_id` no longer exists in
   `session_slide_decks` (so history survives any future deletion). Forward-safe.
-- **Daily logins**: from `usage_events` where available. For days **before** the first
-  login event (`history_boundary`), fall back to sessions-created-per-day from
-  `user_sessions` as a labeled proxy (`logins_proxy: true`).
+- **Daily logins**: from `usage_events` where available, collapsed to visits —
+  distinct `(username, 30-min bucket)` per day (see *Read-time visit collapse*). For
+  days **before** the first login event (`history_boundary`), fall back to
+  sessions-created-per-day from `user_sessions` as a labeled proxy
+  (`logins_proxy: true`).
 - **Daily distinct users**: `DISTINCT username` per day from `usage_events` (any type);
   pre-boundary fallback: `DISTINCT created_by` per day from `user_sessions.created_at`.
 - **New vs returning**: a user is *new* on day D if D is their first-ever appearance
@@ -210,18 +231,21 @@ including today). Aggregation failures return 500.
   `app_identities.first_seen_at`); otherwise returning.
 - **Active user (window)**: appears in `usage_events` in the window, OR has a session
   with `created_at` or `last_activity` in the window.
-- **Top users by logins**: `login` events grouped by username, ranked by
+- **Top users by logins**: `login` events grouped by username and collapsed to
+  visits (distinct 30-min buckets per user), ranked by
   `(logins, sessions_created)` descending, top 20. The table also shows
   `sessions_created` and `decks_created` per user for context (deck counts join
   `session_slide_decks` to `user_sessions.created_by`).
-- **Funnel**: login events and distinct login users in the window; when the window
+- **Funnel**: login visits (collapsed as above) and distinct login users in the
+  window; when the window
   contains **no** login events at all, the whole login side falls back to sessions
   created (flagged `proxy: true`). `users_who_created_deck` unions `deck_created`
   event users with `user_sessions` creators of decks created in the window.
 - **Retention snapshot**: for each of the last 8 ISO weeks (Monday start),
   `retained_from_prev` = users active in both week W-1 and W;
-  `retention_pct = 100 * retained / active(W-1)` (null when the previous week had no
-  active users). Activity = usage events or session creation.
+  `retention_pct = 100 * retained / active(W-1)`. When the previous week had no
+  active users, **both** `retained_from_prev` and `retention_pct` are null.
+  Activity = usage events or session creation.
 - **Heatmap**: 7×24 matrix (rows Monday→Sunday, columns UTC hours) counting all usage
   events plus session creations in the window; `max` is the largest cell for color
   scaling.
@@ -287,9 +311,9 @@ needed — those are only for altering existing tables. See
 | Test file | Coverage |
 |-----------|----------|
 | `tests/unit/test_usage_event_model.py` | Model shape, defaults, indexes (4 tests) |
-| `tests/unit/test_usage_events_writer.py` | Dedup windows, never-raises guarantee, dispatch (10 tests) |
+| `tests/unit/test_usage_events_writer.py` | Dedup windows (incl. sliding-window no-re-emit), never-raises guarantee, dispatch (11 tests) |
 | `tests/unit/test_usage_event_capture.py` | Middleware/session-manager/route capture sites (3 tests) |
-| `tests/unit/test_usage_service.py` | Seeded-event fixtures → every aggregation incl. boundary/proxy and deleted-session deck counting (11 tests) |
+| `tests/unit/test_usage_service.py` | Seeded-event fixtures → every aggregation incl. boundary/proxy, visit collapse, and deleted-session deck counting (12 tests) |
 | `tests/unit/test_admin_usage_routes.py` | Response shapes, `days` validation, error handling (9 tests) |
 | `tests/unit/test_feedback_list.py` | Feedback list pagination + filters (6 tests) |
 

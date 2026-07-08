@@ -41,6 +41,26 @@ class TestLoginDedup:
         assert mock_submit.call_count == 2
 
     @patch("src.api.services.usage_events._submit")
+    def test_continuous_activity_slides_window_no_reemit(self, mock_submit):
+        from src.api.services import usage_events
+
+        usage_events.record_login("alice@corp.com")
+        assert mock_submit.call_count == 1
+        # Age the entry by just under the window, then more activity arrives
+        usage_events._login_cache["alice@corp.com"] -= (
+            usage_events._DEDUP_WINDOW_SECONDS - 1
+        )
+        usage_events.record_login("alice@corp.com")
+        assert mock_submit.call_count == 1  # gap < window -> no new visit
+        # That call must have refreshed the cache (sliding window): another
+        # near-window gap still emits nothing. A fixed window would re-emit here.
+        usage_events._login_cache["alice@corp.com"] -= (
+            usage_events._DEDUP_WINDOW_SECONDS - 1
+        )
+        usage_events.record_login("alice@corp.com")
+        assert mock_submit.call_count == 1
+
+    @patch("src.api.services.usage_events._submit")
     def test_different_users_not_deduped(self, mock_submit):
         from src.api.services.usage_events import record_login
 

@@ -4,7 +4,9 @@ Mirrors the request_logs middleware pattern: writes happen on an executor
 thread (or inline when already off the event loop) and never raise.
 
 Dedup semantics (per spec):
-- ``login``: one event per username per 30-minute window ("visit").
+- ``login``: one event per "visit" — the first authenticated request after
+  >= 30 minutes without any authenticated request (sliding window: every
+  request refreshes the timer, so continuous activity never re-emits).
 - ``deck_retrieved``: one event per (username, session_id) per 30-minute window.
 - ``deck_created``: never deduped.
 
@@ -78,14 +80,20 @@ def _submit(username: str, event_type: str, session_id) -> None:
 
 
 def record_login(username) -> None:
-    """Record a login "visit": first request after >=30 min of inactivity."""
+    """Record a login "visit": the first authenticated request after >=30
+    minutes without any authenticated request (sliding window).
+
+    Every call refreshes the cached timestamp, so continuous activity keeps
+    the window sliding and emits no further events until the user has been
+    inactive for a full window.
+    """
     if not username:
         return
     now = time.monotonic()
     last = _login_cache.get(username)
+    _login_cache[username] = now
     if last is not None and (now - last) < _DEDUP_WINDOW_SECONDS:
         return
-    _login_cache[username] = now
     _submit(username, EVENT_LOGIN, None)
 
 

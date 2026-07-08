@@ -99,7 +99,7 @@ export const UsageDashboard: React.FC = () => {
           <ChartSection
             title="Daily Logins"
             subtitle={hasProxyDays
-              ? 'Days before event tracking use sessions-created as a proxy (dashed).'
+              ? 'Days before event tracking (left of the marked line) use sessions-created as a proxy.'
               : undefined}
           >
             <ResponsiveContainer width="100%" height={260}>

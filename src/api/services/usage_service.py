@@ -34,6 +34,20 @@ ALLOWED_WINDOWS = {7, 14, 21, 28}
 _DECK_OPEN_ROUTE = "/api/sessions/{session_id}"
 
 
+def _login_visit_count(events) -> int:
+    """Collapse raw login events into visits: distinct (username, 30-min bucket).
+
+    Dedup caches are per-worker, so one visit can write several login rows
+    (one per uvicorn worker). Counting distinct 30-minute buckets per user
+    reconstructs visit counts from raw rows, including historical ones.
+    """
+    buckets = set()
+    for e in events:
+        bucket = e.ts.replace(minute=(e.ts.minute // 30) * 30, second=0, microsecond=0)
+        buckets.add((e.username, bucket))
+    return len(buckets)
+
+
 def _day_key(ts: datetime) -> str:
     return ts.strftime("%Y-%m-%d")
 
@@ -154,7 +168,9 @@ class UsageService:
             .filter(SessionSlideDeck.created_at >= start)
             .count()
         )
-        logins = sum(1 for e in events if e.event_type == EVENT_LOGIN)
+        logins = _login_visit_count(
+            e for e in events if e.event_type == EVENT_LOGIN
+        )
 
         avg = round(decks_created / len(active_users), 1) if active_users else None
         return {
@@ -179,16 +195,21 @@ class UsageService:
         decks = self._decks_in_window(db, start)
         first_seen = self._first_seen_map(db)
 
-        logins_by_day: dict[str, int] = defaultdict(int)
+        login_events_by_day: dict[str, list[UsageEvent]] = defaultdict(list)
         users_by_day: dict[str, set] = defaultdict(set)
         retrieved_by_day: dict[str, int] = defaultdict(int)
         for e in events:
             day = _day_key(e.ts)
             users_by_day[day].add(e.username)
             if e.event_type == EVENT_LOGIN:
-                logins_by_day[day] += 1
+                login_events_by_day[day].append(e)
             elif e.event_type == EVENT_DECK_RETRIEVED:
                 retrieved_by_day[day] += 1
+        # Collapse duplicate per-worker login rows into visits per day
+        logins_by_day = {
+            day: _login_visit_count(evts)
+            for day, evts in login_events_by_day.items()
+        }
 
         sessions_by_day: dict[str, int] = defaultdict(int)
         session_users_by_day: dict[str, set] = defaultdict(set)
@@ -250,9 +271,13 @@ class UsageService:
             lambda: {"logins": 0, "sessions_created": 0, "decks_created": 0}
         )
 
+        login_events_by_user: dict[str, list[UsageEvent]] = defaultdict(list)
         for e in self._events_in_window(db, start):
             if e.event_type == EVENT_LOGIN:
-                stats[e.username]["logins"] += 1
+                login_events_by_user[e.username].append(e)
+        for name, user_events in login_events_by_user.items():
+            # Collapse duplicate per-worker login rows into visits
+            stats[name]["logins"] = _login_visit_count(user_events)
 
         for s in self._sessions_in_window(db, start):
             if s.created_by:
@@ -292,7 +317,7 @@ class UsageService:
             logins = len(sessions)
             logged_in_users = {s.created_by for s in sessions if s.created_by}
         else:
-            logins = len(login_events)
+            logins = _login_visit_count(login_events)
             logged_in_users = {e.username for e in login_events}
 
         deck_event_users = {
