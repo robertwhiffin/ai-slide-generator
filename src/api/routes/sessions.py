@@ -25,6 +25,7 @@ from src.api.services.session_manager import (
     SessionNotFoundError,
     get_session_manager,
 )
+from src.api.services.usage_events import record_deck_retrieved
 from src.core.database import get_db, get_db_session
 from src.core.permission_context import get_permission_context
 from src.core.user_context import get_current_user
@@ -466,6 +467,10 @@ async def get_session(session_id: str, db: Session = Depends(get_db)):
 
         # Check permission
         permission = _require_session_access(session, db, PermissionLevel.CAN_VIEW)
+
+        # Record deck-open usage event (deduped per user+deck, non-blocking)
+        if current_user:
+            record_deck_retrieved(current_user, session.get("id"))
 
         # Only the session creator sees chat messages — conversations are private
         is_creator = session.get("created_by") == current_user

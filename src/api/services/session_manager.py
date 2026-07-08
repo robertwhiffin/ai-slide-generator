@@ -689,6 +689,17 @@ class SessionManager:
                 db.add(deck)
                 db.flush()
 
+                # Record deck-created usage event (non-blocking)
+                try:
+                    from src.api.services.usage_events import record_deck_created
+                    from src.core.user_context import get_current_user as _get_user
+
+                    record_deck_created(
+                        modified_by or _get_user(), deck_owner.id
+                    )
+                except Exception:
+                    logger.debug("Failed to record deck_created event", exc_info=True)
+
             # Update activity on both the requesting session and the deck owner
             session.last_activity = datetime.utcnow()
             if session.id != deck_owner.id:
@@ -1780,6 +1791,13 @@ class SessionManager:
     # Cleanup operations
     def cleanup_expired_sessions(self) -> int:
         """Delete sessions that have exceeded TTL.
+
+        WARNING: user_sessions is the app's durable usage history. This
+        method is intentionally NOT scheduled anywhere — it is only
+        reachable via the manual POST /api/sessions/cleanup endpoint.
+        Do not wire it to a scheduler; doing so would destroy the
+        history that the /admin usage dashboard's pre-event-log
+        aggregations rely on.
 
         Returns:
             Number of sessions deleted

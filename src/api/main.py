@@ -381,6 +381,14 @@ async def user_auth_middleware(request: Request, call_next):
     )
     set_permission_context(permission_ctx)
 
+    # Record login usage-event (visit-deduped, non-blocking, all envs)
+    if user_name:
+        try:
+            from src.api.services.usage_events import record_login
+            record_login(user_name)
+        except Exception as e:
+            logger.debug(f"Failed to record login usage event: {e}")
+
     # Record user login for local identity table (non-blocking)
     if user_id and user_name and IS_PRODUCTION:
         try:
