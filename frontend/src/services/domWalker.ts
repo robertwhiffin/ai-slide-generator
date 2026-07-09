@@ -577,7 +577,45 @@ export const WALKER_SOURCE = `
     return { width: rootRect.width, height: rootRect.height, records: records };
   }
 
+  // ─── pre-walk mutation: CSS background-image url() → real <img> ──────
+  // The walker has no handler for non-gradient background-image layers:
+  // hasVisualFill() sees them but only ever emits the solid backgroundColor
+  // rect, so url() assets (logos, photos, data-URI icons) are silently
+  // dropped from the export. Materialize each one as an absolutely-
+  // positioned <img> child before walking — the existing image branch then
+  // emits it (including the SVG→PNG raster for data:image/svg+xml sources,
+  // whose sync .complete/.naturalWidth check is why decodes are awaited
+  // here). Idempotent: the source backgroundImage is cleared on conversion.
+  async function prepareSlideForExtract(root) {
+    const candidates = [root].concat(Array.from(root.querySelectorAll('*')));
+    const decodes = [];
+    for (const el of candidates) {
+      if (el.tagName === 'IMG' || el.tagName === 'CANVAS') continue;
+      const cs = getComputedStyle(el);
+      const bg = cs.backgroundImage;
+      if (!bg || bg === 'none' || bg.indexOf('url(') === -1) continue;
+      if (bg.indexOf('gradient') !== -1) continue; // gradient raster path owns these
+      const m = bg.match(/url\\((["']?)([^"')]+)\\1\\)/);
+      if (!m) continue;
+      el.style.backgroundImage = 'none';
+      if (cs.position === 'static' || !cs.position) el.style.position = 'relative';
+      const img = document.createElement('img');
+      img.src = m[2];
+      img.style.cssText =
+        'position:absolute;left:0;top:0;width:100%;height:100%;' +
+        'object-fit:' + (cs.backgroundSize === 'contain' ? 'contain' : 'cover') + ';' +
+        'pointer-events:none;';
+      el.insertBefore(img, el.firstChild);
+      decodes.push(img.decode().catch(function () {
+        console.warn('[walker] bg-image decode failed, record keeps raw src: ' + img.src.slice(0, 80));
+      }));
+    }
+    await Promise.all(decodes);
+    return decodes.length;
+  }
+
   window.__extractSlide = walk;
+  window.__prepareSlideForExtract = prepareSlideForExtract;
 })();
 `;
 
@@ -716,6 +754,16 @@ export async function extractSlideRecordsForExport(
         const root = d.querySelector(
           `section.slide-container[data-slide-index="${i}"]`
         );
+        if (root) {
+          // Materialize CSS background-image url() layers as <img> children
+          // before the walk — the walker has no bg-url handler, so without
+          // this pass those assets drop out of the export entirely.
+          try {
+            await (w as any).__prepareSlideForExtract(root);
+          } catch (prepErr) {
+            console.warn(`[walker] bg-image prepare failed on slide ${i}:`, prepErr);
+          }
+        }
         extract = root ? (w as any).__extractSlide(root) : null;
       } catch (e) {
         console.error(`[walker] extract failed on slide ${i}:`, e);
