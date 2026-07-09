@@ -161,6 +161,21 @@ export const AgentConfigProvider: React.FC<{ children: React.ReactNode }> = ({ c
     setConfigOwnerSessionId(sessionId);
   }, []);
 
+  // Last SERVER-CONFIRMED config per session (keyed so it can never leak
+  // across switches): updated whenever a session's GET resolves — INCLUDING
+  // when the snapshot is discarded because an in-flight edit claimed
+  // ownership — and whenever a PUT/profile-load confirms. Failure paths
+  // revert to THIS, never to pre-edit in-memory residue: 'edits win over the
+  // in-flight GET' only holds when the edit SUCCEEDS; a failed edit must
+  // restore the target session's OWN state.
+  const lastConfirmedRef = useRef<{ sessionId: string; config: AgentConfig } | null>(null);
+  const stashConfirmed = useCallback((sessionId: string, config: AgentConfig) => {
+    lastConfirmedRef.current = { sessionId, config };
+  }, []);
+  // updateConfig (declared before refreshConfig) triggers a fresh fetch on
+  // the no-snapshot failure path via this forward ref.
+  const refreshConfigRef = useRef<(() => Promise<void>) | null>(null);
+
   // Track whether we've already loaded the default profile for pre-session mode
   // so we only do it once (on first mount with no stored config).
   const defaultProfileLoaded = useRef(false);
@@ -277,11 +292,16 @@ export const AgentConfigProvider: React.FC<{ children: React.ReactNode }> = ({ c
         if (configOwnerRef.current === urlSessionId) {
           // The user explicitly edited config for this session while the
           // GET was in flight: their intent is already persisted via the
-          // PUT — this snapshot is stale. Explicit edits win.
+          // PUT — this snapshot is stale FOR DISPLAY. It is still the
+          // session's own loaded state, so stash it: if that in-flight
+          // edit's PUT fails, the revert target is THIS, never the
+          // pre-edit (possibly foreign) in-memory values.
+          stashConfirmed(urlSessionId, config);
           return;
         }
         setAgentConfig(config);
         claimOwnership(urlSessionId);
+        stashConfirmed(urlSessionId, config);
       })
       .catch(err => {
         console.error('Failed to load agent config for session:', err);
@@ -291,7 +311,7 @@ export const AgentConfigProvider: React.FC<{ children: React.ReactNode }> = ({ c
       });
 
     return () => { cancelled = true; };
-  }, [urlSessionId, isPreSession, showToast, claimOwnership]);
+  }, [urlSessionId, isPreSession, showToast, claimOwnership, stashConfirmed]);
 
   // ------------------------------------------------------------------
   // localStorage persistence for pre-session mode
@@ -311,8 +331,6 @@ export const AgentConfigProvider: React.FC<{ children: React.ReactNode }> = ({ c
   // updateConfig — optimistic update with revert on failure
   // ------------------------------------------------------------------
   const updateConfig = useCallback(async (config: AgentConfig): Promise<boolean> => {
-    const previous = agentConfig;
-    const previousOwner = configOwnerRef.current;
     setAgentConfig(config);
 
     if (!isPreSession && urlSessionId) {
@@ -325,13 +343,28 @@ export const AgentConfigProvider: React.FC<{ children: React.ReactNode }> = ({ c
         const confirmed = await api.updateAgentConfig(urlSessionId, config);
         console.log('[AgentConfigContext] Backend confirmed:', JSON.stringify(confirmed));
         setAgentConfig(confirmed);
+        stashConfirmed(urlSessionId, confirmed);
         return true;
       } catch (err) {
         console.error('[AgentConfigContext] Failed to update agent config:', err);
-        setAgentConfig(previous);
-        // The claim rode on a sync that failed — restore the prior owner so
-        // a reverted (possibly foreign) config can't ride a chat request.
-        claimOwnership(previousOwner);
+        // 'Edits win' only holds for edits that SUCCEED. A failed edit must
+        // restore the target session's OWN state — never pre-edit in-memory
+        // residue, which after a session switch is another session's config.
+        const confirmed = lastConfirmedRef.current;
+        if (confirmed && confirmed.sessionId === urlSessionId) {
+          // The session's last server-confirmed state (its GET snapshot —
+          // including one discarded-as-stale mid-edit — or an earlier
+          // confirmed PUT). It IS this session's state, so it stays owned.
+          setAgentConfig(confirmed.config);
+          claimOwnership(urlSessionId);
+        } else {
+          // The edit fired before any snapshot for this session ever
+          // existed: fall back to defaults with no owner (chat requests
+          // omit config) and fetch the session's real config fresh.
+          setAgentConfig({ ...DEFAULT_AGENT_CONFIG });
+          claimOwnership(null);
+          void refreshConfigRef.current?.();
+        }
         showToast('Failed to update configuration', 'error');
         return false;
       }
@@ -339,7 +372,7 @@ export const AgentConfigProvider: React.FC<{ children: React.ReactNode }> = ({ c
       console.log('[AgentConfigContext] Pre-session mode, config saved locally only. isPreSession:', isPreSession, 'urlSessionId:', urlSessionId);
       return true;
     }
-  }, [agentConfig, isPreSession, urlSessionId, showToast, claimOwnership]);
+  }, [isPreSession, urlSessionId, showToast, claimOwnership, stashConfirmed]);
 
   // ------------------------------------------------------------------
   // Convenience mutators
@@ -470,10 +503,15 @@ export const AgentConfigProvider: React.FC<{ children: React.ReactNode }> = ({ c
       const config = await api.getAgentConfig(urlSessionId);
       setAgentConfig(config);
       claimOwnership(urlSessionId); // freshly loaded FOR this session
+      stashConfirmed(urlSessionId, config);
     } catch (err) {
       console.error('[AgentConfigContext] Failed to refresh config:', err);
     }
-  }, [isPreSession, urlSessionId, claimOwnership]);
+  }, [isPreSession, urlSessionId, claimOwnership, stashConfirmed]);
+
+  useEffect(() => {
+    refreshConfigRef.current = refreshConfig;
+  }, [refreshConfig]);
 
   const loadProfile = useCallback(async (profileId: number) => {
     // If the session already has non-default config, confirm before overwriting
@@ -496,6 +534,7 @@ export const AgentConfigProvider: React.FC<{ children: React.ReactNode }> = ({ c
         const result = await api.loadProfile(urlSessionId, profileId);
         setAgentConfig(result.agent_config);
         claimOwnership(urlSessionId); // explicitly set IN this session
+        stashConfirmed(urlSessionId, result.agent_config);
         showToast('Profile loaded', 'success');
       } catch (err) {
         console.error('Failed to load profile into session:', err);
@@ -517,7 +556,7 @@ export const AgentConfigProvider: React.FC<{ children: React.ReactNode }> = ({ c
         showToast('Failed to load profile', 'error');
       }
     }
-  }, [agentConfig, isPreSession, urlSessionId, showToast, claimOwnership]);
+  }, [agentConfig, isPreSession, urlSessionId, showToast, claimOwnership, stashConfirmed]);
 
   // ------------------------------------------------------------------
   // Render

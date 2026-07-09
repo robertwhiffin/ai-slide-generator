@@ -375,6 +375,140 @@ test.describe('AgentConfigBar — design system selector', () => {
     await expect(page.getByTestId('template-selector')).toHaveValue('');
   });
 
+  test('FAILED edit mid-load restores the session OWN snapshot, never foreign residue (codex repro)', async ({ page }) => {
+    // A loaded {ds:1,tpl:1} -> switch to existing B {ds:2,tpl:2} (GET
+    // delayed) -> explicit edit in B claims ownership -> B's GET resolves
+    // mid-PUT (discarded for display, STASHED as B's own state) -> the PUT
+    // FAILS. The revert target must be B's stashed snapshot — never the
+    // pre-edit in-memory values, which are A's. And the NEXT edit in B must
+    // PUT B-based values.
+    const SESSION_B = 'a2c5f1d9-8ef7-48dc-be69-0ead7be316dd';
+    await mockSessionWithSlides(page, SESSION_B);
+
+    const configPutBodies: string[] = [];
+    let putCount = 0;
+    await page.route(/\/api\/sessions\/[^/]+\/agent-config$/, async (route, request) => {
+      const isA = request.url().includes(TEST_SESSION_ID);
+      if (request.method() === 'PUT') {
+        putCount += 1;
+        configPutBodies.push(request.postData() ?? '');
+        if (putCount === 1) {
+          // First edit's PUT: slow enough for B's GET to land mid-flight,
+          // then FAIL.
+          await new Promise((r) => setTimeout(r, 1500));
+          route.fulfill({ status: 500, contentType: 'application/json', body: JSON.stringify({ detail: 'sync failed' }) });
+          return;
+        }
+        route.fulfill({ status: 200, contentType: 'application/json', body: request.postData() ?? '{}' });
+        return;
+      }
+      if (!isA) await new Promise((r) => setTimeout(r, 1200));
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          ...mockDefaultAgentConfig,
+          design_system_id: isA ? 1 : 2,
+          template_id: isA ? 1 : 2,
+        }),
+      });
+    });
+    await page.route(/\/api\/settings\/design-systems\/\d+\/templates$/, (route) => {
+      route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(mockDesignSystemTemplatesWithLive) });
+    });
+    await page.route(/\/api\/user\/current$/, (route) => {
+      route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ user: 'dev@local.dev' }) });
+    });
+    await page.route(/\/api\/sessions\/[^/]+\/lock$/, (route, request) => {
+      if (request.method() === 'POST') {
+        route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ acquired: true, locked_by: null }) });
+      } else {
+        route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ locked: false, locked_by: null }) });
+      }
+    });
+
+    await expandAgentConfig(page);
+    await expect(page.getByTestId('template-selector')).toHaveValue('1');
+
+    await page.getByText('Session 2026-01-08 20:20').first().click();
+    await page.waitForURL(new RegExp(`/sessions/${SESSION_B}/edit`));
+
+    // Explicit edit in B inside the pending window (PUT will fail at ~1.8s;
+    // B's GET lands at ~1.2s, mid-PUT).
+    await page.waitForTimeout(300);
+    await page.getByTestId('design-system-selector').selectOption('');
+
+    // After the failure: B shows B's OWN persisted config, not A's.
+    await expect(page.getByTestId('design-system-selector')).toHaveValue('2', { timeout: 5000 });
+    await expect(page.getByTestId('template-selector')).toHaveValue('2');
+
+    // And the NEXT edit in B builds on B's values on the wire.
+    await page.getByTestId('template-selector').selectOption('1');
+    await expect.poll(() => configPutBodies.length).toBeGreaterThan(1);
+    const secondPut = JSON.parse(configPutBodies[configPutBodies.length - 1]);
+    expect(secondPut.design_system_id).toBe(2); // B-based, never A's ds:1
+    expect(secondPut.template_id).toBe(1);
+  });
+
+  test('FAILED edit before any session snapshot falls back to defaults + re-fetch, never foreign values', async ({ page }) => {
+    // Variant: the edit's PUT fails BEFORE B's config ever resolved — there
+    // is no B snapshot to restore. The revert must not resurrect A's
+    // values: defaults with no owner, then the session's real config lands.
+    const SESSION_B = 'a2c5f1d9-8ef7-48dc-be69-0ead7be316dd';
+    await mockSessionWithSlides(page, SESSION_B);
+
+    await page.route(/\/api\/sessions\/[^/]+\/agent-config$/, async (route, request) => {
+      const isA = request.url().includes(TEST_SESSION_ID);
+      if (request.method() === 'PUT') {
+        await new Promise((r) => setTimeout(r, 300));
+        route.fulfill({ status: 500, contentType: 'application/json', body: JSON.stringify({ detail: 'sync failed' }) });
+        return;
+      }
+      if (!isA) await new Promise((r) => setTimeout(r, 3000));
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          ...mockDefaultAgentConfig,
+          design_system_id: isA ? 1 : 2,
+          template_id: isA ? 1 : 2,
+        }),
+      });
+    });
+    await page.route(/\/api\/settings\/design-systems\/\d+\/templates$/, (route) => {
+      route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(mockDesignSystemTemplatesWithLive) });
+    });
+    await page.route(/\/api\/user\/current$/, (route) => {
+      route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ user: 'dev@local.dev' }) });
+    });
+    await page.route(/\/api\/sessions\/[^/]+\/lock$/, (route, request) => {
+      if (request.method() === 'POST') {
+        route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ acquired: true, locked_by: null }) });
+      } else {
+        route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ locked: false, locked_by: null }) });
+      }
+    });
+
+    await expandAgentConfig(page);
+    await expect(page.getByTestId('template-selector')).toHaveValue('1');
+
+    await page.getByText('Session 2026-01-08 20:20').first().click();
+    await page.waitForURL(new RegExp(`/sessions/${SESSION_B}/edit`));
+
+    // Edit fails at ~0.6s; B's GET is still 2.4s away — no snapshot exists.
+    await page.waitForTimeout(300);
+    await page.getByTestId('design-system-selector').selectOption('');
+
+    // Right after the failure: NEVER A's values — defaults instead.
+    await page.waitForTimeout(700);
+    await expect(page.getByTestId('design-system-selector')).not.toHaveValue('1');
+    await expect(page.getByTestId('design-system-selector')).toHaveValue('');
+
+    // Eventually B's real config lands (original delayed GET / re-fetch).
+    await expect(page.getByTestId('design-system-selector')).toHaveValue('2', { timeout: 6000 });
+    await expect(page.getByTestId('template-selector')).toHaveValue('2');
+  });
+
   test('an explicit edit during the pending config load wins over the late GET', async ({ page }) => {
     const SESSION_B = 'a2c5f1d9-8ef7-48dc-be69-0ead7be316dd';
     await mockSessionWithSlides(page, SESSION_B);
