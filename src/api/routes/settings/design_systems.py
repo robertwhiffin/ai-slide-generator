@@ -753,13 +753,20 @@ _THUMBNAIL_MAX_DIM = 128
 _THUMBNAIL_CACHE_MAX = 512
 _thumbnail_cache: "OrderedDict[int, bytes]" = OrderedDict()
 
+# Deliberate app-level decompressed-pixel ceiling (~8k x 8k), checked from
+# the image HEADER before any pixel decode. A crafted small-bytes/huge-
+# dimensions file must never buy an unbounded decode; PIL's own
+# DecompressionBomb guard stays as the outer net.
+_MAX_DECODE_PIXELS = 64_000_000
+
 
 def _thumbnail_png(asset_id: int, data: bytes) -> Optional[bytes]:
     """Downscale raster bytes to a <=128px PNG, LRU-cached per asset id.
 
-    ``None`` on any decode/encode failure (corrupt file, decompression-bomb
-    guard, unsupported subformat) — the endpoint then falls back to serving
-    the original bytes, exactly what the grid loaded before this existed.
+    ``None`` on any decode/encode failure (corrupt file, pixel-ceiling or
+    decompression-bomb guard, unsupported subformat) — the endpoint then
+    falls back to serving the original bytes, exactly what the grid loaded
+    before this existed. Never a 500.
     """
     cached = _thumbnail_cache.get(asset_id)
     if cached is not None:
@@ -771,6 +778,17 @@ def _thumbnail_png(asset_id: int, data: bytes) -> Optional[bytes]:
         from PIL import Image
 
         with Image.open(BytesIO(data)) as im:
+            # Header-declared dimensions, available before any pixel decode.
+            if im.width * im.height > _MAX_DECODE_PIXELS:
+                logger.warning(
+                    "Asset %s exceeds the thumbnail pixel ceiling "
+                    "(%dx%d > %d px); serving original bytes without decoding",
+                    asset_id,
+                    im.width,
+                    im.height,
+                    _MAX_DECODE_PIXELS,
+                )
+                return None
             im.thumbnail((_THUMBNAIL_MAX_DIM, _THUMBNAIL_MAX_DIM))
             has_alpha = im.mode in ("RGBA", "LA", "PA") or (
                 im.mode == "P" and "transparency" in im.info

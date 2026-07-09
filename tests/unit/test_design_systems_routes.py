@@ -700,3 +700,69 @@ class TestTemplateSourceEndpoint:
         body = _import_templated(client)
         resp = client.get(f"{BASE}/{body['id']}/templates/999999/source")
         assert resp.status_code == 404
+
+
+def _bomb_png(width: int, height: int) -> bytes:
+    """Tiny-bytes PNG whose HEADER declares huge dimensions (valid CRCs, bogus
+    pixel data) — the classic small-payload decompression-bomb shape. PIL's
+    ``Image.open`` parses the header fine; any actual decode would fail."""
+    import struct
+    import zlib
+
+    def chunk(tag: bytes, payload: bytes) -> bytes:
+        return (
+            struct.pack(">I", len(payload))
+            + tag
+            + payload
+            + struct.pack(">I", zlib.crc32(tag + payload) & 0xFFFFFFFF)
+        )
+
+    signature = b"\x89PNG\r\n\x1a\n"
+    ihdr = chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0))
+    idat = chunk(b"IDAT", zlib.compress(b"\x00"))
+    iend = chunk(b"IEND", b"")
+    return signature + ihdr + idat + iend
+
+
+class TestThumbnailPixelCeiling:
+    """A crafted small-bytes/huge-dimensions image must never buy a pixel
+    decode: the header-declared size is checked BEFORE any decode work and
+    the endpoint degrades to the existing serve-original fallback — never a
+    500, never an unbounded decode. 12000x12000 (144MP) sits above our 64MP
+    ceiling but below PIL's own bomb error threshold, so only the explicit
+    guard can stop it pre-decode."""
+
+    def _import_with_bomb(self, client):
+        from tests.unit.conftest_design_system import (
+            SYNTHETIC_README,
+            SYNTHETIC_SKILL,
+        )
+
+        files = {
+            "assets/huge-claim.png": _bomb_png(12000, 12000),
+            "README.md": SYNTHETIC_README,
+            "SKILL.md": SYNTHETIC_SKILL,
+        }
+        return _import(client, bundle_kwargs={"files": files}).json()
+
+    def test_oversized_header_dims_skip_decode_and_serve_original(
+        self, client, caplog
+    ):
+        import logging
+
+        body = self._import_with_bomb(client)
+        bomb = next(a for a in body["assets"] if a["filename"] == "huge-claim.png")
+
+        with caplog.at_level(logging.WARNING):
+            resp = client.get(f"{bomb['url']}/thumbnail")
+
+        assert resp.status_code == 200  # never a 500
+        assert resp.content == _bomb_png(12000, 12000)  # original-bytes fallback
+        # The CEILING guard (pre-decode) handled it — not a decode error.
+        assert any("pixel ceiling" in r.message for r in caplog.records)
+
+    def test_import_records_no_dimensions_for_bomb_headers(self, client):
+        body = self._import_with_bomb(client)
+        bomb = next(a for a in body["assets"] if a["filename"] == "huge-claim.png")
+        assert bomb["width"] is None
+        assert bomb["height"] is None

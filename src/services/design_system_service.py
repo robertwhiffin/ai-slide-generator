@@ -289,14 +289,31 @@ def _parse_css_root_vars(css_text: str) -> list[tuple[str, str]]:
     return pairs
 
 
+# Deliberate app-level decompressed-pixel ceiling (~8k x 8k) shared with the
+# thumbnail endpoint's guard: header-declared dimensions past it are treated
+# as unusable (a crafted small-bytes/huge-dimensions file must never buy a
+# decode anywhere downstream that trusts these recorded dims).
+_MAX_DECODE_PIXELS = 64_000_000
+
+
 def _image_dimensions(data: bytes, mime: str) -> tuple[Optional[int], Optional[int]]:
-    """Best-effort intrinsic (width, height); ``(None, None)`` for fonts/SVG/failure."""
+    """Best-effort intrinsic (width, height); ``(None, None)`` for fonts/SVG/
+    failure/absurd header-declared dimensions. Header read only — no decode."""
     if mime == "image/svg+xml" or mime.startswith("font/"):
         return (None, None)
     try:
         from PIL import Image as PILImage
 
         with PILImage.open(io.BytesIO(data)) as im:
+            if im.width * im.height > _MAX_DECODE_PIXELS:
+                logger.warning(
+                    "Asset image declares %dx%d px (> %d ceiling); "
+                    "recording no dimensions",
+                    im.width,
+                    im.height,
+                    _MAX_DECODE_PIXELS,
+                )
+                return (None, None)
             return (im.width, im.height)
     except Exception:
         return (None, None)
