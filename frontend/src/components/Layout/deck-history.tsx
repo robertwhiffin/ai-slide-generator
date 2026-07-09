@@ -58,7 +58,6 @@ export function DeckHistory({
 
   useEffect(() => {
     loadSessions()
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [refreshKey])
 
   const handleDeleteClick = (sessionId: string, e: React.MouseEvent) => {

@@ -460,7 +460,8 @@ class TestTemplateIdIsSessionScoped:
         mock_db = MagicMock()
         mock_db.__enter__ = MagicMock(return_value=mock_db)
         mock_db.__exit__ = MagicMock(return_value=False)
-        mock_db.query.return_value.filter.return_value.order_by.return_value.all.return_value = [legacy]
+        query = mock_db.query.return_value.filter.return_value.order_by.return_value
+        query.all.return_value = [legacy]
         mock_get_db.return_value = mock_db
 
         response = client.get("/api/profiles")

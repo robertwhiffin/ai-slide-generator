@@ -2,7 +2,7 @@
 
 import logging
 from datetime import datetime
-from typing import Optional
+from typing import Any, Optional
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
@@ -46,7 +46,7 @@ class UpdateProfileRequest(BaseModel):
 # ── helpers ───────────────────────────────────────────────────────────────
 
 
-def _without_template_id(agent_config: Optional[dict]) -> Optional[dict]:
+def _without_template_id(agent_config: Any) -> Optional[dict]:
     """Return the config with ``template_id`` nulled.
 
     Template selection is SESSION-SCOPED state (a per-session choice, like a

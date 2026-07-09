@@ -426,7 +426,10 @@ class TestBrandManualRootDocsOnly:
     ROOT-level docs are the brand operating manual — nested component docs
     must never pollute the compiled BRAND MANUAL. All fixtures SYNTHETIC."""
 
-    _NESTED_README = "# Acme Website UI Kit\n\nComponent usage notes for the demo site. Not brand rules."
+    _NESTED_README = (
+        "# Acme Website UI Kit\n\n"
+        "Component usage notes for the demo site. Not brand rules."
+    )
 
     def test_nested_readme_stays_out_of_the_manual(self, session):
         from src.services.design_system_compiler import recompute_compiled_style_content
