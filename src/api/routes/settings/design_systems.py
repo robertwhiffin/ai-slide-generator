@@ -17,7 +17,7 @@ import logging
 import os
 import re
 from collections import OrderedDict
-from typing import List, Optional
+from typing import Any, List, Optional
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Response, UploadFile, status
 from pydantic import BaseModel, Field
@@ -193,8 +193,8 @@ def _asset_thumbnail_url(ds_id: int, asset: DesignSystemAsset) -> Optional[str]:
     return f"{_asset_url(ds_id, int(asset.id))}/thumbnail"
 
 
-def _font_families(font_mapping_json: Optional[dict]) -> List[str]:
-    """Sorted family names from ``font_mapping_json`` (scalar column read)."""
+def _font_families(font_mapping_json: Any) -> List[str]:
+    """Sorted family names from ``font_mapping_json`` (scalar JSON-column read)."""
     families = (
         font_mapping_json.get("families")
         if isinstance(font_mapping_json, dict)
