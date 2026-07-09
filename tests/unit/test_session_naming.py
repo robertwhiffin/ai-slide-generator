@@ -412,3 +412,65 @@ class TestSessionNamingInStreaming:
             e for e in events if e.type == StreamEventType.ERROR
         ]
         assert len(error_events) == 0
+
+
+class TestDegenerateOverrunTitles:
+    """Live-reproduced failure shape (diag, 2/2): the naming model emits the
+    correct title, then keeps generating — a fused degenerate `Endtml` marker
+    plus tag-style reasoning — and max_tokens slices it mid-thought
+    (finish_reason == "length"). Both signals must be handled: overruns are
+    rejected outright, and the fused marker is stripped when a provider
+    reports no finish metadata."""
+
+    def test_finish_reason_length_is_rejected(self):
+        """An overrun naming call is junk, never a title — safe fallback."""
+        mock_model = MagicMock()
+        mock_model.invoke.return_value = AIMessage(
+            content=(
+                "Acme Robotics Q3 Autonomy RoadmapEndtml\n<thinking>\nThe user "
+                "wants me to create a presentation with 3 slides"
+            ),
+            response_metadata={"finish_reason": "length"},
+        )
+
+        title = generate_session_title("Create 3 slides on autonomy", mock_model)
+
+        assert title is None
+
+    def test_anthropic_style_max_tokens_is_rejected(self):
+        mock_model = MagicMock()
+        mock_model.invoke.return_value = AIMessage(
+            content="Acme Roadmap<thinking>and now I will",
+            response_metadata={"stop_reason": "max_tokens"},
+        )
+
+        title = generate_session_title("Create slides", mock_model)
+
+        assert title is None
+
+    def test_fused_endtml_marker_stripped_without_finish_metadata(self):
+        """Same content shape but no finish metadata: the fused degenerate
+        marker on the title line is stripped, the thinking tail is gone."""
+        mock_model = MagicMock()
+        mock_model.invoke.return_value = AIMessage(
+            content=(
+                "Acme Robotics Q3 Autonomy RoadmapEndtml\n<thinking>\nThe user "
+                "wants me to create a presentation"
+            )
+        )
+
+        title = generate_session_title("Create 3 slides on autonomy", mock_model)
+
+        assert title == "Acme Robotics Q3 Autonomy Roadmap"
+
+    def test_legit_title_ending_in_end_survives(self):
+        """'End' as a real word (e.g. quarter end) is not the marker."""
+        mock_model = MagicMock()
+        mock_model.invoke.return_value = AIMessage(
+            content="Preparing for Quarter End",
+            response_metadata={"finish_reason": "stop"},
+        )
+
+        title = generate_session_title("Quarter end prep", mock_model)
+
+        assert title == "Preparing for Quarter End"
