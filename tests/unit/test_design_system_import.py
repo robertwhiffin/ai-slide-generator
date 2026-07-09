@@ -246,3 +246,77 @@ class TestGetAssetBase64:
 
         with pytest.raises(ValueError):
             get_asset_base64(session, 999999)
+
+
+class TestDefaultNamePrecedence:
+    """Default name: override -> manifest name -> README H1 -> zip filename ->
+    bundle root folder -> constant. All fixtures SYNTHETIC."""
+
+    def _manifest_without_name(self):
+        from tests.unit.conftest_design_system import default_manifest
+
+        manifest = default_manifest()
+        manifest.pop("name", None)
+        return manifest
+
+    def test_manifest_name_wins_over_readme_h1(self, session):
+        from src.services.design_system_service import import_bundle
+
+        ds = import_bundle(
+            session,
+            zip_bytes=make_bundle_zip(),  # manifest name + README H1 both present
+            user="u",
+            source_filename="acme-bundle.zip",
+        )
+        assert ds.name == "Acme Design System"  # manifest name
+
+    def test_readme_h1_used_when_manifest_has_no_name(self, session):
+        from tests.unit.conftest_design_system import SYNTHETIC_SKILL
+
+        files = {
+            "README.md": b"# Acme Brand Kit\n\nSynthetic readme.\n",
+            "SKILL.md": SYNTHETIC_SKILL,
+        }
+        from src.services.design_system_service import import_bundle
+
+        ds = import_bundle(
+            session,
+            zip_bytes=make_bundle_zip(manifest=self._manifest_without_name(), files=files),
+            user="u",
+            source_filename="whatever.zip",
+        )
+        assert ds.name == "Acme Brand Kit"
+
+    def test_zip_filename_used_when_no_manifest_name_and_no_h1(self, session):
+        files = {"README.md": b"No heading here, just prose.\n"}
+        from src.services.design_system_service import import_bundle
+
+        ds = import_bundle(
+            session,
+            zip_bytes=make_bundle_zip(manifest=self._manifest_without_name(), files=files),
+            user="u",
+            source_filename="acme-export-2026.zip",
+        )
+        assert ds.name == "acme-export-2026"
+
+    def test_constant_fallback_when_nothing_available(self, session):
+        from src.services.design_system_service import import_bundle
+
+        ds = import_bundle(
+            session,
+            zip_bytes=make_bundle_zip(manifest=self._manifest_without_name(), files={}),
+            user="u",
+        )
+        assert ds.name == "Imported Design System"
+
+    def test_override_still_wins_over_everything(self, session):
+        from src.services.design_system_service import import_bundle
+
+        ds = import_bundle(
+            session,
+            zip_bytes=make_bundle_zip(),
+            user="u",
+            name_override="Explicit Name",
+            source_filename="acme.zip",
+        )
+        assert ds.name == "Explicit Name"
