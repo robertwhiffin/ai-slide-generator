@@ -215,6 +215,49 @@ class FeedbackService:
             "usage": usage,
         }
 
+    def list_feedback(
+        self,
+        db: Session,
+        weeks: int = 12,
+        category: str | None = None,
+        severity: str | None = None,
+        page: int = 1,
+        page_size: int = 20,
+    ) -> Dict[str, Any]:
+        """Paginated raw feedback conversations, newest first. Anonymous."""
+        cutoff = datetime.utcnow() - timedelta(weeks=weeks)
+        query = db.query(FeedbackConversation).filter(
+            FeedbackConversation.created_at >= cutoff
+        )
+        if category:
+            query = query.filter(FeedbackConversation.category == category)
+        if severity:
+            query = query.filter(FeedbackConversation.severity == severity)
+
+        total = query.count()
+        items = (
+            query.order_by(FeedbackConversation.created_at.desc())
+            .offset((page - 1) * page_size)
+            .limit(page_size)
+            .all()
+        )
+        return {
+            "items": [
+                {
+                    "id": item.id,
+                    "created_at": item.created_at.isoformat(),
+                    "category": item.category,
+                    "severity": item.severity,
+                    "summary": item.summary,
+                    "raw_conversation": item.raw_conversation,
+                }
+                for item in items
+            ],
+            "total": total,
+            "page": page,
+            "page_size": page_size,
+        }
+
     def get_feedback_summary(self, db: Session, weeks: int = 4) -> Dict[str, Any]:
         """Generate an AI summary of feedback conversations."""
         cutoff = datetime.utcnow() - timedelta(weeks=weeks)

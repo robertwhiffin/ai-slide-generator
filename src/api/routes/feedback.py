@@ -88,6 +88,33 @@ def get_stats_report(weeks: int = Query(default=12, ge=1, le=52), db: Session = 
         )
 
 
+@router.get("/list")
+def list_feedback(
+    weeks: int = Query(default=12, ge=1, le=52),
+    category: str | None = Query(default=None),
+    severity: str | None = Query(default=None),
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=20, ge=1, le=100),
+    db: Session = Depends(get_db),
+):
+    try:
+        service = FeedbackService()
+        return service.list_feedback(
+            db=db,
+            weeks=weeks,
+            category=category,
+            severity=severity,
+            page=page,
+            page_size=page_size,
+        )
+    except Exception as e:
+        logger.error(f"Feedback list error: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to list feedback",
+        )
+
+
 @router.get("/report/summary")
 def get_feedback_summary(weeks: int = Query(default=4, ge=1, le=52), db: Session = Depends(get_db)):
     try:

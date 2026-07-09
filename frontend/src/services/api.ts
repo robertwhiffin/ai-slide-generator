@@ -254,6 +254,103 @@ async function pollExportJob(
   throw new ApiError(408, 'Export timed out');
 }
 
+// --- Admin Usage Analytics types ---
+
+/** Reporting window: preset/custom days, an explicit date range, or all data. */
+export interface UsageWindowParams {
+  days?: number;
+  start?: string; // YYYY-MM-DD, inclusive (must be paired with end)
+  end?: string;   // YYYY-MM-DD, inclusive
+  all?: boolean;
+}
+
+export interface UsageWindowMeta {
+  days: number | null;
+  start: string | null;
+  end: string;
+  all: boolean;
+}
+
+function usageWindowQuery(window: UsageWindowParams): string {
+  const qs = new URLSearchParams();
+  if (window.all) {
+    qs.set('all', 'true');
+  } else if (window.start && window.end) {
+    qs.set('start', window.start);
+    qs.set('end', window.end);
+  } else if (window.days !== undefined) {
+    qs.set('days', String(window.days));
+  }
+  const s = qs.toString();
+  return s ? `?${s}` : '';
+}
+
+export interface UsageSummary {
+  total_users_ever: number;
+  total_decks_ever: number;
+  window: UsageWindowMeta & {
+    active_users: number;
+    decks_created: number;
+    avg_decks_per_active_user: number | null;
+    logins: number;
+  };
+}
+
+export interface UsageDailyRow {
+  date: string;
+  logins: number;
+  logins_proxy: boolean;
+  distinct_users: number;
+  new_users: number;
+  returning_users: number;
+  decks_created: number;
+  decks_retrieved: number;
+  retrievals_proxy: number | null;
+}
+
+export interface UsageTopUser {
+  username: string;
+  logins: number;
+  sessions_created: number;
+  decks_created: number;
+}
+
+export interface UsageFunnel {
+  logins: number;
+  users_who_logged_in: number;
+  users_who_created_deck: number;
+  decks_created: number;
+  proxy: boolean;
+}
+
+export interface UsageRetentionRow {
+  week_start: string;
+  active_users: number;
+  retained_from_prev: number | null;
+  retention_pct: number | null;
+}
+
+export interface UsageHeatmap {
+  matrix: number[][];
+  max: number;
+}
+
+export interface FeedbackItem {
+  id: number;
+  created_at: string;
+  category: string;
+  severity: string;
+  summary: string;
+  raw_conversation: Array<{ role: string; content: string }>;
+}
+
+export interface FeedbackListResponse {
+  items: FeedbackItem[];
+  total: number;
+  page: number;
+  page_size: number;
+}
+
 export const api = {
   /**
    * Create a new session
@@ -1623,6 +1720,62 @@ export const api = {
       throw new ApiError(response.status, error.detail || 'Failed to fetch feedback summary');
     }
 
+    return response.json();
+  },
+
+  // --- Admin Usage Analytics ---
+
+  async getUsageSummary(window: UsageWindowParams = {}): Promise<UsageSummary> {
+    const response = await fetch(`${API_BASE_URL}/api/admin/usage/summary${usageWindowQuery(window)}`);
+    if (!response.ok) throw new ApiError(response.status, 'Failed to fetch usage summary');
+    return response.json();
+  },
+
+  async getUsageDaily(window: UsageWindowParams = {}): Promise<{ history_boundary: string | null; window: UsageWindowMeta; days: UsageDailyRow[] }> {
+    const response = await fetch(`${API_BASE_URL}/api/admin/usage/daily${usageWindowQuery(window)}`);
+    if (!response.ok) throw new ApiError(response.status, 'Failed to fetch daily usage');
+    return response.json();
+  },
+
+  async getUsageTopUsers(window: UsageWindowParams = {}): Promise<UsageTopUser[]> {
+    const response = await fetch(`${API_BASE_URL}/api/admin/usage/top-users${usageWindowQuery(window)}`);
+    if (!response.ok) throw new ApiError(response.status, 'Failed to fetch top users');
+    return response.json();
+  },
+
+  async getUsageFunnel(window: UsageWindowParams = {}): Promise<UsageFunnel> {
+    const response = await fetch(`${API_BASE_URL}/api/admin/usage/funnel${usageWindowQuery(window)}`);
+    if (!response.ok) throw new ApiError(response.status, 'Failed to fetch usage funnel');
+    return response.json();
+  },
+
+  async getUsageRetention(): Promise<UsageRetentionRow[]> {
+    const response = await fetch(`${API_BASE_URL}/api/admin/usage/retention`);
+    if (!response.ok) throw new ApiError(response.status, 'Failed to fetch retention');
+    return response.json();
+  },
+
+  async getUsageHeatmap(window: UsageWindowParams = {}): Promise<UsageHeatmap> {
+    const response = await fetch(`${API_BASE_URL}/api/admin/usage/heatmap${usageWindowQuery(window)}`);
+    if (!response.ok) throw new ApiError(response.status, 'Failed to fetch heatmap');
+    return response.json();
+  },
+
+  async listFeedback(params: {
+    weeks?: number;
+    category?: string;
+    severity?: string;
+    page?: number;
+    pageSize?: number;
+  } = {}): Promise<FeedbackListResponse> {
+    const qs = new URLSearchParams();
+    qs.set('weeks', String(params.weeks ?? 12));
+    if (params.category) qs.set('category', params.category);
+    if (params.severity) qs.set('severity', params.severity);
+    qs.set('page', String(params.page ?? 1));
+    qs.set('page_size', String(params.pageSize ?? 20));
+    const response = await fetch(`${API_BASE_URL}/api/feedback/list?${qs.toString()}`);
+    if (!response.ok) throw new ApiError(response.status, 'Failed to list feedback');
     return response.json();
   },
 
