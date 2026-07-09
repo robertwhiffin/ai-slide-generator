@@ -357,6 +357,7 @@ def import_bundle(
     zip_bytes: bytes,
     user: Optional[str],
     name_override: Optional[str] = None,
+    source_filename: Optional[str] = None,
 ) -> DesignSystem:
     """Import a ``.zip`` design-system bundle into Lakebase and compile it.
 
@@ -384,7 +385,13 @@ def import_bundle(
         budget = _SizeBudget()
         root_prefix = _locate_root_prefix(zf)
         manifest = _read_manifest(zf, root_prefix, budget)
-        name = _resolve_name(name_override, manifest, root_prefix)
+        name = _resolve_name(
+            name_override,
+            manifest,
+            root_prefix,
+            readme_h1=_read_readme_h1(zf, root_prefix, budget),
+            source_filename=source_filename,
+        )
 
         # Fail fast on a name clash before doing any expensive work.
         existing = db.query(DesignSystem).filter(DesignSystem.name == name).first()
@@ -493,12 +500,62 @@ def _read_manifest(zf: zipfile.ZipFile, root_prefix: str, budget: "_SizeBudget")
     return manifest
 
 
-def _resolve_name(name_override: Optional[str], manifest: dict, root_prefix: str) -> str:
-    for candidate in (name_override, manifest.get("name")):
+_MARKDOWN_H1_RE = re.compile(r"^#\s+(.+?)\s*#*\s*$")
+
+
+def _read_readme_h1(
+    zf: zipfile.ZipFile, root_prefix: str, budget: "_SizeBudget"
+) -> Optional[str]:
+    """First ATX ``# Heading`` of the bundle's root README.md, or None.
+
+    Budgeted like every other bundle read. Any failure (no README, undecodable
+    bytes, no heading) degrades to None — naming falls through to the next
+    candidate.
+    """
+    readme_entry = next(
+        (
+            info.filename
+            for info in zf.infolist()
+            if info.filename.startswith(root_prefix)
+            and info.filename[len(root_prefix):].lower() == "readme.md"
+        ),
+        None,
+    )
+    if not readme_entry:
+        return None
+    try:
+        text = budget.read(zf, readme_entry).decode("utf-8", errors="replace")
+    except Exception:
+        return None
+    for line in text.splitlines():
+        match = _MARKDOWN_H1_RE.match(line.strip())
+        if match and match.group(1).strip():
+            return match.group(1).strip()
+    return None
+
+
+def _resolve_name(
+    name_override: Optional[str],
+    manifest: dict,
+    root_prefix: str,
+    *,
+    readme_h1: Optional[str] = None,
+    source_filename: Optional[str] = None,
+) -> str:
+    """Default name precedence: explicit override -> manifest ``name`` ->
+    README H1 -> uploaded zip filename -> bundle root folder -> constant.
+    Every candidate is clamped to the column length."""
+    for candidate in (name_override, manifest.get("name"), readme_h1):
         if isinstance(candidate, str) and candidate.strip():
-            return candidate.strip()
+            return candidate.strip()[:255]
+    if source_filename:
+        stem = _basename(source_filename)
+        if stem.lower().endswith(".zip"):
+            stem = stem[:-4]
+        if stem.strip():
+            return stem.strip()[:255]
     stem = root_prefix.rstrip("/").rsplit("/", 1)[-1] if root_prefix else ""
-    return stem or "Imported Design System"
+    return stem[:255] or "Imported Design System"
 
 
 def _collect_tokens(manifest: dict, css_texts: list[str]) -> list[DesignSystemToken]:
