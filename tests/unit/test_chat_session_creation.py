@@ -486,3 +486,37 @@ class TestSessionCreatingRequestsNeverSeedTemplatePin:
         test_db.commit()
         assert row.agent_config["template_id"] == 9  # pin sticks in-session
         mock_session_manager.create_session.assert_not_called()
+
+    def test_absent_config_on_existing_session_keeps_persisted_config(
+        self, client, mock_session_manager, mock_chat_service, test_db
+    ):
+        """Ownership gating (frontend) omits agent_config while a session's
+        config load is pending; the backend must treat the absent field as
+        'keep the session's persisted config' — never a wipe or overwrite."""
+        from src.database.models.session import UserSession
+
+        self._complete_stream(mock_chat_service)
+        mock_session_manager.get_session.return_value = {"session_id": "sess-keeps"}
+
+        row = UserSession(
+            session_id="sess-keeps",
+            title="t",
+            created_by="test-user",
+            agent_config={"tools": [], "design_system_id": 2, "template_id": 2},
+        )
+        test_db.add(row)
+        test_db.commit()
+
+        response = client.post(
+            "/api/chat/stream",
+            json={"message": "No config on this request", "session_id": "sess-keeps"},
+        )
+
+        assert response.status_code == 200
+        test_db.commit()
+        assert row.agent_config == {
+            "tools": [],
+            "design_system_id": 2,
+            "template_id": 2,
+        }
+        mock_session_manager.create_session.assert_not_called()

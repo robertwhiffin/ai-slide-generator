@@ -47,6 +47,15 @@ interface AgentConfigContextValue {
   loadProfile: (profileId: number) => Promise<void>;
   refreshConfig: () => Promise<void>;
   isPreSession: boolean;
+  /**
+   * The session id the in-memory config is VALID FOR: the session it was
+   * loaded-for (its GET resolved) or explicitly edited-in. Null while a
+   * session's config load is still pending after a switch — in that window
+   * the in-memory config is another surface's leftovers and must never be
+   * sent (a chat request carrying it would overwrite the session's own
+   * persisted config server-side).
+   */
+  configOwnerSessionId: string | null;
 }
 
 const AgentConfigContext = createContext<AgentConfigContextValue | undefined>(undefined);
@@ -142,6 +151,16 @@ export const AgentConfigProvider: React.FC<{ children: React.ReactNode }> = ({ c
     },
   );
 
+  // Ownership: which session the in-memory config is valid for (loaded-for
+  // or explicitly edited-in). State drives consumers (ChatPanel gates what a
+  // chat request may carry); the ref mirror is for async closures.
+  const [configOwnerSessionId, setConfigOwnerSessionId] = useState<string | null>(null);
+  const configOwnerRef = useRef<string | null>(null);
+  const claimOwnership = useCallback((sessionId: string | null) => {
+    configOwnerRef.current = sessionId;
+    setConfigOwnerSessionId(sessionId);
+  }, []);
+
   // Track whether we've already loaded the default profile for pre-session mode
   // so we only do it once (on first mount with no stored config).
   const defaultProfileLoaded = useRef(false);
@@ -215,12 +234,14 @@ export const AgentConfigProvider: React.FC<{ children: React.ReactNode }> = ({ c
     if (isPreSession) return;
 
     // Entering a session (New Deck / session switch): the PREVIOUS surface's
-    // config is still in memory until this session's GET resolves, and a chat
-    // sent inside that window syncs the in-memory config onto this session
-    // server-side. Template pins are session-scoped, so the interim state is
-    // stripped SYNCHRONOUSLY — this session's own persisted pin (if any)
-    // comes back with the GET below, and an in-session pick re-pins as
-    // always. Everything else (design system, style, tools) carries over.
+    // config is still in memory until this session's GET resolves. It is
+    // FOREIGN here — ownership is dropped synchronously so nothing sends it,
+    // and the session-scoped template pin is stripped so the interim UI
+    // never shows another session's pin. This session's own config arrives
+    // with the GET below (which then claims ownership), and an explicit
+    // user edit made in the meantime claims ownership for THIS session and
+    // wins over the later-arriving GET.
+    claimOwnership(null);
     setAgentConfig(prev => withoutSessionScopedState(prev));
 
     let cancelled = false;
@@ -252,7 +273,15 @@ export const AgentConfigProvider: React.FC<{ children: React.ReactNode }> = ({ c
         if (config.deck_prompt_id == null) {
           config.deck_prompt_id = resolveDefaultDeckPromptId();
         }
+        if (cancelled) return;
+        if (configOwnerRef.current === urlSessionId) {
+          // The user explicitly edited config for this session while the
+          // GET was in flight: their intent is already persisted via the
+          // PUT — this snapshot is stale. Explicit edits win.
+          return;
+        }
         setAgentConfig(config);
+        claimOwnership(urlSessionId);
       })
       .catch(err => {
         console.error('Failed to load agent config for session:', err);
@@ -262,7 +291,7 @@ export const AgentConfigProvider: React.FC<{ children: React.ReactNode }> = ({ c
       });
 
     return () => { cancelled = true; };
-  }, [urlSessionId, isPreSession, showToast]);
+  }, [urlSessionId, isPreSession, showToast, claimOwnership]);
 
   // ------------------------------------------------------------------
   // localStorage persistence for pre-session mode
@@ -283,9 +312,14 @@ export const AgentConfigProvider: React.FC<{ children: React.ReactNode }> = ({ c
   // ------------------------------------------------------------------
   const updateConfig = useCallback(async (config: AgentConfig): Promise<boolean> => {
     const previous = agentConfig;
+    const previousOwner = configOwnerRef.current;
     setAgentConfig(config);
 
     if (!isPreSession && urlSessionId) {
+      // An explicit edit is intent FOR THIS SESSION: it claims ownership, so
+      // chat requests may carry the config again and a still-in-flight
+      // config GET for this session is treated as stale (edits win).
+      claimOwnership(urlSessionId);
       console.log('[AgentConfigContext] Syncing to backend, session:', urlSessionId, 'tools:', config.tools.length);
       try {
         const confirmed = await api.updateAgentConfig(urlSessionId, config);
@@ -295,6 +329,9 @@ export const AgentConfigProvider: React.FC<{ children: React.ReactNode }> = ({ c
       } catch (err) {
         console.error('[AgentConfigContext] Failed to update agent config:', err);
         setAgentConfig(previous);
+        // The claim rode on a sync that failed — restore the prior owner so
+        // a reverted (possibly foreign) config can't ride a chat request.
+        claimOwnership(previousOwner);
         showToast('Failed to update configuration', 'error');
         return false;
       }
@@ -302,7 +339,7 @@ export const AgentConfigProvider: React.FC<{ children: React.ReactNode }> = ({ c
       console.log('[AgentConfigContext] Pre-session mode, config saved locally only. isPreSession:', isPreSession, 'urlSessionId:', urlSessionId);
       return true;
     }
-  }, [agentConfig, isPreSession, urlSessionId, showToast]);
+  }, [agentConfig, isPreSession, urlSessionId, showToast, claimOwnership]);
 
   // ------------------------------------------------------------------
   // Convenience mutators
@@ -432,10 +469,11 @@ export const AgentConfigProvider: React.FC<{ children: React.ReactNode }> = ({ c
     try {
       const config = await api.getAgentConfig(urlSessionId);
       setAgentConfig(config);
+      claimOwnership(urlSessionId); // freshly loaded FOR this session
     } catch (err) {
       console.error('[AgentConfigContext] Failed to refresh config:', err);
     }
-  }, [isPreSession, urlSessionId]);
+  }, [isPreSession, urlSessionId, claimOwnership]);
 
   const loadProfile = useCallback(async (profileId: number) => {
     // If the session already has non-default config, confirm before overwriting
@@ -457,6 +495,7 @@ export const AgentConfigProvider: React.FC<{ children: React.ReactNode }> = ({ c
       try {
         const result = await api.loadProfile(urlSessionId, profileId);
         setAgentConfig(result.agent_config);
+        claimOwnership(urlSessionId); // explicitly set IN this session
         showToast('Profile loaded', 'success');
       } catch (err) {
         console.error('Failed to load profile into session:', err);
@@ -478,7 +517,7 @@ export const AgentConfigProvider: React.FC<{ children: React.ReactNode }> = ({ c
         showToast('Failed to load profile', 'error');
       }
     }
-  }, [agentConfig, isPreSession, urlSessionId, showToast]);
+  }, [agentConfig, isPreSession, urlSessionId, showToast, claimOwnership]);
 
   // ------------------------------------------------------------------
   // Render
@@ -499,6 +538,7 @@ export const AgentConfigProvider: React.FC<{ children: React.ReactNode }> = ({ c
     loadProfile,
     refreshConfig,
     isPreSession,
+    configOwnerSessionId,
   };
 
   return (
