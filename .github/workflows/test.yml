@@ -477,9 +477,12 @@ jobs:
       matrix:
         test:
           - chat-ui
+          - css-bg-export
           - deck-integrity
           - deck-prompts-integration
           - deck-prompts-ui
+          - design-system-selector
+          - design-systems-ui
           - export-ui
           - help-ui
           - history-integration
@@ -491,6 +494,7 @@ jobs:
           - slide-styles-integration
           - slide-styles-ui
           - svg-raster-export
+          - template-cards
     
     # Use PostgreSQL for E2E tests - matches production and handles concurrency well
     services:
