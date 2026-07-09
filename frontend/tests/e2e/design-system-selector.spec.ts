@@ -1002,13 +1002,27 @@ test.describe('AgentConfigBar — design system selector', () => {
 
     // Two edits in quick succession: PUT#1 (style->2, slow) then PUT#2
     // (style->1, fast). PUT#2 confirms first at a higher generation; PUT#1
-    // settles later and must NOT regress the stash back to style 2.
+    // settles later and must NOT regress the stash OR the visible state.
     await page.getByTestId('style-selector').selectOption('2'); // PUT#1 (slow)
     await page.getByTestId('style-selector').selectOption('1'); // PUT#2 (fast)
     await page.waitForTimeout(1800); // PUT#1 has now settled late
 
-    // A failing edit reveals the stash: it must hold PUT#2's style=1.
+    // (a) VISIBLE state, asserted IN the post-late-confirm window: the stale
+    // PUT#1 confirm must NOT repaint style 2 (pre-fix it does — the confirm
+    // ignored the generation verdict and called setAgentConfig(stale)).
+    await expect(page.getByTestId('style-selector')).toHaveValue('1');
+
+    // (b) The next edit's WIRE body builds from the newer value. A DS change
+    // preserves slide_style_id, so the PUT body reveals the base style:
+    // post-fix 1, pre-fix 2 (built from the regressed visible state).
+    const putsBefore = putBodies.length;
     await page.getByTestId('design-system-selector').selectOption('2');
+    await expect.poll(() => putBodies.length).toBeGreaterThan(putsBefore);
+    const nextEdit = JSON.parse(putBodies[putBodies.length - 1]);
+    expect(nextEdit.slide_style_id).toBe(1); // newer value, never stale 2
+
+    // (c) That edit FAILED (mock 500) — its revert also lands on style 1,
+    // proving the stash likewise held the newer value.
     await page.waitForTimeout(400);
     await expect(page.getByTestId('style-selector')).toHaveValue('1');
   });
