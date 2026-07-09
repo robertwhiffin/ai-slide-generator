@@ -197,6 +197,55 @@ test.describe('Template cards — preview preference and live-render fallback', 
     expect(externalRequests).toEqual([]);
   });
 
+  test('malformed markup BEFORE <html> still renders behind the CSP (structurally-first guard)', async ({ page }) => {
+    // A fetch-capable tag ahead of the template's own <html>/<head> must not
+    // beat the policy: the preview wrapper is synthesized, so the CSP meta is
+    // the first fetch-capable byte no matter how mangled the upload is.
+    const externalRequests: string[] = [];
+    await page.route('https://external.example/**', (route, request) => {
+      externalRequests.push(request.url());
+      route.fulfill({ status: 200, contentType: 'image/png', body: Buffer.from(TINY_PNG_BASE64, 'base64') });
+    });
+
+    await page.route(/\/api\/settings\/design-systems\/\d+\/templates\/2\/source$/, (route) => {
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          id: 2,
+          name: 'Acme Content',
+          layout_html:
+            // Malformed on purpose: resources declared BEFORE the html/head.
+            '<img src="https://external.example/pre.png">' +
+            '<link rel="stylesheet" href="https://external.example/pre.css">' +
+            '<html><head><style>.slide{width:1280px;height:720px;}</style></head>' +
+            '<body class="acme-body"><section class="slide"><h1>Acme Malformed Probe</h1>' +
+            `<img src="data:image/png;base64,${TINY_PNG_BASE64}" alt="">` +
+            '</section></body></html>',
+          token_css: ':root { --brand-core-primary: #123456; }',
+        }),
+      });
+    });
+
+    await openAcmeDetail(page);
+    const contentCard = page.locator('[data-testid="template-card"]').filter({ hasText: 'Acme Content' });
+    const frame = contentCard.locator('[data-testid="template-live-preview"]');
+    await expect(frame).toBeVisible();
+
+    // Structural guarantee: the CSP meta precedes every uploaded byte.
+    const srcdoc = (await frame.getAttribute('srcdoc')) ?? '';
+    expect(srcdoc.startsWith('<!DOCTYPE html><html><head><meta http-equiv="Content-Security-Policy"')).toBe(true);
+    expect(srcdoc.indexOf('Content-Security-Policy')).toBeLessThan(srcdoc.indexOf('external.example'));
+
+    // The legit render still works (content painted, body attrs preserved)…
+    const inner = page.frameLocator('[data-testid="template-live-preview"]');
+    await expect(inner.locator('h1')).toHaveText('Acme Malformed Probe');
+    await expect(inner.locator('body.acme-body')).toHaveCount(1);
+    // …and nothing left the frame.
+    await page.waitForTimeout(500);
+    expect(externalRequests).toEqual([]);
+  });
+
   test('source fetch fires only for screenshot-less templates', async ({ page }) => {
     const sourceRequests: string[] = [];
     page.on('request', (req) => {
