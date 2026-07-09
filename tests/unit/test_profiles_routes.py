@@ -407,3 +407,103 @@ class TestProfileSerialization:
         assert response.status_code == 200
         data = response.json()
         assert data[0]["updated_at"] == "2026-03-15T10:30:00"
+
+
+class TestTemplateIdIsSessionScoped:
+    """template_id is a per-session choice: profiles are user-global snapshots
+    and must never store, return, or re-inject one (like Genie
+    conversation_ids). Covers write, legacy-row read, and load-into-session."""
+
+    @patch("src.api.routes.profiles.get_current_user", return_value="u@test.com")
+    @patch("src.api.routes.profiles.get_db_session")
+    def test_create_profile_strips_template_id(self, mock_get_db, mock_user, client):
+        mock_db = MagicMock()
+        mock_db.__enter__ = MagicMock(return_value=mock_db)
+        mock_db.__exit__ = MagicMock(return_value=False)
+        mock_db.query.return_value.filter.return_value.all.return_value = []
+        mock_get_db.return_value = mock_db
+
+        def set_id_on_flush():
+            mock_db.add.call_args[0][0].id = 7
+
+        mock_db.flush.side_effect = set_id_on_flush
+
+        response = client.post(
+            "/api/profiles",
+            json={
+                "name": "Pinned",
+                "agent_config": {
+                    "tools": [],
+                    "design_system_id": 3,
+                    "template_id": 9,
+                },
+            },
+        )
+        assert response.status_code == 201, response.text
+        stored = mock_db.add.call_args[0][0].agent_config
+        assert stored["template_id"] is None
+        assert stored["design_system_id"] == 3  # DS selection IS profile-worthy
+        assert response.json()["agent_config"]["template_id"] is None
+
+    @patch("src.api.routes.profiles.get_db_session")
+    @patch(
+        "src.api.routes.profiles.get_permission_service",
+        return_value=_mock_perm_service_allow_all(),
+    )
+    def test_list_profiles_nulls_legacy_template_id(self, mock_perm, mock_get_db, client):
+        """Profiles saved before the rule existed must not leak their pin."""
+        legacy = _make_profile(
+            id=1,
+            name="Legacy",
+            agent_config={"tools": [], "design_system_id": 3, "template_id": 9},
+        )
+        mock_db = MagicMock()
+        mock_db.__enter__ = MagicMock(return_value=mock_db)
+        mock_db.__exit__ = MagicMock(return_value=False)
+        mock_db.query.return_value.filter.return_value.order_by.return_value.all.return_value = [legacy]
+        mock_get_db.return_value = mock_db
+
+        response = client.get("/api/profiles")
+        assert response.status_code == 200
+        config = response.json()[0]["agent_config"]
+        assert config["template_id"] is None
+        assert config["design_system_id"] == 3
+
+    @patch("src.api.routes.profiles.get_db_session")
+    @patch("src.api.routes.profiles.get_session_manager")
+    @patch(
+        "src.api.routes.profiles.get_permission_service",
+        return_value=_mock_perm_service_allow_all(),
+    )
+    def test_load_profile_never_injects_template_id(
+        self, mock_perm, mock_get_mgr, mock_get_db, client
+    ):
+        profile = _make_profile(
+            id=5,
+            agent_config={"tools": [], "design_system_id": 3, "template_id": 9},
+        )
+        mock_session = MagicMock()
+        mock_session.agent_config = None
+
+        from src.database.models.profile import ConfigProfile
+        from src.database.models.session import UserSession
+
+        def query_side_effect(model):
+            q = MagicMock()
+            if model is ConfigProfile:
+                q.filter.return_value.first.return_value = profile
+            elif model is UserSession:
+                q.filter.return_value.first.return_value = mock_session
+            return q
+
+        mock_db = MagicMock()
+        mock_db.__enter__ = MagicMock(return_value=mock_db)
+        mock_db.__exit__ = MagicMock(return_value=False)
+        mock_db.query.side_effect = query_side_effect
+        mock_get_db.return_value = mock_db
+
+        response = client.post("/api/sessions/sess-1/load-profile/5")
+        assert response.status_code == 200
+        assert response.json()["agent_config"]["template_id"] is None
+        assert mock_session.agent_config["template_id"] is None
+        assert mock_session.agent_config["design_system_id"] == 3

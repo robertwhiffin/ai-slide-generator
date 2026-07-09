@@ -4,6 +4,7 @@ import { mockSessionWithSlides, TEST_SESSION_ID } from '../helpers/session-helpe
 import {
   mockDesignSystems,
   mockDefaultAgentConfig,
+  mockDesignSystemDetail,
   mockDesignSystemTemplatesWithLive,
 } from '../fixtures/mocks';
 
@@ -71,10 +72,10 @@ test.describe('AgentConfigBar — design system selector', () => {
     await expect(styleSelector.locator('option', { hasText: 'Corporate Theme' })).toHaveCount(1);
   });
 
-  test('template pin resets to None after a generation; design system stays sticky', async ({ page }) => {
-    // Template selection is a PER-GENERATION choice (Claude Design behavior):
-    // completing a slide generation consumes the pin, while the design-system
-    // selection persists.
+  test('DS + template pin SURVIVE a generation (session-scoped sticky)', async ({ page }) => {
+    // Selections are SESSION-SCOPED STICKY: within a session they persist
+    // across every prompt/generation until the user changes them manually —
+    // there is no after-generation reset.
     const dsId = mockDesignSystems.design_systems[0].id;
 
     // Stateful agent-config: starts with a pinned template; PUTs update it.
@@ -113,12 +114,14 @@ test.describe('AgentConfigBar — design system selector', () => {
 
     // A generation stream that completes WITH slides.
     const deck = {
-      title: 'Pin Reset Deck',
+      title: 'Sticky Pin Deck',
       slides: [{ slide_id: 's1', html: '<h1>One</h1>', scripts: '', verification: null }],
       css: '',
       external_scripts: [],
     };
+    let completedGenerations = 0;
     await page.route('http://127.0.0.1:8000/api/chat/stream', (route) => {
+      completedGenerations += 1;
       route.fulfill({
         status: 200,
         contentType: 'text/event-stream',
@@ -138,14 +141,98 @@ test.describe('AgentConfigBar — design system selector', () => {
     // Run a generation.
     await page.getByTestId('chat-input').fill('Create a deck');
     await page.getByTestId('chat-input').press('Enter');
+    await expect.poll(() => completedGenerations).toBeGreaterThan(0);
+    await expect(page.getByText('Sticky Pin Deck').first()).toBeVisible({ timeout: 10000 }).catch(() => {
+      /* deck title rendering is not what this test asserts */
+    });
 
-    // The pin resets to None...
-    await expect(templateSelector).toHaveValue('');
-    // ...via a persisted config update that keeps the design system.
-    await expect.poll(() => configPuts.length).toBeGreaterThan(0);
-    const lastPut = configPuts[configPuts.length - 1];
-    expect(lastPut.template_id).toBe(null);
-    expect(lastPut.design_system_id).toBe(dsId);
+    // Both selections SURVIVE: still pinned, no PUT ever cleared them.
+    await expect(templateSelector).toHaveValue('1');
     await expect(page.getByTestId('design-system-selector')).toHaveValue(String(dsId));
+    expect(configPuts.filter((c) => c.template_id === null)).toEqual([]);
+  });
+
+  test('a NEW session always starts with template = None (design system carries over)', async ({ page }) => {
+    // template_id is session-scoped state: cross-session stores (the
+    // pre-session localStorage mirror, profiles) never carry it, and a fresh
+    // session's config load strips any in-memory leftovers. Design-system
+    // defaulting is unchanged.
+    const dsId = mockDesignSystems.design_systems[0].id;
+
+    // Simulate a stale cross-session store from before the rule existed.
+    await page.addInitScript(
+      ([key, value]) => localStorage.setItem(key, value),
+      [
+        'pendingAgentConfig',
+        JSON.stringify({
+          ...mockDefaultAgentConfig,
+          design_system_id: dsId,
+          template_id: 1,
+        }),
+      ] as [string, string],
+    );
+
+    // Fresh session: its agent-config is not persisted yet (local-uuid 404).
+    await page.route(`http://127.0.0.1:8000/api/sessions/${TEST_SESSION_ID}/agent-config`, (route, request) => {
+      if (request.method() === 'GET') {
+        route.fulfill({ status: 404, contentType: 'application/json', body: JSON.stringify({ detail: 'Session not found' }) });
+        return;
+      }
+      route.fulfill({ status: 200, contentType: 'application/json', body: request.postData() ?? '{}' });
+    });
+    await page.route(/\/api\/settings\/design-systems\/\d+\/templates$/, (route) => {
+      route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(mockDesignSystemTemplatesWithLive) });
+    });
+
+    await expandAgentConfig(page);
+
+    // DS selection carried over; the template pin did NOT.
+    await expect(page.getByTestId('design-system-selector')).toHaveValue(String(dsId));
+    await expect(page.getByTestId('template-selector')).toHaveValue('');
+  });
+
+  test('Use from the detail panel affects only the current session config', async ({ page }) => {
+    // Using a template from the design-system library (a non-session route)
+    // must not write into any existing session's config, and the
+    // cross-session localStorage mirror never keeps the template part.
+    const dsId = mockDesignSystems.design_systems[0].id;
+
+    const sessionConfigPuts: string[] = [];
+    await page.route(`http://127.0.0.1:8000/api/sessions/${TEST_SESSION_ID}/agent-config`, (route, request) => {
+      if (request.method() === 'PUT') sessionConfigPuts.push(request.postData() ?? '');
+      route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(mockDefaultAgentConfig) });
+    });
+    await page.route(/\/api\/settings\/design-systems\/\d+$/, (route, request) => {
+      if (request.method() === 'GET') {
+        route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(mockDesignSystemDetail) });
+        return;
+      }
+      route.continue();
+    });
+    await page.route(/\/api\/settings\/design-systems\/\d+\/templates$/, (route) => {
+      route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(mockDesignSystemTemplatesWithLive) });
+    });
+    await page.route(/\/api\/settings\/design-systems\/\d+\/files$/, (route) => {
+      route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ files: [], total: 0 }) });
+    });
+    await page.route(/\/api\/settings\/design-systems\/\d+\/templates\/2\/source$/, (route) => {
+      route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ id: 2, name: 'Acme Content', layout_html: '<section></section>', token_css: null }) });
+    });
+
+    // Pick a template from the library page (no active session in the URL).
+    await page.goto('/design-systems');
+    await page.locator('[data-testid="design-system-card"]').filter({ hasText: 'Acme Design System' }).click();
+    await expect(page.getByTestId('design-system-detail')).toBeVisible();
+    await page.getByTestId('use-template-button').first().click();
+
+    // No session config was touched…
+    expect(sessionConfigPuts).toEqual([]);
+    // …and the cross-session mirror keeps the design system but never the pin.
+    await expect
+      .poll(async () => {
+        const raw = await page.evaluate(() => localStorage.getItem('pendingAgentConfig'));
+        return raw ? JSON.parse(raw) : null;
+      })
+      .toMatchObject({ design_system_id: dsId, template_id: null });
   });
 });

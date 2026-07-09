@@ -46,6 +46,22 @@ class UpdateProfileRequest(BaseModel):
 # ── helpers ───────────────────────────────────────────────────────────────
 
 
+def _without_template_id(agent_config: Optional[dict]) -> Optional[dict]:
+    """Return the config with ``template_id`` nulled.
+
+    Template selection is SESSION-SCOPED state (a per-session choice, like a
+    Genie ``conversation_id``): profiles are user-global snapshots and must
+    never carry it, or loading a profile would resurrect another session's
+    template pin. Applied on READ too, so legacy profile rows that stored a
+    ``template_id`` before this rule existed can never leak one.
+    """
+    if not isinstance(agent_config, dict):
+        return agent_config
+    if agent_config.get("template_id") is None and "template_id" in agent_config:
+        return agent_config
+    return {**agent_config, "template_id": None}
+
+
 def _profile_to_dict(profile: ConfigProfile) -> dict:
     """Serialize a profile to a dict, eagerly reading all fields."""
     return {
@@ -53,7 +69,7 @@ def _profile_to_dict(profile: ConfigProfile) -> dict:
         "name": profile.name,
         "description": profile.description,
         "is_default": profile.is_default,
-        "agent_config": profile.agent_config,
+        "agent_config": _without_template_id(profile.agent_config),
         "created_at": profile.created_at.isoformat() if profile.created_at else None,
         "created_by": profile.created_by,
         "updated_at": profile.updated_at.isoformat() if profile.updated_at else None,
@@ -108,10 +124,12 @@ async def create_profile(body: CreateProfileRequest):
     """Create a profile directly from a provided agent_config (no session required)."""
     config = body.agent_config
 
-    # Strip session-specific conversation_ids before persisting
+    # Strip session-scoped state before persisting: Genie conversation_ids
+    # AND the template pin (template_id is a per-session choice).
     for tool in config.tools:
         if isinstance(tool, GenieTool):
             tool.conversation_id = None
+    config.template_id = None
 
     config_dict = config.model_dump()
 
@@ -127,6 +145,7 @@ async def create_profile(body: CreateProfileRequest):
             for tool in existing_config.tools:
                 if isinstance(tool, GenieTool):
                     tool.conversation_id = None
+            existing_config.template_id = None
             if existing_config.model_dump() == config_dict:
                 raise HTTPException(
                     status_code=409,
@@ -181,10 +200,12 @@ async def save_from_session(session_id: str, body: SaveProfileRequest):
     # Prefer client-side config (has resolved defaults) over session's stored config
     config = body.agent_config if body.agent_config else resolve_agent_config(session.get("agent_config"))
 
-    # Strip session-specific conversation_ids before persisting
+    # Strip session-scoped state before persisting: Genie conversation_ids
+    # AND the template pin (template_id is a per-session choice).
     for tool in config.tools:
         if isinstance(tool, GenieTool):
             tool.conversation_id = None
+    config.template_id = None
 
     config_dict = config.model_dump()
 
@@ -197,10 +218,11 @@ async def save_from_session(session_id: str, body: SaveProfileRequest):
         )
         for existing in existing_profiles:
             existing_config = resolve_agent_config(existing.agent_config)
-            # Strip conversation_ids from existing for fair comparison
+            # Strip session-scoped state from existing for fair comparison
             for tool in existing_config.tools:
                 if isinstance(tool, GenieTool):
                     tool.conversation_id = None
+            existing_config.template_id = None
             if existing_config.model_dump() == config_dict:
                 raise HTTPException(
                     status_code=409,
@@ -240,6 +262,9 @@ async def load_profile_into_session(session_id: str, profile_id: int):
             raise HTTPException(status_code=404, detail=f"Session not found: {session_id}")
 
         config = resolve_agent_config(agent_config)
+        # Legacy profile rows may still carry a template_id from before the
+        # session-scoped rule; never let it enter the target session.
+        config.template_id = None
         session.agent_config = config.model_dump()
 
     return {"status": "loaded", "agent_config": config.model_dump()}

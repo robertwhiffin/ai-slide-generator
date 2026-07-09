@@ -61,7 +61,7 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(({
     clearSelection,
   } = useSelection();
   const { sessionId, isInitializing, error: sessionError, setExperimentUrl, setSessionTitle } = useSession();
-  const { agentConfig, refreshConfig, clearTemplatePin } = useAgentConfig();
+  const { agentConfig, refreshConfig } = useAgentConfig();
   const { setIsGenerating } = useGeneration();
   // Synchronously clear messages when sessionId changes (avoids old-message flash on session switch).
   // React discards the intermediate render and immediately re-renders with empty messages,
@@ -309,17 +309,10 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(({
           }
 
           // Refresh agent config to pick up updated conversation_ids from
-          // Genie tools; then, if this completion actually generated slides,
-          // consume the template pin — template selection is per-generation
-          // (Claude Design behavior), while the design system stays sticky.
-          {
-            const didGenerateSlides = !!(
-              event.slides && !event.metadata?.clarification_needed
-            );
-            refreshConfig().finally(() => {
-              if (didGenerateSlides) void clearTemplatePin();
-            });
-          }
+          // Genie tools. DS + template selections are SESSION-SCOPED STICKY:
+          // they persist across every prompt/generation in this session until
+          // the user changes them (no after-generation reset).
+          refreshConfig();
           break;
       }
     };
