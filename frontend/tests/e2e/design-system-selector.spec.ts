@@ -509,6 +509,276 @@ test.describe('AgentConfigBar — design system selector', () => {
     await expect(page.getByTestId('template-selector')).toHaveValue('2');
   });
 
+  test('a FAILED B PUT settling while on C never touches C (settle invariant, codex repro)', async ({ page }) => {
+    // A loaded -> edit B while B's GET/PUT are in flight (B's GET stashes
+    // {ds:2,tpl:2}) -> switch to C BEFORE B's PUT fails -> B's catch settles
+    // from its stale closure while the UI is on C. It must not mutate C's
+    // visible state or ownership; C's next explicit edit PUTs C-based
+    // values.
+    const SESSION_B = 'a2c5f1d9-8ef7-48dc-be69-0ead7be316dd';
+    const SESSION_C = 'c3d6e2f0-1234-4abc-9def-0123456789ab';
+    await mockSessionWithSlides(page, SESSION_B);
+    await mockSessionWithSlides(page, SESSION_C);
+    await page.route('http://127.0.0.1:8000/api/sessions?limit=5', (route) => {
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          sessions: [
+            ...mockSessions.sessions,
+            { ...mockSessions.sessions[1], session_id: SESSION_C, title: 'Session C fixture' },
+          ],
+          count: 3,
+        }),
+      });
+    });
+
+    const putBodies: { url: string; body: string }[] = [];
+    await page.route(/\/api\/sessions\/[^/]+\/agent-config$/, async (route, request) => {
+      const url = request.url();
+      if (request.method() === 'PUT') {
+        putBodies.push({ url, body: request.postData() ?? '' });
+        if (url.includes(SESSION_B)) {
+          // B's edit PUT: hold long enough for the user to be on C, then FAIL.
+          await new Promise((r) => setTimeout(r, 2500));
+          route.fulfill({ status: 500, contentType: 'application/json', body: JSON.stringify({ detail: 'sync failed' }) });
+          return;
+        }
+        route.fulfill({ status: 200, contentType: 'application/json', body: request.postData() ?? '{}' });
+        return;
+      }
+      let ds: number | null = 1;
+      let tpl: number | null = 1;
+      let delay = 0;
+      if (url.includes(SESSION_B)) { ds = 2; tpl = 2; delay = 800; }
+      // C's GET is held open for the whole test: the failure must settle,
+      // AND be observed, while C has no loaded config of its own (codex's
+      // exact ordering). If C's GET were allowed to land it would correct
+      // the poisoned state and mask the bug.
+      else if (url.includes(SESSION_C)) { ds = null; tpl = null; delay = 30000; }
+      if (delay) await new Promise((r) => setTimeout(r, delay));
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ ...mockDefaultAgentConfig, design_system_id: ds, template_id: tpl }),
+      });
+    });
+    await page.route(/\/api\/settings\/design-systems\/\d+\/templates$/, (route) => {
+      route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(mockDesignSystemTemplatesWithLive) });
+    });
+    await page.route(/\/api\/user\/current$/, (route) => {
+      route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ user: 'dev@local.dev' }) });
+    });
+    await page.route(/\/api\/sessions\/[^/]+\/lock$/, (route, request) => {
+      if (request.method() === 'POST') {
+        route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ acquired: true, locked_by: null }) });
+      } else {
+        route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ locked: false, locked_by: null }) });
+      }
+    });
+
+    await expandAgentConfig(page);
+    await expect(page.getByTestId('template-selector')).toHaveValue('1');
+
+    // -> B; edit inside B's pending window (B GET lands ~0.8s and stashes
+    // {ds:2,tpl:2}; B's PUT will fail at ~2.9s).
+    await page.getByText('Session 2026-01-08 20:20').first().click();
+    await page.waitForURL(new RegExp(`/sessions/${SESSION_B}/edit`));
+    await page.waitForTimeout(300);
+    await page.getByTestId('design-system-selector').selectOption('');
+
+    // -> C BEFORE B's PUT settles; C's own GET is still 4s out.
+    await page.waitForTimeout(700);
+    await page.getByText('Session C fixture').first().click();
+    await page.waitForURL(new RegExp(`/sessions/${SESSION_C}/edit`));
+
+    // B's PUT failure settles ~1.8s after the switch, while C's GET is
+    // still held open. On C the screen must NOT paint B's stashed
+    // {ds:2,tpl:2}; C keeps the stripped carry-over ({ds:null}, since B's
+    // last visible edit set None). Assert IN this window — before any
+    // (here: never) C GET could mask it.
+    await page.waitForTimeout(2200);
+    await expect(page.getByTestId('design-system-selector')).not.toHaveValue('2');
+    await expect(page.getByTestId('design-system-selector')).toHaveValue('');
+    // No DS visible -> no template control (pre-fix it appears with '2').
+    await expect(page.getByTestId('template-selector')).toHaveCount(0);
+
+    // Wire discriminator: a style edit PRESERVES the base config, so its
+    // PUT body reveals whether the base was poisoned. Post-fix ds is null
+    // (C's own stripped state); pre-fix it is B's residual 2.
+    await page.getByTestId('style-selector').selectOption('2');
+    await expect
+      .poll(() => putBodies.filter((p) => p.url.includes(SESSION_C)).length)
+      .toBeGreaterThan(0);
+    const cPut = JSON.parse(putBodies.filter((p) => p.url.includes(SESSION_C)).pop()!.body);
+    expect(cPut.design_system_id).toBe(null); // no B residue (B's ds was 2)
+    expect(cPut.template_id).toBe(null);      // no B residue (B's tpl was 2)
+    expect(cPut.slide_style_id).toBe(2);      // the explicit edit
+  });
+
+  test('a late-settling SUCCESSFUL B PUT updates only B stash — never the C screen', async ({ page }) => {
+    const SESSION_B = 'a2c5f1d9-8ef7-48dc-be69-0ead7be316dd';
+    const SESSION_C = 'c3d6e2f0-1234-4abc-9def-0123456789ab';
+    await mockSessionWithSlides(page, SESSION_B);
+    await mockSessionWithSlides(page, SESSION_C);
+    await page.route('http://127.0.0.1:8000/api/sessions?limit=5', (route) => {
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          sessions: [
+            ...mockSessions.sessions,
+            { ...mockSessions.sessions[1], session_id: SESSION_C, title: 'Session C fixture' },
+          ],
+          count: 3,
+        }),
+      });
+    });
+
+    let bGetCount = 0;
+    let bPutCount = 0;
+    await page.route(/\/api\/sessions\/[^/]+\/agent-config$/, async (route, request) => {
+      const url = request.url();
+      if (request.method() === 'PUT') {
+        if (url.includes(SESSION_B)) {
+          bPutCount += 1;
+          if (bPutCount === 1) {
+            // First B PUT: SUCCEEDS, but only after the user is on C.
+            await new Promise((r) => setTimeout(r, 2500));
+            route.fulfill({ status: 200, contentType: 'application/json', body: request.postData() ?? '{}' });
+            return;
+          }
+          // Second B PUT (after returning to B): fails fast — the revert
+          // target must be B's stash, which the late confirm updated.
+          route.fulfill({ status: 500, contentType: 'application/json', body: JSON.stringify({ detail: 'sync failed' }) });
+          return;
+        }
+        route.fulfill({ status: 200, contentType: 'application/json', body: request.postData() ?? '{}' });
+        return;
+      }
+      let ds: number | null = 1;
+      let tpl: number | null = 1;
+      let delay = 0;
+      if (url.includes(SESSION_B)) {
+        bGetCount += 1;
+        ds = 2; tpl = 2;
+        delay = bGetCount === 1 ? 800 : 3000; // slow on the return visit
+      } else if (url.includes(SESSION_C)) { ds = null; tpl = null; delay = 800; }
+      if (delay) await new Promise((r) => setTimeout(r, delay));
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ ...mockDefaultAgentConfig, design_system_id: ds, template_id: tpl }),
+      });
+    });
+    await page.route(/\/api\/settings\/design-systems\/\d+\/templates$/, (route) => {
+      route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(mockDesignSystemTemplatesWithLive) });
+    });
+    await page.route(/\/api\/user\/current$/, (route) => {
+      route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ user: 'dev@local.dev' }) });
+    });
+    await page.route(/\/api\/sessions\/[^/]+\/lock$/, (route, request) => {
+      if (request.method() === 'POST') {
+        route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ acquired: true, locked_by: null }) });
+      } else {
+        route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ locked: false, locked_by: null }) });
+      }
+    });
+
+    await expandAgentConfig(page);
+    await expect(page.getByTestId('template-selector')).toHaveValue('1');
+
+    // -> B; edit (DS -> 1, visibly distinct from both B's {ds:2} and C's
+    // {ds:null}) whose PUT confirms late.
+    await page.getByText('Session 2026-01-08 20:20').first().click();
+    await page.waitForURL(new RegExp(`/sessions/${SESSION_B}/edit`));
+    await page.waitForTimeout(300);
+    await page.getByTestId('design-system-selector').selectOption('1');
+
+    // -> C before the confirm settles.
+    await page.waitForTimeout(700);
+    await page.getByText('Session C fixture').first().click();
+    await page.waitForURL(new RegExp(`/sessions/${SESSION_C}/edit`));
+    await expect(page.getByTestId('design-system-selector')).toHaveValue('', { timeout: 5000 });
+
+    // B's PUT confirms {ds:1} (~2.9s) while on C: C's screen must not
+    // repaint with it — it stays C's own {ds:null}.
+    await page.waitForTimeout(2200);
+    await expect(page.getByTestId('design-system-selector')).toHaveValue('');
+
+    // Return to B (its GET is now slow): a fast-failing edit reverts to B's
+    // stash — which the late confirm updated to {ds:1} — NOT B's server
+    // snapshot {ds:2}. That observable difference proves the keyed stash
+    // took the late confirm.
+    await page.getByText('Session 2026-01-08 20:20').first().click();
+    await page.waitForURL(new RegExp(`/sessions/${SESSION_B}/edit`));
+    await page.waitForTimeout(300);
+    await page.getByTestId('style-selector').selectOption('2'); // any explicit edit
+    await page.waitForTimeout(800); // second B PUT fails fast -> stash revert
+    await expect(page.getByTestId('design-system-selector')).toHaveValue('1');
+  });
+
+  test('interleaved switches with delayed settles only ever show the current session values', async ({ page }) => {
+    const SESSION_B = 'a2c5f1d9-8ef7-48dc-be69-0ead7be316dd';
+    await mockSessionWithSlides(page, SESSION_B);
+
+    await page.route(/\/api\/sessions\/[^/]+\/agent-config$/, async (route, request) => {
+      const isA = request.url().includes(TEST_SESSION_ID);
+      if (request.method() === 'PUT') {
+        route.fulfill({ status: 200, contentType: 'application/json', body: request.postData() ?? '{}' });
+        return;
+      }
+      if (!isA) await new Promise((r) => setTimeout(r, 700));
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          ...mockDefaultAgentConfig,
+          design_system_id: isA ? 1 : 2,
+          template_id: isA ? 1 : 2,
+        }),
+      });
+    });
+    await page.route(/\/api\/settings\/design-systems\/\d+\/templates$/, (route) => {
+      route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(mockDesignSystemTemplatesWithLive) });
+    });
+    await page.route(/\/api\/user\/current$/, (route) => {
+      route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ user: 'dev@local.dev' }) });
+    });
+    await page.route(/\/api\/sessions\/[^/]+\/lock$/, (route, request) => {
+      if (request.method() === 'POST') {
+        route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ acquired: true, locked_by: null }) });
+      } else {
+        route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ locked: false, locked_by: null }) });
+      }
+    });
+
+    await expandAgentConfig(page);
+    await expect(page.getByTestId('design-system-selector')).toHaveValue('1');
+
+    // Two quick A->B->A cycles: B's delayed GETs keep settling while back on
+    // A and must never repaint A with B's values.
+    for (let i = 0; i < 2; i++) {
+      await page.getByText('Session 2026-01-08 20:20').first().click();
+      await page.waitForURL(new RegExp(`/sessions/${SESSION_B}/edit`));
+      await page.waitForTimeout(150); // leave before B's 700ms GET settles
+      await page.getByText('Session 2026-01-08 20:38').first().click();
+      await page.waitForURL(new RegExp(`/sessions/${TEST_SESSION_ID}/edit`));
+      // A resolves instantly; B's stale GET lands ~550ms later and must be
+      // discarded: A keeps showing A.
+      await expect(page.getByTestId('design-system-selector')).toHaveValue('1', { timeout: 3000 });
+      await page.waitForTimeout(900);
+      await expect(page.getByTestId('design-system-selector')).toHaveValue('1');
+      await expect(page.getByTestId('template-selector')).toHaveValue('1');
+    }
+
+    // Settle on B for real: B's own values arrive.
+    await page.getByText('Session 2026-01-08 20:20').first().click();
+    await page.waitForURL(new RegExp(`/sessions/${SESSION_B}/edit`));
+    await expect(page.getByTestId('design-system-selector')).toHaveValue('2', { timeout: 5000 });
+    await expect(page.getByTestId('template-selector')).toHaveValue('2');
+  });
+
   test('an explicit edit during the pending config load wins over the late GET', async ({ page }) => {
     const SESSION_B = 'a2c5f1d9-8ef7-48dc-be69-0ead7be316dd';
     await mockSessionWithSlides(page, SESSION_B);
