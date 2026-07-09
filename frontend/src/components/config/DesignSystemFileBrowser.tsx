@@ -17,9 +17,10 @@
  */
 
 import React, { useCallback, useEffect, useState } from 'react';
-import { ChevronDown, ChevronRight, FileText, FolderOpen, Layers, X } from 'lucide-react';
-import { configApi, resolveApiUrl } from '../../api/config';
+import { ChevronDown, ChevronRight, FileText, FolderOpen, X } from 'lucide-react';
+import { configApi } from '../../api/config';
 import type { DesignSystemFileEntry, DesignSystemTemplate } from '../../api/config';
+import { TemplateThumbnail } from './TemplateThumbnail';
 
 interface DesignSystemFileBrowserProps {
   dsId: number;
@@ -267,20 +268,11 @@ export const DesignSystemFileBrowser: React.FC<DesignSystemFileBrowserProps> = (
                           className="flex w-full items-center gap-2 rounded border border-border bg-background px-2 py-1.5 text-left transition-colors hover:bg-muted focus:outline-none focus-visible:ring-1 focus-visible:ring-ring"
                           data-testid="ds-file-template-card"
                         >
-                          {tmpl.thumbnail_url ? (
-                            <img
-                              src={resolveApiUrl(tmpl.thumbnail_url)}
-                              alt={`${tmpl.name} preview`}
-                              className="h-10 w-16 shrink-0 rounded border border-border bg-background object-cover"
-                              onError={(e) => {
-                                (e.currentTarget as HTMLImageElement).style.visibility = 'hidden';
-                              }}
-                            />
-                          ) : (
-                            <span className="flex h-10 w-16 shrink-0 items-center justify-center rounded border border-border text-muted-foreground/40">
-                              <Layers className="size-4" />
-                            </span>
-                          )}
+                          <TemplateThumbnail
+                            dsId={dsId}
+                            template={tmpl}
+                            className="h-10 w-16 shrink-0 rounded border border-border bg-background"
+                          />
                           <span className="min-w-0 flex-1">
                             <span className="block truncate text-xs font-medium text-foreground">
                               {tmpl.name}

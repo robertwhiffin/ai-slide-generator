@@ -484,6 +484,7 @@ export const mockDesignSystemDetail = {
       width: 120,
       height: 40,
       url: "/api/settings/design-systems/1/assets/10",
+      thumbnail_url: null,
     },
     {
       id: 11,
@@ -494,6 +495,7 @@ export const mockDesignSystemDetail = {
       width: 16,
       height: 16,
       url: "/api/settings/design-systems/1/assets/11",
+      thumbnail_url: "/api/settings/design-systems/1/assets/11/thumbnail",
     },
     {
       id: 12,
@@ -504,6 +506,7 @@ export const mockDesignSystemDetail = {
       width: null,
       height: null,
       url: "/api/settings/design-systems/1/assets/12",
+      thumbnail_url: null,
     },
   ],
 };
@@ -543,6 +546,39 @@ export const mockDesignSystemTemplates = {
     },
   ],
   total: 1,
+};
+
+// Template set with a screenshot-less entry (real Claude Design exports ship
+// no preview images): id 2 exercises the live-render mini-card fallback.
+export const mockDesignSystemTemplatesWithLive = {
+  templates: [
+    {
+      id: 1,
+      name: "Acme Cover",
+      description: "Centered hero with logo lockup.",
+      entry_path: "templates/cover/index.html",
+      thumbnail_url: "/api/settings/design-systems/1/templates/1/thumbnail",
+    },
+    {
+      id: 2,
+      name: "Acme Content",
+      description: "Body layout without a shipped screenshot.",
+      entry_path: "templates/content/index.html",
+      thumbnail_url: null,
+    },
+  ],
+  total: 2,
+};
+
+// GET /api/settings/design-systems/{id}/templates/2/source -> stored sources
+// for the sandboxed live preview (JSON; synthetic Acme only).
+export const mockDesignSystemTemplateSource = {
+  id: 2,
+  name: "Acme Content",
+  layout_html:
+    '<!doctype html><html><head><style>.slide{width:1280px;height:720px;background:var(--brand-core-primary);color:#ffffff;}</style></head>' +
+    '<body><section class="slide"><h1>Acme Content Layout</h1></section></body></html>',
+  token_css: ":root { --brand-core-primary: #123456; }",
 };
 
 // GET /api/settings/design-systems/{id}/files -> retained source-file tree (Phase 6)
