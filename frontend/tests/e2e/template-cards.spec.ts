@@ -149,6 +149,54 @@ test.describe('Template cards — preview preference and live-render fallback', 
     await expect(inner.locator('h1')).toHaveText('Acme Content Layout');
   });
 
+  test('live preview blocks ALL external egress from uploaded template markup (CSP)', async ({ page }) => {
+    // sandbox="" blocks scripts/same-origin; the srcDoc CSP closes the
+    // passive channel: img/link tags and css url()/@import in uploaded
+    // template HTML/CSS must not trigger any external network fetch.
+    const externalRequests: string[] = [];
+    await page.route('https://external.example/**', (route, request) => {
+      externalRequests.push(request.url());
+      route.fulfill({ status: 200, contentType: 'image/png', body: Buffer.from(TINY_PNG_BASE64, 'base64') });
+    });
+
+    // Exfil-shaped template: external <img>, css url(), @import, <link>.
+    await page.route(/\/api\/settings\/design-systems\/\d+\/templates\/2\/source$/, (route) => {
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          id: 2,
+          name: 'Acme Content',
+          layout_html:
+            '<!doctype html><html><head>' +
+            '<link rel="stylesheet" href="https://external.example/style.css">' +
+            '<style>@import url("https://external.example/import.css");' +
+            '.slide{width:1280px;height:720px;background-image:url("https://external.example/bg.png");}</style>' +
+            '</head><body><section class="slide"><h1>Acme Exfil Probe</h1>' +
+            '<img src="https://external.example/pixel.png" alt="">' +
+            `<img src="data:image/png;base64,${TINY_PNG_BASE64}" alt="" data-testid="legit-data-img">` +
+            '</section></body></html>',
+          token_css: ':root { --brand-core-primary: #123456; }',
+        }),
+      });
+    });
+
+    await openAcmeDetail(page);
+    const contentCard = page.locator('[data-testid="template-card"]').filter({ hasText: 'Acme Content' });
+    const frame = contentCard.locator('[data-testid="template-live-preview"]');
+    await expect(frame).toBeVisible();
+
+    // The document rendered (content painted)…
+    const inner = page.frameLocator('[data-testid="template-live-preview"]');
+    await expect(inner.locator('h1')).toHaveText('Acme Exfil Probe');
+    // …the srcDoc carries the CSP…
+    const srcdoc = await frame.getAttribute('srcdoc');
+    expect(srcdoc).toContain('Content-Security-Policy');
+    // …and give any (blocked) fetches a beat, then assert ZERO egress.
+    await page.waitForTimeout(500);
+    expect(externalRequests).toEqual([]);
+  });
+
   test('source fetch fires only for screenshot-less templates', async ({ page }) => {
     const sourceRequests: string[] = [];
     page.on('request', (req) => {
