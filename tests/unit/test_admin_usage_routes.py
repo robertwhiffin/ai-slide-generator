@@ -36,21 +36,76 @@ class TestSummaryEndpoint:
         assert resp.status_code == 200
         assert resp.json()["total_users_ever"] == 10
         mock_service.get_summary.assert_called_once()
-        assert mock_service.get_summary.call_args.kwargs.get("days") == 7 or (
-            mock_service.get_summary.call_args[0]
-            and 7 in mock_service.get_summary.call_args[0]
-        )
+        # No explicit window params -> service applies its own 7-day default
+        assert mock_service.get_summary.call_args.kwargs == {}
 
     def test_invalid_days_rejected(self, client, mock_service):
-        assert client.get("/api/admin/usage/summary?days=10").status_code == 422
-        assert client.get("/api/admin/usage/summary?days=99").status_code == 422
+        assert client.get("/api/admin/usage/summary?days=0").status_code == 422
+        assert client.get("/api/admin/usage/summary?days=400").status_code == 422
 
     def test_valid_windows_accepted(self, client, mock_service):
         mock_service.get_summary.return_value = {}
-        for days in (7, 14, 21, 28):
+        for days in (1, 7, 14, 28, 90, 365):
             assert (
                 client.get(f"/api/admin/usage/summary?days={days}").status_code == 200
             )
+
+
+class TestWindowParams:
+    def test_custom_days_passed_through(self, client, mock_service):
+        mock_service.get_summary.return_value = {}
+        assert client.get("/api/admin/usage/summary?days=90").status_code == 200
+        assert mock_service.get_summary.call_args.kwargs == {"days": 90}
+
+    def test_all_data_mode(self, client, mock_service):
+        mock_service.get_summary.return_value = {}
+        assert client.get("/api/admin/usage/summary?all=true").status_code == 200
+        assert mock_service.get_summary.call_args.kwargs == {"all_data": True}
+
+    def test_all_takes_precedence_over_days_and_range(self, client, mock_service):
+        mock_service.get_summary.return_value = {}
+        resp = client.get(
+            "/api/admin/usage/summary?all=true&days=7&start=2026-06-01&end=2026-06-30"
+        )
+        assert resp.status_code == 200
+        assert mock_service.get_summary.call_args.kwargs == {"all_data": True}
+
+    def test_date_range_passed_as_dates(self, client, mock_service):
+        from datetime import date
+
+        mock_service.get_daily.return_value = {}
+        resp = client.get(
+            "/api/admin/usage/daily?start=2026-06-01&end=2026-06-30"
+        )
+        assert resp.status_code == 200
+        assert mock_service.get_daily.call_args.kwargs == {
+            "start": date(2026, 6, 1),
+            "end": date(2026, 6, 30),
+        }
+
+    def test_start_without_end_rejected(self, client, mock_service):
+        assert (
+            client.get("/api/admin/usage/summary?start=2026-06-01").status_code == 422
+        )
+        assert client.get("/api/admin/usage/summary?end=2026-06-30").status_code == 422
+
+    def test_unparseable_date_rejected(self, client, mock_service):
+        resp = client.get("/api/admin/usage/summary?start=junk&end=2026-06-30")
+        assert resp.status_code == 422
+
+    def test_start_after_end_rejected(self, client, mock_service):
+        resp = client.get(
+            "/api/admin/usage/summary?start=2026-06-30&end=2026-06-01"
+        )
+        assert resp.status_code == 422
+
+    def test_all_endpoints_accept_window_params(self, client, mock_service):
+        mock_service.get_daily.return_value = {}
+        mock_service.get_top_users.return_value = []
+        mock_service.get_funnel.return_value = {}
+        mock_service.get_heatmap.return_value = {}
+        for path in ("daily", "top-users", "funnel", "heatmap"):
+            assert client.get(f"/api/admin/usage/{path}?all=true").status_code == 200
 
 
 class TestOtherEndpoints:

@@ -10,6 +10,8 @@ use `user_sessions` as a labeled proxy.
 """
 
 from collections import defaultdict
+from dataclasses import dataclass
+from datetime import date as dt_date
 from datetime import datetime, timedelta
 from datetime import time as dt_time
 
@@ -28,7 +30,68 @@ from src.database.models.usage_event import (
     EVENT_LOGIN,
 )
 
+# Preset windows offered by the UI; the API accepts any 1..MAX_WINDOW_DAYS,
+# an explicit start/end date range, or all=true for the full history.
 ALLOWED_WINDOWS = {7, 14, 21, 28}
+MAX_WINDOW_DAYS = 365
+# Hard cap on rows returned by get_daily in all-data/range mode
+MAX_DAILY_ROWS = 730
+
+
+@dataclass(frozen=True)
+class Window:
+    """Resolved reporting window.
+
+    ``start`` is an inclusive datetime lower bound (None = beginning of data);
+    ``end`` is an exclusive upper bound. ``days`` is set only in preset/days
+    mode and is echoed back in responses for backward compatibility.
+    """
+
+    start: datetime | None
+    end: datetime
+    days: int | None
+    all_data: bool
+
+    def to_meta(self) -> dict:
+        return {
+            "days": self.days,
+            "start": self.start.strftime("%Y-%m-%d") if self.start else None,
+            "end": (self.end - timedelta(days=1)).strftime("%Y-%m-%d"),
+            "all": self.all_data,
+        }
+
+
+def resolve_window(
+    days: int | None = None,
+    start: dt_date | None = None,
+    end: dt_date | None = None,
+    all_data: bool = False,
+) -> Window:
+    """Resolve query params into a concrete Window.
+
+    Precedence: all_data > explicit start/end range > days > default 7 days.
+    ``end`` is inclusive as a date (callers pass the last day they want to
+    see); internally it becomes an exclusive midnight bound.
+    """
+    tomorrow = datetime.combine(
+        datetime.utcnow().date() + timedelta(days=1), dt_time.min
+    )
+    if all_data:
+        return Window(start=None, end=tomorrow, days=None, all_data=True)
+    if start is not None and end is not None:
+        return Window(
+            start=datetime.combine(start, dt_time.min),
+            end=datetime.combine(end + timedelta(days=1), dt_time.min),
+            days=None,
+            all_data=False,
+        )
+    resolved_days = days if days is not None else 7
+    return Window(
+        start=_window_start(resolved_days),
+        end=tomorrow,
+        days=resolved_days,
+        all_data=False,
+    )
 
 # Route template logged by the request-logging middleware for deck opens
 _DECK_OPEN_ROUTE = "/api/sessions/{session_id}"
@@ -58,35 +121,50 @@ def _window_start(days: int) -> datetime:
     return datetime.combine(today - timedelta(days=days - 1), dt_time.min)
 
 
-def _day_list(days: int) -> list[str]:
-    today = datetime.utcnow().date()
-    return [
-        (today - timedelta(days=offset)).strftime("%Y-%m-%d")
-        for offset in range(days - 1, -1, -1)
-    ]
-
-
 class UsageService:
     """Aggregates usage metrics for /api/admin/usage endpoints."""
 
     # ---------- shared helpers ----------
 
-    def _events_in_window(self, db: Session, start: datetime) -> list[UsageEvent]:
-        return db.query(UsageEvent).filter(UsageEvent.ts >= start).all()
+    def _events_in_window(self, db: Session, w: Window) -> list[UsageEvent]:
+        query = db.query(UsageEvent).filter(UsageEvent.ts < w.end)
+        if w.start is not None:
+            query = query.filter(UsageEvent.ts >= w.start)
+        return query.all()
 
-    def _sessions_in_window(self, db: Session, start: datetime) -> list[UserSession]:
-        return (
-            db.query(UserSession)
-            .filter(UserSession.created_at >= start)
-            .all()
-        )
+    def _sessions_in_window(self, db: Session, w: Window) -> list[UserSession]:
+        query = db.query(UserSession).filter(UserSession.created_at < w.end)
+        if w.start is not None:
+            query = query.filter(UserSession.created_at >= w.start)
+        return query.all()
 
-    def _decks_in_window(self, db: Session, start: datetime) -> list[SessionSlideDeck]:
-        return (
-            db.query(SessionSlideDeck)
-            .filter(SessionSlideDeck.created_at >= start)
-            .all()
-        )
+    def _decks_in_window(self, db: Session, w: Window) -> list[SessionSlideDeck]:
+        query = db.query(SessionSlideDeck).filter(SessionSlideDeck.created_at < w.end)
+        if w.start is not None:
+            query = query.filter(SessionSlideDeck.created_at >= w.start)
+        return query.all()
+
+    def _window_day_list(self, w: Window, earliest: datetime | None) -> list[str]:
+        """Calendar days covered by the window, oldest first, capped.
+
+        In all-data mode the range starts at the earliest observed data point
+        (or today when the database is empty).
+        """
+        last_day = (w.end - timedelta(days=1)).date()
+        if w.start is not None:
+            first_day = w.start.date()
+        elif earliest is not None:
+            first_day = earliest.date()
+        else:
+            first_day = last_day
+        total = (last_day - first_day).days + 1
+        if total > MAX_DAILY_ROWS:
+            first_day = last_day - timedelta(days=MAX_DAILY_ROWS - 1)
+            total = MAX_DAILY_ROWS
+        return [
+            (first_day + timedelta(days=offset)).strftime("%Y-%m-%d")
+            for offset in range(total)
+        ]
 
     def _history_boundary(self, db: Session) -> datetime | None:
         first = (
@@ -119,8 +197,15 @@ class UsageService:
 
     # ---------- endpoints ----------
 
-    def get_summary(self, db: Session, days: int) -> dict:
-        start = _window_start(days)
+    def get_summary(
+        self,
+        db: Session,
+        days: int | None = None,
+        start: dt_date | None = None,
+        end: dt_date | None = None,
+        all_data: bool = False,
+    ) -> dict:
+        w = resolve_window(days=days, start=start, end=end, all_data=all_data)
 
         identity_users = {
             name
@@ -149,25 +234,23 @@ class UsageService:
         }
         total_decks_ever = len(live_deck_session_ids) + len(orphaned_deck_events)
 
-        events = self._events_in_window(db, start)
-        sessions = self._sessions_in_window(db, start)
-        active_from_last_activity = {
-            name
-            for (name,) in db.query(UserSession.created_by).filter(
-                UserSession.last_activity >= start,
-                UserSession.created_by.isnot(None),
+        events = self._events_in_window(db, w)
+        sessions = self._sessions_in_window(db, w)
+        activity_query = db.query(UserSession.created_by).filter(
+            UserSession.last_activity < w.end,
+            UserSession.created_by.isnot(None),
+        )
+        if w.start is not None:
+            activity_query = activity_query.filter(
+                UserSession.last_activity >= w.start
             )
-        }
+        active_from_last_activity = {name for (name,) in activity_query}
         active_users = (
             {e.username for e in events}
             | {s.created_by for s in sessions if s.created_by}
             | active_from_last_activity
         )
-        decks_created = (
-            db.query(SessionSlideDeck)
-            .filter(SessionSlideDeck.created_at >= start)
-            .count()
-        )
+        decks_created = len(self._decks_in_window(db, w))
         logins = _login_visit_count(
             e for e in events if e.event_type == EVENT_LOGIN
         )
@@ -177,7 +260,7 @@ class UsageService:
             "total_users_ever": total_users_ever,
             "total_decks_ever": total_decks_ever,
             "window": {
-                "days": days,
+                **w.to_meta(),
                 "active_users": len(active_users),
                 "decks_created": decks_created,
                 "avg_decks_per_active_user": avg,
@@ -185,14 +268,21 @@ class UsageService:
             },
         }
 
-    def get_daily(self, db: Session, days: int) -> dict:
-        start = _window_start(days)
+    def get_daily(
+        self,
+        db: Session,
+        days: int | None = None,
+        start: dt_date | None = None,
+        end: dt_date | None = None,
+        all_data: bool = False,
+    ) -> dict:
+        w = resolve_window(days=days, start=start, end=end, all_data=all_data)
         boundary = self._history_boundary(db)
         boundary_day = _day_key(boundary) if boundary else None
 
-        events = self._events_in_window(db, start)
-        sessions = self._sessions_in_window(db, start)
-        decks = self._decks_in_window(db, start)
+        events = self._events_in_window(db, w)
+        sessions = self._sessions_in_window(db, w)
+        decks = self._decks_in_window(db, w)
         first_seen = self._first_seen_map(db)
 
         login_events_by_day: dict[str, list[UsageEvent]] = defaultdict(list)
@@ -225,16 +315,31 @@ class UsageService:
 
         # Anonymous deck-open volume proxy from request_logs (30-day retention)
         proxy_retrievals_by_day: dict[str, int] = defaultdict(int)
-        for (ts,) in db.query(RequestLog.timestamp).filter(
-            RequestLog.timestamp >= start,
+        proxy_query = db.query(RequestLog.timestamp).filter(
+            RequestLog.timestamp < w.end,
             RequestLog.method == "GET",
             RequestLog.path == _DECK_OPEN_ROUTE,
             RequestLog.status_code < 400,
-        ):
+        )
+        if w.start is not None:
+            proxy_query = proxy_query.filter(RequestLog.timestamp >= w.start)
+        for (ts,) in proxy_query:
             proxy_retrievals_by_day[_day_key(ts)] += 1
 
+        earliest = min(
+            (
+                ts
+                for ts in (
+                    min((e.ts for e in events), default=None),
+                    min((s.created_at for s in sessions), default=None),
+                    min((d.created_at for d in decks), default=None),
+                )
+                if ts is not None
+            ),
+            default=None,
+        )
         rows = []
-        for day in _day_list(days):
+        for day in self._window_day_list(w, earliest):
             pre_boundary = boundary_day is None or day < boundary_day
             if pre_boundary:
                 logins = sessions_by_day.get(day, 0)
@@ -263,36 +368,51 @@ class UsageService:
                     ),
                 }
             )
-        return {"history_boundary": boundary_day, "days": rows}
+        return {
+            "history_boundary": boundary_day,
+            "window": w.to_meta(),
+            "days": rows,
+        }
 
-    def get_top_users(self, db: Session, days: int) -> list[dict]:
-        start = _window_start(days)
+    def _deck_creator_rows(self, db: Session, w: Window) -> list:
+        query = (
+            db.query(UserSession.created_by)
+            .join(SessionSlideDeck, SessionSlideDeck.session_id == UserSession.id)
+            .filter(
+                SessionSlideDeck.created_at < w.end,
+                UserSession.created_by.isnot(None),
+            )
+        )
+        if w.start is not None:
+            query = query.filter(SessionSlideDeck.created_at >= w.start)
+        return query.all()
+
+    def get_top_users(
+        self,
+        db: Session,
+        days: int | None = None,
+        start: dt_date | None = None,
+        end: dt_date | None = None,
+        all_data: bool = False,
+    ) -> list[dict]:
+        w = resolve_window(days=days, start=start, end=end, all_data=all_data)
         stats: dict[str, dict] = defaultdict(
             lambda: {"logins": 0, "sessions_created": 0, "decks_created": 0}
         )
 
         login_events_by_user: dict[str, list[UsageEvent]] = defaultdict(list)
-        for e in self._events_in_window(db, start):
+        for e in self._events_in_window(db, w):
             if e.event_type == EVENT_LOGIN:
                 login_events_by_user[e.username].append(e)
         for name, user_events in login_events_by_user.items():
             # Collapse duplicate per-worker login rows into visits
             stats[name]["logins"] = _login_visit_count(user_events)
 
-        for s in self._sessions_in_window(db, start):
+        for s in self._sessions_in_window(db, w):
             if s.created_by:
                 stats[s.created_by]["sessions_created"] += 1
 
-        deck_rows = (
-            db.query(UserSession.created_by)
-            .join(SessionSlideDeck, SessionSlideDeck.session_id == UserSession.id)
-            .filter(
-                SessionSlideDeck.created_at >= start,
-                UserSession.created_by.isnot(None),
-            )
-            .all()
-        )
-        for (name,) in deck_rows:
+        for (name,) in self._deck_creator_rows(db, w):
             stats[name]["decks_created"] += 1
 
         ranked = sorted(
@@ -305,15 +425,22 @@ class UsageService:
         )
         return ranked[:20]
 
-    def get_funnel(self, db: Session, days: int) -> dict:
-        start = _window_start(days)
-        events = self._events_in_window(db, start)
+    def get_funnel(
+        self,
+        db: Session,
+        days: int | None = None,
+        start: dt_date | None = None,
+        end: dt_date | None = None,
+        all_data: bool = False,
+    ) -> dict:
+        w = resolve_window(days=days, start=start, end=end, all_data=all_data)
+        events = self._events_in_window(db, w)
 
         login_events = [e for e in events if e.event_type == EVENT_LOGIN]
         proxy = len(login_events) == 0
 
         if proxy:
-            sessions = self._sessions_in_window(db, start)
+            sessions = self._sessions_in_window(db, w)
             logins = len(sessions)
             logged_in_users = {s.created_by for s in sessions if s.created_by}
         else:
@@ -323,20 +450,8 @@ class UsageService:
         deck_event_users = {
             e.username for e in events if e.event_type == EVENT_DECK_CREATED
         }
-        deck_session_users = {
-            name
-            for (name,) in db.query(UserSession.created_by)
-            .join(SessionSlideDeck, SessionSlideDeck.session_id == UserSession.id)
-            .filter(
-                SessionSlideDeck.created_at >= start,
-                UserSession.created_by.isnot(None),
-            )
-        }
-        decks_created = (
-            db.query(SessionSlideDeck)
-            .filter(SessionSlideDeck.created_at >= start)
-            .count()
-        )
+        deck_session_users = {name for (name,) in self._deck_creator_rows(db, w)}
+        decks_created = len(self._decks_in_window(db, w))
         return {
             "logins": logins,
             "users_who_logged_in": len(logged_in_users),
@@ -388,13 +503,20 @@ class UsageService:
             )
         return rows
 
-    def get_heatmap(self, db: Session, days: int) -> dict:
-        start = _window_start(days)
+    def get_heatmap(
+        self,
+        db: Session,
+        days: int | None = None,
+        start: dt_date | None = None,
+        end: dt_date | None = None,
+        all_data: bool = False,
+    ) -> dict:
+        w = resolve_window(days=days, start=start, end=end, all_data=all_data)
         matrix = [[0] * 24 for _ in range(7)]
 
-        for e in self._events_in_window(db, start):
+        for e in self._events_in_window(db, w):
             matrix[e.ts.weekday()][e.ts.hour] += 1
-        for s in self._sessions_in_window(db, start):
+        for s in self._sessions_in_window(db, w):
             matrix[s.created_at.weekday()][s.created_at.hour] += 1
 
         return {"matrix": matrix, "max": max(max(row) for row in matrix)}

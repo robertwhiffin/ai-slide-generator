@@ -256,11 +256,39 @@ async function pollExportJob(
 
 // --- Admin Usage Analytics types ---
 
+/** Reporting window: preset/custom days, an explicit date range, or all data. */
+export interface UsageWindowParams {
+  days?: number;
+  start?: string; // YYYY-MM-DD, inclusive (must be paired with end)
+  end?: string;   // YYYY-MM-DD, inclusive
+  all?: boolean;
+}
+
+export interface UsageWindowMeta {
+  days: number | null;
+  start: string | null;
+  end: string;
+  all: boolean;
+}
+
+function usageWindowQuery(window: UsageWindowParams): string {
+  const qs = new URLSearchParams();
+  if (window.all) {
+    qs.set('all', 'true');
+  } else if (window.start && window.end) {
+    qs.set('start', window.start);
+    qs.set('end', window.end);
+  } else if (window.days !== undefined) {
+    qs.set('days', String(window.days));
+  }
+  const s = qs.toString();
+  return s ? `?${s}` : '';
+}
+
 export interface UsageSummary {
   total_users_ever: number;
   total_decks_ever: number;
-  window: {
-    days: number;
+  window: UsageWindowMeta & {
     active_users: number;
     decks_created: number;
     avg_decks_per_active_user: number | null;
@@ -1697,26 +1725,26 @@ export const api = {
 
   // --- Admin Usage Analytics ---
 
-  async getUsageSummary(days: number = 7): Promise<UsageSummary> {
-    const response = await fetch(`${API_BASE_URL}/api/admin/usage/summary?days=${days}`);
+  async getUsageSummary(window: UsageWindowParams = {}): Promise<UsageSummary> {
+    const response = await fetch(`${API_BASE_URL}/api/admin/usage/summary${usageWindowQuery(window)}`);
     if (!response.ok) throw new ApiError(response.status, 'Failed to fetch usage summary');
     return response.json();
   },
 
-  async getUsageDaily(days: number = 7): Promise<{ history_boundary: string | null; days: UsageDailyRow[] }> {
-    const response = await fetch(`${API_BASE_URL}/api/admin/usage/daily?days=${days}`);
+  async getUsageDaily(window: UsageWindowParams = {}): Promise<{ history_boundary: string | null; window: UsageWindowMeta; days: UsageDailyRow[] }> {
+    const response = await fetch(`${API_BASE_URL}/api/admin/usage/daily${usageWindowQuery(window)}`);
     if (!response.ok) throw new ApiError(response.status, 'Failed to fetch daily usage');
     return response.json();
   },
 
-  async getUsageTopUsers(days: number = 7): Promise<UsageTopUser[]> {
-    const response = await fetch(`${API_BASE_URL}/api/admin/usage/top-users?days=${days}`);
+  async getUsageTopUsers(window: UsageWindowParams = {}): Promise<UsageTopUser[]> {
+    const response = await fetch(`${API_BASE_URL}/api/admin/usage/top-users${usageWindowQuery(window)}`);
     if (!response.ok) throw new ApiError(response.status, 'Failed to fetch top users');
     return response.json();
   },
 
-  async getUsageFunnel(days: number = 7): Promise<UsageFunnel> {
-    const response = await fetch(`${API_BASE_URL}/api/admin/usage/funnel?days=${days}`);
+  async getUsageFunnel(window: UsageWindowParams = {}): Promise<UsageFunnel> {
+    const response = await fetch(`${API_BASE_URL}/api/admin/usage/funnel${usageWindowQuery(window)}`);
     if (!response.ok) throw new ApiError(response.status, 'Failed to fetch usage funnel');
     return response.json();
   },
@@ -1727,8 +1755,8 @@ export const api = {
     return response.json();
   },
 
-  async getUsageHeatmap(days: number = 7): Promise<UsageHeatmap> {
-    const response = await fetch(`${API_BASE_URL}/api/admin/usage/heatmap?days=${days}`);
+  async getUsageHeatmap(window: UsageWindowParams = {}): Promise<UsageHeatmap> {
+    const response = await fetch(`${API_BASE_URL}/api/admin/usage/heatmap${usageWindowQuery(window)}`);
     if (!response.ok) throw new ApiError(response.status, 'Failed to fetch heatmap');
     return response.json();
   },

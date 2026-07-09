@@ -120,9 +120,19 @@ daily, top-users, and funnel login counts; distinct-user metrics are unaffected
 
 ## API Table
 
-All windowed endpoints accept `?days=` in **{7, 14, 21, 28}** (default 7); any other
-value returns 422. Day bucketing is **UTC calendar days** (window = last `days` days
-including today). Aggregation failures return 500.
+All windowed endpoints accept one of three window forms (precedence top to bottom;
+invalid combinations return 422):
+
+| Form | Params | Semantics |
+|------|--------|-----------|
+| All data | `?all=true` | No lower bound — the full history |
+| Date range | `?start=YYYY-MM-DD&end=YYYY-MM-DD` | Both required, both inclusive, `start <= end` |
+| Rolling days | `?days=N` (1..365) | Last `N` UTC calendar days including today; **default 7** when no params |
+
+The UI offers presets {7, 14, 21, 28}, "All data", and a custom range picker.
+Responses echo the resolved window as `window: {days, start, end, all}` (`days` is
+null for range/all modes). `get_daily` caps at 730 rows in range/all modes.
+Day bucketing is **UTC calendar days**. Aggregation failures return 500.
 
 | Method | Path | Purpose |
 |--------|------|---------|
@@ -142,6 +152,9 @@ including today). Aggregation failures return 500.
   "total_decks_ever": 310,
   "window": {
     "days": 7,
+    "start": "2026-07-02",
+    "end": "2026-07-08",
+    "all": false,
     "active_users": 12,
     "decks_created": 31,
     "avg_decks_per_active_user": 2.6,

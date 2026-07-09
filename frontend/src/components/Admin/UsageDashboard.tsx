@@ -6,14 +6,29 @@ import {
 import { api } from '../../services/api';
 import type {
   UsageSummary, UsageDailyRow, UsageTopUser,
-  UsageFunnel, UsageRetentionRow, UsageHeatmap,
+  UsageFunnel, UsageRetentionRow, UsageHeatmap, UsageWindowParams,
 } from '../../services/api';
 
 const WINDOW_OPTIONS = [7, 14, 21, 28];
 const DAY_LABELS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
 
+/** Human label for the applied window, used in card/section titles. */
+function windowLabel(w: UsageWindowParams): string {
+  if (w.all) return 'all time';
+  if (w.start && w.end) {
+    const fmt = (d: string) =>
+      new Date(d + 'T00:00:00').toLocaleDateString('en-GB', { day: 'numeric', month: 'short' });
+    return `${fmt(w.start)} – ${fmt(w.end)}`;
+  }
+  return `${w.days ?? 7}d`;
+}
+
 export const UsageDashboard: React.FC = () => {
-  const [days, setDays] = useState(7);
+  // Applied window (drives fetches) vs. selector UI state
+  const [window_, setWindow] = useState<UsageWindowParams>({ days: 7 });
+  const [selectValue, setSelectValue] = useState('7');
+  const [customStart, setCustomStart] = useState('');
+  const [customEnd, setCustomEnd] = useState('');
   const [summary, setSummary] = useState<UsageSummary | null>(null);
   const [daily, setDaily] = useState<UsageDailyRow[]>([]);
   const [boundary, setBoundary] = useState<string | null>(null);
@@ -29,12 +44,12 @@ export const UsageDashboard: React.FC = () => {
     setError(null);
     try {
       const [s, d, t, f, r, h] = await Promise.all([
-        api.getUsageSummary(days),
-        api.getUsageDaily(days),
-        api.getUsageTopUsers(days),
-        api.getUsageFunnel(days),
+        api.getUsageSummary(window_),
+        api.getUsageDaily(window_),
+        api.getUsageTopUsers(window_),
+        api.getUsageFunnel(window_),
         api.getUsageRetention(),
-        api.getUsageHeatmap(days),
+        api.getUsageHeatmap(window_),
       ]);
       setSummary(s);
       setDaily(d.days);
@@ -48,10 +63,27 @@ export const UsageDashboard: React.FC = () => {
     } finally {
       setLoading(false);
     }
-  }, [days]);
+  }, [window_]);
 
   useEffect(() => { loadAll(); }, [loadAll]);
 
+  const onSelectWindow = (value: string) => {
+    setSelectValue(value);
+    if (value === 'all') {
+      setWindow({ all: true });
+    } else if (value !== 'custom') {
+      setWindow({ days: Number(value) });
+    }
+    // 'custom' waits for Apply
+  };
+
+  const applyCustomRange = () => {
+    if (customStart && customEnd && customStart <= customEnd) {
+      setWindow({ start: customStart, end: customEnd });
+    }
+  };
+
+  const label = windowLabel(window_);
   const hasProxyDays = daily.some((r) => r.logins_proxy);
   const formatDate = (d: string) =>
     new Date(d + 'T00:00:00').toLocaleDateString('en-GB', { day: 'numeric', month: 'short' });
@@ -65,16 +97,45 @@ export const UsageDashboard: React.FC = () => {
           <h2 className="text-lg font-semibold text-gray-900">Usage</h2>
           <p className="text-sm text-gray-500">Who is using Tellr and how.</p>
         </div>
-        <div className="flex items-center gap-2">
-          <label htmlFor="usage-days" className="text-sm text-gray-600">Window:</label>
+        <div className="flex flex-wrap items-center justify-end gap-2">
+          <label htmlFor="usage-window" className="text-sm text-gray-600">Window:</label>
           <select
-            id="usage-days"
-            value={days}
-            onChange={(e) => setDays(Number(e.target.value))}
+            id="usage-window"
+            value={selectValue}
+            onChange={(e) => onSelectWindow(e.target.value)}
             className="text-sm border border-gray-300 rounded px-2 py-1"
           >
-            {WINDOW_OPTIONS.map((d) => <option key={d} value={d}>{d} days</option>)}
+            {WINDOW_OPTIONS.map((d) => <option key={d} value={String(d)}>{d} days</option>)}
+            <option value="all">All data</option>
+            <option value="custom">Custom range…</option>
           </select>
+          {selectValue === 'custom' && (
+            <span className="flex items-center gap-1">
+              <input
+                type="date"
+                aria-label="Range start"
+                value={customStart}
+                onChange={(e) => setCustomStart(e.target.value)}
+                className="text-sm border border-gray-300 rounded px-2 py-1"
+              />
+              <span className="text-sm text-gray-500">to</span>
+              <input
+                type="date"
+                aria-label="Range end"
+                value={customEnd}
+                onChange={(e) => setCustomEnd(e.target.value)}
+                className="text-sm border border-gray-300 rounded px-2 py-1"
+              />
+              <button
+                type="button"
+                onClick={applyCustomRange}
+                disabled={!customStart || !customEnd || customStart > customEnd}
+                className="text-sm px-3 py-1 rounded bg-blue-600 text-white disabled:opacity-40"
+              >
+                Apply
+              </button>
+            </span>
+          )}
         </div>
       </div>
 
@@ -86,14 +147,14 @@ export const UsageDashboard: React.FC = () => {
           <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-4">
             <StatCard label="Total Users Ever" value={String(summary.total_users_ever)} />
             <StatCard label="Total Decks Ever" value={String(summary.total_decks_ever)} />
-            <StatCard label={`Active Users (${days}d)`} value={String(summary.window.active_users)} />
-            <StatCard label={`Decks (${days}d)`} value={String(summary.window.decks_created)} />
+            <StatCard label={`Active Users (${label})`} value={String(summary.window.active_users)} />
+            <StatCard label={`Decks (${label})`} value={String(summary.window.decks_created)} />
             <StatCard
               label="Decks / Active User"
               value={summary.window.avg_decks_per_active_user !== null
                 ? String(summary.window.avg_decks_per_active_user) : '-'}
             />
-            <StatCard label={`Logins (${days}d)`} value={String(summary.window.logins)} />
+            <StatCard label={`Logins (${label})`} value={String(summary.window.logins)} />
           </div>
 
           <ChartSection
@@ -145,7 +206,7 @@ export const UsageDashboard: React.FC = () => {
 
           {funnel && (
             <ChartSection
-              title={`Funnel (${days}d)`}
+              title={`Funnel (${label})`}
               subtitle={funnel.proxy ? 'No login events in window — using session creations as proxy.' : undefined}
             >
               <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
@@ -157,7 +218,7 @@ export const UsageDashboard: React.FC = () => {
             </ChartSection>
           )}
 
-          <ChartSection title={`Top Users (${days}d)`}>
+          <ChartSection title={`Top Users (${label})`}>
             {topUsers.length === 0
               ? <p className="text-sm text-gray-500">No user activity in this window.</p>
               : (
@@ -210,7 +271,7 @@ export const UsageDashboard: React.FC = () => {
           </ChartSection>
 
           {heatmap && (
-            <ChartSection title={`Activity Heatmap (${days}d, UTC)`}>
+            <ChartSection title={`Activity Heatmap (${label}, UTC)`}>
               <div className="overflow-x-auto">
                 <table className="text-xs border-collapse">
                   <thead>

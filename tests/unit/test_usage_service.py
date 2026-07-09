@@ -287,3 +287,123 @@ class TestHeatmap:
         assert all(len(row) == 24 for row in result["matrix"])
         assert result["matrix"][ts.weekday()][12] >= 1
         assert result["max"] >= 1
+
+
+class TestWindowModes:
+    """Custom date-range and all-data windows (resolve_window)."""
+
+    def test_range_mode_filters_both_ends(self, db_session):
+        from src.api.services.usage_service import UsageService
+
+        _seed(
+            db_session,
+            events=[
+                ("old@x.com", "login", TODAY - 10 * D, None),
+                ("now@x.com", "login", TODAY, None),
+            ],
+        )
+        start = (TODAY - 12 * D).date()
+        end = (TODAY - 8 * D).date()
+        result = UsageService().get_summary(db_session, start=start, end=end)
+        # Only the 10-days-ago event falls inside [start, end]
+        assert result["window"]["active_users"] == 1
+        assert result["window"]["logins"] == 1
+        assert result["window"]["days"] is None
+        assert result["window"]["start"] == start.strftime("%Y-%m-%d")
+        assert result["window"]["end"] == end.strftime("%Y-%m-%d")
+        assert result["window"]["all"] is False
+
+    def test_range_mode_daily_rows_cover_exact_range(self, db_session):
+        from src.api.services.usage_service import UsageService
+
+        _seed(db_session, events=[("old@x.com", "login", TODAY - 10 * D, None)])
+        start = (TODAY - 12 * D).date()
+        end = (TODAY - 8 * D).date()
+        result = UsageService().get_daily(db_session, start=start, end=end)
+        dates = [r["date"] for r in result["days"]]
+        assert len(dates) == 5
+        assert dates[0] == start.strftime("%Y-%m-%d")
+        assert dates[-1] == end.strftime("%Y-%m-%d")
+        target = (TODAY - 10 * D).strftime("%Y-%m-%d")
+        row = next(r for r in result["days"] if r["date"] == target)
+        assert row["logins"] == 1
+
+    def test_range_end_is_inclusive(self, db_session):
+        from src.api.services.usage_service import UsageService
+
+        _seed(db_session, events=[("edge@x.com", "login", TODAY, None)])
+        result = UsageService().get_summary(
+            db_session, start=(TODAY - 1 * D).date(), end=TODAY.date()
+        )
+        assert result["window"]["logins"] == 1
+
+    def test_all_data_includes_ancient_history(self, db_session):
+        from src.api.services.usage_service import UsageService
+
+        _seed(
+            db_session,
+            events=[
+                ("ancient@x.com", "login", TODAY - 400 * D, None),
+                ("now@x.com", "login", TODAY, None),
+            ],
+        )
+        result = UsageService().get_summary(db_session, all_data=True)
+        assert result["window"]["active_users"] == 2
+        assert result["window"]["logins"] == 2
+        assert result["window"]["days"] is None
+        assert result["window"]["all"] is True
+        # 400-day-old event is outside any days window but inside all-data
+        default = UsageService().get_summary(db_session)
+        assert default["window"]["active_users"] == 1
+
+    def test_all_data_daily_spans_from_earliest_event(self, db_session):
+        from src.api.services.usage_service import UsageService
+
+        _seed(
+            db_session,
+            events=[
+                ("a@x.com", "login", TODAY - 40 * D, None),
+                ("a@x.com", "login", TODAY, None),
+            ],
+        )
+        result = UsageService().get_daily(db_session, all_data=True)
+        assert len(result["days"]) == 41
+        assert result["days"][0]["date"] == (TODAY - 40 * D).strftime("%Y-%m-%d")
+        assert result["days"][-1]["date"] == TODAY.strftime("%Y-%m-%d")
+
+    def test_all_data_daily_empty_db(self, db_session):
+        from src.api.services.usage_service import UsageService
+
+        result = UsageService().get_daily(db_session, all_data=True)
+        assert len(result["days"]) == 1  # just today
+        assert result["window"]["all"] is True
+
+    def test_days_mode_unchanged_default(self, db_session):
+        from src.api.services.usage_service import UsageService
+
+        result = UsageService().get_daily(db_session)
+        assert len(result["days"]) == 7
+        assert result["window"]["days"] == 7
+
+    def test_top_users_and_funnel_and_heatmap_accept_range(self, db_session):
+        from src.api.services.usage_service import UsageService
+
+        _seed(
+            db_session,
+            events=[("old@x.com", "login", TODAY - 10 * D, None)],
+            sessions=[("s1", "old@x.com", TODAY - 10 * D)],
+            decks=[("s1", TODAY - 10 * D)],
+        )
+        start = (TODAY - 12 * D).date()
+        end = (TODAY - 8 * D).date()
+        svc = UsageService()
+        top = svc.get_top_users(db_session, start=start, end=end)
+        assert top[0]["username"] == "old@x.com"
+        assert top[0]["decks_created"] == 1
+        funnel = svc.get_funnel(db_session, start=start, end=end)
+        assert funnel["logins"] == 1
+        assert funnel["users_who_created_deck"] == 1
+        heatmap = svc.get_heatmap(db_session, start=start, end=end)
+        assert heatmap["max"] >= 1
+        # Same calls with a window that excludes the data
+        assert svc.get_top_users(db_session, start=(TODAY - 5 * D).date(), end=TODAY.date()) == []
