@@ -127,6 +127,9 @@ class DesignSystemSummary(BaseModel):
     token_count: int
     asset_count: int
     template_count: int
+    # Brand font family names (from font_mapping_json) so the picker can show
+    # its "font stack · N templates" subtitle without fetching the detail.
+    font_families: List[str] = []
     created_at: str
     updated_at: str
 
@@ -190,6 +193,24 @@ def _asset_thumbnail_url(ds_id: int, asset: DesignSystemAsset) -> Optional[str]:
     return f"{_asset_url(ds_id, asset.id)}/thumbnail"
 
 
+def _font_families(font_mapping_json: Optional[dict]) -> List[str]:
+    """Sorted family names from ``font_mapping_json`` (scalar column read)."""
+    families = (
+        font_mapping_json.get("families")
+        if isinstance(font_mapping_json, dict)
+        else None
+    )
+    if not isinstance(families, list):
+        return []
+    return sorted(
+        {
+            str(f["family"]).strip()
+            for f in families
+            if isinstance(f, dict) and str(f.get("family") or "").strip()
+        }
+    )
+
+
 def _summary(
     ds: DesignSystem, *, token_count: int, asset_count: int
 ) -> DesignSystemSummary:
@@ -205,6 +226,7 @@ def _summary(
         token_count=token_count,
         asset_count=asset_count,
         template_count=_template_count(ds.manifest_json),
+        font_families=_font_families(ds.font_mapping_json),
         created_at=ds.created_at.isoformat(),
         updated_at=ds.updated_at.isoformat(),
     )
@@ -305,7 +327,11 @@ async def import_design_system(
         )
     try:
         ds = design_system_service.import_bundle(
-            db, zip_bytes=content, user=_current_user(), name_override=name
+            db,
+            zip_bytes=content,
+            user=_current_user(),
+            name_override=name,
+            source_filename=file.filename,
         )
         return _detail(ds)
     except DesignSystemNameConflictError as e:

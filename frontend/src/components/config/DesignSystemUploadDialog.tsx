@@ -106,7 +106,24 @@ export const DesignSystemUploadDialog: React.FC<DesignSystemUploadDialogProps> =
                 accept=".zip,application/zip"
                 disabled={uploading}
                 onChange={(e) => {
-                  setFile(e.target.files?.[0] ?? null);
+                  // Validate at choose time — a wrong pick must produce an
+                  // explicit error immediately, never a silent no-op submit.
+                  const chosen = e.target.files?.[0] ?? null;
+                  if (chosen && !/\.zip$/i.test(chosen.name)) {
+                    setFile(null);
+                    setError(
+                      `"${chosen.name}" is not a .zip bundle. Export the design system as a .zip and try again.`,
+                    );
+                    e.target.value = '';
+                    return;
+                  }
+                  if (chosen && chosen.size === 0) {
+                    setFile(null);
+                    setError(`"${chosen.name}" is empty (0 bytes) — re-export the bundle.`);
+                    e.target.value = '';
+                    return;
+                  }
+                  setFile(chosen);
                   setError(null);
                 }}
                 className="flex w-full rounded-md border border-input bg-background px-3 py-2 text-sm text-foreground file:mr-3 file:rounded file:border-0 file:bg-primary/10 file:px-3 file:py-1 file:text-sm file:font-medium file:text-primary disabled:cursor-not-allowed disabled:opacity-50"

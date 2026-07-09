@@ -189,19 +189,15 @@ export const DesignSystemLibrary: React.FC = () => {
             {systems.map((system) => {
               const isSelected = system.id === selectedId;
               return (
+                /* Click-delegation wrapper (mouse convenience only): the card
+                   title below is the real <button>, so keyboard/AT users get a
+                   proper control and the action Buttons are never nested
+                   inside an interactive element (a11y: nested-interactive). */
                 <div
                   key={system.id}
                   data-testid="design-system-card"
-                  role="button"
-                  tabIndex={0}
                   onClick={() => selectSystem(system.id)}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter' || e.key === ' ') {
-                      e.preventDefault();
-                      selectSystem(system.id);
-                    }
-                  }}
-                  className={`cursor-pointer rounded-lg border bg-card p-4 text-left transition-colors hover:bg-accent/5 focus:outline-none focus-visible:ring-1 focus-visible:ring-ring ${
+                  className={`cursor-pointer rounded-lg border bg-card p-4 text-left transition-colors hover:bg-accent/5 focus-within:ring-1 focus-within:ring-ring ${
                     isSelected ? 'border-primary ring-1 ring-primary' : 'border-border'
                   }`}
                 >
@@ -214,7 +210,18 @@ export const DesignSystemLibrary: React.FC = () => {
                       <div className="flex items-start justify-between gap-3">
                         <div className="min-w-0 flex-1">
                           <div className="flex flex-wrap items-center gap-2">
-                            <h3 className="text-sm font-medium text-foreground">{system.name}</h3>
+                            <h3 className="text-sm font-medium text-foreground">
+                              <button
+                                type="button"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  selectSystem(system.id);
+                                }}
+                                className="text-left focus:outline-none focus-visible:underline"
+                              >
+                                {system.name}
+                              </button>
+                            </h3>
                             {system.is_default && (
                               <Badge className="text-xs bg-amber-500/10 text-amber-700 hover:bg-amber-500/20">
                                 Default
@@ -283,6 +290,10 @@ export const DesignSystemLibrary: React.FC = () => {
               detail={selectedId != null ? detail : null}
               loading={detailLoading}
               error={detailError}
+              onRenamed={(updated) => {
+                setDetail(updated);
+                void loadSystems();
+              }}
             />
           </div>
         </div>
