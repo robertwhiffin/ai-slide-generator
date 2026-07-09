@@ -161,16 +161,46 @@ export const AgentConfigProvider: React.FC<{ children: React.ReactNode }> = ({ c
     setConfigOwnerSessionId(sessionId);
   }, []);
 
-  // Last SERVER-CONFIRMED config per session (keyed so it can never leak
-  // across switches): updated whenever a session's GET resolves — INCLUDING
-  // when the snapshot is discarded because an in-flight edit claimed
-  // ownership — and whenever a PUT/profile-load confirms. Failure paths
-  // revert to THIS, never to pre-edit in-memory residue: 'edits win over the
-  // in-flight GET' only holds when the edit SUCCEEDS; a failed edit must
-  // restore the target session's OWN state.
-  const lastConfirmedRef = useRef<{ sessionId: string; config: AgentConfig } | null>(null);
+  // ------------------------------------------------------------------
+  // THE settle invariant (structural — every async continuation goes
+  // through here).
+  //
+  // Any async continuation in this context (GET resolve, PUT confirm,
+  // PUT catch, refresh resolve, profile-load resolve, pre-session default
+  // loads) captures the surface it was ISSUED FOR (a session id, or null
+  // for pre-session) and, at settle time, may mutate VISIBLE state
+  // (setAgentConfig / ownership / toasts) ONLY if that surface is still
+  // the active one. A continuation settling after the user moved on may
+  // at most update the per-session confirmed stash — which is keyed, so
+  // it is safe by construction. This closes the whole class of stale-
+  // closure holes (a late-failing B PUT poisoning C's screen, etc.), not
+  // individual instances.
+  // ------------------------------------------------------------------
+  const activeSurfaceRef = useRef<string | null>(urlSessionId);
+  // Render-time mirror: continuations settling between a navigation render
+  // and its effects must already compare against the NEW surface.
+  activeSurfaceRef.current = urlSessionId;
+
+  const settleForSurface = useCallback(
+    (issuedFor: string | null, mutateVisible: () => void): boolean => {
+      if (activeSurfaceRef.current !== issuedFor) return false;
+      mutateVisible();
+      return true;
+    },
+    [],
+  );
+
+  // Last SERVER-CONFIRMED config PER SESSION (a keyed map — one session's
+  // late-settling artifacts can never displace another's entry): updated
+  // whenever a session's GET resolves — INCLUDING when the snapshot is
+  // discarded because an in-flight edit claimed ownership, and including
+  // late settles after the user moved on — and whenever a PUT/profile-load
+  // confirms. Failure paths revert to THIS, never to pre-edit in-memory
+  // residue: 'edits win over the in-flight GET' only holds when the edit
+  // SUCCEEDS; a failed edit must restore the target session's OWN state.
+  const lastConfirmedBySessionRef = useRef<Map<string, AgentConfig>>(new Map());
   const stashConfirmed = useCallback((sessionId: string, config: AgentConfig) => {
-    lastConfirmedRef.current = { sessionId, config };
+    lastConfirmedBySessionRef.current.set(sessionId, config);
   }, []);
   // updateConfig (declared before refreshConfig) triggers a fresh fetch on
   // the no-snapshot failure path via this forward ref.
@@ -199,7 +229,7 @@ export const AgentConfigProvider: React.FC<{ children: React.ReactNode }> = ({ c
           const updated = { ...storedConfig };
           if (updated.slide_style_id == null) updated.slide_style_id = styleId;
           if (updated.deck_prompt_id == null) updated.deck_prompt_id = resolveDefaultDeckPromptId();
-          setAgentConfig(updated);
+          settleForSurface(null, () => setAgentConfig(updated));
         });
       }
       return;
@@ -224,12 +254,12 @@ export const AgentConfigProvider: React.FC<{ children: React.ReactNode }> = ({ c
           config.deck_prompt_id = resolveDefaultDeckPromptId();
         }
 
-        setAgentConfig(config);
+        settleForSurface(null, () => setAgentConfig(config));
       })
       .catch(err => {
         console.error('Failed to load default profile for pre-session config:', err);
       });
-  }, [isPreSession]);
+  }, [isPreSession, settleForSurface]);
 
   // ------------------------------------------------------------------
   // Reset default-profile flag when entering an active session so
@@ -259,11 +289,9 @@ export const AgentConfigProvider: React.FC<{ children: React.ReactNode }> = ({ c
     claimOwnership(null);
     setAgentConfig(prev => withoutSessionScopedState(prev));
 
-    let cancelled = false;
-    api.getAgentConfig(urlSessionId)
+    const issuedFor = urlSessionId;
+    api.getAgentConfig(issuedFor)
       .then(async (config) => {
-        if (cancelled) return;
-
         // If the session has no explicitly-saved config, load the default profile
         const isConfigured = (config as AgentConfig & { is_configured?: boolean }).is_configured ?? true;
 
@@ -288,30 +316,28 @@ export const AgentConfigProvider: React.FC<{ children: React.ReactNode }> = ({ c
         if (config.deck_prompt_id == null) {
           config.deck_prompt_id = resolveDefaultDeckPromptId();
         }
-        if (cancelled) return;
-        if (configOwnerRef.current === urlSessionId) {
-          // The user explicitly edited config for this session while the
-          // GET was in flight: their intent is already persisted via the
-          // PUT — this snapshot is stale FOR DISPLAY. It is still the
-          // session's own loaded state, so stash it: if that in-flight
-          // edit's PUT fails, the revert target is THIS, never the
-          // pre-edit (possibly foreign) in-memory values.
-          stashConfirmed(urlSessionId, config);
-          return;
-        }
-        setAgentConfig(config);
-        claimOwnership(urlSessionId);
-        stashConfirmed(urlSessionId, config);
+        // The session's own loaded state — always stash (keyed by ITS id;
+        // late settles after a further switch update only their own entry).
+        if (issuedFor) stashConfirmed(issuedFor, config);
+        settleForSurface(issuedFor, () => {
+          if (configOwnerRef.current === issuedFor) {
+            // The user explicitly edited config for this session while the
+            // GET was in flight: their intent is already persisted via the
+            // PUT — this snapshot is stale FOR DISPLAY (it is stashed above
+            // as the failure-revert target). Explicit edits win.
+            return;
+          }
+          setAgentConfig(config);
+          claimOwnership(issuedFor);
+        });
       })
       .catch(err => {
         console.error('Failed to load agent config for session:', err);
-        if (!cancelled) {
+        settleForSurface(issuedFor, () => {
           showToast('Failed to load agent configuration', 'error');
-        }
+        });
       });
-
-    return () => { cancelled = true; };
-  }, [urlSessionId, isPreSession, showToast, claimOwnership, stashConfirmed]);
+  }, [urlSessionId, isPreSession, showToast, claimOwnership, stashConfirmed, settleForSurface]);
 
   // ------------------------------------------------------------------
   // localStorage persistence for pre-session mode
@@ -334,45 +360,56 @@ export const AgentConfigProvider: React.FC<{ children: React.ReactNode }> = ({ c
     setAgentConfig(config);
 
     if (!isPreSession && urlSessionId) {
+      const issuedFor = urlSessionId;
       // An explicit edit is intent FOR THIS SESSION: it claims ownership, so
       // chat requests may carry the config again and a still-in-flight
       // config GET for this session is treated as stale (edits win).
-      claimOwnership(urlSessionId);
-      console.log('[AgentConfigContext] Syncing to backend, session:', urlSessionId, 'tools:', config.tools.length);
+      claimOwnership(issuedFor);
+      console.log('[AgentConfigContext] Syncing to backend, session:', issuedFor, 'tools:', config.tools.length);
       try {
-        const confirmed = await api.updateAgentConfig(urlSessionId, config);
+        const confirmed = await api.updateAgentConfig(issuedFor, config);
         console.log('[AgentConfigContext] Backend confirmed:', JSON.stringify(confirmed));
-        setAgentConfig(confirmed);
-        stashConfirmed(urlSessionId, confirmed);
+        // Server truth for ITS session — stash unconditionally (keyed);
+        // touch the screen only if the user is still on that session.
+        stashConfirmed(issuedFor, confirmed);
+        settleForSurface(issuedFor, () => setAgentConfig(confirmed));
         return true;
       } catch (err) {
         console.error('[AgentConfigContext] Failed to update agent config:', err);
         // 'Edits win' only holds for edits that SUCCEED. A failed edit must
         // restore the target session's OWN state — never pre-edit in-memory
-        // residue, which after a session switch is another session's config.
-        const confirmed = lastConfirmedRef.current;
-        if (confirmed && confirmed.sessionId === urlSessionId) {
-          // The session's last server-confirmed state (its GET snapshot —
-          // including one discarded-as-stale mid-edit — or an earlier
-          // confirmed PUT). It IS this session's state, so it stays owned.
-          setAgentConfig(confirmed.config);
-          claimOwnership(urlSessionId);
-        } else {
-          // The edit fired before any snapshot for this session ever
-          // existed: fall back to defaults with no owner (chat requests
-          // omit config) and fetch the session's real config fresh.
-          setAgentConfig({ ...DEFAULT_AGENT_CONFIG });
+        // residue — and a failure settling AFTER the user moved on must not
+        // touch the new surface at all (its own load already reset it).
+        const applied = settleForSurface(issuedFor, () => {
+          const ownConfirmed = lastConfirmedBySessionRef.current.get(issuedFor);
+          if (ownConfirmed) {
+            // The session's last server-confirmed state (its GET snapshot —
+            // including one discarded-as-stale mid-edit — or an earlier
+            // confirmed PUT). It IS this session's state, so it stays owned.
+            setAgentConfig(ownConfirmed);
+            claimOwnership(issuedFor);
+          } else {
+            // The edit fired before any snapshot for this session ever
+            // existed: fall back to defaults with no owner (chat requests
+            // omit config) and fetch the session's real config fresh.
+            setAgentConfig({ ...DEFAULT_AGENT_CONFIG });
+            claimOwnership(null);
+            void refreshConfigRef.current?.();
+          }
+          showToast('Failed to update configuration', 'error');
+        });
+        if (!applied && configOwnerRef.current === issuedFor) {
+          // Defensive: never leave a stale claim for a session that is no
+          // longer active (a switch normally already dropped it).
           claimOwnership(null);
-          void refreshConfigRef.current?.();
         }
-        showToast('Failed to update configuration', 'error');
         return false;
       }
     } else {
       console.log('[AgentConfigContext] Pre-session mode, config saved locally only. isPreSession:', isPreSession, 'urlSessionId:', urlSessionId);
       return true;
     }
-  }, [isPreSession, urlSessionId, showToast, claimOwnership, stashConfirmed]);
+  }, [isPreSession, urlSessionId, showToast, claimOwnership, stashConfirmed, settleForSurface]);
 
   // ------------------------------------------------------------------
   // Convenience mutators
@@ -499,15 +536,18 @@ export const AgentConfigProvider: React.FC<{ children: React.ReactNode }> = ({ c
 
   const refreshConfig = useCallback(async () => {
     if (isPreSession || !urlSessionId) return;
+    const issuedFor = urlSessionId;
     try {
-      const config = await api.getAgentConfig(urlSessionId);
-      setAgentConfig(config);
-      claimOwnership(urlSessionId); // freshly loaded FOR this session
-      stashConfirmed(urlSessionId, config);
+      const config = await api.getAgentConfig(issuedFor);
+      stashConfirmed(issuedFor, config);
+      settleForSurface(issuedFor, () => {
+        setAgentConfig(config);
+        claimOwnership(issuedFor); // freshly loaded FOR this session
+      });
     } catch (err) {
       console.error('[AgentConfigContext] Failed to refresh config:', err);
     }
-  }, [isPreSession, urlSessionId, claimOwnership, stashConfirmed]);
+  }, [isPreSession, urlSessionId, claimOwnership, stashConfirmed, settleForSurface]);
 
   useEffect(() => {
     refreshConfigRef.current = refreshConfig;
@@ -529,34 +569,45 @@ export const AgentConfigProvider: React.FC<{ children: React.ReactNode }> = ({ c
     }
 
     if (!isPreSession && urlSessionId) {
+      const issuedFor = urlSessionId;
       // Active session: call backend, then update local state
       try {
-        const result = await api.loadProfile(urlSessionId, profileId);
-        setAgentConfig(result.agent_config);
-        claimOwnership(urlSessionId); // explicitly set IN this session
-        stashConfirmed(urlSessionId, result.agent_config);
-        showToast('Profile loaded', 'success');
+        const result = await api.loadProfile(issuedFor, profileId);
+        // The profile DID apply to issuedFor server-side — stash reflects
+        // that regardless; the screen updates only if we're still there.
+        stashConfirmed(issuedFor, result.agent_config);
+        settleForSurface(issuedFor, () => {
+          setAgentConfig(result.agent_config);
+          claimOwnership(issuedFor); // explicitly set IN this session
+          showToast('Profile loaded', 'success');
+        });
       } catch (err) {
         console.error('Failed to load profile into session:', err);
-        showToast('Failed to load profile', 'error');
+        settleForSurface(issuedFor, () => {
+          showToast('Failed to load profile', 'error');
+        });
       }
     } else {
       // Pre-session: fetch profiles and apply the matching one locally
       try {
         const profiles = await api.listProfiles();
         const profile = profiles.find(p => p.id === profileId);
-        if (profile?.agent_config) {
-          setAgentConfig(profile.agent_config);
-          showToast('Profile loaded', 'success');
-        } else {
-          showToast('Profile not found or has no configuration', 'error');
-        }
+        settleForSurface(null, () => {
+          if (profile?.agent_config) {
+            setAgentConfig(profile.agent_config);
+            showToast('Profile loaded', 'success');
+          } else {
+            showToast('Profile not found or has no configuration', 'error');
+          }
+        });
       } catch (err) {
         console.error('Failed to load profile:', err);
-        showToast('Failed to load profile', 'error');
+        settleForSurface(null, () => {
+          showToast('Failed to load profile', 'error');
+        });
       }
     }
-  }, [agentConfig, isPreSession, urlSessionId, showToast, claimOwnership, stashConfirmed]);
+  }, [agentConfig, isPreSession, urlSessionId, showToast, claimOwnership, stashConfirmed, settleForSurface]);
 
   // ------------------------------------------------------------------
   // Render
