@@ -188,6 +188,8 @@ export interface DesignSystemAsset {
   height: number | null;
   /** Served-asset endpoint; bytes are never inlined in listings. */
   url: string;
+  /** Downscaled-variant endpoint for raster formats; null for SVG/fonts/etc. */
+  thumbnail_url: string | null;
 }
 
 /** List/picker view — counts only, no binary payloads. */
