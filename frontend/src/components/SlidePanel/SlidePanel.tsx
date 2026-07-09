@@ -574,13 +574,25 @@ function SlidePanelComponent(props: SlidePanelProps, ref: React.Ref<SlidePanelHa
       }
     });
 
-    await Promise.all(verificationPromises);
+    const verificationResults = await Promise.all(verificationPromises);
 
     if (sessionIdRef.current !== capturedSessionId) {
       console.log('[Auto-verify] Session changed, discarding stale results');
       setIsAutoVerifying(false);
       setVerifyingSlides(new Set());
       return;
+    }
+
+    // Failures already retried with backoff inside api.verifySlide (transient
+    // 5xx); whatever still failed gets a soft, actionable notice instead of
+    // dying silently in the console.
+    const failedVerifications = verificationResults.filter((r) => !r.success);
+    if (failedVerifications.length > 0) {
+      const failedNumbers = failedVerifications.map((r) => r.index + 1).join(', ');
+      showToast(
+        `Verification didn't complete for slide${failedVerifications.length > 1 ? 's' : ''} ${failedNumbers} — use the slide badge to retry.`,
+        'info',
+      );
     }
 
     try {
@@ -608,7 +620,7 @@ function SlidePanelComponent(props: SlidePanelProps, ref: React.Ref<SlidePanelHa
     console.log('[Auto-verify] Completed');
 
     onVerificationComplete?.();
-  }, [sessionId, isAutoVerifying, onSlideChange, onVerificationComplete]);
+  }, [sessionId, isAutoVerifying, onSlideChange, onVerificationComplete, showToast]);
 
   useEffect(() => {
     if (!slideDeck || !sessionId || isAutoVerifying) return;
