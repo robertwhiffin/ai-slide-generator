@@ -582,3 +582,85 @@ class TestBackwardCompat:
         cm.__exit__ = MagicMock(return_value=False)
         with patch("src.api.routes.agent_config.get_db_session", return_value=cm):
             _validate_references(AgentConfig(slide_style_id=style.id))  # no raise
+
+
+# ---------------------------------------------------------------------------
+# Serve asset thumbnail (downscaled grid variant)
+# ---------------------------------------------------------------------------
+
+
+class TestServeAssetThumbnail:
+    """Large systems ship hundreds of full-size assets; the detail grid loads
+    a <=128px cached PNG variant instead. Security policy identical to the
+    full endpoint (nosniff; non-raster forced to download, never rendered)."""
+
+    def _import_with_big_png(self, client):
+        from tests.unit.conftest_design_system import (
+            SYNTHETIC_README,
+            SYNTHETIC_SKILL,
+            SVG_LOGO,
+            png_bytes,
+        )
+
+        files = {
+            "assets/logo.svg": SVG_LOGO,
+            "assets/backgrounds/hero-bg.png": png_bytes(400, 300),
+            "README.md": SYNTHETIC_README,
+            "SKILL.md": SYNTHETIC_SKILL,
+        }
+        return _import(client, bundle_kwargs={"files": files}).json()
+
+    def test_raster_thumbnail_is_downscaled_png(self, client):
+        import struct
+
+        body = self._import_with_big_png(client)
+        png = next(a for a in body["assets"] if a["filename"] == "hero-bg.png")
+        assert png["thumbnail_url"] == f"{png['url']}/thumbnail"
+        resp = client.get(png["thumbnail_url"])
+        assert resp.status_code == 200
+        assert resp.headers["content-type"] == "image/png"
+        assert resp.headers.get("x-content-type-options") == "nosniff"
+        assert "content-disposition" not in {k.lower() for k in resp.headers}
+        # PNG IHDR dims: downscaled to fit 128, aspect preserved (400x300 -> 128x96)
+        assert resp.content[:8] == b"\x89PNG\r\n\x1a\n"
+        width, height = struct.unpack(">II", resp.content[16:24])
+        assert (width, height) == (128, 96)
+        assert len(resp.content) < png["size_bytes"]
+
+    def test_svg_thumbnail_keeps_download_policy(self, client):
+        """SVG has no scaled variant (small, and can carry script): the
+        endpoint serves the original bytes with the exact full-endpoint
+        policy — attachment + nosniff — so no new render surface exists."""
+        body = self._import_with_big_png(client)
+        svg = next(a for a in body["assets"] if a["filename"] == "logo.svg")
+        assert svg["thumbnail_url"] is None  # grid uses the plain url
+        resp = client.get(f"{svg['url']}/thumbnail")
+        assert resp.status_code == 200
+        assert resp.headers.get("content-disposition") == "attachment"
+        assert resp.headers.get("x-content-type-options") == "nosniff"
+        assert resp.headers["content-type"].startswith("image/svg+xml")
+
+    def test_thumbnail_404_for_wrong_ds(self, client):
+        body = self._import_with_big_png(client)
+        asset = body["assets"][0]
+        resp = client.get(f"{BASE}/999999/assets/{asset['id']}/thumbnail")
+        assert resp.status_code == 404
+
+    def test_undecodable_raster_falls_back_to_original_bytes(self, client):
+        """Corrupt image bytes must degrade to exactly the pre-thumbnail
+        behavior: the original bytes, inline, nosniff."""
+        from tests.unit.conftest_design_system import (
+            SYNTHETIC_README,
+            SYNTHETIC_SKILL,
+        )
+
+        files = {
+            "assets/broken.png": b"\x89PNG\r\n\x1a\nnot really a png",
+            "README.md": SYNTHETIC_README,
+            "SKILL.md": SYNTHETIC_SKILL,
+        }
+        body = _import(client, bundle_kwargs={"files": files}).json()
+        broken = next(a for a in body["assets"] if a["filename"] == "broken.png")
+        resp = client.get(f"{broken['url']}/thumbnail")
+        assert resp.status_code == 200
+        assert resp.content == b"\x89PNG\r\n\x1a\nnot really a png"

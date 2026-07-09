@@ -9,11 +9,12 @@
  * All content is RUNTIME data from the API — nothing brand-specific is hardcoded.
  */
 
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { Check, Layers, Palette, Image as ImageIcon, FileText } from 'lucide-react';
 import { Badge } from '@/ui/badge';
 import { configApi, resolveApiUrl } from '../../api/config';
 import type {
+  DesignSystemAsset,
   DesignSystemDetail,
   DesignSystemTemplate,
   DesignSystemToken,
@@ -50,6 +51,69 @@ function readTemplates(manifest: Record<string, unknown> | null): ManifestTempla
   if (!Array.isArray(templates)) return [];
   return templates.filter((t): t is ManifestTemplate => typeof t === 'object' && t !== null);
 }
+
+/**
+ * Defer mounting children until the placeholder scrolls near the viewport
+ * (IntersectionObserver, 200px rootMargin). Large design systems ship
+ * hundreds of assets — eager-mounting every tile fired ~400 requests /
+ * ~20MB on open. The Claude Design detail view lazy-mounts per card; same
+ * pattern here.
+ */
+const LazyMount: React.FC<{ className?: string; children: React.ReactNode }> = ({
+  className,
+  children,
+}) => {
+  const ref = useRef<HTMLDivElement>(null);
+  const [visible, setVisible] = useState(false);
+  useEffect(() => {
+    const el = ref.current;
+    if (!el || visible) return;
+    if (typeof IntersectionObserver === 'undefined') {
+      setVisible(true);
+      return;
+    }
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((entry) => entry.isIntersecting)) {
+          setVisible(true);
+          observer.disconnect();
+        }
+      },
+      { rootMargin: '200px' },
+    );
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [visible]);
+  return (
+    <div ref={ref} className={className}>
+      {visible ? children : null}
+    </div>
+  );
+};
+
+/** Grid tile image for one brand asset: lazy-mounted, thumbnail-first. */
+const AssetThumb: React.FC<{ asset: DesignSystemAsset }> = ({ asset }) => {
+  if (!asset.mime.startsWith('image/')) {
+    return (
+      <span className="flex size-9 shrink-0 items-center justify-center rounded border border-border bg-background text-muted-foreground">
+        <FileText className="size-4" />
+      </span>
+    );
+  }
+  return (
+    <LazyMount className="size-9 shrink-0">
+      <img
+        // Raster assets have a downscaled server variant; SVGs are small and
+        // served as-is.
+        src={resolveApiUrl(asset.thumbnail_url ?? asset.url)}
+        alt={asset.filename}
+        loading="lazy"
+        className="size-9 rounded border border-border bg-background object-contain"
+        onError={(e) => { (e.currentTarget as HTMLImageElement).style.visibility = 'hidden'; }}
+      />
+    </LazyMount>
+  );
+};
 
 export const DesignSystemDetailPanel: React.FC<DesignSystemDetailPanelProps> = ({
   detail,
@@ -308,18 +372,7 @@ export const DesignSystemDetailPanel: React.FC<DesignSystemDetailPanelProps> = (
                 key={asset.id}
                 className="flex items-center gap-3 rounded-md border border-border bg-muted/20 p-2"
               >
-                {asset.mime.startsWith('image/') ? (
-                  <img
-                    src={resolveApiUrl(asset.url)}
-                    alt={asset.filename}
-                    className="size-9 shrink-0 rounded border border-border bg-background object-contain"
-                    onError={(e) => { (e.currentTarget as HTMLImageElement).style.visibility = 'hidden'; }}
-                  />
-                ) : (
-                  <span className="flex size-9 shrink-0 items-center justify-center rounded border border-border bg-background text-muted-foreground">
-                    <FileText className="size-4" />
-                  </span>
-                )}
+                <AssetThumb asset={asset} />
                 <div className="min-w-0 flex-1">
                   <div className="truncate text-sm text-foreground">{asset.filename}</div>
                   <div className="text-xs text-muted-foreground">

@@ -16,6 +16,7 @@ silently overwritten; the caller supplies a different name (import accepts a
 import logging
 import os
 import re
+from collections import OrderedDict
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Response, UploadFile, status
@@ -66,6 +67,9 @@ class AssetOut(BaseModel):
     width: Optional[int]
     height: Optional[int]
     url: str  # served-asset endpoint (bytes are never inlined in listings)
+    # Downscaled-variant endpoint for raster formats; None for SVG/fonts/etc.
+    # (SVGs are small — grids use ``url`` directly for those).
+    thumbnail_url: Optional[str] = None
 
 
 class TemplateOut(BaseModel):
@@ -165,6 +169,13 @@ def _asset_url(ds_id: int, asset_id: int) -> str:
     return f"/api/settings/design-systems/{ds_id}/assets/{asset_id}"
 
 
+def _asset_thumbnail_url(ds_id: int, asset: DesignSystemAsset) -> Optional[str]:
+    """Thumbnail endpoint URL for raster assets; None for everything else."""
+    if str(asset.mime) not in _INLINE_SAFE_MIMES:
+        return None
+    return f"{_asset_url(ds_id, asset.id)}/thumbnail"
+
+
 def _summary(
     ds: DesignSystem, *, token_count: int, asset_count: int
 ) -> DesignSystemSummary:
@@ -205,6 +216,7 @@ def _detail(ds: DesignSystem) -> DesignSystemDetail:
                 width=a.width,
                 height=a.height,
                 url=_asset_url(ds.id, a.id),
+                thumbnail_url=_asset_thumbnail_url(ds.id, a),
             )
             for a in assets
         ],
@@ -656,6 +668,102 @@ def serve_design_system_asset(ds_id: int, asset_id: int, db: Session = Depends(g
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to serve design system asset",
+        )
+
+
+# In-process LRU of downscaled asset variants. Keyed by asset id — safe
+# because asset rows are immutable after import (a re-upload mints new ids).
+_THUMBNAIL_MAX_DIM = 128
+_THUMBNAIL_CACHE_MAX = 512
+_thumbnail_cache: "OrderedDict[int, bytes]" = OrderedDict()
+
+
+def _thumbnail_png(asset_id: int, data: bytes) -> Optional[bytes]:
+    """Downscale raster bytes to a <=128px PNG, LRU-cached per asset id.
+
+    ``None`` on any decode/encode failure (corrupt file, decompression-bomb
+    guard, unsupported subformat) — the endpoint then falls back to serving
+    the original bytes, exactly what the grid loaded before this existed.
+    """
+    cached = _thumbnail_cache.get(asset_id)
+    if cached is not None:
+        _thumbnail_cache.move_to_end(asset_id)
+        return cached
+    try:
+        from io import BytesIO
+
+        from PIL import Image
+
+        with Image.open(BytesIO(data)) as im:
+            im.thumbnail((_THUMBNAIL_MAX_DIM, _THUMBNAIL_MAX_DIM))
+            has_alpha = im.mode in ("RGBA", "LA", "PA") or (
+                im.mode == "P" and "transparency" in im.info
+            )
+            out = BytesIO()
+            im.convert("RGBA" if has_alpha else "RGB").save(
+                out, format="PNG", optimize=True
+            )
+            png = out.getvalue()
+    except Exception:
+        logger.warning("Thumbnail generation failed for asset %s", asset_id, exc_info=True)
+        return None
+    _thumbnail_cache[asset_id] = png
+    _thumbnail_cache.move_to_end(asset_id)
+    while len(_thumbnail_cache) > _THUMBNAIL_CACHE_MAX:
+        _thumbnail_cache.popitem(last=False)
+    return png
+
+
+@router.get("/{ds_id}/assets/{asset_id}/thumbnail")
+def serve_design_system_asset_thumbnail(
+    ds_id: int, asset_id: int, db: Session = Depends(get_db)
+):
+    """Serve a downscaled variant of a raster asset for grid display.
+
+    Large design systems ship hundreds of full-size assets; the detail grid
+    only needs ~36px tiles, so this serves a cached <=128px PNG instead of
+    the original megabytes. Security policy is IDENTICAL to the full-asset
+    endpoint: nosniff always, and non-raster types (SVG can carry script)
+    are returned as the original bytes forced to download — never a new
+    render surface. Asset rows are immutable per id, so the response is
+    long-cacheable.
+    """
+    try:
+        asset = (
+            db.query(DesignSystemAsset)
+            .filter(
+                DesignSystemAsset.id == asset_id,
+                DesignSystemAsset.design_system_id == ds_id,
+            )
+            .first()
+        )
+        if not asset:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Asset {asset_id} not found for design system {ds_id}",
+            )
+        headers = {
+            "X-Content-Type-Options": "nosniff",
+            "Cache-Control": "private, max-age=86400, immutable",
+        }
+        if asset.mime not in _INLINE_SAFE_MIMES:
+            # Same policy as the full endpoint — static value, no
+            # attacker-controlled filename.
+            headers["Content-Disposition"] = "attachment"
+            return Response(content=asset.data, media_type=asset.mime, headers=headers)
+        png = _thumbnail_png(int(asset.id), bytes(asset.data))
+        if png is None:
+            return Response(content=asset.data, media_type=asset.mime, headers=headers)
+        return Response(content=png, media_type="image/png", headers=headers)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(
+            f"Error serving design system asset thumbnail {asset_id}: {e}", exc_info=True
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to serve design system asset thumbnail",
         )
 
 
