@@ -1,0 +1,37 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src data:;">
+  <meta charset="UTF-8">
+  <title>Inline SVG icon card</title>
+  <style>
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+    html, body {
+      width: 1280px;
+      height: 720px;
+      margin: 0;
+      padding: 0;
+      overflow: hidden;
+      background: #ffffff;
+      font-family: Arial, Helvetica, sans-serif;
+    }
+  </style>
+</head>
+<body>
+  <div class="slide" style="position:relative;width:1280px;height:720px;background:#ffffff;">
+    <h1 style="position:absolute;left:88px;top:72px;width:800px;font-size:40px;color:#0B3D66;">Icon Card Slide</h1>
+    <div style="position:absolute;left:88px;top:200px;width:420px;height:260px;background:#F2E8DA;border-radius:12px;">
+      <svg width="120" height="120" viewBox="0 0 120 120" style="position:absolute;left:40px;top:40px;">
+        <rect width="120" height="120" rx="16" fill="#0B3D66"/>
+        <circle cx="60" cy="52" r="26" fill="#E8722A"/>
+        <path d="M30 96 L60 66 L90 96 Z" fill="#FFFFFF"/>
+      </svg>
+      <p style="position:absolute;left:190px;top:80px;width:200px;font-size:20px;color:#0B3D66;">Vector icon lives here.</p>
+    </div>
+  </div>
+</body>
+</html>
