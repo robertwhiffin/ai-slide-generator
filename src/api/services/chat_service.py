@@ -102,6 +102,16 @@ class ChatService:
         )
         needs_html = raw_html and "{{image:" in raw_html
         needs_deck_html = deck_dict and deck_dict.get("html_content") and "{{image:" in deck_dict.get("html_content", "")
+        # background-image url() references live in the deck's top-level
+        # ``css``, not in slide html — gate on it too, else a deck whose only
+        # image reference is in css skips the resolver entirely (same gap the
+        # ds-asset gate below closed; substitute_deck_dict_images covers the
+        # css field).
+        needs_deck_css = bool(
+            deck_dict
+            and deck_dict.get("css")
+            and "{{image:" in deck_dict.get("css", "")
+        )
 
         # Design-system brand assets ({{ds-asset:ID}}) — parallel, orthogonal namespace.
         ds_needs_deck = deck_dict and any(
@@ -124,11 +134,11 @@ class ChatService:
         )
 
         if (
-            needs_deck or needs_html or needs_deck_html
+            needs_deck or needs_html or needs_deck_html or needs_deck_css
             or ds_needs_deck or ds_needs_html or ds_needs_deck_html or ds_needs_deck_css
         ):
             with get_db_session() as db:
-                if needs_deck or needs_deck_html:
+                if needs_deck or needs_deck_html or needs_deck_css:
                     substitute_deck_dict_images(deck_dict, db)
                 if needs_html:
                     raw_html = substitute_image_placeholders(raw_html, db)
