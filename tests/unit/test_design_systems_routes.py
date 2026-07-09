@@ -597,9 +597,9 @@ class TestServeAssetThumbnail:
 
     def _import_with_big_png(self, client):
         from tests.unit.conftest_design_system import (
+            SVG_LOGO,
             SYNTHETIC_README,
             SYNTHETIC_SKILL,
-            SVG_LOGO,
             png_bytes,
         )
 

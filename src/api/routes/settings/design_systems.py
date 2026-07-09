@@ -190,7 +190,7 @@ def _asset_thumbnail_url(ds_id: int, asset: DesignSystemAsset) -> Optional[str]:
     """Thumbnail endpoint URL for raster assets; None for everything else."""
     if str(asset.mime) not in _INLINE_SAFE_MIMES:
         return None
-    return f"{_asset_url(ds_id, asset.id)}/thumbnail"
+    return f"{_asset_url(ds_id, int(asset.id))}/thumbnail"
 
 
 def _font_families(font_mapping_json: Optional[dict]) -> List[str]:
@@ -252,7 +252,7 @@ def _detail(ds: DesignSystem) -> DesignSystemDetail:
                 width=a.width,
                 height=a.height,
                 url=_asset_url(ds.id, a.id),
-                thumbnail_url=_asset_thumbnail_url(ds.id, a),
+                thumbnail_url=_asset_thumbnail_url(int(ds.id), a),
             )
             for a in assets
         ],
@@ -702,10 +702,10 @@ def get_design_system_template_source(
             detail=f"Template {template_id} not found for design system {ds_id}",
         )
     return TemplateSourceOut(
-        id=template.id,
-        name=template.name,
-        layout_html=template.layout_html,
-        token_css=template.token_css,
+        id=int(template.id),
+        name=str(template.name),
+        layout_html=str(template.layout_html),
+        token_css=str(template.token_css) if template.token_css is not None else None,
     )
 
 
@@ -826,10 +826,10 @@ def serve_design_system_asset_thumbnail(
             # Same policy as the full endpoint — static value, no
             # attacker-controlled filename.
             headers["Content-Disposition"] = "attachment"
-            return Response(content=asset.data, media_type=asset.mime, headers=headers)
+            return Response(content=asset.data, media_type=str(asset.mime), headers=headers)
         png = _thumbnail_png(int(asset.id), bytes(asset.data))
         if png is None:
-            return Response(content=asset.data, media_type=asset.mime, headers=headers)
+            return Response(content=asset.data, media_type=str(asset.mime), headers=headers)
         return Response(content=png, media_type="image/png", headers=headers)
     except HTTPException:
         raise
