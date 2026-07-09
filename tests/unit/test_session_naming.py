@@ -61,15 +61,71 @@ class TestGenerateSessionTitle:
 
         assert title is None
 
-    def test_truncates_excessively_long_title(self):
-        """Titles longer than 100 characters are truncated."""
+    def test_rejects_excessively_long_title(self):
+        """An output longer than 100 chars is an overrun, not a title —
+        rejected so the caller keeps the session's default name (never a
+        mid-word truncation of junk)."""
         mock_model = MagicMock()
         long_title = "A" * 150
         mock_model.invoke.return_value = AIMessage(content=long_title)
 
         title = generate_session_title("Some prompt", mock_model)
 
-        assert len(title) <= 100
+        assert title is None
+
+    def test_strips_complete_thinking_block(self):
+        """A leading <thinking> block is removed; the title line survives."""
+        mock_model = MagicMock()
+        mock_model.invoke.return_value = AIMessage(
+            content=(
+                "<thinking>The user wants a revenue deck, so a good title "
+                "would mention revenue.</thinking>\nQ3 Revenue Analysis"
+            )
+        )
+
+        title = generate_session_title("Show me Q3 revenue", mock_model)
+
+        assert title == "Q3 Revenue Analysis"
+
+    def test_unclosed_thinking_block_rejected_to_fallback(self):
+        """max_tokens can cut the model mid-thought: an unclosed <thinking>
+        tag means NO title was produced — return None (safe fallback name)."""
+        mock_model = MagicMock()
+        mock_model.invoke.return_value = AIMessage(
+            content="<thinking>The user is asking about Q3 revenue and I sh"
+        )
+
+        title = generate_session_title("Show me Q3 revenue", mock_model)
+
+        assert title is None
+
+    def test_takes_first_non_empty_line_only(self):
+        """Explanatory prose after the title never leaks into the name."""
+        mock_model = MagicMock()
+        mock_model.invoke.return_value = AIMessage(
+            content="\n\nQ3 Revenue Analysis\n\nThis title captures the request."
+        )
+
+        title = generate_session_title("Show me Q3 revenue", mock_model)
+
+        assert title == "Q3 Revenue Analysis"
+
+    def test_strips_markdown_decoration(self):
+        mock_model = MagicMock()
+        mock_model.invoke.return_value = AIMessage(content="**Q3 Revenue Analysis**")
+
+        title = generate_session_title("Show me Q3 revenue", mock_model)
+
+        assert title == "Q3 Revenue Analysis"
+
+    def test_tag_only_response_rejected(self):
+        """A response that is nothing but markup yields None, not '<...>'."""
+        mock_model = MagicMock()
+        mock_model.invoke.return_value = AIMessage(content="<thinking></thinking>")
+
+        title = generate_session_title("Show me Q3 revenue", mock_model)
+
+        assert title is None
 
 
 # ============================================
