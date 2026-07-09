@@ -169,6 +169,89 @@ async function goToHistory(page: Page) {
 }
 
 // ============================================
+// Sessions list — loud failure (Retry parity with the DS library)
+// ============================================
+
+test.describe('SessionHistoryList — loud failure', () => {
+  test.beforeEach(async ({ page }) => {
+    await setupMocks(page);
+  });
+
+  test('list API failure renders an explicit error with Retry; Retry refetches', async ({ page }) => {
+    // Live incident shape: DB connectivity died app-wide; the DS page showed
+    // 'Error … + Retry' while the sessions list rendered silently empty and
+    // masqueraded as data loss. The list must fail LOUD.
+    let failing = true;
+    await page.route('http://127.0.0.1:8000/api/sessions**', (route, request) => {
+      const url = request.url();
+      if (url.includes('/sessions/shared')) {
+        route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ presentations: [], count: 0 }) });
+        return;
+      }
+      if (url.includes('limit=') && request.method() === 'GET') {
+        if (failing) {
+          route.fulfill({ status: 500, contentType: 'application/json', body: JSON.stringify({ detail: 'database unavailable' }) });
+        } else {
+          route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(mockSessions) });
+        }
+        return;
+      }
+      route.fulfill({ status: 404 });
+    });
+
+    await page.goto('/history');
+
+    // Explicit error state — and NOT the empty state pretending data is gone.
+    const errorBox = page.getByTestId('sessions-list-error');
+    await expect(errorBox).toBeVisible({ timeout: 10000 });
+    await expect(errorBox).toContainText('Error:');
+    await expect(page.getByText('No sessions yet')).toHaveCount(0);
+    await expect(page.getByRole('table')).toHaveCount(0);
+
+    // Retry refetches and renders the list.
+    failing = false;
+    await page.getByTestId('sessions-list-retry').click();
+    await expect(page.getByRole('heading', { name: 'Sessions', exact: true })).toBeVisible();
+    await expect(page.getByText('Session 2026-01-08 20:38').first()).toBeVisible();
+    await expect(page.getByTestId('sessions-list-error')).toHaveCount(0);
+  });
+
+  test('sidebar Recent Decks shows an error with Retry instead of vanishing', async ({ page }) => {
+    let failing = true;
+    await page.route('http://127.0.0.1:8000/api/sessions**', (route, request) => {
+      const url = request.url();
+      const method = request.method();
+      if (url.includes('/sessions/shared')) {
+        route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ presentations: [], count: 0 }) });
+        return;
+      }
+      if (url.includes('limit=') && method === 'GET') {
+        if (failing) {
+          route.fulfill({ status: 500, contentType: 'application/json', body: JSON.stringify({ detail: 'database unavailable' }) });
+        } else {
+          route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(mockSessions) });
+        }
+        return;
+      }
+      if (method === 'POST') {
+        route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ session_id: 'mock', title: 'New', user_id: null, created_at: '2026-01-01T00:00:00Z' }) });
+        return;
+      }
+      route.fulfill({ status: 404 });
+    });
+
+    await page.goto('/');
+    const sidebarError = page.getByTestId('deck-history-error');
+    await expect(sidebarError).toBeVisible({ timeout: 10000 });
+
+    failing = false;
+    await page.getByTestId('deck-history-retry').click();
+    await expect(page.getByTestId('deck-history-error')).toHaveCount(0);
+    await expect(page.getByText('Recent Decks')).toBeVisible();
+  });
+});
+
+// ============================================
 // Session History List Tests
 // ============================================
 
@@ -398,10 +481,15 @@ test.describe('SessionHistory Error State', () => {
       });
     });
 
-    await goToHistory(page);
+    await page.goto('/history');
 
-    // Should show error message
-    await expect(page.getByText(/Failed to load sessions/i)).toBeVisible();
+    // Loud failure: the explicit error state (with Retry) replaces the page
+    // content — no heading, no table, no fake empty state.
+    const errorBox = page.getByTestId('sessions-list-error');
+    await expect(errorBox).toBeVisible({ timeout: 10000 });
+    await expect(errorBox).toContainText(/Failed to list sessions/i);
+    await expect(page.getByTestId('sessions-list-retry')).toBeVisible();
+    await expect(page.getByRole('table')).toHaveCount(0);
   });
 });
 

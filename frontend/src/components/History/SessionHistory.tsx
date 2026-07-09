@@ -19,6 +19,9 @@ export const SessionHistory: React.FC<SessionHistoryProps> = ({
   const [sharedPresentations, setSharedPresentations] = useState<SharedPresentation[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  // List-load failures are LOUD and replace the content (never an empty list
+  // masquerading as data loss); `error` above stays for per-action failures.
+  const [listError, setListError] = useState<string | null>(null);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editTitle, setEditTitle] = useState('');
   const [activeTab, setActiveTab] = useState<TabType>('my');
@@ -37,8 +40,11 @@ export const SessionHistory: React.FC<SessionHistoryProps> = ({
       setMySessions(myResult.sessions);
       setSharedPresentations(sharedResult.presentations);
       setError(null);
+      setListError(null);
     } catch (err) {
-      if (isFirstLoad.current) setError('Failed to load sessions');
+      // Every load failure is loud — a backend outage mid-session must never
+      // degrade to a silently-stale (or empty) list.
+      setListError(err instanceof Error ? err.message : 'Failed to load sessions');
       console.error(err);
     } finally {
       setLoading(false);
@@ -121,6 +127,28 @@ export const SessionHistory: React.FC<SessionHistoryProps> = ({
     return (
       <div className="flex items-center justify-center h-64">
         <div className="text-gray-500">Loading sessions...</div>
+      </div>
+    );
+  }
+
+  if (listError) {
+    // Same loud pattern as the Design System library: explicit error + Retry,
+    // never an empty list pretending the data is gone.
+    return (
+      <div
+        className="max-w-6xl mx-auto rounded-lg border border-red-200 bg-red-50 p-4 text-red-700"
+        role="alert"
+        data-testid="sessions-list-error"
+      >
+        Error: {listError}
+        <button
+          type="button"
+          onClick={() => void loadSessions()}
+          className="ml-4 rounded border border-red-300 bg-white px-3 py-1 text-sm font-medium text-red-700 hover:bg-red-100"
+          data-testid="sessions-list-retry"
+        >
+          Retry
+        </button>
       </div>
     );
   }

@@ -39,12 +39,26 @@ export function DeckHistory({
 }: DeckHistoryProps) {
   const { isMobile } = useSidebar()
   const [sessions, setSessions] = useState<Session[]>([])
+  const [loadError, setLoadError] = useState<string | null>(null)
   const [deleteTarget, setDeleteTarget] = useState<string | null>(null)
 
-  useEffect(() => {
+  const loadSessions = () => {
     api.listSessions(5)
-      .then(result => setSessions(result.sessions))
-      .catch(err => console.error('Failed to load sessions:', err))
+      .then(result => {
+        setSessions(result.sessions)
+        setLoadError(null)
+      })
+      .catch(err => {
+        // Loud, like the Design System library: a failed list must never
+        // render as silently empty (which reads as data loss).
+        console.error('Failed to load sessions:', err)
+        setLoadError(err instanceof Error ? err.message : 'Failed to load sessions')
+      })
+  }
+
+  useEffect(() => {
+    loadSessions()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [refreshKey])
 
   const handleDeleteClick = (sessionId: string, e: React.MouseEvent) => {
@@ -59,8 +73,7 @@ export function DeckHistory({
     setDeleteTarget(null)
     try {
       await api.deleteSession(id)
-      const result = await api.listSessions(5)
-      setSessions(result.sessions)
+      loadSessions()
       if (wasActive) onNewSession?.()
     } catch (err) {
       console.error('Failed to delete session:', err)
@@ -78,6 +91,29 @@ export function DeckHistory({
     if (hours < 24) return `${hours}h ago`
     const days = Math.floor(hours / 24)
     return `${days}d ago`
+  }
+
+  if (loadError) {
+    return (
+      <SidebarGroup className="group-data-[collapsible=icon]:hidden">
+        <SidebarGroupLabel>Recent Decks</SidebarGroupLabel>
+        <div
+          className="mx-2 rounded-md border border-destructive/30 bg-destructive/5 p-2 text-xs text-destructive"
+          role="alert"
+          data-testid="deck-history-error"
+        >
+          Error: {loadError}
+          <button
+            type="button"
+            onClick={loadSessions}
+            className="mt-1 block rounded border border-destructive/30 bg-background px-2 py-0.5 font-medium hover:bg-destructive/10"
+            data-testid="deck-history-retry"
+          >
+            Retry
+          </button>
+        </div>
+      </SidebarGroup>
+    )
   }
 
   if (sessions.length === 0) {
