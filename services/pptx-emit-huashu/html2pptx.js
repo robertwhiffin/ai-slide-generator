@@ -597,7 +597,12 @@ async function extractSlideData(page) {
       }
 
       // Extract placeholder elements (for charts, etc.)
-      if (el.className && el.className.includes('placeholder')) {
+      // Tellr-soften: el.className is only a string on HTML elements — on
+      // SVG elements it's an SVGAnimatedString with no .includes, which
+      // threw here and silently dropped the whole slide. getAttribute is
+      // string-or-null on every element type.
+      const elClassName = el.getAttribute('class') || '';
+      if (elClassName.includes('placeholder')) {
         const rect = el.getBoundingClientRect();
         if (rect.width === 0 || rect.height === 0) {
           errors.push(

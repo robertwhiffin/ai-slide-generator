@@ -625,6 +625,75 @@ export const PREPROCESS_SOURCE = `
     return count;
   }
 
+  // ─── Inline <svg> → rasterized PNG <img> ───────────────────────────
+  // huashu's walker has no svg handler: inline icons produce nothing, and
+  // (pre-guard) the walker's string-assumed el.className even threw on
+  // SVGAnimatedString, dropping the whole slide. Serialize each top-level
+  // inline <svg>, decode it as an image, draw to a canvas at 2x the layout
+  // box (crispness), and swap in a same-size PNG <img> at the svg's DOM
+  // position so paint order and flow layout are preserved. Per-svg
+  // try/catch: a failed raster leaves the svg in place — the walker now
+  // ignores it (className guard), so the slide exports without the icon
+  // instead of vanishing.
+  async function rasterizeInlineSvgs() {
+    let count = 0;
+    const svgs = Array.from(document.querySelectorAll('svg')).filter(
+      (svg) => !(svg.parentElement && svg.parentElement.closest('svg'))
+    );
+    for (const svg of svgs) {
+      try {
+        const cs = window.getComputedStyle(svg);
+        if (cs.display === 'none' || cs.visibility === 'hidden') continue;
+        const rect = svg.getBoundingClientRect();
+        if (!rect.width || !rect.height) continue;
+
+        const clone = svg.cloneNode(true);
+        clone.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
+        // CSS-sized svgs serialize without intrinsic dimensions; pin the
+        // rendered box so the standalone document decodes at a real size.
+        clone.setAttribute('width', String(rect.width));
+        clone.setAttribute('height', String(rect.height));
+        // currentColor resolves against the element's own color in the
+        // standalone doc — pin the computed inherited color.
+        clone.style.color = cs.color;
+        const xml = new XMLSerializer().serializeToString(clone);
+        const probe = new Image();
+        probe.src = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(xml);
+        await probe.decode();
+
+        const w = Math.max(1, Math.round(rect.width * 2));
+        const h = Math.max(1, Math.round(rect.height * 2));
+        const c = document.createElement('canvas');
+        c.width = w;
+        c.height = h;
+        c.getContext('2d').drawImage(probe, 0, 0, w, h);
+        const dataUrl = c.toDataURL('image/png');
+
+        const img = document.createElement('img');
+        img.src = dataUrl;
+        // Occupy the svg's exact slot: same box for in-flow svgs, same
+        // resolved offsets for positioned ones, so neither siblings nor
+        // the svg's own paint position move.
+        img.style.display = 'block';
+        img.style.width = rect.width + 'px';
+        img.style.height = rect.height + 'px';
+        img.style.margin = cs.margin;
+        if (cs.position === 'absolute' || cs.position === 'fixed') {
+          img.style.position = cs.position;
+          img.style.left = cs.left;
+          img.style.top = cs.top;
+          if (cs.transform && cs.transform !== 'none') img.style.transform = cs.transform;
+        }
+        svg.parentNode.insertBefore(img, svg);
+        svg.style.display = 'none';
+        count++;
+      } catch (e) {
+        console.warn('[preprocess] inline svg raster failed — exporting slide without it: ' + (e && e.message));
+      }
+    }
+    return count;
+  }
+
   // ─── orchestrator ──────────────────────────────────────────────────
   // Order matters: bg transfer first (cheap, mutates body only); flatten
   // code blocks BEFORE wrapBareTextInDivs (so the per-line <div>s become
@@ -638,10 +707,11 @@ export const PREPROCESS_SOURCE = `
   const wrapped = wrapBareTextInDivs();
   const replacedImgs = replaceBackgroundImageWithImg();
   const svgImgsRasterized = await rasterizeSvgDataUriImages();
+  const inlineSvgsRasterized = await rasterizeInlineSvgs();
   const peeledTextTags = peelBackgroundsOffTextTags();
   const tableCells = flattenTables();
   const canvasImgs = rasterizeCanvases();
   const inlineBgs = emitInlineBackgrounds();
-  return { bgTransferred, codeBlocks, wrapped, replacedImgs, svgImgsRasterized, peeledTextTags, tableCells, canvasImgs, inlineBgs };
+  return { bgTransferred, codeBlocks, wrapped, replacedImgs, svgImgsRasterized, inlineSvgsRasterized, peeledTextTags, tableCells, canvasImgs, inlineBgs };
 })();
 `;
