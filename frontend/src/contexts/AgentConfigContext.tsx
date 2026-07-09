@@ -214,6 +214,15 @@ export const AgentConfigProvider: React.FC<{ children: React.ReactNode }> = ({ c
   useEffect(() => {
     if (isPreSession) return;
 
+    // Entering a session (New Deck / session switch): the PREVIOUS surface's
+    // config is still in memory until this session's GET resolves, and a chat
+    // sent inside that window syncs the in-memory config onto this session
+    // server-side. Template pins are session-scoped, so the interim state is
+    // stripped SYNCHRONOUSLY — this session's own persisted pin (if any)
+    // comes back with the GET below, and an in-session pick re-pins as
+    // always. Everything else (design system, style, tools) carries over.
+    setAgentConfig(prev => withoutSessionScopedState(prev));
+
     let cancelled = false;
     api.getAgentConfig(urlSessionId)
       .then(async (config) => {
@@ -249,11 +258,6 @@ export const AgentConfigProvider: React.FC<{ children: React.ReactNode }> = ({ c
         console.error('Failed to load agent config for session:', err);
         if (!cancelled) {
           showToast('Failed to load agent configuration', 'error');
-          // The in-memory config may have followed us here from another
-          // surface (SPA navigation keeps this provider mounted). Whatever
-          // else carries over, a template pin never enters a session it
-          // wasn't chosen in — new sessions always start template = None.
-          setAgentConfig(prev => withoutSessionScopedState(prev));
         }
       });
 

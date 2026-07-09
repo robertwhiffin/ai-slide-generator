@@ -191,6 +191,148 @@ test.describe('AgentConfigBar — design system selector', () => {
     await expect(page.getByTestId('template-selector')).toHaveValue('');
   });
 
+  test('RACE: switching sessions never sends the previous session template pin (delayed config load)', async ({ page }) => {
+    // codex-reported race: entering a fresh session, the in-memory config
+    // still holds the PREVIOUS session's pin until the new session's
+    // agent-config GET resolves; a chat sent in that window used to carry —
+    // and server-side persist — the stale pin. The context now strips
+    // session-scoped state synchronously on session change.
+    const dsId = mockDesignSystems.design_systems[0].id;
+    const SESSION_B = 'a2c5f1d9-8ef7-48dc-be69-0ead7be316dd'; // mockSessions[1]
+    await mockSessionWithSlides(page, SESSION_B);
+
+    // Agent-config: session A answers instantly WITH a pin; any other
+    // session's GET is DELAYED past the chat send (the race window).
+    await page.route(/\/api\/sessions\/[^/]+\/agent-config$/, async (route, request) => {
+      const url = request.url();
+      const isA = url.includes(TEST_SESSION_ID);
+      if (request.method() === 'GET') {
+        if (!isA) await new Promise((r) => setTimeout(r, 2000));
+        route.fulfill({
+          status: 200,
+          contentType: 'application/json',
+          body: JSON.stringify({
+            ...mockDefaultAgentConfig,
+            design_system_id: dsId,
+            template_id: isA ? 1 : null,
+          }),
+        });
+        return;
+      }
+      route.fulfill({ status: 200, contentType: 'application/json', body: request.postData() ?? '{}' });
+    });
+    await page.route(/\/api\/settings\/design-systems\/\d+\/templates$/, (route) => {
+      route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(mockDesignSystemTemplatesWithLive) });
+    });
+    await page.route(/\/api\/user\/current$/, (route) => {
+      route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ user: 'dev@local.dev' }) });
+    });
+    await page.route(/\/api\/sessions\/[^/]+\/lock$/, (route, request) => {
+      if (request.method() === 'POST') {
+        route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ acquired: true, locked_by: null }) });
+      } else if (request.method() === 'DELETE') {
+        route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ released: true }) });
+      } else {
+        route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ locked: false, locked_by: null }) });
+      }
+    });
+
+    const streamBodies: string[] = [];
+    await page.route('http://127.0.0.1:8000/api/chat/stream', (route, request) => {
+      streamBodies.push(request.postData() ?? '');
+      route.fulfill({
+        status: 200,
+        contentType: 'text/event-stream',
+        body: 'data: {"type": "complete", "message": "done", "slides": {"title": "d", "slides": [], "css": "", "external_scripts": []}}\n\n',
+      });
+    });
+
+    // Session A: pin loaded and visible.
+    await expandAgentConfig(page);
+    await expect(page.getByTestId('template-selector')).toHaveValue('1');
+
+    // Client-side switch to session B via the sidebar (SPA navigation keeps
+    // the provider — and its in-memory config — mounted).
+    await page.getByText('Session 2026-01-08 20:20').first().click();
+    await page.waitForURL(new RegExp(`/sessions/${SESSION_B}/edit`));
+
+    // Send inside B's delayed config-load window (well before the 2s GET).
+    const chatInput = page.getByTestId('chat-input');
+    await expect(chatInput).toBeEnabled();
+    await page.waitForTimeout(300); // let the switch's re-renders settle
+    await chatInput.fill('First prompt in the new session');
+    await expect(chatInput).toHaveValue('First prompt in the new session');
+    await chatInput.press('Enter');
+
+    await expect.poll(() => streamBodies.length).toBeGreaterThan(0);
+    const sentConfig = JSON.parse(streamBodies[0]).agent_config;
+    // The previous session's pin must NOT ride along…
+    expect(sentConfig.template_id).toBe(null);
+    // …while the design system still carries over.
+    expect(sentConfig.design_system_id).toBe(dsId);
+  });
+
+  test('a template picked IN a fresh session before the first prompt still applies', async ({ page }) => {
+    // Legit flow guard for the race fix: pinning inside the new session
+    // (before any prompt) persists and rides on the chat request.
+    const dsId = mockDesignSystems.design_systems[0].id;
+
+    const configPuts: Record<string, unknown>[] = [];
+    let serverConfig: Record<string, unknown> = {
+      ...mockDefaultAgentConfig,
+      design_system_id: dsId,
+      template_id: null,
+    };
+    await page.route(`http://127.0.0.1:8000/api/sessions/${TEST_SESSION_ID}/agent-config`, (route, request) => {
+      if (request.method() === 'PUT') {
+        serverConfig = JSON.parse(request.postData() ?? '{}');
+        configPuts.push(serverConfig);
+      }
+      route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(serverConfig) });
+    });
+    await page.route(/\/api\/settings\/design-systems\/\d+\/templates$/, (route) => {
+      route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(mockDesignSystemTemplatesWithLive) });
+    });
+    await page.route(/\/api\/user\/current$/, (route) => {
+      route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ user: 'dev@local.dev' }) });
+    });
+    await page.route(/\/api\/sessions\/[^/]+\/lock$/, (route, request) => {
+      if (request.method() === 'POST') {
+        route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ acquired: true, locked_by: null }) });
+      } else if (request.method() === 'DELETE') {
+        route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ released: true }) });
+      } else {
+        route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ locked: false, locked_by: null }) });
+      }
+    });
+    const streamBodies: string[] = [];
+    await page.route('http://127.0.0.1:8000/api/chat/stream', (route, request) => {
+      streamBodies.push(request.postData() ?? '');
+      route.fulfill({
+        status: 200,
+        contentType: 'text/event-stream',
+        body: 'data: {"type": "complete", "message": "done", "slides": {"title": "d", "slides": [], "css": "", "external_scripts": []}}\n\n',
+      });
+    });
+
+    await expandAgentConfig(page);
+    await expect(page.getByTestId('template-selector')).toHaveValue('');
+
+    // Pin a template IN this session, before the first prompt.
+    await page.getByTestId('template-selector').selectOption('2');
+    await expect.poll(() => configPuts.length).toBeGreaterThan(0);
+    expect(configPuts[configPuts.length - 1].template_id).toBe(2);
+
+    const chatInput = page.getByTestId('chat-input');
+    await chatInput.fill('First prompt');
+    await chatInput.press('Enter');
+
+    await expect.poll(() => streamBodies.length).toBeGreaterThan(0);
+    const sentConfig = JSON.parse(streamBodies[0]).agent_config;
+    expect(sentConfig.template_id).toBe(2);
+    expect(sentConfig.design_system_id).toBe(dsId);
+  });
+
   test('Use from the detail panel affects only the current session config', async ({ page }) => {
     // Using a template from the design-system library (a non-session route)
     // must not write into any existing session's config, and the

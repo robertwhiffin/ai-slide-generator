@@ -393,3 +393,96 @@ class TestSessionManagerAgentConfig:
 
         sig = inspect.signature(SessionManager.create_session)
         assert "agent_config" in sig.parameters
+
+
+class TestSessionCreatingRequestsNeverSeedTemplatePin:
+    """template_id is session-scoped: a pin is chosen IN a session. A pin
+    arriving on the request that CREATES the session can only be another
+    surface's in-memory carryover (the new-session race), so session-creating
+    chat requests drop it — while a sync onto an EXISTING session preserves
+    the pin (in-session stickiness)."""
+
+    def _complete_stream(self, mock_chat_service):
+        from src.api.schemas.streaming import StreamEvent
+
+        mock_chat_service.send_message_streaming.return_value = iter(
+            [StreamEvent(type=StreamEventType.COMPLETE, slides={"slides": []})]
+        )
+
+    def test_create_without_session_id_strips_template_pin(
+        self, client, mock_session_manager, mock_chat_service
+    ):
+        self._complete_stream(mock_chat_service)
+
+        response = client.post(
+            "/api/chat/stream",
+            json={
+                "message": "Create slides",
+                "agent_config": {"tools": [], "design_system_id": 3, "template_id": 9},
+            },
+        )
+
+        assert response.status_code == 200
+        created_config = mock_session_manager.create_session.call_args.kwargs["agent_config"]
+        assert created_config["template_id"] is None
+        assert created_config["design_system_id"] == 3  # DS carries over
+
+    def test_create_from_client_generated_id_strips_template_pin(
+        self, client, mock_session_manager, mock_chat_service
+    ):
+        from src.api.services.session_manager import SessionNotFoundError
+
+        self._complete_stream(mock_chat_service)
+        mock_session_manager.get_session.side_effect = SessionNotFoundError("nope")
+
+        response = client.post(
+            "/api/chat/stream",
+            json={
+                "message": "Create slides",
+                "session_id": "local-uuid-1",
+                "agent_config": {"tools": [], "design_system_id": 3, "template_id": 9},
+            },
+        )
+
+        assert response.status_code == 200
+        created_config = mock_session_manager.create_session.call_args.kwargs["agent_config"]
+        assert created_config["template_id"] is None
+        assert created_config["design_system_id"] == 3
+
+    def test_sync_onto_existing_session_preserves_template_pin(
+        self, client, mock_session_manager, mock_chat_service, test_db
+    ):
+        """In-session stickiness: an existing session's chat sync keeps the
+        pin the user chose in that session."""
+        from src.database.models.session import UserSession
+
+        self._complete_stream(mock_chat_service)
+        mock_session_manager.get_session.return_value = {"session_id": "sess-exists"}
+
+        row = UserSession(
+            session_id="sess-exists",
+            title="t",
+            created_by="test-user",
+        )
+        test_db.add(row)
+        test_db.commit()
+
+        with patch("src.core.database.get_db_session") as mock_get_db_session:
+            mock_ctx = MagicMock()
+            mock_ctx.__enter__ = MagicMock(return_value=test_db)
+            mock_ctx.__exit__ = MagicMock(return_value=False)
+            mock_get_db_session.return_value = mock_ctx
+
+            response = client.post(
+                "/api/chat/stream",
+                json={
+                    "message": "Another prompt",
+                    "session_id": "sess-exists",
+                    "agent_config": {"tools": [], "design_system_id": 3, "template_id": 9},
+                },
+            )
+
+        assert response.status_code == 200
+        test_db.commit()
+        assert row.agent_config["template_id"] == 9  # pin sticks in-session
+        mock_session_manager.create_session.assert_not_called()

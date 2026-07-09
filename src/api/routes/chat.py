@@ -140,6 +140,20 @@ def _maybe_create_session(request: ChatRequest, session_manager) -> bool:
         if default_id is not None:
             agent_config_data["slide_style_id"] = default_id
 
+    def _without_template_pin(config_data: dict) -> dict:
+        """Session-CREATING requests never seed a template pin.
+
+        template_id is session-scoped: a pin is chosen IN a session (via the
+        agent-config PUT, or a chat sync onto an EXISTING session). A pin
+        arriving on the request that CREATES the session can only be another
+        surface's in-memory carryover (the new-session race), so it is
+        dropped; the design system and everything else carries over as
+        configured.
+        """
+        if config_data.get("template_id") is None:
+            return config_data
+        return {**config_data, "template_id": None}
+
     if request.session_id:
         # Session ID provided — only sync if client explicitly sent agent_config
         if explicit_config:
@@ -165,7 +179,7 @@ def _maybe_create_session(request: ChatRequest, session_manager) -> bool:
                 current_user = get_current_user()
                 session_manager.create_session(
                     session_id=request.session_id,
-                    agent_config=agent_config_data,
+                    agent_config=_without_template_pin(agent_config_data),
                     created_by=current_user,
                 )
                 logger.info(
@@ -179,7 +193,7 @@ def _maybe_create_session(request: ChatRequest, session_manager) -> bool:
 
     current_user = get_current_user()
     session = session_manager.create_session(
-        agent_config=agent_config_data,
+        agent_config=_without_template_pin(agent_config_data),
         created_by=current_user,
     )
     request.session_id = session["session_id"]
