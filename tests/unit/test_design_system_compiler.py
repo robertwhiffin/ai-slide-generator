@@ -1124,3 +1124,136 @@ class TestEnsureCompiledStyleContentCurrent:
         assert "SLIDE FRAME CONSTRAINTS" in out
         assert ds.compiled_style_content == out  # refreshed in place for persistence
         assert compiled_style_content_is_current(ds.compiled_style_content)
+
+
+# ---------------------------------------------------------------------------
+# BRAND TYPE SCALE (the "small titles" fix)
+# ---------------------------------------------------------------------------
+
+class TestBrandTypeScale:
+    """A DS deck bypasses ``DEFAULT_SLIDE_STYLE`` — the only place H1/H2/body
+    size anchors lived — so the compiler must emit its own type-size anchors.
+    Derived from the design system's OWN font-size ramp when one is
+    recognizable BY PATTERN (Claude Design manifests mislabel the fs-* ramp as
+    kind "spacing", so group membership can't be trusted), otherwise the app
+    default style's neutral bands. All fixtures SYNTHETIC.
+    """
+
+    # A Claude-Design-shaped ramp, deliberately mislabeled group="spacing".
+    _MISLABELED_RAMP = [
+        {"group": "spacing", "name": f"fs-{px}", "value": f"{px}px"}
+        for px in (12, 14, 16, 18, 20, 24, 32, 40, 48, 64)
+    ]
+
+    def test_mislabeled_spacing_ramp_derives_brand_scale(self, session):
+        from src.services.design_system_compiler import compile_design_system
+
+        ds = _make_ds(session, tokens=self._MISLABELED_RAMP)
+        out = compile_design_system(ds)
+        assert "BRAND TYPE SCALE (REQUIRED" in out
+        block = out[out.index("BRAND TYPE SCALE"):]
+        block = block[: block.index("\n\n")]
+        # Every number derives from the fixture ramp: hero = top, floor =
+        # bottom, body = the 16-22 band, section = upper-mid between them.
+        assert "Cover/hero titles: 64px (token fs-64)" in block
+        assert "Section/slide titles: 40px (token fs-40)" in block
+        assert "Body text: 16px-20px (tokens: fs-16, fs-18, fs-20)" in block
+        assert "never render ANY text below 12px (token fs-12)" in block
+        assert "NEVER shrink type below the brand type scale" in block
+
+    def test_ramp_in_type_group_detected_too(self, session):
+        """Correctly-labeled ramps (group='type') derive the same scale."""
+        from src.services.design_system_compiler import compile_design_system
+
+        tokens = [
+            {"group": "type", "name": f"font-size-{px}", "value": f"{px}px"}
+            for px in (14, 18, 28, 44)
+        ]
+        out = compile_design_system(_make_ds(session, tokens=tokens))
+        block = out[out.index("BRAND TYPE SCALE"):]
+        assert "Cover/hero titles: 44px (token font-size-44)" in block
+        assert "below 14px (token font-size-14)" in block
+
+    def test_no_ramp_emits_neutral_default_bands(self, session):
+        """The anchor vacuum can never recur: a DS without a recognizable
+        ramp gets the app default style's bands (H1 40-52 / H2 28-36 /
+        body 16-18 — src/core/defaults.py)."""
+        from src.services.design_system_compiler import compile_design_system
+
+        out = compile_design_system(_make_ds(session, tokens=_TOKENS))
+        assert "BRAND TYPE SCALE (REQUIRED" in out
+        assert "no font-size" in out
+        assert "40-52px" in out
+        assert "28-36px" in out
+        assert "16-18px" in out
+
+    def test_always_present_even_for_empty_ds(self, session):
+        from src.services.design_system_compiler import compile_design_system
+
+        ds = _make_ds(session, description=None, tokens=None, assets=None, manifest_json=None)
+        out = compile_design_system(ds)
+        assert "BRAND TYPE SCALE (REQUIRED" in out
+        assert "40-52px" in out  # neutral bands
+
+    def test_two_sizes_is_not_a_ramp(self, session):
+        """Fewer than 3 distinct px sizes -> neutral bands, not a 2-point ramp."""
+        from src.services.design_system_compiler import compile_design_system
+
+        tokens = [
+            {"group": "spacing", "name": "fs-12", "value": "12px"},
+            {"group": "spacing", "name": "fs-64", "value": "64px"},
+        ]
+        out = compile_design_system(_make_ds(session, tokens=tokens))
+        assert "no font-size" in out
+        assert "40-52px" in out
+
+    def test_spacing_tokens_that_are_not_sizes_do_not_form_a_ramp(self, session):
+        """Real spacing tokens (md/lg/gap-*) must never masquerade as type."""
+        from src.services.design_system_compiler import compile_design_system
+
+        tokens = [
+            {"group": "spacing", "name": "sp-4", "value": "4px"},
+            {"group": "spacing", "name": "gap-8", "value": "8px"},
+            {"group": "spacing", "name": "md", "value": "16px"},
+            {"group": "spacing", "name": "lg", "value": "24px"},
+            {"group": "spacing", "name": "xl", "value": "32px"},
+        ]
+        out = compile_design_system(_make_ds(session, tokens=tokens))
+        assert "no font-size" in out  # neutral path
+
+    def test_ramp_skipping_body_band_anchors_on_closest(self, session):
+        """A ramp with nothing in 16-22px anchors body on the closest entry
+        (larger wins the tie) and section falls back to the top."""
+        from src.services.design_system_compiler import compile_design_system
+
+        tokens = [
+            {"group": "spacing", "name": f"fs-{px}", "value": f"{px}px"}
+            for px in (10, 26, 58)
+        ]
+        out = compile_design_system(_make_ds(session, tokens=tokens))
+        block = out[out.index("BRAND TYPE SCALE"):]
+        assert "Body text: 26px (tokens: fs-26)" in block
+        assert "Cover/hero titles: 58px (token fs-58)" in block
+        assert "Section/slide titles: 58px (token fs-58)" in block
+        assert "below 10px (token fs-10)" in block
+
+    def test_frame_block_no_longer_suggests_scaling_down(self, session):
+        from src.services.design_system_compiler import compile_design_system
+
+        out = compile_design_system(_make_ds(session, tokens=_TOKENS))
+        assert "scale it down" not in out
+        frame = out[out.index("SLIDE FRAME CONSTRAINTS"):]
+        assert "NEVER shrink type below the BRAND TYPE SCALE" in frame
+
+    def test_scale_before_fonts_after_tokens(self, session):
+        from src.services.design_system_compiler import compile_design_system
+
+        ds = _make_ds(
+            session,
+            tokens=_TOKENS + self._MISLABELED_RAMP,
+            assets=[_FONT_ASSET],
+            manifest_json=_MANIFEST,
+        )
+        out = compile_design_system(ds)
+        assert out.index("SPACING TOKENS") < out.index("BRAND TYPE SCALE")
+        assert out.index("BRAND TYPE SCALE") < out.index("BRAND FONTS")
