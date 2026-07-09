@@ -408,10 +408,17 @@ export const AgentConfigProvider: React.FC<{ children: React.ReactNode }> = ({ c
       try {
         const confirmed = await api.updateAgentConfig(issuedFor, config);
         console.log('[AgentConfigContext] Backend confirmed:', JSON.stringify(confirmed));
-        // Server truth for ITS session — stash (keyed) unless a still-newer
-        // write already landed; touch the screen only if still on it.
-        stashConfirmed(issuedFor, confirmed, issueGen);
-        settleForSurface(issuedFor, () => setAgentConfig(confirmed));
+        // ONE generation verdict gates BOTH effects. When a newer PUT for
+        // this session already confirmed, this older-issued confirm is
+        // outdated: its stash write is rejected AND its repaint is skipped —
+        // otherwise the visible state would regress to stale values even
+        // though the stash held the newer ones (same discipline the
+        // stash-rejected GET already follows).
+        const accepted = stashConfirmed(issuedFor, confirmed, issueGen);
+        settleForSurface(issuedFor, () => {
+          if (!accepted) return; // superseded by a newer confirmed write
+          setAgentConfig(confirmed);
+        });
         return true;
       } catch (err) {
         console.error('[AgentConfigContext] Failed to update agent config:', err);
