@@ -74,15 +74,23 @@ const PREVIEW_CSP =
  * Compose the preview document: the template layout with its token
  * stylesheet resolved and preview-only overflow clipping. Rendered ONLY in a
  * fully-sandboxed iframe.
+ *
+ * The wrapper is SYNTHESIZED — the CSP meta is the first fetch-capable byte
+ * of the document, unconditionally. Injecting into a found <head> is not
+ * enough: malformed-but-parser-preserved markup (e.g. an <img> BEFORE the
+ * <html> tag) would declare resources ahead of the policy. DOMParser gives
+ * browser-grade handling of malformed input without fetching or executing
+ * anything; the parsed head content is re-emitted AFTER the guard block and
+ * the parsed body (attributes included, via its own serialization) follows.
  */
 function buildTemplatePreviewDoc(layoutHtml: string, tokenCss: string | null): string {
   const cspMeta = `<meta http-equiv="Content-Security-Policy" content="${PREVIEW_CSP}">`;
   const previewReset = '<style>html,body{margin:0;overflow:hidden}</style>';
-  // CSP first — it must precede any fetch-capable markup in the document.
-  const cssBlock = cspMeta + (tokenCss ? `<style>${tokenCss}</style>` : '') + previewReset;
-  const headMatch = layoutHtml.match(/<head[^>]*>/i);
-  if (headMatch) return layoutHtml.replace(headMatch[0], headMatch[0] + cssBlock);
-  return cssBlock + layoutHtml;
+  const guard = cspMeta + (tokenCss ? `<style>${tokenCss}</style>` : '') + previewReset;
+  const parsed = new DOMParser().parseFromString(layoutHtml, 'text/html');
+  const templateHead = parsed.head?.innerHTML ?? '';
+  const templateBody = parsed.body?.outerHTML ?? '<body></body>';
+  return `<!DOCTYPE html><html><head>${guard}${templateHead}</head>${templateBody}</html>`;
 }
 
 const FramePlaceholder: React.FC = () => (
