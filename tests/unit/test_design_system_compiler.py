@@ -420,6 +420,62 @@ class TestBrandManualWiring:
         assert "BRAND MANUAL" not in ds.compiled_style_content
 
 
+class TestBrandManualRootDocsOnly:
+    """Real Claude Design exports ship NESTED component READMEs (e.g.
+    ``ui_kits/website/README.md``) alongside the root brand README. Only the
+    ROOT-level docs are the brand operating manual — nested component docs
+    must never pollute the compiled BRAND MANUAL. All fixtures SYNTHETIC."""
+
+    _NESTED_README = "# Acme Website UI Kit\n\nComponent usage notes for the demo site. Not brand rules."
+
+    def test_nested_readme_stays_out_of_the_manual(self, session):
+        from src.services.design_system_compiler import recompute_compiled_style_content
+
+        ds = _make_ds(
+            session,
+            tokens=_TOKENS,
+            files=[
+                _file("readme", _README_MD),  # root README.md
+                _file("readme", self._NESTED_README, path="ui_kits/website/README.md"),
+            ],
+        )
+        recompute_compiled_style_content(ds)
+        assert "BRAND MANUAL" in ds.compiled_style_content
+        assert "Founded in a fixture in 2020" in ds.compiled_style_content  # root text
+        assert "Component usage notes for the demo site" not in ds.compiled_style_content
+
+    def test_nested_skill_stays_out_of_the_manual(self, session):
+        from src.services.design_system_compiler import recompute_compiled_style_content
+
+        ds = _make_ds(
+            session,
+            tokens=_TOKENS,
+            files=[
+                _file("skill", _SKILL_MD),  # root SKILL.md
+                _file("skill", "Nested component skill doc.", path="ui_kits/SKILL.md"),
+            ],
+        )
+        recompute_compiled_style_content(ds)
+        assert "Never recolor or stretch the logo." in ds.compiled_style_content
+        assert "Nested component skill doc." not in ds.compiled_style_content
+
+    def test_nested_only_readme_still_forms_a_manual(self, session):
+        """A bundle with NO root README keeps the pre-existing all-rows join
+        (better a component doc than no manual at all)."""
+        from src.services.design_system_compiler import recompute_compiled_style_content
+
+        ds = _make_ds(
+            session,
+            tokens=_TOKENS,
+            files=[
+                _file("readme", self._NESTED_README, path="ui_kits/website/README.md"),
+            ],
+        )
+        recompute_compiled_style_content(ds)
+        assert "BRAND MANUAL" in ds.compiled_style_content
+        assert "Component usage notes for the demo site" in ds.compiled_style_content
+
+
 # ---------------------------------------------------------------------------
 # Shadow tokens — emitted UNCAPPED
 # ---------------------------------------------------------------------------

@@ -82,7 +82,9 @@ _STYLE_HEADER = "SLIDE VISUAL STYLE"
 # v4: BRAND TYPE SCALE block (ramp derived from the DS's own font-size tokens,
 # neutral default bands when no ramp is recognizable) + the frame block's
 # overflow line no longer suggests scaling content down.
-COMPILER_VERSION = 4
+# v5: BRAND MANUAL is built from ROOT-level README/SKILL only — nested
+# component docs (e.g. a ui-kit folder's README) no longer pollute it.
+COMPILER_VERSION = 5
 _COMPILER_VERSION_MARKER = f"[ds-compiler v{COMPILER_VERSION}]"
 
 # Canonical color-group ordering -> deterministic, human-meaningful sections.
@@ -665,7 +667,15 @@ def _brand_manual_text_from_files(
     def _join(rows: list[tuple[str, str]]) -> Optional[str]:
         if not rows:
             return None
-        return "\n\n".join(text for _, text in sorted(rows, key=lambda row: row[0]))
+        # ROOT-level docs are the brand operating manual. Real Claude Design
+        # exports also ship nested component READMEs (e.g.
+        # ``ui_kits/website/README.md``) which the importer retains for the
+        # source browser — those are component docs, never brand authority,
+        # and must not pollute the manual. Only when a bundle has no
+        # root-level doc at all does the previous all-rows join apply.
+        root_rows = [row for row in rows if "/" not in row[0]]
+        chosen = root_rows or rows
+        return "\n\n".join(text for _, text in sorted(chosen, key=lambda row: row[0]))
 
     return _join(skills), _join(readmes)
 
