@@ -42,6 +42,12 @@ interface AgentConfigContextValue {
   setStyle: (styleId: number | null) => Promise<void>;
   setDesignSystem: (designSystemId: number | null) => Promise<void>;
   setTemplate: (templateId: number | null) => Promise<void>;
+  /**
+   * Reset the template pin to None (design system stays). Template selection
+   * is a PER-GENERATION choice (Claude Design behavior) — call after a deck
+   * generation completes. No-op when nothing is pinned.
+   */
+  clearTemplatePin: () => Promise<void>;
   setDeckPrompt: (promptId: number | null) => Promise<void>;
   saveAsProfile: (name: string, description?: string) => Promise<void>;
   loadProfile: (profileId: number) => Promise<void>;
@@ -378,6 +384,19 @@ export const AgentConfigProvider: React.FC<{ children: React.ReactNode }> = ({ c
     await updateConfig({ ...agentConfig, template_id: templateId });
   }, [agentConfig, updateConfig]);
 
+  // Latest config, readable from async completion handlers whose closures
+  // captured an older render's state (the stream runs for tens of seconds).
+  const agentConfigRef = useRef(agentConfig);
+  useEffect(() => {
+    agentConfigRef.current = agentConfig;
+  }, [agentConfig]);
+
+  const clearTemplatePin = useCallback(async () => {
+    const current = agentConfigRef.current;
+    if (current.template_id == null) return;
+    await updateConfig({ ...current, template_id: null });
+  }, [updateConfig]);
+
   const setDeckPrompt = useCallback(async (promptId: number | null) => {
     await updateConfig({ ...agentConfig, deck_prompt_id: promptId });
   }, [agentConfig, updateConfig]);
@@ -468,6 +487,7 @@ export const AgentConfigProvider: React.FC<{ children: React.ReactNode }> = ({ c
     setStyle,
     setDesignSystem,
     setTemplate,
+    clearTemplatePin,
     setDeckPrompt,
     saveAsProfile,
     loadProfile,
