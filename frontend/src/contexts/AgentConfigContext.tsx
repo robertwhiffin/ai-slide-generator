@@ -198,10 +198,38 @@ export const AgentConfigProvider: React.FC<{ children: React.ReactNode }> = ({ c
   // confirms. Failure paths revert to THIS, never to pre-edit in-memory
   // residue: 'edits win over the in-flight GET' only holds when the edit
   // SUCCEEDS; a failed edit must restore the target session's OWN state.
-  const lastConfirmedBySessionRef = useRef<Map<string, AgentConfig>>(new Map());
-  const stashConfirmed = useCallback((sessionId: string, config: AgentConfig) => {
-    lastConfirmedBySessionRef.current.set(sessionId, config);
+  //
+  // GENERATION axis (state moves FORWARD only). The surface guard stops a
+  // continuation from a DIFFERENT session touching the screen, but two ops
+  // for the SAME session can still settle out of issue order — a slow early
+  // GET returning stale server state can land AFTER a newer edit's PUT
+  // confirmed, and (repaint aside) regress the stash. So every stash-writing
+  // op captures the session's monotonic generation AT ISSUE TIME
+  // (``nextGeneration``); a settling write is accepted only if its
+  // issue-generation is not older than the entry's recorded generation.
+  // A confirmed PUT was issued after any GET/PUT before it, so it carries a
+  // higher generation — older ops settling later are outdated and rejected.
+  // The counter lives per session in the Map, so a B→C→B round trip keeps
+  // B's history and a pre-round-trip B GET can't regress the post-return
+  // stash.
+  const generationBySessionRef = useRef<Map<string, number>>(new Map());
+  const nextGeneration = useCallback((sessionId: string): number => {
+    const next = (generationBySessionRef.current.get(sessionId) ?? 0) + 1;
+    generationBySessionRef.current.set(sessionId, next);
+    return next;
   }, []);
+  const lastConfirmedBySessionRef = useRef<
+    Map<string, { config: AgentConfig; generation: number }>
+  >(new Map());
+  const stashConfirmed = useCallback(
+    (sessionId: string, config: AgentConfig, generation: number): boolean => {
+      const existing = lastConfirmedBySessionRef.current.get(sessionId);
+      if (existing && generation < existing.generation) return false; // outdated
+      lastConfirmedBySessionRef.current.set(sessionId, { config, generation });
+      return true;
+    },
+    [],
+  );
   // updateConfig (declared before refreshConfig) triggers a fresh fetch on
   // the no-snapshot failure path via this forward ref.
   const refreshConfigRef = useRef<(() => Promise<void>) | null>(null);
@@ -290,6 +318,7 @@ export const AgentConfigProvider: React.FC<{ children: React.ReactNode }> = ({ c
     setAgentConfig(prev => withoutSessionScopedState(prev));
 
     const issuedFor = urlSessionId;
+    const issueGen = issuedFor ? nextGeneration(issuedFor) : 0;
     api.getAgentConfig(issuedFor)
       .then(async (config) => {
         // If the session has no explicitly-saved config, load the default profile
@@ -316,15 +345,21 @@ export const AgentConfigProvider: React.FC<{ children: React.ReactNode }> = ({ c
         if (config.deck_prompt_id == null) {
           config.deck_prompt_id = resolveDefaultDeckPromptId();
         }
-        // The session's own loaded state — always stash (keyed by ITS id;
-        // late settles after a further switch update only their own entry).
-        if (issuedFor) stashConfirmed(issuedFor, config);
+        // The session's own loaded state — stash keyed by ITS id, but only
+        // if this GET is not OLDER than what's recorded (a newer edit's PUT
+        // may have already confirmed for this session). ``accepted`` gates
+        // the display apply too: a stash-rejected GET is stale server truth
+        // and must not repaint either.
+        const accepted = issuedFor
+          ? stashConfirmed(issuedFor, config, issueGen)
+          : true;
         settleForSurface(issuedFor, () => {
+          if (!accepted) return; // superseded by a newer confirmed write
           if (configOwnerRef.current === issuedFor) {
             // The user explicitly edited config for this session while the
             // GET was in flight: their intent is already persisted via the
-            // PUT — this snapshot is stale FOR DISPLAY (it is stashed above
-            // as the failure-revert target). Explicit edits win.
+            // PUT — this snapshot is stale FOR DISPLAY (a still-accepted
+            // stash entry is the failure-revert target). Explicit edits win.
             return;
           }
           setAgentConfig(config);
@@ -337,7 +372,7 @@ export const AgentConfigProvider: React.FC<{ children: React.ReactNode }> = ({ c
           showToast('Failed to load agent configuration', 'error');
         });
       });
-  }, [urlSessionId, isPreSession, showToast, claimOwnership, stashConfirmed, settleForSurface]);
+  }, [urlSessionId, isPreSession, showToast, claimOwnership, stashConfirmed, settleForSurface, nextGeneration]);
 
   // ------------------------------------------------------------------
   // localStorage persistence for pre-session mode
@@ -361,6 +396,10 @@ export const AgentConfigProvider: React.FC<{ children: React.ReactNode }> = ({ c
 
     if (!isPreSession && urlSessionId) {
       const issuedFor = urlSessionId;
+      // Issued AFTER any GET/PUT before it for this session, so it carries a
+      // higher generation: when it confirms, older ops settling later are
+      // outdated and can't regress the stash.
+      const issueGen = nextGeneration(issuedFor);
       // An explicit edit is intent FOR THIS SESSION: it claims ownership, so
       // chat requests may carry the config again and a still-in-flight
       // config GET for this session is treated as stale (edits win).
@@ -369,9 +408,9 @@ export const AgentConfigProvider: React.FC<{ children: React.ReactNode }> = ({ c
       try {
         const confirmed = await api.updateAgentConfig(issuedFor, config);
         console.log('[AgentConfigContext] Backend confirmed:', JSON.stringify(confirmed));
-        // Server truth for ITS session — stash unconditionally (keyed);
-        // touch the screen only if the user is still on that session.
-        stashConfirmed(issuedFor, confirmed);
+        // Server truth for ITS session — stash (keyed) unless a still-newer
+        // write already landed; touch the screen only if still on it.
+        stashConfirmed(issuedFor, confirmed, issueGen);
         settleForSurface(issuedFor, () => setAgentConfig(confirmed));
         return true;
       } catch (err) {
@@ -385,8 +424,9 @@ export const AgentConfigProvider: React.FC<{ children: React.ReactNode }> = ({ c
           if (ownConfirmed) {
             // The session's last server-confirmed state (its GET snapshot —
             // including one discarded-as-stale mid-edit — or an earlier
-            // confirmed PUT). It IS this session's state, so it stays owned.
-            setAgentConfig(ownConfirmed);
+            // confirmed PUT), protected by the generation gate. It IS this
+            // session's state, so it stays owned.
+            setAgentConfig(ownConfirmed.config);
             claimOwnership(issuedFor);
           } else {
             // The edit fired before any snapshot for this session ever
@@ -409,7 +449,7 @@ export const AgentConfigProvider: React.FC<{ children: React.ReactNode }> = ({ c
       console.log('[AgentConfigContext] Pre-session mode, config saved locally only. isPreSession:', isPreSession, 'urlSessionId:', urlSessionId);
       return true;
     }
-  }, [isPreSession, urlSessionId, showToast, claimOwnership, stashConfirmed, settleForSurface]);
+  }, [isPreSession, urlSessionId, showToast, claimOwnership, stashConfirmed, settleForSurface, nextGeneration]);
 
   // ------------------------------------------------------------------
   // Convenience mutators
@@ -537,17 +577,19 @@ export const AgentConfigProvider: React.FC<{ children: React.ReactNode }> = ({ c
   const refreshConfig = useCallback(async () => {
     if (isPreSession || !urlSessionId) return;
     const issuedFor = urlSessionId;
+    const issueGen = nextGeneration(issuedFor);
     try {
       const config = await api.getAgentConfig(issuedFor);
-      stashConfirmed(issuedFor, config);
+      const accepted = stashConfirmed(issuedFor, config, issueGen);
       settleForSurface(issuedFor, () => {
+        if (!accepted) return; // superseded by a newer confirmed write
         setAgentConfig(config);
         claimOwnership(issuedFor); // freshly loaded FOR this session
       });
     } catch (err) {
       console.error('[AgentConfigContext] Failed to refresh config:', err);
     }
-  }, [isPreSession, urlSessionId, claimOwnership, stashConfirmed, settleForSurface]);
+  }, [isPreSession, urlSessionId, claimOwnership, stashConfirmed, settleForSurface, nextGeneration]);
 
   useEffect(() => {
     refreshConfigRef.current = refreshConfig;
@@ -570,13 +612,18 @@ export const AgentConfigProvider: React.FC<{ children: React.ReactNode }> = ({ c
 
     if (!isPreSession && urlSessionId) {
       const issuedFor = urlSessionId;
+      // A profile load is a server WRITE for this session — issued now, so
+      // it takes a fresh (higher) generation like a PUT.
+      const issueGen = nextGeneration(issuedFor);
       // Active session: call backend, then update local state
       try {
         const result = await api.loadProfile(issuedFor, profileId);
         // The profile DID apply to issuedFor server-side — stash reflects
-        // that regardless; the screen updates only if we're still there.
-        stashConfirmed(issuedFor, result.agent_config);
+        // that unless a still-newer write landed; screen updates only if
+        // we're still there.
+        const accepted = stashConfirmed(issuedFor, result.agent_config, issueGen);
         settleForSurface(issuedFor, () => {
+          if (!accepted) return;
           setAgentConfig(result.agent_config);
           claimOwnership(issuedFor); // explicitly set IN this session
           showToast('Profile loaded', 'success');
@@ -607,7 +654,7 @@ export const AgentConfigProvider: React.FC<{ children: React.ReactNode }> = ({ c
         });
       }
     }
-  }, [agentConfig, isPreSession, urlSessionId, showToast, claimOwnership, stashConfirmed, settleForSurface]);
+  }, [agentConfig, isPreSession, urlSessionId, showToast, claimOwnership, stashConfirmed, settleForSurface, nextGeneration]);
 
   // ------------------------------------------------------------------
   // Render

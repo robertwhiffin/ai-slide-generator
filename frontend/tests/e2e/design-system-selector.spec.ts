@@ -779,6 +779,240 @@ test.describe('AgentConfigBar — design system selector', () => {
     await expect(page.getByTestId('template-selector')).toHaveValue('2');
   });
 
+  test('a stale same-session GET settling after a successful PUT does not regress the stash (codex repro)', async ({ page }) => {
+    // B's GET is issued early but returns OLD server state {ds:2,tpl:2} and
+    // is DELAYED. The user edits B and the edit PUT succeeds FIRST, stashing
+    // {ds:1,tpl:null}. The old GET then settles: repaint is display-guarded
+    // (owner=B), but its stash write must ALSO be rejected as outdated —
+    // otherwise a later failed edit reverts to the stale {ds:2,tpl:2}.
+    const dsB = 1; // the value the successful edit sets
+    const putBodies: string[] = [];
+    let bPutCount = 0;
+    await page.route(/\/api\/sessions\/[^/]+\/agent-config$/, async (route, request) => {
+      const isB = request.url().includes(TEST_SESSION_ID);
+      if (request.method() === 'PUT') {
+        putBodies.push(request.postData() ?? '');
+        if (isB) {
+          bPutCount += 1;
+          if (bPutCount === 1) {
+            // The successful edit — confirms promptly (before the slow GET).
+            route.fulfill({ status: 200, contentType: 'application/json', body: request.postData() ?? '{}' });
+            return;
+          }
+          // A LATER edit that FAILS — its revert reveals what the stash holds.
+          route.fulfill({ status: 500, contentType: 'application/json', body: JSON.stringify({ detail: 'sync failed' }) });
+          return;
+        }
+        route.fulfill({ status: 200, contentType: 'application/json', body: request.postData() ?? '{}' });
+        return;
+      }
+      // B's GET: OLD state, DELAYED so it lands after the first PUT confirms.
+      await new Promise((r) => setTimeout(r, 1500));
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ ...mockDefaultAgentConfig, design_system_id: 2, template_id: 2 }),
+      });
+    });
+    await page.route(/\/api\/settings\/design-systems\/\d+\/templates$/, (route) => {
+      route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(mockDesignSystemTemplatesWithLive) });
+    });
+    await page.route(/\/api\/user\/current$/, (route) => {
+      route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ user: 'dev@local.dev' }) });
+    });
+    await page.route(/\/api\/sessions\/[^/]+\/lock$/, (route, request) => {
+      if (request.method() === 'POST') {
+        route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ acquired: true, locked_by: null }) });
+      } else {
+        route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ locked: false, locked_by: null }) });
+      }
+    });
+
+    // Land on session A (=TEST_SESSION_ID here) with its GET in flight.
+    await page.goto(`/sessions/${TEST_SESSION_ID}/edit`);
+    await expect(page.getByTestId('agent-config-bar')).toBeVisible();
+    await page.getByTestId('agent-config-toggle').click();
+    await expect(page.getByTestId('design-system-selector')).toBeVisible();
+
+    // Edit BEFORE the slow GET lands: set DS to 1 (distinct from the GET's
+    // stale 2). This edit's PUT confirms first and stashes {ds:1,tpl:null}.
+    await page.waitForTimeout(300);
+    await page.getByTestId('design-system-selector').selectOption(String(dsB));
+    await expect.poll(() => putBodies.length).toBeGreaterThan(0);
+    await expect(page.getByTestId('design-system-selector')).toHaveValue('1');
+
+    // Let the stale OLD GET ({ds:2}) settle (issued before the PUT → lower
+    // generation → stash write rejected). Screen stays {ds:1}.
+    await page.waitForTimeout(1600);
+    await expect(page.getByTestId('design-system-selector')).toHaveValue('1');
+
+    // Now a SECOND edit whose PUT FAILS — the revert must land on the
+    // post-PUT {ds:1}, NOT the stale GET's {ds:2}.
+    await page.getByTestId('style-selector').selectOption('2');
+    await page.waitForTimeout(500);
+    await expect(page.getByTestId('design-system-selector')).toHaveValue('1');
+
+    // And the next edit's wire body builds from {ds:1}, never {ds:2}.
+    await page.getByTestId('style-selector').selectOption('1');
+    await expect.poll(() => putBodies.length).toBeGreaterThan(2);
+    const lastPut = JSON.parse(putBodies[putBodies.length - 1]);
+    expect(lastPut.design_system_id).toBe(1); // post-PUT truth, not stale 2
+  });
+
+  test('B->C->B: a pre-round-trip stale B GET settling after return cannot regress B (generation)', async ({ page }) => {
+    const SESSION_C = 'c3d6e2f0-1234-4abc-9def-0123456789ab';
+    await mockSessionWithSlides(page, SESSION_C);
+    await page.route('http://127.0.0.1:8000/api/sessions?limit=5', (route) => {
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          sessions: [
+            ...mockSessions.sessions,
+            { ...mockSessions.sessions[1], session_id: SESSION_C, title: 'Session C fixture' },
+          ],
+          count: 3,
+        }),
+      });
+    });
+
+    const putBodies: { url: string; body: string }[] = [];
+    let bGetCount = 0;
+    let bPutCount = 0;
+    await page.route(/\/api\/sessions\/[^/]+\/agent-config$/, async (route, request) => {
+      const url = request.url();
+      const isB = url.includes(TEST_SESSION_ID);
+      const isC = url.includes(SESSION_C);
+      if (request.method() === 'PUT') {
+        putBodies.push({ url, body: request.postData() ?? '' });
+        if (isB) {
+          // Every B edit FAILS so its revert reads (and thus reveals) B's
+          // stash — the observable that proves the stale GET was rejected.
+          bPutCount += 1;
+          route.fulfill({ status: 500, contentType: 'application/json', body: JSON.stringify({ detail: 'fail' }) });
+          return;
+        }
+        route.fulfill({ status: 200, contentType: 'application/json', body: request.postData() ?? '{}' });
+        return;
+      }
+      if (isB) {
+        bGetCount += 1;
+        // The FIRST B GET (before the round trip) is very slow AND stale
+        // ({ds:2}); the second (on return) is prompt ({ds:1}).
+        if (bGetCount === 1) {
+          await new Promise((r) => setTimeout(r, 2000));
+          route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ ...mockDefaultAgentConfig, design_system_id: 2, template_id: 2 }) });
+          return;
+        }
+        await new Promise((r) => setTimeout(r, 300));
+        route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ ...mockDefaultAgentConfig, design_system_id: 1, template_id: 1 }) });
+        return;
+      }
+      if (isC) {
+        await new Promise((r) => setTimeout(r, 300));
+        route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ ...mockDefaultAgentConfig, design_system_id: null, template_id: null }) });
+        return;
+      }
+      route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(mockDefaultAgentConfig) });
+    });
+    await page.route(/\/api\/settings\/design-systems\/\d+\/templates$/, (route) => {
+      route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(mockDesignSystemTemplatesWithLive) });
+    });
+    await page.route(/\/api\/user\/current$/, (route) => {
+      route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ user: 'dev@local.dev' }) });
+    });
+    await page.route(/\/api\/sessions\/[^/]+\/lock$/, (route, request) => {
+      if (request.method() === 'POST') {
+        route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ acquired: true, locked_by: null }) });
+      } else {
+        route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ locked: false, locked_by: null }) });
+      }
+    });
+
+    // Start on B; its first GET is 4s out (stale {ds:2}).
+    await page.goto(`/sessions/${TEST_SESSION_ID}/edit`);
+    await expect(page.getByTestId('agent-config-bar')).toBeVisible();
+    await page.getByTestId('agent-config-toggle').click();
+
+    // B -> C -> B quickly (each new GET bumps B's generation on return).
+    await page.getByText('Session C fixture').first().click();
+    await page.waitForURL(new RegExp(`/sessions/${SESSION_C}/edit`));
+    await page.getByText('Session 2026-01-08 20:38').first().click();
+    await page.waitForURL(new RegExp(`/sessions/${TEST_SESSION_ID}/edit`));
+
+    // On return, B's prompt GET ({ds:1}) lands (~300ms).
+    await expect(page.getByTestId('design-system-selector')).toHaveValue('1', { timeout: 4000 });
+
+    // The pre-round-trip stale B GET ({ds:2}) settles at ~2s from the first
+    // mount: it was issued at an OLDER generation than the return GET →
+    // stash write rejected, screen stays {ds:1}. Wait past its settle.
+    await page.waitForTimeout(2500);
+    await expect(page.getByTestId('design-system-selector')).toHaveValue('1');
+
+    // Prove the STASH wasn't regressed: a failing edit reverts to {ds:1}
+    // (pre-fix the unconditional stale-GET stash would revert to {ds:2}).
+    await page.getByTestId('style-selector').selectOption('2');
+    await page.waitForTimeout(500);
+    await expect(page.getByTestId('design-system-selector')).toHaveValue('1');
+  });
+
+  test('overlapping PUTs: an earlier-issued PUT settling later does not regress the stash', async ({ page }) => {
+    const putBodies: string[] = [];
+    let putSeen = 0;
+    await page.route(/\/api\/sessions\/[^/]+\/agent-config$/, async (route, request) => {
+      const isB = request.url().includes(TEST_SESSION_ID);
+      if (request.method() === 'PUT') {
+        putSeen += 1;
+        putBodies.push(request.postData() ?? '');
+        if (isB && putSeen === 1) {
+          // First-issued PUT: confirm SLOWLY (settles after the 2nd).
+          await new Promise((r) => setTimeout(r, 1500));
+          route.fulfill({ status: 200, contentType: 'application/json', body: request.postData() ?? '{}' });
+          return;
+        }
+        if (isB && putSeen === 2) {
+          // Second-issued PUT: confirm fast (newer generation wins).
+          route.fulfill({ status: 200, contentType: 'application/json', body: request.postData() ?? '{}' });
+          return;
+        }
+        // Any later (failing) edit exposes the stash via revert.
+        route.fulfill({ status: 500, contentType: 'application/json', body: JSON.stringify({ detail: 'fail' }) });
+        return;
+      }
+      route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ ...mockDefaultAgentConfig, design_system_id: 1, template_id: 1 }) });
+    });
+    await page.route(/\/api\/settings\/design-systems\/\d+\/templates$/, (route) => {
+      route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(mockDesignSystemTemplatesWithLive) });
+    });
+    await page.route(/\/api\/user\/current$/, (route) => {
+      route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ user: 'dev@local.dev' }) });
+    });
+    await page.route(/\/api\/sessions\/[^/]+\/lock$/, (route, request) => {
+      if (request.method() === 'POST') {
+        route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ acquired: true, locked_by: null }) });
+      } else {
+        route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ locked: false, locked_by: null }) });
+      }
+    });
+
+    await page.goto(`/sessions/${TEST_SESSION_ID}/edit`);
+    await expect(page.getByTestId('agent-config-bar')).toBeVisible();
+    await page.getByTestId('agent-config-toggle').click();
+    await expect(page.getByTestId('design-system-selector')).toHaveValue('1', { timeout: 4000 });
+
+    // Two edits in quick succession: PUT#1 (style->2, slow) then PUT#2
+    // (style->1, fast). PUT#2 confirms first at a higher generation; PUT#1
+    // settles later and must NOT regress the stash back to style 2.
+    await page.getByTestId('style-selector').selectOption('2'); // PUT#1 (slow)
+    await page.getByTestId('style-selector').selectOption('1'); // PUT#2 (fast)
+    await page.waitForTimeout(1800); // PUT#1 has now settled late
+
+    // A failing edit reveals the stash: it must hold PUT#2's style=1.
+    await page.getByTestId('design-system-selector').selectOption('2');
+    await page.waitForTimeout(400);
+    await expect(page.getByTestId('style-selector')).toHaveValue('1');
+  });
+
   test('an explicit edit during the pending config load wins over the late GET', async ({ page }) => {
     const SESSION_B = 'a2c5f1d9-8ef7-48dc-be69-0ead7be316dd';
     await mockSessionWithSlides(page, SESSION_B);
