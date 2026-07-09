@@ -878,7 +878,6 @@ test.describe('AgentConfigBar — design system selector', () => {
 
     const putBodies: { url: string; body: string }[] = [];
     let bGetCount = 0;
-    let bPutCount = 0;
     await page.route(/\/api\/sessions\/[^/]+\/agent-config$/, async (route, request) => {
       const url = request.url();
       const isB = url.includes(TEST_SESSION_ID);
@@ -888,7 +887,6 @@ test.describe('AgentConfigBar — design system selector', () => {
         if (isB) {
           // Every B edit FAILS so its revert reads (and thus reveals) B's
           // stash — the observable that proves the stale GET was rejected.
-          bPutCount += 1;
           route.fulfill({ status: 500, contentType: 'application/json', body: JSON.stringify({ detail: 'fail' }) });
           return;
         }
