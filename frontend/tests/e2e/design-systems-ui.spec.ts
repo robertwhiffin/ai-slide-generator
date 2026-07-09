@@ -290,8 +290,10 @@ test.describe('Design System Library — source files', () => {
     await openAcme(page);
     const readme = page.getByTestId('ds-readme-content');
     // The literal markdown source is shown (leading '#') — NOT a rendered heading.
-    await expect(readme).toContainText('# Acme Design System');
+    // Rendered as markdown: the H1 marker becomes a real heading element.
+    await expect(readme.locator('h1')).toHaveText('Acme Design System');
     await expect(readme).toContainText('Synthetic readme for tests');
+    await expect(readme).not.toContainText('# Acme Design System');
   });
 
   test('clicking a file opens its source in the read-only text viewer', async ({ page }) => {

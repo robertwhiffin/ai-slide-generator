@@ -470,6 +470,22 @@ export const AgentConfigBar: React.FC = () => {
   const [templates, setTemplates] = useState<DesignSystemTemplate[]>([]);
   const [templatesLoading, setTemplatesLoading] = useState(false);
 
+  // Picker polish: filter the design-system options by name; keep the
+  // selected system's option visible even when it doesn't match the filter.
+  const [designSystemFilter, setDesignSystemFilter] = useState('');
+  const normalizedFilter = designSystemFilter.trim().toLowerCase();
+  const filteredDesignSystems = normalizedFilter
+    ? designSystems.filter(
+        (d) =>
+          d.name.toLowerCase().includes(normalizedFilter) ||
+          d.id === agentConfig.design_system_id,
+      )
+    : designSystems;
+  const selectedDesignSystem =
+    agentConfig.design_system_id != null
+      ? designSystems.find((d) => d.id === agentConfig.design_system_id) ?? null
+      : null;
+
   // Fetch style/design-system/prompt options eagerly so the collapsed summary can show names
   useEffect(() => {
     let cancelled = false;
@@ -700,6 +716,17 @@ export const AgentConfigBar: React.FC = () => {
             {/* Design system selector — takes precedence over slide style when set */}
             <div className="flex-1 min-w-[140px]" data-tour="agent-design-system-selector">
               <label className="block text-xs font-medium text-gray-500 mb-1">Design System</label>
+              {designSystems.length > 5 && (
+                <input
+                  type="search"
+                  value={designSystemFilter}
+                  onChange={(e) => setDesignSystemFilter(e.target.value)}
+                  placeholder="Search design systems…"
+                  aria-label="Search design systems"
+                  data-testid="design-system-search"
+                  className="mb-1 w-full px-2 py-1 border border-gray-300 rounded text-xs bg-white focus:outline-none focus:ring-1 focus:ring-blue-500"
+                />
+              )}
               <select
                 value={agentConfig.design_system_id ?? ''}
                 onChange={handleDesignSystemChange}
@@ -707,11 +734,28 @@ export const AgentConfigBar: React.FC = () => {
                 className="w-full px-2 py-1.5 border border-gray-300 rounded text-sm bg-white focus:outline-none focus:ring-1 focus:ring-blue-500 disabled:opacity-50"
                 data-testid="design-system-selector"
               >
-                <option value="">None</option>
-                {designSystems.map(d => (
+                <option value="">{designSystemsLoading ? 'Loading design systems…' : 'None'}</option>
+                {filteredDesignSystems.map(d => (
                   <option key={d.id} value={d.id}>{d.name}</option>
                 ))}
               </select>
+              {!designSystemsLoading && designSystems.length === 0 && (
+                <p className="mt-1 text-[11px] text-gray-400">
+                  No design systems yet — upload one in Settings.
+                </p>
+              )}
+              {selectedDesignSystem && (
+                <p className="mt-1 text-[11px] text-gray-400" data-testid="design-system-subtitle">
+                  {[
+                    selectedDesignSystem.font_families?.length
+                      ? selectedDesignSystem.font_families.join(', ')
+                      : null,
+                    `${selectedDesignSystem.template_count} template${selectedDesignSystem.template_count === 1 ? '' : 's'}`,
+                  ]
+                    .filter(Boolean)
+                    .join(' · ')}
+                </p>
+              )}
               {agentConfig.design_system_id != null && agentConfig.slide_style_id != null && (
                 <p className="mt-1 text-[11px] text-gray-400">
                   Design system takes precedence over slide style.
@@ -721,7 +765,7 @@ export const AgentConfigBar: React.FC = () => {
 
             {/* Template selector — dependent on the selected design system;
                 hidden when no design system is selected or it has no templates */}
-            {agentConfig.design_system_id != null && templates.length > 0 && (
+            {agentConfig.design_system_id != null && (templatesLoading || templates.length > 0) && (
               <div className="flex-1 min-w-[140px]" data-tour="agent-template-selector">
                 <label className="block text-xs font-medium text-gray-500 mb-1">Template</label>
                 <select
@@ -731,7 +775,7 @@ export const AgentConfigBar: React.FC = () => {
                   className="w-full px-2 py-1.5 border border-gray-300 rounded text-sm bg-white focus:outline-none focus:ring-1 focus:ring-blue-500 disabled:opacity-50"
                   data-testid="template-selector"
                 >
-                  <option value="">None</option>
+                  <option value="">{templatesLoading ? 'Loading templates…' : 'None'}</option>
                   {templates.map(t => (
                     <option key={t.id} value={t.id}>{t.name}</option>
                   ))}

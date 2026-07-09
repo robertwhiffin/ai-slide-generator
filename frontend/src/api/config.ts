@@ -205,6 +205,8 @@ export interface DesignSystemSummary {
   token_count: number;
   asset_count: number;
   template_count: number;
+  /** Brand font family names, for the picker's "font stack · N templates" subtitle. */
+  font_families?: string[];
   created_at: string;
   updated_at: string;
 }

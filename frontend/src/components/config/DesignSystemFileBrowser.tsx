@@ -18,6 +18,7 @@
 
 import React, { useCallback, useEffect, useState } from 'react';
 import { ChevronDown, ChevronRight, FileText, FolderOpen, X } from 'lucide-react';
+import ReactMarkdown from 'react-markdown';
 import { configApi } from '../../api/config';
 import type { DesignSystemFileEntry, DesignSystemTemplate } from '../../api/config';
 import { TemplateThumbnail } from './TemplateThumbnail';
@@ -251,21 +252,29 @@ export const DesignSystemFileBrowser: React.FC<DesignSystemFileBrowserProps> = (
                 {open && (
                   <div className="flex flex-col gap-1 border-t border-border p-2">
                     {id === 'readme' && readme != null && (
-                      <pre
+                      /* Rendered as sanitized markdown: react-markdown emits
+                         React elements only — raw HTML in the source shows as
+                         text, never injects (no rehype-raw, no
+                         dangerouslySetInnerHTML). The raw source stays one
+                         click away via the README.md file row below. */
+                      <div
                         data-testid="ds-readme-content"
-                        className="max-h-64 overflow-auto whitespace-pre-wrap break-words rounded border border-border bg-background p-3 font-mono text-xs text-foreground"
+                        className="max-h-64 space-y-2 overflow-auto break-words rounded border border-border bg-background p-3 text-xs leading-relaxed text-foreground [&_a]:underline [&_code]:rounded [&_code]:bg-muted [&_code]:px-1 [&_code]:font-mono [&_h1]:text-sm [&_h1]:font-semibold [&_h2]:text-xs [&_h2]:font-semibold [&_h3]:text-xs [&_h3]:font-medium [&_li]:ml-4 [&_ol]:list-decimal [&_pre]:overflow-auto [&_pre]:rounded [&_pre]:bg-muted [&_pre]:p-2 [&_ul]:list-disc"
                       >
-                        {readme.content}
-                      </pre>
+                        <ReactMarkdown>{readme.content}</ReactMarkdown>
+                      </div>
                     )}
 
                     {id === 'templates' &&
                       templates.map((tmpl) => (
-                        <button
+                        /* Click-delegation wrapper: the template NAME is the
+                           real <button>; the live-preview iframe must never
+                           sit inside an interactive element (a11y:
+                           nested-interactive). */
+                        <div
                           key={tmpl.id}
-                          type="button"
                           onClick={() => openSourceFile(tmpl.entry_path)}
-                          className="flex w-full items-center gap-2 rounded border border-border bg-background px-2 py-1.5 text-left transition-colors hover:bg-muted focus:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                          className="flex w-full cursor-pointer items-center gap-2 rounded border border-border bg-background px-2 py-1.5 text-left transition-colors hover:bg-muted focus-within:ring-1 focus-within:ring-ring"
                           data-testid="ds-file-template-card"
                         >
                           <TemplateThumbnail
@@ -274,9 +283,16 @@ export const DesignSystemFileBrowser: React.FC<DesignSystemFileBrowserProps> = (
                             className="h-10 w-16 shrink-0 rounded border border-border bg-background"
                           />
                           <span className="min-w-0 flex-1">
-                            <span className="block truncate text-xs font-medium text-foreground">
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                openSourceFile(tmpl.entry_path);
+                              }}
+                              className="block w-full truncate text-left text-xs font-medium text-foreground focus:outline-none focus-visible:underline"
+                            >
                               {tmpl.name}
-                            </span>
+                            </button>
                             {tmpl.description && (
                               <span className="block truncate text-[11px] text-muted-foreground">
                                 {tmpl.description}
@@ -286,7 +302,7 @@ export const DesignSystemFileBrowser: React.FC<DesignSystemFileBrowserProps> = (
                               {tmpl.entry_path}
                             </span>
                           </span>
-                        </button>
+                        </div>
                       ))}
 
                     {sectionFiles
