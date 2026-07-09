@@ -59,13 +59,27 @@ export const LazyMount: React.FC<{ className?: string; children: React.ReactNode
 };
 
 /**
+ * CSP for the preview document: uploaded template HTML/CSS must not be able
+ * to trigger ANY external network fetch from the frame (img/link tags, css
+ * url()/@import — passive egress). The legit live render only needs inline
+ * styles plus data:/blob: resources: the importer rewrites ds-asset and
+ * relative references to data: URIs, and token CSS arrives inline.
+ * sandbox="" on the iframe already blocks scripts/same-origin; this closes
+ * the passive-fetch channel sandbox does not.
+ */
+const PREVIEW_CSP =
+  "default-src 'none'; style-src 'unsafe-inline'; img-src data: blob:; font-src data:;";
+
+/**
  * Compose the preview document: the template layout with its token
  * stylesheet resolved and preview-only overflow clipping. Rendered ONLY in a
  * fully-sandboxed iframe.
  */
 function buildTemplatePreviewDoc(layoutHtml: string, tokenCss: string | null): string {
+  const cspMeta = `<meta http-equiv="Content-Security-Policy" content="${PREVIEW_CSP}">`;
   const previewReset = '<style>html,body{margin:0;overflow:hidden}</style>';
-  const cssBlock = (tokenCss ? `<style>${tokenCss}</style>` : '') + previewReset;
+  // CSP first — it must precede any fetch-capable markup in the document.
+  const cssBlock = cspMeta + (tokenCss ? `<style>${tokenCss}</style>` : '') + previewReset;
   const headMatch = layoutHtml.match(/<head[^>]*>/i);
   if (headMatch) return layoutHtml.replace(headMatch[0], headMatch[0] + cssBlock);
   return cssBlock + layoutHtml;
