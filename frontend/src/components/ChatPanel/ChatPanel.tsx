@@ -61,7 +61,7 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(({
     clearSelection,
   } = useSelection();
   const { sessionId, isInitializing, error: sessionError, setExperimentUrl, setSessionTitle } = useSession();
-  const { agentConfig, refreshConfig } = useAgentConfig();
+  const { agentConfig, refreshConfig, clearTemplatePin } = useAgentConfig();
   const { setIsGenerating } = useGeneration();
   // Synchronously clear messages when sessionId changes (avoids old-message flash on session switch).
   // React discards the intermediate render and immediately re-renders with empty messages,
@@ -308,8 +308,18 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(({
             setLastReplacement({ sync_error: event.metadata.sync_error });
           }
 
-          // Refresh agent config to pick up updated conversation_ids from Genie tools
-          refreshConfig();
+          // Refresh agent config to pick up updated conversation_ids from
+          // Genie tools; then, if this completion actually generated slides,
+          // consume the template pin — template selection is per-generation
+          // (Claude Design behavior), while the design system stays sticky.
+          {
+            const didGenerateSlides = !!(
+              event.slides && !event.metadata?.clarification_needed
+            );
+            refreshConfig().finally(() => {
+              if (didGenerateSlides) void clearTemplatePin();
+            });
+          }
           break;
       }
     };
