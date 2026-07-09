@@ -87,6 +87,20 @@ class DesignSystemTemplateListResponse(BaseModel):
     total: int
 
 
+class TemplateSourceOut(BaseModel):
+    """The stored template sources for CLIENT-SIDE preview rendering.
+
+    Real Claude Design exports ship no screenshot, so the frontend live-renders
+    the layout inside a fully-sandboxed iframe (no scripts, no same-origin).
+    Returned as JSON — this endpoint never serves renderable markup from the
+    app origin (the Phase-6 rule).
+    """
+    id: int
+    name: str
+    layout_html: str
+    token_css: Optional[str]
+
+
 class FileEntryOut(BaseModel):
     """One node of the source-file tree (Phase 6) — metadata only, never bytes."""
     path: str
@@ -631,6 +645,42 @@ def serve_design_system_template_thumbnail(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to serve design system template thumbnail",
         )
+
+
+@router.get(
+    "/{ds_id}/templates/{template_id}/source", response_model=TemplateSourceOut
+)
+def get_design_system_template_source(
+    ds_id: int, template_id: int, db: Session = Depends(get_db)
+):
+    """Return one template's stored layout HTML + token CSS as JSON.
+
+    Powers the live-rendered template mini-cards: real Claude Design bundles
+    ship no preview screenshots, so when ``thumbnail_url`` is null the
+    frontend fetches this and renders it inside a fully-sandboxed iframe
+    (``sandbox=""`` — no scripts, no same-origin). JSON keeps the response
+    non-renderable from the app origin, consistent with the Phase-6 file
+    browser's never-serve-user-markup rule.
+    """
+    template = (
+        db.query(DesignSystemTemplate)
+        .filter(
+            DesignSystemTemplate.id == template_id,
+            DesignSystemTemplate.design_system_id == ds_id,
+        )
+        .first()
+    )
+    if not template:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Template {template_id} not found for design system {ds_id}",
+        )
+    return TemplateSourceOut(
+        id=template.id,
+        name=template.name,
+        layout_html=template.layout_html,
+        token_css=template.token_css,
+    )
 
 
 @router.get("/{ds_id}/assets/{asset_id}")

@@ -9,7 +9,7 @@
  * All content is RUNTIME data from the API — nothing brand-specific is hardcoded.
  */
 
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { Check, Layers, Palette, Image as ImageIcon, FileText } from 'lucide-react';
 import { Badge } from '@/ui/badge';
 import { configApi, resolveApiUrl } from '../../api/config';
@@ -22,6 +22,7 @@ import type {
 import { useAgentConfig } from '../../contexts/AgentConfigContext';
 import { useToast } from '../../contexts/ToastContext';
 import { DesignSystemFileBrowser } from './DesignSystemFileBrowser';
+import { LazyMount, TemplateThumbnail } from './TemplateThumbnail';
 
 interface DesignSystemDetailPanelProps {
   detail: DesignSystemDetail | null;
@@ -51,45 +52,6 @@ function readTemplates(manifest: Record<string, unknown> | null): ManifestTempla
   if (!Array.isArray(templates)) return [];
   return templates.filter((t): t is ManifestTemplate => typeof t === 'object' && t !== null);
 }
-
-/**
- * Defer mounting children until the placeholder scrolls near the viewport
- * (IntersectionObserver, 200px rootMargin). Large design systems ship
- * hundreds of assets — eager-mounting every tile fired ~400 requests /
- * ~20MB on open. The Claude Design detail view lazy-mounts per card; same
- * pattern here.
- */
-const LazyMount: React.FC<{ className?: string; children: React.ReactNode }> = ({
-  className,
-  children,
-}) => {
-  const ref = useRef<HTMLDivElement>(null);
-  const [visible, setVisible] = useState(false);
-  useEffect(() => {
-    const el = ref.current;
-    if (!el || visible) return;
-    if (typeof IntersectionObserver === 'undefined') {
-      setVisible(true);
-      return;
-    }
-    const observer = new IntersectionObserver(
-      (entries) => {
-        if (entries.some((entry) => entry.isIntersecting)) {
-          setVisible(true);
-          observer.disconnect();
-        }
-      },
-      { rootMargin: '200px' },
-    );
-    observer.observe(el);
-    return () => observer.disconnect();
-  }, [visible]);
-  return (
-    <div ref={ref} className={className}>
-      {visible ? children : null}
-    </div>
-  );
-};
 
 /** Grid tile image for one brand asset: lazy-mounted, thumbnail-first. */
 const AssetThumb: React.FC<{ asset: DesignSystemAsset }> = ({ asset }) => {
@@ -242,18 +204,11 @@ export const DesignSystemDetailPanel: React.FC<DesignSystemDetailPanelProps> = (
                   className="flex flex-col overflow-hidden rounded-md border border-border bg-muted/20"
                   data-testid="template-card"
                 >
-                  {tmpl.thumbnail_url ? (
-                    <img
-                      src={resolveApiUrl(tmpl.thumbnail_url)}
-                      alt={`${tmpl.name} preview`}
-                      className="aspect-video w-full border-b border-border bg-background object-cover"
-                      onError={(e) => { (e.currentTarget as HTMLImageElement).style.display = 'none'; }}
-                    />
-                  ) : (
-                    <div className="flex aspect-video w-full items-center justify-center border-b border-border bg-background text-muted-foreground/40">
-                      <Layers className="size-6" />
-                    </div>
-                  )}
+                  <TemplateThumbnail
+                    dsId={detail.id}
+                    template={tmpl}
+                    className="aspect-video w-full border-b border-border bg-background"
+                  />
                   <div className="flex flex-1 flex-col gap-1 p-3">
                     <div className="text-sm font-medium text-foreground">{tmpl.name}</div>
                     {tmpl.description && (

@@ -316,7 +316,8 @@ class TestTemplateEndpoints:
             f"/api/settings/design-systems/{body['id']}/templates/"
             f"{template['id']}/thumbnail"
         )
-        # No endpoint serves template HTML — the listing must not carry it either.
+        # Layout HTML rides only on the dedicated /source JSON endpoint —
+        # the listing must not carry it.
         assert "layout_html" not in template
 
     def test_list_templates_404_for_unknown_design_system(self, client):
@@ -664,3 +665,38 @@ class TestServeAssetThumbnail:
         resp = client.get(f"{broken['url']}/thumbnail")
         assert resp.status_code == 200
         assert resp.content == b"\x89PNG\r\n\x1a\nnot really a png"
+
+
+# ---------------------------------------------------------------------------
+# Template source (JSON for the live-rendered preview cards)
+# ---------------------------------------------------------------------------
+
+
+class TestTemplateSourceEndpoint:
+    """Real Claude Design bundles ship no screenshots; the frontend fetches
+    the stored layout as JSON and renders it in a fully-sandboxed iframe.
+    JSON keeps the response non-renderable from the app origin (Phase-6
+    rule: user markup is never served as text/html)."""
+
+    def test_source_returns_layout_and_token_css_as_json(self, client):
+        body = _import_templated(client)
+        tmpl = client.get(f"{BASE}/{body['id']}/templates").json()["templates"][0]
+        resp = client.get(f"{BASE}/{body['id']}/templates/{tmpl['id']}/source")
+        assert resp.status_code == 200
+        assert resp.headers["content-type"].startswith("application/json")
+        data = resp.json()
+        assert data["id"] == tmpl["id"]
+        assert data["name"] == "Acme Corporate"
+        assert "<" in data["layout_html"]  # the stored (rewritten) entry HTML
+        assert data["token_css"]  # retained CSS token sources
+
+    def test_source_404_for_wrong_ds(self, client):
+        body = _import_templated(client)
+        tmpl = client.get(f"{BASE}/{body['id']}/templates").json()["templates"][0]
+        resp = client.get(f"{BASE}/999999/templates/{tmpl['id']}/source")
+        assert resp.status_code == 404
+
+    def test_source_404_for_unknown_template(self, client):
+        body = _import_templated(client)
+        resp = client.get(f"{BASE}/{body['id']}/templates/999999/source")
+        assert resp.status_code == 404

@@ -237,6 +237,18 @@ export interface DesignSystemTemplateListResponse {
   total: number;
 }
 
+/**
+ * One template's stored sources for CLIENT-SIDE preview rendering (JSON —
+ * the server never serves user markup renderable from the app origin).
+ * Only ever rendered inside a fully-sandboxed iframe (sandbox="").
+ */
+export interface DesignSystemTemplateSource {
+  id: number;
+  name: string;
+  layout_html: string;
+  token_css: string | null;
+}
+
 /** One node of a design system's retained source-file tree — metadata only. */
 export interface DesignSystemFileEntry {
   path: string;
@@ -542,6 +554,12 @@ export const configApi = {
 
   listDesignSystemTemplates: (dsId: number): Promise<DesignSystemTemplateListResponse> =>
     fetchJson(`${API_BASE}/design-systems/${dsId}/templates`),
+
+  getDesignSystemTemplateSource: (
+    dsId: number,
+    templateId: number,
+  ): Promise<DesignSystemTemplateSource> =>
+    fetchJson(`${API_BASE}/design-systems/${dsId}/templates/${templateId}/source`),
 
   listDesignSystemFiles: (dsId: number): Promise<DesignSystemFileListResponse> =>
     fetchJson(`${API_BASE}/design-systems/${dsId}/files`),
