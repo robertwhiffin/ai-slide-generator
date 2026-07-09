@@ -301,12 +301,19 @@ function SlidePanelComponent(props: SlidePanelProps, ref: React.Ref<SlidePanelHa
       if (result.failures.length === 0) {
         showToast(`PPTX downloaded (${result.succeeded}/${result.totalSlides} slides)`, 'success');
       } else {
-        // Per-slide failures get logged for the developer; user sees a
-        // softer info toast so they know not all slides made it in.
+        // Partial export must be loud: the file is missing slides, so the
+        // user gets a persistent error naming exactly which ones failed.
         console.warn('[huashu] per-slide failures:', result.failures);
+        const failedSlideNumbers = result.failures
+          .map((f) => f.slide_index + 1)
+          .sort((a, b) => a - b)
+          .join(', ');
+        const firstError = result.failures[0]?.error?.split('\n')[0] || 'unknown error';
         showToast(
-          `PPTX: ${result.succeeded}/${result.totalSlides} slides exported (${result.failures.length} rejected — see console)`,
-          'info',
+          `PPTX incomplete: only ${result.succeeded} of ${result.totalSlides} slides exported. ` +
+            `Slide${result.failures.length > 1 ? 's' : ''} ${failedSlideNumbers} failed (${firstError}).`,
+          'error',
+          { persistent: true },
         );
       }
     } catch (error) {

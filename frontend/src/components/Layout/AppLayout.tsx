@@ -652,12 +652,33 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
       }
 
       setExportStatus('Exporting to Google Slides…');
-      const { presentation_url } = await api.exportToGoogleSlides(
+      const { presentation_url, totalSlides, succeeded, failures } = await api.exportToGoogleSlides(
         sessionId,
         slideDeck,
         (_progress, _total, status) => setExportStatus(status || 'Exporting…')
       );
       setExportStatus(null);
+
+      // Partial export must be loud: the uploaded deck is missing slides,
+      // so name exactly which ones failed (persistent, with the link so the
+      // user can still inspect what did make it).
+      if (failures.length > 0) {
+        console.warn('[google-slides] per-slide failures:', failures);
+        const failedSlideNumbers = failures
+          .map((f) => f.slide_index + 1)
+          .sort((a, b) => a - b)
+          .join(', ');
+        const firstError = failures[0]?.error?.split('\n')[0] || 'unknown error';
+        showToast(
+          `Google Slides incomplete: only ${succeeded ?? '?'} of ${totalSlides ?? '?'} slides uploaded. ` +
+            `Slide${failures.length > 1 ? 's' : ''} ${failedSlideNumbers} failed (${firstError}).`,
+          'error',
+          presentation_url
+            ? { link: { text: 'Open partial deck', url: presentation_url } }
+            : { persistent: true },
+        );
+        return;
+      }
 
       if (!presentation_url) {
         showToast('Slides ready (no URL returned)', 'success');

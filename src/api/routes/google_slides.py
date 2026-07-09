@@ -368,6 +368,12 @@ class GoogleSlidesFromRecordsRequest(BaseModel):
 class GoogleSlidesExportResponse(BaseModel):
     presentation_id: str
     presentation_url: str
+    # Per-slide export failures (huashu path). A non-empty list means the
+    # uploaded deck is missing those slides — the frontend must tell the
+    # user which ones instead of silently presenting a partial deck.
+    total_slides: int | None = None
+    succeeded: int | None = None
+    failures: list[dict] = []
 
 
 @router.post("/from-records", response_model=GoogleSlidesExportResponse)
@@ -586,4 +592,7 @@ async def export_google_slides_from_huashu(
     return GoogleSlidesExportResponse(
         presentation_id=presentation_id,
         presentation_url=url,
+        total_slides=len(slides_html),
+        succeeded=len(slides_html) - len(failures),
+        failures=failures,
     )

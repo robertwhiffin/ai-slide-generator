@@ -1329,7 +1329,14 @@ export const api = {
     sessionId: string,
     slideDeck?: import('../types/slide').SlideDeck,
     onProgress?: (progress: number, total: number, status: string) => void,
-  ): Promise<{ presentation_id: string; presentation_url: string; alreadyOpened: boolean }> {
+  ): Promise<{
+    presentation_id: string;
+    presentation_url: string;
+    alreadyOpened: boolean;
+    totalSlides: number | null;
+    succeeded: number | null;
+    failures: Array<{ slide_index: number; error: string }>;
+  }> {
     const total = slideDeck?.slides.length ?? 0;
     onProgress?.(0, total, 'Rendering slides server-side…');
 
@@ -1364,9 +1371,17 @@ export const api = {
       throw new ApiError(response.status, error.detail || 'Google Slides export failed');
     }
 
-    const { presentation_id, presentation_url } = await response.json();
+    const { presentation_id, presentation_url, total_slides, succeeded, failures } =
+      await response.json();
     onProgress?.(total, total, 'Done!');
-    return { presentation_id, presentation_url, alreadyOpened: false };
+    return {
+      presentation_id,
+      presentation_url,
+      alreadyOpened: false,
+      totalSlides: total_slides ?? null,
+      succeeded: succeeded ?? null,
+      failures: Array.isArray(failures) ? failures : [],
+    };
   },
 
   // =========================================================================
