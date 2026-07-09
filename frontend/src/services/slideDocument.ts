@@ -37,6 +37,14 @@ export const KEY_BRIDGE_SCRIPT = `
   }, true);
 </script>`;
 
+// Layout reset for fixed-frame preview surfaces (slide tiles, visual editor).
+// The UA's default 8px body margin alone pushes 1280x720 content past the
+// frame and draws scrollbars inside the preview; these surfaces clip instead
+// (the filmstrip and presentation mode already carry their own resets).
+export const SLIDE_PREVIEW_RESET_STYLE = `
+  html, body { margin: 0; padding: 0; overflow: hidden; }
+`;
+
 export interface SlideDocumentOptions {
   css?: string;
   externalScripts?: string[];

@@ -10,7 +10,7 @@ import { HTMLEditorModal } from './HTMLEditorModal';
 import { useSelection } from '../../contexts/SelectionContext';
 import { VerificationBadge } from './VerificationBadge';
 import { api } from '../../services/api';
-import { buildSlideDocument } from '../../services/slideDocument';
+import { buildSlideDocument, SLIDE_PREVIEW_RESET_STYLE } from '../../services/slideDocument';
 
 function formatRelativeTime(iso: string): string {
   const date = new Date(iso);
@@ -145,6 +145,7 @@ export const SlideTile: React.FC<SlideTileProps> = ({
       css: slideDeck.css,
       externalScripts: slideDeck.external_scripts,
       scripts: slideScripts,
+      extraHeadStyle: SLIDE_PREVIEW_RESET_STYLE,
     });
   }, [slide.html, slide.scripts, slideDeck.css, slideDeck.external_scripts]);
 
@@ -274,6 +275,7 @@ export const SlideTile: React.FC<SlideTileProps> = ({
           title={`Slide ${index + 1}`}
           className="absolute top-0 left-0 border-0"
           sandbox="allow-scripts"
+          scrolling="no"
           style={{
             width: `${SLIDE_WIDTH}px`,
             height: `${SLIDE_HEIGHT}px`,
