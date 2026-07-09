@@ -26,6 +26,7 @@ from src.database.models.session import (
 )
 from src.database.models.slide_deck_prompt import SlideDeckPromptLibrary
 from src.database.models.slide_style_library import SlideStyleLibrary
+from src.database.models.usage_event import UsageEvent
 from src.database.models.user_preference import UserProfilePreference
 
 __all__ = [
@@ -51,6 +52,7 @@ __all__ = [
     "SlideDeckVersion",
     "SlideStyleLibrary",
     "SurveyResponse",
+    "UsageEvent",
     "UserProfilePreference",
     "UserSession",
 ]
