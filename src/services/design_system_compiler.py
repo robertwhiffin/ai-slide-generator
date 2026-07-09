@@ -79,7 +79,10 @@ _STYLE_HEADER = "SLIDE VISUAL STYLE"
 # output changes in a way persisted rows must pick up (new/changed blocks).
 # v3: content/style scope firewall + the templates section's soft-pick enabler
 # (Round 2 — reconciled with the live Claude Design probe).
-COMPILER_VERSION = 3
+# v4: BRAND TYPE SCALE block (ramp derived from the DS's own font-size tokens,
+# neutral default bands when no ramp is recognizable) + the frame block's
+# overflow line no longer suggests scaling content down.
+COMPILER_VERSION = 4
 _COMPILER_VERSION_MARKER = f"[ds-compiler v{COMPILER_VERSION}]"
 
 # Canonical color-group ordering -> deterministic, human-meaningful sections.
@@ -163,7 +166,8 @@ _SLIDE_FRAME_CONSTRAINTS = (
     "must be CLIPPED on export, never scrolled.\n"
     "- One slide per frame: fit ALL of that slide's content inside its single "
     "1280x720 frame, with no in-slide scrolling. If content would overflow, trim "
-    "it, scale it down, or split it across additional slides until it fits.\n"
+    "it or split it across additional slides until it fits — NEVER shrink type "
+    "below the BRAND TYPE SCALE to make room.\n"
     "- Safe area (soft guidance): keep primary content (titles, body text, charts, "
     "tables) roughly 72px clear of the top and bottom edges and 88px clear of the "
     "left and right edges; let only full-bleed backgrounds or images reach the "
@@ -175,6 +179,120 @@ def _slug(value: str) -> str:
     """Slugify a token name for use in a CSS custom-property identifier."""
     slug = re.sub(r"[^a-z0-9]+", "-", (value or "").strip().lower()).strip("-")
     return slug or "token"
+
+
+# BRAND TYPE SCALE (the "small titles" fix). A DS deck bypasses
+# ``DEFAULT_SLIDE_STYLE`` — the only place H1/H2/body size anchors used to
+# live — so a compiled artifact without its own anchors leaves the model in a
+# size vacuum and titles drift small. The block is ALWAYS emitted: derived
+# from the design system's own font-size ramp when one is recognizable,
+# otherwise falling back to the app default style's neutral bands
+# (``src/core/defaults.py``: H1 40-52px / H2 28-36px / body 16-18px) so the
+# vacuum can never recur. Nothing brand-specific is hardcoded — every
+# ramp-path number comes from the uploaded bundle's tokens.
+#
+# Ramp detection is BY NAME+VALUE PATTERN across ALL token groups, not by
+# group membership: Claude Design manifests mislabel the type ramp (fs-12 …
+# fs-64) as kind "spacing", so the sizes never reach the "type" group.
+_TYPE_SIZE_NAME_RE = re.compile(r"^(?:fs|font-?size|text)[-_]?\d*($|[-_])", re.IGNORECASE)
+_PX_VALUE_RE = re.compile(r"^\s*(\d+(?:\.\d+)?)\s*px\s*$", re.IGNORECASE)
+
+# Body band bounds for role mapping (which ramp entries read as body text).
+# These bound the SELECTION out of the ramp — the emitted numbers themselves
+# always come from the tokens.
+_BODY_BAND_MIN_PX = 16.0
+_BODY_BAND_MAX_PX = 22.0
+_BODY_BAND_IDEAL_PX = 18.0
+
+_TYPE_SCALE_ANTI_SHRINK_LINE = (
+    "- These sizes are REQUIRED, not suggestions: titles at or above their "
+    "band, body inside its band. To make content fit, trim it or split it "
+    "across more slides — NEVER shrink type below the brand type scale."
+)
+
+# Neutral fallback bands = the app default style's anchors, restated. Kept in
+# prose form (no CSS) like the rest of the compiled guidance.
+_TYPE_SCALE_NEUTRAL_BLOCK = "\n".join(
+    [
+        "BRAND TYPE SCALE (REQUIRED — this design system ships no font-size "
+        "ramp, so use the app's neutral bands):",
+        "- Cover/hero and slide titles (H1): 40-52px, bold.",
+        "- Section headers (H2): 28-36px.",
+        "- Body text: 16-18px.",
+        _TYPE_SCALE_ANTI_SHRINK_LINE,
+    ]
+)
+
+
+def _fmt_px(px: float) -> str:
+    return f"{int(px)}px" if px == int(px) else f"{px:g}px"
+
+
+def _font_size_ramp(grouped: dict[str, list[tuple[str, str]]]) -> dict[float, str]:
+    """Collect ramp-shaped tokens (font-size-ish name + px value) from EVERY
+    group and return ``{px: token_name}`` (first name per size wins, in
+    deterministic group/name order)."""
+    ramp: dict[float, str] = {}
+    for group in sorted(grouped):
+        for name, value in grouped[group]:
+            if not _TYPE_SIZE_NAME_RE.match((name or "").strip()):
+                continue
+            px_match = _PX_VALUE_RE.match(value or "")
+            if not px_match:
+                continue
+            px = float(px_match.group(1))
+            if px <= 0:
+                continue
+            ramp.setdefault(px, name.strip())
+    return ramp
+
+
+def _type_scale_section(grouped: dict[str, list[tuple[str, str]]]) -> str:
+    """Build the BRAND TYPE SCALE block (always emitted; see comment above).
+
+    Role mapping over the sorted distinct ramp sizes: cover/hero = top,
+    floor = bottom, body = the 16-22px band (closest-to-18 when the ramp
+    skips that range), section headers = the upper-middle entry between the
+    body band and the top. Fewer than 3 distinct sizes is not a usable ramp
+    -> neutral default bands.
+    """
+    ramp = _font_size_ramp(grouped)
+    sizes = sorted(ramp)
+    if len(sizes) < 3:
+        return _TYPE_SCALE_NEUTRAL_BLOCK
+
+    floor_px = sizes[0]
+    hero_px = sizes[-1]
+    body_sizes = [px for px in sizes if _BODY_BAND_MIN_PX <= px <= _BODY_BAND_MAX_PX]
+    if not body_sizes:
+        # Ramp skips the band entirely — anchor body on the entry closest to
+        # the ideal (larger wins a tie, for legibility).
+        body_sizes = [min(sizes, key=lambda px: (abs(px - _BODY_BAND_IDEAL_PX), -px))]
+    body_top = body_sizes[-1]
+    mids = [px for px in sizes if body_top < px < hero_px]
+    section_px = mids[len(mids) // 2] if mids else hero_px
+
+    if len(body_sizes) > 1:
+        body_label = f"{_fmt_px(body_sizes[0])}-{_fmt_px(body_top)}"
+        body_tokens = ", ".join(ramp[px] for px in body_sizes)
+    else:
+        body_label = _fmt_px(body_top)
+        body_tokens = ramp[body_top]
+
+    return "\n".join(
+        [
+            "BRAND TYPE SCALE (REQUIRED — derived from this design system's "
+            "own tokens):",
+            f"- Cover/hero titles: {_fmt_px(hero_px)} (token {ramp[hero_px]}) — "
+            "the top of the brand ramp.",
+            f"- Section/slide titles: {_fmt_px(section_px)} (token "
+            f"{ramp[section_px]}) or larger.",
+            f"- Body text: {body_label} (tokens: {body_tokens}).",
+            f"- Floor: never render ANY text below {_fmt_px(floor_px)} (token "
+            f"{ramp[floor_px]}), the bottom of the brand ramp.",
+            _TYPE_SCALE_ANTI_SHRINK_LINE,
+        ]
+    )
 
 
 def _brand_manual_section(skill_md: Optional[str], readme_md: Optional[str]) -> Optional[str]:
@@ -431,11 +549,13 @@ def compile_design_system(
     Emitted order: header (stamped with the compiler-version marker) ->
     description -> BRAND MANUAL (README + SKILL, full) -> scope firewall
     (always present: the design system governs STYLE only, never content) ->
-    tokens (color, type, spacing, shadow; all uncapped) -> fonts (@font-face
-    refs + family listing; uncapped) -> templates (closed by the soft-pick
-    enabler) -> SLIDE FRAME CONSTRAINTS (frame guardrails, always present) ->
-    the brand IMAGE ASSET CONTRACT (fetch via ``search_brand_assets``). Brand
-    images are NOT enumerated.
+    tokens (color, type, spacing, shadow; all uncapped) -> BRAND TYPE SCALE
+    (always present: ramp-derived role anchors, or the neutral default bands
+    when no ramp is recognizable) -> fonts (@font-face refs + family listing;
+    uncapped) -> templates (closed by the soft-pick enabler) -> SLIDE FRAME
+    CONSTRAINTS (frame guardrails, always present) -> the brand IMAGE ASSET
+    CONTRACT (fetch via ``search_brand_assets``). Brand images are NOT
+    enumerated.
     """
     parts: list[str] = []
 
@@ -484,6 +604,11 @@ def compile_design_system(
     if spacing:
         parts.append(spacing)
     parts.extend(_shadow_sections(grouped))
+
+    # Type-size role anchors — ALWAYS present (ramp-derived or neutral), so a
+    # DS deck never generates in the size vacuum left by bypassing
+    # DEFAULT_SLIDE_STYLE. Emitted right after the token sections it reads.
+    parts.append(_type_scale_section(grouped))
 
     # Fonts: inline @font-face references + family listing (both uncapped).
     font_assets = _font_assets_section(design_system)
