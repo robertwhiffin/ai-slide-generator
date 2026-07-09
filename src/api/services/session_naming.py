@@ -37,6 +37,16 @@ _UNCLOSED_THINKING_RE = re.compile(
 )
 _MARKUP_TAG_RE = re.compile(r"<[^>]*>")
 
+# Degenerate end-marker the naming model fuses onto the title line when it
+# overruns (live-reproduced: "…Q3 Autonomy RoadmapEndtml\n<thinking>…" with
+# finish_reason "length"). Fused variants only — a real word like
+# "Quarter End" never matches.
+_DEGENERATE_END_MARKER_RE = re.compile(r"(?:Endtml|End</?html>?)+\s*$")
+
+# finish/stop reasons that mean the model was CUT OFF: whatever text came
+# back is an overrun artifact, not a title.
+_TRUNCATION_FINISH_REASONS = frozenset({"length", "max_tokens"})
+
 
 def _sanitize_title(raw: str) -> Optional[str]:
     """Reduce a naming-model response to a clean one-line title, or ``None``.
@@ -55,12 +65,27 @@ def _sanitize_title(raw: str) -> Optional[str]:
     first_line = next(
         (line.strip() for line in text.splitlines() if line.strip()), ""
     )
+    first_line = _DEGENERATE_END_MARKER_RE.sub("", first_line)
     title = first_line.strip().strip("\"'").strip("*_#` ").strip()
     if not title:
         return None
     if len(title) > MAX_TITLE_LENGTH:
         return None
     return title
+
+
+def _was_truncated(response: object) -> bool:
+    """True when the model reports it hit the token limit — the response is
+    an overrun artifact (title fused with reasoning junk), never a title.
+    Providers report this as ``finish_reason: "length"`` (OpenAI-compatible)
+    or ``stop_reason: "max_tokens"`` (Anthropic-style); unknown/missing
+    metadata is treated as not-truncated so providers that report nothing
+    keep working (the sanitizer still applies)."""
+    metadata = getattr(response, "response_metadata", None) or {}
+    for key in ("finish_reason", "stop_reason"):
+        if str(metadata.get(key, "")).lower() in _TRUNCATION_FINISH_REASONS:
+            return True
+    return False
 
 
 def generate_session_title(
@@ -82,6 +107,14 @@ def generate_session_title(
             SystemMessage(content=TITLE_GENERATION_PROMPT),
             HumanMessage(content=user_message),
         ])
+
+        if _was_truncated(response):
+            logger.info(
+                "Naming model hit its token limit; keeping the default "
+                "session name",
+                extra={"message_preview": user_message[:80]},
+            )
+            return None
 
         content = response.content
         if not isinstance(content, str):
