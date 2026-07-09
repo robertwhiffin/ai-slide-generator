@@ -759,7 +759,11 @@ export async function extractSlideRecordsForExport(
           // before the walk — the walker has no bg-url handler, so without
           // this pass those assets drop out of the export entirely.
           try {
-            await (w as any).__prepareSlideForExtract(root);
+            await (
+              w as unknown as {
+                __prepareSlideForExtract: (el: Element) => Promise<number>;
+              }
+            ).__prepareSlideForExtract(root);
           } catch (prepErr) {
             console.warn(`[walker] bg-image prepare failed on slide ${i}:`, prepErr);
           }

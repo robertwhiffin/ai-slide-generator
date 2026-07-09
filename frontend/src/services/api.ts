@@ -954,7 +954,12 @@ export const api = {
   // ============ Verification API ============
 
   /**
-   * Verify a slide's numerical accuracy against source data
+   * Verify a slide's numerical accuracy against source data.
+   *
+   * Verification rides on LLM/Genie backends that intermittently 5xx under
+   * load; a transient failure retries with backoff (2 retries: 1s, 3s)
+   * before surfacing — callers then render their graceful error state
+   * instead of failing the whole pass on a blip.
    */
   async verifySlide(
     sessionId: string,
@@ -970,18 +975,42 @@ export const api = {
     error: boolean;
     error_message?: string;
   }> {
-    const response = await fetch(`${API_BASE_URL}/api/verification/${slideIndex}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ session_id: sessionId }),
-    });
+    const RETRY_DELAYS_MS = [1000, 3000];
+    for (let attempt = 0; ; attempt++) {
+      let response: Response;
+      try {
+        response = await fetch(`${API_BASE_URL}/api/verification/${slideIndex}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ session_id: sessionId }),
+        });
+      } catch (networkErr) {
+        // Network blip — retry like a 5xx.
+        if (attempt < RETRY_DELAYS_MS.length) {
+          console.warn(
+            `[verify] slide ${slideIndex} network error, retrying in ${RETRY_DELAYS_MS[attempt]}ms`,
+          );
+          await new Promise((r) => setTimeout(r, RETRY_DELAYS_MS[attempt]));
+          continue;
+        }
+        throw networkErr;
+      }
 
-    if (!response.ok) {
-      const error = await response.json().catch(() => ({}));
-      throw new ApiError(response.status, error.detail || 'Failed to verify slide');
+      if (response.status >= 500 && attempt < RETRY_DELAYS_MS.length) {
+        console.warn(
+          `[verify] slide ${slideIndex} got HTTP ${response.status}, retrying in ${RETRY_DELAYS_MS[attempt]}ms`,
+        );
+        await new Promise((r) => setTimeout(r, RETRY_DELAYS_MS[attempt]));
+        continue;
+      }
+
+      if (!response.ok) {
+        const error = await response.json().catch(() => ({}));
+        throw new ApiError(response.status, error.detail || 'Failed to verify slide');
+      }
+
+      return response.json();
     }
-
-    return response.json();
   },
 
   /**
