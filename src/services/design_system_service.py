@@ -992,15 +992,36 @@ def _collect_assets_and_files(
 # ---------------------------------------------------------------------------
 
 
-def get_asset_base64(db: Session, asset_id: int) -> tuple[str, str]:
-    """Return ``(base64_data, mime)`` for a stored design-system asset.
+def get_asset_base64(
+    db: Session, asset_id: int, *, design_system_id: Optional[int]
+) -> tuple[str, str]:
+    """Return ``(base64_data, mime)`` for a stored design-system asset, scoped to
+    its owning design system.
 
     Mirrors ``image_service.get_image_base64`` so the ``{{ds-asset:ID}}`` resolver
-    embeds bytes exactly the way ``{{image:ID}}`` does.
+    embeds bytes exactly the way ``{{image:ID}}`` does — but the fetch is filtered
+    on ``(id AND design_system_id)``, never on a bare global id. This is the
+    confused-deputy guard: a ``{{ds-asset:<foreign_id>}}`` handle (e.g. a crafted
+    bundle's template referencing another system's asset id) must not resolve to
+    that other system's bytes. ``design_system_id`` is mandatory and keyword-only
+    so every caller makes the scope explicit.
+
+    ``design_system_id=None`` is FAIL-CLOSED: the column is ``NOT NULL``, so the
+    ``IS NULL`` filter matches no row and the asset is reported not-found. A deck
+    with no active design system therefore resolves NO brand asset by bare id.
     """
-    asset = db.query(DesignSystemAsset).filter(DesignSystemAsset.id == asset_id).first()
+    asset = (
+        db.query(DesignSystemAsset)
+        .filter(
+            DesignSystemAsset.id == asset_id,
+            DesignSystemAsset.design_system_id == design_system_id,
+        )
+        .first()
+    )
     if not asset:
-        raise ValueError(f"Design system asset {asset_id} not found")
+        raise ValueError(
+            f"Design system asset {asset_id} not found in design system {design_system_id}"
+        )
     return base64.b64encode(asset.data).decode("utf-8"), asset.mime
 
 

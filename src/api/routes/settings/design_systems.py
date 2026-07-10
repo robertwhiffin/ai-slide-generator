@@ -703,15 +703,24 @@ def get_design_system_template_source(
         )
     # Serve-time resolution (dsv2 F8): the preview frame is sandboxed behind a
     # no-egress CSP, so {{ds-asset:ID}} handles must leave here as inline
-    # data: URIs. The stored row keeps its handles for generation.
+    # data: URIs. The stored row keeps its handles for generation. Resolution is
+    # scoped to the template's OWNING design system (this row was already fetched
+    # under design_system_id == ds_id) so a crafted bundle's foreign handle can
+    # never disclose another system's asset bytes.
     from src.services.design_system_templates import resolve_template_source_for_preview
 
+    owning_ds_id = int(template.design_system_id)
     return TemplateSourceOut(
         id=int(template.id),
         name=str(template.name),
-        layout_html=resolve_template_source_for_preview(str(template.layout_html), db) or "",
+        layout_html=resolve_template_source_for_preview(
+            str(template.layout_html), db, design_system_id=owning_ds_id
+        )
+        or "",
         token_css=(
-            resolve_template_source_for_preview(str(template.token_css), db)
+            resolve_template_source_for_preview(
+                str(template.token_css), db, design_system_id=owning_ds_id
+            )
             if template.token_css is not None
             else None
         ),

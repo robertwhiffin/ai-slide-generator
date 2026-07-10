@@ -44,6 +44,28 @@ from src.utils.image_utils import substitute_deck_dict_images, substitute_image_
 logger = logging.getLogger(__name__)
 
 
+def resolve_active_design_system_id(session_id: Optional[str]) -> Optional[int]:
+    """The session's pinned/active design-system id, or None.
+
+    ``{{ds-asset:ID}}`` resolution is scoped to this id at every deck response
+    boundary (render, export). A generated deck can only legitimately reference
+    assets of the session's active design system, so scoping to it makes a
+    foreign handle — e.g. one echoed from a crafted pinned template's HTML into
+    the generated deck — go inert instead of leaking another system's bytes.
+    Any lookup miss (no session, no pin) resolves to None, which the resolver
+    treats as fail-closed (nothing resolves).
+    """
+    if not session_id:
+        return None
+    from src.api.services.session_manager import get_session_manager
+
+    try:
+        session = get_session_manager().get_session(session_id)
+    except Exception:
+        return None
+    return resolve_agent_config(session.get("agent_config")).design_system_id
+
+
 def _sanitize_replacement_info(replacement_info: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
     """Sanitize replacement_info for JSON serialization.
     
@@ -86,7 +108,7 @@ class ChatService:
 
         logger.info("ChatService initialized successfully")
 
-    def _substitute_images_for_response(self, deck_dict, raw_html=None):
+    def _substitute_images_for_response(self, deck_dict, raw_html=None, *, session_id):
         """Apply image + design-system asset substitution before sending to client.
 
         Converts {{image:ID}} placeholders (image_assets) and {{ds-asset:ID}}
@@ -94,6 +116,10 @@ class ChatService:
         raw HTML. Called at API response boundaries so that stored/cached HTML
         keeps lightweight placeholders (avoiding LLM context bloat). The two
         namespaces are resolved independently.
+
+        ``session_id`` (keyword-only, mandatory) scopes ds-asset resolution to the
+        session's active design system so a foreign ``{{ds-asset:ID}}`` handle
+        cannot disclose another system's bytes.
         """
         from src.core.database import get_db_session
 
@@ -142,10 +168,14 @@ class ChatService:
                     substitute_deck_dict_images(deck_dict, db)
                 if needs_html:
                     raw_html = substitute_image_placeholders(raw_html, db)
-                if ds_needs_deck or ds_needs_deck_html or ds_needs_deck_css:
-                    substitute_deck_dict_ds_assets(deck_dict, db)
-                if ds_needs_html:
-                    raw_html = substitute_ds_asset_placeholders(raw_html, db)
+                if ds_needs_deck or ds_needs_deck_html or ds_needs_deck_css or ds_needs_html:
+                    ds_id = resolve_active_design_system_id(session_id)
+                    if ds_needs_deck or ds_needs_deck_html or ds_needs_deck_css:
+                        substitute_deck_dict_ds_assets(deck_dict, db, design_system_id=ds_id)
+                    if ds_needs_html:
+                        raw_html = substitute_ds_asset_placeholders(
+                            raw_html, db, design_system_id=ds_id
+                        )
         return deck_dict, raw_html
 
     def _build_agent_for_session(
@@ -733,7 +763,9 @@ class ChatService:
                     )
 
             # Substitute image placeholders before sending to client
-            slide_deck_dict, raw_html = self._substitute_images_for_response(slide_deck_dict, raw_html)
+            slide_deck_dict, raw_html = self._substitute_images_for_response(
+                slide_deck_dict, raw_html, session_id=session_id
+            )
 
             # Build response. Appended notices need a timestamp — MessageResponse
             # requires it, and omitting it raises a Pydantic ValidationError that
@@ -908,7 +940,9 @@ class ChatService:
                         type=StreamEventType.ASSISTANT,
                         content=clarification_msg,
                     )
-                    early_deck_dict, _ = self._substitute_images_for_response(existing_deck.to_dict())
+                    early_deck_dict, _ = self._substitute_images_for_response(
+                        existing_deck.to_dict(), session_id=session_id
+                    )
                     yield StreamEvent(
                         type=StreamEventType.COMPLETE,
                         slides=early_deck_dict,
@@ -939,7 +973,9 @@ class ChatService:
                         type=StreamEventType.ASSISTANT,
                         content=clarification_msg,
                     )
-                    early_deck_dict, _ = self._substitute_images_for_response(existing_deck.to_dict())
+                    early_deck_dict, _ = self._substitute_images_for_response(
+                        existing_deck.to_dict(), session_id=session_id
+                    )
                     yield StreamEvent(
                         type=StreamEventType.COMPLETE,
                         slides=early_deck_dict,
@@ -1011,7 +1047,9 @@ class ChatService:
                     )
                     early_deck_dict = existing_deck.to_dict() if existing_deck else None
                     if early_deck_dict:
-                        early_deck_dict, _ = self._substitute_images_for_response(early_deck_dict)
+                        early_deck_dict, _ = self._substitute_images_for_response(
+                            early_deck_dict, session_id=session_id
+                        )
                     # Include error in metadata for ReplacementFeedback display
                     yield StreamEvent(
                         type=StreamEventType.COMPLETE,
@@ -1479,7 +1517,9 @@ class ChatService:
         session_manager.update_last_activity(session_id)
 
         # Substitute image placeholders before sending to client
-        slide_deck_dict, raw_html = self._substitute_images_for_response(slide_deck_dict, raw_html)
+        slide_deck_dict, raw_html = self._substitute_images_for_response(
+            slide_deck_dict, raw_html, session_id=session_id
+        )
 
         # RC11: Include conflict note in metadata for ReplacementFeedback display
         complete_metadata = result.get("metadata") or {}
@@ -2584,7 +2624,9 @@ class ChatService:
             # Use session_manager to get deck with verification merged
             deck_dict = session_manager.get_slide_deck(session_id)
             if deck_dict and deck_dict.get("slides"):
-                deck_dict, _ = self._substitute_images_for_response(deck_dict)
+                deck_dict, _ = self._substitute_images_for_response(
+                    deck_dict, session_id=session_id
+                )
                 return deck_dict
         except Exception as e:
             logger.warning(f"Failed to load deck from session_manager: {e}")
@@ -2602,7 +2644,7 @@ class ChatService:
                 deck_dict["version"] = db_deck["version"]
         except Exception:
             deck_dict.setdefault("version", 0)
-        deck_dict, _ = self._substitute_images_for_response(deck_dict)
+        deck_dict, _ = self._substitute_images_for_response(deck_dict, session_id=session_id)
         return deck_dict
 
     def reorder_slides(self, session_id: str, new_order: List[int], *, expected_version: Optional[int] = None) -> Dict[str, Any]:
@@ -2686,7 +2728,7 @@ class ChatService:
             extra={"new_order": new_order, "session_id": session_id},
         )
 
-        deck_dict, _ = self._substitute_images_for_response(deck_dict)
+        deck_dict, _ = self._substitute_images_for_response(deck_dict, session_id=session_id)
         return deck_dict
 
     def update_slide(self, session_id: str, index: int, html: str, *, expected_version: Optional[int] = None) -> Dict[str, Any]:
@@ -2831,7 +2873,7 @@ class ChatService:
             },
         )
 
-        deck_dict, _ = self._substitute_images_for_response(deck_dict)
+        deck_dict, _ = self._substitute_images_for_response(deck_dict, session_id=session_id)
         return deck_dict
 
     def delete_slide(self, session_id: str, index: int, *, expected_version: Optional[int] = None) -> Dict[str, Any]:
@@ -2894,7 +2936,7 @@ class ChatService:
             },
         )
 
-        deck_dict, _ = self._substitute_images_for_response(deck_dict)
+        deck_dict, _ = self._substitute_images_for_response(deck_dict, session_id=session_id)
         return deck_dict
 
 

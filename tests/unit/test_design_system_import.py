@@ -237,7 +237,7 @@ class TestGetAssetBase64:
             design_system_id=ds.id, filename="logo.svg"
         ).one()
 
-        b64, mime = get_asset_base64(session, logo.id)
+        b64, mime = get_asset_base64(session, logo.id, design_system_id=ds.id)
         assert mime == "image/svg+xml"
         assert base64.b64decode(b64) == logo.data
 
@@ -245,7 +245,36 @@ class TestGetAssetBase64:
         from src.services.design_system_service import get_asset_base64
 
         with pytest.raises(ValueError):
-            get_asset_base64(session, 999999)
+            get_asset_base64(session, 999999, design_system_id=1)
+
+    def test_foreign_design_system_id_raises_not_found(self, session):
+        """Confused-deputy guard: an asset id fetched under the WRONG design
+        system id must be reported not-found (never returns the other system's
+        bytes)."""
+        from src.database.models.design_system import DesignSystemAsset
+        from src.services.design_system_service import get_asset_base64, import_bundle
+
+        ds = import_bundle(session, zip_bytes=make_bundle_zip(), user="u")
+        logo = session.query(DesignSystemAsset).filter_by(
+            design_system_id=ds.id, filename="logo.svg"
+        ).one()
+
+        with pytest.raises(ValueError):
+            get_asset_base64(session, logo.id, design_system_id=ds.id + 1)
+
+    def test_none_design_system_id_raises_not_found(self, session):
+        """Fail-closed: a None scope resolves NO asset (the column is NOT NULL,
+        so the IS NULL filter matches nothing)."""
+        from src.database.models.design_system import DesignSystemAsset
+        from src.services.design_system_service import get_asset_base64, import_bundle
+
+        ds = import_bundle(session, zip_bytes=make_bundle_zip(), user="u")
+        logo = session.query(DesignSystemAsset).filter_by(
+            design_system_id=ds.id, filename="logo.svg"
+        ).one()
+
+        with pytest.raises(ValueError):
+            get_asset_base64(session, logo.id, design_system_id=None)
 
 
 class TestDefaultNamePrecedence:

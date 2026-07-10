@@ -1142,12 +1142,16 @@ class SessionManager:
                     slide["verification"] = verification_map.get(content_hash)
                     slide["content_hash"] = content_hash
 
-            # Substitute {{image:ID}} + {{ds-asset:ID}} placeholders with base64 for client
+            # Substitute {{image:ID}} + {{ds-asset:ID}} placeholders with base64 for
+            # client. ds-asset resolution is scoped to the session's active design
+            # system so a foreign handle cannot leak another system's bytes.
+            from src.api.services.chat_service import resolve_active_design_system_id
             from src.utils.ds_asset_utils import substitute_deck_dict_ds_assets
             from src.utils.image_utils import substitute_deck_dict_images
 
+            ds_id = resolve_active_design_system_id(session_id)
             substitute_deck_dict_images(deck_dict, db)
-            substitute_deck_dict_ds_assets(deck_dict, db)
+            substitute_deck_dict_ds_assets(deck_dict, db, design_system_id=ds_id)
 
             # Parse chat history for preview
             chat_history = (

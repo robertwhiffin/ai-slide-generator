@@ -757,20 +757,28 @@ def materialize_templates(design_system: Any) -> list[Any]:
 # ---------------------------------------------------------------------------
 
 
-def resolve_template_source_for_preview(text: Optional[str], db: Any) -> Optional[str]:
+def resolve_template_source_for_preview(
+    text: Optional[str], db: Any, *, design_system_id: Optional[int]
+) -> Optional[str]:
     """Resolve a stored template source's ``{{ds-asset:ID}}`` handles for the
-    live preview card, at the response boundary.
+    live preview card, at the response boundary, scoped to the owning design
+    system.
 
     The preview renders inside ``sandbox=""`` plus a no-egress CSP (dsv2
     battery F8): the frame can fetch NOTHING, so every handle must arrive as
     an inline ``data:`` URI — ``<img src>``, CSS ``url()``, and ``@font-face``
     sources alike, which is exactly the substitution the deck resolver
     (``src.utils.ds_asset_utils``) already performs at the other API response
-    boundaries. A handle the resolver cannot satisfy (deleted asset,
-    fabricated id — left in place by the resolver's contract) is then
-    neutralized to the inert :data:`_UNRESOLVED_PLACEHOLDER` rather than
-    riding into the frame as fetch-shaped text the CSP would refuse. The
-    STORED row is never touched: generation keeps consuming handles.
+    boundaries.
+
+    ``design_system_id`` is the template's OWNING design system (keyword-only,
+    mandatory). Resolution is scoped to it, so a handle naming another system's
+    asset id — a crafted bundle's ``{{ds-asset:<foreign_id>}}`` — does NOT
+    resolve to that system's bytes: like a deleted/fabricated id it is left
+    unresolved by the scoped resolver, then neutralized to the inert
+    :data:`_UNRESOLVED_PLACEHOLDER` rather than riding into the frame as
+    fetch-shaped text the CSP would refuse. The STORED row is never touched:
+    generation keeps consuming handles.
     """
     if not text or "{{ds-asset:" not in text:
         return text
@@ -782,7 +790,9 @@ def resolve_template_source_for_preview(text: Optional[str], db: Any) -> Optiona
         substitute_ds_asset_placeholders,
     )
 
-    resolved = substitute_ds_asset_placeholders(text, db)
+    resolved = substitute_ds_asset_placeholders(
+        text, db, design_system_id=design_system_id
+    )
     return DS_ASSET_PLACEHOLDER_PATTERN.sub(_UNRESOLVED_PLACEHOLDER, resolved)
 
 

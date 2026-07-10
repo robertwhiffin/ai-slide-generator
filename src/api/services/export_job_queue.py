@@ -204,13 +204,16 @@ async def process_export_job(job_id: str, payload: dict) -> None:
             raise ValueError("No slides available")
 
         # Substitute {{image:ID}} + {{ds-asset:ID}} placeholders with base64 data URIs
-        # so the PPTX converter can extract and embed the actual images/brand assets
+        # so the PPTX converter can extract and embed the actual images/brand assets.
+        # ds-asset resolution is scoped to the session's active design system.
+        from src.api.services.chat_service import resolve_active_design_system_id
         from src.utils.ds_asset_utils import substitute_deck_dict_ds_assets
         from src.utils.image_utils import substitute_deck_dict_images
         from src.core.database import get_db_session
+        ds_id = resolve_active_design_system_id(session_id)
         with get_db_session() as db:
             substitute_deck_dict_images(slide_deck, db)
-            substitute_deck_dict_ds_assets(slide_deck, db)
+            substitute_deck_dict_ds_assets(slide_deck, db, design_system_id=ds_id)
 
         slides = slide_deck.get("slides", [])
         total_slides = len(slides)
