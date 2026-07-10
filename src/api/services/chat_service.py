@@ -629,6 +629,11 @@ class ChatService:
 
             # Persist slide deck to database
             if current_deck and slide_deck_dict:
+                # WB-1 backstop: re-emit the pinned template's token
+                # stylesheet when the model dropped it, then rebuild the dict
+                # so both persisted representations agree.
+                if self._ensure_pinned_template_token_css(session_id, current_deck):
+                    slide_deck_dict = current_deck.to_dict()
                 try:
                     _user = get_current_username()
                 except Exception:
@@ -1414,6 +1419,11 @@ class ChatService:
 
         # Persist slide deck to database
         if current_deck and slide_deck_dict:
+            # WB-1 backstop: re-emit the pinned template's token stylesheet
+            # when the model dropped it, then rebuild the dict so both
+            # persisted representations agree.
+            if self._ensure_pinned_template_token_css(session_id, current_deck):
+                slide_deck_dict = current_deck.to_dict()
             try:
                 _user = get_current_username()
             except Exception:
@@ -1963,6 +1973,74 @@ class ChatService:
 
         context = "\n\n[Attached images]\n" + "\n".join(image_descriptions)
         return message + context
+
+    def _resolve_pinned_template_token_css(self, session_id: str) -> Optional[str]:
+        """Token stylesheet of the session's pinned template, or ``None``.
+
+        Mirrors ``agent_factory._get_prompt_content``'s resolution: the
+        session's agent_config names the design system + template pin, the
+        active DesignSystem row owns the template. Any miss (no pin, inactive
+        system, stale template id) resolves to ``None`` — the guarantee only
+        applies where a pin actually supplied a token stylesheet.
+        """
+        session_manager = get_session_manager()
+        session = session_manager.get_session(session_id)
+        config = resolve_agent_config(session.get("agent_config"))
+        if config.design_system_id is None or config.template_id is None:
+            return None
+
+        from src.core.database import get_db_session
+        from src.database.models import DesignSystem
+        from src.services.design_system_templates import get_template_for_generation
+
+        with get_db_session() as db:
+            design_system = (
+                db.query(DesignSystem)
+                .filter_by(id=config.design_system_id, is_active=True)
+                .first()
+            )
+            if design_system is None:
+                return None
+            template = get_template_for_generation(design_system, config.template_id)
+            if template is None:
+                return None
+            return (getattr(template, "token_css", None) or "").strip() or None
+
+    def _ensure_pinned_template_token_css(self, session_id: str, deck: SlideDeck) -> bool:
+        """Deterministic WB-1 backstop, applied right before every deck save.
+
+        The pinned-template prompt block ASKS the model to carry the TOKEN
+        STYLESHEET into the deck CSS; the live battery proved it can refuse
+        (57 var() references, zero definitions — washout in preview and both
+        PPTX paths). When the session pins a template and the deck CSS lost
+        the template's token definitions, they are re-emitted into
+        ``deck.css`` (see ``ensure_deck_token_css``). Returns True when the
+        deck changed so callers can rebuild derived representations. Never
+        raises — a failed guarantee must not block saving the deck.
+        """
+        try:
+            token_css = self._resolve_pinned_template_token_css(session_id)
+            if not token_css:
+                return False
+
+            from src.services.design_system_templates import ensure_deck_token_css
+
+            ensured = ensure_deck_token_css(deck.css, token_css)
+            if ensured == (deck.css or ""):
+                return False
+            deck.css = ensured
+            logger.info(
+                "Re-emitted pinned template token stylesheet into deck CSS "
+                "(model omitted its definitions)",
+                extra={"session_id": session_id},
+            )
+            return True
+        except Exception:
+            logger.exception(
+                "Token-css guarantee failed; saving deck unchanged",
+                extra={"session_id": session_id},
+            )
+            return False
 
     def _get_or_load_deck(self, session_id: str) -> Optional[SlideDeck]:
         """Get deck from cache or load from database.
