@@ -1003,6 +1003,30 @@ class TestSlideFrameConstraints:
         # (compare from the frame heading to the shared trailing asset contract)
         assert frame_a == frame_b
 
+    def test_frame_block_forbids_root_outer_margin(self, session):
+        """dsv2 F3: unpinned generations authored ``.slide { margin: 32px auto }``
+        print-preview roots, shifting content past the 720px clip on every
+        clipping surface. The frame block must state — as prose, per the
+        prose-only contract above — that the slide root carries no outer
+        margin."""
+        from src.services.design_system_compiler import compile_design_system
+
+        out = compile_design_system(_make_ds(session, tokens=_TOKENS))
+        block = out[out.index("SLIDE FRAME CONSTRAINTS"):out.index("BRAND IMAGE ASSETS")]
+        assert "outer margin" in block.lower()
+
+    def test_frame_block_forbids_decorative_art_over_text(self, session):
+        """dsv2 F3 (cover-art bleed): decorative/nodal artwork overlapped
+        titles, subtitles and list items on cover slides. The frame block must
+        forbid decorative imagery overlapping text content."""
+        from src.services.design_system_compiler import compile_design_system
+
+        out = compile_design_system(_make_ds(session, tokens=_TOKENS))
+        block = out[out.index("SLIDE FRAME CONSTRAINTS"):out.index("BRAND IMAGE ASSETS")]
+        lowered = block.lower()
+        assert "overlap" in lowered
+        assert "decorative" in lowered
+
 
 # ---------------------------------------------------------------------------
 # Scope firewall + soft-pick enabler (Round 2 — live Claude Design probe)

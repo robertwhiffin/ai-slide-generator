@@ -41,8 +41,13 @@ export const KEY_BRIDGE_SCRIPT = `
 // The UA's default 8px body margin alone pushes 1280x720 content past the
 // frame and draws scrollbars inside the preview; these surfaces clip instead
 // (the filmstrip and presentation mode already carry their own resets).
+// The body > * rule zeroes any outer margin deck CSS put on the slide root
+// (".slide { margin: 32px auto }" print-preview styling) — the same
+// neutralization presentation mode applies — so every clipping surface pins
+// the root to the frame origin instead of truncating its bottom edge.
 export const SLIDE_PREVIEW_RESET_STYLE = `
   html, body { margin: 0; padding: 0; overflow: hidden; }
+  body > * { margin: 0 !important; }
 `;
 
 export interface SlideDocumentOptions {

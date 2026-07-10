@@ -11,8 +11,9 @@ const SLIDE_HEIGHT = 720;
 
 /**
  * Build HTML for a single slide (same as PDF client).
+ * Exported so tests can pin the document's layout guarantees.
  */
-function buildSlideHTML(slideDeck: SlideDeck, slideIndex: number): string {
+export function buildSlideHTML(slideDeck: SlideDeck, slideIndex: number): string {
   const slide = slideDeck.slides[slideIndex];
   const externalScripts = slideDeck.external_scripts
     .map((src) => `    <script src="${src}"></script>`)
@@ -50,6 +51,13 @@ ${externalScripts}
       position: relative;
     }
     ${slideDeck.css}
+    /* After deck CSS: zero any outer margin the deck put on the slide root —
+       inside this fixed 1280x720 overflow:hidden document a root margin
+       shifts content past the clip and truncates the export's bottom edge
+       (same neutralization as presentation mode / preview surfaces). */
+    body > * {
+      margin: 0 !important;
+    }
   </style>
 </head>
 <body>

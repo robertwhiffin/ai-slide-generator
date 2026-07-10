@@ -84,7 +84,11 @@ _STYLE_HEADER = "SLIDE VISUAL STYLE"
 # overflow line no longer suggests scaling content down.
 # v5: BRAND MANUAL is built from ROOT-level README/SKILL only — nested
 # component docs (e.g. a ui-kit folder's README) no longer pollute it.
-COMPILER_VERSION = 5
+# v6: frame block adds two hard rules (dsv2 battery F3): the slide root
+# carries NO outer margin (print-preview roots shifted content past the 720px
+# clip on every surface), and decorative imagery never overlaps text content
+# (cover-art bled over titles/subtitles/list items).
+COMPILER_VERSION = 6
 _COMPILER_VERSION_MARKER = f"[ds-compiler v{COMPILER_VERSION}]"
 
 # Canonical color-group ordering -> deterministic, human-meaningful sections.
@@ -173,7 +177,14 @@ _SLIDE_FRAME_CONSTRAINTS = (
     "- Safe area (soft guidance): keep primary content (titles, body text, charts, "
     "tables) roughly 72px clear of the top and bottom edges and 88px clear of the "
     "left and right edges; let only full-bleed backgrounds or images reach the "
-    "slide edges."
+    "slide edges.\n"
+    "- The slide's root element carries NO outer margin: it starts at the very "
+    "top-left corner of its frame. Styling the root like a floating print-preview "
+    "card shifts everything past the frame edge, and the bottom of the slide gets "
+    "clipped on every surface and in every export.\n"
+    "- Decorative imagery (cover art, corner motifs, background illustrations) "
+    "must never overlap text content: keep titles, subtitles, list items, and "
+    "footers fully clear of any artwork layer."
 )
 
 
