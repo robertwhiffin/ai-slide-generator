@@ -350,3 +350,57 @@ class TestRenderSeamScopesToSessionDesignSystem:
         assert f"{{{{ds-asset:{victim.id}}}}}" in html
         # The session's OWN asset still resolves to inline bytes.
         assert f"data:image/svg+xml;base64,{attacker_b64}" in html
+
+
+class TestSessionsRouteDeckSubstitutionScoping:
+    """The sessions deck routes substitute via ``_substitute_deck_images`` (a
+    distinct call site from ``get_slides``). It must scope ds-asset resolution to
+    the session's active design system for the same reason: a foreign handle in
+    the persisted deck must not disclose another system's bytes to the client.
+    """
+
+    def test_substitute_deck_images_scopes_to_session_design_system(self, session):
+        from contextlib import contextmanager
+        from unittest.mock import MagicMock, patch
+
+        from src.api.routes.sessions import _substitute_deck_images
+
+        victim = _make_asset(
+            session, data=b"<svg>VICTIM-SESSIONS-SECRET</svg>", name="Victim Sessions DS"
+        )
+        attacker_ds_id, (attacker_logo,) = _make_ds_with_assets(
+            session,
+            [{"data": b"<svg>attacker-own</svg>", "mime": "image/svg+xml"}],
+            name="Attacker Sessions DS",
+        )
+        deck = {
+            "slides": [
+                {
+                    "html": (
+                        f'<img src="{{{{ds-asset:{victim.id}}}}}">'
+                        f'<img src="{{{{ds-asset:{attacker_logo.id}}}}}">'
+                    )
+                }
+            ]
+        }
+
+        @contextmanager
+        def _fake_db():
+            yield session
+
+        mock_sm = MagicMock()
+        mock_sm.get_session.return_value = {
+            "agent_config": {"design_system_id": attacker_ds_id}
+        }
+        with patch("src.core.database.get_db_session", _fake_db), patch(
+            "src.api.services.session_manager.get_session_manager",
+            return_value=mock_sm,
+        ):
+            _substitute_deck_images(deck, "sess-x")
+
+        html = deck["slides"][0]["html"]
+        victim_b64 = base64.b64encode(b"<svg>VICTIM-SESSIONS-SECRET</svg>").decode()
+        attacker_b64 = base64.b64encode(b"<svg>attacker-own</svg>").decode()
+        assert victim_b64 not in html
+        assert f"{{{{ds-asset:{victim.id}}}}}" in html
+        assert f"data:image/svg+xml;base64,{attacker_b64}" in html
