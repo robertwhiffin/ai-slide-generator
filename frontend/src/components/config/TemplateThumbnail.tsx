@@ -62,13 +62,23 @@ export const LazyMount: React.FC<{ className?: string; children: React.ReactNode
  * CSP for the preview document: uploaded template HTML/CSS must not be able
  * to trigger ANY external network fetch from the frame (img/link tags, css
  * url()/@import — passive egress). The legit live render only needs inline
- * styles plus data:/blob: resources: the importer rewrites ds-asset and
- * relative references to data: URIs, and token CSS arrives inline.
- * sandbox="" on the iframe already blocks scripts/same-origin; this closes
- * the passive-fetch channel sandbox does not.
+ * styles plus data:/blob: resources: the /source endpoint resolves
+ * {{ds-asset:ID}} handles to data: URIs at serve time, and token CSS arrives
+ * inline. sandbox="" on the iframe already blocks scripts/same-origin; this
+ * closes the passive-fetch channel sandbox does not.
  */
 const PREVIEW_CSP =
   "default-src 'none'; style-src 'unsafe-inline'; img-src data: blob:; font-src data:;";
+
+/**
+ * A {{ds-asset:ID}} handle that still reaches the builder (a backend that
+ * predates serve-time resolution, or an id its resolver could not satisfy)
+ * would resolve as a relative URL inside the frame and be refused by the CSP
+ * above — one failed-resource console error per occurrence, in every card.
+ * Neutralize to the inert `data:,` placeholder (the import rewrite's own
+ * convention for unresolvable refs): renders as nothing, never fetches.
+ */
+const DS_ASSET_HANDLE_RE = /\{\{ds-asset:\d+\}\}/g;
 
 /**
  * Compose the preview document: the template layout with its token
@@ -84,10 +94,12 @@ const PREVIEW_CSP =
  * the parsed body (attributes included, via its own serialization) follows.
  */
 function buildTemplatePreviewDoc(layoutHtml: string, tokenCss: string | null): string {
+  const inlineLayout = layoutHtml.replace(DS_ASSET_HANDLE_RE, 'data:,');
+  const inlineTokenCss = tokenCss ? tokenCss.replace(DS_ASSET_HANDLE_RE, 'data:,') : tokenCss;
   const cspMeta = `<meta http-equiv="Content-Security-Policy" content="${PREVIEW_CSP}">`;
   const previewReset = '<style>html,body{margin:0;overflow:hidden}</style>';
-  const guard = cspMeta + (tokenCss ? `<style>${tokenCss}</style>` : '') + previewReset;
-  const parsed = new DOMParser().parseFromString(layoutHtml, 'text/html');
+  const guard = cspMeta + (inlineTokenCss ? `<style>${inlineTokenCss}</style>` : '') + previewReset;
+  const parsed = new DOMParser().parseFromString(inlineLayout, 'text/html');
   const templateHead = parsed.head?.innerHTML ?? '';
   const templateBody = parsed.body?.outerHTML ?? '<body></body>';
   return `<!DOCTYPE html><html><head>${guard}${templateHead}</head>${templateBody}</html>`;

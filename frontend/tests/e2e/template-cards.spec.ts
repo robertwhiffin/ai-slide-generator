@@ -11,6 +11,7 @@ import {
   mockDesignSystemTemplatesWithLive,
   mockDesignSystemTemplateSource,
   mockDesignSystemFiles,
+  mockDesignSystemFileContents,
   TINY_PNG_BASE64,
 } from '../fixtures/mocks';
 
@@ -63,6 +64,22 @@ async function setupShellMocks(page: Page) {
   await page.route('**/api/version**', (route) => {
     route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ version: '0.1.21', latest: '0.1.21' }) });
   });
+  // Shell endpoints the app polls on every mount — mocked so the console-clean
+  // assertion sees only the preview surface, exactly like a served backend.
+  await page.route('**/api/user/current', (route) => {
+    route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ username: 'test@test.com', display_name: 'Test User' }),
+    });
+  });
+  await page.route('**/api/slides/versions**', (route) => {
+    route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ versions: [], current_version: null }),
+    });
+  });
 }
 
 async function setupDesignSystemMocks(page: Page) {
@@ -82,6 +99,23 @@ async function setupDesignSystemMocks(page: Page) {
   });
   await page.route(/\/api\/settings\/design-systems\/\d+\/files$/, (route) => {
     route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(mockDesignSystemFiles) });
+  });
+  // Single-file serving (the detail page fetches README.md for its docs pane) —
+  // the design-systems-ui suite's pattern, security posture included.
+  await page.route(/\/api\/settings\/design-systems\/\d+\/files\/.+$/, (route, request) => {
+    const rawPath = new URL(request.url()).pathname.split('/files/')[1] ?? '';
+    const filePath = rawPath.split('/').map(decodeURIComponent).join('/');
+    const body = mockDesignSystemFileContents[filePath];
+    if (body === undefined) {
+      route.fulfill({ status: 404, contentType: 'application/json', body: JSON.stringify({ detail: 'File not found' }) });
+      return;
+    }
+    route.fulfill({
+      status: 200,
+      contentType: 'text/plain; charset=utf-8',
+      headers: { 'Content-Disposition': 'attachment', 'X-Content-Type-Options': 'nosniff' },
+      body,
+    });
   });
 
   // Two templates: id 1 ships a screenshot, id 2 does not (live-render path).
@@ -244,6 +278,79 @@ test.describe('Template cards — preview preference and live-render fallback', 
     // …and nothing left the frame.
     await page.waitForTimeout(500);
     expect(externalRequests).toEqual([]);
+  });
+
+  test('srcdoc arrives fully inline: data: URIs render, stray handles are neutralized, console stays clean', async ({ page }) => {
+    // The /source endpoint resolves {{ds-asset:ID}} handles to data: URIs at
+    // the response boundary (dsv2 F8). The BUILDER must still guarantee the
+    // srcdoc-level invariant against a version-skewed backend or a handle the
+    // resolver could not satisfy: nothing placeholder-shaped may enter the
+    // frame — inside the sandbox a raw handle resolves as a relative URL and
+    // the CSP refuses it (a failed-resource console error per occurrence,
+    // the ~174-error signature of the dsv2 battery). Stray handles degrade
+    // to the inert data:, placeholder instead.
+    const resourceErrors: string[] = [];
+    page.on('console', (msg) => {
+      if (msg.type() !== 'error') return;
+      const text = msg.text();
+      if (/Refused to load|Failed to load resource|net::ERR/i.test(text)) {
+        resourceErrors.push(text);
+      }
+    });
+    page.on('requestfailed', (req) => resourceErrors.push(`requestfailed: ${req.url()}`));
+    page.on('response', (res) => {
+      if (res.status() >= 400) resourceErrors.push(`HTTP ${res.status()}: ${res.url()}`);
+    });
+
+    await page.route(/\/api\/settings\/design-systems\/\d+\/templates\/2\/source$/, (route) => {
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          id: 2,
+          name: 'Acme Content',
+          layout_html:
+            '<!doctype html><html><head>' +
+            '<style>.slide{width:1280px;height:720px;}' +
+            '.hero{background-image:url("{{ds-asset:31}}");}</style>' +
+            '</head><body><section class="slide hero"><h1>Acme Inline Probe</h1>' +
+            `<img src="data:image/png;base64,${TINY_PNG_BASE64}" alt="resolved brand mark">` +
+            '<img src="{{ds-asset:99}}" alt="ghost">' +
+            '</section></body></html>',
+          token_css:
+            "@font-face { font-family: 'Acme Preview Sans'; " +
+            "src: url(data:font/woff2;base64,d29mZjItYnl0ZXM=) format('woff2'); }\n" +
+            ':root { --brand-core-primary: #123456; }',
+        }),
+      });
+    });
+
+    await openAcmeDetail(page);
+    const contentCard = page.locator('[data-testid="template-card"]').filter({ hasText: 'Acme Content' });
+    const frame = contentCard.locator('[data-testid="template-live-preview"]');
+    await expect(frame).toBeVisible();
+
+    // The legit inline content painted…
+    const inner = page.frameLocator('[data-testid="template-live-preview"]');
+    await expect(inner.locator('h1')).toHaveText('Acme Inline Probe');
+
+    const srcdoc = (await frame.getAttribute('srcdoc')) ?? '';
+    // …resolved data: URIs pass through untouched (img src AND @font-face)…
+    expect(srcdoc).toContain(`data:image/png;base64,${TINY_PNG_BASE64}`);
+    expect(srcdoc).toContain('data:font/woff2;base64,');
+    // …NOTHING placeholder-shaped survives (img src and CSS url() forms)…
+    expect(srcdoc).not.toContain('{{ds-asset');
+    expect(srcdoc).toContain('src="data:,"');
+    expect(srcdoc).toContain('url("data:,")');
+    // …the hardening is byte-identical: same sandbox, same CSP…
+    await expect(frame).toHaveAttribute('sandbox', '');
+    expect(srcdoc).toContain(
+      '<meta http-equiv="Content-Security-Policy" content="default-src \'none\'; ' +
+        "style-src 'unsafe-inline'; img-src data: blob:; font-src data:;\">",
+    );
+    // …and the detail page produced ZERO failed-resource console errors.
+    await page.waitForTimeout(500);
+    expect(resourceErrors).toEqual([]);
   });
 
   test('source fetch fires only for screenshot-less templates', async ({ page }) => {
