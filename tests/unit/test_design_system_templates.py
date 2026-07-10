@@ -762,6 +762,20 @@ class TestBuildSelectedTemplateBlock:
         assert "var(--acme-navy)" in block
         assert block.rstrip().endswith("END OF SELECTED SLIDE TEMPLATE.")
 
+    def test_instructions_mandate_exact_native_sizes_on_cover_and_closing(self, session):
+        """dsv2 F6: pinned generations under-obeyed template-native heading
+        sizes precisely on cover/closing slides (64px where the template
+        ships 72/80). The keep-sizes bullet must demand the template's OWN
+        sizes exactly — cover and closing included, never a tier smaller."""
+        from src.services.design_system_templates import build_selected_template_block
+
+        _, template = self._template(session)
+        block = build_selected_template_block(template)
+        lowered = block.lower()
+        assert "exactly" in lowered
+        assert "cover" in lowered and "closing" in lowered
+        assert "never a tier smaller" in lowered
+
     def test_block_without_token_css_omits_stylesheet_section(self, session):
         from src.services.design_system_templates import build_selected_template_block
 

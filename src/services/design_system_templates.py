@@ -720,8 +720,10 @@ def build_selected_template_block(template: Any) -> Optional[str]:
         "- Keep the template's <style> rules intact; put any additional CSS in a "
         "separate <style> block below it and never redefine the template's "
         "selectors.",
-        "- Keep the template's own heading/title sizes; never shrink type below "
-        "them to fit more content — trim or split across slides instead.",
+        "- Use the template's own heading/title sizes EXACTLY as it ships them, "
+        "on every slide type INCLUDING the cover and the closing slide — never a "
+        "tier smaller. Never shrink type below them to fit more content — trim "
+        "or split across slides instead.",
     ]
     if token_css:
         instructions.append(
