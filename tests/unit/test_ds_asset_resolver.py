@@ -284,3 +284,69 @@ class TestChatServiceCallerGate:
         bg_b64 = base64.b64encode(b"synthetic-bg-bytes").decode()
         assert f"data:image/png;base64,{bg_b64}" in out_deck["css"]
         assert "{{ds-asset:" not in out_deck["css"]
+
+
+class TestRenderSeamScopesToSessionDesignSystem:
+    """Render seam (``ChatService.get_slides`` -> ``_substitute_images_for_response``)
+    scopes ds-asset resolution to the session's ACTIVE design system.
+
+    A crafted pinned template can carry ``{{ds-asset:<foreign_id>}}`` in its HTML;
+    the model can echo that into the generated deck. When the deck is read back
+    for the client, the foreign handle must NOT resolve to the other system's
+    bytes — only assets of the session's own design system may embed. Driven
+    through ``get_slides`` (an unchanged boundary) so it reproduces the leak on
+    the pre-fix code.
+    """
+
+    def test_get_slides_does_not_leak_foreign_ds_asset_bytes(self, session):
+        from contextlib import contextmanager
+        from unittest.mock import MagicMock, patch
+
+        from src.api.services.chat_service import ChatService
+
+        victim = _make_asset(
+            session, data=b"<svg>VICTIM-RENDER-SECRET</svg>", name="Victim Render DS"
+        )
+        attacker_ds_id, (attacker_logo,) = _make_ds_with_assets(
+            session,
+            [{"data": b"<svg>attacker-own</svg>", "mime": "image/svg+xml"}],
+            name="Attacker Render DS",
+        )
+        # The session's deck (model output) references BOTH the Victim's asset id
+        # (echoed foreign handle) and the Attacker's own asset id.
+        deck = {
+            "slides": [
+                {
+                    "html": (
+                        f'<img src="{{{{ds-asset:{victim.id}}}}}">'
+                        f'<img src="{{{{ds-asset:{attacker_logo.id}}}}}">'
+                    )
+                }
+            ]
+        }
+
+        @contextmanager
+        def _fake_db():
+            yield session
+
+        mock_sm = MagicMock()
+        mock_sm.get_slide_deck.return_value = deck
+        mock_sm.get_session.return_value = {
+            "agent_config": {"design_system_id": attacker_ds_id}
+        }
+
+        service = ChatService()
+        with patch("src.core.database.get_db_session", _fake_db), patch(
+            "src.api.services.session_manager.get_session_manager",
+            return_value=mock_sm,
+        ):
+            out = service.get_slides("sess-attacker")
+
+        html = out["slides"][0]["html"]
+        victim_b64 = base64.b64encode(b"<svg>VICTIM-RENDER-SECRET</svg>").decode()
+        attacker_b64 = base64.b64encode(b"<svg>attacker-own</svg>").decode()
+        # Foreign bytes never served; foreign handle left raw (deck contract).
+        assert victim_b64 not in html
+        assert f"{{{{ds-asset:{victim.id}}}}}" in html
+        # The session's OWN asset still resolves to inline bytes.
+        assert f"data:image/svg+xml;base64,{attacker_b64}" in html
