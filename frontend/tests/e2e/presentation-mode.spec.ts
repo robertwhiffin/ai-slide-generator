@@ -162,7 +162,7 @@ test.describe('Presentation Mode', () => {
 // ship (transparent .slide variants over a body background). Presentation
 // mode's reset must not paint white over it.
 const DARK_DECK_CSS =
-  'body { margin: 0; background: #0e1a1f; } ' +
+  'body { margin: 0; background: #102030; } ' +
   '.slide { width: 1280px; height: 720px; }';
 
 /** Re-mock the slides endpoint with custom deck CSS (registered after
@@ -214,7 +214,7 @@ test.describe('Presentation Mode deck background fidelity', () => {
     });
 
     // Deck CSS keeps painting the canvas…
-    expect(backgrounds.body).toBe('rgb(14, 26, 31)');
+    expect(backgrounds.body).toBe('rgb(16, 32, 48)');
     // …and the slide container no longer paints white over it.
     expect(backgrounds.container).toBe('rgba(0, 0, 0, 0)');
   });

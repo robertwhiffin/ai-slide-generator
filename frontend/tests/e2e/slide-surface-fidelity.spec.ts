@@ -31,7 +31,7 @@ import { buildCompositeHtml } from '../../src/services/domWalker';
 // computed font-family reports the specified stack whether or not a face
 // resolves, which keeps the assertion hermetic.)
 const BRAND_DECK_CSS =
-  "body { margin: 0; background: #0e1a1f; font-family: 'Acme Sans', sans-serif; } " +
+  "body { margin: 0; background: #102030; font-family: 'Acme Sans', sans-serif; } " +
   '.slide-container { width: 1280px; height: 720px; }';
 
 // A deck whose slide root carries a model-authored print-preview margin —
@@ -104,7 +104,7 @@ test.describe('Filmstrip (SlideSelection) preview fidelity', () => {
     });
 
     // Deck-authored values survive the reset…
-    expect(style.background).toBe('rgb(14, 26, 31)');
+    expect(style.background).toBe('rgb(16, 32, 48)');
     expect(style.font).toContain('Acme Sans');
     // …while the fixed 1280x720 preview frame sizing is kept.
     expect(style.width).toBe('1280px');
