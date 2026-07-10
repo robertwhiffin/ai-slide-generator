@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import type { SlideDeck } from '../../types/slide';
-import { buildSlideDocument } from '../../services/slideDocument';
+import { buildSlideDocument, SLIDE_ROOT_RESET_STYLE } from '../../services/slideDocument';
 
 interface PresentationModeProps {
   slideDeck: SlideDeck;
@@ -86,11 +86,8 @@ export const PresentationMode: React.FC<PresentationModeProps> = ({
     .slide-container > * {
       width: 100%;
       height: 100%;
-      /* Zero any margin a deck CSS may add to its slide root — margins push
-         the slide inside the 720px clipping container and cause bottom-edge
-         truncation (e.g. ".slide { margin: 40px auto }" preview-mode styles). */
-      margin: 0 !important;
-    }`;
+    }
+    ${SLIDE_ROOT_RESET_STYLE}`;
 
     const bootstrapScripts = `
     // Wait for Chart.js to be available before running scripts

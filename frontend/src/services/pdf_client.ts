@@ -6,7 +6,7 @@
 import html2canvas from 'html2canvas';
 import jsPDF from 'jspdf';
 import type { SlideDeck } from '../types/slide';
-import { SLIDE_CSP } from './slideDocument';
+import { SLIDE_CSP, SLIDE_ROOT_RESET_STYLE } from './slideDocument';
 
 const SLIDE_WIDTH = 1280;
 const SLIDE_HEIGHT = 720;
@@ -55,13 +55,11 @@ ${externalScripts}
       position: relative;
     }
     ${slideDeck.css}
-    /* After deck CSS: zero any outer margin the deck put on the slide root —
+    /* After deck CSS: flatten the slide root (outer margin / radius / shadow) —
        inside this fixed 1280x720 overflow:hidden document a root margin
        shifts content past the clip and truncates the export's bottom edge
-       (same neutralization as presentation mode / preview surfaces). */
-    body > * {
-      margin: 0 !important;
-    }
+       (same neutralization as every other surface). */
+    ${SLIDE_ROOT_RESET_STYLE}
     /* CRITICAL: Explicitly preserve subtitle spacing - override any global resets */
     /* This must come AFTER slideDeck.css to override any * { margin: 0; } resets */
     .subtitle, p.subtitle, h2.subtitle, div.subtitle, [class*="subtitle"] {

@@ -13,7 +13,7 @@
  */
 
 import type { SlideDeck } from '../types/slide';
-import { SLIDE_CSP } from './slideDocument';
+import { SLIDE_CSP, SLIDE_ROOT_RESET_STYLE } from './slideDocument';
 
 /** Font strategy for the editable export. */
 export type EditableFontMode =
@@ -113,18 +113,12 @@ ${ext}
 html, body { margin: 0; padding: 0; }
 html { width: ${DESIGN_W}px; height: ${DESIGN_H}px; }
 section.slide-container { width: ${DESIGN_W}px; height: ${DESIGN_H}px; position: relative; overflow: hidden; }
-/* Authored decks often wrap each slide in an inner <div class="slide">
-   styled like a print-preview card (margin: 40px auto; border-radius: 12px;
-   box-shadow: ...). That 40px margin shifts every absolutely-positioned
-   descendant out past the 720px clip rect. Neutralize. */
-section.slide-container > .slide, section.slide-container .slide {
-  margin: 0 !important;
-  border-radius: 0 !important;
-  box-shadow: none !important;
-}
-/* Same guarantee for roots the model did NOT class ".slide" — whatever the
-   slide's outermost element is, it must sit at the frame origin. */
-section.slide-container > * { margin: 0 !important; }
+/* Authored decks often style the slide root like a print-preview card
+   (margin: 40px auto; border-radius: 12px; box-shadow: ...). The 40px margin
+   shifts every absolutely-positioned descendant out past the 720px clip rect,
+   and pptxgenjs cannot render root rounding/shadows. The shared reset
+   flattens the root — whatever its class — exactly like every other surface. */
+${SLIDE_ROOT_RESET_STYLE}
 ${deck.css || ''}
 </style>
 </head>

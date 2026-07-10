@@ -11,7 +11,11 @@ from pydantic import BaseModel
 
 from src.api.services.chat_service import get_chat_service
 from src.services.html_to_pptx import HtmlToPptxConverterV3, PPTXConversionError
-from src.utils.html_safety import SLIDE_CSP_META, scan_html_for_unsafe_patterns
+from src.utils.html_safety import (
+    SLIDE_CSP_META,
+    SLIDE_ROOT_RESET_STYLE,
+    scan_html_for_unsafe_patterns,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -138,13 +142,11 @@ def build_slide_html(slide: dict, slide_deck: dict) -> str:
       font-family: 'Inter', 'Segoe UI', system-ui, -apple-system, sans-serif;
     }}
     {deck_css}
-    /* After deck CSS: zero any outer margin the deck put on the slide root —
+    /* After deck CSS: flatten the slide root (outer margin / radius / shadow) —
        inside this fixed 1280x720 overflow:hidden document a root margin
        shifts content past the clip and truncates the export's bottom edge
-       (same neutralization as presentation mode / preview surfaces). */
-    body > * {{
-      margin: 0 !important;
-    }}
+       (same neutralization as every other surface). */
+    {SLIDE_ROOT_RESET_STYLE}
   </style>
 </head>
 <body>
