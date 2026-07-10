@@ -627,6 +627,56 @@ class TestRootTagSelectorNormalization:
         assert "section, .slide, .slide" not in second
 
 
+class TestAttributeSelectorValueSafety:
+    """dsv2 cross-review F1: the root-tag rewrite matched the tag token inside
+    quoted attribute-selector values (``section[data-kind="section"]`` gained
+    the parallel ``.slide[data-kind=".slide"]``), so templates keyed on
+    attribute selectors STILL never matched generated ``div.slide`` roots —
+    the exact failure the rewrite exists to fix. The tag token is an element
+    key only OUTSIDE quoted strings and ``[…]`` attribute blocks."""
+
+    def _normalize(self, css):
+        from src.services.design_system_templates import normalize_root_tag_selectors
+
+        return normalize_root_tag_selectors(
+            "<!doctype html><html><head><style>\n"
+            f"{css}\n"
+            "</style></head><body>\n"
+            '<section class="slide"><h1>Root</h1></section>\n'
+            "</body></html>\n"
+        )
+
+    def test_double_quoted_attribute_values_survive_the_rewrite(self):
+        out = self._normalize('section[data-kind="section"] .title { color: #111; }')
+        assert '.slide[data-kind="section"] .title' in out
+        assert '".slide"' not in out
+
+    def test_single_quoted_attribute_values_survive_the_rewrite(self):
+        out = self._normalize("section[data-kind='section'] .title { color: #111; }")
+        assert ".slide[data-kind='section'] .title" in out
+        assert "'.slide'" not in out
+
+    def test_bare_attribute_names_survive_the_rewrite(self):
+        out = self._normalize("section[section] { color: #111; }")
+        assert ".slide[section]" in out
+        assert "[.slide]" not in out
+
+    def test_every_element_position_is_rewritten_in_one_parallel(self):
+        out = self._normalize("section [data-x] section.hero { color: #111; }")
+        assert "section [data-x] section.hero, .slide [data-x] .slide.hero" in out
+
+    def test_attribute_only_occurrences_gain_no_parallel(self):
+        out = self._normalize('.card[data-kind="section"] { color: #111; }')
+        assert '.card[data-kind="section"] { color: #111; }' in out
+        assert out.count("data-kind") == 1
+
+    def test_attribute_selector_normalization_is_idempotent(self):
+        from src.services.design_system_templates import normalize_root_tag_selectors
+
+        once = self._normalize('section[data-kind="section"] .title { color: #111; }')
+        assert normalize_root_tag_selectors(once) == once
+
+
 class TestEnsureDeckTokenCss:
     """dsv2 battery WB-1: a pinned generation referenced 57 var(--…) tokens
     while defining none — the model dropped the TOKEN STYLESHEET despite the
