@@ -581,6 +581,64 @@ export const WALKER_SOURCE = `
     return { width: rootRect.width, height: rootRect.height, records: records };
   }
 
+  // ─── pre-walk mutation: inline <svg> → <img data:image/svg+xml> ──────
+  // visit() covers text leaves, <img> (with SVG-src raster), <canvas>, and
+  // background fills — but inline <svg> ELEMENTS had no handler: the walk
+  // recursed into SVG children and emitted nothing, so icon glyphs vanished
+  // from the records export (the huashu path materializes them). Swap each
+  // top-level svg for an equal-box <img> whose src is the serialized svg;
+  // the existing IMG branch + rasterizeSvgImage then emit a PNG record.
+  // Layout-critical styles are copied so the swap holds the svg's box in
+  // flex/absolute layouts; currentColor is frozen via an explicit color.
+  // Serialization failures keep the svg in place (warn, never throw).
+  function materializeInlineSvgs(root, decodes) {
+    const svgs = Array.prototype.filter.call(
+      root.querySelectorAll('svg'),
+      function (s) { return !s.ownerSVGElement; }
+    );
+    let converted = 0;
+    for (const svg of svgs) {
+      const cs = getComputedStyle(svg);
+      if (cs.display === 'none' || cs.visibility === 'hidden') continue;
+      const r = svg.getBoundingClientRect();
+      if (r.width < 1 || r.height < 1 || !svg.parentNode) continue;
+      let src;
+      try {
+        const clone = svg.cloneNode(true);
+        if (!clone.getAttribute('xmlns')) {
+          clone.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
+        }
+        // Standalone svg loses the CSS-sized box and inherited currentColor;
+        // freeze both so the raster matches the rendered glyph.
+        if (!clone.getAttribute('viewBox') && svg.hasAttribute('width') && svg.hasAttribute('height')) {
+          clone.setAttribute('viewBox', '0 0 ' + svg.getAttribute('width') + ' ' + svg.getAttribute('height'));
+        }
+        clone.setAttribute('width', String(r.width));
+        clone.setAttribute('height', String(r.height));
+        clone.style.color = cs.color;
+        src = 'data:image/svg+xml;charset=utf-8,' +
+          encodeURIComponent(new XMLSerializer().serializeToString(clone));
+      } catch (e) {
+        console.warn('[walker] inline svg serialize failed, glyph kept as-is:', e.message);
+        continue;
+      }
+      const img = document.createElement('img');
+      img.src = src;
+      img.style.cssText =
+        'width:' + r.width + 'px;height:' + r.height + 'px;' +
+        'position:' + cs.position + ';left:' + cs.left + ';top:' + cs.top + ';' +
+        'right:' + cs.right + ';bottom:' + cs.bottom + ';margin:' + cs.margin + ';' +
+        'transform:' + cs.transform + ';vertical-align:' + cs.verticalAlign + ';' +
+        'z-index:' + cs.zIndex + ';flex-shrink:0;';
+      svg.parentNode.replaceChild(img, svg);
+      converted++;
+      decodes.push(img.decode().catch(function () {
+        console.warn('[walker] inline svg decode failed, record keeps raw src: ' + img.src.slice(0, 80));
+      }));
+    }
+    return converted;
+  }
+
   // ─── pre-walk mutation: CSS background-image url() → real <img> ──────
   // The walker has no handler for non-gradient background-image layers:
   // hasVisualFill() sees them but only ever emits the solid backgroundColor
@@ -590,9 +648,11 @@ export const WALKER_SOURCE = `
   // emits it (including the SVG→PNG raster for data:image/svg+xml sources,
   // whose sync .complete/.naturalWidth check is why decodes are awaited
   // here). Idempotent: the source backgroundImage is cleared on conversion.
+  // Inline <svg> elements are materialized first (same decode barrier).
   async function prepareSlideForExtract(root) {
-    const candidates = [root].concat(Array.from(root.querySelectorAll('*')));
     const decodes = [];
+    materializeInlineSvgs(root, decodes);
+    const candidates = [root].concat(Array.from(root.querySelectorAll('*')));
     for (const el of candidates) {
       if (el.tagName === 'IMG' || el.tagName === 'CANVAS') continue;
       const cs = getComputedStyle(el);
@@ -759,9 +819,10 @@ export async function extractSlideRecordsForExport(
           `section.slide-container[data-slide-index="${i}"]`
         );
         if (root) {
-          // Materialize CSS background-image url() layers as <img> children
-          // before the walk — the walker has no bg-url handler, so without
-          // this pass those assets drop out of the export entirely.
+          // Materialize inline <svg> elements and CSS background-image url()
+          // layers as <img> before the walk — the walker has handlers for
+          // neither, so without this pass those visuals drop out of the
+          // export entirely.
           try {
             await (
               w as unknown as {
