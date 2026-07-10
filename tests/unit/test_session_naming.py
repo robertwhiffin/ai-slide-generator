@@ -253,7 +253,7 @@ class TestSessionNamingInStreaming:
         service._detect_explicit_replace_intent = MagicMock(return_value=False)
         service._get_or_load_deck = MagicMock(return_value=None)
         service._substitute_images_for_response = MagicMock(
-            side_effect=lambda d, r=None: (d, r)
+            side_effect=lambda d, r=None, *, session_id: (d, r)
         )
         service._persist_genie_conversation_ids = MagicMock()
 
@@ -325,7 +325,7 @@ class TestSessionNamingInStreaming:
         service._detect_explicit_replace_intent = MagicMock(return_value=False)
         service._get_or_load_deck = MagicMock(return_value=None)
         service._substitute_images_for_response = MagicMock(
-            side_effect=lambda d, r=None: (d, r)
+            side_effect=lambda d, r=None, *, session_id: (d, r)
         )
         service._persist_genie_conversation_ids = MagicMock()
 
@@ -376,7 +376,7 @@ class TestSessionNamingInStreaming:
         service._detect_explicit_replace_intent = MagicMock(return_value=False)
         service._get_or_load_deck = MagicMock(return_value=None)
         service._substitute_images_for_response = MagicMock(
-            side_effect=lambda d, r=None: (d, r)
+            side_effect=lambda d, r=None, *, session_id: (d, r)
         )
         service._persist_genie_conversation_ids = MagicMock()
 

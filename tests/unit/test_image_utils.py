@@ -240,7 +240,11 @@ class TestChatServiceImageCssCallerGate:
         with patch("src.core.database.get_db_session", _fake_db), \
              patch("src.utils.image_utils.image_service") as mock_svc:
             mock_svc.get_image_base64.return_value = ("GATEDATA", "image/png")
-            out_deck, _ = service._substitute_images_for_response(deck)
+            # No {{ds-asset:ID}} handle here, so scope resolution is never
+            # reached; session_id is still required by the signature.
+            out_deck, _ = service._substitute_images_for_response(
+                deck, session_id="sess-1"
+            )
 
         assert "data:image/png;base64,GATEDATA" in out_deck["css"]
         assert "{{image:" not in out_deck["css"]

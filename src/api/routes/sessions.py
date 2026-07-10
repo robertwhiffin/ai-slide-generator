@@ -146,15 +146,23 @@ def _check_deck_permission_for_session(
         _require_session_access(session_info, db, min_permission)
 
 
-def _substitute_deck_images(deck_dict: dict) -> None:
-    """Substitute {{image:ID}} placeholders in a deck dict with base64 data URIs."""
+def _substitute_deck_images(deck_dict: dict, session_id: str) -> None:
+    """Substitute {{image:ID}} + {{ds-asset:ID}} placeholders in a deck dict with
+    base64 data URIs.
+
+    ds-asset resolution is scoped to the session's active design system so a
+    foreign ``{{ds-asset:ID}}`` handle in the deck cannot disclose another
+    system's asset bytes.
+    """
+    from src.api.services.chat_service import resolve_active_design_system_id
     from src.core.database import get_db_session
     from src.utils.ds_asset_utils import substitute_deck_dict_ds_assets
     from src.utils.image_utils import substitute_deck_dict_images
 
+    ds_id = resolve_active_design_system_id(session_id)
     with get_db_session() as db:
         substitute_deck_dict_images(deck_dict, db)
-        substitute_deck_dict_ds_assets(deck_dict, db)
+        substitute_deck_dict_ds_assets(deck_dict, db, design_system_id=ds_id)
 
 
 @router.post("")
@@ -480,7 +488,7 @@ async def get_session(session_id: str, db: Session = Depends(get_db)):
 
         # Substitute {{image:ID}} placeholders with base64 before sending to client
         if slide_deck:
-            await asyncio.to_thread(_substitute_deck_images, slide_deck)
+            await asyncio.to_thread(_substitute_deck_images, slide_deck, session_id)
 
         return {
             **session,
@@ -731,7 +739,7 @@ async def get_session_slides(session_id: str):
         deck = await asyncio.to_thread(session_manager.get_slide_deck, session_id)
 
         if deck:
-            await asyncio.to_thread(_substitute_deck_images, deck)
+            await asyncio.to_thread(_substitute_deck_images, deck, session_id)
 
         return {"session_id": session_id, "slide_deck": deck}
 

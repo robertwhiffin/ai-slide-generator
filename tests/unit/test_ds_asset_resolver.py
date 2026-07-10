@@ -45,13 +45,41 @@ def _make_asset(session, *, data=b"<svg/>", mime="image/svg+xml", kind="logo", n
     return ds.assets[0]
 
 
+def _make_ds_with_assets(session, specs, *, name="Acme DS"):
+    """Create ONE design system holding several assets; return (ds_id, [assets]).
+
+    Resolution is scoped to a single design system, so any test that resolves
+    multiple assets in one deck must put them all in the SAME system.
+    ``specs`` is a list of ``dict(data=, mime=, kind=)``.
+    """
+    from src.database.models.design_system import DesignSystem, DesignSystemAsset
+
+    ds = DesignSystem(name=name)
+    for spec in specs:
+        ds.assets.append(
+            DesignSystemAsset(
+                kind=spec.get("kind", "logo"),
+                filename=spec.get("filename", "asset.bin"),
+                mime=spec["mime"],
+                data=spec["data"],
+                size_bytes=len(spec["data"]),
+            )
+        )
+    session.add(ds)
+    session.commit()
+    session.refresh(ds)
+    return ds.id, list(ds.assets)
+
+
 class TestSubstituteDsAssetPlaceholders:
     def test_replaces_placeholder_with_data_uri(self, session):
         from src.utils.ds_asset_utils import substitute_ds_asset_placeholders
 
         asset = _make_asset(session, data=b"<svg>logo</svg>", mime="image/svg+xml")
         html = f'<img src="{{{{ds-asset:{asset.id}}}}}" alt="logo" />'
-        out = substitute_ds_asset_placeholders(html, session)
+        out = substitute_ds_asset_placeholders(
+            html, session, design_system_id=asset.design_system_id
+        )
 
         expected_b64 = base64.b64encode(b"<svg>logo</svg>").decode()
         assert f"data:image/svg+xml;base64,{expected_b64}" in out
@@ -63,17 +91,51 @@ class TestSubstituteDsAssetPlaceholders:
 
         asset = _make_asset(session)
         html = f'<img src="{{{{ds-asset:{asset.id}}}}}"><img src="{{{{image:1}}}}">'
-        out = substitute_ds_asset_placeholders(html, session)
+        out = substitute_ds_asset_placeholders(
+            html, session, design_system_id=asset.design_system_id
+        )
 
         assert "{{ds-asset:" not in out
         assert "{{image:1}}" in out  # untouched
+
+    def test_foreign_design_system_asset_id_left_in_place(self, session):
+        """Confused-deputy guard at the resolver: an id that belongs to a
+        DIFFERENT design system than the one in scope must NOT resolve to that
+        system's bytes — it is left in place exactly like an unknown id."""
+        from src.utils.ds_asset_utils import substitute_ds_asset_placeholders
+
+        victim = _make_asset(
+            session, data=b"<svg>victim-secret</svg>", name="Victim DS"
+        )
+        attacker_id, _ = _make_ds_with_assets(
+            session, [{"data": b"<svg>attacker</svg>", "mime": "image/svg+xml"}],
+            name="Attacker DS",
+        )
+        html = f'<img src="{{{{ds-asset:{victim.id}}}}}">'
+        out = substitute_ds_asset_placeholders(
+            html, session, design_system_id=attacker_id
+        )
+
+        victim_b64 = base64.b64encode(b"<svg>victim-secret</svg>").decode()
+        assert victim_b64 not in out  # foreign bytes never served
+        assert out == html  # handle left in place, not resolved
 
     def test_unknown_asset_id_left_in_place(self, session):
         from src.utils.ds_asset_utils import substitute_ds_asset_placeholders
 
         html = "background: url('{{ds-asset:987654}}')"
-        out = substitute_ds_asset_placeholders(html, session)
+        out = substitute_ds_asset_placeholders(html, session, design_system_id=1)
         assert out == html  # unresolved placeholder preserved, not crashed
+
+    def test_none_scope_resolves_nothing(self, session):
+        """Fail-closed: with no active design system in scope, no handle resolves
+        (a deck with no design system must not embed any brand asset by bare id)."""
+        from src.utils.ds_asset_utils import substitute_ds_asset_placeholders
+
+        asset = _make_asset(session, data=b"<svg>logo</svg>", mime="image/svg+xml")
+        html = f'<img src="{{{{ds-asset:{asset.id}}}}}">'
+        out = substitute_ds_asset_placeholders(html, session, design_system_id=None)
+        assert out == html  # left in place; nothing embedded
 
     def test_unknown_asset_id_is_logged_not_silent(self, session, caplog):
         """Phase-2 reset (section D): with brand images now fetched via the
@@ -87,7 +149,7 @@ class TestSubstituteDsAssetPlaceholders:
 
         html = '<img src="{{ds-asset:987654}}">'
         with caplog.at_level(logging.WARNING, logger="src.utils.ds_asset_utils"):
-            out = substitute_ds_asset_placeholders(html, session)
+            out = substitute_ds_asset_placeholders(html, session, design_system_id=1)
 
         assert out == html  # left in place, never raises
         warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
@@ -97,7 +159,7 @@ class TestSubstituteDsAssetPlaceholders:
         from src.utils.ds_asset_utils import substitute_ds_asset_placeholders
 
         html = "<div>no placeholders here</div>"
-        assert substitute_ds_asset_placeholders(html, session) is html
+        assert substitute_ds_asset_placeholders(html, session, design_system_id=1) is html
 
 
 class TestSubstituteDeckDictDsAssets:
@@ -112,7 +174,9 @@ class TestSubstituteDeckDictDsAssets:
             ],
             "html_content": f'<div style="background:url({{{{ds-asset:{asset.id}}}}})"></div>',
         }
-        out = substitute_deck_dict_ds_assets(deck, session)
+        out = substitute_deck_dict_ds_assets(
+            deck, session, design_system_id=asset.design_system_id
+        )
 
         b64 = base64.b64encode(b"BYTES").decode()
         assert f"data:image/png;base64,{b64}" in out["slides"][0]["html"]
@@ -132,13 +196,15 @@ class TestSubstituteDeckDictDsAssets:
         """
         from src.utils.ds_asset_utils import substitute_deck_dict_ds_assets
 
-        font = _make_asset(
-            session, data=b"synthetic-font-bytes", mime="font/woff2", kind="font",
-            name="Acme DS Fonts",
-        )
-        bg = _make_asset(
-            session, data=b"synthetic-bg-bytes", mime="image/png", kind="background",
-            name="Acme DS Backgrounds",
+        # Font and background must live in the SAME design system (resolution is
+        # scoped to one system), mirroring a real bundle's assets.
+        ds_id, (font, bg) = _make_ds_with_assets(
+            session,
+            [
+                {"data": b"synthetic-font-bytes", "mime": "font/woff2", "kind": "font"},
+                {"data": b"synthetic-bg-bytes", "mime": "image/png", "kind": "background"},
+            ],
+            name="Acme DS Fonts+Backgrounds",
         )
         # Build placeholders via the compiler's own convention to avoid f-string
         # brace collisions with the surrounding CSS braces.
@@ -152,7 +218,7 @@ class TestSubstituteDeckDictDsAssets:
                 ".hero { background-image: url('" + bg_ph + "'); }"
             ),
         }
-        out = substitute_deck_dict_ds_assets(deck, session)
+        out = substitute_deck_dict_ds_assets(deck, session, design_system_id=ds_id)
 
         font_b64 = base64.b64encode(b"synthetic-font-bytes").decode()
         bg_b64 = base64.b64encode(b"synthetic-bg-bytes").decode()
@@ -165,8 +231,10 @@ class TestSubstituteDeckDictDsAssets:
     def test_empty_deck_is_noop(self, session):
         from src.utils.ds_asset_utils import substitute_deck_dict_ds_assets
 
-        assert substitute_deck_dict_ds_assets({}, session) == {}
-        assert substitute_deck_dict_ds_assets({"slides": []}, session) == {"slides": []}
+        assert substitute_deck_dict_ds_assets({}, session, design_system_id=None) == {}
+        assert substitute_deck_dict_ds_assets(
+            {"slides": []}, session, design_system_id=None
+        ) == {"slides": []}
 
 
 class TestChatServiceCallerGate:
@@ -203,9 +271,15 @@ class TestChatServiceCallerGate:
 
         service = ChatService()
         # The method does ``from src.core.database import get_db_session`` at call
-        # time, so patch it at its source module.
-        with patch("src.core.database.get_db_session", _fake_db):
-            out_deck, _ = service._substitute_images_for_response(deck)
+        # time, so patch it at its source module. Scope resolution is stubbed to
+        # the asset's own design system (the session's active system).
+        with patch("src.core.database.get_db_session", _fake_db), patch(
+            "src.api.services.chat_service.resolve_active_design_system_id",
+            return_value=asset.design_system_id,
+        ):
+            out_deck, _ = service._substitute_images_for_response(
+                deck, session_id="sess-1"
+            )
 
         bg_b64 = base64.b64encode(b"synthetic-bg-bytes").decode()
         assert f"data:image/png;base64,{bg_b64}" in out_deck["css"]

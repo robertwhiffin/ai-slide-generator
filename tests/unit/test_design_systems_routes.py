@@ -783,6 +783,76 @@ class TestTemplateSourceEndpoint:
         # The surviving real assets still resolve to inline bytes.
         assert "data:image/png;base64," in data["layout_html"]
 
+    def test_source_does_not_leak_foreign_design_system_asset_bytes(
+        self, client, db_session
+    ):
+        """Confused-deputy guard: the /source route scopes the TEMPLATE row to
+        (template_id, design_system_id), but asset resolution must ALSO be scoped
+        to the owning design system. Otherwise a crafted bundle whose template
+        HTML carries a literal ``{{ds-asset:<foreign_id>}}`` handle (in ``src=``
+        AND in CSS ``url()``) would make the preview serve another design
+        system's private asset bytes.
+
+        Repro: a Victim DS with distinctive asset bytes, and an Attacker DS whose
+        stored template references the Victim's asset id. GET the Attacker's
+        /source: the Victim's bytes must be ABSENT and no raw handle may survive
+        (it degrades to the inert ``data:,`` placeholder), while the Attacker's
+        OWN assets still resolve to inline bytes.
+        """
+        import base64
+
+        from src.database.models.design_system import (
+            DesignSystemAsset,
+            DesignSystemTemplate,
+        )
+
+        # Victim DS — give its logo distinctive bytes so any leak is unambiguous.
+        victim = _import_templated(client, name="Victim DS")
+        victim_logo = (
+            db_session.query(DesignSystemAsset)
+            .filter_by(design_system_id=victim["id"], filename="logo.svg")
+            .one()
+        )
+        victim_secret = b'<svg xmlns="http://www.w3.org/2000/svg"><!--VICTIM-SECRET--></svg>'
+        victim_logo.data = victim_secret
+        db_session.commit()
+        victim_asset_id = victim_logo.id
+        victim_secret_b64 = base64.b64encode(victim_secret).decode()
+
+        # Attacker DS — its stored template references the Victim's asset id in
+        # both an <img src> and a CSS url() (mirrors a crafted bundle's handles).
+        attacker = _import_templated(client, name="Attacker DS")
+        attacker_tmpl = client.get(
+            f"{BASE}/{attacker['id']}/templates"
+        ).json()["templates"][0]
+        stored = (
+            db_session.query(DesignSystemTemplate)
+            .filter_by(id=attacker_tmpl["id"])
+            .one()
+        )
+        steal = (
+            '<img src="{{ds-asset:%d}}" alt="stolen" />'
+            "<div style=\"background-image:url('{{ds-asset:%d}}')\"></div></body>"
+        ) % (victim_asset_id, victim_asset_id)
+        stored.layout_html = stored.layout_html.replace("</body>", steal)
+        db_session.commit()
+
+        resp = client.get(
+            f"{BASE}/{attacker['id']}/templates/{attacker_tmpl['id']}/source"
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+
+        # The Victim's private bytes must NOT appear in the Attacker's preview.
+        assert victim_secret_b64 not in data["layout_html"]
+        # No fetch-shaped handle may ride into the sandboxed frame.
+        assert "{{ds-asset:" not in data["layout_html"]
+        # The foreign handle degraded to the inert placeholder (src= and url()).
+        assert 'src="data:,"' in data["layout_html"]
+        assert "url('data:,')" in data["layout_html"] or 'url("data:,")' in data["layout_html"]
+        # The Attacker's OWN assets still resolve to inline bytes (legit case).
+        assert "data:image/svg+xml;base64," in data["layout_html"]
+
     def test_source_404_for_wrong_ds(self, client):
         body = _import_templated(client)
         tmpl = client.get(f"{BASE}/{body['id']}/templates").json()["templates"][0]

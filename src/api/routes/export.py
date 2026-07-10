@@ -415,13 +415,17 @@ async def export_to_pptx(request: ExportPPTXRequest):
             raise HTTPException(status_code=404, detail="No slides available")
 
         # Substitute {{image:ID}} + {{ds-asset:ID}} placeholders with base64 data URIs
-        # so the PPTX converter can extract and embed the actual images/brand assets
+        # so the PPTX converter can extract and embed the actual images/brand assets.
+        # ds-asset resolution is scoped to the session's active design system so a
+        # foreign handle cannot leak another system's bytes into the export.
+        from src.api.services.chat_service import resolve_active_design_system_id
         from src.utils.ds_asset_utils import substitute_deck_dict_ds_assets
         from src.utils.image_utils import substitute_deck_dict_images
         from src.core.database import get_db_session
+        ds_id = resolve_active_design_system_id(request.session_id)
         with get_db_session() as db:
             substitute_deck_dict_images(slide_deck, db)
-            substitute_deck_dict_ds_assets(slide_deck, db)
+            substitute_deck_dict_ds_assets(slide_deck, db, design_system_id=ds_id)
         
         slide_count = len(slide_deck.get("slides", []))
         log_msg = (
