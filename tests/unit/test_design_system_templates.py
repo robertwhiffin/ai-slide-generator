@@ -518,6 +518,115 @@ class TestMaterializeTemplates:
 # ---------------------------------------------------------------------------
 
 
+SECTION_KEYED_TEMPLATE_HTML = b"""<!doctype html>
+<html><head>
+<style>
+section { font-family: var(--heading-font); }
+section .title { font-size: 42px; }
+section.dark { background: #123456; }
+.section-title { letter-spacing: 0.1em; }
+body { margin: 0; }
+@font-face { font-family: 'Acme Sans'; src: url('../fonts/acme-sans.woff2'); }
+@media (min-width: 100px) {
+  section .kicker { font-size: 14px; }
+}
+</style>
+</head><body>
+<section class="slide cover"><h1 class="title">Sample cover title</h1></section>
+<section class="slide dark"><p class="kicker">Sample kicker</p></section>
+</body></html>
+"""
+
+
+class TestRootTagSelectorNormalization:
+    """dsv2 battery F7: templates key typography on their root TAG
+    (``section { font-family: var(--font-sans) }``) but generated decks emit
+    ``<div class="slide">`` roots — the selector never matches and every
+    pinned deck fell back to UA serif. At materialization the template CSS
+    gains ``.slide``-keyed parallel selectors for every tag the template
+    itself uses as a slide root; already-imported rows self-heal lazily."""
+
+    def _materialized_layout(self, session, template_html=SECTION_KEYED_TEMPLATE_HTML):
+        from src.services.design_system_templates import materialize_templates
+
+        ds = _file_backed_ds(
+            session, manifest=templated_manifest(), template_html=template_html
+        )
+        return materialize_templates(ds)[0].layout_html
+
+    def test_root_tag_selectors_gain_slide_class_parallels(self, session):
+        import re
+
+        layout = self._materialized_layout(session)
+        assert re.search(r"section\s*,\s*\.slide\s*\{", layout)
+        assert "section .title, .slide .title" in layout
+        assert "section.dark, .slide.dark" in layout
+        # rules inside @media blocks are normalized too
+        assert "section .kicker, .slide .kicker" in layout
+
+    def test_unrelated_selectors_and_at_rules_untouched(self, session):
+        layout = self._materialized_layout(session)
+        # class names CONTAINING the tag name are not selector keys
+        assert ".section-title { letter-spacing: 0.1em; }" in layout
+        assert ".slide-title" not in layout
+        # non-root tags and at-rule preludes stay as authored
+        assert "body { margin: 0; }" in layout
+        assert "@font-face { font-family: 'Acme Sans';" in layout
+
+    def test_tags_that_are_not_slide_roots_stay_untouched(self, session):
+        html = (
+            b"<!doctype html><html><head><style>\n"
+            b"section { font-size: 18px; }\n"
+            b"</style></head><body>\n"
+            b'<div class="slide"><section><h1>Nested non-root section</h1></section></div>\n'
+            b"</body></html>\n"
+        )
+        layout = self._materialized_layout(session, template_html=html)
+        assert "section { font-size: 18px; }" in layout
+        assert ".slide {" not in layout.replace("section, .slide {", "")
+
+    def test_existing_rows_self_heal_on_read(self, session):
+        """Rows materialized before this normalization existed carry tag-keyed
+        CSS; reading them through materialize_templates rewrites them in
+        place (persistence is the calling session's business, matching the
+        compiler's lazy recompute discipline)."""
+        from src.services.design_system_templates import materialize_templates
+
+        ds = _file_backed_ds(
+            session,
+            manifest=templated_manifest(),
+            template_html=SECTION_KEYED_TEMPLATE_HTML,
+        )
+        template = materialize_templates(ds)[0]
+        # Regress the stored row to the pre-normalization shape.
+        template.layout_html = template.layout_html.replace(
+            "section, .slide {", "section {"
+        ).replace(
+            "section .title, .slide .title", "section .title"
+        ).replace(
+            "section.dark, .slide.dark", "section.dark"
+        ).replace(
+            "section .kicker, .slide .kicker", "section .kicker"
+        )
+        session.flush()
+
+        healed = materialize_templates(ds)[0]
+        assert "section .title, .slide .title" in healed.layout_html
+
+    def test_normalization_is_idempotent_across_reads(self, session):
+        from src.services.design_system_templates import materialize_templates
+
+        ds = _file_backed_ds(
+            session,
+            manifest=templated_manifest(),
+            template_html=SECTION_KEYED_TEMPLATE_HTML,
+        )
+        first = materialize_templates(ds)[0].layout_html
+        second = materialize_templates(ds)[0].layout_html
+        assert second == first
+        assert "section, .slide, .slide" not in second
+
+
 class TestImportPopulatesTemplates:
     def test_import_creates_template_entities(self, session):
         ds = _import_templated_ds(session)
