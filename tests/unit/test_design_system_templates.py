@@ -627,6 +627,64 @@ class TestRootTagSelectorNormalization:
         assert "section, .slide, .slide" not in second
 
 
+class TestEnsureDeckTokenCss:
+    """dsv2 battery WB-1: a pinned generation referenced 57 var(--…) tokens
+    while defining none — the model dropped the TOKEN STYLESHEET despite the
+    prompt's carry instruction, washing out preview and both PPTX paths.
+    ``ensure_deck_token_css`` is the deterministic backstop: if the deck CSS
+    does not define what the template's token stylesheet defines, the token
+    stylesheet is re-emitted (prepended, so deck CSS still wins the cascade).
+    """
+
+    TOKEN_CSS = (
+        ":root { --acme-navy: #123456; --acme-lava: #654321; }\n"
+        "@font-face { font-family: 'Acme Sans'; src: url('{{ds-asset:9}}'); }"
+    )
+
+    def _ensure(self, deck_css, token_css=TOKEN_CSS):
+        from src.services.design_system_templates import ensure_deck_token_css
+
+        return ensure_deck_token_css(deck_css, token_css)
+
+    def test_missing_definitions_are_prepended(self):
+        deck_css = ".dark { background: var(--acme-navy); }"
+        out = self._ensure(deck_css)
+        assert "--acme-navy: #123456" in out
+        assert "@font-face" in out
+        # Prepended: deck CSS keeps the last word in the cascade.
+        assert out.index("--acme-navy: #123456") < out.index(".dark {")
+
+    def test_compliant_deck_css_is_untouched(self):
+        deck_css = self.TOKEN_CSS + "\n.dark { background: var(--acme-navy); }"
+        assert self._ensure(deck_css) == deck_css
+
+    def test_partially_dropped_tokens_still_re_emitted(self):
+        deck_css = (
+            ":root { --acme-navy: #123456; }\n"
+            "@font-face { font-family: 'Acme Sans'; src: url('x'); }"
+        )  # --acme-lava definition lost
+        out = self._ensure(deck_css)
+        assert "--acme-lava: #654321" in out
+
+    def test_missing_font_faces_alone_trigger_re_emit(self):
+        deck_css = ":root { --acme-navy: #123456; --acme-lava: #654321; }"
+        out = self._ensure(deck_css)
+        assert "@font-face" in out
+
+    def test_no_token_css_is_identity(self):
+        assert self._ensure(".x { color: red; }", token_css=None) == ".x { color: red; }"
+        assert self._ensure(".x { color: red; }", token_css="   ") == ".x { color: red; }"
+
+    def test_empty_deck_css_becomes_the_token_stylesheet(self):
+        out = self._ensure("")
+        assert "--acme-navy: #123456" in out
+
+    def test_idempotent(self):
+        deck_css = ".dark { color: var(--acme-lava); }"
+        once = self._ensure(deck_css)
+        assert self._ensure(once) == once
+
+
 class TestImportPopulatesTemplates:
     def test_import_creates_template_entities(self, session):
         ds = _import_templated_ds(session)

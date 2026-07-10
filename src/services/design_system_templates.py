@@ -327,6 +327,52 @@ def rewrite_template_asset_refs(
 # ---------------------------------------------------------------------------
 
 
+# Custom-property DEFINITIONS (name followed by a colon). var(--x) USES don't
+# match — inside var() the name is followed by ')' or ','.
+_CUSTOM_PROP_DEF_RE = re.compile(r"--[A-Za-z0-9_-]+(?=\s*:)")
+
+# Observability marker for the deterministic re-emit (dsv2 WB-1); also what a
+# reviewer greps for when a deck's CSS suddenly starts with token definitions.
+_TOKEN_CSS_REEMIT_MARKER = (
+    "/* design-system token stylesheet (re-emitted at save: the generated deck "
+    "CSS did not define it) */"
+)
+
+
+def ensure_deck_token_css(deck_css: Optional[str], token_css: Optional[str]) -> str:
+    """Deterministically guarantee the template's token definitions in deck CSS.
+
+    dsv2 battery WB-1: the SELECTED-TEMPLATE prompt block tells the model to
+    carry the TOKEN STYLESHEET into the emitted deck's CSS, and the live
+    battery proved it can refuse — a pinned deck referenced 57 ``var(--…)``
+    tokens while defining none, washing out preview and both PPTX export
+    paths. Prompt prose is not a guarantee; this is.
+
+    If every custom property the token stylesheet defines is also defined in
+    the deck CSS (the model complied — its own copy, possibly re-themed, wins)
+    and ``@font-face`` supply survives where the tokens ship one, the deck CSS
+    is returned untouched. Otherwise the FULL token stylesheet is PREPENDED:
+    deck CSS stays later in the cascade, so any definitions the model did
+    author still win. Idempotent — after one re-emit every token is defined.
+    """
+    deck = deck_css or ""
+    tokens = (token_css or "").strip()
+    if not tokens:
+        return deck
+
+    missing_props = set(_CUSTOM_PROP_DEF_RE.findall(tokens)) - set(
+        _CUSTOM_PROP_DEF_RE.findall(deck)
+    )
+    missing_font_faces = "@font-face" in tokens and "@font-face" not in deck
+    if not missing_props and not missing_font_faces:
+        return deck
+
+    reemitted = f"{_TOKEN_CSS_REEMIT_MARKER}\n{tokens}"
+    if not deck.strip():
+        return f"{reemitted}\n"
+    return f"{reemitted}\n\n{deck}"
+
+
 # <style> blocks inside a template's layout HTML (the ONE inline stylesheet
 # Claude-Design exports ship, but any count is handled).
 _STYLE_BLOCK_RE = re.compile(
