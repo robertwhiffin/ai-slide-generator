@@ -18,7 +18,6 @@ from unittest.mock import MagicMock, patch
 from src.api.services.chat_service import ChatService
 from src.domain.slide import Slide
 from src.domain.slide_deck import SlideDeck
-
 from tests.fixtures.html import load_3_slide_deck
 from tests.unit.test_chat_persistence import MockSessionManager
 
