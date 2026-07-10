@@ -45,6 +45,10 @@ export const SlideSelection: React.FC<SlideSelectionProps> = ({
         console.debug('Chart initialization skipped for missing canvas:', error.message);
       }` : '';
 
+    // Layout-only reset (like SLIDE_PREVIEW_RESET_STYLE): fixes the 1280x720
+    // frame the thumbnail scale math needs, and nothing else. Deliberately no
+    // background/font-family — those lines repainted deck-level brand
+    // backgrounds white and forced Inter on every filmstrip preview.
     const resetStyle = `
       * {
         box-sizing: border-box;
@@ -53,8 +57,6 @@ export const SlideSelection: React.FC<SlideSelectionProps> = ({
         margin: 0;
         width: 1280px;
         height: 720px;
-        background: #ffffff;
-        font-family: 'Inter', 'Segoe UI', system-ui, -apple-system, sans-serif;
       }`;
 
     return (slideHtml: string) =>
