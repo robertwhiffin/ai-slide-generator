@@ -327,6 +327,95 @@ def rewrite_template_asset_refs(
 # ---------------------------------------------------------------------------
 
 
+# <style> blocks inside a template's layout HTML (the ONE inline stylesheet
+# Claude-Design exports ship, but any count is handled).
+_STYLE_BLOCK_RE = re.compile(
+    r"(?P<open><style\b[^>]*>)(?P<css>.*?)(?P<close></style\s*>)",
+    re.IGNORECASE | re.DOTALL,
+)
+
+# Opening tags that carry a class attribute — used to find which TAGS the
+# template uses as slide roots (elements classed ``slide``).
+_CLASSED_TAG_RE = re.compile(
+    r"<(?P<tag>[a-zA-Z][a-zA-Z0-9-]*)\b[^>]*\bclass\s*=\s*([\"'])(?P<classes>[^\"']*)\2",
+    re.IGNORECASE,
+)
+
+# Everything between the previous block boundary and an opening ``{`` — the
+# candidate rule prelude (selector list or at-rule head).
+_CSS_PRELUDE_RE = re.compile(r"(?P<prelude>[^{}]+)\{")
+
+
+def _detect_slide_root_tags(layout_html: str) -> frozenset:
+    """Tags the template itself uses as slide roots (elements classed ``slide``)."""
+    tags = set()
+    for match in _CLASSED_TAG_RE.finditer(layout_html):
+        if "slide" in match.group("classes").split():
+            tags.add(match.group("tag").lower())
+    return frozenset(tags)
+
+
+def _augment_selector_list(selector_list: str, root_tags: frozenset) -> str:
+    """Append a ``.slide``-keyed parallel for each selector keyed on a root tag.
+
+    ``section .title`` gains ``.slide .title``; ``section.dark`` gains
+    ``.slide.dark``. Tag tokens are matched with identifier boundaries so
+    class/id names that merely CONTAIN the tag (``.section-title``) are left
+    alone. Idempotent: a parallel already present is not appended again.
+    """
+    parts = [part.strip() for part in selector_list.split(",") if part.strip()]
+    augmented = list(parts)
+    for part in parts:
+        for tag in sorted(root_tags):
+            tag_token = re.compile(rf"(?<![\w.#-]){re.escape(tag)}(?![\w-])")
+            if not tag_token.search(part):
+                continue
+            parallel = tag_token.sub(".slide", part)
+            if parallel not in augmented:
+                augmented.append(parallel)
+    return ", ".join(augmented)
+
+
+def normalize_root_tag_selectors(layout_html: str) -> str:
+    """Make tag-keyed template CSS also match class-keyed generated roots.
+
+    dsv2 battery F7: templates key typography on their root TAG
+    (``section { font-family: var(--font-sans) }``, roots being
+    ``<section class="slide">``), but generation emits ``<div class="slide">``
+    roots — the selector never matches and pinned decks render in the UA
+    serif. Every rule keyed on a tag the template uses as a slide root gains a
+    ``.slide``-keyed parallel selector, inside every ``<style>`` block
+    (at-rule preludes are skipped; rules nested in ``@media`` are reached
+    because their preludes parse like top-level ones). Plain-CSS selector
+    lists only — functional pseudo-class argument lists (``:is(a, b)``) are
+    beyond this trusted surface's needs. Idempotent, so it doubles as the
+    lazy self-heal pass for rows materialized before it existed.
+    """
+    root_tags = _detect_slide_root_tags(layout_html)
+    if not root_tags:
+        return layout_html
+
+    def _rewrite_css(css_text: str) -> str:
+        def _rewrite_prelude(match: "re.Match[str]") -> str:
+            prelude = match.group("prelude")
+            # Only the text after the previous block close is the selector.
+            head, brace, selector = prelude.rpartition("}")
+            stripped = selector.strip()
+            if not stripped or stripped.startswith("@"):
+                return match.group(0)
+            leading = selector[: len(selector) - len(selector.lstrip())]
+            trailing = selector[len(selector.rstrip()):]
+            rebuilt = _augment_selector_list(stripped, root_tags)
+            return f"{head}{brace}{leading}{rebuilt}{trailing}{{"
+
+        return _CSS_PRELUDE_RE.sub(_rewrite_prelude, css_text)
+
+    def _rewrite_style_block(match: "re.Match[str]") -> str:
+        return f"{match.group('open')}{_rewrite_css(match.group('css'))}{match.group('close')}"
+
+    return _STYLE_BLOCK_RE.sub(_rewrite_style_block, layout_html)
+
+
 def _decode_file_text(ds_file: Any) -> Optional[str]:
     data = getattr(ds_file, "data", None)
     if data is None:
@@ -428,6 +517,22 @@ def materialize_templates(design_system: Any) -> list[Any]:
     """
     existing = list(getattr(design_system, "templates", None) or [])
     if existing:
+        # Lazy self-heal (the compiler's recompute-on-read discipline): rows
+        # materialized before root-tag selector normalization existed carry
+        # tag-keyed CSS that never matches generated <div class="slide">
+        # roots. The pass is idempotent, so healed rows read as no-ops and
+        # only stale ones are rewritten (persisted by the calling session).
+        for template in existing:
+            layout_html = getattr(template, "layout_html", None) or ""
+            normalized = normalize_root_tag_selectors(layout_html)
+            if normalized != layout_html:
+                template.layout_html = normalized
+                logger.info(
+                    "Design system %s: normalized root-tag selectors in stored "
+                    "template '%s'",
+                    getattr(design_system, "id", None),
+                    getattr(template, "name", None),
+                )
         return existing
 
     manifest = getattr(design_system, "manifest_json", None)
@@ -484,10 +589,12 @@ def materialize_templates(design_system: Any) -> list[Any]:
         seen_paths.add(entry_path)
 
         template_dir = posixpath.dirname(entry_path)
-        layout_html = rewrite_template_asset_refs(
-            _decode_file_text(entry_files[entry_path]) or "",
-            base_dir=template_dir,
-            asset_ids_by_path=asset_ids_by_path,
+        layout_html = normalize_root_tag_selectors(
+            rewrite_template_asset_refs(
+                _decode_file_text(entry_files[entry_path]) or "",
+                base_dir=template_dir,
+                asset_ids_by_path=asset_ids_by_path,
+            )
         )
         raw_description = entry.get("description")
         description = (
