@@ -1,6 +1,10 @@
 import { test, expect, Page } from '@playwright/test';
 import { setupMocks } from '../helpers/setup-mocks';
-import { mockSessionWithSlides, TEST_SESSION_ID } from '../helpers/session-helpers';
+import {
+  mockSessionWithSlides,
+  mockSlidesResponse,
+  TEST_SESSION_ID,
+} from '../helpers/session-helpers';
 
 /**
  * Presentation Mode UI Tests
@@ -135,28 +139,99 @@ test.describe('Presentation Mode', () => {
     // padding, the flex-shrinkable .slide-container collapsed below 720px
     // and content was clipped on both edges.
     await setupPresentationMocks(page);
-    await page.goto(`/sessions/${TEST_SESSION_ID}/edit`);
-
-    const presentButton = page.getByRole('button', { name: 'Present' });
-    await presentButton.waitFor({ state: 'visible', timeout: 15000 });
-    await presentButton.click();
-
-    await expect(presentationOverlay(page)).toBeVisible({ timeout: 5000 });
+    const frame = await openPresentation(page);
 
     // Inject body padding into the iframe document, mimicking what a styled
     // deck would do, then assert the slide-container is still 720px tall.
-    const containerHeight = await page.evaluate(() => {
-      const iframes = Array.from(document.querySelectorAll('iframe'))
-        .filter((f) => f.title?.startsWith('Slide '));
-      const presentIframe = iframes[iframes.length - 1] as HTMLIFrameElement | undefined;
-      if (!presentIframe) return null;
-      const doc = presentIframe.contentDocument;
-      if (!doc) return null;
-      doc.body.style.padding = '40px 0';
-      const sc = doc.querySelector('.slide-container') as HTMLElement | null;
-      return sc ? sc.getBoundingClientRect().height : null;
+    // Driven through Playwright's frame handling (origin-agnostic): the
+    // presentation iframe is sandboxed WITHOUT allow-same-origin (AISEC-248),
+    // so parent-page contentDocument access returns null.
+    const container = frame.locator('.slide-container').first();
+    await expect(container).toBeVisible({ timeout: 5000 });
+    const containerHeight = await container.evaluate((sc) => {
+      document.body.style.padding = '40px 0';
+      return sc.getBoundingClientRect().height;
     });
 
     expect(containerHeight).toBe(720);
+  });
+});
+
+// Deck CSS whose brand background lives at DECK level (body) while the slide
+// roots stay transparent — the pattern both Claude-Design template families
+// ship (transparent .slide variants over a body background). Presentation
+// mode's reset must not paint white over it.
+const DARK_DECK_CSS =
+  'body { margin: 0; background: #0e1a1f; } ' +
+  '.slide { width: 1280px; height: 720px; }';
+
+/** Re-mock the slides endpoint with custom deck CSS (registered after
+ *  setupPresentationMocks, so it wins Playwright's LIFO route matching). */
+async function mockDeckCss(page: Page, css: string) {
+  await page.route(
+    `http://127.0.0.1:8000/api/sessions/${TEST_SESSION_ID}/slides`,
+    (route) => {
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          ...mockSlidesResponse,
+          slide_deck: { ...mockSlidesResponse.slide_deck, css },
+        }),
+      });
+    },
+  );
+}
+
+async function openPresentation(page: Page) {
+  await page.goto(`/sessions/${TEST_SESSION_ID}/edit`);
+  const presentButton = page.getByRole('button', { name: 'Present' });
+  await presentButton.waitFor({ state: 'visible', timeout: 15000 });
+  await presentButton.click();
+  await expect(presentationOverlay(page)).toBeVisible({ timeout: 5000 });
+  return page.frameLocator('div[style*="z-index: 9999"] iframe');
+}
+
+test.describe('Presentation Mode deck background fidelity', () => {
+  test('deck-level body background survives into presentation mode', async ({ page }) => {
+    // dsv2 battery F1: the reset styles appended after deck CSS forced
+    // html/body AND .slide-container to #ffffff, so any deck whose brand
+    // background lives in `body { background: … }` presented WHITE while
+    // tiles/editor showed the brand color.
+    await setupPresentationMocks(page);
+    await mockDeckCss(page, DARK_DECK_CSS);
+    const frame = await openPresentation(page);
+
+    // .first(): the outermost .slide-container is the presentation wrapper —
+    // mock slide HTML may nest its own element of the same class.
+    await expect(frame.locator('.slide-container').first()).toBeVisible({ timeout: 5000 });
+    const backgrounds = await frame.locator('body').evaluate((body) => {
+      const container = body.querySelector('.slide-container') as HTMLElement;
+      return {
+        body: getComputedStyle(body).backgroundColor,
+        container: getComputedStyle(container).backgroundColor,
+      };
+    });
+
+    // Deck CSS keeps painting the canvas…
+    expect(backgrounds.body).toBe('rgb(14, 26, 31)');
+    // …and the slide container no longer paints white over it.
+    expect(backgrounds.container).toBe('rgba(0, 0, 0, 0)');
+  });
+
+  test('decks that paint no background still get a white canvas', async ({ page }) => {
+    // Zero-regression guard for no-DS decks: with no deck-authored
+    // background at all, the presentation canvas must stay white (not the
+    // black letterbox bleeding through a fully transparent document).
+    await setupPresentationMocks(page); // stock mock deck: css ''
+    const frame = await openPresentation(page);
+
+    // .first(): the outermost .slide-container is the presentation wrapper —
+    // mock slide HTML may nest its own element of the same class.
+    await expect(frame.locator('.slide-container').first()).toBeVisible({ timeout: 5000 });
+    const htmlBackground = await frame
+      .locator('html')
+      .evaluate((el) => getComputedStyle(el).backgroundColor);
+    expect(htmlBackground).toBe('rgb(255, 255, 255)');
   });
 });

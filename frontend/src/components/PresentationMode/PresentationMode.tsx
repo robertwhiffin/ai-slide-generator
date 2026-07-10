@@ -46,6 +46,14 @@ export const PresentationMode: React.FC<PresentationModeProps> = ({
       width: 100%;
       height: 100%;
       overflow: hidden;
+    }
+    /* Default canvas for decks that paint no background of their own. Zero
+       specificity (:where) so any deck-authored html/body background wins the
+       cascade even though this block is appended after deck CSS — both
+       Claude-Design template families put the brand background on body and
+       layer transparent slide roots over it, and overriding it here presented
+       those decks as washed-out white. */
+    :where(html) {
       background: #ffffff;
     }
     /* Chart canvas scaling */
@@ -69,7 +77,9 @@ export const PresentationMode: React.FC<PresentationModeProps> = ({
       flex-shrink: 0;
       flex-grow: 0;
       position: relative;
-      background: #ffffff;
+      /* Transparent on purpose: the deck's own body/html background (or the
+         :where(html) white default above) is the canvas. Painting white here
+         killed deck-level backgrounds behind transparent slide roots. */
       overflow: hidden;
       margin: 0;
     }
