@@ -663,6 +663,40 @@ def materialize_templates(design_system: Any) -> list[Any]:
 
 
 # ---------------------------------------------------------------------------
+# Serve-side resolution for the live preview cards
+# ---------------------------------------------------------------------------
+
+
+def resolve_template_source_for_preview(text: Optional[str], db: Any) -> Optional[str]:
+    """Resolve a stored template source's ``{{ds-asset:ID}}`` handles for the
+    live preview card, at the response boundary.
+
+    The preview renders inside ``sandbox=""`` plus a no-egress CSP (dsv2
+    battery F8): the frame can fetch NOTHING, so every handle must arrive as
+    an inline ``data:`` URI — ``<img src>``, CSS ``url()``, and ``@font-face``
+    sources alike, which is exactly the substitution the deck resolver
+    (``src.utils.ds_asset_utils``) already performs at the other API response
+    boundaries. A handle the resolver cannot satisfy (deleted asset,
+    fabricated id — left in place by the resolver's contract) is then
+    neutralized to the inert :data:`_UNRESOLVED_PLACEHOLDER` rather than
+    riding into the frame as fetch-shaped text the CSP would refuse. The
+    STORED row is never touched: generation keeps consuming handles.
+    """
+    if not text or "{{ds-asset:" not in text:
+        return text
+    # Deferred import: ds_asset_utils imports design_system_service, which
+    # defers its import of this module — deferring here keeps the module
+    # graph acyclic-by-construction.
+    from src.utils.ds_asset_utils import (
+        DS_ASSET_PLACEHOLDER_PATTERN,
+        substitute_ds_asset_placeholders,
+    )
+
+    resolved = substitute_ds_asset_placeholders(text, db)
+    return DS_ASSET_PLACEHOLDER_PATTERN.sub(_UNRESOLVED_PLACEHOLDER, resolved)
+
+
+# ---------------------------------------------------------------------------
 # Generation-side lookup + the SELECTED-TEMPLATE prompt block
 # ---------------------------------------------------------------------------
 

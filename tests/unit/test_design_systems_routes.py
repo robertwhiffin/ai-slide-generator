@@ -672,6 +672,29 @@ class TestServeAssetThumbnail:
 # ---------------------------------------------------------------------------
 
 
+def _import_templated_with_fontface(client):
+    """Templated bundle whose token stylesheet ships an @font-face pointing at
+    the bundled font file — the real Claude-Design shape. The import rewrite
+    turns the src url into a ``{{ds-asset:ID}}`` handle in the stored
+    ``token_css``."""
+    from tests.unit.conftest_design_system import templated_bundle_files, templated_manifest
+
+    resp = _import(
+        client,
+        bundle_kwargs={
+            "manifest": templated_manifest(),
+            "files": templated_bundle_files(),
+            "css": (
+                "@font-face { font-family: 'Acme Sans'; "
+                'src: url("fonts/acme-sans.woff2") format("woff2"); }\n'
+                ":root { --brand-core-primary: #123456; }"
+            ),
+        },
+    )
+    assert resp.status_code == 201, resp.text
+    return resp.json()
+
+
 class TestTemplateSourceEndpoint:
     """Real Claude Design bundles ship no screenshots; the frontend fetches
     the stored layout as JSON and renders it in a fully-sandboxed iframe.
@@ -689,6 +712,76 @@ class TestTemplateSourceEndpoint:
         assert data["name"] == "Acme Corporate"
         assert "<" in data["layout_html"]  # the stored (rewritten) entry HTML
         assert data["token_css"]  # retained CSS token sources
+
+    def test_source_resolves_asset_placeholders_to_data_uris(self, client, db_session):
+        """The live preview renders inside ``sandbox=""`` plus a no-egress CSP:
+        the frame can fetch NOTHING, so every ``{{ds-asset:ID}}`` handle must
+        arrive as an inline ``data:`` URI (dsv2 battery F8 — raw handles broke
+        every image in every card). Resolution is serve-time only: the STORED
+        row keeps its handles for the generation pipeline."""
+        import base64
+
+        from src.database.models.design_system import DesignSystemTemplate
+        from tests.unit.conftest_design_system import SVG_LOGO
+
+        body = _import_templated(client)
+        tmpl = client.get(f"{BASE}/{body['id']}/templates").json()["templates"][0]
+        resp = client.get(f"{BASE}/{body['id']}/templates/{tmpl['id']}/source")
+        assert resp.status_code == 200
+        data = resp.json()
+
+        # <img src="{{ds-asset:ID}}"> handles -> byte-exact data: URIs.
+        logo_b64 = base64.b64encode(SVG_LOGO).decode()
+        assert f"data:image/svg+xml;base64,{logo_b64}" in data["layout_html"]
+        # CSS url() handle (the hero background in the template <style>) too.
+        assert 'url("data:image/png;base64,' in data["layout_html"]
+        # Nothing placeholder-shaped survives into the sandboxed document.
+        assert "{{ds-asset:" not in data["layout_html"]
+
+        # Serve-time only: the stored layout keeps its handles for generation.
+        stored = db_session.query(DesignSystemTemplate).filter_by(id=tmpl["id"]).one()
+        assert "{{ds-asset:" in stored.layout_html
+
+    def test_source_inlines_font_face_sources_in_token_css(self, client):
+        """Template-relative @font-face refs are import-rewritten to
+        ``{{ds-asset:ID}}`` handles in the stored ``token_css``; the preview CSP
+        allows ``font-src data:`` ONLY, so the served source must inline the
+        stored font bytes the same way as images."""
+        import base64
+
+        body = _import_templated_with_fontface(client)
+        tmpl = client.get(f"{BASE}/{body['id']}/templates").json()["templates"][0]
+        resp = client.get(f"{BASE}/{body['id']}/templates/{tmpl['id']}/source")
+        assert resp.status_code == 200
+        data = resp.json()
+
+        font_b64 = base64.b64encode(b"OTTO synthetic-font-bytes").decode()
+        assert f"data:font/woff2;base64,{font_b64}" in data["token_css"]
+        assert "{{ds-asset:" not in data["token_css"]
+
+    def test_source_neutralizes_unresolvable_asset_ids(self, client, db_session):
+        """Graceful degradation: a handle whose asset row no longer exists must
+        not crash the card or ride into the frame as fetch-shaped text — it
+        degrades to the inert ``data:,`` placeholder (the import rewrite's own
+        convention for unresolvable refs), while real handles still resolve."""
+        from src.database.models.design_system import DesignSystemTemplate
+
+        body = _import_templated(client)
+        tmpl = client.get(f"{BASE}/{body['id']}/templates").json()["templates"][0]
+
+        stored = db_session.query(DesignSystemTemplate).filter_by(id=tmpl["id"]).one()
+        stored.layout_html = stored.layout_html.replace(
+            "</body>", '<img src="{{ds-asset:987654}}" alt="ghost" /></body>'
+        )
+        db_session.commit()
+
+        resp = client.get(f"{BASE}/{body['id']}/templates/{tmpl['id']}/source")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "{{ds-asset:" not in data["layout_html"]
+        assert 'src="data:,"' in data["layout_html"]
+        # The surviving real assets still resolve to inline bytes.
+        assert "data:image/png;base64," in data["layout_html"]
 
     def test_source_404_for_wrong_ds(self, client):
         body = _import_templated(client)
