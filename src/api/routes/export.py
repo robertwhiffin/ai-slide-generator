@@ -138,6 +138,13 @@ def build_slide_html(slide: dict, slide_deck: dict) -> str:
       font-family: 'Inter', 'Segoe UI', system-ui, -apple-system, sans-serif;
     }}
     {deck_css}
+    /* After deck CSS: zero any outer margin the deck put on the slide root —
+       inside this fixed 1280x720 overflow:hidden document a root margin
+       shifts content past the clip and truncates the export's bottom edge
+       (same neutralization as presentation mode / preview surfaces). */
+    body > * {{
+      margin: 0 !important;
+    }}
   </style>
 </head>
 <body>

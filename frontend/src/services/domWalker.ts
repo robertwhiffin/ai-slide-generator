@@ -78,7 +78,8 @@ const DESIGN_W = 1280;
 const DESIGN_H = 720;
 const SLIDE_SETTLE_MS = 400;
 
-function buildCompositeHtml(deck: SlideDeck): string {
+// Exported so tests can pin the composite document's layout guarantees.
+export function buildCompositeHtml(deck: SlideDeck): string {
   const slides = deck.slides || [];
   const sections = slides.map((s, i) => {
     const hidden = i === 0 ? '' : ' style="display:none"';
@@ -121,6 +122,9 @@ section.slide-container > .slide, section.slide-container .slide {
   border-radius: 0 !important;
   box-shadow: none !important;
 }
+/* Same guarantee for roots the model did NOT class ".slide" — whatever the
+   slide's outermost element is, it must sit at the frame origin. */
+section.slide-container > * { margin: 0 !important; }
 ${deck.css || ''}
 </style>
 </head>

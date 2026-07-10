@@ -5,6 +5,10 @@ import {
   mockSlidesResponse,
   TEST_SESSION_ID,
 } from '../helpers/session-helpers';
+import { buildSlideHTML as buildPdfSlideHTML } from '../../src/services/pdf_client';
+import { buildSlideHTML as buildPptxSlideHTML } from '../../src/services/pptx_client';
+import { buildSlideHtml as buildScreenshotSlideHtml } from '../../src/services/screenshotCapture';
+import { buildCompositeHtml } from '../../src/services/domWalker';
 
 /**
  * Slide preview-surface fidelity tests (dsv2 battery F2/F3).
@@ -30,7 +34,15 @@ const BRAND_DECK_CSS =
   "body { margin: 0; background: #0e1a1f; font-family: 'Acme Sans', sans-serif; } " +
   '.slide-container { width: 1280px; height: 720px; }';
 
-async function setupSurfaceMocks(page: Page, css: string) {
+// A deck whose slide root carries a model-authored print-preview margin —
+// the exact dsv2 F3 pattern (`.slide { margin: 32px auto }`): every clipping
+// surface must pin the root back to the frame origin or the bottom 32px of
+// content is silently truncated.
+const MARGIN_DECK_CSS =
+  '.slide { margin: 32px auto; width: 1280px; height: 720px; background: #204060; }';
+const MARGIN_SLIDE_HTML = '<div class="slide"><h1 style="margin:0">Margin probe</h1></div>';
+
+async function setupSurfaceMocks(page: Page, css: string, slideHtml?: string) {
   await setupMocks(page);
   await mockSessionWithSlides(page, TEST_SESSION_ID);
 
@@ -50,17 +62,24 @@ async function setupSurfaceMocks(page: Page, css: string) {
   });
 
   // Registered last → wins Playwright's LIFO route matching over the
-  // stock slides mock, letting each test choose its deck CSS.
+  // stock slides mock, letting each test choose its deck CSS (and,
+  // optionally, its slide markup).
+  const slideDeck: Record<string, unknown> = {
+    ...mockSlidesResponse.slide_deck,
+    css,
+  };
+  if (slideHtml) {
+    slideDeck.slides = (
+      mockSlidesResponse.slide_deck.slides as Array<Record<string, unknown>>
+    ).map((s) => ({ ...s, html: slideHtml }));
+  }
   await page.route(
     `http://127.0.0.1:8000/api/sessions/${TEST_SESSION_ID}/slides`,
     (route) => {
       route.fulfill({
         status: 200,
         contentType: 'application/json',
-        body: JSON.stringify({
-          ...mockSlidesResponse,
-          slide_deck: { ...mockSlidesResponse.slide_deck, css },
-        }),
+        body: JSON.stringify({ ...mockSlidesResponse, slide_deck: slideDeck }),
       });
     },
   );
@@ -89,5 +108,82 @@ test.describe('Filmstrip (SlideSelection) preview fidelity', () => {
     expect(style.font).toContain('Acme Sans');
     // …while the fixed 1280x720 preview frame sizing is kept.
     expect(style.width).toBe('1280px');
+  });
+});
+
+test.describe('Slide-root outer margin neutralization (dsv2 F3)', () => {
+  test('tile and filmstrip previews pin a margined slide root to the frame origin', async ({ page }) => {
+    await setupSurfaceMocks(page, MARGIN_DECK_CSS, MARGIN_SLIDE_HTML);
+    await page.goto(`/sessions/${TEST_SESSION_ID}/edit`);
+
+    const tileRoot = page
+      .frameLocator('iframe[title="Slide 1"]')
+      .locator('.slide')
+      .first();
+    await expect(tileRoot).toBeVisible({ timeout: 15000 });
+    expect(
+      await tileRoot.evaluate((el) => el.getBoundingClientRect().top),
+      'SlideTile (shared SLIDE_PREVIEW_RESET_STYLE surface)',
+    ).toBe(0);
+
+    const stripRoot = page
+      .frameLocator('iframe[title="Slide 1 preview"]')
+      .locator('.slide')
+      .first();
+    await expect(stripRoot).toBeVisible({ timeout: 15000 });
+    expect(
+      await stripRoot.evaluate((el) => el.getBoundingClientRect().top),
+      'filmstrip (SlideSelection reset surface)',
+    ).toBe(0);
+  });
+
+  test('single-slide export documents pin a margined slide root to the frame origin', async ({ page }) => {
+    // WYSIWYG invariant: the pdf / huashu-screenshot / thumbnail documents all
+    // force-wrap the slide at 1280x720 with overflow:hidden, so a root margin
+    // that survives into them clips the bottom edge of the EXPORT too.
+    const deck = {
+      title: 'T',
+      css: MARGIN_DECK_CSS,
+      scripts: '',
+      external_scripts: [],
+      slides: [{ slide_id: 's1', html: MARGIN_SLIDE_HTML, scripts: '' }],
+    } as never;
+
+    const documents: Array<[string, string]> = [
+      ['pdf export', buildPdfSlideHTML(deck, 0)],
+      ['pptx capture', buildPptxSlideHTML(deck, 0)],
+      ['screenshot capture', buildScreenshotSlideHtml(deck, 0)],
+    ];
+    for (const [name, doc] of documents) {
+      await page.setContent(doc, { waitUntil: 'load' });
+      const top = await page.evaluate(
+        () => document.querySelector('.slide')!.getBoundingClientRect().top,
+      );
+      expect(top, `${name} document`).toBe(0);
+    }
+  });
+
+  test('records-export composite pins margined roots regardless of class name', async ({ page }) => {
+    // The composite already neutralized `.slide`-classed roots; the guarantee
+    // must hold for ANY root element the model authored.
+    const deck = {
+      title: 'T',
+      css: 'article.frame { margin: 40px auto; width: 1280px; height: 720px; }',
+      scripts: '',
+      external_scripts: [],
+      slides: [
+        {
+          slide_id: 's1',
+          html: '<article class="frame"><h1 style="margin:0">Any-root probe</h1></article>',
+          scripts: '',
+        },
+      ],
+    } as never;
+
+    await page.setContent(buildCompositeHtml(deck), { waitUntil: 'load' });
+    const top = await page.evaluate(
+      () => document.querySelector('article.frame')!.getBoundingClientRect().top,
+    );
+    expect(top).toBe(0);
   });
 });

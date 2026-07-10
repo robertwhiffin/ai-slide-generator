@@ -39,6 +39,10 @@ ${externalScripts}
   html { width:${SLIDE_WIDTH}px; height:${SLIDE_HEIGHT}px; overflow:hidden; }
   body { width:${SLIDE_WIDTH}px; height:${SLIDE_HEIGHT}px; overflow:hidden; position:relative; }
   ${css}
+  /* After deck CSS: zero any outer margin the deck put on the slide root —
+     a root margin inside this fixed 1280x720 overflow:hidden document shifts
+     content past the clip and truncates the capture's bottom edge. */
+  body > * { margin: 0 !important; }
 </style>
 </head>
 <body>

@@ -48,7 +48,9 @@ export const SlideSelection: React.FC<SlideSelectionProps> = ({
     // Layout-only reset (like SLIDE_PREVIEW_RESET_STYLE): fixes the 1280x720
     // frame the thumbnail scale math needs, and nothing else. Deliberately no
     // background/font-family — those lines repainted deck-level brand
-    // backgrounds white and forced Inter on every filmstrip preview.
+    // backgrounds white and forced Inter on every filmstrip preview. The
+    // body > * rule zeroes outer margins on the slide root, matching every
+    // other clipping surface (see SLIDE_PREVIEW_RESET_STYLE).
     const resetStyle = `
       * {
         box-sizing: border-box;
@@ -57,6 +59,9 @@ export const SlideSelection: React.FC<SlideSelectionProps> = ({
         margin: 0;
         width: 1280px;
         height: 720px;
+      }
+      body > * {
+        margin: 0 !important;
       }`;
 
     return (slideHtml: string) =>

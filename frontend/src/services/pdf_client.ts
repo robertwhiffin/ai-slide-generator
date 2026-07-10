@@ -14,8 +14,9 @@ const SLIDE_HEIGHT = 720;
 /**
  * Build HTML for a single slide.
  * Matches the structure used in SlideTile for consistent rendering.
+ * Exported so tests can pin the document's layout guarantees.
  */
-function buildSlideHTML(slideDeck: SlideDeck, slideIndex: number): string {
+export function buildSlideHTML(slideDeck: SlideDeck, slideIndex: number): string {
   const slide = slideDeck.slides[slideIndex];
   const externalScripts = slideDeck.external_scripts
     .map((src) => `    <script src="${src}"></script>`)
@@ -54,6 +55,13 @@ ${externalScripts}
       position: relative;
     }
     ${slideDeck.css}
+    /* After deck CSS: zero any outer margin the deck put on the slide root —
+       inside this fixed 1280x720 overflow:hidden document a root margin
+       shifts content past the clip and truncates the export's bottom edge
+       (same neutralization as presentation mode / preview surfaces). */
+    body > * {
+      margin: 0 !important;
+    }
     /* CRITICAL: Explicitly preserve subtitle spacing - override any global resets */
     /* This must come AFTER slideDeck.css to override any * { margin: 0; } resets */
     .subtitle, p.subtitle, h2.subtitle, div.subtitle, [class*="subtitle"] {
