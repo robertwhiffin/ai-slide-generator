@@ -23,7 +23,7 @@ import { useSelection } from '../../contexts/SelectionContext';
 import { exportSlideDeckToPDF } from '../../services/pdf_client';
 import { useSession } from '../../contexts/SessionContext';
 import { useToast } from '../../contexts/ToastContext';
-import { buildSlideDocument } from '../../services/slideDocument';
+import { buildStandaloneDeckDocument } from '../../services/slideDocument';
 
 interface SlideContext {
   indices: number[];
@@ -359,113 +359,7 @@ function SlidePanelComponent(props: SlidePanelProps, ref: React.Ref<SlidePanelHa
   const handleSaveAsHTML = () => {
     if (!slideDeck) return;
 
-    const slidesHtml = slideDeck.slides
-      .map((slide, index) => {
-        const slideScripts = slide.scripts || '';
-        return `
-    <div class="slide-wrapper" data-slide-index="${index}">
-      <div class="slide-container">
-        ${slide.html}
-      </div>
-      ${slideScripts ? `<script>
-        (function() {
-          ${slideScripts}
-        })();
-      </script>` : ''}
-    </div>`;
-      })
-      .join('\n');
-
-    // Multi-slide wrapper/reset layout for the standalone export document.
-    const wrapperStyle = `
-    * {
-      margin: 0;
-      padding: 0;
-      box-sizing: border-box;
-    }
-    html, body {
-      width: 100%;
-      height: 100%;
-      overflow: auto;
-      background: #f9fafb;
-    }
-    body {
-      padding: 40px 20px;
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      gap: 40px;
-    }
-    .slide-wrapper {
-      width: 100%;
-      max-width: 1280px;
-      margin: 0 auto;
-      display: flex;
-      justify-content: center;
-      align-items: flex-start;
-      page-break-after: always;
-    }
-    .slide-container {
-      width: 1280px;
-      height: 720px;
-      max-width: 100%;
-      max-height: calc(100vh - 80px);
-      position: relative;
-      background: #ffffff;
-      overflow: auto;
-      box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
-      border-radius: 8px;
-    }
-    .slide-container > * {
-      width: 100%;
-      min-height: 100%;
-    }
-    canvas {
-      max-width: 100%;
-      height: auto;
-    }`;
-
-    const bootstrapScripts = `
-    function waitForChartJs(callback, maxAttempts = 50) {
-      let attempts = 0;
-      const check = () => {
-        attempts++;
-        if (typeof Chart !== 'undefined') {
-          callback();
-        } else if (attempts < maxAttempts) {
-          setTimeout(check, 100);
-        } else {
-          console.error('Chart.js failed to load');
-        }
-      };
-      check();
-    }
-
-    function initializeCharts() {
-      try {
-        ${slideDeck.scripts || ''}
-      } catch (err) {
-        console.error('Chart initialization error:', err);
-      }
-    }
-
-    if (document.readyState === 'loading') {
-      document.addEventListener('DOMContentLoaded', () => {
-        waitForChartJs(initializeCharts);
-      });
-    } else {
-      waitForChartJs(initializeCharts);
-    }`;
-
-    const html = buildSlideDocument(
-      `<title>${slideDeck.title || 'Presentation'}</title>\n${slidesHtml}`,
-      {
-        css: slideDeck.css,
-        externalScripts: slideDeck.external_scripts,
-        extraHeadStyle: wrapperStyle,
-        scripts: bootstrapScripts,
-      }
-    );
+    const html = buildStandaloneDeckDocument(slideDeck);
 
     const blob = new Blob([html], { type: 'text/html' });
     const url = URL.createObjectURL(blob);

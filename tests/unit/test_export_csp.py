@@ -8,7 +8,7 @@ import re
 from pathlib import Path
 
 from src.api.routes.export import build_slide_html
-from src.utils.html_safety import SLIDE_CSP, SLIDE_CSP_META
+from src.utils.html_safety import SLIDE_CSP, SLIDE_CSP_META, SLIDE_ROOT_RESET_STYLE
 
 _FRONTEND_SLIDE_DOC = (
     Path(__file__).resolve().parents[2]
@@ -49,6 +49,43 @@ def test_backend_csp_matches_frontend_csp():
     # Two render surfaces, one policy. If the frontend constant changes, this
     # fails loudly so the backend copy is updated in lockstep.
     assert SLIDE_CSP == _frontend_slide_csp()
+
+
+def _frontend_slide_root_reset() -> str:
+    """Extract the SLIDE_ROOT_RESET_STYLE template literal from the TS source."""
+    src = _FRONTEND_SLIDE_DOC.read_text()
+    m = re.search(
+        r"export const SLIDE_ROOT_RESET_STYLE = `(.*?)`;", src, re.DOTALL
+    )
+    assert m, "could not find SLIDE_ROOT_RESET_STYLE in slideDocument.ts"
+    return m.group(1)
+
+
+def test_backend_root_reset_matches_frontend_root_reset():
+    # dsv2 cross-review F2: ONE root-slide reset for every surface. If the
+    # frontend constant changes, this fails loudly so the backend mirror is
+    # updated in lockstep.
+    assert SLIDE_ROOT_RESET_STYLE == _frontend_slide_root_reset()
+
+
+def test_build_slide_html_flattens_the_slide_root_after_deck_css():
+    # dsv2 cross-review F2: the old `body > *` reset lost the specificity
+    # fight against authored `.slide { margin: 40px auto !important }`, so the
+    # huashu render kept the print-preview card offset (and its rounding and
+    # shadow) that other surfaces stripped. The shared reset must sit AFTER
+    # deck CSS and carry all three flattening declarations.
+    slide = {"slide_id": "s1", "html": '<div class="slide">hi</div>'}
+    deck = {
+        "title": "T",
+        "css": ".slide { margin: 40px auto !important; border-radius: 18px !important; }",
+        "scripts": "",
+        "external_scripts": [],
+    }
+    html = build_slide_html(slide, deck)
+    assert SLIDE_ROOT_RESET_STYLE in html
+    assert html.index(SLIDE_ROOT_RESET_STYLE) > html.index(deck["css"])
+    assert "border-radius: 0 !important" in html
+    assert "box-shadow: none !important" in html
 
 
 def test_csp_meta_precedes_slide_content():

@@ -9,6 +9,7 @@ import { buildSlideHTML as buildPdfSlideHTML } from '../../src/services/pdf_clie
 import { buildSlideHTML as buildPptxSlideHTML } from '../../src/services/pptx_client';
 import { buildSlideHtml as buildScreenshotSlideHtml } from '../../src/services/screenshotCapture';
 import { buildCompositeHtml } from '../../src/services/domWalker';
+import { buildStandaloneDeckDocument } from '../../src/services/slideDocument';
 
 /**
  * Slide preview-surface fidelity tests (dsv2 battery F2/F3).
@@ -185,5 +186,152 @@ test.describe('Slide-root outer margin neutralization (dsv2 F3)', () => {
       () => document.querySelector('article.frame')!.getBoundingClientRect().top,
     );
     expect(top).toBe(0);
+  });
+});
+
+// ─── Uniform root-slide reset (dsv2 cross-review F2) ────────────────────────
+// A model-authored print-preview card on the slide ROOT — outer margin,
+// rounded corners and a drop shadow, all !important — must be flattened
+// IDENTICALLY on every surface: a PPTX canvas cannot render root rounding or
+// shadows, so preview/export parity is only achievable by stripping them
+// everywhere. Inner elements (cards, buttons, images) keep their own radius
+// and shadow. Before the shared reset, the records walker was the only
+// surface that stripped radius/shadow, and the `body > *` margin reset used
+// by tile/filmstrip/pdf/pptx/screenshot lost the specificity fight against
+// authored `.slide { margin: 40px auto !important }`.
+
+const HOSTILE_ROOT_DECK_CSS =
+  '.slide { margin: 40px auto !important; border-radius: 18px !important; ' +
+  'box-shadow: 0 12px 40px rgba(16, 32, 48, 0.5) !important; ' +
+  'width: 1280px; height: 720px; background: #204060; } ' +
+  '.card { width: 320px; height: 120px; background: #f0f4f8; ' +
+  'border-radius: 12px; box-shadow: 0 4px 10px rgba(16, 32, 48, 0.35); }';
+const HOSTILE_ROOT_SLIDE_HTML =
+  '<div class="slide"><h1 style="margin:0">Reset probe</h1>' +
+  '<div class="card">Inner card</div></div>';
+
+/** Serializable computed-style probe for a slide root element. */
+const ROOT_PROBE = (el: Element) => {
+  const cs = getComputedStyle(el);
+  return {
+    marginTop: cs.marginTop,
+    borderRadius: cs.borderRadius,
+    boxShadow: cs.boxShadow,
+    top: el.getBoundingClientRect().top,
+  };
+};
+
+/** Serializable computed-style probe for the inner card. */
+const CARD_PROBE = (el: Element) => {
+  const cs = getComputedStyle(el);
+  return { borderRadius: cs.borderRadius, boxShadow: cs.boxShadow };
+};
+
+test.describe('Uniform root-slide reset (dsv2 cross-review F2)', () => {
+  test('tile and filmstrip previews flatten a hostile !important root card', async ({ page }) => {
+    await setupSurfaceMocks(page, HOSTILE_ROOT_DECK_CSS, HOSTILE_ROOT_SLIDE_HTML);
+    await page.goto(`/sessions/${TEST_SESSION_ID}/edit`);
+
+    for (const [name, title] of [
+      ['SlideTile', 'Slide 1'],
+      ['filmstrip', 'Slide 1 preview'],
+    ] as const) {
+      const frame = page.frameLocator(`iframe[title="${title}"]`);
+      const root = frame.locator('.slide').first();
+      await expect(root).toBeVisible({ timeout: 15000 });
+
+      const rootStyle = await root.evaluate(ROOT_PROBE);
+      expect.soft(rootStyle.marginTop, `${name}: root outer margin`).toBe('0px');
+      expect.soft(rootStyle.top, `${name}: root pinned to frame origin`).toBe(0);
+      expect.soft(rootStyle.borderRadius, `${name}: root corner radius`).toBe('0px');
+      expect.soft(rootStyle.boxShadow, `${name}: root drop shadow`).toBe('none');
+
+      const card = await frame.locator('.card').first().evaluate(CARD_PROBE);
+      expect.soft(card.borderRadius, `${name}: inner card keeps radius`).toBe('12px');
+      expect
+        .soft(card.boxShadow, `${name}: inner card keeps shadow`)
+        .toContain('rgba(16, 32, 48, 0.35)');
+    }
+  });
+
+  test('presentation mode flattens the hostile root like the records walker', async ({ page }) => {
+    await setupSurfaceMocks(page, HOSTILE_ROOT_DECK_CSS, HOSTILE_ROOT_SLIDE_HTML);
+    await page.goto(`/sessions/${TEST_SESSION_ID}/edit`);
+
+    const presentButton = page.getByRole('button', { name: 'Present' });
+    await presentButton.waitFor({ state: 'visible', timeout: 15000 });
+    await presentButton.click();
+    await expect(
+      page.locator('div[style*="position: fixed"][style*="z-index: 9999"]'),
+    ).toBeVisible({ timeout: 5000 });
+
+    const frame = page.frameLocator('div[style*="z-index: 9999"] iframe');
+    const root = frame.locator('.slide-container > .slide').first();
+    await expect(root).toBeVisible({ timeout: 5000 });
+
+    const rootStyle = await root.evaluate(ROOT_PROBE);
+    expect.soft(rootStyle.marginTop, 'presentation: root outer margin').toBe('0px');
+    expect.soft(rootStyle.borderRadius, 'presentation: root corner radius').toBe('0px');
+    expect.soft(rootStyle.boxShadow, 'presentation: root drop shadow').toBe('none');
+
+    const card = await frame.locator('.card').first().evaluate(CARD_PROBE);
+    expect.soft(card.borderRadius, 'presentation: inner card keeps radius').toBe('12px');
+    expect
+      .soft(card.boxShadow, 'presentation: inner card keeps shadow')
+      .toContain('rgba(16, 32, 48, 0.35)');
+  });
+
+  test('export documents flatten the hostile root and keep inner card styling', async ({ page }) => {
+    const deck = {
+      title: 'T',
+      css: HOSTILE_ROOT_DECK_CSS,
+      scripts: '',
+      external_scripts: [],
+      slides: [{ slide_id: 's1', html: HOSTILE_ROOT_SLIDE_HTML, scripts: '' }],
+    } as never;
+
+    const documents: Array<{
+      name: string;
+      doc: string;
+      rootSelector: string;
+      pinnedToOrigin: boolean;
+    }> = [
+      { name: 'pdf export', doc: buildPdfSlideHTML(deck, 0), rootSelector: '.slide', pinnedToOrigin: true },
+      { name: 'pptx capture', doc: buildPptxSlideHTML(deck, 0), rootSelector: '.slide', pinnedToOrigin: true },
+      { name: 'screenshot capture', doc: buildScreenshotSlideHtml(deck, 0), rootSelector: '.slide', pinnedToOrigin: true },
+      { name: 'records composite', doc: buildCompositeHtml(deck), rootSelector: 'section.slide-container > .slide', pinnedToOrigin: true },
+      // The standalone document lays slides out as a scrollable page (body
+      // padding + card chrome), so the root is flattened INSIDE its
+      // .slide-container rather than pinned to the viewport origin.
+      { name: 'standalone html export', doc: buildStandaloneDeckDocument(deck), rootSelector: '.slide-container > .slide', pinnedToOrigin: false },
+    ];
+    for (const { name, doc, rootSelector, pinnedToOrigin } of documents) {
+      await page.setContent(doc, { waitUntil: 'load' });
+      const probe = await page.evaluate((sel) => {
+        const root = document.querySelector(sel) as HTMLElement;
+        const card = document.querySelector('.card') as HTMLElement;
+        const rootCs = getComputedStyle(root);
+        const cardCs = getComputedStyle(card);
+        return {
+          marginTop: rootCs.marginTop,
+          borderRadius: rootCs.borderRadius,
+          boxShadow: rootCs.boxShadow,
+          top: root.getBoundingClientRect().top,
+          cardRadius: cardCs.borderRadius,
+          cardShadow: cardCs.boxShadow,
+        };
+      }, rootSelector);
+
+      expect.soft(probe.marginTop, `${name}: root outer margin`).toBe('0px');
+      if (pinnedToOrigin) {
+        expect.soft(probe.top, `${name}: root pinned to frame origin`).toBe(0);
+      }
+      expect.soft(probe.borderRadius, `${name}: root corner radius`).toBe('0px');
+      expect.soft(probe.boxShadow, `${name}: root drop shadow`).toBe('none');
+      expect.soft(probe.cardRadius, `${name}: inner card keeps radius`).toBe('12px');
+      expect
+        .soft(probe.cardShadow, `${name}: inner card keeps shadow`)
+        .toContain('rgba(16, 32, 48, 0.35)');
+    }
   });
 });
