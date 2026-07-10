@@ -701,11 +701,20 @@ def get_design_system_template_source(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Template {template_id} not found for design system {ds_id}",
         )
+    # Serve-time resolution (dsv2 F8): the preview frame is sandboxed behind a
+    # no-egress CSP, so {{ds-asset:ID}} handles must leave here as inline
+    # data: URIs. The stored row keeps its handles for generation.
+    from src.services.design_system_templates import resolve_template_source_for_preview
+
     return TemplateSourceOut(
         id=int(template.id),
         name=str(template.name),
-        layout_html=str(template.layout_html),
-        token_css=str(template.token_css) if template.token_css is not None else None,
+        layout_html=resolve_template_source_for_preview(str(template.layout_html), db) or "",
+        token_css=(
+            resolve_template_source_for_preview(str(template.token_css), db)
+            if template.token_css is not None
+            else None
+        ),
     )
 
 
