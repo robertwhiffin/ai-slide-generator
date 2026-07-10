@@ -331,6 +331,33 @@ def rewrite_template_asset_refs(
 # match — inside var() the name is followed by ')' or ','.
 _CUSTOM_PROP_DEF_RE = re.compile(r"--[A-Za-z0-9_-]+(?=\s*:)")
 
+# ``@font-face`` blocks (they cannot nest, so a brace-free body is exact) and
+# the ``font-family`` descriptor(s) inside one — used to check PER-FAMILY
+# survival, not just "any @font-face at all" (dsv2 cross-review F3).
+_FONT_FACE_BLOCK_RE = re.compile(r"@font-face\s*\{(?P<body>[^{}]*)\}", re.IGNORECASE)
+_FONT_FAMILY_DESC_RE = re.compile(r"font-family\s*:\s*(?P<value>[^;}]+)", re.IGNORECASE)
+
+# ``{{ds-asset:ID}}``-style handles (unresolved at rest in token_css ``src:
+# url(…)``) carry braces that would truncate the block-body match above.
+_BRACED_HANDLE_RE = re.compile(r"\{\{[^{}]*\}\}")
+
+
+def _font_face_families(css: str) -> set[str]:
+    """Normalized family names declared by ``@font-face`` blocks in *css*.
+
+    CSS family matching is case-insensitive and quoting-agnostic, so names
+    are unquoted and casefolded (``'Acme Sans'`` == ``"ACME SANS"``).
+    """
+    families: set[str] = set()
+    css = _BRACED_HANDLE_RE.sub("ds-asset-handle", css)
+    for block in _FONT_FACE_BLOCK_RE.finditer(css):
+        for descriptor in _FONT_FAMILY_DESC_RE.finditer(block.group("body")):
+            name = descriptor.group("value").strip()
+            if len(name) >= 2 and name[0] == name[-1] and name[0] in "\"'":
+                name = name[1:-1]
+            families.add(name.strip().casefold())
+    return families
+
 # Observability marker for the deterministic re-emit (dsv2 WB-1); also what a
 # reviewer greps for when a deck's CSS suddenly starts with token definitions.
 _TOKEN_CSS_REEMIT_MARKER = (
@@ -350,10 +377,11 @@ def ensure_deck_token_css(deck_css: Optional[str], token_css: Optional[str]) -> 
 
     If every custom property the token stylesheet defines is also defined in
     the deck CSS (the model complied — its own copy, possibly re-themed, wins)
-    and ``@font-face`` supply survives where the tokens ship one, the deck CSS
-    is returned untouched. Otherwise the FULL token stylesheet is PREPENDED:
-    deck CSS stays later in the cascade, so any definitions the model did
-    author still win. Idempotent — after one re-emit every token is defined.
+    and every ``@font-face`` FAMILY the tokens ship is still declared by a
+    deck ``@font-face``, the deck CSS is returned untouched. Otherwise the
+    FULL token stylesheet is PREPENDED: deck CSS stays later in the cascade,
+    so any definitions the model did author still win. Idempotent — after one
+    re-emit every token and family is defined.
     """
     deck = deck_css or ""
     tokens = (token_css or "").strip()
@@ -363,7 +391,16 @@ def ensure_deck_token_css(deck_css: Optional[str], token_css: Optional[str]) -> 
     missing_props = set(_CUSTOM_PROP_DEF_RE.findall(tokens)) - set(
         _CUSTOM_PROP_DEF_RE.findall(deck)
     )
-    missing_font_faces = "@font-face" in tokens and "@font-face" not in deck
+    token_families = _font_face_families(tokens)
+    if token_families:
+        # dsv2 cross-review F3: per-family survival — a deck that kept SOME
+        # @font-face (e.g. a foreign 'Other' face) while dropping the brand
+        # families must still get the token stylesheet back.
+        missing_font_faces = not token_families <= _font_face_families(deck)
+    else:
+        # Token @font-face with no parseable family (degenerate): keep the
+        # old any-block check rather than never re-emitting.
+        missing_font_faces = "@font-face" in tokens and "@font-face" not in deck
     if not missing_props and not missing_font_faces:
         return deck
 
