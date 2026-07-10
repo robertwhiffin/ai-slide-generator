@@ -401,24 +401,77 @@ def _detect_slide_root_tags(layout_html: str) -> frozenset:
     return frozenset(tags)
 
 
+def _quoted_or_bracketed_positions(selector: str) -> list[bool]:
+    """Per-character mask of the positions inside single-/double-quoted
+    strings or ``[…]`` attribute blocks (delimiters included). A root-tag
+    token at a masked position is attribute/string CONTENT
+    (``[data-kind="section"]``), never an element-selector key."""
+    masked = [False] * len(selector)
+    quote: Optional[str] = None
+    bracket_depth = 0
+    for index, char in enumerate(selector):
+        if quote is not None:
+            masked[index] = True
+            if char == quote:
+                quote = None
+            continue
+        if char in "\"'":
+            masked[index] = True
+            quote = char
+            continue
+        if char == "[":
+            bracket_depth += 1
+        elif char == "]" and bracket_depth:
+            masked[index] = True
+            bracket_depth -= 1
+            continue
+        if bracket_depth:
+            masked[index] = True
+    return masked
+
+
+def _sub_tag_at_element_positions(
+    tag_token: "re.Pattern[str]", replacement: str, selector: str
+) -> Optional[str]:
+    """Substitute every *tag_token* match that sits at an element-selector
+    position (outside quotes and ``[…]``); ``None`` when no such match
+    exists. Matches never straddle a mask boundary — the token is a single
+    identifier, so checking its start position suffices."""
+    masked = _quoted_or_bracketed_positions(selector)
+    pieces: list[str] = []
+    cursor = 0
+    for match in tag_token.finditer(selector):
+        if masked[match.start()]:
+            continue
+        pieces.append(selector[cursor:match.start()])
+        pieces.append(replacement)
+        cursor = match.end()
+    if not pieces:
+        return None
+    pieces.append(selector[cursor:])
+    return "".join(pieces)
+
+
 def _augment_selector_list(selector_list: str, root_tags: frozenset) -> str:
     """Append a ``.slide``-keyed parallel for each selector keyed on a root tag.
 
     ``section .title`` gains ``.slide .title``; ``section.dark`` gains
     ``.slide.dark``. Tag tokens are matched with identifier boundaries so
     class/id names that merely CONTAIN the tag (``.section-title``) are left
-    alone. Idempotent: a parallel already present is not appended again.
+    alone, and only at element-selector positions — a token inside a quoted
+    string or a ``[…]`` attribute block is attribute content, not a selector
+    key, and is never rewritten (dsv2 cross-review F1). Idempotent: a
+    parallel already present is not appended again.
     """
     parts = [part.strip() for part in selector_list.split(",") if part.strip()]
     augmented = list(parts)
     for part in parts:
         for tag in sorted(root_tags):
             tag_token = re.compile(rf"(?<![\w.#-]){re.escape(tag)}(?![\w-])")
-            if not tag_token.search(part):
+            parallel = _sub_tag_at_element_positions(tag_token, ".slide", part)
+            if parallel is None or parallel in augmented:
                 continue
-            parallel = tag_token.sub(".slide", part)
-            if parallel not in augmented:
-                augmented.append(parallel)
+            augmented.append(parallel)
     return ", ".join(augmented)
 
 
