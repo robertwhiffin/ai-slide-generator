@@ -20,6 +20,35 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/verification", tags=["verification"])
 
 
+# Asset-lookup tools return filename/handle LISTINGS for layout purposes, not
+# source data — judging numeric claims against them produced blanket
+# unknown/"Review suggested" badges on design-system decks (dsv2 battery F4).
+# Exclusion is strictly name-based: results persisted without tool_name
+# metadata keep flowing to the judge.
+_ASSET_SEARCH_TOOL_NAMES = frozenset({"search_images", "search_brand_assets"})
+
+
+def _build_verification_corpus(messages: list) -> str:
+    """Join data-bearing tool results into the judge's source corpus.
+
+    Collects tool results from any DATA tool (Genie, Vector Index, Agent
+    Bricks, Model Endpoint, MCP, …) and skips asset-search results. Returns
+    ``""`` when nothing data-bearing remains, which routes verification to the
+    honest "No source data available" path.
+    """
+    source_data_parts = []
+    for msg in messages:
+        if msg.get("role") != "tool" or msg.get("message_type") != "tool_result":
+            continue
+        metadata = msg.get("metadata") or {}
+        if metadata.get("tool_name") in _ASSET_SEARCH_TOOL_NAMES:
+            continue
+        content = msg.get("content", "")
+        if content and content.strip():
+            source_data_parts.append(content)
+    return "\n---\n".join(source_data_parts)
+
+
 def _source_data_insufficient_for_verification(genie_data: str) -> bool:
     """True when tool/source text has no substantive facts to verify against (skip judge)."""
     s = (genie_data or "").strip()
@@ -139,17 +168,9 @@ async def verify_slide(slide_index: int, request: VerifySlideRequest):
             session_manager.get_messages, request.session_id
         )
 
-        # Collect all tool results (data from any tool: Genie, Vector Index,
-        # Agent Bricks, Model Endpoint, MCP, etc.)
-        source_data_parts = []
-        for msg in messages:
-            if msg.get("role") == "tool" and msg.get("message_type") == "tool_result":
-                content = msg.get("content", "")
-                if content and content.strip():
-                    source_data_parts.append(content)
-
-        # Combine all source data from tools
-        genie_data = "\n---\n".join(source_data_parts) if source_data_parts else ""
+        # Combine data-bearing tool results (asset-search listings excluded —
+        # see _build_verification_corpus).
+        genie_data = _build_verification_corpus(messages)
 
         if not genie_data:
             # No tool data found - verification cannot be performed
