@@ -721,6 +721,44 @@ class TestEnsureDeckTokenCss:
         out = self._ensure(deck_css)
         assert "@font-face" in out
 
+    def test_foreign_font_face_does_not_mask_missing_brand_families(self):
+        # dsv2 cross-review F3: the survival check was "ANY @font-face in the
+        # deck" — a deck that kept only a foreign 'Other' face while dropping
+        # the brand families slipped through, and the export lost brand type.
+        deck_css = (
+            ":root { --acme-navy: #123456; --acme-lava: #654321; }\n"
+            "@font-face { font-family: 'Other'; src: url('other.woff2'); }"
+        )
+        out = self._ensure(deck_css)
+        assert "font-family: 'Acme Sans'" in out
+
+    def test_any_single_dropped_family_triggers_re_emit(self):
+        token_css = (
+            "@font-face { font-family: 'Acme Sans'; src: url('a'); }\n"
+            "@font-face { font-family: 'Acme Mono'; src: url('b'); }"
+        )
+        deck_css = "@font-face { font-family: 'Acme Sans'; src: url('a'); }"
+        out = self._ensure(deck_css, token_css=token_css)
+        assert "'Acme Mono'" in out
+
+    def test_family_survival_is_quote_and_case_insensitive(self):
+        # CSS font-family matching is case-insensitive and quoting-agnostic;
+        # a deck that re-declares the face as "ACME SANS" complied and must
+        # not be re-emitted over.
+        deck_css = (
+            ":root { --acme-navy: #123456; --acme-lava: #654321; }\n"
+            '@font-face { font-family: "ACME SANS"; src: url(\'x\'); }'
+        )
+        assert self._ensure(deck_css) == deck_css
+
+    def test_font_face_re_emit_is_idempotent(self):
+        deck_css = (
+            ":root { --acme-navy: #123456; --acme-lava: #654321; }\n"
+            "@font-face { font-family: 'Other'; src: url('other.woff2'); }"
+        )
+        once = self._ensure(deck_css)
+        assert self._ensure(once) == once
+
     def test_no_token_css_is_identity(self):
         assert self._ensure(".x { color: red; }", token_css=None) == ".x { color: red; }"
         assert self._ensure(".x { color: red; }", token_css="   ") == ".x { color: red; }"
