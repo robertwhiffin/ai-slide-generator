@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "databricks-tellr-app"
-version = "0.3.10"
+version = "0.3.11"
 description = "Tellr application package for Databricks Apps"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -14,7 +14,6 @@ dependencies = [
     "python-multipart==0.0.20",
     "pydantic==2.12.4",
     "pydantic-settings==2.12.0",
-    "databricks-sdk>=0.96.0,<1.0",
     "databricks-langchain==0.9.0",
     "langchain==1.0.5",
     "langchain-core==1.0.4",
@@ -22,7 +21,6 @@ dependencies = [
     "langchain-text-splitters==1.0.0",
     "litellm==1.80.11",
     "mcp==1.27.0",
-    "mlflow[databricks]>=3.11.0,<4",
     "opentelemetry-api==1.38.0",
     "opentelemetry-sdk==1.38.0",
     "beautifulsoup4==4.14.2",
@@ -45,5 +43,33 @@ dependencies = [
     "google-auth-httplib2>=0.2.0",
     "cryptography>=42.0.0",
     "sse-starlette>=3.0.0",
+    # --- Resolver-speedup pins: the backtracking-driver cluster ---
+    # Databricks Apps installs this wheel in a platform-managed BUILD phase with a
+    # ~10-minute budget. Left ranged, the databricks-langchain ->
+    # mlflow[databricks] -> databricks-agents graph (with unbounded
+    # databricks-ai-bridge / databricks-vectorsearch) sends pip's resolver into
+    # heavy backtracking as new versions land on PyPI, which blows the budget and
+    # fails the deploy ("App process did not start within 10 minutes"). These
+    # exact pins are a known-good resolution (proven on db-tellr-dev-pinfix,
+    # July 2026) that short-circuits the search. All are available on the
+    # Databricks build proxy; leaf transitives are intentionally left ranged so
+    # the Apps base image can satisfy them (hard-pinning the full closure fights
+    # the base image and pins versions the proxy mirror doesn't carry). Refresh
+    # via a devloop deploy if these constraints change. Formerly injected at
+    # deploy time as _RESOLVER_SPEEDUP_PINS; now carried in the wheel so a bare
+    # `pip install databricks-tellr-app` is safe.
+    "databricks-sdk==0.120.0",
+    "mlflow[databricks]==3.14.0",
+    "mlflow-skinny==3.14.0",
+    "databricks-agents==1.11.0",
+    "databricks-ai-bridge==0.21.0",
+    "databricks-ai-search==0.76",
+    "databricks-connect==16.1.7",
+    "databricks-vectorsearch==0.75",
+    "langchain-classic==1.0.0",
+    "langgraph==1.0.10",
+    "langgraph-prebuilt==1.0.10",
+    "langsmith==0.9.5",
+    "unitycatalog-ai==0.3.2",
+    "unitycatalog-langchain==0.3.0",
 ]
-
