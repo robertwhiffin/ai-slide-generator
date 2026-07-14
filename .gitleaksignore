@@ -1,0 +1,18 @@
+# False-positive gitleaks findings: placeholder/dummy Postgres connection
+# strings (test:test CI creds, user:pass doc examples) in commits already on
+# origin/main. Format: <commit>:<file>:<rule>:<line>
+0fea2c413eab1c517942b7baea1e7bbe1a7d5046:.github/workflows/test.yml:postgres-connection-string:502
+29b17a48d835e414955cde8fda0809fd082e50fe:src/config/init_default_profile.py:postgres-connection-string:176
+3bc599c928aa1fbe25d4df77c503f185d6490abd:.github/workflows/test.yml:postgres-connection-string:140
+3bc599c928aa1fbe25d4df77c503f185d6490abd:.github/workflows/test.yml:postgres-connection-string:185
+3bc599c928aa1fbe25d4df77c503f185d6490abd:.github/workflows/test.yml:postgres-connection-string:230
+3bc599c928aa1fbe25d4df77c503f185d6490abd:.github/workflows/test.yml:postgres-connection-string:275
+3bc599c928aa1fbe25d4df77c503f185d6490abd:.github/workflows/test.yml:postgres-connection-string:365
+5abd8fba8bb5fc2e5481deb1301daf43ee7a8971:docs/CONFIG_MANAGEMENT_UI_PLAN.md:postgres-connection-string:1692
+6793c7e095b11e25a20cbd31b57c2010b9c2b414:.github/workflows/test.yml:postgres-connection-string:89
+6793c7e095b11e25a20cbd31b57c2010b9c2b414:docs/plans/2026-01-30-testing-strategy-design.md:postgres-connection-string:331
+9629926d8e2b7bd126fd085038b82b890a871f22:.github/workflows/test.yml:postgres-connection-string:439
+9629926d8e2b7bd126fd085038b82b890a871f22:.github/workflows/test.yml:postgres-connection-string:502
+a1b483d7b622ca9d1701c25912ea932ed940489a:src/core/lakebase.py:postgres-connection-string:226
+d554841952c5df538032b74293ee6e4153f8cc25:.env.example:postgres-connection-string:25
+d554841952c5df538032b74293ee6e4153f8cc25:quickstart/PREREQUISITES.md:postgres-connection-string:141
