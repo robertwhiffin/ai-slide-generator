@@ -35,7 +35,9 @@ from src.services.permission_service import get_permission_service
 
 logger = logging.getLogger(__name__)
 
-MCP_PROMPT_LIMIT = 8192  # mirror ChatRequest.message max_length
+# Mirrors CHAT_MESSAGE_MAX_LENGTH (ChatRequest.message max_length). Disabled
+# (None) for usability; set an int to re-enable the length guard.
+MCP_PROMPT_LIMIT: Optional[int] = None
 
 
 class _PermissionServiceFacade:
@@ -332,8 +334,8 @@ async def _create_deck_impl(
     """Implementation, separated from the decorated tool for testability."""
     if not prompt or not prompt.strip():
         raise MCPToolError("prompt must be a non-empty string")
-    if len(prompt) > MCP_PROMPT_LIMIT:
-        raise MCPToolError("prompt is too long (max 8192 characters)")
+    if MCP_PROMPT_LIMIT is not None and len(prompt) > MCP_PROMPT_LIMIT:
+        raise MCPToolError(f"prompt is too long (max {MCP_PROMPT_LIMIT} characters)")
     if num_slides is not None and not (1 <= num_slides <= 50):
         raise MCPToolError("num_slides must be between 1 and 50")
     # Same inbound prompt-injection guard as the browser chat endpoints (AISEC-248).
@@ -748,8 +750,10 @@ async def _edit_deck_impl(
     """
     if not instruction or not instruction.strip():
         raise MCPToolError("instruction must be a non-empty string")
-    if len(instruction) > MCP_PROMPT_LIMIT:
-        raise MCPToolError("instruction is too long (max 8192 characters)")
+    if MCP_PROMPT_LIMIT is not None and len(instruction) > MCP_PROMPT_LIMIT:
+        raise MCPToolError(
+            f"instruction is too long (max {MCP_PROMPT_LIMIT} characters)"
+        )
     # Same inbound prompt-injection guard as the browser chat endpoints and
     # create_deck (AISEC-248).
     from src.utils.pi_filter import scan_for_injection
