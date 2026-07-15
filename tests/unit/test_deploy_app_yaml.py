@@ -24,3 +24,20 @@ def test_generated_app_yaml_has_no_custom_index_url(tmp_path: Path):
     assert "--index-url" not in content
     assert "test.pypi.org" not in content
     assert "pip install --upgrade --no-cache-dir -r requirements.txt" in content
+
+
+def test_write_app_yaml_is_keyless():
+    """CRITICAL-3: app.yaml must not carry the Fernet key or accept one."""
+    import inspect as _inspect
+    import tempfile
+    from pathlib import Path
+
+    from databricks_tellr import deploy
+
+    sig = _inspect.signature(deploy._write_app_yaml)
+    assert "encryption_key" not in sig.parameters
+
+    with tempfile.TemporaryDirectory() as td:
+        deploy._write_app_yaml(Path(td), "lb", "app_data")
+        content = (Path(td) / "app.yaml").read_text()
+    assert "GOOGLE_OAUTH_ENCRYPTION_KEY" not in content

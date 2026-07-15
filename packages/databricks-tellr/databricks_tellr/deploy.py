@@ -197,7 +197,6 @@ def create(
     client: WorkspaceClient | None = None,
     profile: str | None = None,
     config_yaml_path: str | None = None,
-    encryption_key: str | None = None,
     mlflow_tracing: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Deploy Tellr to Databricks Apps.
@@ -227,7 +226,6 @@ def create(
         client: External WorkspaceClient (optional)
         profile: Databricks CLI profile name (optional)
         config_yaml_path: Path to deployment config YAML (mutually exclusive with other args)
-        encryption_key: Fernet key for Google OAuth encryption. Auto-generated if not provided.
         mlflow_tracing: Optional overrides for UC tracing env vars in generated ``app.yaml``.
             Keys: ``MLFLOW_TRACING_SQL_WAREHOUSE_ID``, ``TELLR_MLFLOW_UC_CATALOG``,
             ``TELLR_MLFLOW_UC_SCHEMA``, ``TELLR_MLFLOW_UC_TABLE_PREFIX``. With
@@ -260,7 +258,6 @@ def create(
         profile=profile,
         config_yaml_path=config_yaml_path,
         seed_databricks_defaults=False,
-        encryption_key=encryption_key,
         mlflow_tracing=mlflow_tracing,
     )
 
@@ -336,7 +333,6 @@ def _create_databricks(
     profile: str | None = None,
     config_yaml_path: str | None = None,
     seed_databricks_defaults: bool = True,
-    encryption_key: str | None = None,
     mlflow_tracing: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Deploy Tellr to Databricks Apps with configurable seeding.
@@ -356,7 +352,6 @@ def _create_databricks(
         profile: Databricks CLI profile name (optional)
         config_yaml_path: Path to deployment config YAML (mutually exclusive with other args)
         seed_databricks_defaults: If True, seed Databricks-specific content on startup
-        encryption_key: Fernet key for Google OAuth encryption. Auto-generated if not provided.
         mlflow_tracing: Optional overrides for UC tracing placeholders in ``app.yaml``.
 
     Returns:
@@ -420,11 +415,10 @@ def _create_databricks(
                 lakebase_name,
                 schema_name,
                 seed_databricks_defaults=seed_databricks_defaults,
-                encryption_key=encryption_key,
                 lakebase_result=lakebase_result,
                 mlflow_tracing=mlflow_subs,
             )
-            print("   Generated app.yaml (with encryption key)")
+            print("   Generated app.yaml")
 
             print(f"Uploading to: {app_file_workspace_path}")
             _upload_files(ws, staging, app_file_workspace_path)
@@ -581,7 +575,6 @@ def _update_databricks(
                 lakebase_name,
                 schema_name,
                 seed_databricks_defaults=seed_databricks_defaults,
-                encryption_key=encryption_key,
                 lakebase_result=lakebase_result,
                 mlflow_tracing=mlflow_subs,
             )
@@ -1367,19 +1360,19 @@ def _write_app_yaml(
     lakebase_name: str,
     schema_name: str,
     seed_databricks_defaults: bool = False,
-    encryption_key: str | None = None,
     lakebase_result: dict[str, Any] | None = None,
     mlflow_tracing: dict[str, str] | None = None,
 ) -> None:
     """Generate app.yaml with environment variables.
+
+    The Fernet encryption key is deliberately NOT written here (SDR-4437
+    CRITICAL-3): the app reads/seeds it from the encryption_keys table.
 
     Args:
         staging_dir: Directory to write the app.yaml file
         lakebase_name: Lakebase instance name
         schema_name: Schema name
         seed_databricks_defaults: If True, include Databricks-specific content seeding
-        encryption_key: Fernet encryption key for Google OAuth credentials/tokens.
-            Auto-generated if not provided.
         lakebase_result: Result dict from _get_or_create_lakebase() with type info.
         mlflow_tracing: Resolved template keys for UC tracing (four entries). If
             omitted, values are taken only from ``TELLR_DEPLOY_MLFLOW_*`` env vars.
@@ -1389,12 +1382,6 @@ def _write_app_yaml(
         init_call = "init_database(seed_databricks_defaults=True)"
     else:
         init_call = "init_database()"
-
-    if not encryption_key:
-        from cryptography.fernet import Fernet
-
-        encryption_key = Fernet.generate_key().decode()
-        logger.info("Auto-generated GOOGLE_OAUTH_ENCRYPTION_KEY for deployment")
 
     # Determine lakebase type info for env vars
     lakebase_type = (lakebase_result or {}).get("type", "provisioned")
@@ -1410,7 +1397,6 @@ def _write_app_yaml(
         LAKEBASE_INSTANCE=lakebase_name,
         LAKEBASE_SCHEMA=schema_name,
         INIT_DATABASE_CALL=init_call,
-        GOOGLE_OAUTH_ENCRYPTION_KEY=encryption_key,
         LAKEBASE_TYPE=lakebase_type,
         LAKEBASE_PG_HOST=lakebase_pg_host,
         LAKEBASE_PROJECT_ID=lakebase_project_id,

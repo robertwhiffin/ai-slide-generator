@@ -97,7 +97,6 @@ class TestReadExistingEncryptionKeyStrict:
 
 
 class TestUpdateDatabricksWiring:
-    @pytest.mark.xfail(reason="keyless _write_app_yaml lands in the next task", strict=True)
     @patch("databricks_tellr.deploy._get_workspace_client")
     @patch("databricks_tellr.deploy._get_or_create_lakebase")
     @patch("databricks_tellr.deploy._check_breaking_migrations")
