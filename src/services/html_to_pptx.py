@@ -16,6 +16,7 @@ from databricks.sdk import WorkspaceClient
 from pptx import Presentation
 from pptx.util import Inches
 
+from src.services.converter_jail.codeprep import sanitize_code
 from src.services.pptx_prompts_defaults import (
     DEFAULT_SYSTEM_PROMPT,
     DEFAULT_USER_PROMPT_TEMPLATE,
@@ -982,52 +983,6 @@ class HtmlToPptxConverterV3:
                 return f"<html><head>{style_tag}</head><body>{body_slice}...</body></html>"
             return html_str[:max_length]
     
-    @staticmethod
-    def _sanitize_code(code: str) -> str:
-        """Fix common LLM-generated code issues before execution.
-
-        Handles smart quotes, em-dashes, and apostrophes inside string literals
-        that cause SyntaxError (e.g. ``Anthony's`` inside a single-quoted string).
-        """
-        # Smart/curly quotes → straight quotes
-        for smart, straight in {
-            "\u2018": "'", "\u2019": "'",   # single curly quotes
-            "\u201c": '"', "\u201d": '"',   # double curly quotes
-        }.items():
-            code = code.replace(smart, straight)
-
-        # Em-dash / en-dash → regular hyphen (prevents SyntaxError when
-        # they appear outside strings due to broken quoting)
-        code = code.replace("\u2014", "-")   # em-dash
-        code = code.replace("\u2013", "-")   # en-dash
-
-        # Fix apostrophes inside single-quoted strings (e.g. 'Anthony's workflow')
-        # by converting affected lines to use double-quoted strings.
-        import ast as _ast
-        for _ in range(20):
-            try:
-                _ast.parse(code)
-                break
-            except SyntaxError as exc:
-                if exc.lineno is None:
-                    break
-                lines = code.splitlines()
-                idx = exc.lineno - 1
-                if idx < 0 or idx >= len(lines):
-                    break
-                original = lines[idx]
-                # Re-quote single-quoted strings that contain apostrophes
-                fixed = re.sub(
-                    r"'([^']*\w'\w[^']*)'",
-                    lambda m: '"' + m.group(1) + '"',
-                    original,
-                )
-                if fixed == original:
-                    break
-                lines[idx] = fixed
-                code = "\n".join(lines)
-        return code
-
     def _execute_single_slide_converter(
         self,
         code: str,
@@ -1046,7 +1001,7 @@ class HtmlToPptxConverterV3:
         Raises:
             PPTXConversionError: If code execution fails
         """
-        code = self._sanitize_code(code)
+        code = sanitize_code(code)
 
         required_imports = """from pptx import Presentation
 from pptx.util import Inches, Pt
@@ -1093,7 +1048,7 @@ import os
             html_str: HTML content
             assets_dir: Directory containing assets
         """
-        code = self._sanitize_code(code)
+        code = sanitize_code(code)
 
         required_imports = """from pptx.util import Inches, Pt
 from pptx.enum.text import PP_ALIGN
