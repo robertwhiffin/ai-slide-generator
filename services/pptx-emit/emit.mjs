@@ -59,6 +59,7 @@ export async function emitPptx(slides, outPath, fontMode = 'universal', title = 
       if (r.kind === 'rect') emitRect(s, r);
       else if (r.kind === 'image') emitImage(s, r);
       else if (r.kind === 'text') emitText(s, r, fontMode);
+      else if (r.kind === 'background') emitBackground(s, r);
     }
   }
 
@@ -80,6 +81,17 @@ function emitRect(s, r) {
     s.addShape('roundRect', opts);
   } else {
     s.addShape('rect', opts);
+  }
+}
+
+// Full-bleed slide background: a real pptxgenjs slide background (image or color),
+// not a slide-sized shape/image on the canvas. A white/absent background is never
+// emitted as a record, so the slide keeps pptxgenjs's default white.
+function emitBackground(s, r) {
+  if (typeof r.src === 'string' && r.src) {
+    s.background = r.src.startsWith('data:') ? { data: r.src } : { path: r.src };
+  } else if (r.fill) {
+    s.background = { color: r.fill };
   }
 }
 
