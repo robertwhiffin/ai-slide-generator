@@ -510,7 +510,10 @@ class TestUpdateDatabricks:
     @patch("databricks_tellr.deploy._write_app_yaml")
     @patch("databricks_tellr.deploy._write_requirements")
     @patch("databricks_tellr.deploy._get_or_create_lakebase")
-    @patch("databricks_tellr.deploy._read_existing_encryption_key", return_value="key")
+    # return_value=None: a truthy key would trigger the CRITICAL-3 migration
+    # (own coverage in test_deploy_encryption_key_migration.py); these tests
+    # pin lakebase-state passing only.
+    @patch("databricks_tellr.deploy._read_existing_encryption_key", return_value=None)
     def test_update_fetches_lakebase_state(
         self, _mock_key, mock_get_lakebase, _mock_req, _mock_yaml, _mock_upload
     ):
@@ -530,7 +533,10 @@ class TestUpdateDatabricks:
     @patch("databricks_tellr.deploy._write_app_yaml")
     @patch("databricks_tellr.deploy._write_requirements")
     @patch("databricks_tellr.deploy._get_or_create_lakebase")
-    @patch("databricks_tellr.deploy._read_existing_encryption_key", return_value="key")
+    # return_value=None: a truthy key would trigger the CRITICAL-3 migration
+    # (own coverage in test_deploy_encryption_key_migration.py); these tests
+    # pin lakebase-state passing only.
+    @patch("databricks_tellr.deploy._read_existing_encryption_key", return_value=None)
     def test_update_passes_lakebase_result_to_write_app_yaml(
         self, _mock_key, mock_get_lakebase, _mock_req, mock_yaml, _mock_upload
     ):
@@ -552,7 +558,10 @@ class TestUpdateDatabricks:
     @patch("databricks_tellr.deploy._write_requirements")
     @patch("databricks_tellr.deploy._reset_schema")
     @patch("databricks_tellr.deploy._get_or_create_lakebase")
-    @patch("databricks_tellr.deploy._read_existing_encryption_key", return_value="key")
+    # return_value=None: a truthy key would trigger the CRITICAL-3 migration
+    # (own coverage in test_deploy_encryption_key_migration.py); these tests
+    # pin lakebase-state passing only.
+    @patch("databricks_tellr.deploy._read_existing_encryption_key", return_value=None)
     def test_update_passes_lakebase_result_to_reset_schema(
         self, _mock_key, mock_get_lakebase, mock_reset, _mock_req, _mock_yaml, _mock_upload
     ):
@@ -574,7 +583,10 @@ class TestUpdateDatabricks:
     @patch("databricks_tellr.deploy._write_app_yaml")
     @patch("databricks_tellr.deploy._write_requirements")
     @patch("databricks_tellr.deploy._get_or_create_lakebase")
-    @patch("databricks_tellr.deploy._read_existing_encryption_key", return_value="key")
+    # return_value=None: a truthy key would trigger the CRITICAL-3 migration
+    # (own coverage in test_deploy_encryption_key_migration.py); these tests
+    # pin lakebase-state passing only.
+    @patch("databricks_tellr.deploy._read_existing_encryption_key", return_value=None)
     def test_update_returns_lakebase_type(
         self, _mock_key, mock_get_lakebase, _mock_req, _mock_yaml, _mock_upload
     ):
