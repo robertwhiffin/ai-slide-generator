@@ -29,7 +29,7 @@ dependencies = [
     "esprima==4.0.1",
     "sqlalchemy==2.0.36",
     "psycopg2-binary==2.9.10",
-    "databricks-sql-connector>=3.0.0",
+    "databricks-sql-connector==3.0.1",
     "httpx==0.28.1",
     "jinja2==3.1.2",
     "python-dotenv==1.2.1",
@@ -37,12 +37,12 @@ dependencies = [
     "pandas==2.3.3",
     "python-pptx==0.6.23",
     "playwright==1.48.0",
-    "Pillow>=10.0.0",
-    "google-api-python-client>=2.100.0",
-    "google-auth-oauthlib>=1.2.0",
-    "google-auth-httplib2>=0.2.0",
-    "cryptography>=42.0.0",
-    "sse-starlette>=3.0.0",
+    "Pillow==11.3.0",
+    "google-api-python-client==2.190.0",
+    "google-auth-oauthlib==1.2.4",
+    "google-auth-httplib2==0.3.0",
+    "cryptography==46.0.3",
+    "sse-starlette==3.0.3",
     # --- Resolver-speedup pins: the backtracking-driver cluster ---
     # Databricks Apps installs this wheel in a platform-managed BUILD phase with a
     # ~10-minute budget. Left ranged, the databricks-langchain ->
@@ -58,6 +58,8 @@ dependencies = [
     # via a devloop deploy if these constraints change. Formerly injected at
     # deploy time as _RESOLVER_SPEEDUP_PINS; now carried in the wheel so a bare
     # `pip install databricks-tellr-app` is safe.
+    # SDR-4437 MEDIUM-7 (July 2026): the 7 formerly-ranged direct deps above
+    # this block are now exact-pinned too; same refresh discipline.
     "databricks-sdk==0.120.0",
     "mlflow[databricks]==3.14.0",
     "mlflow-skinny==3.14.0",
