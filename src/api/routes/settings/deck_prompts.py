@@ -200,12 +200,14 @@ def create_deck_prompt(
         if os.getenv("ENVIRONMENT") in ("development", "test"):
             user = "system"
         else:
-            try:
-                from src.core.databricks_client import get_user_client
-                client = get_user_client()
-                user = client.current_user.me().user_name
-            except Exception:
-                user = "system"
+            # HIGH-6 (SDR-4437): no except-Exception fallback — attribution
+            # must not silently degrade to "system"; a missing OBO client or
+            # empty user_name raises instead of storing a fallback identity.
+            from src.core.databricks_client import UserClientRequiredError, get_user_client
+
+            user = get_user_client().current_user.me().user_name
+            if not user:
+                raise UserClientRequiredError("OBO client resolved no user_name")
         
         prompt = SlideDeckPromptLibrary(
             name=request.name,
@@ -301,12 +303,15 @@ def update_deck_prompt(
         if os.getenv("ENVIRONMENT") in ("development", "test"):
             prompt.updated_by = "system"
         else:
-            try:
-                from src.core.databricks_client import get_user_client
-                client = get_user_client()
-                prompt.updated_by = client.current_user.me().user_name
-            except Exception:
-                prompt.updated_by = "system"
+            # HIGH-6 (SDR-4437): no except-Exception fallback — attribution
+            # must not silently degrade to "system"; a missing OBO client or
+            # empty user_name raises instead of storing a fallback identity.
+            from src.core.databricks_client import UserClientRequiredError, get_user_client
+
+            user_name = get_user_client().current_user.me().user_name
+            if not user_name:
+                raise UserClientRequiredError("OBO client resolved no user_name")
+            prompt.updated_by = user_name
         
         db.commit()
         db.refresh(prompt)
@@ -372,12 +377,15 @@ def delete_deck_prompt(
             if os.getenv("ENVIRONMENT") in ("development", "test"):
                 prompt.updated_by = "system"
             else:
-                try:
-                    from src.core.databricks_client import get_user_client
-                    client = get_user_client()
-                    prompt.updated_by = client.current_user.me().user_name
-                except Exception:
-                    prompt.updated_by = "system"
+                # HIGH-6 (SDR-4437): no except-Exception fallback — attribution
+                # must not silently degrade to "system"; a missing OBO client or
+                # empty user_name raises instead of storing a fallback identity.
+                from src.core.databricks_client import UserClientRequiredError, get_user_client
+
+                user_name = get_user_client().current_user.me().user_name
+                if not user_name:
+                    raise UserClientRequiredError("OBO client resolved no user_name")
+                prompt.updated_by = user_name
             logger.info(f"Soft deleted deck prompt: {prompt.name} (id={prompt.id})")
         
         db.commit()

@@ -211,12 +211,14 @@ def create_slide_style(
         if os.getenv("ENVIRONMENT") in ("development", "test"):
             user = "system"
         else:
-            try:
-                from src.core.databricks_client import get_user_client
-                client = get_user_client()
-                user = client.current_user.me().user_name
-            except Exception:
-                user = "system"
+            # HIGH-6 (SDR-4437): no except-Exception fallback — attribution
+            # must not silently degrade to "system"; a missing OBO client or
+            # empty user_name raises instead of storing a fallback identity.
+            from src.core.databricks_client import UserClientRequiredError, get_user_client
+
+            user = get_user_client().current_user.me().user_name
+            if not user:
+                raise UserClientRequiredError("OBO client resolved no user_name")
         
         style = SlideStyleLibrary(
             name=request.name,
@@ -325,12 +327,15 @@ def update_slide_style(
         if os.getenv("ENVIRONMENT") in ("development", "test"):
             style.updated_by = "system"
         else:
-            try:
-                from src.core.databricks_client import get_user_client
-                client = get_user_client()
-                style.updated_by = client.current_user.me().user_name
-            except Exception:
-                style.updated_by = "system"
+            # HIGH-6 (SDR-4437): no except-Exception fallback — attribution
+            # must not silently degrade to "system"; a missing OBO client or
+            # empty user_name raises instead of storing a fallback identity.
+            from src.core.databricks_client import UserClientRequiredError, get_user_client
+
+            user_name = get_user_client().current_user.me().user_name
+            if not user_name:
+                raise UserClientRequiredError("OBO client resolved no user_name")
+            style.updated_by = user_name
         
         db.commit()
         db.refresh(style)
@@ -417,12 +422,15 @@ def delete_slide_style(
             if os.getenv("ENVIRONMENT") in ("development", "test"):
                 style.updated_by = "system"
             else:
-                try:
-                    from src.core.databricks_client import get_user_client
-                    client = get_user_client()
-                    style.updated_by = client.current_user.me().user_name
-                except Exception:
-                    style.updated_by = "system"
+                # HIGH-6 (SDR-4437): no except-Exception fallback — attribution
+                # must not silently degrade to "system"; a missing OBO client or
+                # empty user_name raises instead of storing a fallback identity.
+                from src.core.databricks_client import UserClientRequiredError, get_user_client
+
+                user_name = get_user_client().current_user.me().user_name
+                if not user_name:
+                    raise UserClientRequiredError("OBO client resolved no user_name")
+                style.updated_by = user_name
             logger.info(f"Soft deleted slide style: {style.name} (id={style.id})")
         
         db.commit()

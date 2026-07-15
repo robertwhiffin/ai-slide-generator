@@ -39,15 +39,20 @@ def _get_user_identity() -> str:
 
     In production (Databricks Apps) this is the authenticated user's email.
     In local dev it falls back to ``"local_dev"``.
+
+    HIGH-6 (SDR-4437): no except-Exception fallback in production — a
+    missing/failed OBO client must fail closed (UserClientRequiredError,
+    mapped to 401 in main.py), never store Google OAuth tokens under a
+    fallback identity.
     """
     if os.getenv("ENVIRONMENT") in ("development", "test"):
         return "local_dev"
-    try:
-        from src.core.databricks_client import get_user_client
-        client = get_user_client()
-        return client.current_user.me().user_name or "local_dev"
-    except Exception:
-        return "local_dev"
+    from src.core.databricks_client import UserClientRequiredError, get_user_client
+
+    user_name = get_user_client().current_user.me().user_name
+    if not user_name:
+        raise UserClientRequiredError("OBO client resolved no user_name")
+    return user_name
 
 
 def _get_auth(db: Session) -> GoogleSlidesAuth:

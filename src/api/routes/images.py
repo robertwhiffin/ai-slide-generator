@@ -62,14 +62,20 @@ class ImageUpdateRequest(BaseModel):
 # --- Helper ---
 
 def _get_current_user() -> str:
-    """Get current username (dev fallback to 'system')."""
+    """Get current username (dev/test fallback to 'system').
+
+    HIGH-6 (SDR-4437): no except-Exception fallback in production — the
+    ownership checks on image writes compare against this value, so it must
+    never silently degrade to "system".
+    """
     if os.getenv("ENVIRONMENT") in ("development", "test"):
         return "system"
-    try:
-        from src.core.databricks_client import get_user_client
-        return get_user_client().current_user.me().user_name
-    except Exception:
-        return "system"
+    from src.core.databricks_client import UserClientRequiredError, get_user_client
+
+    user_name = get_user_client().current_user.me().user_name
+    if not user_name:
+        raise UserClientRequiredError("OBO client resolved no user_name")
+    return user_name
 
 
 def _image_to_response(img: ImageAsset) -> ImageResponse:
