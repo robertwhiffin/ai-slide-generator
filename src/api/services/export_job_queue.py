@@ -307,9 +307,6 @@ async def convert_slides_with_progress(
         output_path: Path to save PPTX
         chart_images_per_slide: Chart images per slide
     """
-    from pptx import Presentation
-    from pptx.util import Inches
-
     total_slides = len(slides_html)
 
     # -- Phase 1: Prepare assets + parallel LLM code generation ---------------
@@ -336,27 +333,17 @@ async def convert_slides_with_progress(
         slide_inputs, on_codegen_progress=_on_codegen_progress,
     )
 
-    # -- Phase 2: Sequential execution ----------------------------------------
-    prs = Presentation()
-    prs.slide_width = Inches(10)
-    prs.slide_height = Inches(7.5)
+    # -- Phase 2: Sequential execution INSIDE the subprocess jail -------------
+    def _relay(current: int, total: int, message: str) -> None:
+        update_export_progress(job_id, current, total, status_message=message)
 
-    for i, (code, (html_str, _chart_files, _content_files, assets_dir)) in enumerate(
-        zip(codes, slide_inputs), 1,
-    ):
-        update_export_progress(
-            job_id, i, total_slides,
-            status_message=f"Building slide {i}/{total_slides}…",
-        )
-
-        converter._execute_slide(code, prs, html_str, assets_dir, i)
-
-        logger.debug(
-            f"Processed slide {i}/{total_slides}",
-            extra={"job_id": job_id, "slide": i, "total": total_slides},
-        )
-
-    prs.save(output_path)
+    # to_thread: keep the long blocking jail wait off the event loop (this
+    # coroutine runs on the loop; _relay is fired from the jail's stdout
+    # reader thread and update_export_progress opens its own session per call).
+    await asyncio.to_thread(
+        converter._run_pptx_conversion,
+        codes, slide_inputs, output_path, progress_cb=_relay,
+    )
 
 
 async def export_worker() -> None:
