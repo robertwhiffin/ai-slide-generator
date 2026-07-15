@@ -44,3 +44,82 @@ def test_runner_emits_request_json(tmp_path):
     assert data[0]["error"] is None
     assert data[1]["requests"] is None       # bad slide isolated
     assert "ValueError" in data[1]["error"]
+
+
+import pytest
+
+from src.services.html_to_google_slides import (
+    HtmlToGoogleSlidesConverter,
+    GoogleSlidesConversionError,
+)
+
+
+def _conv():
+    return HtmlToGoogleSlidesConverter.__new__(HtmlToGoogleSlidesConverter)
+
+
+class TestValidateRequests:
+    def test_accepts_known_request_types(self):
+        reqs = [{"createShape": {"objectId": "a", "shapeType": "TEXT_BOX"}},
+                {"insertText": {"objectId": "a", "text": "hi"}}]
+        assert _conv()._validate_requests(reqs) == reqs
+
+    def test_rejects_unknown_top_level_key(self):
+        with pytest.raises(GoogleSlidesConversionError):
+            _conv()._validate_requests([{"exfiltrate": {"url": "http://evil"}}])
+
+    def test_rejects_non_placeholder_non_https_image_url(self):
+        with pytest.raises(GoogleSlidesConversionError):
+            _conv()._validate_requests(
+                [{"createImage": {"objectId": "i", "url": "file:///etc/passwd"}}]
+            )
+
+    def test_accepts_placeholder_image_url(self):
+        reqs = [{"createImage": {"objectId": "i", "url": "tellr-asset://chart_0.png"}}]
+        assert _conv()._validate_requests(reqs) == reqs
+
+
+class TestUploadAndSubstitute:
+    def test_uploads_and_substitutes(self, tmp_path):
+        from unittest.mock import MagicMock
+        (tmp_path / "chart_0.png").write_bytes(b"\x89PNG\r\n")
+        drive = MagicMock()
+        drive.files().create().execute.return_value = {"id": "FILEID"}
+        drive.permissions().create().execute.return_value = {}
+        reqs = [{"createImage": {"objectId": "i", "url": "tellr-asset://chart_0.png"}}]
+        out = _conv()._upload_and_substitute_assets(reqs, drive, str(tmp_path))
+        assert out[0]["createImage"]["url"] == "https://drive.google.com/uc?id=FILEID"
+
+
+class TestExecuteThroughChunkedService:
+    def test_requests_run_through_chunking_and_retry_429(self, tmp_path, monkeypatch):
+        from unittest.mock import MagicMock
+
+        import src.services.html_to_google_slides as g
+        monkeypatch.setattr(g.time, "sleep", lambda *_: None)
+
+        conv = _conv()
+        # A batchUpdate that 429s once then succeeds, proving retry is wired.
+        calls = {"n": 0}
+
+        def _batch(*a, **k):
+            m = MagicMock()
+
+            def _execute():
+                calls["n"] += 1
+                if calls["n"] == 1:
+                    raise Exception("429 quota exceeded rate limit")
+                return {"ok": True}
+            m.execute.side_effect = _execute
+            return m
+
+        slides_service = MagicMock()
+        slides_service.presentations().batchUpdate.side_effect = _batch
+        drive = MagicMock()
+        reqs = [{"createShape": {"objectId": "a", "shapeType": "TEXT_BOX",
+                                 "elementProperties": {"pageObjectId": "p"}}}]
+        err = conv._execute_slide_requests(
+            reqs, slides_service, drive, "PRES", "p", str(tmp_path), 1,
+        )
+        assert err is None
+        assert calls["n"] >= 2  # retried after the 429
