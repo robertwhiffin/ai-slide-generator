@@ -84,3 +84,21 @@ def test_key_auto_generated_when_missing(tmp_path):
         assert len(key) > 0
         assert key_file.exists(), "Key file should be created"
         assert key_file.read_text().strip().encode() == key
+
+
+def test_encryption_keys_table_created_by_create_all():
+    """EncryptionKey is registered on Base so init_db's create_all creates it."""
+    from sqlalchemy import create_engine, inspect
+    from sqlalchemy.pool import StaticPool
+
+    from src.core.database import Base
+    import src.database.models  # noqa: F401 — registers all models on Base
+
+    engine = create_engine(
+        "sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool
+    )
+    Base.metadata.create_all(engine)
+    insp = inspect(engine)
+    assert "encryption_keys" in insp.get_table_names()
+    cols = {c["name"] for c in insp.get_columns("encryption_keys")}
+    assert cols == {"id", "key_value", "created_at"}
