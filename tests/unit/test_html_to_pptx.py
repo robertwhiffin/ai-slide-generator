@@ -11,6 +11,7 @@ svgpathtools + Pillow (pure Python) for PPTX compatibility.
 import base64
 import io
 import os
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -143,9 +144,14 @@ class TestLLMPromptHasNoBase64:
         assert "data:image" not in last_prompt
         assert "content_image_" in last_prompt
 
-    @pytest.mark.asyncio
-    async def test_multi_slide_prompt_contains_no_base64(self, tmp_path):
-        """Multi-slide path: LLM prompt must not contain base64 data URIs."""
+    def test_multi_slide_prompt_contains_no_base64(self, tmp_path):
+        """Multi-slide path: LLM prompt must not contain base64 data URIs.
+
+        Targets the production multi-slide codegen path
+        (_generate_all_codes → _generate_code_sync); the old
+        _generate_slide_adder_code single-slide adder path was removed with
+        the in-process exec sites (SDR-4437 PR-5).
+        """
         converter = _make_converter()
 
         html = (
@@ -156,21 +162,50 @@ class TestLLMPromptHasNoBase64:
 
         captured_prompts = []
 
-        async def fake_call_llm(system_prompt, user_prompt):
+        def fake_call_llm_sync(system_prompt, user_prompt):
             captured_prompts.append(user_prompt)
             return "def add_slide_to_presentation(prs, html_str, assets_dir): pass"
 
-        converter._call_llm = fake_call_llm
+        converter._call_llm_sync = fake_call_llm_sync
 
         cleaned_html, content_images = converter._extract_and_save_content_images(
             html, str(tmp_path)
         )
         chart_images = list(content_images)
-        await converter._generate_slide_adder_code(cleaned_html, chart_images=chart_images)
+        converter._generate_code_sync(cleaned_html, chart_images=chart_images)
 
         assert len(captured_prompts) == 1
         assert "data:image" not in captured_prompts[0]
         assert "content_image_" in captured_prompts[0]
+
+
+class TestInProcessExecRemoved:
+    """SDR-4437 HIGH-5: no generated code runs in-process any more."""
+
+    def test_execute_single_slide_converter_removed(self):
+        assert not hasattr(HtmlToPptxConverterV3, "_execute_single_slide_converter")
+
+    def test_no_exec_module_in_source(self):
+        import inspect
+        from src.services import html_to_pptx
+        src = inspect.getsource(html_to_pptx)
+        assert "exec_module" not in src, "generated code must not run in-process"
+
+
+class TestBuildPptxJobDir:
+    def test_hostile_snippet_marked_no_code(self, tmp_path):
+        import json
+
+        from src.services.converter_jail import protocol
+
+        conv = HtmlToPptxConverterV3.__new__(HtmlToPptxConverterV3)
+        assets = tmp_path / "assets"
+        assets.mkdir()
+        slide_inputs = [("<p>x</p>", [], [], str(assets))]
+        codes = ["import socket\ndef add_slide_to_presentation(p,h,a):\n    pass\n"]
+        job_dir = conv._build_pptx_job_dir(codes, slide_inputs)
+        manifest = json.loads((Path(job_dir) / protocol.MANIFEST_NAME).read_text())
+        assert manifest["slides"][0]["has_code"] is False  # socket import -> fallback
 
 
 # -----------------------------------------------------------------------
