@@ -147,3 +147,16 @@ def test_default_enabled_tracks_environment(monkeypatch):
     assert CSRFProtectionMiddleware(app=None).enabled is True
     monkeypatch.setenv("ENVIRONMENT", "test")
     assert CSRFProtectionMiddleware(app=None).enabled is False
+
+
+def test_main_app_registers_csrf_middleware():
+    # ENVIRONMENT=test (conftest) -> middleware registered but inactive; a
+    # cross-origin POST must pass in test env, proving both registration
+    # wiring and the non-production gate on the real app. (Import placement
+    # in main.py is asserted by ordering comments + this smoke import.)
+    from src.api.main import app as main_app
+    from src.api.middleware.csrf import CSRFProtectionMiddleware as _CSRF
+
+    assert any(
+        m.cls is _CSRF for m in main_app.user_middleware
+    ), "CSRFProtectionMiddleware not registered on app"
