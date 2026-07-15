@@ -69,3 +69,13 @@ def test_document_csp_hardening_directives():
 
 def test_api_csp_is_deny_all():
     assert API_CSP == "default-src 'none'; frame-ancestors 'none'"
+
+
+def test_main_app_registers_security_headers():
+    # Registration check against the real app (ENVIRONMENT=test via conftest;
+    # the SPA is only mounted in production's lifespan, so use an API route).
+    from src.api.main import app as main_app
+
+    r = TestClient(main_app).get("/api/health")
+    assert r.headers["Content-Security-Policy"] == API_CSP
+    assert r.headers["X-Frame-Options"] == "DENY"
