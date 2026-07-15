@@ -291,7 +291,10 @@ const WALKER_SOURCE = `
       c.width = w; c.height = h;
       const ctx = c.getContext('2d');
       const bg = cs.backgroundImage;
-      const m = bg.match(/linear-gradient\\((.+)\\)\\s*\$/);
+      // Match the first linear-gradient(...) layer, allowing one level of nested
+      // parens (rgba(...) stops). NOT end-anchored, so a combined value like
+      // "linear-gradient(scrim), url(photo)" (Tellr covers) still matches the scrim.
+      const m = bg.match(/linear-gradient\\(((?:[^()]|\\([^()]*\\))*)\\)/);
       if (!m) return null;
       const inner = m[1];
       // Split on commas NOT inside parens. Tracks paren depth manually
@@ -310,7 +313,22 @@ const WALKER_SOURCE = `
       let angle = 180, stopStart = 0;
       if (/deg|turn|rad|to /.test(parts[0])) {
         const a = parts[0].match(/(-?\\d+(?:\\.\\d+)?)deg/);
-        if (a) angle = parseFloat(a[1]);
+        if (a) {
+          angle = parseFloat(a[1]);
+        } else if (/to /.test(parts[0])) {
+          // CSS keyword directions → angle (0=to top, 90=to right, 180=to bottom, 270=to left).
+          const dir = parts[0];
+          const right = /right/.test(dir), left = /left/.test(dir);
+          const top = /top/.test(dir), bottom = /bottom/.test(dir);
+          if (top && right) angle = 45;
+          else if (bottom && right) angle = 135;
+          else if (bottom && left) angle = 225;
+          else if (top && left) angle = 315;
+          else if (right) angle = 90;
+          else if (left) angle = 270;
+          else if (top) angle = 0;
+          else angle = 180; // to bottom
+        }
         stopStart = 1;
       }
       const stops = [];
