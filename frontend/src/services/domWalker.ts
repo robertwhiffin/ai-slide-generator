@@ -477,8 +477,19 @@ const WALKER_SOURCE = `
             }
           } catch (e) { /* swallow */ }
         }
-        const borderColor = parseColor(cs.borderTopColor);
-        const borderW = parseFloat(cs.borderTopWidth) || 0;
+        // Per-side borders. pptxgenjs 'line' stroke applies to ALL FOUR sides, so it's
+        // only correct for a uniform border. A single-side accent (border-top only —
+        // common in Tellr cards) must NOT become a full outline: emit each present side
+        // as a thin filled bar instead, and leave the box itself unstroked.
+        const bTop = { w: parseFloat(cs.borderTopWidth) || 0, c: parseColor(cs.borderTopColor) };
+        const bRight = { w: parseFloat(cs.borderRightWidth) || 0, c: parseColor(cs.borderRightColor) };
+        const bBottom = { w: parseFloat(cs.borderBottomWidth) || 0, c: parseColor(cs.borderBottomColor) };
+        const bLeft = { w: parseFloat(cs.borderLeftWidth) || 0, c: parseColor(cs.borderLeftColor) };
+        const sides = [bTop, bRight, bBottom, bLeft];
+        const present = sides.filter(sd => sd.w > 0 && sd.c);
+        const uniform = present.length === 4 &&
+          sides.every(sd => sd.w === bTop.w && sd.c && bTop.c && sd.c.hex === bTop.c.hex);
+
         // A full-bleed element (covers the whole slide) IS the slide background:
         // set it as the PPTX slide background rather than a slide-sized shape/image
         // that sits on top and is awkward to select/edit. A plain white background
@@ -486,10 +497,10 @@ const WALKER_SOURCE = `
         const fullBleed = box.x <= 1 && box.y <= 1 &&
           box.w >= rootRect.width - 2 && box.h >= rootRect.height - 2;
 
-        if (fullBleed && borderW === 0 && (el.dataset.bgRaster || fill)) {
-          // Full-bleed url() photo is emitted BEFORE the gradient overlay below so a
-          // combined gradient-scrim + url-photo cover layers correctly (photo as the
-          // background, scrim painted over it).
+        if (fullBleed && present.length === 0 && (el.dataset.bgRaster || fill)) {
+          // Full-bleed url() photo is emitted as the slide background; a combined
+          // gradient-scrim + url-photo cover layers correctly (photo as background,
+          // scrim painted over it by the gradient overlay below).
           if (el.dataset.bgRaster) {
             records.push({ kind: 'background', src: el.dataset.bgRaster });
           } else if (fill.hex !== 'FFFFFF') {
@@ -497,18 +508,28 @@ const WALKER_SOURCE = `
           }
           // white fill → nothing (default white slide)
         } else {
-          if (fill || borderW > 0) {
+          if (fill || uniform) {
             const rect = {
               kind: 'rect',
               x: box.x, y: box.y, w: box.w, h: box.h,
               fill: fill ? fill.hex : null,
-              stroke: borderW > 0 && borderColor ? borderColor.hex : null,
-              strokeW: borderW,
+              stroke: uniform && bTop.c ? bTop.c.hex : null,
+              strokeW: uniform ? bTop.w : 0,
               radius: parseRadius(cs),
               _depth: depth,
             };
             if (shadow) rect.shadow = shadow;
             records.push(rect);
+          }
+          if (!uniform && present.length > 0) {
+            const bar = (x, y, w, h, hex) => records.push({
+              kind: 'rect', x: x, y: y, w: w, h: h,
+              fill: hex, stroke: null, strokeW: 0, radius: 0, _depth: depth + 0.1,
+            });
+            if (bTop.w > 0 && bTop.c) bar(box.x, box.y, box.w, bTop.w, bTop.c.hex);
+            if (bBottom.w > 0 && bBottom.c) bar(box.x, box.y + box.h - bBottom.w, box.w, bBottom.w, bBottom.c.hex);
+            if (bLeft.w > 0 && bLeft.c) bar(box.x, box.y, bLeft.w, box.h, bLeft.c.hex);
+            if (bRight.w > 0 && bRight.c) bar(box.x + box.w - bRight.w, box.y, bRight.w, box.h, bRight.c.hex);
           }
           // Non-full-bleed background-image url() (rasterized to el.dataset.bgRaster
           // by the export pre-pass, since pptxgenjs can't read CSS backgrounds).
