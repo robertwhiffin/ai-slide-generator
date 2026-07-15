@@ -22,33 +22,37 @@ def good_config():
 
 
 class TestCheckBranchingPreconditions:
-    def test_happy_path_returns_encryption_key(self, mock_ws, good_config):
-        from scripts.deploy_local import _check_branching_preconditions
-
-        # Patch all the Workspace/SDK calls
-        with patch(
-            "scripts.deploy_local._read_existing_encryption_key",
-            return_value="prod-key-123",
-        ), patch(
-            "scripts.deploy_local._probe_autoscaling_available", return_value=True
-        ):
-            mock_ws.postgres.get_project.return_value = MagicMock()
-            with patch(
-                "scripts.deploy_local._branch_exists", return_value=True
-            ):
-                key = _check_branching_preconditions(mock_ws, good_config)
-        assert key == "prod-key-123"
-
-    def test_missing_prod_app_yaml(self, mock_ws, good_config):
+    def test_preflight_ok_when_source_deployed_and_keyless(self, mock_ws, good_config):
         from scripts.deploy_local import _check_branching_preconditions
 
         with patch(
-            "scripts.deploy_local._read_existing_encryption_key",
-            return_value=None,
+            "scripts.deploy_local._read_existing_encryption_key", return_value=None
         ):
-            with pytest.raises(
-                DeploymentError, match="production not deployed"
-            ):
+            with patch("scripts.deploy_local._probe_autoscaling_available", return_value=True):
+                with patch("scripts.deploy_local._branch_exists", return_value=True):
+                    mock_ws.postgres.get_project.return_value = MagicMock()
+                    # returns None — nothing to relocate on the fork
+                    assert _check_branching_preconditions(mock_ws, good_config) is None
+
+    def test_preflight_fails_when_source_still_has_legacy_key(self, mock_ws, good_config):
+        from scripts.deploy_local import DeploymentError, _check_branching_preconditions
+
+        with patch(
+            "scripts.deploy_local._read_existing_encryption_key", return_value="old-key"
+        ):
+            with pytest.raises(DeploymentError, match="legacy encryption key"):
+                _check_branching_preconditions(mock_ws, good_config)
+
+    def test_preflight_fails_when_source_not_deployed(self, mock_ws, good_config):
+        from scripts.deploy_local import DeploymentError, _check_branching_preconditions
+
+        with patch(
+            "scripts.deploy_local._read_existing_encryption_key",
+            side_effect=DeploymentError(
+                "Could not read the deployed app.yaml at /Workspace/x/app.yaml"
+            ),
+        ):
+            with pytest.raises(DeploymentError, match="not deployed"):
                 _check_branching_preconditions(mock_ws, good_config)
 
     def test_provisioned_lakebase_errors(self, mock_ws, good_config):
@@ -56,7 +60,7 @@ class TestCheckBranchingPreconditions:
 
         with patch(
             "scripts.deploy_local._read_existing_encryption_key",
-            return_value="k",
+            return_value=None,
         ), patch(
             "scripts.deploy_local._probe_autoscaling_available",
             return_value=False,
@@ -71,7 +75,7 @@ class TestCheckBranchingPreconditions:
 
         with patch(
             "scripts.deploy_local._read_existing_encryption_key",
-            return_value="k",
+            return_value=None,
         ), patch(
             "scripts.deploy_local._probe_autoscaling_available",
             return_value=True,
@@ -87,7 +91,7 @@ class TestCheckBranchingPreconditions:
 
         with patch(
             "scripts.deploy_local._read_existing_encryption_key",
-            return_value="k",
+            return_value=None,
         ), patch(
             "scripts.deploy_local._probe_autoscaling_available",
             return_value=True,
@@ -106,7 +110,7 @@ class TestCheckBranchingPreconditions:
 
         with patch(
             "scripts.deploy_local._read_existing_encryption_key",
-            return_value=None,
+            side_effect=DeploymentError("Could not read the deployed app.yaml"),
         ):
             with pytest.raises(DeploymentError):
                 _check_branching_preconditions(mock_ws, good_config)
