@@ -1112,6 +1112,171 @@ class HtmlToGoogleSlidesConverter:
 
         return code
 
+    # -- Host-side batchUpdate executor (SDR-4437 PR-5) --------------------
+
+    # Positive allowlist of batchUpdate request-type keys the host will execute.
+    # Derived from _SkipTracker._CREATE_KEYS (createShape, createTable,
+    # createImage, createLine, createSheetsChart) so the two sets cannot drift.
+    _ALLOWED_REQUEST_KEYS = frozenset(_SkipTracker._CREATE_KEYS) | frozenset({
+        "createSlide", "insertText", "deleteObject",
+        "updateTextStyle", "updateParagraphStyle", "updateShapeProperties",
+        "updatePageProperties", "updateTableCellProperties",
+        "createParagraphBullets", "insertTableRows", "insertTableColumns",
+        "updatePageElementTransform", "updateImageProperties",
+    })
+
+    def _validate_requests(self, requests):
+        """Schema-gate emitted requests. Raises GoogleSlidesConversionError on
+        any unknown top-level key or a non-placeholder/non-https image url."""
+        if not isinstance(requests, list):
+            raise GoogleSlidesConversionError("requests must be a list")
+        from src.services.converter_jail import protocol
+        for req in requests:
+            if not isinstance(req, dict) or len(req) != 1:
+                raise GoogleSlidesConversionError(f"malformed request: {req!r}")
+            (key, val), = req.items()
+            if key not in self._ALLOWED_REQUEST_KEYS:
+                raise GoogleSlidesConversionError(f"disallowed request type: {key}")
+            if key == "createImage":
+                url = (val or {}).get("url", "")
+                if not (url.startswith(protocol.ASSET_SCHEME) or url.startswith("https://")):
+                    raise GoogleSlidesConversionError(f"disallowed image url: {url!r}")
+        return requests
+
+    def _upload_and_substitute_assets(self, requests, drive_service, assets_dir):
+        """Upload each tellr-asset:// referenced file to Drive and substitute
+        the real URL. Records uploaded file IDs on self._uploaded_file_ids."""
+        from googleapiclient.http import MediaFileUpload
+        from src.services.converter_jail import protocol
+
+        if not hasattr(self, "_uploaded_file_ids"):
+            self._uploaded_file_ids = []
+        cache = {}
+        for req in requests:
+            if "createImage" not in req:
+                continue
+            url = req["createImage"].get("url", "")
+            if not url.startswith(protocol.ASSET_SCHEME):
+                continue
+            filename = url[len(protocol.ASSET_SCHEME):]
+            if filename not in cache:
+                path = Path(assets_dir) / filename
+                media = MediaFileUpload(str(path), mimetype="image/png")
+                created = _retry_api_call(
+                    lambda: drive_service.files().create(
+                        body={"name": filename, "mimeType": "image/png"},
+                        media_body=media, fields="id",
+                    ).execute(),
+                    label=f"Upload {filename}",
+                )
+                file_id = created["id"]
+                _retry_api_call(
+                    lambda: drive_service.permissions().create(
+                        fileId=file_id, body={"type": "anyone", "role": "reader"},
+                    ).execute(),
+                    label=f"Share {filename}",
+                )
+                self._uploaded_file_ids.append(file_id)
+                cache[filename] = f"https://drive.google.com/uc?id={file_id}"
+            req["createImage"]["url"] = cache[filename]
+        return requests
+
+    def _execute_slide_requests(self, requests, slides_service, drive_service,
+                                pres_id, page_id, assets_dir, slide_num):
+        """Validate → upload+substitute → execute through _ChunkedSlidesService.
+        Returns None on success, error string on failure."""
+        try:
+            self._validate_requests(requests)
+            requests = self._upload_and_substitute_assets(
+                requests, drive_service, assets_dir,
+            )
+            wrapped = _ChunkedSlidesService(
+                slides_service, chunk_size=4, slide_num=slide_num,
+            )
+            wrapped.presentations().batchUpdate(
+                presentationId=pres_id, body={"requests": requests},
+            ).execute()
+            return None
+        except Exception as exc:
+            logger.warning("Slide %d host execution failed", slide_num, exc_info=True)
+            return str(exc)
+
+    def _build_gslides_job_dir(self, codes, slide_inputs, page_ids) -> str:
+        """Write the jail job dir: manifest + per-slide code/html/assets, with
+        page_id per slide and AST-guarded snippets (rejected → has_code=false →
+        host fallback)."""
+        import json as _json
+        import os as _os
+        import shutil as _shutil
+        import tempfile as _tempfile
+        from src.services.converter_jail import protocol
+        from src.services.converter_jail.ast_guard import DisallowedImport, check_imports
+
+        job_dir = _tempfile.mkdtemp(prefix="gslides_jail_job_")
+        slides_manifest = []
+        for idx, (code, (html_str, _cf, _if, assets_dir)) in enumerate(
+            zip(codes, slide_inputs)
+        ):
+            sdir = Path(job_dir) / f"slide_{idx:03d}"
+            sdir.mkdir()
+            has_code = bool(code) and page_ids[idx] is not None
+            if has_code:
+                try:
+                    check_imports(code)
+                except (DisallowedImport, SyntaxError) as exc:
+                    logger.warning("GSlides slide %d snippet rejected pre-jail: %s", idx + 1, exc)
+                    has_code = False
+            if has_code:
+                (sdir / protocol.CODE_NAME).write_text(code, encoding="utf-8")
+                (sdir / protocol.HTML_NAME).write_text(html_str, encoding="utf-8")
+            dest = sdir / protocol.ASSETS_DIR
+            try:
+                _os.symlink(assets_dir, dest, target_is_directory=True)
+            except OSError:
+                _shutil.copytree(assets_dir, dest)
+            slides_manifest.append({
+                "index": idx, "has_code": has_code,
+                "dir": sdir.name, "page_id": page_ids[idx],
+            })
+        (Path(job_dir) / protocol.MANIFEST_NAME).write_text(
+            _json.dumps({"slides": slides_manifest})
+        )
+        return job_dir
+
+    def _emit_single_slide(self, code, html_str, assets_dir, page_id):
+        """Run one snippet through the jail to (re)emit its requests. Returns
+        the requests list or None on failure."""
+        import json as _json
+        import os as _os
+        import shutil as _shutil
+        import tempfile as _tempfile
+        from src.services.converter_jail import protocol, run_gslides_jail
+
+        job_dir = _tempfile.mkdtemp(prefix="gslides_retry_")
+        try:
+            sdir = Path(job_dir) / "slide_000"
+            (sdir / protocol.ASSETS_DIR).mkdir(parents=True)
+            # Reuse the already-prepared assets.
+            _shutil.rmtree(sdir / protocol.ASSETS_DIR)
+            try:
+                _os.symlink(assets_dir, sdir / protocol.ASSETS_DIR, target_is_directory=True)
+            except OSError:
+                _shutil.copytree(assets_dir, sdir / protocol.ASSETS_DIR)
+            (sdir / protocol.CODE_NAME).write_text(code, encoding="utf-8")
+            (sdir / protocol.HTML_NAME).write_text(html_str, encoding="utf-8")
+            (Path(job_dir) / protocol.MANIFEST_NAME).write_text(_json.dumps(
+                {"slides": [{"index": 0, "has_code": True,
+                             "dir": "slide_000", "page_id": page_id}]}
+            ))
+            out = str(Path(job_dir) / "requests.json")
+            result = run_gslides_jail(job_dir, out)
+            if result.timed_out or result.returncode != 0:
+                return None
+            data = _json.loads(Path(out).read_text())
+            return data[0].get("requests")
+        finally:
+            _shutil.rmtree(job_dir, ignore_errors=True)
+
     # -- Code execution ----------------------------------------------------
 
     def _execute_code(self, code, slides_service, drive_service, pres_id, page_id,
