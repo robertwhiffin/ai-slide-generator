@@ -41,3 +41,18 @@ def test_write_app_yaml_is_keyless():
         deploy._write_app_yaml(Path(td), "lb", "app_data")
         content = (Path(td) / "app.yaml").read_text()
     assert "GOOGLE_OAUTH_ENCRYPTION_KEY" not in content
+
+
+def test_app_yaml_has_no_databricks_token():
+    """MEDIUM-4: SP auth via auto-injected OAuth M2M creds, not a token env var."""
+    import tempfile
+    from pathlib import Path
+
+    from databricks_tellr import deploy
+
+    with tempfile.TemporaryDirectory() as td:
+        deploy._write_app_yaml(Path(td), "lb", "app_data")
+        content = (Path(td) / "app.yaml").read_text()
+    assert "DATABRICKS_TOKEN" not in content
+    assert "system.databricks_token" not in content
+    assert "DATABRICKS_HOST" in content  # still required by create_user_client

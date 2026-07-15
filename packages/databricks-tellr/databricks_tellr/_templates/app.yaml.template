@@ -37,8 +37,6 @@ env:
     value: "${LAKEBASE_ENDPOINT_NAME}"
   - name: DATABRICKS_HOST
     valueFrom: "system.databricks_host"
-  - name: DATABRICKS_TOKEN
-    valueFrom: "system.databricks_token"
   # Opt-in to trust x-forwarded-email / x-forwarded-user on the MCP endpoint
   # for app-to-app calls. Safe inside Databricks Apps because the proxy sets
   # these headers itself and strips any caller-supplied versions. See
