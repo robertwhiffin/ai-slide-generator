@@ -36,7 +36,7 @@ esprima==4.0.1
 # Database
 sqlalchemy==2.0.36
 psycopg2-binary==2.9.10
-databricks-sql-connector>=3.0.0  # For Lakebase connections
+databricks-sql-connector==3.0.1  # For Lakebase connections
 
 # Utilities
 httpx==0.28.1
@@ -49,18 +49,18 @@ pandas==2.3.3
 python-pptx==0.6.23
 
 # Google Slides export
-google-api-python-client>=2.100.0
-google-auth-oauthlib>=1.2.0
-google-auth-httplib2>=0.2.0
+google-api-python-client==2.190.0
+google-auth-oauthlib==1.2.4
+google-auth-httplib2==0.3.0
 
 # Encryption (Fernet symmetric encryption for OAuth credentials/tokens)
-cryptography>=42.0.0
+cryptography==46.0.3
 
 # Browser automation (HTML to image rendering)
 playwright==1.48.0
 
 # Image processing
-Pillow>=10.0.0
+Pillow==11.3.0
 svgpathtools>=1.6.0
 
 # Note: Development dependencies are in pyproject.toml [project.optional-dependencies.dev]
