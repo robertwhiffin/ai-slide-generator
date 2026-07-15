@@ -449,7 +449,9 @@ class TestGrantSchemaPermissions:
         # First call is the role existence check
         cur.fetchone.return_value = (1,)
 
-        _grant_schema_permissions(cur, "app_data", "client-123")
+        _grant_schema_permissions(
+            cur, "app_data", "12345678-abcd-abcd-0123-456789abcdef"
+        )
 
         # 1 SELECT for role check + 6 GRANT/ALTER statements = 7 total
         assert cur.execute.call_count == 7
@@ -459,14 +461,18 @@ class TestGrantSchemaPermissions:
         cur.fetchone.return_value = None  # role not found
 
         with patch("databricks_tellr.deploy.logger") as mock_logger:
-            _grant_schema_permissions(cur, "app_data", "client-123")
+            _grant_schema_permissions(
+            cur, "app_data", "12345678-abcd-abcd-0123-456789abcdef"
+        )
             mock_logger.warning.assert_called_once()
 
     def test_does_not_create_role(self):
         cur = Mock()
         cur.fetchone.return_value = (1,)
 
-        _grant_schema_permissions(cur, "app_data", "client-123")
+        _grant_schema_permissions(
+            cur, "app_data", "12345678-abcd-abcd-0123-456789abcdef"
+        )
 
         # Verify no CREATE ROLE statement was executed
         for call_args in cur.execute.call_args_list:

@@ -162,7 +162,7 @@ The codebase supports two Lakebase deployment modes controlled by the `LAKEBASE_
 | Required env vars | `PGHOST`, `PGUSER`, `LAKEBASE_INSTANCE` | `LAKEBASE_TYPE`, `LAKEBASE_PG_HOST`, `LAKEBASE_ENDPOINT_NAME` |
 | SDK import | `databricks.sdk.service.database` | `databricks.sdk.service.postgres` (optional; guarded by try/except) |
 
-All `lakebase.py` helper functions — `generate_lakebase_credential()`, `get_lakebase_connection_info()`, `get_lakebase_connection_url()`, `setup_lakebase_schema()`, and `initialize_lakebase_tables()` — accept `endpoint_name`, `host`, and `lakebase_type` parameters so callers can route to the autoscaling path.
+All `lakebase.py` helper functions — `generate_lakebase_credential()`, `get_lakebase_connection_info()`, `get_lakebase_connection_url()`, and `initialize_lakebase_tables()` — accept `endpoint_name`, `host`, and `lakebase_type` parameters so callers can route to the autoscaling path.
 
 ---
 
@@ -174,7 +174,6 @@ All `lakebase.py` helper functions — `generate_lakebase_credential()`, `get_la
 | `generate_lakebase_credential()` | Generate OAuth token | `ws.database` (provisioned) or `ws.postgres` (autoscaling) |
 | `get_lakebase_connection_info()` | Build connection params | `ws.database.get_database_instance()` or pre-resolved host |
 | `get_lakebase_connection_url()` | Build SQLAlchemy URL | Combines above functions |
-| `setup_lakebase_schema()` | Create schema + grant perms | Direct SQL via psycopg2 |
 | `initialize_lakebase_tables()` | Create SQLAlchemy tables | `Base.metadata.create_all()` |
 | `_get_database_url()` (database.py) | Auto-detect environment | Checks `LAKEBASE_TYPE`, `PGHOST` env vars |
 | `_generate_lakebase_token()` (database.py) | Generate fresh OAuth token | Routes between `ws.postgres` and `ws.database` |
@@ -212,8 +211,8 @@ When deploying with `scripts/deploy_local.sh create --env development --profile 
    └── apps.deploy_and_wait()
 
 7. Setup schema and permissions
-   └── setup_lakebase_schema(instance, schema, client_id)
-   └── SQL: CREATE SCHEMA, GRANT permissions
+   └── deploy tooling (databricks_tellr.deploy) runs
+       CREATE SCHEMA + GRANT permissions via psycopg2
 
 8. Initialize tables
    └── initialize_lakebase_tables()
