@@ -13,7 +13,7 @@ from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from src.api.routes import admin, admin_usage, agent_config, chat, export, feedback, images, profiles, sessions, slides, tools, tour, verification, version, google_slides, setup, local_version
@@ -434,6 +434,29 @@ from src.api.middleware.security_headers import SecurityHeadersMiddleware  # noq
 app.add_middleware(CSRFProtectionMiddleware)
 app.add_middleware(SecurityHeadersMiddleware)
 # === end SDR-4437 Track A security middleware =============================
+
+# ---------------------------------------------------------------------------
+# Exception handlers — keep BELOW the middleware-registration block above
+# (Track A of SDR-4437 owns that block; do not reorder or interleave).
+#
+# HIGH-6: when user_auth_middleware fails to build the OBO client, the request
+# used to proceed silently as the SP; now the first user-scoped call raises
+# UserClientRequiredError, mapped here to a clean 401 instead of a 500 from
+# deep inside a tool call.
+# ---------------------------------------------------------------------------
+from src.core.databricks_client import UserClientRequiredError
+
+
+@app.exception_handler(UserClientRequiredError)
+async def user_client_required_handler(request: Request, exc: UserClientRequiredError):
+    logger.warning("User-scoped call without a bound OBO client: %s", exc)
+    return JSONResponse(
+        status_code=401,
+        content={
+            "detail": "Your Databricks identity could not be resolved for this "
+            "request. Please refresh the page to re-authenticate."
+        },
+    )
 
 # Include API routers
 app.include_router(admin.router)
