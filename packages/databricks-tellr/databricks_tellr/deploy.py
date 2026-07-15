@@ -30,6 +30,8 @@ from databricks.sdk.service.apps import (
 from databricks.sdk.service.database import DatabaseInstance
 from databricks.sdk.service.workspace import ImportFormat
 
+from databricks_tellr.identifiers import validate_client_id, validate_schema_name
+
 # Autoscaling imports (Lakebase next-gen)
 try:
     from databricks.sdk.service.postgres import (
@@ -1567,6 +1569,9 @@ def _setup_database_schema(
         print("   Warning: Could not get app client ID - schema setup skipped")
         return
 
+    validate_schema_name(schema_name)
+    validate_client_id(client_id)
+
     conn, _ = _get_lakebase_connection(ws, lakebase_name, lakebase_result=lakebase_result)
 
     try:
@@ -1597,6 +1602,10 @@ def _reset_schema(
     """
     client_id = _get_app_client_id(app)
 
+    validate_schema_name(schema_name)
+    if client_id:
+        validate_client_id(client_id)
+
     conn, _ = _get_lakebase_connection(ws, lakebase_name, lakebase_result=lakebase_result)
 
     try:
@@ -1624,6 +1633,9 @@ def _grant_schema_permissions(cur: Any, schema_name: str, client_id: str) -> Non
 
     This function only grants schema/table permissions — it does NOT create roles.
     """
+    validate_schema_name(schema_name)
+    validate_client_id(client_id)
+
     # Verify the role exists before granting
     cur.execute(
         "SELECT 1 FROM pg_roles WHERE rolname = %s", (client_id,)
