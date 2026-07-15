@@ -1,11 +1,16 @@
 # tests/unit/test_converter_jail.py
 """Unit tests for the converter subprocess jail (SDR-4437 PR-5)."""
 
+import sys
+import textwrap
+from pathlib import Path
+
 import pytest
 
 from src.services.converter_jail import protocol
 from src.services.converter_jail import ast_guard
 from src.services.converter_jail.ast_guard import DisallowedImport
+from src.services.converter_jail import jail
 
 
 class TestProgressProtocol:
@@ -57,3 +62,89 @@ class TestAstGuard:
     def test_syntax_error_propagates(self):
         with pytest.raises(SyntaxError):
             ast_guard.check_imports("def broken(:\n")
+
+
+class TestScrubbedEnv:
+    def test_only_whitelist_survives(self, monkeypatch):
+        monkeypatch.setenv("DATABRICKS_TOKEN", "secret-token")
+        monkeypatch.setenv("DATABRICKS_HOST", "https://example")
+        monkeypatch.setenv("PGPASSWORD", "lakebase-pw")
+        monkeypatch.setenv("TELLR_FERNET_KEY", "fernet-secret")
+        monkeypatch.setenv("PATH", "/usr/bin:/bin")
+        env = jail.build_scrubbed_env()
+        assert env.get("PATH") == "/usr/bin:/bin"
+        assert "DATABRICKS_TOKEN" not in env
+        assert "DATABRICKS_HOST" not in env
+        assert "PGPASSWORD" not in env
+        assert "TELLR_FERNET_KEY" not in env
+        # HOME/TMPDIR point at a fresh dir, not the real home
+        assert env["HOME"] == env["TMPDIR"]
+        assert Path(env["HOME"]).is_dir()
+
+    def test_env_has_no_databricks_keys_at_all(self, monkeypatch):
+        monkeypatch.setenv("DATABRICKS_CLIENT_SECRET", "x")
+        monkeypatch.setenv("DATABRICKS_CLIENT_ID", "y")
+        env = jail.build_scrubbed_env()
+        assert not any(k.startswith("DATABRICKS_") for k in env)
+
+
+class TestNetnsProbe:
+    def test_probe_never_raises(self):
+        # Must return a bool on any platform; on macOS this is False.
+        assert isinstance(jail.netns_available(), bool)
+
+
+class TestWallClockTimeout:
+    def test_runaway_child_is_killed(self, tmp_path):
+        # A minimal runner file that sleeps forever; the jail must kill it.
+        runner = tmp_path / "sleeper.py"
+        runner.write_text(textwrap.dedent("""
+            import time
+            time.sleep(3600)
+        """))
+        result = jail._spawn(
+            runner_file=str(runner),
+            argv=[],
+            timeout_s=1.0,
+            progress_cb=None,
+        )
+        assert result.timed_out is True
+
+
+class TestRlimitsEnforced:
+    @pytest.mark.skipif(
+        sys.platform == "darwin",
+        reason="RLIMIT_AS not enforced on macOS; verified on Linux Apps runtime",
+    )
+    def test_address_space_limit_kills_allocator(self, tmp_path):
+        # Child tries to allocate far beyond RLIMIT_AS -> MemoryError / kill.
+        runner = tmp_path / "hog.py"
+        runner.write_text(textwrap.dedent("""
+            x = bytearray(4 * 1024 * 1024 * 1024)  # 4 GiB > cap
+        """))
+        result = jail._spawn(
+            runner_file=str(runner),
+            argv=[],
+            timeout_s=30.0,
+            progress_cb=None,
+            limits=jail.ResourceLimits(address_space_bytes=512 * 1024 * 1024),
+        )
+        assert result.timed_out is False
+        assert result.returncode != 0
+
+
+class TestEscapeAttempt:
+    def test_generated_style_env_read_sees_no_secrets(self, tmp_path, monkeypatch):
+        # Simulate hostile code trying to read a credential from the env.
+        monkeypatch.setenv("DATABRICKS_TOKEN", "THE-SECRET")
+        out = tmp_path / "leak.txt"
+        runner = tmp_path / "exfil.py"
+        runner.write_text(textwrap.dedent(f"""
+            import os
+            open({str(out)!r}, "w").write(os.environ.get("DATABRICKS_TOKEN", "ABSENT"))
+        """))
+        result = jail._spawn(
+            runner_file=str(runner), argv=[], timeout_s=30.0, progress_cb=None,
+        )
+        assert result.returncode == 0
+        assert out.read_text() == "ABSENT"
