@@ -13,13 +13,17 @@ import json
 import logging
 from datetime import datetime
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
+from src.api.routes._authz import (
+    _check_deck_permission_for_session,
+    _require_session_access,
+)
 from src.api.schemas.requests import CreateSessionRequest, DuplicateSessionRequest
 from src.api.services.session_manager import (
     SessionAccessDeniedError,
@@ -47,105 +51,6 @@ class UpdateSessionRequest(BaseModel):
 
     title: Optional[str] = Field(None, description="Session/deck title")
     slide_count: Optional[int] = Field(None, ge=0, description="Deck slide count")
-
-
-def _get_session_permission(
-    session_info: dict,
-    db: Session,
-) -> Tuple[bool, Optional[PermissionLevel]]:
-    """Check user's permission on a session via deck_contributors.
-
-    Resolves to the root session (parent for contributor sessions) and checks
-    the DeckContributor table for the current user's permission level.
-
-    Args:
-        session_info: Session dict with id, created_by, parent_session_id, etc.
-        db: Database session
-
-    Returns:
-        Tuple of (has_access, permission_level)
-    """
-    perm_ctx = get_permission_context()
-    perm_service = get_permission_service()
-    parent_id = session_info.get("parent_session_internal_id")
-    root_session_id = parent_id if parent_id is not None else session_info.get("id")
-    perm = perm_service.get_deck_permission(
-        db, root_session_id,
-        user_id=perm_ctx.user_id if perm_ctx else None,
-        user_name=perm_ctx.user_name if perm_ctx else None,
-        group_ids=perm_ctx.group_ids if perm_ctx else None,
-    )
-    if perm is None:
-        return False, None
-    return True, perm
-
-
-def _require_session_access(
-    session_info: dict,
-    db: Session,
-    min_permission: PermissionLevel = PermissionLevel.CAN_VIEW,
-) -> PermissionLevel:
-    """Require user has at least the specified permission level on a session.
-    
-    Args:
-        session_info: Session dict with created_by and profile_id
-        db: Database session
-        min_permission: Minimum required permission (default: CAN_VIEW)
-        
-    Returns:
-        The user's actual permission level
-        
-    Raises:
-        HTTPException 403: If user doesn't have required permission
-    """
-    from src.services.permission_service import PERMISSION_PRIORITY
-
-    has_access, permission = _get_session_permission(session_info, db)
-    
-    if not has_access or permission is None:
-        raise HTTPException(
-            status_code=403,
-            detail="You don't have permission to access this session",
-        )
-    
-    if PERMISSION_PRIORITY[permission] < PERMISSION_PRIORITY[min_permission]:
-        raise HTTPException(
-            status_code=403,
-            detail=f"This action requires {min_permission.value} permission",
-        )
-    
-    return permission
-
-
-def _check_deck_permission_for_session(
-    session_id: str,
-    min_permission: PermissionLevel = PermissionLevel.CAN_VIEW,
-) -> None:
-    """Look up a session by string ID, resolve root, and enforce deck permission.
-
-    This is the standard pattern for endpoints that only have a session_id string
-    and need to gate on deck permissions.  It opens its own DB session via
-    ``get_db_session`` so it can be called from endpoints that do not already
-    have one.
-
-    Args:
-        session_id: The string session_id passed to the endpoint.
-        min_permission: Minimum required permission level.
-
-    Raises:
-        HTTPException 404: If the session does not exist (stale tab, deleted session, wrong ID).
-        HTTPException 403: If the caller lacks the required permission.
-    """
-    session_manager = get_session_manager()
-    try:
-        session_info = session_manager.get_session(session_id)
-    except SessionNotFoundError:
-        raise HTTPException(
-            status_code=404,
-            detail=f"Session not found: {session_id}",
-        ) from None
-    with get_db_session() as db:
-        _require_session_access(session_info, db, min_permission)
 
 
 def _substitute_deck_images(deck_dict: dict) -> None:
