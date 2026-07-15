@@ -16,6 +16,7 @@ from typing import Callable, Dict, List, Optional, Tuple
 
 from databricks.sdk import WorkspaceClient
 
+from src.services.converter_jail.codeprep import _fix_apostrophe_strings
 from src.services.google_slides_auth import GoogleSlidesAuth, GoogleSlidesAuthError
 from src.services.google_slides_prompts_defaults import (
     DEFAULT_GSLIDES_SYSTEM_PROMPT,
@@ -141,97 +142,6 @@ def _filter_requests(requests: list) -> list:
         filtered.append(req)
 
     return filtered
-
-
-# ---------------------------------------------------------------------------
-# Apostrophe-in-string syntax fixer
-# ---------------------------------------------------------------------------
-
-def _convert_single_to_double_quoted(line: str) -> str:
-    """Re-quote single-quoted strings that contain apostrophes as double-quoted.
-
-    Scans each single-quote-delimited token on *line*.  When an apostrophe is
-    surrounded by word characters (``\\w'\\w``) it is treated as part of the
-    content (not a closing delimiter), so the scanner continues until it finds a
-    genuine closing quote.  Those strings are then re-emitted with double-quote
-    delimiters so Python can parse them correctly.
-
-    Example::
-
-        'We didn't do it'  →  "We didn't do it"
-    """
-    result: list = []
-    i = 0
-    n = len(line)
-
-    while i < n:
-        if line[i] != "'":
-            result.append(line[i])
-            i += 1
-            continue
-
-        # Scan for the "real" closing quote, treating word-apostrophe-word as content.
-        j = i + 1
-        while j < n:
-            if line[j] == "'":
-                before_word = j > 0 and line[j - 1].isalnum()
-                after_word = (j + 1) < n and line[j + 1].isalnum()
-                if before_word and after_word:
-                    j += 1  # it's a contraction apostrophe — keep scanning
-                    continue
-                break  # genuine closing quote
-            j += 1
-
-        if j >= n:
-            # Never found a real closing quote — rest of line is broken content.
-            content = line[i + 1:]
-            result.append('"' + content.replace('"', '\\"') + '"')
-            break
-
-        content = line[i + 1: j]
-        if re.search(r"\w'\w", content):
-            # Content has an apostrophe → rewrite as double-quoted string.
-            result.append('"' + content.replace('"', '\\"') + '"')
-        else:
-            result.append(line[i: j + 1])
-
-        i = j + 1
-
-    return "".join(result)
-
-
-def _fix_apostrophe_strings(code: str) -> str:
-    """Fix single-quoted literals whose content contains apostrophes (contractions).
-
-    The LLM often emits ``'text': 'We don't ...'``.  The ``'`` in *don't* ends the
-    literal early; the parser may report ``unterminated string``, ``eol while
-    scanning``, or ``invalid character`` (e.g. em-dash) on the remainder.
-
-    Repeatedly ``ast.parse`` and rewrite the error line with
-    :func:`_convert_single_to_double_quoted` whenever that changes the line.
-    """
-    for _ in range(20):  # guard against infinite loops
-        try:
-            ast.parse(code)
-            return code
-        except SyntaxError as exc:
-            if exc.lineno is None:
-                return code
-
-            lines = code.splitlines()
-            line_idx = exc.lineno - 1
-            if line_idx >= len(lines):
-                return code
-
-            original = lines[line_idx]
-            fixed = _convert_single_to_double_quoted(original)
-            if fixed == original:
-                return code  # heuristic cannot improve this error
-
-            lines[line_idx] = fixed
-            code = "\n".join(lines)
-
-    return code
 
 
 # ---------------------------------------------------------------------------
