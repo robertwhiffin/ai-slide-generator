@@ -12,6 +12,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
+from src.api.routes._authz import require_admin
 from src.core.database import get_db
 from src.database.models import SlideDeckPromptLibrary
 
@@ -167,7 +168,8 @@ def get_deck_prompt(
         )
 
 
-@router.post("", response_model=DeckPromptResponse, status_code=status.HTTP_201_CREATED)
+# SDR-4437 HIGH-3: workspace-global library writes are admin-only.
+@router.post("", response_model=DeckPromptResponse, status_code=status.HTTP_201_CREATED, dependencies=[Depends(require_admin)])
 def create_deck_prompt(
     request: DeckPromptCreate,
     db: Session = Depends(get_db),
@@ -248,7 +250,8 @@ def create_deck_prompt(
         )
 
 
-@router.put("/{prompt_id}", response_model=DeckPromptResponse)
+# SDR-4437 HIGH-3: workspace-global library writes are admin-only.
+@router.put("/{prompt_id}", response_model=DeckPromptResponse, dependencies=[Depends(require_admin)])
 def update_deck_prompt(
     prompt_id: int,
     request: DeckPromptUpdate,
@@ -341,7 +344,8 @@ def update_deck_prompt(
         )
 
 
-@router.delete("/{prompt_id}", status_code=status.HTTP_204_NO_CONTENT)
+# SDR-4437 HIGH-3: workspace-global library writes are admin-only.
+@router.delete("/{prompt_id}", status_code=status.HTTP_204_NO_CONTENT, dependencies=[Depends(require_admin)])
 def delete_deck_prompt(
     prompt_id: int,
     hard_delete: bool = False,

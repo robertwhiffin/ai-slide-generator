@@ -13,6 +13,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
+from src.api.routes._authz import require_admin
 from src.core.database import get_db, get_db_session
 from src.database.models import SlideStyleLibrary
 
@@ -178,7 +179,8 @@ def get_slide_style(
         )
 
 
-@router.post("", response_model=SlideStyleResponse, status_code=status.HTTP_201_CREATED)
+# SDR-4437 HIGH-3: workspace-global library writes are admin-only.
+@router.post("", response_model=SlideStyleResponse, status_code=status.HTTP_201_CREATED, dependencies=[Depends(require_admin)])
 def create_slide_style(
     request: SlideStyleCreate,
     db: Session = Depends(get_db),
@@ -263,7 +265,8 @@ def create_slide_style(
         )
 
 
-@router.put("/{style_id}", response_model=SlideStyleResponse)
+# SDR-4437 HIGH-3: workspace-global library writes are admin-only.
+@router.put("/{style_id}", response_model=SlideStyleResponse, dependencies=[Depends(require_admin)])
 def update_slide_style(
     style_id: int,
     request: SlideStyleUpdate,
@@ -368,7 +371,8 @@ def update_slide_style(
         )
 
 
-@router.delete("/{style_id}", status_code=status.HTTP_204_NO_CONTENT)
+# SDR-4437 HIGH-3: workspace-global library writes are admin-only.
+@router.delete("/{style_id}", status_code=status.HTTP_204_NO_CONTENT, dependencies=[Depends(require_admin)])
 def delete_slide_style(
     style_id: int,
     hard_delete: bool = False,
@@ -445,7 +449,8 @@ def delete_slide_style(
         )
 
 
-@router.post("/{style_id}/set-default", response_model=SlideStyleResponse)
+# SDR-4437 HIGH-3: workspace-global library writes are admin-only.
+@router.post("/{style_id}/set-default", response_model=SlideStyleResponse, dependencies=[Depends(require_admin)])
 def set_default_slide_style(style_id: int):
     """Set a slide style as the system-wide default.
 
