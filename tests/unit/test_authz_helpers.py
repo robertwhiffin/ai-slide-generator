@@ -166,15 +166,13 @@ def test_require_admin_fails_closed_on_probe_error(admin_env, monkeypatch):
     assert len(calls) == 2
 
 
-def test_require_admin_permission_denied_is_cached_deny(admin_env, monkeypatch):
-    """A definitive PermissionDenied from the API is a cacheable non-admin verdict."""
-    from databricks.sdk.errors import PermissionDenied
-
+def test_require_admin_definitive_non_admin_is_cached_deny(admin_env, monkeypatch):
+    """A definitive non-admin verdict (absent from all CAN_MANAGE grants) caches."""
     calls = []
 
     def probe(user):
         calls.append(user)
-        raise PermissionDenied("no CAN_MANAGE on app")
+        return False
 
     monkeypatch.setattr(admin_env, "_admin_acl_probe", probe)
     for _ in range(2):
@@ -202,3 +200,119 @@ def test_require_admin_caches_verdict(admin_env, monkeypatch):
     admin_env.require_admin()
     admin_env.require_admin()
     assert probes == ["user@test.com"]  # second call served from cache
+
+
+# ---------------------------------------------------------------------------
+# _admin_acl_probe — membership-in-CAN_MANAGE-grant decision (the redesign)
+#
+# The probe must be a presence-in-grant check, NOT an ACL-readability oracle:
+# a caller who can READ the ACL but is absent from every CAN_MANAGE grant must
+# be DENIED. That is the exact case the old readability-probe design got wrong
+# (it would fail OPEN — every authenticated user classified admin).
+# ---------------------------------------------------------------------------
+
+
+def _acl_entry(*, user_name=None, group_name=None, level="CAN_MANAGE"):
+    """Build a fake ACL entry mirroring the SDK's AccessControlResponse shape."""
+    perm = MagicMock()
+    perm.permission_level = level  # string, as the SDK enum's .value resolves to
+    entry = MagicMock()
+    entry.user_name = user_name
+    entry.group_name = group_name
+    entry.all_permissions = [perm]
+    return entry
+
+
+def _wire_probe(monkeypatch, *, acl_entries, caller_groups, app_name="tellr-app"):
+    """Patch _admin_acl_probe's dependencies: system client ACL + caller groups."""
+    from src.api.routes import _authz
+
+    monkeypatch.setenv("DATABRICKS_APP_NAME", app_name)
+
+    acl = MagicMock()
+    acl.access_control_list = acl_entries
+    fake_client = MagicMock()
+    fake_client.apps.get_permissions.return_value = acl
+
+    monkeypatch.setattr(
+        "src.core.databricks_client.get_system_client", lambda: fake_client
+    )
+    monkeypatch.setattr(
+        _authz, "_caller_group_display_names", lambda client, user: set(caller_groups)
+    )
+    return _authz
+
+
+def test_probe_direct_user_grant_is_admin(monkeypatch):
+    _authz = _wire_probe(
+        monkeypatch,
+        acl_entries=[_acl_entry(user_name="alice@test.com")],
+        caller_groups=[],
+    )
+    assert _authz._admin_acl_probe("alice@test.com") is True
+
+
+def test_probe_group_membership_grant_is_admin(monkeypatch):
+    """Admin ONLY via an inherited group (e.g. workspace 'admins') must pass."""
+    _authz = _wire_probe(
+        monkeypatch,
+        acl_entries=[_acl_entry(group_name="admins")],
+        caller_groups=["admins", "users"],
+    )
+    assert _authz._admin_acl_probe("bob@test.com") is True
+
+
+def test_probe_can_read_but_not_in_grant_is_denied(monkeypatch):
+    """THE FLAW REGRESSION: a caller absent from every CAN_MANAGE grant is
+    NOT admin, even though they can read the whole ACL. The old readability
+    probe returned True here (fail-open); the redesign must return False."""
+    _authz = _wire_probe(
+        monkeypatch,
+        acl_entries=[
+            _acl_entry(user_name="owner@test.com"),
+            _acl_entry(group_name="admins"),
+        ],
+        caller_groups=["users", "tellr consumers"],  # not in any CAN_MANAGE grant
+    )
+    assert _authz._admin_acl_probe("stranger@test.com") is False
+
+
+def test_probe_can_use_only_grant_is_not_admin(monkeypatch):
+    """A grant that is not CAN_MANAGE (e.g. CAN_USE) does not confer admin."""
+    _authz = _wire_probe(
+        monkeypatch,
+        acl_entries=[_acl_entry(user_name="alice@test.com", level="CAN_USE")],
+        caller_groups=[],
+    )
+    assert _authz._admin_acl_probe("alice@test.com") is False
+
+
+def test_probe_missing_app_name_fails_closed(monkeypatch):
+    from src.api.routes import _authz
+
+    monkeypatch.delenv("DATABRICKS_APP_NAME", raising=False)
+    assert _authz._admin_acl_probe("alice@test.com") is False
+
+
+def test_probe_group_name_only_matched_when_caller_is_member(monkeypatch):
+    """A CAN_MANAGE group grant the caller does NOT belong to must not admit."""
+    _authz = _wire_probe(
+        monkeypatch,
+        acl_entries=[_acl_entry(group_name="some-other-team")],
+        caller_groups=["users"],
+    )
+    assert _authz._admin_acl_probe("carol@test.com") is False
+
+
+def test_caller_group_display_names_reads_scim_display(monkeypatch):
+    """_caller_group_display_names returns the SCIM group *display* names."""
+    from src.api.routes import _authz
+
+    g1 = MagicMock(); g1.display = "admins"
+    g2 = MagicMock(); g2.display = "users"
+    user = MagicMock(); user.groups = [g1, g2]
+    client = MagicMock()
+    client.users.list.return_value = [user]
+
+    names = _authz._caller_group_display_names(client, "alice@test.com")
+    assert names == {"admins", "users"}

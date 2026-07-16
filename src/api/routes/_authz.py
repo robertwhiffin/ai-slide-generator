@@ -17,7 +17,6 @@ import os
 import time
 from typing import Optional, Tuple
 
-from databricks.sdk.errors import PermissionDenied
 from fastapi import HTTPException
 from sqlalchemy.orm import Session
 
@@ -249,56 +248,115 @@ def _require_export_job_access(
 
 
 # ---------------------------------------------------------------------------
-# HIGH-2: admin primitive — App CAN_MANAGE via OBO self-test
+# HIGH-2: admin primitive — caller holds CAN_MANAGE in the App's ACL
 # ---------------------------------------------------------------------------
+#
+# SECURITY NOTE (why this is NOT a "can you read the ACL?" test): an earlier
+# design decided admin by whether the caller's OBO client could read the app
+# ACL, on the premise "reading an ACL requires CAN_MANAGE." That premise is
+# FALSE — ``apps.get_permissions`` only needs the ``iam.access-control:read``
+# scope, which is present on every user's OBO token, so a faithful
+# readability probe classifies EVERY authenticated user as admin (fail-OPEN).
+# The correct control is an authorization DECISION: does the caller's own
+# identity (directly, or via a group they belong to) appear in the app ACL
+# with a CAN_MANAGE grant? That is a presence-in-grant check and cannot fail
+# open to "everyone is admin."
 
 _ADMIN_CACHE: dict = {}
 _ADMIN_CACHE_TTL_SECONDS = 60.0
+
+# App ACL entries carry Databricks IAM permission levels as *strings* like
+# "CAN_MANAGE" (databricks.sdk.service.iam.PermissionLevel); do NOT confuse
+# with the deck-permission ``PermissionLevel`` imported at module top.
+_APP_CAN_MANAGE = "CAN_MANAGE"
 
 
 def _is_production() -> bool:
     return os.getenv("ENVIRONMENT", "development") == "production"
 
 
-def _admin_acl_probe(user_name: str) -> bool:
-    """Return True iff the caller's OBO client can read the app's ACL.
+def _caller_group_display_names(client, user_name: str) -> set:
+    """Resolve the caller's group *display names* via workspace SCIM.
 
-    Reading an object's ACL in Databricks requires CAN_MANAGE on it, so a
-    successful ``apps.get_permissions`` call with the caller's own token is
-    the admin test. A CAN_USE-only caller raises ``PermissionDenied``, which
-    ``require_admin`` treats as a definitive (cacheable) deny; any other
-    error (missing OBO client, API/network failure) fails closed for the
-    current request without being cached. Missing app name -> False.
-    ``user_name`` is for logging/attribution only — the *token* is what is
-    being tested.
+    The app ACL identifies groups by ``group_name`` (display name, e.g.
+    "admins"), so membership matching must be on display names — not the
+    group IDs that ``permission_context``/``get_user_groups`` return, and not
+    the request-time permission context (which is built with
+    ``fetch_groups=False`` in production). We therefore look the caller up
+    directly through the system client's SCIM ``users`` API and read the
+    ``display`` of each group they belong to.
+    """
+    users = list(
+        client.users.list(filter=f'userName eq "{user_name}"', attributes="groups")
+    )
+    names: set = set()
+    for u in users:
+        for g in (u.groups or []):
+            if g.display:
+                names.add(g.display)
+    return names
+
+
+def _admin_acl_probe(user_name: str) -> bool:
+    """Return True iff ``user_name`` holds CAN_MANAGE in the app's ACL.
+
+    Admin is a real authorization decision (presence-in-grant), not an ACL
+    readability oracle: the caller is admin iff their ``user_name`` appears
+    as a direct CAN_MANAGE grant in the app ACL, OR any group they belong to
+    appears as a CAN_MANAGE ``group_name`` grant (inherited grants — e.g. the
+    workspace ``admins`` group — count). Both the ACL read and the caller's
+    group resolution use the SP/system client, which is unambiguously
+    permitted to read them and, crucially, does not depend on the caller's
+    OBO scopes (so it cannot be tricked into a fail-open verdict).
+
+    Returns False for a caller absent from every CAN_MANAGE grant (even
+    though such a caller can still *read* the ACL). Missing app name -> False.
+    Raises on genuine infra/API errors so ``require_admin`` can fail closed
+    without caching a transient blip.
     """
     app_name = os.environ.get("DATABRICKS_APP_NAME")
     if not app_name:
         logger.warning("require_admin: DATABRICKS_APP_NAME unset; failing closed")
         return False
-    from src.core.databricks_client import get_user_client
+    from src.core.databricks_client import get_system_client
 
-    client = get_user_client()
-    client.apps.get_permissions(app_name)
-    return True
+    client = get_system_client()
+    acl = client.apps.get_permissions(app_name)
+
+    caller_groups = _caller_group_display_names(client, user_name)
+
+    for entry in (acl.access_control_list or []):
+        grants_manage = any(
+            getattr(p.permission_level, "value", p.permission_level) == _APP_CAN_MANAGE
+            for p in (entry.all_permissions or [])
+        )
+        if not grants_manage:
+            continue
+        if entry.user_name and entry.user_name == user_name:
+            return True
+        if entry.group_name and entry.group_name in caller_groups:
+            return True
+    return False
 
 
 def require_admin() -> None:
-    """FastAPI dependency: caller must hold CAN_MANAGE on the Databricks App.
+    """FastAPI dependency: caller must hold CAN_MANAGE in the app's ACL.
 
     - Local dev/test: bypass (dev auth is DEV_USER_ID with no token or ACL
       behind it) — same pattern as the dev-only CORS gate in main.py.
+    - Admin verdict = ``_admin_acl_probe`` (a presence-in-grant check against
+      the app ACL, direct or via group membership). See the SECURITY NOTE
+      above for why this is a membership decision, not an ACL-readability
+      test.
     - Verdicts cached per-username with a short TTL. The cache is in-memory
       and therefore per-worker — deliberately fine here: a cache miss on
-      another worker just re-runs the ACL lookup; correctness never depends
-      on which worker got the request.
-    - Only *definitive* verdicts are cached: a probe result, or a
-      ``PermissionDenied`` from the API (the token demonstrably lacks
-      CAN_MANAGE). Transient probe errors fail closed for the current
-      request but are NOT cached — otherwise one network blip would lock a
-      real admin out for the full TTL.
-    - Fail closed (403) on non-admin, missing user, missing OBO client, or
-      lookup error.
+      another worker just re-runs the lookup; correctness never depends on
+      which worker got the request.
+    - Only *definitive* verdicts are cached (the probe's True/False result).
+      Transient probe errors fail closed for the current request but are NOT
+      cached — otherwise one network blip would lock a real admin out for the
+      full TTL.
+    - Fail closed (403) on non-admin, missing user, or lookup error.
     """
     if not _is_production():
         return
@@ -313,14 +371,12 @@ def require_admin() -> None:
     else:
         try:
             verdict = _admin_acl_probe(user)
-            _ADMIN_CACHE[user] = (verdict, now)
-        except PermissionDenied:
-            # Definitive API answer: the token lacks CAN_MANAGE. Cacheable.
-            verdict = False
+            # Definitive membership verdict (True or False). Cacheable.
             _ADMIN_CACHE[user] = (verdict, now)
         except Exception:
             logger.warning(
-                "require_admin: ACL probe failed for %s; failing closed (uncached)",
+                "require_admin: ACL membership check failed for %s; failing "
+                "closed (uncached)",
                 user,
                 exc_info=True,
             )
