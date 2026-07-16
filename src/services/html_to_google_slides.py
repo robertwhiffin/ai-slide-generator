@@ -34,6 +34,12 @@ MAX_CONCURRENT_LLM = 5
 _RETRY_MAX_ATTEMPTS = 5
 _RETRY_BASE_DELAY = 5  # seconds
 
+# SDR-4437 PR-5: safe basename for a tellr-asset:// filename. No path
+# separators, no leading dot-dot — a plain asset filename only. Both the
+# schema gate (_validate_requests) and the uploader (_upload_and_substitute_assets)
+# enforce this before the untrusted filename ever reaches the filesystem.
+_SAFE_ASSET_NAME_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
+
 
 def _is_rate_limit_error(exc: Exception) -> bool:
     """True if the exception is a 429 rate-limit error from the Google API."""
@@ -1149,7 +1155,18 @@ class HtmlToGoogleSlidesConverter:
 
     def _validate_requests(self, requests):
         """Schema-gate emitted requests. Raises GoogleSlidesConversionError on
-        any unknown top-level key or a non-placeholder/non-https image url."""
+        any unknown top-level key or an image url that is not a
+        ``tellr-asset://<safe-basename>`` placeholder.
+
+        SDR-4437 PR-5 hardening: the ONLY accepted createImage url shape is the
+        placeholder scheme with a safe basename (``^[A-Za-z0-9_.-]+$``, no path
+        separators). Raw ``https://`` urls are rejected — every legitimate image
+        now flows through host-side upload of a ``tellr-asset://`` placeholder,
+        so accepting attacker-controlled ``https://`` would be a Google-side
+        SSRF (Google fetches the url server-side). Rejecting non-basename
+        filenames here is the first of two path-traversal guards; the second is
+        the resolved-path containment check in
+        ``_upload_and_substitute_assets``."""
         if not isinstance(requests, list):
             raise GoogleSlidesConversionError("requests must be a list")
         from src.services.converter_jail import protocol
@@ -1161,18 +1178,31 @@ class HtmlToGoogleSlidesConverter:
                 raise GoogleSlidesConversionError(f"disallowed request type: {key}")
             if key == "createImage":
                 url = (val or {}).get("url", "")
-                if not (url.startswith(protocol.ASSET_SCHEME) or url.startswith("https://")):
+                if not url.startswith(protocol.ASSET_SCHEME):
                     raise GoogleSlidesConversionError(f"disallowed image url: {url!r}")
+                filename = url[len(protocol.ASSET_SCHEME):]
+                if not _SAFE_ASSET_NAME_RE.match(filename):
+                    raise GoogleSlidesConversionError(
+                        f"unsafe asset filename: {filename!r}"
+                    )
         return requests
 
     def _upload_and_substitute_assets(self, requests, drive_service, assets_dir):
         """Upload each tellr-asset:// referenced file to Drive and substitute
-        the real URL. Records uploaded file IDs on self._uploaded_file_ids."""
+        the real URL. Records uploaded file IDs on self._uploaded_file_ids.
+
+        SDR-4437 PR-5 hardening: the filename comes from untrusted LLM-emitted
+        request data, so before opening the file we confine the resolved path
+        to ``assets_dir``. This blocks absolute-path (``tellr-asset:///proc/self/environ``
+        — ``Path(base) / "/abs"`` discards ``base``) and traversal
+        (``tellr-asset://../../etc/passwd``) reads that would otherwise be
+        uploaded to Drive and made world-readable by the trusted host."""
         from googleapiclient.http import MediaFileUpload
         from src.services.converter_jail import protocol
 
         if not hasattr(self, "_uploaded_file_ids"):
             self._uploaded_file_ids = []
+        base = Path(assets_dir).resolve()
         cache = {}
         for req in requests:
             if "createImage" not in req:
@@ -1182,7 +1212,15 @@ class HtmlToGoogleSlidesConverter:
                 continue
             filename = url[len(protocol.ASSET_SCHEME):]
             if filename not in cache:
-                path = Path(assets_dir) / filename
+                if not _SAFE_ASSET_NAME_RE.match(filename):
+                    raise GoogleSlidesConversionError(
+                        f"unsafe asset filename: {filename!r}"
+                    )
+                path = (base / filename).resolve()
+                if not path.is_relative_to(base):
+                    raise GoogleSlidesConversionError(
+                        f"asset path escapes assets_dir: {filename!r}"
+                    )
                 media = MediaFileUpload(str(path), mimetype="image/png")
                 created = _retry_api_call(
                     lambda: drive_service.files().create(

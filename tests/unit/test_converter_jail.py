@@ -111,6 +111,52 @@ class TestWallClockTimeout:
         assert result.timed_out is True
 
 
+class TestJailHomeCleanup:
+    """SDR-4437 PR-5 MEDIUM: the per-launch HOME/TMPDIR temp dir must be
+    removed on every exit path (no per-deck disk leak / DoS)."""
+
+    def test_home_dir_removed_after_success(self, tmp_path, monkeypatch):
+        captured = {}
+        real_build = jail.build_scrubbed_env
+
+        def _spy():
+            env = real_build()
+            captured["home"] = env["HOME"]
+            return env
+
+        monkeypatch.setattr(jail, "build_scrubbed_env", _spy)
+
+        runner = tmp_path / "noop.py"
+        runner.write_text("pass\n")
+        result = jail._spawn(
+            runner_file=str(runner), argv=[], timeout_s=30.0, progress_cb=None,
+        )
+        assert result.timed_out is False
+        assert not Path(captured["home"]).exists()  # cleaned up
+
+    def test_home_dir_removed_after_timeout(self, tmp_path, monkeypatch):
+        captured = {}
+        real_build = jail.build_scrubbed_env
+
+        def _spy():
+            env = real_build()
+            captured["home"] = env["HOME"]
+            return env
+
+        monkeypatch.setattr(jail, "build_scrubbed_env", _spy)
+
+        runner = tmp_path / "sleeper.py"
+        runner.write_text(textwrap.dedent("""
+            import time
+            time.sleep(3600)
+        """))
+        result = jail._spawn(
+            runner_file=str(runner), argv=[], timeout_s=1.0, progress_cb=None,
+        )
+        assert result.timed_out is True
+        assert not Path(captured["home"]).exists()  # cleaned up even on kill
+
+
 class TestRlimitsEnforced:
     @pytest.mark.skipif(
         sys.platform == "darwin",

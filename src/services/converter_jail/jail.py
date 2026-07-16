@@ -146,62 +146,70 @@ def _spawn(
     env = build_scrubbed_env()
     stderr_lines: List[str] = []
 
+    # SDR-4437 PR-5: the per-launch HOME/TMPDIR/cwd temp dir must be removed on
+    # EVERY exit path (success, timeout, or launch failure) — otherwise one dir
+    # leaks per deck and the child can fill it up to RLIMIT_FSIZE (disk-
+    # exhaustion DoS). The whole spawn is wrapped so cleanup also covers a
+    # Popen failure.
     try:
-        proc = subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            env=env,
-            cwd=env["HOME"],
-            preexec_fn=_rlimit_preexec(limits),
-            text=True,
-        )
-    except Exception as exc:  # launch failure, not a child error
-        raise JailError(f"Failed to launch jail: {exc}") from exc
-
-    def _drain_stderr():
-        assert proc.stderr is not None
-        for line in proc.stderr:
-            stderr_lines.append(line)
-            if len(stderr_lines) > 200:
-                del stderr_lines[0]
-
-    err_thread = threading.Thread(target=_drain_stderr, daemon=True)
-    err_thread.start()
-
-    assert proc.stdout is not None
-
-    def _drain_stdout():
-        for line in proc.stdout:
-            decoded = protocol.decode_progress(line)
-            if decoded and progress_cb:
-                try:
-                    progress_cb(*decoded)
-                except Exception:
-                    logger.debug("progress_cb raised", exc_info=True)
-
-    out_thread = threading.Thread(target=_drain_stdout, daemon=True)
-    out_thread.start()
-
-    timed_out = False
-    try:
-        proc.wait(timeout=timeout_s)
-    except subprocess.TimeoutExpired:
-        timed_out = True
         try:
-            os.killpg(os.getpgid(proc.pid), 9)
-        except Exception:
-            proc.kill()
-        proc.wait()
-    finally:
-        out_thread.join(timeout=1.0)
-        err_thread.join(timeout=1.0)
+            proc = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                env=env,
+                cwd=env["HOME"],
+                preexec_fn=_rlimit_preexec(limits),
+                text=True,
+            )
+        except Exception as exc:  # launch failure, not a child error
+            raise JailError(f"Failed to launch jail: {exc}") from exc
 
-    return JailResult(
-        returncode=proc.returncode if proc.returncode is not None else -1,
-        timed_out=timed_out,
-        stderr_tail="".join(stderr_lines[-40:]),
-    )
+        def _drain_stderr():
+            assert proc.stderr is not None
+            for line in proc.stderr:
+                stderr_lines.append(line)
+                if len(stderr_lines) > 200:
+                    del stderr_lines[0]
+
+        err_thread = threading.Thread(target=_drain_stderr, daemon=True)
+        err_thread.start()
+
+        assert proc.stdout is not None
+
+        def _drain_stdout():
+            for line in proc.stdout:
+                decoded = protocol.decode_progress(line)
+                if decoded and progress_cb:
+                    try:
+                        progress_cb(*decoded)
+                    except Exception:
+                        logger.debug("progress_cb raised", exc_info=True)
+
+        out_thread = threading.Thread(target=_drain_stdout, daemon=True)
+        out_thread.start()
+
+        timed_out = False
+        try:
+            proc.wait(timeout=timeout_s)
+        except subprocess.TimeoutExpired:
+            timed_out = True
+            try:
+                os.killpg(os.getpgid(proc.pid), 9)
+            except Exception:
+                proc.kill()
+            proc.wait()
+        finally:
+            out_thread.join(timeout=1.0)
+            err_thread.join(timeout=1.0)
+
+        return JailResult(
+            returncode=proc.returncode if proc.returncode is not None else -1,
+            timed_out=timed_out,
+            stderr_tail="".join(stderr_lines[-40:]),
+        )
+    finally:
+        shutil.rmtree(env["HOME"], ignore_errors=True)
 
 
 def run_pptx_jail(
