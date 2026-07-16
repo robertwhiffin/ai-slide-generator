@@ -9,6 +9,7 @@ from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
+from src.api.routes._authz import require_admin
 from src.api.utils.validation import validate_credentials_json
 from src.core.database import get_db
 from src.core.encryption import decrypt_data, encrypt_data
@@ -23,7 +24,10 @@ from src.database.models.google_oauth_token import GoogleOAuthToken
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/api/admin", tags=["admin"])
+# SDR-4437 HIGH-2: entire admin surface requires App CAN_MANAGE.
+router = APIRouter(
+    prefix="/api/admin", tags=["admin"], dependencies=[Depends(require_admin)]
+)
 
 _MAX_CREDENTIALS_SIZE = 100 * 1024
 

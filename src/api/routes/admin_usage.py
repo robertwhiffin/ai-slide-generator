@@ -1,4 +1,4 @@
-"""Admin usage-analytics endpoints (ungated, like the rest of /admin)."""
+"""Admin usage-analytics endpoints (admin-gated, like the rest of /admin)."""
 
 import logging
 from datetime import date as dt_date
@@ -7,11 +7,18 @@ from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
 
+from src.api.routes._authz import require_admin
 from src.api.services.usage_service import MAX_WINDOW_DAYS, UsageService
 from src.core.database import get_db
 
 logger = logging.getLogger(__name__)
-router = APIRouter(prefix="/api/admin/usage", tags=["admin-usage"])
+
+# SDR-4437 MEDIUM-6: workspace-wide usage analytics are admin-only.
+router = APIRouter(
+    prefix="/api/admin/usage",
+    tags=["admin-usage"],
+    dependencies=[Depends(require_admin)],
+)
 
 
 def _parse_date(value: str, name: str) -> dt_date:
