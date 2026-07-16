@@ -395,8 +395,13 @@ class TestDatabaseLoadPreservesScripts:
         assert "dbChart" in deck.slides[0].scripts
         assert deck.slides[1].scripts == ""
 
-    def test_cache_hit_skips_database(self):
-        """When deck is in cache, database should not be called."""
+    def test_cache_hit_with_current_version_skips_deck_rebuild(self):
+        """When the cached deck matches the DB version, it is served as-is.
+
+        A cache hit still performs a version lookup (the cache is per-process
+        while prod runs multiple uvicorn workers sharing one database), but it
+        must not re-parse/rebuild the deck — the cached object is returned.
+        """
         service = ChatService.__new__(ChatService)
         service.agent = MagicMock()
 
@@ -406,15 +411,16 @@ class TestDatabaseLoadPreservesScripts:
         session_id = "test-session"
         cached_deck = _create_deck_with_charts(1, 0)
         service._deck_cache = {session_id: cached_deck}
+        service._deck_cache_versions = {session_id: 3}
 
         mock_sm = MagicMock()
+        mock_sm.get_slide_deck.return_value = {"version": 3}
 
         with patch("src.api.services.chat_service.get_session_manager", return_value=mock_sm):
             deck = service._get_or_load_deck(session_id)
 
-        # Should return cached deck without calling database
+        # Same object back — no reconstruction from the database payload
         assert deck is cached_deck
-        mock_sm.get_slide_deck.assert_not_called()
 
 
 class TestCanvasIdExtraction:
