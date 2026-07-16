@@ -29,7 +29,6 @@ from src.api.services.session_manager import get_session_manager
 from src.core.database import get_db_session
 from src.core.permission_context import get_permission_context
 from src.core.settings_db import get_default_slide_style_id
-from src.domain.slide import Slide
 from src.domain.slide_deck import SlideDeck
 from src.services.permission_service import get_permission_service
 
@@ -446,32 +445,14 @@ def _render_deck_response(
         base_url: Public app URL prefix for building deck URLs. Empty
             string yields relative URLs.
 
-    ``SlideDeck`` has no ``from_dict`` constructor, so the deck is
-    rebuilt by constructing ``Slide`` instances for each entry in
-    ``deck_dict["slides"]`` and handing them to ``SlideDeck.__init__``
-    together with the stored title, CSS, external scripts, and head
-    metadata.
+    ``SlideDeck.from_dict`` rebuilds the deck from the stored snapshot,
+    including per-slide scripts/metadata and head metadata.
     """
     deck_dict = deck_dict or {}
     if deck_dict:
-        slides = [
-            Slide(
-                html=s.get("html", ""),
-                scripts=s.get("scripts", ""),
-                slide_id=s.get("slide_id"),
-                created_by=s.get("created_by"),
-                created_at=s.get("created_at"),
-                modified_by=s.get("modified_by"),
-                modified_at=s.get("modified_at"),
-            )
-            for s in deck_dict.get("slides", [])
-        ]
-        deck = SlideDeck(
+        deck = SlideDeck.from_dict(
+            deck_dict,
             title=deck_dict.get("title") or session.get("title"),
-            css=deck_dict.get("css", ""),
-            external_scripts=list(deck_dict.get("external_scripts") or []),
-            slides=slides,
-            head_meta=dict(deck_dict.get("head_meta") or {}),
         )
     else:
         deck = SlideDeck(title=session.get("title"))

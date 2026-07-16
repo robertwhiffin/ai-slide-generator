@@ -134,3 +134,18 @@ class CreateSessionRequest(BaseModel):
         description="Optional session title",
         max_length=255,
     )
+
+
+class DuplicateSessionRequest(BaseModel):
+    """Request model for duplicating an existing slide deck session."""
+
+    title: Optional[str] = Field(
+        default=None,
+        description="Optional title for the duplicated deck (default: Copy of {source title})",
+        max_length=255,
+    )
+    version_number: Optional[int] = Field(
+        default=None,
+        ge=1,
+        description="Optional save point version to copy instead of the live deck",
+    )

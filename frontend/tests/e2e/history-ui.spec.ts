@@ -58,6 +58,23 @@ async function setupMocks(page: Page) {
       return;
     }
 
+    // Handle deck duplicate
+    if (method === 'POST' && url.includes('/duplicate')) {
+      route.fulfill({
+        status: 201,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          session_id: 'copy-session-1',
+          title: 'Copy of Session 2026-01-08 20:38',
+          created_by: 'test@test.com',
+          created_at: '2026-01-01T00:00:00Z',
+          slide_count: 3,
+          source_session_id: 'sess-1',
+        }),
+      });
+      return;
+    }
+
     // Handle session creation
     if (method === 'POST') {
       route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ session_id: 'mock', title: 'New', user_id: null, created_at: '2026-01-01T00:00:00Z' }) });
@@ -345,6 +362,73 @@ test.describe('SessionHistory Delete', () => {
     // Sessions count should be unchanged (mocked data doesn't actually change)
     const sessionsAfter = await page.locator('tbody tr').count();
     expect(sessionsAfter).toBe(sessionsBefore);
+  });
+});
+
+// ============================================
+// Duplicate Session Tests
+// ============================================
+
+test.describe('SessionHistory Duplicate', () => {
+  test.beforeEach(async ({ page }) => {
+    await setupMocks(page);
+  });
+
+  test('shows Duplicate action on My Sessions rows', async ({ page }) => {
+    await goToHistory(page);
+
+    await expect(page.getByRole('button', { name: 'Duplicate' }).first()).toBeVisible();
+  });
+
+  test('clicking Duplicate on My Sessions calls duplicate API', async ({ page }) => {
+    let duplicateCalled = false;
+    await page.route('http://127.0.0.1:8000/api/sessions/**/duplicate', (route) => {
+      duplicateCalled = true;
+      route.fulfill({
+        status: 201,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          session_id: 'copy-session-1',
+          title: 'Copy of Session 2026-01-08 20:38',
+          created_by: 'test@test.com',
+          created_at: '2026-01-01T00:00:00Z',
+          slide_count: 3,
+          source_session_id: 'sess-1',
+        }),
+      });
+    });
+
+    await goToHistory(page);
+    await page.getByRole('button', { name: 'Duplicate' }).first().click();
+    await expect.poll(() => duplicateCalled).toBe(true);
+  });
+
+  test('shows Duplicate action on Shared with Me rows', async ({ page }) => {
+    await page.route('http://127.0.0.1:8000/api/sessions/shared**', (route) => {
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          presentations: [
+            {
+              session_id: 'shared-1',
+              title: 'Shared Deck',
+              created_by: 'owner@test.com',
+              created_at: '2026-01-01T00:00:00Z',
+              last_activity: '2026-01-02T00:00:00Z',
+              modified_by: 'owner@test.com',
+              modified_at: '2026-01-02T00:00:00Z',
+              my_permission: 'CAN_VIEW',
+            },
+          ],
+          count: 1,
+        }),
+      });
+    });
+
+    await goToHistory(page);
+    await page.getByRole('button', { name: 'Shared with Me' }).click();
+    await expect(page.getByRole('button', { name: 'Duplicate' })).toBeVisible();
   });
 });
 

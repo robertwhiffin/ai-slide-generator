@@ -113,6 +113,16 @@ export interface Session {
   global_permission?: 'CAN_VIEW' | 'CAN_EDIT' | null;
 }
 
+export interface DuplicateSessionResult {
+  session_id: string;
+  title: string;
+  created_by: string;
+  created_at: string;
+  slide_count: number;
+  source_session_id: string;
+  source_version_number?: number;
+}
+
 export interface SharedPresentation {
   session_id: string;
   title: string | null;
@@ -408,8 +418,15 @@ export const api = {
   /**
    * List user's own sessions (My Sessions)
    */
-  async listSessions(limit = 50): Promise<{ sessions: Session[]; count: number }> {
-    const response = await fetch(`${API_BASE_URL}/api/sessions?limit=${limit}`);
+  async listSessions(
+    limit = 50,
+    options?: { deckOnly?: boolean },
+  ): Promise<{ sessions: Session[]; count: number }> {
+    const params = new URLSearchParams({ limit: String(limit) });
+    if (options?.deckOnly) {
+      params.set('deck_only', 'true');
+    }
+    const response = await fetch(`${API_BASE_URL}/api/sessions?${params.toString()}`);
 
     if (!response.ok) {
       throw new ApiError(response.status, 'Failed to list sessions');
@@ -527,6 +544,38 @@ export const api = {
     if (currentSessionId === sessionId) {
       currentSessionId = null;
     }
+  },
+
+  /**
+   * Duplicate a slide deck into a new private session for the current user.
+   */
+  async duplicateSession(
+    sessionId: string,
+    options?: { title?: string; versionNumber?: number },
+  ): Promise<DuplicateSessionResult> {
+    const body: Record<string, unknown> = {};
+    if (options?.title) {
+      body.title = options.title;
+    }
+    if (options?.versionNumber != null) {
+      body.version_number = options.versionNumber;
+    }
+    const response = await fetch(`${API_BASE_URL}/api/sessions/${sessionId}/duplicate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+
+    if (!response.ok) {
+      const detail = response.status === 403
+        ? 'You do not have permission to duplicate this deck'
+        : response.status === 400
+          ? 'This session has no slide deck to duplicate'
+          : 'Failed to duplicate session';
+      throw new ApiError(response.status, detail);
+    }
+
+    return response.json();
   },
 
   /**

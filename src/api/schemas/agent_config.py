@@ -97,3 +97,20 @@ def resolve_agent_config(raw: Optional[dict]) -> AgentConfig:
     if raw is None:
         return AgentConfig()
     return AgentConfig.model_validate(raw)
+
+
+def sanitize_agent_config_for_persist(
+    raw: Optional[dict | AgentConfig],
+) -> Optional[dict]:
+    """Return agent_config safe to store on a new session or profile.
+
+    Strips session-specific fields (e.g. Genie ``conversation_id``) so copies
+    do not inherit another session's conversation state.
+    """
+    if raw is None:
+        return None
+    config = raw if isinstance(raw, AgentConfig) else resolve_agent_config(raw)
+    for tool in config.tools:
+        if isinstance(tool, GenieTool):
+            tool.conversation_id = None
+    return config.model_dump()
