@@ -723,6 +723,33 @@ class SessionManager:
                 "version": deck.version,
             }
 
+    def get_slide_deck_version(self, session_id: str) -> Optional[int]:
+        """Return only the deck's current version number.
+
+        Selects a single column — no deck_json parse, verification merge, or
+        display-name resolution — so it is cheap enough to run on every
+        deck-cache hit (multi-worker cache validation) and before LLM calls
+        (optimistic locking).
+
+        Args:
+            session_id: Session to check (contributor sessions resolve to the
+                owner's deck)
+
+        Returns:
+            Current version number, or None if the session/deck doesn't exist
+        """
+        with get_db_session() as db:
+            try:
+                session = self._get_session_or_raise(db, session_id)
+            except SessionNotFoundError:
+                return None
+            deck_owner = self._get_deck_owner_session(db, session)
+            return (
+                db.query(SessionSlideDeck.version)
+                .filter(SessionSlideDeck.session_id == deck_owner.id)
+                .scalar()
+            )
+
     def get_slide_deck(self, session_id: str) -> Optional[Dict[str, Any]]:
         """Get slide deck for a session with verification merged by content hash.
 
