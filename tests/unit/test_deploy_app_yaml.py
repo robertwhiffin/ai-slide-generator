@@ -43,8 +43,13 @@ def test_write_app_yaml_is_keyless():
     assert "GOOGLE_OAUTH_ENCRYPTION_KEY" not in content
 
 
-def test_app_yaml_has_no_databricks_token():
-    """MEDIUM-4: SP auth via auto-injected OAuth M2M creds, not a token env var."""
+def test_app_yaml_has_databricks_token():
+    """MEDIUM-4 DROPPED: DATABRICKS_TOKEN stays in app.yaml. It is a
+    platform-managed short-lived OAuth token reference (valueFrom:
+    system.databricks_token), not a hardcoded secret, and MLflow tracing
+    reads it from the env — dropping it broke MLflow, so it is retained.
+    (CRITICAL-3 still removes GOOGLE_OAUTH_ENCRYPTION_KEY — see the keyless
+    test above.)"""
     import tempfile
     from pathlib import Path
 
@@ -53,6 +58,6 @@ def test_app_yaml_has_no_databricks_token():
     with tempfile.TemporaryDirectory() as td:
         deploy._write_app_yaml(Path(td), "lb", "app_data")
         content = (Path(td) / "app.yaml").read_text()
-    assert "DATABRICKS_TOKEN" not in content
-    assert "system.databricks_token" not in content
+    assert "DATABRICKS_TOKEN" in content
+    assert "system.databricks_token" in content
     assert "DATABRICKS_HOST" in content  # still required by create_user_client
