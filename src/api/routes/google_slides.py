@@ -18,8 +18,13 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from src.api.services.chat_service import get_chat_service
+from src.api.routes._authz import (
+    _check_deck_permission_for_session,
+    _require_export_job_access,
+)
 from src.api.routes.export import ExportJobResponse
 from src.core.database import get_db
+from src.database.models.profile_contributor import PermissionLevel
 from src.services.drive_uploader import replace_presentation, upload_pptx_as_slides
 from src.services.google_slides_auth import GoogleSlidesAuth, GoogleSlidesAuthError
 from src.services.pptx_from_records import EmitError, build_pptx
@@ -254,6 +259,9 @@ async def start_google_slides_export(
     2. Enqueue background job for the slow LLM conversion.
     3. Return job_id so the frontend can poll.
     """
+    # SDR-4437 HIGH-1: caller must hold CAN_VIEW on the deck being exported.
+    _check_deck_permission_for_session(request_body.session_id, PermissionLevel.CAN_VIEW)
+
     from src.api.services.export_job_queue import (
         enqueue_export_job,
         generate_job_id,
@@ -343,6 +351,9 @@ async def poll_google_slides_export(job_id: str):
     When ``status`` is ``completed``, the response includes
     ``presentation_id`` and ``presentation_url``.
     """
+    # SDR-4437: job-ID IDOR — possession of a job_id must not grant access.
+    _require_export_job_access(job_id)
+
     from src.api.services.export_job_queue import build_export_job_response
 
     try:
@@ -386,6 +397,9 @@ async def export_google_slides_from_records(
 
     Re-exports on the same session overwrite the previous presentation.
     """
+    # SDR-4437 HIGH-1: caller must hold CAN_VIEW on the deck being exported.
+    _check_deck_permission_for_session(request.session_id, PermissionLevel.CAN_VIEW)
+
     try:
         auth = _get_auth(db)
     except GoogleSlidesAuthError as exc:
@@ -482,6 +496,9 @@ async def export_google_slides_from_huashu(
     Re-exports on the same session overwrite the previous presentation
     (same as ``/from-records``).
     """
+    # SDR-4437 HIGH-1: caller must hold CAN_VIEW on the deck being exported.
+    _check_deck_permission_for_session(request.session_id, PermissionLevel.CAN_VIEW)
+
     from src.services.pptx_from_html_huashu import (
         HuashuExportError,
         build_pptx_huashu,
