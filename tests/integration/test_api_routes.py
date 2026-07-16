@@ -109,13 +109,17 @@ def mock_session_manager(test_db):
          patch("src.api.routes.slides.get_session_manager") as mock_slides, \
          patch("src.api.routes.sessions.get_session_manager") as mock_sessions, \
          patch("src.api.routes.verification.get_session_manager") as mock_verify, \
+         patch("src.api.routes._authz.get_session_manager") as mock_authz, \
          patch("src.api.routes.chat.get_current_user", return_value="test@local.dev"), \
          patch("src.api.routes.slides.get_current_user", return_value="test@local.dev"), \
          patch("src.api.routes.sessions.get_current_user", return_value="test@local.dev"), \
+         patch("src.api.routes._authz.get_current_user", return_value="test@local.dev"), \
          patch("src.api.routes.chat.get_permission_context", return_value=perm_ctx), \
          patch("src.api.routes.slides.get_permission_context", return_value=perm_ctx), \
          patch("src.api.routes.sessions.get_permission_context", return_value=perm_ctx), \
-         patch("src.api.routes.sessions.get_db_session", _fake_db_session):
+         patch("src.api.routes._authz.get_permission_context", return_value=perm_ctx), \
+         patch("src.api.routes.sessions.get_db_session", _fake_db_session), \
+         patch("src.api.routes._authz.get_db_session", _fake_db_session):
 
         manager = MagicMock()
         manager.acquire_session_lock.return_value = True
@@ -132,6 +136,7 @@ def mock_session_manager(test_db):
         mock_slides.return_value = manager
         mock_sessions.return_value = manager
         mock_verify.return_value = manager
+        mock_authz.return_value = manager
         yield manager
 
 
