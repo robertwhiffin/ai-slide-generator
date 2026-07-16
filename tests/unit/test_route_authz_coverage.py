@@ -44,6 +44,13 @@ _PERMISSION_CALL_RE = re.compile(
     r"|_require_manage"             # deck_contributors.py
     r"|get_deck_permission"         # profiles.py / sessions.py inline checks
     r")\s*[(,]"
+    # images.py PUT/DELETE enforce HIGH-1 owner-scoping with a bespoke inline
+    # check rather than a deck-permission helper: `if image.uploaded_by !=
+    # <caller>: raise HTTPException(403, ...)`. Verified enforcing (per-endpoint
+    # 403 tests: test_update_image_other_owner_403 / test_delete_image_other_owner_403
+    # in test_authz_images.py) — the `!=`-then-raise IS the gate. Matched as a
+    # verified enforcement token per the Task-4/Task-15 decision procedure.
+    r"|image\.uploaded_by\s*!="
 )
 
 ADMIN_PATH_PREFIXES = (
