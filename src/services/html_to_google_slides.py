@@ -4,7 +4,6 @@
 import ast
 import asyncio
 import base64
-import importlib.util
 import logging
 import re
 import shutil
@@ -447,40 +446,94 @@ class HtmlToGoogleSlidesConverter:
             extra={"total_slides": total, "duration_s": f"{time.time() - t0:.1f}"},
         )
 
-        # ── Phase 2: Sequential Google Slides API execution ───────────────
+        # ── Phase 2a: create all slide pages (host-side; page_ids known up front)
+        page_ids = []
+        for i in range(1, total + 1):
+            page_id = f"slide_{uuid.uuid4().hex[:12]}"
+            try:
+                _retry_api_call(
+                    lambda _pid=pres_id, _pg=page_id: slides_service.presentations().batchUpdate(
+                        presentationId=_pid,
+                        body={"requests": [{"createSlide": {
+                            "objectId": _pg,
+                            "slideLayoutReference": {"predefinedLayout": "BLANK"},
+                        }}]},
+                    ).execute(),
+                    label=f"createSlide {i}/{total}",
+                )
+                page_ids.append(page_id)
+            except Exception:
+                logger.error("Failed to create slide %d after retries", i, exc_info=True)
+                page_ids.append(None)
+
+        # ── Phase 2b: emit all batchUpdate requests inside the jail (no network)
+        import json as _json
+        import shutil as _shutil
+        from src.services.converter_jail import run_gslides_jail
+
+        job_dir = self._build_gslides_job_dir(codes, slide_inputs, page_ids)
+        requests_out = str(Path(job_dir) / "requests.json")
+        emitted = []
+        try:
+            # to_thread: the jail blocks on proc.wait for the whole deck and
+            # this coroutine runs on the event loop (same rationale as the
+            # PPTX call sites in Task 4).
+            result = await asyncio.to_thread(run_gslides_jail, job_dir, requests_out)
+            if result.timed_out or result.returncode != 0:
+                logger.error("GSlides jail failed rc=%s timeout=%s: %s",
+                             result.returncode, result.timed_out, result.stderr_tail)
+            else:
+                emitted = _json.loads(Path(requests_out).read_text())
+        finally:
+            _shutil.rmtree(job_dir, ignore_errors=True)
+        by_index = {e["index"]: e for e in emitted}
+
+        # ── Phase 2c: execute per slide on the host (validate, upload, chunked)
         for i, (code, (html_str, chart_files, content_files, assets_dir)) in enumerate(
             zip(codes, slide_inputs), 1,
         ):
-            print(f"[GSLIDES_CONVERTER] Executing slide {i}/{total}")
-            page_id = f"slide_{uuid.uuid4().hex[:12]}"
-            try:
-                create_body: dict = {
-                    "objectId": page_id,
-                    "slideLayoutReference": {"predefinedLayout": "BLANK"},
-                }
-                _retry_api_call(
-                    lambda _pid=pres_id, _body=create_body: (
-                        slides_service.presentations().batchUpdate(
-                            presentationId=_pid,
-                            body={"requests": [{"createSlide": _body}]},
-                        ).execute()
-                    ),
-                    label=f"createSlide {i}/{total}",
-                )
-            except Exception:
-                logger.error("Failed to create slide %d after retries", i, exc_info=True)
+            page_id = page_ids[i - 1]
+            if page_id is None:
                 continue
+            entry = by_index.get(i - 1)
+            requests = entry.get("requests") if entry else None
 
-            await self._execute_slide(
-                code, slides_service, drive_service, pres_id, page_id,
-                html_str, assets_dir, i, chart_files, content_files,
-            )
+            if requests is None:
+                logger.warning("Slide %d: no emitted requests, adding fallback", i)
+                self._add_fallback(slides_service, pres_id, page_id, i)
+            else:
+                err = self._execute_slide_requests(
+                    requests, slides_service, drive_service, pres_id, page_id,
+                    assets_dir, i,
+                )
+                if err is not None:
+                    fixed = await self._retry_with_error(
+                        code, err, html_str, chart_files, content_files,
+                    )
+                    retry_err = "no-retry-code"
+                    if fixed:
+                        retry_requests = self._emit_single_slide(fixed, html_str, assets_dir, page_id)
+                        if retry_requests is not None:
+                            retry_err = self._execute_slide_requests(
+                                retry_requests, slides_service, drive_service,
+                                pres_id, page_id, assets_dir, i,
+                            )
+                    if retry_err is not None:
+                        logger.warning("Slide %d: all attempts failed, fallback", i)
+                        self._add_fallback(slides_service, pres_id, page_id, i)
 
             if progress_callback:
                 try:
                     progress_callback(i, total, f"Building slide {i}/{total}…")
                 except Exception:
                     pass
+
+        # Best-effort Drive cleanup of uploaded asset files (generated code never did this).
+        for file_id in getattr(self, "_uploaded_file_ids", []):
+            try:
+                drive_service.files().delete(fileId=file_id).execute()
+            except Exception:
+                logger.debug("Asset cleanup failed for %s", file_id, exc_info=True)
 
         print(f"[GSLIDES_CONVERTER] Done: {url}")
         return {"presentation_id": pres_id, "presentation_url": url}
@@ -719,37 +772,6 @@ class HtmlToGoogleSlidesConverter:
             *(gen_one(h, c, ci) for h, c, ci, _ad in slide_inputs)
         ))
 
-    async def _execute_slide(
-        self, code: Optional[str], slides_service, drive_service,
-        pres_id: str, page_id: str, html_str: str, assets_dir: str,
-        slide_num: int, chart_images: List[str], content_images: List[str],
-    ) -> None:
-        """Execute generated code, retry once on failure, fallback on second failure."""
-        if not code:
-            logger.warning("No code for slide %d, adding fallback", slide_num)
-            self._add_fallback(slides_service, pres_id, page_id, slide_num)
-            return
-
-        error = self._execute_code(
-            code, slides_service, drive_service, pres_id, page_id, html_str,
-            assets_dir, slide_num,
-        )
-        if error is None:
-            return
-
-        logger.info("Retrying slide %d with error context", slide_num)
-        fixed = await self._retry_with_error(code, error, html_str, chart_images, content_images)
-        if fixed:
-            retry_err = self._execute_code(
-                fixed, slides_service, drive_service, pres_id, page_id,
-                html_str, assets_dir, slide_num,
-            )
-            if retry_err is None:
-                return
-
-        logger.warning("Slide %d: all attempts failed, adding fallback", slide_num)
-        self._add_fallback(slides_service, pres_id, page_id, slide_num)
-
     # -- LLM calls ---------------------------------------------------------
 
     async def _generate_code(self, html_str, chart_images, content_images=None):
@@ -863,7 +885,7 @@ class HtmlToGoogleSlidesConverter:
                         "Your previous generation was TRUNCATED — the token limit was reached "
                         "before the function was complete (shown by the unclosed bracket/brace "
                         "at the end above). Using the HTML source below as your complete "
-                        "reference, write the COMPLETE add_slide_to_presentation function from "
+                        "reference, write the COMPLETE build_slide_requests function from "
                         "scratch. Keep the implementation concise: combine related requests into "
                         "fewer batchUpdate calls to stay within the token limit."
                     ),
@@ -889,7 +911,7 @@ class HtmlToGoogleSlidesConverter:
                     "guidance": (
                         "Your generated code had a syntax error (shown above). "
                         "Use the HTML source below as your complete reference and write the "
-                        "COMPLETE add_slide_to_presentation function from scratch — do not try "
+                        "COMPLETE build_slide_requests function from scratch — do not try "
                         "to patch only the lines shown above; the HTML is the source of truth "
                         "for all slide content and layout."
                     ),
@@ -908,7 +930,7 @@ class HtmlToGoogleSlidesConverter:
                 "guidance": (
                     "Fix the Google Slides API error shown above. "
                     "Using the HTML source below as your reference for slide content, "
-                    "return the COMPLETE corrected add_slide_to_presentation function."
+                    "return the COMPLETE corrected build_slide_requests function."
                 ),
                 "concise_retry": False,
             }
@@ -920,7 +942,7 @@ class HtmlToGoogleSlidesConverter:
             "code_excerpt": original_code[:6000],
             "guidance": (
                 "Fix the error shown above. Using the HTML source below as your reference, "
-                "return the COMPLETE add_slide_to_presentation function."
+                "return the COMPLETE build_slide_requests function."
             ),
             "concise_retry": False,
         }
@@ -952,7 +974,7 @@ class HtmlToGoogleSlidesConverter:
             f"{ctx['code_section_label']}\n\n"
             f"```python\n{ctx['code_excerpt']}\n```\n"
             f"{html_content}{chart_note}\n"
-            f"Return ONLY the Python code for the complete add_slide_to_presentation function."
+            f"Return ONLY the Python code for the complete build_slide_requests function."
         )
         return await self._call_llm(
             self.SYSTEM_PROMPT, fix_prompt,
@@ -1278,37 +1300,6 @@ class HtmlToGoogleSlidesConverter:
             _shutil.rmtree(job_dir, ignore_errors=True)
 
     # -- Code execution ----------------------------------------------------
-
-    def _execute_code(self, code, slides_service, drive_service, pres_id, page_id,
-                      html_str, assets_dir, slide_num):
-        """Execute generated code. Returns None on success, error string on failure."""
-        code = self._prepare_code(code)
-        tmp = Path(tempfile.mktemp(suffix=".py", prefix="gslides_adder_"))
-        tmp.write_text(code, encoding="utf-8")
-
-        try:
-            spec = importlib.util.spec_from_file_location("temp_gslides_adder", str(tmp))
-            module = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(module)
-            wrapped_service = _ChunkedSlidesService(
-                slides_service, chunk_size=4, slide_num=slide_num,
-            )
-            module.add_slide_to_presentation(
-                wrapped_service, drive_service, pres_id, page_id, html_str, assets_dir,
-            )
-            return None
-        except Exception as exc:
-            debug_dir = Path("logs/gslides_debug")
-            debug_dir.mkdir(parents=True, exist_ok=True)
-            try:
-                shutil.copy2(tmp, debug_dir / f"slide_{slide_num}_{tmp.stem}.py")
-            except Exception:
-                pass
-            logger.warning("Generated code failed for slide %d", slide_num, exc_info=True)
-            return str(exc)
-        finally:
-            if tmp.exists():
-                tmp.unlink()
 
     def _add_fallback(self, slides_service, pres_id, page_id, slide_num):
         """Add a simple placeholder text box when all code-gen attempts fail."""
