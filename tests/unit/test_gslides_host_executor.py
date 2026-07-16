@@ -78,6 +78,54 @@ class TestValidateRequests:
         reqs = [{"createImage": {"objectId": "i", "url": "tellr-asset://chart_0.png"}}]
         assert _conv()._validate_requests(reqs) == reqs
 
+    def test_rejects_raw_https_image_url(self):
+        # SDR-4437 PR-5 MEDIUM: raw https urls are Google-side SSRF (Google
+        # fetches server-side). Every legit image now flows through
+        # tellr-asset:// + host upload, so https is no longer accepted.
+        with pytest.raises(GoogleSlidesConversionError):
+            _conv()._validate_requests(
+                [{"createImage": {"objectId": "i", "url": "https://evil.example/x.png"}}]
+            )
+
+    def test_rejects_path_traversal_asset_filename(self):
+        # SDR-4437 PR-5 CRITICAL: traversal in the tellr-asset:// remainder.
+        with pytest.raises(GoogleSlidesConversionError):
+            _conv()._validate_requests(
+                [{"createImage": {"objectId": "i",
+                                  "url": "tellr-asset://../../../../etc/passwd"}}]
+            )
+
+    def test_rejects_absolute_path_asset_filename(self):
+        # SDR-4437 PR-5 CRITICAL: absolute path — Path(base) / "/abs" discards base.
+        with pytest.raises(GoogleSlidesConversionError):
+            _conv()._validate_requests(
+                [{"createImage": {"objectId": "i",
+                                  "url": "tellr-asset:///proc/self/environ"}}]
+            )
+
+
+class TestAssetPathContainment:
+    """SDR-4437 PR-5 CRITICAL: the uploader must confine the resolved path to
+    assets_dir even if _validate_requests were bypassed (defense in depth)."""
+
+    def test_upload_rejects_traversal_filename(self, tmp_path):
+        from unittest.mock import MagicMock
+        drive = MagicMock()
+        reqs = [{"createImage": {"objectId": "i",
+                                 "url": "tellr-asset://../../../../etc/passwd"}}]
+        with pytest.raises(GoogleSlidesConversionError):
+            _conv()._upload_and_substitute_assets(reqs, drive, str(tmp_path))
+        drive.files().create.assert_not_called()
+
+    def test_upload_rejects_absolute_path_filename(self, tmp_path):
+        from unittest.mock import MagicMock
+        drive = MagicMock()
+        reqs = [{"createImage": {"objectId": "i",
+                                 "url": "tellr-asset:///etc/passwd"}}]
+        with pytest.raises(GoogleSlidesConversionError):
+            _conv()._upload_and_substitute_assets(reqs, drive, str(tmp_path))
+        drive.files().create.assert_not_called()
+
 
 class TestUploadAndSubstitute:
     def test_uploads_and_substitutes(self, tmp_path):
