@@ -148,3 +148,14 @@ class TestEscapeAttempt:
         )
         assert result.returncode == 0
         assert out.read_text() == "ABSENT"
+
+
+class TestNoInProcessExecAnywhere:
+    """SDR-4437 HIGH-5 gate: neither export service execs generated code in-process."""
+
+    def test_no_exec_module_in_either_service(self):
+        import inspect
+        from src.services import html_to_pptx, html_to_google_slides
+        for mod in (html_to_pptx, html_to_google_slides):
+            src = inspect.getsource(mod)
+            assert "exec_module" not in src, f"{mod.__name__} still execs in-process"
