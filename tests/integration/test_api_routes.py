@@ -1015,6 +1015,17 @@ class TestSessionEndpoints:
 class TestVerificationEndpoints:
     """Tests for /api/verification endpoints."""
 
+    @pytest.fixture(autouse=True)
+    def _bypass_deck_gate(self, monkeypatch):
+        # SDR-4437 PR-2 (Task 7): verification writes/genie-link now require
+        # deck permission. These pre-existing tests mock get_session with a
+        # minimal dict (no id/created_by), so the gate can't resolve a grant —
+        # no-op it here; enforcement is covered by test_authz_verification.py.
+        monkeypatch.setattr(
+            "src.api.routes.verification._check_deck_permission_for_session",
+            lambda *a, **k: None,
+        )
+
     def test_verify_slide_success(self, client, mock_session_manager):
         """POST /api/verification/{index} triggers verification."""
         mock_session_manager.get_session.return_value = {
