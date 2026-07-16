@@ -2094,33 +2094,14 @@ class ChatService:
 
     def _reconstruct_deck_from_dict(self, deck_data: Dict[str, Any]) -> SlideDeck:
         """Reconstruct SlideDeck from stored dict (preserves individual slide scripts).
-        
+
         Args:
             deck_data: Dictionary from get_slide_deck with slides array
-            
+
         Returns:
             Reconstructed SlideDeck with proper per-slide scripts and metadata
         """
-        slides = []
-        for slide_data in deck_data.get("slides", []):
-            slide = Slide(
-                html=slide_data.get("html", ""),
-                slide_id=slide_data.get("slide_id", f"slide_{len(slides)}"),
-                scripts=slide_data.get("scripts", ""),
-                created_by=slide_data.get("created_by"),
-                created_at=slide_data.get("created_at"),
-                modified_by=slide_data.get("modified_by"),
-                modified_at=slide_data.get("modified_at"),
-            )
-            slides.append(slide)
-        
-        deck = SlideDeck(
-            slides=slides,
-            css=deck_data.get("css", ""),
-            external_scripts=deck_data.get("external_scripts", []),
-            title=deck_data.get("title"),
-        )
-        return deck
+        return SlideDeck.from_dict(deck_data)
 
     def reload_deck_from_database(self, session_id: str) -> Optional[SlideDeck]:
         """Force reload deck from database (clears cache first).

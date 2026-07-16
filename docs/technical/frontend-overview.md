@@ -31,7 +31,8 @@ Each page has a dedicated URL. Navigation buttons use `useNavigate()` to change 
 
 - **New Session** (`/sessions/:id/edit`): The primary slide generation interface
 - **Viewer** (`/sessions/:id/view`): Read-only presentation viewer (chat disabled, editing disabled)
-- **My Sessions** (`/history`): Session list and restore functionality
+- **My Sessions** (`/history`): Session list, restore, rename, delete, and **duplicate** deck (opens the new copy; shared tab does the same after duplicate)
+- **Recent Decks** (sidebar): Ten most recent decks via `GET /api/sessions?deck_only=true`
 - **Profiles** (`/profiles`): Saved configuration snapshots
 - **Deck Prompts** (`/deck-prompts`): Presentation template library management
 - **Slide Styles** (`/slide-styles`): Visual style library management (typography, colors, layout)
@@ -255,6 +256,7 @@ const versionKey = previewVersion
 - After auto-verification completes, frontend calls `api.syncVersionVerification()` to backfill scores onto the latest save point
 - Maximum 40 save points per session; oldest deleted on overflow
 - Preview mode disables chat input and slide editing; chat history from that version is shown
+- **Duplicate** (PageHeader): copies the previewed save point when in preview; shows a confirm dialog if preview is older than the latest save point
 - Restoring deletes all newer versions permanently
 - `setSlideDeckGated` in AppLayout rejects stale `getSlides` responses using server deck version (`deckVersionRef`), preventing race conditions from overwriting edits
 - Version dropdown auto-refreshes after any operation that bumps the deck version

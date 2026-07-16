@@ -20,8 +20,9 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
-from src.api.schemas.requests import CreateSessionRequest
+from src.api.schemas.requests import CreateSessionRequest, DuplicateSessionRequest
 from src.api.services.session_manager import (
+    SessionAccessDeniedError,
     SessionNotFoundError,
     get_session_manager,
 )
@@ -172,6 +173,9 @@ async def create_session(request: CreateSessionRequest = None):
     request = request or CreateSessionRequest()
     current_user = get_current_user()
 
+    if not current_user:
+        raise HTTPException(status_code=401, detail="Authentication required")
+
     try:
         session_manager = get_session_manager()
         result = await asyncio.to_thread(
@@ -199,6 +203,10 @@ async def create_session(request: CreateSessionRequest = None):
 @router.get("")
 async def list_sessions(
     limit: int = Query(50, ge=1, le=100, description="Maximum sessions to return"),
+    deck_only: bool = Query(
+        False,
+        description="When true, return only sessions that have a slide deck",
+    ),
 ):
     """List sessions created by the current user (My Sessions).
 
@@ -207,11 +215,15 @@ async def list_sessions(
 
     Args:
         limit: Maximum number of sessions to return
+        deck_only: When true, return only sessions with a slide deck
 
     Returns:
         List of session summaries with my_permission = CAN_MANAGE
     """
     current_user = get_current_user()
+
+    if not current_user:
+        raise HTTPException(status_code=401, detail="Authentication required")
 
     try:
         session_manager = get_session_manager()
@@ -219,6 +231,7 @@ async def list_sessions(
             session_manager.list_sessions,
             created_by=current_user,
             limit=limit,
+            deck_only=deck_only,
         )
         
         # Add permission info (creator always has CAN_MANAGE)
@@ -561,6 +574,71 @@ async def update_session(
         raise HTTPException(
             status_code=500,
             detail=f"Failed to update session: {str(e)}",
+        ) from e
+
+
+@router.post("/{session_id}/duplicate", status_code=201)
+async def duplicate_session(
+    session_id: str,
+    request: DuplicateSessionRequest = None,
+):
+    """Duplicate a slide deck into a new private session for the current user.
+
+    Requires at least CAN_VIEW on the source deck. The copy includes slide
+    content and agent configuration but not chat history, save points, or
+    sharing settings.
+
+    Args:
+        session_id: Source session ID (root or contributor session)
+        request: Optional title override for the copy
+
+    Returns:
+        New session info with ``source_session_id``
+    """
+    request = request or DuplicateSessionRequest()
+    current_user = get_current_user()
+
+    if not current_user:
+        raise HTTPException(status_code=401, detail="Authentication required")
+
+    try:
+        session_manager = get_session_manager()
+        result = await asyncio.to_thread(
+            session_manager.duplicate_session,
+            session_id,
+            current_user,
+            request.title,
+            request.version_number,
+            min_permission=PermissionLevel.CAN_VIEW,
+        )
+
+        logger.info(
+            "Session duplicated via API",
+            extra={
+                "source_session_id": session_id,
+                "new_session_id": result["session_id"],
+                "created_by": current_user,
+            },
+        )
+        return result
+
+    except SessionNotFoundError:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Session not found: {session_id}",
+        )
+    except SessionAccessDeniedError as e:
+        raise HTTPException(status_code=403, detail=e.message) from e
+    except HTTPException:
+        raise
+    except ValueError as e:
+        logger.warning(f"Validation error in duplicate_session: {e}")
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(f"Failed to duplicate session: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to duplicate session: {str(e)}",
         ) from e
 
 

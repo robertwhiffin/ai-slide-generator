@@ -7,7 +7,11 @@ from typing import Optional
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
-from src.api.schemas.agent_config import AgentConfig, GenieTool, resolve_agent_config
+from src.api.schemas.agent_config import (
+    AgentConfig,
+    resolve_agent_config,
+    sanitize_agent_config_for_persist,
+)
 from src.api.services.session_manager import SessionNotFoundError, get_session_manager
 from src.core.database import get_db_session
 from src.core.permission_context import get_permission_context
@@ -60,6 +64,16 @@ def _profile_to_dict(profile: ConfigProfile) -> dict:
     }
 
 
+def _normalized_config_for_compare(raw: Optional[dict | AgentConfig]) -> dict:
+    """Normalize agent_config for duplicate-profile comparison."""
+    if isinstance(raw, AgentConfig):
+        resolved = raw
+    else:
+        resolved = resolve_agent_config(raw)
+    normalized = sanitize_agent_config_for_persist(resolved)
+    return normalized if normalized is not None else AgentConfig().model_dump()
+
+
 def _get_profile(db, profile_id: int) -> ConfigProfile:
     """Load a profile by ID, raising 404 if not found or deleted."""
     profile = (
@@ -106,14 +120,7 @@ async def list_profiles():
 @router.post("", status_code=201)
 async def create_profile(body: CreateProfileRequest):
     """Create a profile directly from a provided agent_config (no session required)."""
-    config = body.agent_config
-
-    # Strip session-specific conversation_ids before persisting
-    for tool in config.tools:
-        if isinstance(tool, GenieTool):
-            tool.conversation_id = None
-
-    config_dict = config.model_dump()
+    config_dict = sanitize_agent_config_for_persist(body.agent_config)
 
     with get_db_session() as db:
         # Check for duplicate agent_config among non-deleted profiles
@@ -123,11 +130,8 @@ async def create_profile(body: CreateProfileRequest):
             .all()
         )
         for existing in existing_profiles:
-            existing_config = resolve_agent_config(existing.agent_config)
-            for tool in existing_config.tools:
-                if isinstance(tool, GenieTool):
-                    tool.conversation_id = None
-            if existing_config.model_dump() == config_dict:
+            existing_config = _normalized_config_for_compare(existing.agent_config)
+            if existing_config == config_dict:
                 raise HTTPException(
                     status_code=409,
                     detail=f"A profile with this configuration already exists: '{existing.name}'",
@@ -179,14 +183,12 @@ async def save_from_session(session_id: str, body: SaveProfileRequest):
             )
 
     # Prefer client-side config (has resolved defaults) over session's stored config
-    config = body.agent_config if body.agent_config else resolve_agent_config(session.get("agent_config"))
-
-    # Strip session-specific conversation_ids before persisting
-    for tool in config.tools:
-        if isinstance(tool, GenieTool):
-            tool.conversation_id = None
-
-    config_dict = config.model_dump()
+    if body.agent_config:
+        config_dict = sanitize_agent_config_for_persist(body.agent_config)
+    else:
+        config_dict = sanitize_agent_config_for_persist(
+            resolve_agent_config(session.get("agent_config"))
+        )
 
     with get_db_session() as db:
         # Check for duplicate agent_config among non-deleted profiles
@@ -196,12 +198,8 @@ async def save_from_session(session_id: str, body: SaveProfileRequest):
             .all()
         )
         for existing in existing_profiles:
-            existing_config = resolve_agent_config(existing.agent_config)
-            # Strip conversation_ids from existing for fair comparison
-            for tool in existing_config.tools:
-                if isinstance(tool, GenieTool):
-                    tool.conversation_id = None
-            if existing_config.model_dump() == config_dict:
+            existing_config = _normalized_config_for_compare(existing.agent_config)
+            if existing_config == config_dict:
                 raise HTTPException(
                     status_code=409,
                     detail=f"A profile with this configuration already exists: '{existing.name}'",

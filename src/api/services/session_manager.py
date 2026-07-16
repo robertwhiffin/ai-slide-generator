@@ -10,9 +10,12 @@ import secrets
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 
+from sqlalchemy import func, or_
 from sqlalchemy.orm import Session, joinedload
 
+from src.api.schemas.agent_config import sanitize_agent_config_for_persist
 from src.core.database import get_db_session
+from src.database.models.profile_contributor import PermissionLevel
 from src.database.models.session import (
     ChatRequest,
     SessionMessage,
@@ -23,11 +26,55 @@ from src.database.models.session import (
 
 logger = logging.getLogger(__name__)
 
+_MAX_SESSION_TITLE_LEN = 255
+_DUPLICATE_TITLE_PREFIX = "Copy of "
+
+
+def _truncate_session_title(title: str, max_len: int = _MAX_SESSION_TITLE_LEN) -> str:
+    """Truncate a title to fit the user_sessions.title column."""
+    return title[:max_len] if len(title) > max_len else title
+
+
+def _default_duplicate_title(base_title: str, max_len: int = _MAX_SESSION_TITLE_LEN) -> str:
+    """Build a default duplicate title, preserving the ``Copy of `` prefix when truncating."""
+    full = f"{_DUPLICATE_TITLE_PREFIX}{base_title or 'Untitled'}"
+    if len(full) <= max_len:
+        return full
+    max_base_len = max_len - len(_DUPLICATE_TITLE_PREFIX)
+    return f"{_DUPLICATE_TITLE_PREFIX}{base_title[:max_base_len]}"
+
+
+def _deck_content_fields_from_dict(deck_dict: Dict[str, Any]) -> tuple[str, Optional[str], int]:
+    """Derive persisted deck columns from a deck JSON snapshot."""
+    from src.domain.slide_deck import SlideDeck
+
+    slides = deck_dict.get("slides") or []
+    slide_count = deck_dict.get("slide_count", len(slides))
+
+    if slides:
+        deck = SlideDeck.from_dict(deck_dict)
+        return deck.knit(), deck.scripts or "", slide_count
+
+    html_content = deck_dict.get("html_content") or ""
+    scripts_content = deck_dict.get("scripts_content") or deck_dict.get("scripts") or ""
+    return html_content, scripts_content, slide_count
+
 
 class SessionNotFoundError(Exception):
     """Raised when a session is not found."""
 
     pass
+
+
+class SessionAccessDeniedError(Exception):
+    """Raised when the current user lacks permission on a session."""
+
+    def __init__(
+        self,
+        message: str = "You don't have permission to access this session",
+    ):
+        self.message = message
+        super().__init__(message)
 
 
 class VersionConflictError(Exception):
@@ -150,6 +197,13 @@ class SessionManager:
                 if parent:
                     deck_owner = parent
 
+            message_count = (
+                db.query(func.count(SessionMessage.id))
+                .filter(SessionMessage.session_id == session.id)
+                .scalar()
+                or 0
+            )
+
             return {
                 "id": session.id,
                 "session_id": session.session_id,
@@ -162,7 +216,7 @@ class SessionManager:
                 "experiment_id": session.experiment_id,
                 "experiment_url": self._build_experiment_url(session.experiment_id),
                 "agent_config": session.agent_config,
-                "message_count": len(session.messages),
+                "message_count": message_count,
                 "has_slide_deck": deck_owner.slide_deck is not None,
                 "google_slides_url": deck_owner.google_slides_url,
                 "google_slides_presentation_id": deck_owner.google_slides_presentation_id,
@@ -269,11 +323,39 @@ class SessionManager:
             )
         return parent
 
+    def _require_deck_permission(
+        self,
+        db: Session,
+        session: UserSession,
+        min_permission: PermissionLevel,
+    ) -> PermissionLevel:
+        """Require the current user has deck permission on a loaded session row."""
+        from src.core.permission_context import get_permission_context
+        from src.services.permission_service import PERMISSION_PRIORITY, get_permission_service
+
+        perm_ctx = get_permission_context()
+        perm_service = get_permission_service()
+        perm = perm_service.get_deck_permission(
+            db,
+            session.id,
+            user_id=perm_ctx.user_id if perm_ctx else None,
+            user_name=perm_ctx.user_name if perm_ctx else None,
+            group_ids=perm_ctx.group_ids if perm_ctx else None,
+        )
+        if perm is None:
+            raise SessionAccessDeniedError()
+        if PERMISSION_PRIORITY[perm] < PERMISSION_PRIORITY[min_permission]:
+            raise SessionAccessDeniedError(
+                f"This action requires {min_permission.value} permission"
+            )
+        return perm
+
     def list_sessions(
         self,
         created_by: Optional[str] = None,
         user_id: Optional[str] = None,
         limit: int = 50,
+        deck_only: bool = False,
     ) -> List[Dict[str, Any]]:
         """List sessions, optionally filtered by creator.
 
@@ -281,15 +363,36 @@ class SessionManager:
             created_by: Filter sessions to those created by this username
             user_id: Legacy user filter (kept for backward compat)
             limit: Maximum number of sessions to return
+            deck_only: When True, return only root sessions that have a slide deck
 
         Returns:
             List of session info dictionaries
         """
         with get_db_session() as db:
-            query = db.query(UserSession).filter(
-                UserSession.messages.any(),
-                UserSession.parent_session_id.is_(None),  # Exclude contributor sessions
+            message_count_subq = (
+                db.query(
+                    SessionMessage.session_id.label("session_id"),
+                    func.count(SessionMessage.id).label("message_count"),
+                )
+                .group_by(SessionMessage.session_id)
+                .subquery()
             )
+
+            if deck_only:
+                query = db.query(UserSession).filter(
+                    UserSession.slide_deck.has(),
+                    UserSession.parent_session_id.is_(None),  # Exclude contributor sessions
+                )
+            else:
+                # Include sessions with a slide deck (e.g. duplicated decks) even when
+                # they have no chat messages yet; also include chat-only sessions.
+                query = db.query(UserSession).filter(
+                    or_(
+                        UserSession.messages.any(),
+                        UserSession.slide_deck.has(),
+                    ),
+                    UserSession.parent_session_id.is_(None),  # Exclude contributor sessions
+                )
 
             if created_by:
                 query = query.filter(UserSession.created_by == created_by)
@@ -297,7 +400,17 @@ class SessionManager:
                 query = query.filter(UserSession.user_id == user_id)
 
             sessions = (
-                query.options(joinedload(UserSession.slide_deck))
+                query.outerjoin(
+                    message_count_subq,
+                    UserSession.id == message_count_subq.c.session_id,
+                )
+                .with_entities(
+                    UserSession,
+                    func.coalesce(message_count_subq.c.message_count, 0).label(
+                        "message_count"
+                    ),
+                )
+                .options(joinedload(UserSession.slide_deck))
                 .order_by(UserSession.last_activity.desc())
                 .limit(limit)
                 .all()
@@ -311,12 +424,12 @@ class SessionManager:
                     "title": s.title,
                     "created_at": s.created_at.isoformat(),
                     "last_activity": s.last_activity.isoformat(),
-                    "message_count": len(s.messages),
+                    "message_count": int(message_count),
                     "has_slide_deck": s.slide_deck is not None,
                     "slide_count": s.slide_deck.slide_count if s.slide_deck is not None else 0,
                     "global_permission": s.global_permission,
                 }
-                for s in sessions
+                for s, message_count in sessions
             ]
 
     def list_user_sessions(
@@ -403,6 +516,132 @@ class SessionManager:
                 "title": session.title,
                 "updated_at": session.last_activity.isoformat(),
             }
+
+    def duplicate_session(
+        self,
+        source_session_id: str,
+        created_by: str,
+        title: Optional[str] = None,
+        version_number: Optional[int] = None,
+        *,
+        min_permission: Optional[PermissionLevel] = None,
+    ) -> Dict[str, Any]:
+        """Duplicate a slide deck into a new root session owned by ``created_by``.
+
+        Copies the slide deck snapshot from the source (resolving contributor
+        sessions to the parent deck owner). When ``version_number`` is set,
+        copies that save point instead of the live deck. Chat history, save
+        points, sharing grants, and session-specific IDs are not copied.
+
+        Args:
+            source_session_id: Session to duplicate (root or contributor)
+            created_by: Username of the user creating the copy
+            title: Optional title (default: ``Copy of {source title}``)
+            version_number: Optional save point to copy instead of live deck
+            min_permission: When set, enforce deck permission before copying
+
+        Returns:
+            New session info including ``source_session_id``
+
+        Raises:
+            SessionNotFoundError: If source session does not exist
+            SessionAccessDeniedError: If ``min_permission`` is not satisfied
+            ValueError: If source has no slide deck or version not found
+        """
+        with get_db_session() as db:
+            source = self._get_session_or_raise(db, source_session_id)
+            if min_permission is not None:
+                self._require_deck_permission(db, source, min_permission)
+            deck_owner = self._get_deck_owner_session(db, source)
+
+            if deck_owner.slide_deck is None:
+                raise ValueError("Source session has no slide deck to duplicate")
+
+            if version_number is not None:
+                version = (
+                    db.query(SlideDeckVersion)
+                    .filter(
+                        SlideDeckVersion.session_id == deck_owner.id,
+                        SlideDeckVersion.version_number == version_number,
+                    )
+                    .first()
+                )
+                if not version:
+                    raise ValueError(f"Version {version_number} not found")
+
+                deck_dict = json.loads(version.deck_json) if version.deck_json else {}
+                html_content, scripts_content, slide_count = _deck_content_fields_from_dict(
+                    deck_dict
+                )
+                deck_json = version.deck_json
+                verification_map = version.verification_map_json
+            else:
+                source_deck = deck_owner.slide_deck
+                html_content = source_deck.html_content
+                scripts_content = source_deck.scripts_content
+                slide_count = source_deck.slide_count
+                deck_json = source_deck.deck_json
+                verification_map = source_deck.verification_map
+
+            base_title = deck_owner.title or "Untitled"
+            if title and title.strip():
+                new_title = _truncate_session_title(title.strip())
+            else:
+                new_title = _default_duplicate_title(base_title)
+
+            new_session = UserSession(
+                session_id=secrets.token_urlsafe(32),
+                created_by=created_by,
+                title=new_title,
+                agent_config=sanitize_agent_config_for_persist(deck_owner.agent_config),
+                global_permission=None,
+                parent_session_id=None,
+                genie_conversation_id=None,
+                experiment_id=None,
+                google_slides_presentation_id=None,
+                google_slides_url=None,
+            )
+            db.add(new_session)
+            db.flush()
+
+            new_deck = SessionSlideDeck(
+                session_id=new_session.id,
+                title=new_title,
+                html_content=html_content,
+                scripts_content=scripts_content,
+                slide_count=slide_count,
+                deck_json=deck_json,
+                verification_map=verification_map,
+                version=1,
+                modified_by=created_by,
+                locked_by=None,
+                locked_at=None,
+            )
+            db.add(new_deck)
+            db.flush()
+
+            logger.info(
+                "Duplicated session",
+                extra={
+                    "source_session_id": deck_owner.session_id,
+                    "new_session_id": new_session.session_id,
+                    "created_by": created_by,
+                    "slide_count": slide_count,
+                    "source_version_number": version_number,
+                },
+            )
+
+            result = {
+                "session_id": new_session.session_id,
+                "title": new_title,
+                "created_by": created_by,
+                "created_at": new_session.created_at.isoformat(),
+                "slide_count": slide_count,
+                "source_session_id": deck_owner.session_id,
+            }
+            if version_number is not None:
+                result["source_version_number"] = version_number
+            return result
 
     def update_last_activity(self, session_id: str) -> None:
         """Update session's last activity timestamp.
