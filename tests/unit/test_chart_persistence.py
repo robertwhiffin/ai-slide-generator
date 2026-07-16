@@ -414,7 +414,7 @@ class TestDatabaseLoadPreservesScripts:
         service._deck_cache_versions = {session_id: 3}
 
         mock_sm = MagicMock()
-        mock_sm.get_slide_deck.return_value = {"version": 3}
+        mock_sm.get_slide_deck_version.return_value = 3
 
         with patch("src.api.services.chat_service.get_session_manager", return_value=mock_sm):
             deck = service._get_or_load_deck(session_id)

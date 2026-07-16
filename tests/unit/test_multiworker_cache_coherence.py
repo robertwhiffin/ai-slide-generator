@@ -75,6 +75,10 @@ class FakeDeckStore:
         record = self.decks.get(session_id)
         return copy.deepcopy(record) if record else None
 
+    def get_slide_deck_version(self, session_id: str) -> Optional[int]:
+        record = self.decks.get(session_id)
+        return record["version"] if record else None
+
     # -- collaborators ChatService touches during mutations ------------------
 
     def get_session(self, session_id: str) -> Dict[str, Any]:
@@ -125,6 +129,30 @@ def shared_db():
         "src.api.services.chat_service.get_session_manager", return_value=store
     ):
         yield store
+
+
+class TestVersionProbeCost:
+    """The cache-validation probe must be a lightweight version lookup."""
+
+    def test_cache_hit_probe_does_not_fetch_full_deck(self):
+        """A warm cache hit pays one version read, never a full deck fetch
+        (get_slide_deck parses the whole deck JSON and hashes every slide —
+        running it per mutation made deletes visibly slow)."""
+        worker = make_worker()
+        deck = SlideDeck.from_html_string(load_6_slide_deck())
+        worker._deck_cache[SESSION_ID] = deck
+        worker._deck_cache_versions = {SESSION_ID: 7}
+
+        sm = MagicMock()
+        sm.get_slide_deck_version.return_value = 7
+
+        with patch(
+            "src.api.services.chat_service.get_session_manager", return_value=sm
+        ):
+            result = worker._get_or_load_deck(SESSION_ID)
+
+        assert result is deck
+        sm.get_slide_deck.assert_not_called()
 
 
 class TestMultiWorkerCacheCoherence:

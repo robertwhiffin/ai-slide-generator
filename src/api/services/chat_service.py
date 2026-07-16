@@ -2031,23 +2031,18 @@ class ChatService:
     def _get_deck_version(self, session_id: str) -> Optional[int]:
         """Read the current deck version from the database.
 
-        Called once before the LLM runs to capture the version for
-        optimistic locking. Uses the existing get_slide_deck which
-        returns the full deck dict including the version column.
-
-        On Lakebase/PostgreSQL this is a single-row indexed lookup (~1-2ms).
+        Used on every deck-cache hit (multi-worker cache validation) and
+        before LLM calls (optimistic locking), so it must stay cheap: a
+        single-column indexed lookup, never a full deck fetch.
 
         Returns:
             Current deck version number, or None if no deck exists.
         """
         session_manager = get_session_manager()
         try:
-            deck_data = session_manager.get_slide_deck(session_id)
-            if deck_data:
-                return deck_data.get("version")
+            return session_manager.get_slide_deck_version(session_id)
         except Exception:
-            pass
-        return None
+            return None
 
     @staticmethod
     def _reindex_slide_ids(deck: "SlideDeck") -> None:

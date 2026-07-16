@@ -601,6 +601,7 @@ class TestCreateSavePoint:
 
         mock_sm = MagicMock()
         mock_sm.get_slide_deck.return_value = None  # deck lives in cache only
+        mock_sm.get_slide_deck_version.return_value = None
         mock_sm.get_verification_map.return_value = {"hash1": {"status": "verified"}}
         mock_sm.create_version.return_value = {
             "version_number": 1,
