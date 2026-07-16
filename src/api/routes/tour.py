@@ -17,8 +17,10 @@ from pathlib import Path
 
 from fastapi import APIRouter, HTTPException
 
+from src.api.routes._authz import _check_deck_permission_for_session
 from src.api.services.session_manager import get_session_manager
 from src.core.user_context import get_current_user
+from src.database.models.profile_contributor import PermissionLevel
 
 logger = logging.getLogger(__name__)
 
@@ -115,6 +117,8 @@ async def create_demo_deck():
 @router.post("/demo-deck/{session_id}/slides")
 async def add_demo_slides(session_id: str):
     """Phase 2: add assistant reply and pre-built slides."""
+    # SDR-4437 HIGH-1 class: writes slides into an arbitrary session_id.
+    _check_deck_permission_for_session(session_id, PermissionLevel.CAN_EDIT)
     current_user = get_current_user()
     try:
         result = await asyncio.to_thread(_phase2_add_slides, session_id, current_user)
