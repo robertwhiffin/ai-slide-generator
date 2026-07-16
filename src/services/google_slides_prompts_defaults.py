@@ -34,6 +34,17 @@ FONT SIZE GUIDE (CRITICAL — maximums for 16:9):
 NEVER exceed these. When content is dense, go SMALLER.
 Always set font size explicitly on every text element you create.
 
+HEADINGS — FULL WIDTH (CRITICAL):
+- Every heading-type text box (slide title, section/divider number like "01", eyebrow/kicker,
+  and any large standalone heading) MUST span the full margined width: left=0.4", width=9.2"
+  (so the right edge lands at 9.6", mirroring the left margin). This is true even for a short
+  string like "01" or a two-word title.
+- Rationale: a heading box sized tight to its expected text wraps or clips when the font is large.
+  A full-width box has room for the text on one line, so it never wraps for lack of width.
+- Only exception: a heading that shares its row with other content (e.g. a logo beside it, or a
+  two-column header) — then size it to its own column, still with symmetric gutters.
+- Keep the font within the guide above; do NOT shrink a heading just because the box is now wider.
+
 METRIC CARDS (.metric-card):
 - Create ROUND_RECTANGLE bg: card_id = 'card_' + str(uuid.uuid4())[:8]
   createShape with shapeType='ROUND_RECTANGLE', then updateShapeProperties for white fill.
