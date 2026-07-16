@@ -224,7 +224,12 @@ def _acl_entry(*, user_name=None, group_name=None, level="CAN_MANAGE"):
 
 
 def _wire_probe(monkeypatch, *, acl_entries, caller_groups, app_name="tellr-app"):
-    """Patch _admin_acl_probe's dependencies: system client ACL + caller groups."""
+    """Patch _admin_acl_probe's dependencies: OBO client ACL read + caller groups.
+
+    The redesign fetches BOTH the app ACL and the caller's groups with the
+    OBO/user client (the app SP cannot read its own ACL — verified live), so
+    the seam is get_user_client, not get_system_client.
+    """
     from src.api.routes import _authz
 
     monkeypatch.setenv("DATABRICKS_APP_NAME", app_name)
@@ -235,7 +240,7 @@ def _wire_probe(monkeypatch, *, acl_entries, caller_groups, app_name="tellr-app"
     fake_client.apps.get_permissions.return_value = acl
 
     monkeypatch.setattr(
-        "src.core.databricks_client.get_system_client", lambda: fake_client
+        "src.core.databricks_client.get_user_client", lambda: fake_client
     )
     monkeypatch.setattr(
         _authz, "_caller_group_display_names", lambda client, user: set(caller_groups)
@@ -304,15 +309,17 @@ def test_probe_group_name_only_matched_when_caller_is_member(monkeypatch):
     assert _authz._admin_acl_probe("carol@test.com") is False
 
 
-def test_caller_group_display_names_reads_scim_display(monkeypatch):
-    """_caller_group_display_names returns the SCIM group *display* names."""
+def test_caller_group_display_names_reads_me_group_display(monkeypatch):
+    """_caller_group_display_names returns the caller's own group *display* names
+    from current_user.me() on the OBO client (verified live: 'admins' present
+    for a workspace admin)."""
     from src.api.routes import _authz
 
     g1 = MagicMock(); g1.display = "admins"
     g2 = MagicMock(); g2.display = "users"
-    user = MagicMock(); user.groups = [g1, g2]
+    me = MagicMock(); me.groups = [g1, g2]
     client = MagicMock()
-    client.users.list.return_value = [user]
+    client.current_user.me.return_value = me
 
     names = _authz._caller_group_display_names(client, "alice@test.com")
     assert names == {"admins", "users"}
