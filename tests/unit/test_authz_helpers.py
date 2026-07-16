@@ -203,42 +203,27 @@ def test_require_admin_caches_verdict(admin_env, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# _admin_acl_probe — membership-in-CAN_MANAGE-grant decision (the redesign)
+# _admin_acl_probe — workspace ``admins`` group membership (Direction C)
 #
-# The probe must be a presence-in-grant check, NOT an ACL-readability oracle:
-# a caller who can READ the ACL but is absent from every CAN_MANAGE grant must
-# be DENIED. That is the exact case the old readability-probe design got wrong
-# (it would fail OPEN — every authenticated user classified admin).
+# Admin is decided from the caller's OWN group membership via the OBO client's
+# current_user.me().groups — NOT an app-object ACL read. apps.get_permissions
+# is the wrong primitive at runtime: the app's OBO token lacks the
+# access-management scope and the app SP is absent from its own ACL. Deciding
+# on the caller's own group list cannot fail open (a non-admin's me().groups
+# won't contain "admins" and cannot be forged).
 # ---------------------------------------------------------------------------
 
 
-def _acl_entry(*, user_name=None, group_name=None, level="CAN_MANAGE"):
-    """Build a fake ACL entry mirroring the SDK's AccessControlResponse shape."""
-    perm = MagicMock()
-    perm.permission_level = level  # string, as the SDK enum's .value resolves to
-    entry = MagicMock()
-    entry.user_name = user_name
-    entry.group_name = group_name
-    entry.all_permissions = [perm]
-    return entry
+def _wire_probe(monkeypatch, *, caller_groups):
+    """Patch _admin_acl_probe's only dependency: the caller's own group names.
 
-
-def _wire_probe(monkeypatch, *, acl_entries, caller_groups, app_name="tellr-app"):
-    """Patch _admin_acl_probe's dependencies: OBO client ACL read + caller groups.
-
-    The redesign fetches BOTH the app ACL and the caller's groups with the
-    OBO/user client (the app SP cannot read its own ACL — verified live), so
-    the seam is get_user_client, not get_system_client.
+    The probe resolves groups via get_user_client().current_user.me().groups
+    (OBO); the seam is _caller_group_display_names, which takes the OBO token's
+    own identity. No app name, no ACL, no SP.
     """
     from src.api.routes import _authz
 
-    monkeypatch.setenv("DATABRICKS_APP_NAME", app_name)
-
-    acl = MagicMock()
-    acl.access_control_list = acl_entries
     fake_client = MagicMock()
-    fake_client.apps.get_permissions.return_value = acl
-
     monkeypatch.setattr(
         "src.core.databricks_client.get_user_client", lambda: fake_client
     )
@@ -248,71 +233,41 @@ def _wire_probe(monkeypatch, *, acl_entries, caller_groups, app_name="tellr-app"
     return _authz
 
 
-def test_probe_direct_user_grant_is_admin(monkeypatch):
-    _authz = _wire_probe(
-        monkeypatch,
-        acl_entries=[_acl_entry(user_name="alice@test.com")],
-        caller_groups=[],
-    )
-    assert _authz._admin_acl_probe("alice@test.com") is True
-
-
-def test_probe_group_membership_grant_is_admin(monkeypatch):
-    """Admin ONLY via an inherited group (e.g. workspace 'admins') must pass."""
-    _authz = _wire_probe(
-        monkeypatch,
-        acl_entries=[_acl_entry(group_name="admins")],
-        caller_groups=["admins", "users"],
-    )
+def test_probe_admins_group_member_is_admin(monkeypatch):
+    """Caller whose own groups include 'admins' -> admin."""
+    _authz = _wire_probe(monkeypatch, caller_groups=["admins", "users"])
     assert _authz._admin_acl_probe("bob@test.com") is True
 
 
-def test_probe_can_read_but_not_in_grant_is_denied(monkeypatch):
-    """THE FLAW REGRESSION: a caller absent from every CAN_MANAGE grant is
-    NOT admin, even though they can read the whole ACL. The old readability
-    probe returned True here (fail-open); the redesign must return False."""
-    _authz = _wire_probe(
-        monkeypatch,
-        acl_entries=[
-            _acl_entry(user_name="owner@test.com"),
-            _acl_entry(group_name="admins"),
-        ],
-        caller_groups=["users", "tellr consumers"],  # not in any CAN_MANAGE grant
-    )
+def test_probe_non_admin_group_member_denied(monkeypatch):
+    """FAIL-OPEN REGRESSION: caller not in 'admins' -> DENIED, even though
+    they are an authenticated user with their own (non-admin) groups."""
+    _authz = _wire_probe(monkeypatch, caller_groups=["users", "tellr consumers"])
     assert _authz._admin_acl_probe("stranger@test.com") is False
 
 
-def test_probe_can_use_only_grant_is_not_admin(monkeypatch):
-    """A grant that is not CAN_MANAGE (e.g. CAN_USE) does not confer admin."""
-    _authz = _wire_probe(
-        monkeypatch,
-        acl_entries=[_acl_entry(user_name="alice@test.com", level="CAN_USE")],
-        caller_groups=[],
-    )
-    assert _authz._admin_acl_probe("alice@test.com") is False
+def test_probe_no_groups_denied(monkeypatch):
+    """Caller with no group memberships -> not admin."""
+    _authz = _wire_probe(monkeypatch, caller_groups=[])
+    assert _authz._admin_acl_probe("nobody@test.com") is False
 
 
-def test_probe_missing_app_name_fails_closed(monkeypatch):
+def test_probe_transient_error_raises(monkeypatch):
+    """A me() failure propagates so require_admin fails closed WITHOUT caching."""
     from src.api.routes import _authz
 
-    monkeypatch.delenv("DATABRICKS_APP_NAME", raising=False)
-    assert _authz._admin_acl_probe("alice@test.com") is False
-
-
-def test_probe_group_name_only_matched_when_caller_is_member(monkeypatch):
-    """A CAN_MANAGE group grant the caller does NOT belong to must not admit."""
-    _authz = _wire_probe(
-        monkeypatch,
-        acl_entries=[_acl_entry(group_name="some-other-team")],
-        caller_groups=["users"],
+    fake_client = MagicMock()
+    fake_client.current_user.me.side_effect = RuntimeError("workspace unreachable")
+    monkeypatch.setattr(
+        "src.core.databricks_client.get_user_client", lambda: fake_client
     )
-    assert _authz._admin_acl_probe("carol@test.com") is False
+    with pytest.raises(RuntimeError):
+        _authz._admin_acl_probe("alice@test.com")
 
 
 def test_caller_group_display_names_reads_me_group_display(monkeypatch):
     """_caller_group_display_names returns the caller's own group *display* names
-    from current_user.me() on the OBO client (verified live: 'admins' present
-    for a workspace admin)."""
+    from current_user.me() on the OBO client (iam.current-user:read scope)."""
     from src.api.routes import _authz
 
     g1 = MagicMock(); g1.display = "admins"

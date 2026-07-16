@@ -248,45 +248,41 @@ def _require_export_job_access(
 
 
 # ---------------------------------------------------------------------------
-# HIGH-2: admin primitive — caller holds CAN_MANAGE in the App's ACL
+# HIGH-2: admin primitive — caller is a member of the workspace ``admins`` group
 # ---------------------------------------------------------------------------
 #
-# SECURITY NOTE — admin is a DECISION, not an ACL-readability oracle; and the
-# READ and the DECISION use different-but-verified principals.
+# SEMANTIC DEFINITION (Robert's decision, "Direction C"): admin == the caller
+# is a member of the workspace ``admins`` group. This is NOT "holds CAN_MANAGE
+# on this specific app" — the earlier app-ACL designs are abandoned because
+# ``apps.get_permissions`` is simply the wrong primitive for a Databricks App
+# to call at runtime. Three deploys proved the walls empirically:
 #
-# Wrong design #1 (fail-OPEN): decide admin by whether the caller's OBO client
-# can READ the app ACL. False premise — ``apps.get_permissions`` only needs
-# ``iam.access-control:read``, present on every user's OBO token, so a
-# readability probe classifies EVERY authenticated user as admin.
+#   1. OBO-can-read-the-ACL as the verdict           -> fail-OPEN (every user
+#      could read the ACL, so every user was "admin").
+#   2. SP/system client reads the ACL                -> fail-CLOSED for all:
+#      PermissionDenied ``apps.ruleSets/get`` (the app's own SP is not in its
+#      own ACL).
+#   3. OBO client reads the ACL (apps.get_permissions) -> fail-CLOSED for all:
+#      ``PermissionDenied: Provided OAuth token does not have required scopes:
+#      access-management``. The runtime OBO x-forwarded-access-token is scoped
+#      down to the app's declared user_api_scopes and does NOT carry
+#      ``access-management``; only a full-scope human/CLI token does, which the
+#      app never has at runtime (that scope gap is exactly what made the first
+#      three "verifications" — all done with a CLI token — false positives).
 #
-# Wrong design #2 (fail-CLOSED for all): fetch the ACL + caller groups with the
-# SP/system client. Verified live: the app's own SP is NOT in its own ACL and
-# gets ``PermissionDenied: ... apps.ruleSets/get`` — the SP has LESS access
-# here, not more, so every request hit the fail-closed path.
-#
-# Correct design: SEPARATE the data fetch from the verdict.
-#   - READ the ACL and RESOLVE the caller's groups with the caller's OBO/user
-#     client. Empirically verified against the deployed sdr4437-pr2 workspace
-#     (profile tellr-dev, U2M ~= OBO scope):
-#       * ``apps.get_permissions(app)`` -> 200 OK as OBO for apps the caller
-#         both does and does NOT manage (SP -> PermissionDenied).
-#       * ``current_user.me().groups`` -> the caller's own group *display
-#         names* (e.g. 'admins','users','tellr consumers') as OBO.
-#     Using OBO to FETCH does not reintroduce fail-open, because the read is
-#     not the verdict (see below), and ``me()`` returns only the CALLER's own
-#     identity — a user cannot forge membership in a group they aren't in.
-#   - DECIDE by presence-in-grant: admit iff the caller's ``user_name`` OR one
-#     of their group display-names appears in the ACL with CAN_MANAGE. This is
-#     the real authorization decision and cannot fail open regardless of who
-#     fetched the data.
+# So we drop object-ACL reads entirely and decide admin from the caller's OWN
+# group membership: ``current_user.me()`` is governed by ``iam.current-user:read``,
+# which IS in the app's effective OBO scopes (unlike access-management), needs
+# no object-ACL permission and no SP. Presence-in-own-group-list cannot fail
+# open — a non-admin's ``me().groups`` will not contain ``admins`` and a caller
+# cannot forge membership in a group they are not in. ``DATABRICKS_APP_NAME`` is
+# no longer needed on this path.
 
 _ADMIN_CACHE: dict = {}
 _ADMIN_CACHE_TTL_SECONDS = 60.0
 
-# App ACL entries carry Databricks IAM permission levels as *strings* like
-# "CAN_MANAGE" (databricks.sdk.service.iam.PermissionLevel); do NOT confuse
-# with the deck-permission ``PermissionLevel`` imported at module top.
-_APP_CAN_MANAGE = "CAN_MANAGE"
+# The workspace group whose members are treated as Tellr admins.
+_ADMIN_GROUP = "admins"
 
 
 def _is_production() -> bool:
@@ -296,76 +292,46 @@ def _is_production() -> bool:
 def _caller_group_display_names(client, user_name: str) -> set:
     """Resolve the caller's own group *display names* via ``current_user.me``.
 
-    The app ACL identifies groups by ``group_name`` display name (e.g.
-    "admins"), so membership matching must be on display names — not the group
-    IDs that ``permission_context``/``get_user_groups`` return, and not the
-    request-time permission context (built with ``fetch_groups=False`` in
-    production). ``client`` MUST be the caller's OBO/user client:
-    ``current_user.me()`` returns the token holder's own identity and its
-    ``groups[].display`` are exactly the caller's group display names
-    (verified live — 'admins' among them for a workspace admin). ``user_name``
-    is accepted for signature symmetry / logging; the OBO token is what scopes
-    the answer to the caller.
+    ``client`` MUST be the caller's OBO/user client: ``current_user.me()``
+    returns the token holder's own identity, scoped by ``iam.current-user:read``
+    (present in the app's effective OBO scopes), and its ``groups[].display``
+    are exactly the caller's own group display names. ``user_name`` is accepted
+    for signature symmetry / logging; the OBO token is what scopes the answer
+    to the caller (a caller cannot enumerate another principal's groups here).
     """
     me = client.current_user.me()
     return {g.display for g in (me.groups or []) if g.display}
 
 
 def _admin_acl_probe(user_name: str) -> bool:
-    """Return True iff ``user_name`` holds CAN_MANAGE in the app's ACL.
+    """Return True iff the caller is a member of the workspace ``admins`` group.
 
-    Admin is a presence-in-grant authorization decision, not an ACL
-    readability oracle: the caller is admin iff their ``user_name`` appears as
-    a direct CAN_MANAGE grant in the app ACL, OR any group they belong to
-    appears as a CAN_MANAGE ``group_name`` grant (inherited grants — e.g. the
-    workspace ``admins`` group — count).
+    Admin is decided from the caller's OWN group membership (resolved via the
+    OBO/user client's ``current_user.me().groups``), NOT from any app-object
+    ACL — see the SEMANTIC DEFINITION / three-walls note above for why
+    ``apps.get_permissions`` cannot work from an app's runtime OBO token or SP.
 
-    Both the ACL read and the caller's group resolution use the caller's
-    OBO/user client, because that is the principal empirically verified to be
-    able to make these calls (the app SP cannot read its own ACL). Using OBO
-    to fetch is safe: the verdict is the presence-in-grant check below, not the
-    read succeeding, and ``current_user.me()`` only ever returns the caller's
-    own identity/groups — so a non-admin cannot be admitted.
-
-    Returns False for a caller absent from every CAN_MANAGE grant (even though
-    such a caller can still *read* the ACL). Missing app name -> False. Raises
-    on genuine infra/API errors so ``require_admin`` can fail closed without
-    caching a transient blip.
+    This cannot fail open: ``me().groups`` returns only the caller's own
+    memberships, so a non-admin's list will not contain ``admins`` and the
+    caller cannot forge it. Raises on genuine infra/API errors so
+    ``require_admin`` can fail closed without caching a transient blip.
     """
-    app_name = os.environ.get("DATABRICKS_APP_NAME")
-    if not app_name:
-        logger.warning("require_admin: DATABRICKS_APP_NAME unset; failing closed")
-        return False
     from src.core.databricks_client import get_user_client
 
     client = get_user_client()
-    acl = client.apps.get_permissions(app_name)
-
     caller_groups = _caller_group_display_names(client, user_name)
-
-    for entry in (acl.access_control_list or []):
-        grants_manage = any(
-            getattr(p.permission_level, "value", p.permission_level) == _APP_CAN_MANAGE
-            for p in (entry.all_permissions or [])
-        )
-        if not grants_manage:
-            continue
-        if entry.user_name and entry.user_name == user_name:
-            return True
-        if entry.group_name and entry.group_name in caller_groups:
-            return True
-    return False
+    return _ADMIN_GROUP in caller_groups
 
 
 def require_admin() -> None:
-    """FastAPI dependency: caller must hold CAN_MANAGE in the app's ACL.
+    """FastAPI dependency: caller must be a member of the workspace ``admins`` group.
 
-    - Local dev/test: bypass (dev auth is DEV_USER_ID with no token or ACL
-      behind it) — same pattern as the dev-only CORS gate in main.py.
-    - Admin verdict = ``_admin_acl_probe`` (a presence-in-grant check against
-      the app ACL, direct or via group membership). See the SECURITY NOTE
-      above for why this is a membership decision, not an ACL-readability
-      test.
+    - Local dev/test: bypass (dev auth is DEV_USER_ID with no token or group
+      membership behind it) — same pattern as the dev-only CORS gate in main.py.
+    - Admin verdict = ``_admin_acl_probe`` (caller is in the workspace
+      ``admins`` group, resolved from their own OBO ``current_user.me()``).
+      See the SEMANTIC DEFINITION note above for why this is a group-membership
+      decision and not an app-object-ACL check.
     - Verdicts cached per-username with a short TTL. The cache is in-memory
       and therefore per-worker — deliberately fine here: a cache miss on
       another worker just re-runs the lookup; correctness never depends on
