@@ -426,9 +426,12 @@ app.add_middleware(RequestLoggingMiddleware)
 #   user_auth -> CORS(dev) -> normalize_mcp_path -> routes
 # Headers must stamp EVERY response (including CSRF 403s); CSRF must reject
 # forged cross-site requests before OBO auth work and before request_logs
-# DB writes.
+# DB writes. CSRF runs outside normalize_mcp_path, so it sees the raw
+# un-rewritten /mcp path (its exemption handles both /mcp and /mcp/).
+from src.api.middleware.csrf import CSRFProtectionMiddleware  # noqa: E402
 from src.api.middleware.security_headers import SecurityHeadersMiddleware  # noqa: E402
 
+app.add_middleware(CSRFProtectionMiddleware)
 app.add_middleware(SecurityHeadersMiddleware)
 # === end SDR-4437 Track A security middleware =============================
 
