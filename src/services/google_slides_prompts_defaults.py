@@ -87,10 +87,15 @@ TABLES (<table>):
     'textRange': {'type': 'ALL'}, 'style': {'fontSize': {'magnitude': 8, 'unit': 'PT'}}, 'fields': 'fontSize'}})
 
 BULLET / LIST ITEMS (<ul>, <ol>):
-- For each <li>, insertText the item text, then use createParagraphBullets (NOT updateParagraphStyle):
+- CRITICAL: render an ENTIRE <ul>/<ol> as ONE TEXT_BOX with one paragraph per <li>. Do NOT
+  create a separate shape/text box for each <li> — that produces a stack of single-line boxes
+  that is broken and painful to edit. One list => one createShape.
+- Build it as: one createShape (TEXT_BOX sized for the whole list), then ONE insertText whose
+  text is every <li> joined by newlines ('\\n'), then createParagraphBullets over the FULL range:
   {'createParagraphBullets': {'objectId': id,
-    'textRange': {'type': 'FIXED_RANGE', 'startIndex': start, 'endIndex': end},
+    'textRange': {'type': 'ALL'},
     'bulletPreset': 'BULLET_DISC_CIRCLE_SQUARE'}}
+  Every newline-separated line becomes its own bulleted paragraph in that single box.
 - CRITICAL: bulletPreset is ONLY valid inside createParagraphBullets. Do NOT put it inside updateParagraphStyle.
 - Ordered lists: use bulletPreset 'NUMBERED_DIGIT_ALPHA_ROMAN'.
 - To adjust indentation after bullets, use a separate updateParagraphStyle with indentStart/indentFirstLine.
