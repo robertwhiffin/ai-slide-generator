@@ -270,7 +270,7 @@ async def verify_slide(slide_index: int, request: VerifySlideRequest):
         logger.error(f"Verification failed: {e}", exc_info=True)
         raise HTTPException(
             status_code=500,
-            detail=f"Verification failed: {str(e)}",
+            detail="Verification failed",
         )
 
 
@@ -392,7 +392,7 @@ async def submit_feedback(slide_index: int, request: FeedbackRequest):
         logger.error(f"Failed to submit feedback: {e}", exc_info=True)
         raise HTTPException(
             status_code=500,
-            detail=f"Failed to submit feedback: {str(e)}",
+            detail="Failed to submit feedback",
         )
 
 
@@ -520,6 +520,6 @@ async def get_genie_link(
         logger.error(f"Failed to get Genie link: {e}", exc_info=True)
         raise HTTPException(
             status_code=500,
-            detail=f"Failed to get Genie link: {str(e)}",
+            detail="Failed to get Genie link",
         )
 
