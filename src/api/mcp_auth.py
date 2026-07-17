@@ -16,8 +16,10 @@ Accepts three identity sources, evaluated in priority order:
    identity headers. The receiving app (tellr) trusts those headers
    because the same proxy sets them, strips any caller-supplied versions,
    and cannot be bypassed by external traffic. This path has no user
-   token, so downstream Databricks API calls use tellr's own service
-   principal credentials; attribution (``created_by`` on decks, etc.)
+   token, so it is valid for **attribution and read/permission operations
+   only**: no Databricks client is bound, and tools that execute Databricks
+   resources (Genie/UC/model serving) refuse header-only callers
+   (SDR-4437 HIGH-7). Attribution (``created_by`` on decks, etc.)
    remains the real user via ``user_name``.
 
 The priority-3 path is gated on ``TELLR_TRUST_FORWARDED_IDENTITY=true``
@@ -43,7 +45,6 @@ from fastapi import Request
 
 from src.core.databricks_client import (
     get_or_create_user_client,
-    get_system_client,
     set_user_client,
 )
 from src.core.permission_context import (
@@ -147,7 +148,9 @@ def extract_mcp_identity(request: Request) -> MCPIdentity:
 
 
 @contextmanager
-def mcp_auth_scope(request: Request) -> Iterator[MCPIdentity]:
+def mcp_auth_scope(
+    request: Request, *, require_user_token: bool = False
+) -> Iterator[MCPIdentity]:
     """Authenticate an MCP request and bind identity ContextVars for the block.
 
     On entry: resolves identity, binds ``current_user``, ``user_client``,
@@ -155,22 +158,35 @@ def mcp_auth_scope(request: Request) -> Iterator[MCPIdentity]:
 
     On exit: clears all three ContextVars, even if the wrapped block raised.
 
-    When the identity was resolved via priority 3 (no user token), the
-    bound ``user_client`` is tellr's service-principal client — downstream
-    services still function, but any SDK calls are made with SP credentials
-    rather than the user's own. Attribution (``created_by``) is unaffected:
-    it uses ``user_name`` from the forwarded identity headers, which the
-    proxy attests.
+    HIGH-7 (SDR-4437): when the identity was resolved via priority 3 (header-
+    only forwarded identity, no user token), **no Databricks client is bound**
+    — the identity is used for attribution and permission checks only. Tools
+    that execute Databricks resources (Genie/UC/model serving — anything that
+    runs the agent) must pass ``require_user_token=True``, which refuses the
+    priority-3 path outright with ``MCPAuthError``. Any stray downstream
+    ``get_user_client()`` call on the header-only path fails closed in
+    production (``UserClientRequiredError`` — see databricks_client.py) rather
+    than silently running as the service principal. Attribution
+    (``created_by``) is unaffected: it uses ``user_name`` from the forwarded
+    identity headers, which the proxy attests.
     """
     identity = extract_mcp_identity(request)
 
     if identity.token is not None:
         user_client = get_or_create_user_client(identity.token)
+    elif require_user_token:
+        raise MCPAuthError(
+            "This tool executes Databricks resources and requires a user "
+            "access token (x-forwarded-access-token or Authorization: "
+            "Bearer). Header-only forwarded identity (app-to-app) is "
+            "accepted only for read/attribution operations."
+        )
     else:
-        # Priority-3 path: no user token, so downstream Databricks API
-        # calls use tellr's service principal. Safe because the app-to-app
-        # model explicitly delegates credentialing to the receiving app.
-        user_client = get_system_client()
+        # HIGH-7: priority-3 path binds NO client. Downstream services that
+        # only need identity (session manager, permission service, MLflow
+        # attribution) keep working; anything needing a Databricks client
+        # fails closed instead of running as the SP.
+        user_client = None
 
     permission_ctx = build_permission_context(
         user_id=identity.user_id,
