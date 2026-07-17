@@ -272,7 +272,11 @@ async def auth_url(
 
         return AuthUrlResponse(url=url)
     except GoogleSlidesAuthError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        logger.warning("auth_url rejected: %s", exc)
+        raise HTTPException(
+            status_code=400,
+            detail="Google authorization is missing, expired, or not configured. Connect your Google account and try again.",
+        ) from exc
     except Exception as exc:
         logger.error("Failed to generate auth URL: %s", exc)
         raise HTTPException(
@@ -389,7 +393,11 @@ async def start_google_slides_export(
     try:
         auth = _get_auth(db)
     except GoogleSlidesAuthError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        logger.warning("start_google_slides_export rejected: %s", exc)
+        raise HTTPException(
+            status_code=400,
+            detail="Google authorization is missing, expired, or not configured. Connect your Google account and try again.",
+        ) from exc
 
     if not auth.is_authorized():
         raise HTTPException(
@@ -403,7 +411,7 @@ async def start_google_slides_export(
         slide_deck = chat_service.get_slides(request_body.session_id)
     except Exception as exc:
         logger.error("Failed to fetch slides", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Failed to fetch slides: {exc}") from exc
+        raise HTTPException(status_code=500, detail="Failed to fetch slides") from exc
 
     if not slide_deck or not slide_deck.get("slides"):
         raise HTTPException(status_code=404, detail="No slides available")
@@ -522,7 +530,11 @@ async def export_google_slides_from_records(
     try:
         auth = _get_auth(db)
     except GoogleSlidesAuthError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        logger.warning("export_google_slides_from_records rejected: %s", exc)
+        raise HTTPException(
+            status_code=400,
+            detail="Google authorization is missing, expired, or not configured. Connect your Google account and try again.",
+        ) from exc
 
     if not auth.is_authorized():
         raise HTTPException(
@@ -538,7 +550,7 @@ async def export_google_slides_from_records(
         )
     except EmitError as exc:
         logger.error("PPTX build failed for Google Slides export", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"PPTX build failed: {exc}") from exc
+        raise HTTPException(status_code=500, detail="PPTX build failed") from exc
 
     from src.api.services.session_manager import get_session_manager
     session_manager = get_session_manager()
@@ -556,7 +568,7 @@ async def export_google_slides_from_records(
             )
     except Exception as exc:
         logger.error("Drive upload failed", exc_info=True)
-        raise HTTPException(status_code=502, detail=f"Drive upload failed: {exc}") from exc
+        raise HTTPException(status_code=502, detail="Drive upload failed") from exc
 
     session_manager.set_google_slides_info(
         session_id=request.session_id,
@@ -626,7 +638,11 @@ async def export_google_slides_from_huashu(
     try:
         auth = _get_auth(db)
     except GoogleSlidesAuthError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        logger.warning("export_google_slides_from_huashu rejected: %s", exc)
+        raise HTTPException(
+            status_code=400,
+            detail="Google authorization is missing, expired, or not configured. Connect your Google account and try again.",
+        ) from exc
 
     if not auth.is_authorized():
         raise HTTPException(
@@ -668,7 +684,7 @@ async def export_google_slides_from_huashu(
         logger.error("Huashu pipeline error for Google Slides export", exc_info=True)
         raise HTTPException(
             status_code=503,
-            detail=f"Huashu pipeline unavailable: {exc}",
+            detail="Huashu pipeline unavailable",
         ) from exc
 
     if not pptx_bytes:
@@ -701,7 +717,7 @@ async def export_google_slides_from_huashu(
         logger.error("Drive upload failed (huashu path)", exc_info=True)
         raise HTTPException(
             status_code=502,
-            detail=f"Drive upload failed: {exc}",
+            detail="Drive upload failed",
         ) from exc
 
     session_manager.set_google_slides_info(
