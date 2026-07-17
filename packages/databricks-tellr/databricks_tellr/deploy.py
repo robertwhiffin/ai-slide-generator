@@ -30,6 +30,8 @@ from databricks.sdk.service.apps import (
 from databricks.sdk.service.database import DatabaseInstance
 from databricks.sdk.service.workspace import ImportFormat
 
+from databricks_tellr.identifiers import validate_client_id, validate_schema_name
+
 # Autoscaling imports (Lakebase next-gen)
 try:
     from databricks.sdk.service.postgres import (
@@ -195,7 +197,6 @@ def create(
     client: WorkspaceClient | None = None,
     profile: str | None = None,
     config_yaml_path: str | None = None,
-    encryption_key: str | None = None,
     mlflow_tracing: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Deploy Tellr to Databricks Apps.
@@ -225,7 +226,6 @@ def create(
         client: External WorkspaceClient (optional)
         profile: Databricks CLI profile name (optional)
         config_yaml_path: Path to deployment config YAML (mutually exclusive with other args)
-        encryption_key: Fernet key for Google OAuth encryption. Auto-generated if not provided.
         mlflow_tracing: Optional overrides for UC tracing env vars in generated ``app.yaml``.
             Keys: ``MLFLOW_TRACING_SQL_WAREHOUSE_ID``, ``TELLR_MLFLOW_UC_CATALOG``,
             ``TELLR_MLFLOW_UC_SCHEMA``, ``TELLR_MLFLOW_UC_TABLE_PREFIX``. With
@@ -258,7 +258,6 @@ def create(
         profile=profile,
         config_yaml_path=config_yaml_path,
         seed_databricks_defaults=False,
-        encryption_key=encryption_key,
         mlflow_tracing=mlflow_tracing,
     )
 
@@ -288,8 +287,9 @@ def update(
         reset_database: If True, drop and recreate the schema (tables recreated on app startup)
         client: External WorkspaceClient (optional)
         profile: Databricks CLI profile name (optional)
-        encryption_key: Fernet key for Google OAuth encryption. If not provided, the
-            existing key is read from the deployed app.yaml to preserve encrypted data.
+        encryption_key: Override for the legacy Fernet key to relocate into
+            the encryption_keys table. Default: read from the deployed
+            app.yaml. The key is no longer written to app.yaml.
         mlflow_tracing: Optional overrides for UC tracing env vars (same keys as ``create``).
             Values from deployment YAML are not loaded on update; use this argument or
             ``TELLR_DEPLOY_MLFLOW_*`` environment variables.
@@ -333,7 +333,6 @@ def _create_databricks(
     profile: str | None = None,
     config_yaml_path: str | None = None,
     seed_databricks_defaults: bool = True,
-    encryption_key: str | None = None,
     mlflow_tracing: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Deploy Tellr to Databricks Apps with configurable seeding.
@@ -353,7 +352,6 @@ def _create_databricks(
         profile: Databricks CLI profile name (optional)
         config_yaml_path: Path to deployment config YAML (mutually exclusive with other args)
         seed_databricks_defaults: If True, seed Databricks-specific content on startup
-        encryption_key: Fernet key for Google OAuth encryption. Auto-generated if not provided.
         mlflow_tracing: Optional overrides for UC tracing placeholders in ``app.yaml``.
 
     Returns:
@@ -417,11 +415,10 @@ def _create_databricks(
                 lakebase_name,
                 schema_name,
                 seed_databricks_defaults=seed_databricks_defaults,
-                encryption_key=encryption_key,
                 lakebase_result=lakebase_result,
                 mlflow_tracing=mlflow_subs,
             )
-            print("   Generated app.yaml (with encryption key)")
+            print("   Generated app.yaml")
 
             print(f"Uploading to: {app_file_workspace_path}")
             _upload_files(ws, staging, app_file_workspace_path)
@@ -507,8 +504,9 @@ def _update_databricks(
         client: External WorkspaceClient (optional)
         profile: Databricks CLI profile name (optional)
         seed_databricks_defaults: If True, seed Databricks-specific content on startup
-        encryption_key: Fernet key for Google OAuth encryption. If not provided, reads
-            the existing key from the deployed app.yaml to preserve encrypted data.
+        encryption_key: Override for the legacy Fernet key to relocate into
+            the encryption_keys table. Default: read from the deployed
+            app.yaml. The key is no longer written to app.yaml.
         mlflow_tracing: Optional overrides for UC tracing placeholders in ``app.yaml``.
 
     Returns:
@@ -547,6 +545,28 @@ def _update_databricks(
             print(f"   Schema '{schema_name}' reset (tables will be recreated on app startup)")
             print()
 
+        # CRITICAL-3 migration: relocate the legacy app.yaml key into the
+        # encryption_keys table BEFORE the new (keyless) app.yaml overwrites
+        # it. Runs at most once per install: after it succeeds, the deployed
+        # app.yaml has no key entry and encryption_key is None on re-runs.
+        if encryption_key:
+            print("Relocating encryption key into Lakebase (encryption_keys)...")
+            app_for_grant = ws.apps.get(name=app_name)
+            grant_client_id = _get_app_client_id(app_for_grant)
+            if not grant_client_id:
+                print("   Warning: no app client ID — table grant will be skipped")
+            mig_conn, _ = _get_lakebase_connection(
+                ws, lakebase_name, lakebase_result=lakebase_result
+            )
+            try:
+                with mig_conn.cursor() as cur:
+                    _migrate_encryption_key_to_lakebase(
+                        cur, schema_name, grant_client_id, encryption_key
+                    )
+            finally:
+                mig_conn.close()
+            print("   Key relocated (relocate, not rotate — no re-encryption)")
+
         # Generate and upload updated files
         with _staging_dir() as staging:
             _write_requirements(staging, app_version)
@@ -555,7 +575,6 @@ def _update_databricks(
                 lakebase_name,
                 schema_name,
                 seed_databricks_defaults=seed_databricks_defaults,
-                encryption_key=encryption_key,
                 lakebase_result=lakebase_result,
                 mlflow_tracing=mlflow_subs,
             )
@@ -660,6 +679,11 @@ def _check_breaking_migrations(
     Raises:
         DeploymentError: If the user declines the migration.
     """
+    # MEDIUM-5: schema_name is interpolated into the row-count DDL below
+    # (identifiers can't be parameterized); validate before any interpolation,
+    # matching the other DDL sites in this module.
+    validate_schema_name(schema_name)
+
     try:
         conn, _ = _get_lakebase_connection(ws, lakebase_name, lakebase_result=lakebase_result)
     except Exception as e:
@@ -733,30 +757,94 @@ def _check_breaking_migrations(
 def _read_existing_encryption_key(
     ws: WorkspaceClient, workspace_path: str
 ) -> str | None:
-    """Read the GOOGLE_OAUTH_ENCRYPTION_KEY from an existing deployed app.yaml.
+    """Read GOOGLE_OAUTH_ENCRYPTION_KEY from an existing deployed app.yaml.
 
-    This preserves the encryption key across updates so that previously encrypted
-    credentials and tokens remain decryptable.
+    Returns the key string, or None when app.yaml is readable but carries no
+    key entry (already migrated, or a fresh-era install).
 
-    Returns:
-        The encryption key string, or None if not found.
+    Raises DeploymentError when app.yaml cannot be downloaded or parsed:
+    silently treating an unreadable app.yaml as "no key" would skip the
+    CRITICAL-3 migration and let the new code generate a fresh key,
+    orphaning all existing ciphertext.
     """
     try:
         resp = ws.workspace.download(f"{workspace_path}/app.yaml")
         raw = resp.read() if hasattr(resp, "read") else resp
         content = raw.decode("utf-8") if isinstance(raw, bytes) else str(raw)
-
         existing = yaml.safe_load(content)
-        for env_entry in existing.get("env", []):
-            if env_entry.get("name") == "GOOGLE_OAUTH_ENCRYPTION_KEY":
-                key = env_entry.get("value")
-                if key:
-                    print("   Preserved existing encryption key from deployed app.yaml")
-                    return key
     except Exception as e:
-        logger.warning("Could not read existing encryption key from app.yaml: %s", e)
+        raise DeploymentError(
+            f"Could not read the deployed app.yaml at {workspace_path}/app.yaml "
+            f"({e}). Aborting: the update must know whether a legacy encryption "
+            f"key needs relocating before it overwrites app.yaml."
+        ) from e
 
+    for env_entry in (existing or {}).get("env", []):
+        if env_entry.get("name") == "GOOGLE_OAUTH_ENCRYPTION_KEY":
+            key = env_entry.get("value")
+            if key:
+                print("   Found legacy encryption key in deployed app.yaml")
+                return key
     return None
+
+
+def _migrate_encryption_key_to_lakebase(
+    cur: Any,
+    schema_name: str,
+    client_id: str | None,
+    encryption_key: str,
+) -> None:
+    """Relocate the legacy app.yaml Fernet key into <schema>.encryption_keys.
+
+    SDR-4437 CRITICAL-3, deploy-time migration. Relocate, not rotate: no
+    re-encryption of existing rows. Idempotent: re-running with the same key
+    is a no-op. A *different* pre-existing key is a hard error — silently
+    keeping either key would orphan the ciphertext encrypted under the other.
+
+    The GRANT is unconditional: the original deployer's ALTER DEFAULT
+    PRIVILEGES attaches to the creating role, so when a different identity
+    runs the upgrade this explicit grant is the only one that applies.
+    INSERT is included so the app's boot seed (insert-when-missing branch)
+    can never be privilege-blocked.
+
+    Takes an open cursor so callers control the endpoint (prod branch,
+    devloop fork, ...). Caller owns the connection lifecycle.
+    """
+    validate_schema_name(schema_name)
+    if client_id is not None:
+        validate_client_id(client_id)
+
+    # Matches the SQLAlchemy model (src/database/models/encryption_key.py):
+    # id INTEGER PK (no autoincrement), key_value TEXT, created_at TIMESTAMP.
+    cur.execute(
+        f'CREATE TABLE IF NOT EXISTS "{schema_name}".encryption_keys ('
+        "id INTEGER PRIMARY KEY, "
+        "key_value TEXT NOT NULL, "
+        "created_at TIMESTAMP NOT NULL)"
+    )
+    cur.execute(
+        f'INSERT INTO "{schema_name}".encryption_keys (id, key_value, created_at) '
+        "VALUES (1, %s, CURRENT_TIMESTAMP) ON CONFLICT (id) DO NOTHING",
+        (encryption_key,),
+    )
+    cur.execute(
+        f'SELECT key_value FROM "{schema_name}".encryption_keys WHERE id = 1'
+    )
+    row = cur.fetchone()
+    if not row or row[0] != encryption_key:
+        raise DeploymentError(
+            "encryption_keys already holds a DIFFERENT key than the deployed "
+            "app.yaml. Refusing to continue: proceeding would orphan ciphertext "
+            "encrypted under one of the two keys. Determine which key decrypts "
+            "the existing google_oauth_tokens/google_global_credentials rows, "
+            "fix the encryption_keys row (or the app.yaml) to match, then "
+            "re-run the update. See SDR-4437 PR-3 design."
+        )
+    if client_id:
+        cur.execute(
+            f'GRANT SELECT, INSERT ON "{schema_name}".encryption_keys '
+            f'TO "{client_id}"'
+        )
 
 
 def _load_deployment_config(config_yaml_path: str) -> dict[str, str]:
@@ -1277,19 +1365,19 @@ def _write_app_yaml(
     lakebase_name: str,
     schema_name: str,
     seed_databricks_defaults: bool = False,
-    encryption_key: str | None = None,
     lakebase_result: dict[str, Any] | None = None,
     mlflow_tracing: dict[str, str] | None = None,
 ) -> None:
     """Generate app.yaml with environment variables.
+
+    The Fernet encryption key is deliberately NOT written here (SDR-4437
+    CRITICAL-3): the app reads/seeds it from the encryption_keys table.
 
     Args:
         staging_dir: Directory to write the app.yaml file
         lakebase_name: Lakebase instance name
         schema_name: Schema name
         seed_databricks_defaults: If True, include Databricks-specific content seeding
-        encryption_key: Fernet encryption key for Google OAuth credentials/tokens.
-            Auto-generated if not provided.
         lakebase_result: Result dict from _get_or_create_lakebase() with type info.
         mlflow_tracing: Resolved template keys for UC tracing (four entries). If
             omitted, values are taken only from ``TELLR_DEPLOY_MLFLOW_*`` env vars.
@@ -1299,12 +1387,6 @@ def _write_app_yaml(
         init_call = "init_database(seed_databricks_defaults=True)"
     else:
         init_call = "init_database()"
-
-    if not encryption_key:
-        from cryptography.fernet import Fernet
-
-        encryption_key = Fernet.generate_key().decode()
-        logger.info("Auto-generated GOOGLE_OAUTH_ENCRYPTION_KEY for deployment")
 
     # Determine lakebase type info for env vars
     lakebase_type = (lakebase_result or {}).get("type", "provisioned")
@@ -1320,7 +1402,6 @@ def _write_app_yaml(
         LAKEBASE_INSTANCE=lakebase_name,
         LAKEBASE_SCHEMA=schema_name,
         INIT_DATABASE_CALL=init_call,
-        GOOGLE_OAUTH_ENCRYPTION_KEY=encryption_key,
         LAKEBASE_TYPE=lakebase_type,
         LAKEBASE_PG_HOST=lakebase_pg_host,
         LAKEBASE_PROJECT_ID=lakebase_project_id,
@@ -1567,6 +1648,9 @@ def _setup_database_schema(
         print("   Warning: Could not get app client ID - schema setup skipped")
         return
 
+    validate_schema_name(schema_name)
+    validate_client_id(client_id)
+
     conn, _ = _get_lakebase_connection(ws, lakebase_name, lakebase_result=lakebase_result)
 
     try:
@@ -1597,6 +1681,10 @@ def _reset_schema(
     """
     client_id = _get_app_client_id(app)
 
+    validate_schema_name(schema_name)
+    if client_id:
+        validate_client_id(client_id)
+
     conn, _ = _get_lakebase_connection(ws, lakebase_name, lakebase_result=lakebase_result)
 
     try:
@@ -1624,6 +1712,9 @@ def _grant_schema_permissions(cur: Any, schema_name: str, client_id: str) -> Non
 
     This function only grants schema/table permissions — it does NOT create roles.
     """
+    validate_schema_name(schema_name)
+    validate_client_id(client_id)
+
     # Verify the role exists before granting
     cur.execute(
         "SELECT 1 FROM pg_roles WHERE rolname = %s", (client_id,)
