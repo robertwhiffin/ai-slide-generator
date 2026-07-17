@@ -203,35 +203,41 @@ class TestAuthUrl:
 class TestAuthCallback:
 
     def test_callback_no_credentials_returns_failure_html(self, test_client):
-        """No global credentials → returns HTML failure page (not 500)."""
-        state = json.dumps({"user": "local_dev"})
+        """No global credentials → returns HTML failure page (not 500).
+
+        MEDIUM-3: with no matching nonce row, the callback fails at the
+        nonce check and returns the generic popup-contract failure page.
+        """
         resp = test_client.get(
             "/api/export/google-slides/auth/callback",
-            params={"code": "fake-code", "state": state},
+            params={"code": "fake-code", "state": "never-issued"},
         )
         assert resp.status_code == 200
         assert "Authorization Failed" in resp.text
+        assert "postMessage" in resp.text
+        assert "'*'" not in resp.text and '"*"' not in resp.text
 
     def test_callback_invalid_code_returns_failure_html(self, test_client, session_factory):
-        """Valid credentials but invalid auth code → returns HTML failure page (not 500).
+        """Invalid/unknown nonce → returns HTML failure page (not 500).
 
-        Regression test: previously, OAuth library exceptions (e.g. InvalidGrantError)
-        were not caught, causing a raw 500 Internal Server Error.
+        MEDIUM-3: an unknown or already-used nonce fails the nonce check
+        before any code exchange; still the generic failure page.
         """
         _seed_global_credentials(session_factory)
-        state = json.dumps({"user": "local_dev"})
         resp = test_client.get(
             "/api/export/google-slides/auth/callback",
-            params={"code": "invalid-code", "state": state},
+            params={"code": "invalid-code", "state": "never-issued"},
         )
         assert resp.status_code == 200
         assert "Authorization Failed" in resp.text
+        assert "postMessage" in resp.text
+        assert "'*'" not in resp.text and '"*"' not in resp.text
 
-    def test_callback_missing_user_in_state(self, test_client):
-        """State without user key → returns HTML failure page."""
+    def test_callback_without_valid_nonce_rejected(self, test_client):
+        """No/absent nonce → returns HTML failure page (login-CSRF gap closed)."""
         resp = test_client.get(
             "/api/export/google-slides/auth/callback",
-            params={"code": "fake-code", "state": "{}"},
+            params={"code": "fake-code", "state": ""},
         )
         assert resp.status_code == 200
         assert "Authorization Failed" in resp.text

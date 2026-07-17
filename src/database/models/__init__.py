@@ -8,6 +8,7 @@ from src.database.models.google_global_credentials import GoogleGlobalCredential
 from src.database.models.google_oauth_token import GoogleOAuthToken
 from src.database.models.identity import AppIdentity
 from src.database.models.image import ImageAsset
+from src.database.models.oauth_state import OAuthState
 from src.database.models.profile import ConfigProfile
 from src.database.models.profile_contributor import (
     ConfigProfileContributor,
@@ -45,6 +46,7 @@ __all__ = [
     "GoogleOAuthToken",
     "IdentityType",
     "ImageAsset",
+    "OAuthState",
     "PermissionLevel",
     "ProfileContributor",  # Backward compatibility alias
     "RequestLog",

@@ -10,11 +10,14 @@ user tokens are stored per-user in the ``google_oauth_tokens`` table.
 import json
 import logging
 import os
+import secrets
+from datetime import datetime, timedelta
 from typing import Any, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
+from sqlalchemy import delete
 from sqlalchemy.orm import Session
 
 from src.api.services.chat_service import get_chat_service
@@ -24,6 +27,7 @@ from src.api.routes._authz import (
 )
 from src.api.routes.export import ExportJobResponse
 from src.core.database import get_db
+from src.database.models.oauth_state import OAuthState
 from src.database.models.profile_contributor import PermissionLevel
 from src.services.drive_uploader import replace_presentation, upload_pptx_as_slides
 from src.services.google_slides_auth import GoogleSlidesAuth, GoogleSlidesAuthError
@@ -32,6 +36,9 @@ from src.services.pptx_from_records import EmitError, build_pptx
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/export/google-slides", tags=["google-slides"])
+
+# MEDIUM-3 (SDR-4437): OAuth state nonces are single-use and short-lived.
+_OAUTH_STATE_TTL_SECONDS = 600
 
 
 # -------------------------------------------------------------------------
@@ -98,16 +105,13 @@ class AuthUrlResponse(BaseModel):
 # -------------------------------------------------------------------------
 
 
-def _build_redirect_uri(request: Request) -> str:
-    """Build the OAuth callback redirect URI from the current request.
+def _public_base_url(request: Request) -> str:
+    """Public origin of the app, reconstructed from x-forwarded-* headers.
 
-    Google requires redirect URIs to match *exactly* what's registered in GCP,
-    with no query parameters.
-
-    Behind a reverse proxy (e.g. Databricks Apps), ``request.base_url``
-    returns the internal address (``http://localhost:8000``).  We use the
-    ``X-Forwarded-Host`` / ``X-Forwarded-Proto`` headers set by the proxy
-    to reconstruct the public URL instead.
+    Behind a reverse proxy (Databricks Apps), ``request.base_url`` returns
+    the internal address; the proxy's X-Forwarded-Host/Proto give the public
+    one. Also used as the explicit postMessage targetOrigin in the OAuth
+    popup pages (SDR-4437 MEDIUM-3).
 
     For localhost, Google only allows ``http``.
     """
@@ -116,14 +120,111 @@ def _build_redirect_uri(request: Request) -> str:
 
     if forwarded_host:
         scheme = forwarded_proto or "https"
-        base = f"{scheme}://{forwarded_host.split(',')[0].strip()}"
-    else:
-        base = str(request.base_url).rstrip("/")
-        # Force http for localhost (Google rejects https://localhost)
-        if "://localhost" in base or "://127.0.0.1" in base:
-            base = base.replace("https://", "http://")
+        return f"{scheme}://{forwarded_host.split(',')[0].strip()}"
 
-    return f"{base}/api/export/google-slides/auth/callback"
+    base = str(request.base_url).rstrip("/")
+    # Force http for localhost (Google rejects https://localhost)
+    if "://localhost" in base or "://127.0.0.1" in base:
+        base = base.replace("https://", "http://")
+    return base
+
+
+def _build_redirect_uri(request: Request) -> str:
+    """Build the OAuth callback redirect URI (exact-match, no query params).
+
+    Google requires redirect URIs to match *exactly* what's registered in
+    GCP, with no query parameters.
+    """
+    return f"{_public_base_url(request)}/api/export/google-slides/auth/callback"
+
+
+def _create_oauth_state(
+    db: Session, nonce: str, user_identity: str, code_verifier: str
+) -> None:
+    """Store a single-use state nonce bound to the authenticated user.
+
+    The caller generates the nonce first: it must be handed to
+    ``get_auth_url(state=nonce)``, which is also the call that returns the
+    PKCE verifier — so this helper cannot mint the nonce itself (the row's
+    PK must equal the ``state`` sent to Google). Expired rows are swept
+    opportunistically on every insert.
+    """
+    cutoff = datetime.utcnow() - timedelta(seconds=_OAUTH_STATE_TTL_SECONDS)
+    db.query(OAuthState).filter(OAuthState.created_at < cutoff).delete()
+    db.add(
+        OAuthState(
+            nonce=nonce, user_identity=user_identity, code_verifier=code_verifier
+        )
+    )
+    db.commit()
+
+
+def _consume_oauth_state(db: Session, nonce: str):
+    """Atomically consume a state nonce (single-use, race-safe).
+
+    ``DELETE ... WHERE nonce = :n RETURNING ...`` — under two concurrent
+    callbacks exactly one wins; the loser sees no row. Returns the Row
+    (user_identity, code_verifier, created_at) or None.
+    """
+    if not nonce:
+        return None
+    row = db.execute(
+        delete(OAuthState)
+        .where(OAuthState.nonce == nonce)
+        .returning(
+            OAuthState.user_identity,
+            OAuthState.code_verifier,
+            OAuthState.created_at,
+        )
+    ).first()
+    db.commit()
+    return row
+
+
+def _callback_page(
+    app_origin: str, *, success: bool, heading: str, body_text: str, close_ms: int
+) -> HTMLResponse:
+    payload = json.dumps({"type": "google-slides-auth", "success": success})
+    origin_js = json.dumps(app_origin)
+    return HTMLResponse(
+        content=f"""
+        <html><body>
+            <h2>{heading}</h2>
+            <p>{body_text}</p>
+            <script>
+                if (window.opener) {{
+                    window.opener.postMessage({payload}, {origin_js});
+                }}
+                setTimeout(() => window.close(), {close_ms});
+            </script>
+        </body></html>
+        """,
+        status_code=200,
+    )
+
+
+def _oauth_success_html(app_origin: str) -> HTMLResponse:
+    return _callback_page(
+        app_origin,
+        success=True,
+        heading="Authorization Successful",
+        body_text="You can close this window.",
+        close_ms=1500,
+    )
+
+
+def _oauth_failure_html(app_origin: str) -> HTMLResponse:
+    # MEDIUM-2: generic text only — the reason is logged server-side.
+    return _callback_page(
+        app_origin,
+        success=False,
+        heading="Authorization Failed",
+        body_text=(
+            "Authorization failed. Close this window and try connecting "
+            "your Google account again."
+        ),
+        close_ms=3000,
+    )
 
 
 @router.get("/auth/status", response_model=AuthStatusResponse)
@@ -145,16 +246,29 @@ async def auth_url(
 ):
     """Generate the Google OAuth consent URL.
 
-    The frontend should open this URL in a popup window.  User identity is
-    passed via the OAuth ``state`` parameter so the callback can persist the
-    token for the correct user — the redirect URI itself stays clean
-    (no query params) to satisfy Google's exact-match requirement.
+    The frontend should open this URL in a popup window.  The OAuth ``state``
+    parameter carries ONLY a server-issued single-use nonce (SDR-4437
+    MEDIUM-3) — the PKCE verifier and the user binding live in the
+    ``oauth_states`` row, never in anything client-visible. The redirect URI
+    itself stays clean (no query params) to satisfy Google's exact-match
+    requirement.
+
+    Invariant: the nonce passed as ``state`` to ``get_auth_url`` must equal
+    the ``oauth_states`` row's PK — ``_create_oauth_state`` takes the nonce
+    as an argument for exactly this reason.
     """
     try:
-        auth = _get_auth(db)
+        user_identity = _get_user_identity()
+        auth = GoogleSlidesAuth.from_global(user_identity, db)
         redirect_uri = _build_redirect_uri(request)
-        state = json.dumps({"user": _get_user_identity()})
-        url = auth.get_auth_url(redirect_uri=redirect_uri, state=state)
+
+        # MEDIUM-3 (SDR-4437): state carries ONLY a server-issued single-use
+        # nonce; the PKCE verifier and the user binding live in the
+        # oauth_states row, never in anything client-visible. Nonce first,
+        # then get_auth_url (which returns the verifier), then the row.
+        nonce = secrets.token_urlsafe(32)  # 256-bit
+        url, code_verifier = auth.get_auth_url(redirect_uri=redirect_uri, state=nonce)
+        _create_oauth_state(db, nonce, user_identity, code_verifier)
 
         return AuthUrlResponse(url=url)
     except GoogleSlidesAuthError as exc:
@@ -170,67 +284,72 @@ async def auth_url(
 @router.get("/auth/callback", response_class=HTMLResponse)
 async def auth_callback(
     request: Request,
-    code: str,
-    state: str = Query("", description="OAuth state carrying user identity"),
+    code: str = Query("", description="Authorization code (absent when the user denies consent)"),
+    state: str = Query("", description="Server-issued single-use state nonce"),
     db: Session = Depends(get_db),
 ):
     """Handle the OAuth callback from Google.
 
-    User identity is extracted from the ``state`` parameter that was set
-    during the consent URL generation.  The redirect URI used here must
-    match exactly what was registered in GCP (no query params).
-
-    Exchanges the authorization code for tokens, encrypts them, and stores
-    them in the ``google_oauth_tokens`` table.  Returns a small HTML page
-    that notifies the opener window and closes itself.
+    MEDIUM-3 (SDR-4437): ``state`` is a single-use server-issued nonce
+    (``oauth_states`` row) binding this callback to a consent flow that the
+    authenticated request user started. Login-CSRF — an attacker completing
+    their own consent and feeding the victim their code — fails the
+    nonce/user checks. Token persistence keys off the authenticated request
+    identity, never off anything client-supplied. All failures return the
+    same generic popup page (HTTP 200 + postMessage, the popup contract);
+    the specific reason is logged server-side only (MEDIUM-2).
     """
+    app_origin = _public_base_url(request)
+
     try:
-        state_data = json.loads(state) if state else {}
-        user = state_data.get("user")
-        if not user:
-            raise ValueError("Missing user in OAuth state")
+        user_identity = _get_user_identity()
+    except Exception:
+        # PR-2's fail-closed _get_user_identity() raises in production on OBO
+        # failure — keep the popup contract: generic page, reason in the log
+        # (an unhandled raise here would surface as a 500 JSON body instead).
+        logger.error("OAuth callback failed to resolve user identity", exc_info=True)
+        return _oauth_failure_html(app_origin)
 
-        auth = _get_auth(db)
+    if not code:
+        # Consent denied / error redirect: Google calls back with ?error=...
+        # and NO code. `code` is optional (default "") precisely so this path
+        # returns the popup-contract page instead of FastAPI's 422 JSON
+        # validation error. Retire the nonce — the flow is over either way.
+        _consume_oauth_state(db, state)
+        logger.warning(
+            "OAuth callback rejected: no authorization code "
+            "(consent denied or error redirect)"
+        )
+        return _oauth_failure_html(app_origin)
+
+    row = _consume_oauth_state(db, state)
+    if row is None:
+        logger.warning("OAuth callback rejected: unknown or already-used state nonce")
+        return _oauth_failure_html(app_origin)
+    if row.user_identity != user_identity:
+        logger.warning("OAuth callback rejected: state nonce belongs to another user")
+        return _oauth_failure_html(app_origin)
+    if datetime.utcnow() - row.created_at > timedelta(
+        seconds=_OAUTH_STATE_TTL_SECONDS
+    ):
+        logger.warning("OAuth callback rejected: state nonce expired")
+        return _oauth_failure_html(app_origin)
+
+    try:
+        auth = GoogleSlidesAuth.from_global(user_identity, db)
         redirect_uri = _build_redirect_uri(request)
-        code_verifier = state_data.get("code_verifier")
-        auth.authorize(code=code, redirect_uri=redirect_uri, code_verifier=code_verifier)
+        auth.authorize(
+            code=code, redirect_uri=redirect_uri, code_verifier=row.code_verifier
+        )
         logger.info(
-            "Google Slides OAuth callback successful",
-            extra={"user": _get_user_identity()},
+            "Google Slides OAuth callback successful", extra={"user": user_identity}
         )
-    except Exception as exc:
+    except Exception:
+        # MEDIUM-2 (SDR-4437): never reflect the exception into the page.
         logger.error("OAuth callback failed", exc_info=True)
-        return HTMLResponse(
-            content=f"""
-            <html><body>
-                <h2>Authorization Failed</h2>
-                <p>{exc}</p>
-                <script>
-                    if (window.opener) {{
-                        window.opener.postMessage({{ type: 'google-slides-auth', success: false }}, '*');
-                    }}
-                    setTimeout(() => window.close(), 3000);
-                </script>
-            </body></html>
-            """,
-            status_code=200,
-        )
+        return _oauth_failure_html(app_origin)
 
-    return HTMLResponse(
-        content="""
-        <html><body>
-            <h2>Authorization Successful</h2>
-            <p>You can close this window.</p>
-            <script>
-                if (window.opener) {
-                    window.opener.postMessage({ type: 'google-slides-auth', success: true }, '*');
-                }
-                setTimeout(() => window.close(), 1500);
-            </script>
-        </body></html>
-        """,
-        status_code=200,
-    )
+    return _oauth_success_html(app_origin)
 
 
 # -------------------------------------------------------------------------
