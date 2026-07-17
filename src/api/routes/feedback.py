@@ -13,6 +13,7 @@ from src.api.schemas.feedback import (
     SurveySubmitRequest,
     SurveySubmitResponse,
 )
+from src.api.routes._authz import require_admin
 from src.api.services.feedback_service import FeedbackService
 from src.core.database import get_db
 
@@ -75,7 +76,7 @@ def submit_survey(request: SurveySubmitRequest, db: Session = Depends(get_db)):
         )
 
 
-@router.get("/report/stats")
+@router.get("/report/stats", dependencies=[Depends(require_admin)])
 def get_stats_report(weeks: int = Query(default=12, ge=1, le=52), db: Session = Depends(get_db)):
     try:
         service = FeedbackService()
@@ -88,7 +89,7 @@ def get_stats_report(weeks: int = Query(default=12, ge=1, le=52), db: Session = 
         )
 
 
-@router.get("/list")
+@router.get("/list", dependencies=[Depends(require_admin)])
 def list_feedback(
     weeks: int = Query(default=12, ge=1, le=52),
     category: str | None = Query(default=None),
@@ -115,7 +116,7 @@ def list_feedback(
         )
 
 
-@router.get("/report/summary")
+@router.get("/report/summary", dependencies=[Depends(require_admin)])
 def get_feedback_summary(weeks: int = Query(default=4, ge=1, le=52), db: Session = Depends(get_db)):
     try:
         service = FeedbackService()

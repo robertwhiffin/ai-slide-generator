@@ -98,16 +98,16 @@ def deck_contributor_view(db, owner_session):
 
 
 # ---------------------------------------------------------------------------
-# Test _get_session_permission in sessions.py
+# Test _get_session_permission_for_info in _authz.py (moved from sessions.py)
 # ---------------------------------------------------------------------------
 
 
 class TestSessionsGetSessionPermission:
-    """sessions.py _get_session_permission should use deck-based permissions."""
+    """_authz._get_session_permission_for_info should use deck-based permissions."""
 
     def test_creator_gets_can_manage(self, db, owner_session):
         """Session creator should get CAN_MANAGE via deck permission (creator check)."""
-        from src.api.routes.sessions import _get_session_permission
+        from src.api.routes._authz import _get_session_permission_for_info
 
         session_info = {
             "id": owner_session.id,
@@ -118,16 +118,16 @@ class TestSessionsGetSessionPermission:
         }
 
         ctx = PermissionContext(user_id="owner-uid", user_name="owner@test.com")
-        with patch("src.api.routes.sessions.get_permission_context", return_value=ctx), \
-             patch("src.api.routes.sessions.get_current_user", return_value="owner@test.com"):
-            has_access, perm = _get_session_permission(session_info, db)
+        with patch("src.api.routes._authz.get_permission_context", return_value=ctx), \
+             patch("src.api.routes._authz.get_current_user", return_value="owner@test.com"):
+            has_access, perm = _get_session_permission_for_info(session_info, db)
 
         assert has_access is True
         assert perm == PermissionLevel.CAN_MANAGE
 
     def test_deck_contributor_gets_edit(self, db, owner_session, deck_contributor_edit):
         """User with CAN_EDIT DeckContributor entry should get CAN_EDIT."""
-        from src.api.routes.sessions import _get_session_permission
+        from src.api.routes._authz import _get_session_permission_for_info
 
         session_info = {
             "id": owner_session.id,
@@ -138,16 +138,16 @@ class TestSessionsGetSessionPermission:
         }
 
         ctx = PermissionContext(user_id="editor-uid", user_name="editor@test.com")
-        with patch("src.api.routes.sessions.get_permission_context", return_value=ctx), \
-             patch("src.api.routes.sessions.get_current_user", return_value="editor@test.com"):
-            has_access, perm = _get_session_permission(session_info, db)
+        with patch("src.api.routes._authz.get_permission_context", return_value=ctx), \
+             patch("src.api.routes._authz.get_current_user", return_value="editor@test.com"):
+            has_access, perm = _get_session_permission_for_info(session_info, db)
 
         assert has_access is True
         assert perm == PermissionLevel.CAN_EDIT
 
     def test_stranger_gets_no_access(self, db, owner_session):
         """User with no DeckContributor entry and not creator should get no access."""
-        from src.api.routes.sessions import _get_session_permission
+        from src.api.routes._authz import _get_session_permission_for_info
 
         session_info = {
             "id": owner_session.id,
@@ -158,16 +158,16 @@ class TestSessionsGetSessionPermission:
         }
 
         ctx = PermissionContext(user_id="stranger-uid", user_name="stranger@test.com")
-        with patch("src.api.routes.sessions.get_permission_context", return_value=ctx), \
-             patch("src.api.routes.sessions.get_current_user", return_value="stranger@test.com"):
-            has_access, perm = _get_session_permission(session_info, db)
+        with patch("src.api.routes._authz.get_permission_context", return_value=ctx), \
+             patch("src.api.routes._authz.get_current_user", return_value="stranger@test.com"):
+            has_access, perm = _get_session_permission_for_info(session_info, db)
 
         assert has_access is False
         assert perm is None
 
     def test_contributor_session_checks_parent(self, db, owner_session, contributor_session, deck_contributor_edit):
         """Contributor session should check deck permission on parent session."""
-        from src.api.routes.sessions import _get_session_permission
+        from src.api.routes._authz import _get_session_permission_for_info
 
         session_info = {
             "id": contributor_session.id,
@@ -178,25 +178,25 @@ class TestSessionsGetSessionPermission:
         }
 
         ctx = PermissionContext(user_id="editor-uid", user_name="editor@test.com")
-        with patch("src.api.routes.sessions.get_permission_context", return_value=ctx), \
-             patch("src.api.routes.sessions.get_current_user", return_value="editor@test.com"):
-            has_access, perm = _get_session_permission(session_info, db)
+        with patch("src.api.routes._authz.get_permission_context", return_value=ctx), \
+             patch("src.api.routes._authz.get_current_user", return_value="editor@test.com"):
+            has_access, perm = _get_session_permission_for_info(session_info, db)
 
         assert has_access is True
         assert perm == PermissionLevel.CAN_EDIT
 
 
 # ---------------------------------------------------------------------------
-# Test _get_session_permission in slides.py (parallel copy)
+# Test _get_session_permission_by_id in _authz.py (moved from slides.py)
 # ---------------------------------------------------------------------------
 
 
 class TestSlidesGetSessionPermission:
-    """slides.py _get_session_permission should use deck-based permissions."""
+    """_authz._get_session_permission_by_id should use deck-based permissions."""
 
     def test_creator_gets_can_manage(self, db, owner_session):
         """Session creator gets CAN_MANAGE for slides."""
-        from src.api.routes.slides import _get_session_permission
+        from src.api.routes._authz import _get_session_permission_by_id
 
         mock_session_info = {
             "id": owner_session.id,
@@ -207,18 +207,18 @@ class TestSlidesGetSessionPermission:
         }
 
         ctx = PermissionContext(user_id="owner-uid", user_name="owner@test.com")
-        with patch("src.api.routes.slides.get_permission_context", return_value=ctx), \
-             patch("src.api.routes.slides.get_current_user", return_value="owner@test.com"), \
-             patch("src.api.routes.slides.get_session_manager") as mock_mgr:
+        with patch("src.api.routes._authz.get_permission_context", return_value=ctx), \
+             patch("src.api.routes._authz.get_current_user", return_value="owner@test.com"), \
+             patch("src.api.routes._authz.get_session_manager") as mock_mgr:
             mock_mgr.return_value.get_session.return_value = mock_session_info
-            has_access, perm = _get_session_permission(owner_session.session_id, db)
+            has_access, perm = _get_session_permission_by_id(owner_session.session_id, db)
 
         assert has_access is True
         assert perm == PermissionLevel.CAN_MANAGE
 
     def test_stranger_gets_no_access(self, db, owner_session):
         """Stranger gets no access to slides."""
-        from src.api.routes.slides import _get_session_permission
+        from src.api.routes._authz import _get_session_permission_by_id
 
         mock_session_info = {
             "id": owner_session.id,
@@ -229,18 +229,18 @@ class TestSlidesGetSessionPermission:
         }
 
         ctx = PermissionContext(user_id="stranger-uid", user_name="stranger@test.com")
-        with patch("src.api.routes.slides.get_permission_context", return_value=ctx), \
-             patch("src.api.routes.slides.get_current_user", return_value="stranger@test.com"), \
-             patch("src.api.routes.slides.get_session_manager") as mock_mgr:
+        with patch("src.api.routes._authz.get_permission_context", return_value=ctx), \
+             patch("src.api.routes._authz.get_current_user", return_value="stranger@test.com"), \
+             patch("src.api.routes._authz.get_session_manager") as mock_mgr:
             mock_mgr.return_value.get_session.return_value = mock_session_info
-            has_access, perm = _get_session_permission(owner_session.session_id, db)
+            has_access, perm = _get_session_permission_by_id(owner_session.session_id, db)
 
         assert has_access is False
         assert perm is None
 
     def test_deck_contributor_gets_edit(self, db, owner_session, deck_contributor_edit):
         """Deck contributor with CAN_EDIT gets edit access to slides."""
-        from src.api.routes.slides import _get_session_permission
+        from src.api.routes._authz import _get_session_permission_by_id
 
         mock_session_info = {
             "id": owner_session.id,
@@ -251,11 +251,11 @@ class TestSlidesGetSessionPermission:
         }
 
         ctx = PermissionContext(user_id="editor-uid", user_name="editor@test.com")
-        with patch("src.api.routes.slides.get_permission_context", return_value=ctx), \
-             patch("src.api.routes.slides.get_current_user", return_value="editor@test.com"), \
-             patch("src.api.routes.slides.get_session_manager") as mock_mgr:
+        with patch("src.api.routes._authz.get_permission_context", return_value=ctx), \
+             patch("src.api.routes._authz.get_current_user", return_value="editor@test.com"), \
+             patch("src.api.routes._authz.get_session_manager") as mock_mgr:
             mock_mgr.return_value.get_session.return_value = mock_session_info
-            has_access, perm = _get_session_permission(owner_session.session_id, db)
+            has_access, perm = _get_session_permission_by_id(owner_session.session_id, db)
 
         assert has_access is True
         assert perm == PermissionLevel.CAN_EDIT
@@ -508,8 +508,11 @@ class TestDuplicateDeckPermission:
         }
 
         ctx = PermissionContext(user_id="viewer-uid", user_name="viewer@test.com")
-        with patch("src.api.routes.sessions.get_permission_context", return_value=ctx), \
-             patch("src.api.routes.sessions.get_current_user", return_value="viewer@test.com"):
+        # _require_session_access was moved into _authz.py by PR-2; it resolves
+        # get_permission_context/get_current_user from that module's namespace,
+        # so patch there (matches every sibling test in this file).
+        with patch("src.api.routes._authz.get_permission_context", return_value=ctx), \
+             patch("src.api.routes._authz.get_current_user", return_value="viewer@test.com"):
             perm = _require_session_access(session_info, db, PermissionLevel.CAN_VIEW)
 
         assert perm == PermissionLevel.CAN_VIEW

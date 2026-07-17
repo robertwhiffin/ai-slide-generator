@@ -7,10 +7,12 @@ from typing import Literal
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field, ValidationError
 
+from src.api.routes._authz import _check_deck_permission_for_session
 from src.api.schemas.agent_config import AgentConfig, ToolEntry, resolve_agent_config
 from src.api.services.session_manager import SessionNotFoundError, get_session_manager
 from src.core.database import get_db_session
 from src.database.models import UserSession
+from src.database.models.profile_contributor import PermissionLevel
 
 logger = logging.getLogger(__name__)
 
@@ -83,6 +85,8 @@ class PatchToolRequest(BaseModel):
 @router.get("")
 async def get_agent_config(session_id: str):
     """Return the current agent config for a session (defaults if null)."""
+    # SDR-4437 HIGH-1: reading a session's agent config requires CAN_VIEW.
+    _check_deck_permission_for_session(session_id, PermissionLevel.CAN_VIEW)
     try:
         mgr = get_session_manager()
         session = await asyncio.to_thread(mgr.get_session, session_id)
@@ -99,6 +103,8 @@ async def get_agent_config(session_id: str):
 @router.put("")
 async def put_agent_config(session_id: str, config: AgentConfig):
     """Replace the full agent config for a session."""
+    # SDR-4437 HIGH-1: agent-config writes repoint the session's tools — CAN_MANAGE.
+    _check_deck_permission_for_session(session_id, PermissionLevel.CAN_MANAGE)
     # Pydantic already validated duplicates via model_validator.
     # Now validate foreign-key references.
     _validate_references(config)
@@ -114,6 +120,8 @@ async def put_agent_config(session_id: str, config: AgentConfig):
 @router.patch("/tools")
 async def patch_tools(session_id: str, body: PatchToolRequest):
     """Add or remove a single tool from the session's agent config."""
+    # SDR-4437 HIGH-1: agent-config writes repoint the session's tools — CAN_MANAGE.
+    _check_deck_permission_for_session(session_id, PermissionLevel.CAN_MANAGE)
     try:
         mgr = get_session_manager()
         session = await asyncio.to_thread(mgr.get_session, session_id)

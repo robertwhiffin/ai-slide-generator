@@ -13,6 +13,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
+from src.api.routes._authz import require_admin
 from src.core.database import get_db, get_db_session
 from src.database.models import SlideStyleLibrary
 
@@ -178,7 +179,8 @@ def get_slide_style(
         )
 
 
-@router.post("", response_model=SlideStyleResponse, status_code=status.HTTP_201_CREATED)
+# SDR-4437 HIGH-3: workspace-global library writes are admin-only.
+@router.post("", response_model=SlideStyleResponse, status_code=status.HTTP_201_CREATED, dependencies=[Depends(require_admin)])
 def create_slide_style(
     request: SlideStyleCreate,
     db: Session = Depends(get_db),
@@ -211,12 +213,14 @@ def create_slide_style(
         if os.getenv("ENVIRONMENT") in ("development", "test"):
             user = "system"
         else:
-            try:
-                from src.core.databricks_client import get_user_client
-                client = get_user_client()
-                user = client.current_user.me().user_name
-            except Exception:
-                user = "system"
+            # HIGH-6 (SDR-4437): no except-Exception fallback — attribution
+            # must not silently degrade to "system"; a missing OBO client or
+            # empty user_name raises instead of storing a fallback identity.
+            from src.core.databricks_client import UserClientRequiredError, get_user_client
+
+            user = get_user_client().current_user.me().user_name
+            if not user:
+                raise UserClientRequiredError("OBO client resolved no user_name")
         
         style = SlideStyleLibrary(
             name=request.name,
@@ -261,7 +265,8 @@ def create_slide_style(
         )
 
 
-@router.put("/{style_id}", response_model=SlideStyleResponse)
+# SDR-4437 HIGH-3: workspace-global library writes are admin-only.
+@router.put("/{style_id}", response_model=SlideStyleResponse, dependencies=[Depends(require_admin)])
 def update_slide_style(
     style_id: int,
     request: SlideStyleUpdate,
@@ -325,12 +330,15 @@ def update_slide_style(
         if os.getenv("ENVIRONMENT") in ("development", "test"):
             style.updated_by = "system"
         else:
-            try:
-                from src.core.databricks_client import get_user_client
-                client = get_user_client()
-                style.updated_by = client.current_user.me().user_name
-            except Exception:
-                style.updated_by = "system"
+            # HIGH-6 (SDR-4437): no except-Exception fallback — attribution
+            # must not silently degrade to "system"; a missing OBO client or
+            # empty user_name raises instead of storing a fallback identity.
+            from src.core.databricks_client import UserClientRequiredError, get_user_client
+
+            user_name = get_user_client().current_user.me().user_name
+            if not user_name:
+                raise UserClientRequiredError("OBO client resolved no user_name")
+            style.updated_by = user_name
         
         db.commit()
         db.refresh(style)
@@ -363,7 +371,8 @@ def update_slide_style(
         )
 
 
-@router.delete("/{style_id}", status_code=status.HTTP_204_NO_CONTENT)
+# SDR-4437 HIGH-3: workspace-global library writes are admin-only.
+@router.delete("/{style_id}", status_code=status.HTTP_204_NO_CONTENT, dependencies=[Depends(require_admin)])
 def delete_slide_style(
     style_id: int,
     hard_delete: bool = False,
@@ -417,12 +426,15 @@ def delete_slide_style(
             if os.getenv("ENVIRONMENT") in ("development", "test"):
                 style.updated_by = "system"
             else:
-                try:
-                    from src.core.databricks_client import get_user_client
-                    client = get_user_client()
-                    style.updated_by = client.current_user.me().user_name
-                except Exception:
-                    style.updated_by = "system"
+                # HIGH-6 (SDR-4437): no except-Exception fallback — attribution
+                # must not silently degrade to "system"; a missing OBO client or
+                # empty user_name raises instead of storing a fallback identity.
+                from src.core.databricks_client import UserClientRequiredError, get_user_client
+
+                user_name = get_user_client().current_user.me().user_name
+                if not user_name:
+                    raise UserClientRequiredError("OBO client resolved no user_name")
+                style.updated_by = user_name
             logger.info(f"Soft deleted slide style: {style.name} (id={style.id})")
         
         db.commit()
@@ -437,7 +449,8 @@ def delete_slide_style(
         )
 
 
-@router.post("/{style_id}/set-default", response_model=SlideStyleResponse)
+# SDR-4437 HIGH-3: workspace-global library writes are admin-only.
+@router.post("/{style_id}/set-default", response_model=SlideStyleResponse, dependencies=[Depends(require_admin)])
 def set_default_slide_style(style_id: int):
     """Set a slide style as the system-wide default.
 

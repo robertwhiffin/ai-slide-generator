@@ -5,11 +5,17 @@ import tempfile
 from pathlib import Path
 from typing import Optional
 
-from fastapi import APIRouter, BackgroundTasks, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
+from src.api.routes._authz import (
+    _check_deck_permission_for_session,
+    _require_export_job_access,
+    require_admin,
+)
 from src.api.services.chat_service import get_chat_service
+from src.database.models.profile_contributor import PermissionLevel
 from src.services.html_to_pptx import HtmlToPptxConverterV3, PPTXConversionError
 from src.utils.html_safety import SLIDE_CSP_META, scan_html_for_unsafe_patterns
 
@@ -392,6 +398,8 @@ async def export_to_pptx(request: ExportPPTXRequest):
     Raises:
         HTTPException: 404 if no slides, 500 on conversion error
     """
+    # SDR-4437 HIGH-1: caller must hold CAN_VIEW on the deck being exported.
+    _check_deck_permission_for_session(request.session_id, PermissionLevel.CAN_VIEW)
     # Log to both logger and print to ensure visibility
     log_msg = f"PPTX export request received - session_id: {request.session_id}, use_screenshot: {request.use_screenshot}"
     logger.info(log_msg)
@@ -659,6 +667,8 @@ async def start_pptx_export_async(request: ExportPPTXRequest):
     Raises:
         HTTPException: 404 if no slides available
     """
+    # SDR-4437 HIGH-1: caller must hold CAN_VIEW on the deck being exported.
+    _check_deck_permission_for_session(request.session_id, PermissionLevel.CAN_VIEW)
     import asyncio
     from src.api.services.export_job_queue import (
         enqueue_export_job,
@@ -764,6 +774,8 @@ async def poll_pptx_export(job_id: str):
     Raises:
         HTTPException: 404 if job not found
     """
+    # SDR-4437: job-ID IDOR — possession of a job_id must not grant access.
+    _require_export_job_access(job_id)
     from src.api.services.export_job_queue import build_export_job_response
     
     try:
@@ -786,6 +798,8 @@ async def download_pptx_export(job_id: str, background_tasks: BackgroundTasks):
     Raises:
         HTTPException: 404 if job not found, 400 if not completed
     """
+    # SDR-4437: job-ID IDOR — possession of a job_id must not grant access.
+    _require_export_job_access(job_id)
     from src.api.services.export_job_queue import (
         get_export_job_status,
         cleanup_export_job,
@@ -874,6 +888,9 @@ async def export_pptx_editable_from_records(request: ExportPPTXFromRecordsReques
     slide-px coordinates) and ``notes`` (speaker-notes string). Nothing
     here talks to headless Chromium; the browser did that work already.
     """
+    # SDR-4437 HIGH-1: when a session is referenced, the caller needs CAN_VIEW.
+    if request.session_id:
+        _check_deck_permission_for_session(request.session_id, PermissionLevel.CAN_VIEW)
     from src.services.pptx_from_records import build_pptx
 
     title = request.title or "slides"
@@ -913,6 +930,9 @@ class ExportPPTXFromImagesRequest(BaseModel):
 async def export_pptx_screenshot_from_images(request: ExportPPTXFromImagesRequest):
     """Screenshot-based .pptx — each slide is a single embedded image.
     Pixel-perfect fidelity, but nothing is editable."""
+    # SDR-4437 HIGH-1: when a session is referenced, the caller needs CAN_VIEW.
+    if request.session_id:
+        _check_deck_permission_for_session(request.session_id, PermissionLevel.CAN_VIEW)
     import base64, io, re
     from pptx import Presentation
     from pptx.util import Emu
@@ -961,6 +981,8 @@ async def export_pptx_editable(request: ExportPPTXEditableRequest):
     Synchronous (no job queue) — the sidecar is fast (<30s for typical decks)
     and the existing async path is kept intact for the raster exporter.
     """
+    # SDR-4437 HIGH-1: caller must hold CAN_VIEW on the deck being exported.
+    _check_deck_permission_for_session(request.session_id, PermissionLevel.CAN_VIEW)
     from src.services.html_editable_exporter import (
         export as export_editable,
         EditableExportError,
@@ -1001,13 +1023,13 @@ async def export_pptx_editable(request: ExportPPTXEditableRequest):
 # local dev. Surface as an additive 5th export mode in the frontend modal.
 
 
-@router.get("/pptx/editable/huashu/available")
+@router.get("/pptx/editable/huashu/available", dependencies=[Depends(require_admin)])
 async def export_pptx_huashu_available() -> dict:
     """Tell the frontend whether the huashu pipeline is available.
 
-    Returns the boolean plus per-check diagnostics so it's clear which
-    requirement is missing on a given deployment (helpful while we're
-    bringing chromium up on the Apps container).
+    Returns the boolean plus a slim set of per-check booleans. Full
+    diagnostics (paths, env, log tails, directory listings) are logged
+    server-side only (SDR-4437 MEDIUM-1).
     """
     import os
     import shutil
@@ -1036,57 +1058,44 @@ async def export_pptx_huashu_available() -> dict:
             setup_log_tail = "".join(lines[-40:])
         except Exception as e:  # noqa: BLE001
             setup_log_tail = f"(error reading log: {e})"
-    cache_dir_listing = []
-    cache_root = home / ".cache"
-    if cache_root.exists():
-        try:
-            cache_dir_listing = [p.name for p in cache_root.iterdir()]
-        except Exception:  # noqa: BLE001
-            pass
-    tmp_listing = []
-    try:
-        tmp_listing = sorted(p.name for p in Path("/tmp").iterdir())[:50]
-    except Exception:  # noqa: BLE001
-        pass
+    checks_full = {
+        "huashu_pipeline_enabled": os.environ.get("HUASHU_PIPELINE_ENABLED") == "1",
+        "databricks_app_name": os.environ.get("DATABRICKS_APP_NAME") or None,
+        "environment": os.environ.get("ENVIRONMENT"),
+        "node_on_path": shutil.which("node") is not None,
+        "sidecar_dir": str(SIDECAR_DIR),
+        "sidecar_script_exists": SIDECAR_SCRIPT.exists(),
+        "playwright_node_modules": (SIDECAR_DIR / "node_modules" / "playwright").exists(),
+        "pptxgenjs_node_modules": (SIDECAR_DIR / "node_modules" / "pptxgenjs").exists(),
+        "chromium_cache": _has_chromium(),
+        "chromium_cache_paths": chromium_paths,
+        "home": str(home),
+        "playwright_browsers_path_env": os.environ.get("PLAYWRIGHT_BROWSERS_PATH"),
+        "setup_log_path_exists": setup_log_path.exists(),
+        "setup_log_size": setup_log_size,
+        "setup_log_tail": setup_log_tail,
+    }
+    logger.info("huashu availability diagnostics: %s", checks_full)
     return {
         "available": is_available(),
         "checks": {
             "huashu_pipeline_enabled": os.environ.get("HUASHU_PIPELINE_ENABLED") == "1",
-            "databricks_app_name": os.environ.get("DATABRICKS_APP_NAME") or None,
-            "environment": os.environ.get("ENVIRONMENT"),
             "node_on_path": shutil.which("node") is not None,
-            "sidecar_dir": str(SIDECAR_DIR),
             "sidecar_script_exists": SIDECAR_SCRIPT.exists(),
             "playwright_node_modules": (SIDECAR_DIR / "node_modules" / "playwright").exists(),
             "pptxgenjs_node_modules": (SIDECAR_DIR / "node_modules" / "pptxgenjs").exists(),
-            "playwright_dir_listing": _list_dir_safe(SIDECAR_DIR / "node_modules" / "playwright"),
-            "playwright_core_dir_listing": _list_dir_safe(SIDECAR_DIR / "node_modules" / "playwright-core"),
             "chromium_cache": _has_chromium(),
-            "chromium_cache_paths": chromium_paths,
-            "home": str(home),
-            "playwright_browsers_path_env": os.environ.get("PLAYWRIGHT_BROWSERS_PATH"),
-            "cache_root_listing": cache_dir_listing,
-            "setup_log_path_exists": setup_log_path.exists(),
-            "setup_log_size": setup_log_size,
-            "setup_log_tail": setup_log_tail,
-            "tmp_listing": tmp_listing,
         },
     }
 
 
-def _list_dir_safe(p) -> list[str]:
-    try:
-        return sorted(c.name for c in p.iterdir())
-    except Exception:  # noqa: BLE001
-        return []
-
-
-@router.post("/pptx/editable/huashu/install-chromium")
+@router.post("/pptx/editable/huashu/install-chromium", dependencies=[Depends(require_admin)])
 async def export_pptx_huashu_install_chromium() -> dict:
-    """Synchronously run `npx playwright install chromium` and return the output.
+    """Synchronously run `npx playwright install chromium`.
 
     Diagnostic-only: lets us see exactly why the boot-time background install
-    is silently failing on the Databricks Apps container.
+    is silently failing on the Databricks Apps container. Full output is
+    logged server-side; the response is slim (SDR-4437 MEDIUM-1).
     """
     import subprocess
     from pathlib import Path
@@ -1097,7 +1106,8 @@ async def export_pptx_huashu_install_chromium() -> dict:
     env.setdefault("HOME", str(Path.home()))
     cli = SIDECAR_DIR / "node_modules" / "playwright" / "cli.js"
     if not cli.exists():
-        return {"error": f"playwright cli not found at {cli}"}
+        logger.warning("huashu install-chromium: playwright cli not found at %s", cli)
+        return {"ok": False, "error": "playwright cli not found"}
     try:
         result = subprocess.run(
             ["node", str(cli), "install", "chromium"],
@@ -1107,29 +1117,32 @@ async def export_pptx_huashu_install_chromium() -> dict:
             check=False,
             env=env,
         )
-        return {
-            "returncode": result.returncode,
-            "stdout_tail": result.stdout.decode("utf-8", errors="replace")[-4000:],
-            "stderr_tail": result.stderr.decode("utf-8", errors="replace")[-4000:],
-            "home": env.get("HOME"),
-            "path_env": env.get("PATH"),
-        }
+        logger.info(
+            "huashu install-chromium: rc=%s stdout_tail=%s stderr_tail=%s",
+            result.returncode,
+            result.stdout.decode("utf-8", errors="replace")[-4000:],
+            result.stderr.decode("utf-8", errors="replace")[-4000:],
+        )
+        return {"ok": result.returncode == 0, "returncode": result.returncode}
     except subprocess.TimeoutExpired as e:
-        return {
-            "error": "timeout",
-            "stdout_tail": (e.stdout or b"").decode("utf-8", errors="replace")[-4000:],
-            "stderr_tail": (e.stderr or b"").decode("utf-8", errors="replace")[-4000:],
-        }
+        logger.warning(
+            "huashu install-chromium timed out: stdout_tail=%s stderr_tail=%s",
+            (e.stdout or b"").decode("utf-8", errors="replace")[-4000:],
+            (e.stderr or b"").decode("utf-8", errors="replace")[-4000:],
+        )
+        return {"ok": False, "error": "timeout"}
     except Exception as e:  # noqa: BLE001
-        return {"error": f"{type(e).__name__}: {e}"}
+        logger.warning("huashu install-chromium failed: %s: %s", type(e).__name__, e)
+        return {"ok": False, "error": "install failed"}
 
 
-@router.post("/pptx/editable/huashu/probe-launch")
+@router.post("/pptx/editable/huashu/probe-launch", dependencies=[Depends(require_admin)])
 async def export_pptx_huashu_probe_launch() -> dict:
     """Spawn chromium with our standard launch options. No html2pptx, no pptxgenjs.
 
     De-risks the rest of the sidecar: if this exits 0 with PROBE_OK on the
     deployed app, chromium-on-Apps is solid and the full export will work.
+    Full output is logged server-side; the response is slim (SDR-4437 MEDIUM-1).
     """
     import subprocess
     from pathlib import Path
@@ -1138,7 +1151,8 @@ async def export_pptx_huashu_probe_launch() -> dict:
 
     probe_js = SIDECAR_DIR / "probe_launch.mjs"
     if not probe_js.exists():
-        return {"error": f"probe_launch.mjs not found at {probe_js}"}
+        logger.warning("huashu probe-launch: probe_launch.mjs not found at %s", probe_js)
+        return {"ok": False, "error": "probe script not found"}
 
     env = sidecar_subprocess_env()
     env.setdefault("HOME", str(Path.home()))
@@ -1151,19 +1165,23 @@ async def export_pptx_huashu_probe_launch() -> dict:
             check=False,
             env=env,
         )
-        return {
-            "returncode": result.returncode,
-            "stdout": result.stdout.decode("utf-8", errors="replace")[-2000:],
-            "stderr": result.stderr.decode("utf-8", errors="replace")[-2000:],
-        }
+        logger.info(
+            "huashu probe-launch: rc=%s stdout=%s stderr=%s",
+            result.returncode,
+            result.stdout.decode("utf-8", errors="replace")[-2000:],
+            result.stderr.decode("utf-8", errors="replace")[-2000:],
+        )
+        return {"ok": result.returncode == 0, "returncode": result.returncode}
     except subprocess.TimeoutExpired as e:
-        return {
-            "error": "timeout",
-            "stdout_tail": (e.stdout or b"").decode("utf-8", errors="replace")[-2000:],
-            "stderr_tail": (e.stderr or b"").decode("utf-8", errors="replace")[-2000:],
-        }
+        logger.warning(
+            "huashu probe-launch timed out: stdout_tail=%s stderr_tail=%s",
+            (e.stdout or b"").decode("utf-8", errors="replace")[-2000:],
+            (e.stderr or b"").decode("utf-8", errors="replace")[-2000:],
+        )
+        return {"ok": False, "error": "timeout"}
     except Exception as e:  # noqa: BLE001
-        return {"error": f"{type(e).__name__}: {e}"}
+        logger.warning("huashu probe-launch failed: %s: %s", type(e).__name__, e)
+        return {"ok": False, "error": "probe failed"}
 
 
 @router.post("/pptx/editable/huashu/from-html")
@@ -1175,6 +1193,8 @@ async def export_pptx_huashu_from_html(request: ExportPPTXEditableRequest):
     with an ``X-Huashu-Failures`` header carrying the per-slide error
     JSON so the frontend can surface what huashu objected to.
     """
+    # SDR-4437 HIGH-1: caller must hold CAN_VIEW on the deck being exported.
+    _check_deck_permission_for_session(request.session_id, PermissionLevel.CAN_VIEW)
     from src.services.pptx_from_html_huashu import (
         HuashuExportError,
         build_pptx_huashu,

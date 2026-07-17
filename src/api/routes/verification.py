@@ -11,8 +11,10 @@ from typing import Optional
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 
+from src.api.routes._authz import _check_deck_permission_for_session
 from src.api.services.session_manager import SessionNotFoundError, get_session_manager
 from src.core.settings_db import get_settings
+from src.database.models.profile_contributor import PermissionLevel
 from src.services.evaluation import evaluate_with_judge
 
 logger = logging.getLogger(__name__)
@@ -97,6 +99,10 @@ async def verify_slide(slide_index: int, request: VerifySlideRequest):
     Raises:
         HTTPException: 404 if session/slide not found, 500 on error
     """
+    # SDR-4437 HIGH-1: verification writes state and bills an LLM-judge run —
+    # requires CAN_EDIT (viewers can no longer trigger runs / file feedback).
+    _check_deck_permission_for_session(request.session_id, PermissionLevel.CAN_EDIT)
+
     from src.utils.slide_hash import compute_slide_hash
 
     session_manager = get_session_manager()
@@ -286,6 +292,10 @@ async def submit_feedback(slide_index: int, request: FeedbackRequest):
     Returns:
         Confirmation of feedback submission with trace linkage info
     """
+    # SDR-4437 HIGH-1: verification writes state and bills an LLM-judge run —
+    # requires CAN_EDIT (viewers can no longer trigger runs / file feedback).
+    _check_deck_permission_for_session(request.session_id, PermissionLevel.CAN_EDIT)
+
     import mlflow
     from mlflow.entities import AssessmentSource, AssessmentSourceType
 
@@ -406,6 +416,9 @@ async def get_genie_link(
     Returns:
         Genie conversation URL and metadata
     """
+    # SDR-4437 HIGH-1: read — requires CAN_VIEW on the deck.
+    _check_deck_permission_for_session(session_id, PermissionLevel.CAN_VIEW)
+
     import re
 
     from src.api.schemas.agent_config import GenieTool, resolve_agent_config
