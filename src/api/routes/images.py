@@ -132,7 +132,8 @@ async def upload_image(
         return _image_to_response(image)
 
     except ValueError as e:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+        logger.warning("upload_image rejected: %s", e)
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid image upload.")
     except HTTPException:
         raise
     except Exception as e:
@@ -200,7 +201,8 @@ def get_image_data(image_id: int, db: Session = Depends(get_db)):
             data_uri=f"data:{mime_type};base64,{b64_data}",
         )
     except ValueError as e:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+        logger.warning("get_image_data rejected: %s", e)
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Image not found")
     except Exception as e:
         logger.error(f"Error getting image data {image_id}: {e}", exc_info=True)
         raise HTTPException(
@@ -274,7 +276,8 @@ def delete_image(image_id: int, db: Session = Depends(get_db)):
     except HTTPException:
         raise
     except ValueError as e:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+        logger.warning("delete_image rejected: %s", e)
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Image not found")
     except Exception as e:
         db.rollback()
         logger.error(f"Error deleting image {image_id}: {e}", exc_info=True)
