@@ -906,7 +906,9 @@ class TestSessionEndpoints:
 
         response = client.post("/api/sessions/test-123/duplicate", json={})
         assert response.status_code == 400
-        assert "no slide deck" in response.json()["detail"]
+        # SDR-4437 MEDIUM-2: client detail is now generic; the specific reason
+        # (source has no deck) is logged server-side.
+        assert response.json()["detail"] == "Invalid request."
 
     def test_duplicate_session_forbidden(self, client, mock_session_manager):
         """POST /api/sessions/{id}/duplicate returns 403 without deck access."""
