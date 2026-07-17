@@ -489,26 +489,53 @@ def set_user_client(client: Optional[WorkspaceClient]) -> None:
     _user_client_var.set(client)
 
 
+class UserClientRequiredError(RuntimeError):
+    """A user-scoped operation ran without a bound per-request OBO client.
+
+    Raised in production when the request-scoped ContextVar holds no user
+    client — either the auth middleware failed to build one (missing or
+    invalid x-forwarded-access-token) or the caller is running on a thread
+    spawned without contextvars.copy_context(). Threads MUST be spawned via
+    copy_context() / src.core.context_utils / asyncio.to_thread for the user
+    client to resolve here (the chat agent and title-gen threads already do:
+    chat_service.py:1041, 1102). Mapped to HTTP 401 by main.py.
+    """
+
+
 def get_user_client() -> WorkspaceClient:
     """
     Get the user-scoped WorkspaceClient for Genie queries and tool operations.
 
-    Returns the request-scoped user client if available (set by middleware),
-    otherwise falls back to the system client (for local development).
+    Returns the request-scoped user client set by the auth middleware.
+
+    HIGH-6 (SDR-4437): in production this fails closed when no user client is
+    bound — the old behaviour silently fell back to the SP system client,
+    which also made downstream ``uploaded_by == caller`` ownership checks
+    compare against the fallback identity. The SP fallback is now restricted
+    to non-production (local dev/test).
 
     Returns:
         WorkspaceClient for user operations
+
+    Raises:
+        UserClientRequiredError: production, and no user client is bound.
     """
     client = _user_client_var.get()
     if client is not None:
         logger.warning("get_user_client: returning user-scoped client from ContextVar")
         return client
 
-    # Fallback to system client for local development
-    logger.warning(
-        "get_user_client: ContextVar empty, falling back to system client"
+    if os.getenv("ENVIRONMENT", "development") != "production":
+        # Fallback to system client for local development only
+        logger.warning(
+            "get_user_client: ContextVar empty, falling back to system client "
+            "(non-production only)"
+        )
+        return get_system_client()
+
+    raise UserClientRequiredError(
+        "No user-scoped Databricks client is bound to this request context"
     )
-    return get_system_client()
 
 
 def reset_user_client() -> None:

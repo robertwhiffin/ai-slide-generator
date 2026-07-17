@@ -8,10 +8,16 @@ from fastapi.testclient import TestClient
 
 
 @pytest.fixture
-def client():
+def client(monkeypatch):
     """Create a test client with mocked dependencies."""
     from src.api.main import app
 
+    # SDR-4437 PR-2: these tests exercise route behaviour, not authz — no-op the
+    # deck-permission gate (gate behaviour is covered in test_authz_agent_config.py).
+    monkeypatch.setattr(
+        "src.api.routes.profiles._check_deck_permission_for_session",
+        lambda *a, **k: None,
+    )
     return TestClient(app)
 
 

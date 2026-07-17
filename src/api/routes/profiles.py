@@ -7,8 +7,10 @@ from typing import Optional
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
+from src.api.routes._authz import _check_deck_permission_for_session
 from src.api.schemas.agent_config import (
     AgentConfig,
+    GenieTool,
     resolve_agent_config,
     sanitize_agent_config_for_persist,
 )
@@ -17,6 +19,7 @@ from src.core.database import get_db_session
 from src.core.permission_context import get_permission_context
 from src.core.user_context import get_current_user
 from src.database.models.profile import ConfigProfile
+from src.database.models.profile_contributor import PermissionLevel
 from src.database.models.session import UserSession
 from src.services.permission_service import get_permission_service
 
@@ -222,6 +225,10 @@ async def save_from_session(session_id: str, body: SaveProfileRequest):
 @load_router.post("/{session_id}/load-profile/{profile_id}")
 async def load_profile_into_session(session_id: str, profile_id: int):
     """Copy a profile's agent_config into a session. Requires CAN_USE on the profile."""
+    # SDR-4437 HIGH-1 (found in plan verification): loading a profile writes
+    # session.agent_config into an arbitrary session_id — same write as the
+    # agent-config PUT, same gate: CAN_MANAGE on the session's deck.
+    _check_deck_permission_for_session(session_id, PermissionLevel.CAN_MANAGE)
     perm_service = get_permission_service()
     with get_db_session() as db:
         perm_service.require_use_profile(db, profile_id)

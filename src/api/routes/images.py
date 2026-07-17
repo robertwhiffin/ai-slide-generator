@@ -62,14 +62,20 @@ class ImageUpdateRequest(BaseModel):
 # --- Helper ---
 
 def _get_current_user() -> str:
-    """Get current username (dev fallback to 'system')."""
+    """Get current username (dev/test fallback to 'system').
+
+    HIGH-6 (SDR-4437): no except-Exception fallback in production — the
+    ownership checks on image writes compare against this value, so it must
+    never silently degrade to "system".
+    """
     if os.getenv("ENVIRONMENT") in ("development", "test"):
         return "system"
-    try:
-        from src.core.databricks_client import get_user_client
-        return get_user_client().current_user.me().user_name
-    except Exception:
-        return "system"
+    from src.core.databricks_client import UserClientRequiredError, get_user_client
+
+    user_name = get_user_client().current_user.me().user_name
+    if not user_name:
+        raise UserClientRequiredError("OBO client resolved no user_name")
+    return user_name
 
 
 def _image_to_response(img: ImageAsset) -> ImageResponse:
@@ -146,7 +152,9 @@ def list_images(
 ):
     """List images with optional filtering."""
     try:
-        images = image_service.search_images(db=db, category=category, query=query)
+        images = image_service.search_images(
+            db=db, category=category, query=query, uploaded_by=_get_current_user()
+        )
         return ImageListResponse(
             images=[_image_to_response(img) for img in images],
             total=len(images),
@@ -216,6 +224,13 @@ def update_image(
         if not image:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Image not found")
 
+        # SDR-4437 HIGH-1: writes are owner-scoped (uploaded_by == caller).
+        if image.uploaded_by != _get_current_user():
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="You don't have permission to modify this image",
+            )
+
         if request.tags is not None:
             image.tags = request.tags
         if request.description is not None:
@@ -243,7 +258,21 @@ def delete_image(image_id: int, db: Session = Depends(get_db)):
     """Soft-delete an image."""
     try:
         user = _get_current_user()
+        image = db.query(ImageAsset).filter(
+            ImageAsset.id == image_id,
+            ImageAsset.is_active == True,  # noqa: E712
+        ).first()
+        if not image:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Image not found")
+        # SDR-4437 HIGH-1: writes are owner-scoped (uploaded_by == caller).
+        if image.uploaded_by != user:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="You don't have permission to modify this image",
+            )
         image_service.delete_image(db, image_id, user)
+    except HTTPException:
+        raise
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
     except Exception as e:

@@ -345,6 +345,19 @@ class TestListProfilesPermissions:
 class TestLoadProfilePermissions:
     """load_profile_into_session requires CAN_USE."""
 
+    @pytest.fixture(autouse=True)
+    def _bypass_deck_gate(self, monkeypatch):
+        # SDR-4437 PR-2 (Task 14): load_profile_into_session now also requires
+        # CAN_MANAGE on the target session's deck (ratified IDOR fix). These
+        # tests exercise the orthogonal profile-permission (CAN_USE) layer and
+        # don't set up a deck grant, so no-op the deck gate here — never weaken
+        # it; its enforcement is covered by
+        # tests/unit/test_authz_agent_config.py::test_load_profile_requires_can_manage_on_session.
+        monkeypatch.setattr(
+            "src.api.routes.profiles._check_deck_permission_for_session",
+            lambda *a, **k: None,
+        )
+
     def test_load_profile_without_access_returns_403(
         self, stranger_client, owned_profile, session_for_load
     ):

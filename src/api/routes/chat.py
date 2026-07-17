@@ -24,6 +24,7 @@ from sqlalchemy.orm import Session as DBSession
 from src.api.schemas.requests import ChatRequest
 from src.api.schemas.responses import ChatResponse
 from src.api.schemas.streaming import StreamEvent, StreamEventType
+from src.api.routes._authz import _check_deck_permission_for_session
 from src.api.services.chat_service import get_chat_service
 from src.api.services.job_queue import enqueue_job
 from src.api.services.session_manager import SessionNotFoundError, get_session_manager
@@ -573,6 +574,18 @@ async def poll_chat(
         HTTPException: 404 if request not found
     """
     session_manager = get_session_manager()
+
+    # SDR-4437 (chat-poll IDOR): a request_id must not grant access to another
+    # user's chat events/result. ChatRequest rows are session-bound — resolve
+    # the session and require CAN_VIEW on the deck.
+    session_id = await asyncio.to_thread(
+        session_manager.get_session_id_for_request, request_id
+    )
+    if session_id is None:
+        raise HTTPException(status_code=404, detail="Request not found")
+    await asyncio.to_thread(
+        _check_deck_permission_for_session, session_id, PermissionLevel.CAN_VIEW
+    )
 
     chat_request = await asyncio.to_thread(
         session_manager.get_chat_request, request_id
