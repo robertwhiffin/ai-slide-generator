@@ -120,10 +120,10 @@ async def configure_workspace(request: ConfigureWorkspaceRequest):
         )
 
     except Exception as e:
-        logger.error(f"Failed to configure workspace: {e}")
+        logger.error(f"Failed to configure workspace: {e}", exc_info=True)
         raise HTTPException(
             status_code=500,
-            detail=f"Failed to save configuration: {str(e)}"
+            detail="Failed to save configuration"
         )
 
 
@@ -151,8 +151,8 @@ async def test_connection():
         }
 
     except Exception as e:
-        logger.error(f"Connection test failed: {e}")
+        logger.error(f"Connection test failed: {e}", exc_info=True)
         raise HTTPException(
             status_code=400,
-            detail=f"Connection failed: {str(e)}"
+            detail="Connection failed"
         )
