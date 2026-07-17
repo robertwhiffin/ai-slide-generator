@@ -234,9 +234,10 @@ def add_contributor(
         permission_level = _validate_permission_level(request.permission_level)
         identity_type = _validate_identity_type(request.identity_type)
     except ValueError as e:
+        logger.warning("add_contributor rejected: %s", e)
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(e),
+            detail="Invalid permission level or identity type.",
         )
     
     # Check if contributor already exists
@@ -416,9 +417,10 @@ def update_contributor(
     try:
         permission_level = _validate_permission_level(request.permission_level)
     except ValueError as e:
+        logger.warning("update_contributor rejected: %s", e)
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(e),
+            detail="Invalid permission level or identity type.",
         )
     
     contributor.permission_level = permission_level
