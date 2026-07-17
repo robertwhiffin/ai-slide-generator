@@ -508,8 +508,11 @@ class TestDuplicateDeckPermission:
         }
 
         ctx = PermissionContext(user_id="viewer-uid", user_name="viewer@test.com")
-        with patch("src.api.routes.sessions.get_permission_context", return_value=ctx), \
-             patch("src.api.routes.sessions.get_current_user", return_value="viewer@test.com"):
+        # _require_session_access was moved into _authz.py by PR-2; it resolves
+        # get_permission_context/get_current_user from that module's namespace,
+        # so patch there (matches every sibling test in this file).
+        with patch("src.api.routes._authz.get_permission_context", return_value=ctx), \
+             patch("src.api.routes._authz.get_current_user", return_value="viewer@test.com"):
             perm = _require_session_access(session_info, db, PermissionLevel.CAN_VIEW)
 
         assert perm == PermissionLevel.CAN_VIEW

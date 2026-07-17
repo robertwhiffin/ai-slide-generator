@@ -123,6 +123,16 @@ ALLOWLIST = {
     ("POST", "/api/sessions/{session_id}/messages"):
         "Gated inline: creator-only privacy check (403 for non-creators), "
         "stricter than deck CAN_VIEW; no helper name to detect.",
+    # Duplicate-deck (added by #213, post-dates PR-2's fan-out). Gated in the
+    # service layer, not the route facade: the handler calls
+    # session_manager.duplicate_session(..., min_permission=CAN_VIEW), which
+    # runs _require_deck_permission on the SOURCE deck and raises
+    # SessionAccessDeniedError -> 403 before copying. Verified enforcing
+    # (session_manager.py:553-554); no route-level helper name to detect.
+    ("POST", "/api/sessions/{session_id}/duplicate"):
+        "Gated in service layer: duplicate_session(min_permission=CAN_VIEW) "
+        "enforces deck CAN_VIEW on the source before copying; no helper name "
+        "to detect at the route.",
     # HIGH-3 gates library WRITES only — reads stay open (users browse the
     # prompt/style libraries to pick one); flagged only because the whole
     # settings prefix is marked sensitive.
