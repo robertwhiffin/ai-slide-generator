@@ -22,7 +22,11 @@ from src.api.routes._authz import (
     _require_slide_permission,
 )
 from src.api.services.chat_service import get_chat_service
-from src.api.services.session_manager import VersionConflictError, get_session_manager
+from src.api.services.session_manager import (
+    SessionNotFoundError,
+    VersionConflictError,
+    get_session_manager,
+)
 from src.core.context_utils import run_in_thread_with_context
 from src.core.database import get_db
 from src.core.permission_context import get_permission_context  # noqa: F401 — patched by integration-test fixtures
@@ -105,7 +109,7 @@ async def get_slides(
         raise
     except Exception as e:
         logger.error(f"Failed to get slides: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Failed to get slides")
 
 
 @router.put("/reorder")
@@ -125,13 +129,14 @@ async def reorder_slides(request: ReorderRequest, db: Session = Depends(get_db))
         HTTPException: 403 if no permission, 400 for validation errors, 409 if session busy, 500 on error
     """
     _require_slide_permission(request.session_id, db, PermissionLevel.CAN_EDIT)
-    
+
     session_manager = get_session_manager()
 
     try:
         await run_in_thread_with_context(session_manager.require_editing_lock, request.session_id)
     except PermissionError as e:
-        raise HTTPException(status_code=423, detail=str(e))
+        logger.warning("reorder_slides rejected: %s", e)
+        raise HTTPException(status_code=423, detail="This deck is locked by another editing session. Try again shortly.")
 
     locked = await asyncio.to_thread(
         session_manager.acquire_session_lock,
@@ -159,15 +164,17 @@ async def reorder_slides(request: ReorderRequest, db: Session = Depends(get_db))
         return result
 
     except VersionConflictError as e:
-        raise HTTPException(status_code=409, detail=str(e))
+        logger.warning("reorder_slides rejected: %s", e)
+        raise HTTPException(status_code=409, detail="The deck was modified by another request. Refresh and try again.")
     except PermissionError as e:
-        raise HTTPException(status_code=423, detail=str(e))
+        logger.warning("reorder_slides rejected: %s", e)
+        raise HTTPException(status_code=423, detail="This deck is locked by another editing session. Try again shortly.")
     except ValueError as e:
         logger.warning(f"Validation error in reorder_slides: {e}")
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail="Invalid request.")
     except Exception as e:
         logger.error(f"Failed to reorder slides: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Failed to reorder slides")
     finally:
         await asyncio.to_thread(
             session_manager.release_session_lock,
@@ -198,7 +205,8 @@ async def update_slide(index: int, request: UpdateSlideRequest, db: Session = De
     try:
         await run_in_thread_with_context(session_manager.require_editing_lock, request.session_id)
     except PermissionError as e:
-        raise HTTPException(status_code=423, detail=str(e))
+        logger.warning("update_slide rejected: %s", e)
+        raise HTTPException(status_code=423, detail="This deck is locked by another editing session. Try again shortly.")
 
     locked = await asyncio.to_thread(
         session_manager.acquire_session_lock,
@@ -227,15 +235,17 @@ async def update_slide(index: int, request: UpdateSlideRequest, db: Session = De
         return result
 
     except VersionConflictError as e:
-        raise HTTPException(status_code=409, detail=str(e))
+        logger.warning("update_slide rejected: %s", e)
+        raise HTTPException(status_code=409, detail="The deck was modified by another request. Refresh and try again.")
     except PermissionError as e:
-        raise HTTPException(status_code=423, detail=str(e))
+        logger.warning("update_slide rejected: %s", e)
+        raise HTTPException(status_code=423, detail="This deck is locked by another editing session. Try again shortly.")
     except ValueError as e:
         logger.warning(f"Validation error in update_slide: {e}")
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail="Invalid request.")
     except Exception as e:
         logger.error(f"Failed to update slide: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Failed to update slide")
     finally:
         await asyncio.to_thread(
             session_manager.release_session_lock,
@@ -261,13 +271,14 @@ async def duplicate_slide(index: int, request: SlideActionRequest, db: Session =
         HTTPException: 403 if no permission, 400 for validation errors, 409 if session busy, 500 on error
     """
     _require_slide_permission(request.session_id, db, PermissionLevel.CAN_EDIT)
-    
+
     session_manager = get_session_manager()
 
     try:
         await run_in_thread_with_context(session_manager.require_editing_lock, request.session_id)
     except PermissionError as e:
-        raise HTTPException(status_code=423, detail=str(e))
+        logger.warning("duplicate_slide rejected: %s", e)
+        raise HTTPException(status_code=423, detail="This deck is locked by another editing session. Try again shortly.")
 
     locked = await asyncio.to_thread(
         session_manager.acquire_session_lock,
@@ -295,15 +306,17 @@ async def duplicate_slide(index: int, request: SlideActionRequest, db: Session =
         return result
 
     except VersionConflictError as e:
-        raise HTTPException(status_code=409, detail=str(e))
+        logger.warning("duplicate_slide rejected: %s", e)
+        raise HTTPException(status_code=409, detail="The deck was modified by another request. Refresh and try again.")
     except PermissionError as e:
-        raise HTTPException(status_code=423, detail=str(e))
+        logger.warning("duplicate_slide rejected: %s", e)
+        raise HTTPException(status_code=423, detail="This deck is locked by another editing session. Try again shortly.")
     except ValueError as e:
         logger.warning(f"Validation error in duplicate_slide: {e}")
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail="Invalid request.")
     except Exception as e:
         logger.error(f"Failed to duplicate slide: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Failed to duplicate slide")
     finally:
         await asyncio.to_thread(
             session_manager.release_session_lock,
@@ -335,13 +348,14 @@ async def delete_slide(
         HTTPException: 403 if no permission, 400 for validation errors, 409 if session busy or version conflict, 500 on error
     """
     _require_slide_permission(session_id, db, PermissionLevel.CAN_EDIT)
-    
+
     session_manager = get_session_manager()
 
     try:
         await run_in_thread_with_context(session_manager.require_editing_lock, session_id)
     except PermissionError as e:
-        raise HTTPException(status_code=423, detail=str(e))
+        logger.warning("delete_slide rejected: %s", e)
+        raise HTTPException(status_code=423, detail="This deck is locked by another editing session. Try again shortly.")
 
     locked = await asyncio.to_thread(
         session_manager.acquire_session_lock,
@@ -369,15 +383,17 @@ async def delete_slide(
         return result
 
     except VersionConflictError as e:
-        raise HTTPException(status_code=409, detail=str(e))
+        logger.warning("delete_slide rejected: %s", e)
+        raise HTTPException(status_code=409, detail="The deck was modified by another request. Refresh and try again.")
     except PermissionError as e:
-        raise HTTPException(status_code=423, detail=str(e))
+        logger.warning("delete_slide rejected: %s", e)
+        raise HTTPException(status_code=423, detail="This deck is locked by another editing session. Try again shortly.")
     except ValueError as e:
         logger.warning(f"Validation error in delete_slide: {e}")
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail="Invalid request.")
     except Exception as e:
         logger.error(f"Failed to delete slide: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Failed to delete slide")
     finally:
         await asyncio.to_thread(
             session_manager.release_session_lock,
@@ -476,7 +492,7 @@ async def update_slide_verification(index: int, request: UpdateVerificationReque
         raise
     except Exception as e:
         logger.error(f"Failed to update slide verification: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Failed to update slide verification")
 
 
 # ============================================================================
@@ -543,10 +559,10 @@ async def create_version(request: CreateVersionRequest):
 
     except ValueError as e:
         logger.warning(f"Validation error in create_version: {e}")
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail="Invalid request.")
     except Exception as e:
         logger.error(f"Failed to create version: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Failed to create version")
 
 
 @router.patch("/versions/{version_number}/verification")
@@ -592,10 +608,11 @@ async def update_version_verification(
         return result
 
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        logger.warning("update_version_verification rejected: %s", e)
+        raise HTTPException(status_code=400, detail="Invalid request.")
     except Exception as e:
         logger.error(f"Failed to update version verification: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Failed to update version verification")
 
 
 class SyncVerificationRequest(BaseModel):
@@ -663,7 +680,7 @@ async def sync_latest_version_verification(request: SyncVerificationRequest):
 
     except Exception as e:
         logger.error(f"Failed to sync version verification: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Failed to sync version verification")
 
 
 @router.get("/versions")
@@ -701,7 +718,7 @@ async def list_versions(session_id: str = Query(..., description="Session ID")):
         return {"versions": [], "current_version": None}
     except Exception as e:
         logger.error(f"Failed to list versions: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Failed to list versions")
 
 
 # NOTE: must be registered BEFORE the parameterized "/versions/{version_number}"
@@ -738,7 +755,7 @@ async def get_current_version(session_id: str = Query(..., description="Session 
         return {"current_version": None}
     except Exception as e:
         logger.error(f"Failed to get current version: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Failed to get current version")
 
 
 @router.get("/versions/{version_number}")
@@ -789,7 +806,7 @@ async def preview_version(
         raise
     except Exception as e:
         logger.error(f"Failed to preview version: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Failed to preview version")
 
 
 @router.post("/versions/{version_number}/restore")
@@ -853,13 +870,14 @@ async def restore_version(version_number: int, request: RestoreVersionRequest):
         return result
 
     except PermissionError as e:
-        raise HTTPException(status_code=423, detail=str(e))
+        logger.warning("restore_version rejected: %s", e)
+        raise HTTPException(status_code=423, detail="This deck is locked by another editing session. Try again shortly.")
     except ValueError as e:
         logger.warning(f"Validation error in restore_version: {e}")
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail="Invalid request.")
     except Exception as e:
         logger.error(f"Failed to restore version: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Failed to restore version")
     finally:
         await asyncio.to_thread(
             session_manager.release_session_lock,
