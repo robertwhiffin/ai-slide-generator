@@ -158,7 +158,8 @@ async def patch_tools(session_id: str, body: PatchToolRequest):
     try:
         config = AgentConfig.model_validate(config.model_dump())
     except ValidationError as exc:
-        raise HTTPException(status_code=422, detail=str(exc))
+        logger.warning("patch_tools rejected: %s", exc)
+        raise HTTPException(status_code=422, detail="Invalid agent tool configuration.")
 
     try:
         result = await asyncio.to_thread(_save_agent_config, session_id, config)
