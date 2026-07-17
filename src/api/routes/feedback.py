@@ -28,7 +28,8 @@ def feedback_chat(request: FeedbackChatRequest):
         result = service.chat(request.messages)
         return FeedbackChatResponse(**result)
     except ValueError as e:
-        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(e))
+        logger.warning("feedback_chat rejected: %s", e)
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Feedback service is unavailable.")
     except Exception as e:
         logger.error(f"Feedback chat error: {e}", exc_info=True)
         raise HTTPException(
