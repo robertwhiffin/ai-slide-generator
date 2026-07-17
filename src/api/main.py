@@ -417,6 +417,21 @@ from src.api.middleware.request_logging import RequestLoggingMiddleware
 
 app.add_middleware(RequestLoggingMiddleware)
 
+# === SDR-4437 Track A security middleware (PR-1a/PR-1b) ==================
+# Keep ALL security-middleware registration inside this delimited block
+# (PR-2 adds an exception handler below the middleware block — do not edit
+# outside these markers). Starlette wraps later-added middleware outermost;
+# ordering here is deliberate:
+#   SecurityHeaders (outermost, added last) -> CSRF -> RequestLogging ->
+#   user_auth -> CORS(dev) -> normalize_mcp_path -> routes
+# Headers must stamp EVERY response (including CSRF 403s); CSRF must reject
+# forged cross-site requests before OBO auth work and before request_logs
+# DB writes.
+from src.api.middleware.security_headers import SecurityHeadersMiddleware  # noqa: E402
+
+app.add_middleware(SecurityHeadersMiddleware)
+# === end SDR-4437 Track A security middleware =============================
+
 # Include API routers
 app.include_router(admin.router)
 app.include_router(admin_usage.router)
