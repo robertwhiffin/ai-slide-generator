@@ -2,7 +2,6 @@
 
 import asyncio
 import base64
-import importlib.util
 import logging
 import os
 import re
@@ -13,8 +12,6 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from bs4 import BeautifulSoup
 from databricks.sdk import WorkspaceClient
-from pptx import Presentation
-from pptx.util import Inches
 
 from src.services.pptx_prompts_defaults import (
     DEFAULT_SYSTEM_PROMPT,
@@ -88,70 +85,6 @@ class HtmlToPptxConverterV3:
             extra={"model": self.model_endpoint}
         )
     
-    async def convert_html_to_pptx(
-        self,
-        html_str: str,
-        output_path: str,
-        use_screenshot: bool = True,
-        html_source_path: Optional[str] = None
-    ) -> str:
-        """Convert single HTML slide to PowerPoint.
-        
-        Args:
-            html_str: HTML content
-            output_path: Path to save PPTX
-            use_screenshot: Whether to capture and use screenshot
-            html_source_path: Path to HTML file (for screenshot)
-        
-        Returns:
-            Path to created PPTX file
-        
-        Raises:
-            PPTXConversionError: If conversion fails
-        """
-        logger.info("Converting single HTML to PowerPoint")
-        
-        # 1. Setup working directory
-        work_dir = Path(tempfile.mkdtemp(prefix="v3_convert_"))
-        assets_dir = work_dir / "assets"
-        assets_dir.mkdir()
-        
-        # 2. Chart screenshots are now captured client-side
-        # Server-side Playwright capture has been removed
-        chart_images = []
-        if use_screenshot and html_source_path:
-            logger.warning(
-                "Server-side screenshot capture is no longer supported. "
-                "Use client-side capture via chart_images parameter."
-            )
-            print("[PPTX_CONVERTER] WARNING: Server-side screenshots disabled. Use client-side capture.")
-        
-        # 2b. Extract base64 content images before sending to LLM
-        html_str, content_images = self._extract_and_save_content_images(html_str, str(assets_dir))
-        chart_images.extend(content_images)
-
-        # 3. Call LLM to generate converter code
-        logger.info("Calling LLM to generate converter code")
-        converter_code = await self._generate_converter_code(
-            html_str,
-            chart_images=chart_images
-        )
-        
-        if not converter_code:
-            raise PPTXConversionError("Failed to generate converter code from LLM")
-        
-        # 4. Execute generated code
-        logger.info("Executing generated converter")
-        self._execute_single_slide_converter(
-            converter_code,
-            html_str,
-            output_path,
-            str(assets_dir)
-        )
-        
-        logger.info("PowerPoint created", extra={"path": output_path})
-        return output_path
-    
     async def convert_slide_deck(
         self,
         slides: List[str],
@@ -222,126 +155,26 @@ class HtmlToPptxConverterV3:
             extra={"total_slides": total, "duration_s": f"{time.time() - t0:.1f}"},
         )
 
-        # -- Phase 2: Sequential execution -----------------------------------
-        prs = Presentation()
-        prs.slide_width = Inches(10)
-        prs.slide_height = Inches(7.5)
-
-        for i, (code, (html_str, _chart_files, _content_files, assets_dir)) in enumerate(
-            zip(codes, slide_inputs), 1,
-        ):
-            print(f"[PPTX_CONVERTER] Executing slide {i}/{total}")
-            self._execute_slide(code, prs, html_str, assets_dir, i)
-
+        # -- Phase 2: Sequential execution INSIDE the subprocess jail ---------
+        def _relay(current: int, total_slides: int, message: str) -> None:
             if progress_callback:
                 try:
-                    progress_callback(i, total, f"Building slide {i}/{total}…")
+                    progress_callback(current, total_slides, message)
                 except Exception:
                     pass
 
-        prs.save(output_path)
+        # to_thread: _run_pptx_conversion blocks on proc.wait for the whole
+        # deck; convert_slide_deck is async (awaited by the sync route), so the
+        # jail wait must come off the event loop.
+        await asyncio.to_thread(
+            self._run_pptx_conversion, codes, slide_inputs, output_path,
+            progress_cb=_relay,
+        )
         logger.info(
             "PowerPoint deck created",
             extra={"path": output_path, "slide_count": total},
         )
         return output_path
-    
-    async def _add_slide_to_presentation(
-        self,
-        prs: Presentation,
-        html_str: str,
-        use_screenshot: bool,
-        html_source_path: Optional[str],
-        slide_number: int,
-        client_chart_images: Optional[Dict[str, str]] = None
-    ) -> None:
-        """Add a slide to existing presentation using V3 approach.
-        
-        Args:
-            prs: Presentation object to add slide to
-            html_str: HTML content for the slide
-            use_screenshot: Whether to capture and use screenshot
-            html_source_path: Path to HTML file (for screenshot capture, if not using client images)
-            slide_number: Slide number for logging purposes
-            client_chart_images: Dict mapping canvas_id to base64 data URL (from client-side capture)
-        """
-        # 1. Setup working directory for this slide
-        work_dir = Path(tempfile.mkdtemp(prefix=f"v3_slide_{slide_number}_"))
-        assets_dir = work_dir / "assets"
-        assets_dir.mkdir()
-        
-        # 2. Get chart images - prefer client-provided, fallback to server-side capture
-        chart_images = []
-        if use_screenshot:
-            if client_chart_images:
-                # Save client-provided base64 images to files
-                logger.info(
-                    "Saving client-provided chart images",
-                    extra={
-                        "slide_number": slide_number,
-                        "chart_count": len(client_chart_images),
-                        "assets_dir": str(assets_dir)
-                    }
-                )
-                print(f"[PPTX_CONVERTER] Saving {len(client_chart_images)} client-provided chart images for slide {slide_number}")
-                chart_images = self._save_client_chart_images(client_chart_images, str(assets_dir))
-                if chart_images:
-                    logger.info(
-                        "Client chart images saved successfully",
-                        extra={
-                            "slide_number": slide_number,
-                            "chart_count": len(chart_images),
-                            "chart_files": chart_images
-                        }
-                    )
-                    print(f"[PPTX_CONVERTER] Saved {len(chart_images)} chart images for slide {slide_number}: {chart_images}")
-            elif html_source_path:
-                # Server-side Playwright capture has been removed
-                # Client-side capture should be used instead
-                logger.warning(
-                    "Server-side screenshot capture is no longer supported for slide",
-                    extra={
-                        "slide_number": slide_number,
-                        "html_source_path": html_source_path
-                    }
-                )
-                print(f"[PPTX_CONVERTER] WARNING: Server-side screenshots disabled for slide {slide_number}. Use client-side capture.")
-            else:
-                logger.warning("No chart screenshots captured", extra={"slide_number": slide_number})
-                print(f"[PPTX_CONVERTER] WARNING: No chart screenshots captured for slide {slide_number}")
-
-        # 2b. Extract base64 content images before sending to LLM
-        has_base64_img = "data:image" in html_str
-        print(f"[PPTX_CONVERTER] Slide {slide_number}: base64 images in HTML: {has_base64_img}, HTML length: {len(html_str)}")
-        html_str, content_images = self._extract_and_save_content_images(html_str, str(assets_dir))
-        if content_images:
-            print(f"[PPTX_CONVERTER] Slide {slide_number}: extracted {len(content_images)} content images: {content_images}")
-
-        # 3. Call LLM to generate code for adding this slide
-        logger.debug("Calling LLM for slide", extra={"slide_number": slide_number})
-        slide_code = await self._generate_slide_adder_code(
-            html_str,
-            chart_images=chart_images,
-            content_images=content_images,
-        )
-        
-        if not slide_code:
-            logger.warning(
-                "Failed to generate code for slide, skipping",
-                extra={"slide_number": slide_number}
-            )
-            return
-        
-        # 4. Execute generated code to add slide
-        logger.debug("Adding slide to presentation", extra={"slide_number": slide_number})
-        self._execute_slide_adder(
-            slide_code,
-            prs,
-            html_str,
-            str(assets_dir)
-        )
-        
-        logger.debug("Slide added", extra={"slide_number": slide_number})
     
     async def _generate_converter_code(
         self,
@@ -408,88 +241,6 @@ class HtmlToPptxConverterV3:
         
         return await self._call_llm(self.SYSTEM_PROMPT, prompt)
     
-    async def _generate_slide_adder_code(
-        self,
-        html_str: str,
-        chart_images: list[str],
-        content_images: Optional[list[str]] = None,
-    ) -> Optional[str]:
-        """Call LLM to generate code for adding slide to existing presentation.
-
-        Args:
-            html_str: HTML content to convert
-            chart_images: List of chart image filenames (e.g., ['chart_0.png', 'chart_1.png'])
-            content_images: List of content image filenames (e.g., ['content_image_0.png'])
-
-        Returns:
-            Generated Python code or None if generation fails
-        """
-        content_images = content_images or []
-        logger.debug(
-            "Generating slide adder code",
-            extra={
-                "original_html_length": len(html_str),
-                "chart_images": chart_images,
-                "chart_count": len(chart_images),
-                "content_images": content_images,
-                "content_image_count": len(content_images),
-            }
-        )
-
-        # Truncate HTML if too long
-        html_content = self._truncate_html(html_str)
-
-        logger.debug(
-            "HTML truncated for LLM (slide adder)",
-            extra={
-                "original_length": len(html_str),
-                "truncated_length": len(html_content),
-                "was_truncated": len(html_content) < len(html_str),
-                "truncated_preview": html_content[:500] + "..." if len(html_content) > 500 else html_content,
-            }
-        )
-
-        screenshot_note = ""
-        if chart_images:
-            chart_files_str = ", ".join(chart_images)
-            # Provide clear instructions with all available chart files
-            if len(chart_images) == 1:
-                screenshot_note = (
-                    f"Chart image available: {chart_files_str}. "
-                    f"CRITICAL: Use slide.shapes.add_picture(os.path.join(assets_dir, '{chart_images[0]}'), left, top, width, height) to add this image. "
-                    f"Find the canvas element in the HTML (look for <canvas> tags) and position the image at that location. "
-                    f"Typical position: left=1.0\", top=3.5\", width=8.0\", height=3.5\" (adjust based on HTML layout)."
-                )
-            else:
-                screenshot_note = (
-                    f"Chart images available: {chart_files_str}. "
-                    f"CRITICAL: Use slide.shapes.add_picture() for each image. "
-                    f"Match each image filename to its corresponding canvas element in the HTML by canvas ID or position. "
-                    f"Find canvas elements in HTML and position images at their locations. "
-                    f"Example: slide.shapes.add_picture(os.path.join(assets_dir, '{chart_images[0]}'), left, top, width, height)"
-                )
-        else:
-            screenshot_note = "No chart images. Extract Chart.js data from <script> tags. Only use data from HTML."
-
-        if content_images:
-            content_files_str = ", ".join(content_images)
-            screenshot_note += (
-                f"\nContent images in assets_dir: {content_files_str}. "
-                f"These are logos/icons extracted from <img> tags in the HTML. "
-                f"CRITICAL: You MUST add each content image using slide.shapes.add_picture(os.path.join(assets_dir, filename), left, top, width, height). "
-                f"Match position and size to the original <img> tag's placement in the HTML (e.g. a logo in the top-right corner). "
-                f"Typical logo size: width=Inches(1.0), height=Inches(0.5). Place in the header area near the title."
-            )
-
-        print(f"[PPTX_CONVERTER] screenshot_note for LLM: {screenshot_note[:500]}")
-
-        prompt = self.MULTI_SLIDE_USER_PROMPT.format(
-            html_content=html_content,
-            screenshot_note=screenshot_note
-        )
-
-        return await self._call_llm(self.MULTI_SLIDE_SYSTEM_PROMPT, prompt)
-
     # -- Slide prep / parallel codegen / execution helpers --------------------
 
     def _prepare_slide(
@@ -603,30 +354,69 @@ class HtmlToPptxConverterV3:
             *(gen_one(h, c, ci) for h, c, ci, _ad in slide_inputs)
         ))
 
-    def _execute_slide(
-        self, code: Optional[str], prs: Presentation, html_str: str,
-        assets_dir: str, slide_number: int,
-    ) -> None:
-        """Execute generated code for one slide, with fallback on failure."""
-        if not code:
-            logger.warning("No code for slide %d, adding fallback", slide_number)
-            self._add_fallback_slide(prs, slide_number)
-            return
-        self._execute_slide_adder(code, prs, html_str, assets_dir)
+    def _build_pptx_job_dir(self, codes, slide_inputs) -> str:
+        """Write the jail job directory: manifest + per-slide code/html/assets.
 
-    def _add_fallback_slide(self, prs: Presentation, slide_number: int) -> None:
-        """Add a placeholder fallback slide when code generation or execution fails."""
-        from pptx.util import Pt
-        from pptx.enum.text import PP_ALIGN
-        from pptx.dml.color import RGBColor
+        A snippet that fails the AST import allowlist or does not parse is
+        recorded has_code=False so the jail runner uses the deterministic
+        fallback (defense-in-depth, never the boundary)."""
+        import json
+        import shutil as _shutil
 
-        slide = prs.slides.add_slide(prs.slide_layouts[6])
-        title_box = slide.shapes.add_textbox(Inches(1), Inches(3), Inches(8), Inches(1))
-        title_frame = title_box.text_frame
-        title_frame.text = f"Slide {slide_number}"
-        title_frame.paragraphs[0].alignment = PP_ALIGN.CENTER
-        title_frame.paragraphs[0].font.size = Pt(32)
-        title_frame.paragraphs[0].font.color.rgb = RGBColor(16, 32, 37)
+        from src.services.converter_jail import protocol
+        from src.services.converter_jail.ast_guard import (
+            DisallowedImport, check_imports,
+        )
+
+        job_dir = tempfile.mkdtemp(prefix="pptx_jail_job_")
+        slides_manifest = []
+        for idx, (code, (html_str, _cf, _if, assets_dir)) in enumerate(
+            zip(codes, slide_inputs)
+        ):
+            sdir = Path(job_dir) / f"slide_{idx:03d}"
+            sdir.mkdir()
+            has_code = bool(code)
+            if has_code:
+                try:
+                    check_imports(code)
+                except (DisallowedImport, SyntaxError) as exc:
+                    logger.warning("Slide %d snippet rejected pre-jail: %s", idx + 1, exc)
+                    has_code = False
+            if has_code:
+                (sdir / protocol.CODE_NAME).write_text(code, encoding="utf-8")
+                (sdir / protocol.HTML_NAME).write_text(html_str, encoding="utf-8")
+            # Point the slide's assets at the already-prepared dir.
+            dest_assets = sdir / protocol.ASSETS_DIR
+            try:
+                os.symlink(assets_dir, dest_assets, target_is_directory=True)
+            except OSError:
+                _shutil.copytree(assets_dir, dest_assets)
+            slides_manifest.append(
+                {"index": idx, "has_code": has_code, "dir": sdir.name}
+            )
+        (Path(job_dir) / protocol.MANIFEST_NAME).write_text(
+            json.dumps({"slides": slides_manifest})
+        )
+        return job_dir
+
+    def _run_pptx_conversion(self, codes, slide_inputs, output_path, progress_cb=None) -> None:
+        """Build the job dir and run the jailed PPTX runner. Raises
+        PPTXConversionError on jail failure/timeout."""
+        import shutil as _shutil
+
+        from src.services.converter_jail import run_pptx_jail
+
+        job_dir = self._build_pptx_job_dir(codes, slide_inputs)
+        try:
+            result = run_pptx_jail(job_dir, output_path, progress_cb=progress_cb)
+        finally:
+            _shutil.rmtree(job_dir, ignore_errors=True)
+        if result.timed_out:
+            logger.error("PPTX jail timed out")
+            raise PPTXConversionError("PPTX conversion timed out")
+        if result.returncode != 0:
+            logger.error("PPTX jail failed rc=%s: %s", result.returncode, result.stderr_tail)
+            raise PPTXConversionError("PPTX conversion failed in sandbox")
 
     def _call_llm_sync(self, system_prompt: str, user_prompt: str) -> Optional[str]:
         """Synchronous LLM call — core implementation used by both async and threaded paths."""
@@ -982,173 +772,3 @@ class HtmlToPptxConverterV3:
                 return f"<html><head>{style_tag}</head><body>{body_slice}...</body></html>"
             return html_str[:max_length]
     
-    @staticmethod
-    def _sanitize_code(code: str) -> str:
-        """Fix common LLM-generated code issues before execution.
-
-        Handles smart quotes, em-dashes, and apostrophes inside string literals
-        that cause SyntaxError (e.g. ``Anthony's`` inside a single-quoted string).
-        """
-        # Smart/curly quotes → straight quotes
-        for smart, straight in {
-            "\u2018": "'", "\u2019": "'",   # single curly quotes
-            "\u201c": '"', "\u201d": '"',   # double curly quotes
-        }.items():
-            code = code.replace(smart, straight)
-
-        # Em-dash / en-dash → regular hyphen (prevents SyntaxError when
-        # they appear outside strings due to broken quoting)
-        code = code.replace("\u2014", "-")   # em-dash
-        code = code.replace("\u2013", "-")   # en-dash
-
-        # Fix apostrophes inside single-quoted strings (e.g. 'Anthony's workflow')
-        # by converting affected lines to use double-quoted strings.
-        import ast as _ast
-        for _ in range(20):
-            try:
-                _ast.parse(code)
-                break
-            except SyntaxError as exc:
-                if exc.lineno is None:
-                    break
-                lines = code.splitlines()
-                idx = exc.lineno - 1
-                if idx < 0 or idx >= len(lines):
-                    break
-                original = lines[idx]
-                # Re-quote single-quoted strings that contain apostrophes
-                fixed = re.sub(
-                    r"'([^']*\w'\w[^']*)'",
-                    lambda m: '"' + m.group(1) + '"',
-                    original,
-                )
-                if fixed == original:
-                    break
-                lines[idx] = fixed
-                code = "\n".join(lines)
-        return code
-
-    def _execute_single_slide_converter(
-        self,
-        code: str,
-        html_str: str,
-        output_path: str,
-        assets_dir: str
-    ) -> None:
-        """Execute generated converter code for single slide.
-        
-        Args:
-            code: Generated Python code
-            html_str: HTML content
-            output_path: Path to save PPTX
-            assets_dir: Directory containing assets
-        
-        Raises:
-            PPTXConversionError: If code execution fails
-        """
-        code = self._sanitize_code(code)
-
-        required_imports = """from pptx import Presentation
-from pptx.util import Inches, Pt
-from pptx.enum.text import PP_ALIGN
-from pptx.dml.color import RGBColor
-import os
-"""
-        if "from pptx import Presentation" not in code and "from pptx import" not in code:
-            code = required_imports + "\n" + code
-            logger.debug("Injected required imports into generated code")
-        
-        temp_module_path = Path(tempfile.mktemp(suffix=".py", prefix="converter_"))
-        temp_module_path.write_text(code, encoding='utf-8')
-        
-        try:
-            # Load as module
-            spec = importlib.util.spec_from_file_location("temp_converter", str(temp_module_path))
-            module = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(module)
-            
-            # Execute convert_to_pptx function
-            module.convert_to_pptx(html_str, output_path, assets_dir)
-            
-        except Exception as e:
-            logger.error("Failed to execute converter code", exc_info=True)
-            raise PPTXConversionError(f"Code execution failed: {str(e)}") from e
-        finally:
-            # Cleanup temp module file
-            if temp_module_path.exists():
-                temp_module_path.unlink()
-    
-    def _execute_slide_adder(
-        self,
-        code: str,
-        prs: Presentation,
-        html_str: str,
-        assets_dir: str
-    ) -> None:
-        """Execute generated code to add slide to presentation.
-        
-        Args:
-            code: Generated Python code
-            prs: Presentation object
-            html_str: HTML content
-            assets_dir: Directory containing assets
-        """
-        code = self._sanitize_code(code)
-
-        required_imports = """from pptx.util import Inches, Pt
-from pptx.enum.text import PP_ALIGN
-from pptx.dml.color import RGBColor
-import os
-"""
-        if "from pptx.util import" not in code:
-            code = required_imports + "\n" + code
-            logger.debug("Injected required imports into generated code")
-
-        temp_module_path = Path(tempfile.mktemp(suffix=".py", prefix="slide_adder_"))
-        temp_module_path.write_text(code, encoding='utf-8')
-
-        # Also save to debug dir for inspection (use .txt to avoid triggering uvicorn reload)
-        debug_dir = Path("logs/pptx_debug")
-        debug_dir.mkdir(parents=True, exist_ok=True)
-        debug_file = debug_dir / f"slide_{len(prs.slides) + 1}_code.txt"
-        debug_file.write_text(code, encoding='utf-8')
-        print(f"[PPTX_CONVERTER] Generated code saved to: {debug_file}")
-
-        slides_before = len(prs.slides)
-
-        try:
-            # Load as module and execute the generated function
-            spec = importlib.util.spec_from_file_location("temp_slide_adder", str(temp_module_path))
-            module = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(module)
-            module.add_slide_to_presentation(prs, html_str, assets_dir)
-
-            if len(prs.slides) > slides_before:
-                new_slide = prs.slides[len(prs.slides) - 1]
-                pic_shapes = [s for s in new_slide.shapes if s.shape_type == 13]  # 13 = PICTURE
-                print(f"[PPTX_CONVERTER] Slide has {len(new_slide.shapes)} shapes, {len(pic_shapes)} are pictures")
-                if not pic_shapes and "add_picture" in code:
-                    print(f"[PPTX_CONVERTER] WARNING: Code contains add_picture but no picture shapes found on slide!")
-        except Exception as e:
-            logger.warning(
-                "Generated code error, creating fallback slide",
-                exc_info=True,
-                extra={"error": str(e)}
-            )
-            (debug_dir / f"slide_{slides_before + 1}_ERROR.txt").write_text(str(e), encoding='utf-8')
-
-            slide = prs.slides.add_slide(prs.slide_layouts[6])
-            from pptx.util import Inches, Pt
-            from pptx.enum.text import PP_ALIGN
-            from pptx.dml.color import RGBColor
-
-            title_box = slide.shapes.add_textbox(Inches(1), Inches(3), Inches(8), Inches(1))
-            title_frame = title_box.text_frame
-            title_frame.text = "Slide Content"
-            title_frame.paragraphs[0].alignment = PP_ALIGN.CENTER
-            title_frame.paragraphs[0].font.size = Pt(32)
-            title_frame.paragraphs[0].font.color.rgb = RGBColor(16, 32, 37)
-        finally:
-            # Cleanup temp module file
-            if temp_module_path.exists():
-                temp_module_path.unlink()

@@ -49,7 +49,7 @@ class TestGoogleSlidesPrompts:
     def test_multi_slide_prompts(self):
         """Multi-slide system + user prompt templates are valid."""
         assert isinstance(DEFAULT_GSLIDES_SYSTEM_PROMPT, str)
-        assert "add_slide_to_presentation" in DEFAULT_GSLIDES_SYSTEM_PROMPT
+        assert "build_slide_requests" in DEFAULT_GSLIDES_SYSTEM_PROMPT
         assert "{html_content}" in DEFAULT_GSLIDES_USER_PROMPT
         assert "{screenshot_note}" in DEFAULT_GSLIDES_USER_PROMPT
 
@@ -75,3 +75,39 @@ class TestGoogleSlidesPrompts:
         # Should NOT reference python-pptx concepts
         assert "Presentation()" not in DEFAULT_GSLIDES_SYSTEM_PROMPT
         assert "slide_layouts" not in DEFAULT_GSLIDES_SYSTEM_PROMPT
+
+
+class TestGoogleSlidesDataOutContract:
+    """SDR-4437 HIGH-5: generated Google code emits data, never touches network."""
+
+    def test_system_prompt_uses_build_slide_requests(self):
+        assert "build_slide_requests" in DEFAULT_GSLIDES_SYSTEM_PROMPT
+        assert "tellr-asset://" in DEFAULT_GSLIDES_SYSTEM_PROMPT
+
+    def test_system_prompt_forbids_network(self):
+        p = DEFAULT_GSLIDES_SYSTEM_PROMPT
+        assert "MediaFileUpload" not in p
+        assert "files().create" not in p
+        assert "permissions().create" not in p
+        assert ".execute()" not in p
+
+    def test_prompt_never_instructs_calling_batchupdate(self):
+        # The word "batchUpdate" is fine as data-shape wording ("batchUpdate
+        # request dicts") — what must be gone are the old EXECUTION/TABLES
+        # instructions to *call* it, which NameError in the jail.
+        p = DEFAULT_GSLIDES_SYSTEM_PROMPT
+        assert "then ONE batchUpdate" not in p
+        assert "FIRST batchUpdate" not in p
+        assert "SECOND batchUpdate" not in p
+        assert "wrap batchUpdate in try/except" not in p
+
+    def test_image_notes_use_placeholder_scheme(self):
+        from src.services.html_to_google_slides import HtmlToGoogleSlidesConverter
+        conv = HtmlToGoogleSlidesConverter.__new__(HtmlToGoogleSlidesConverter)
+        for note in (
+            conv._build_chart_note(["chart_0.png"]),
+            conv._build_content_image_note(["logo.png"]),
+        ):
+            assert "tellr-asset://" in note
+            assert "MediaFileUpload" not in note
+            assert "drive_service" not in note
