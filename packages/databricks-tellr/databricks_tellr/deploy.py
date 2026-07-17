@@ -679,6 +679,11 @@ def _check_breaking_migrations(
     Raises:
         DeploymentError: If the user declines the migration.
     """
+    # MEDIUM-5: schema_name is interpolated into the row-count DDL below
+    # (identifiers can't be parameterized); validate before any interpolation,
+    # matching the other DDL sites in this module.
+    validate_schema_name(schema_name)
+
     try:
         conn, _ = _get_lakebase_connection(ws, lakebase_name, lakebase_result=lakebase_result)
     except Exception as e:

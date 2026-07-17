@@ -49,7 +49,13 @@ class TestValidateClientId:
 
 
 class TestDeploySitesValidate:
-    """The three deploy.py DDL sites reject bad identifiers BEFORE any execute."""
+    """The deploy.py DDL sites reject bad identifiers BEFORE any execute.
+
+    Validated sites (all call validate_schema_name before interpolating):
+    _migrate_encryption_key_to_lakebase, _setup_database_schema, _reset_schema,
+    _grant_schema_permissions, and _check_breaking_migrations (the last was the
+    5th interpolation site MEDIUM-5's original "three sites" claim under-counted).
+    """
 
     def test_grant_schema_permissions_rejects_bad_schema(self):
         from databricks_tellr.deploy import _grant_schema_permissions
@@ -66,3 +72,17 @@ class TestDeploySitesValidate:
         with pytest.raises(ValueError):
             _grant_schema_permissions(cur, "app_data", '"; GRANT ALL --')
         cur.execute.assert_not_called()
+
+    def test_check_breaking_migrations_rejects_bad_schema(self):
+        # validate_schema_name runs before _get_lakebase_connection, so a bad
+        # schema raises ValueError without ever touching the database.
+        from unittest.mock import patch
+
+        from databricks_tellr.deploy import _check_breaking_migrations
+
+        with patch("databricks_tellr.deploy._get_lakebase_connection") as conn:
+            with pytest.raises(ValueError, match="schema"):
+                _check_breaking_migrations(
+                    MagicMock(), "lakebase", 'x"; DROP SCHEMA public; --'
+                )
+        conn.assert_not_called()
