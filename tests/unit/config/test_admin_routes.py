@@ -131,7 +131,7 @@ def test_post_google_credentials_missing_keys_returns_400(test_client):
         files={"file": ("creds.json", bad, "application/json")},
     )
     assert resp.status_code == 400
-    assert "installed" in resp.json()["detail"]
+    assert "Invalid Google credentials file" in resp.json()["detail"]
 
 
 def test_get_google_credentials_status_returns_true_when_exists(test_client):
