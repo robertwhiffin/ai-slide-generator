@@ -449,7 +449,9 @@ class TestGrantSchemaPermissions:
         # First call is the role existence check
         cur.fetchone.return_value = (1,)
 
-        _grant_schema_permissions(cur, "app_data", "client-123")
+        _grant_schema_permissions(
+            cur, "app_data", "12345678-abcd-abcd-0123-456789abcdef"
+        )
 
         # 1 SELECT for role check + 6 GRANT/ALTER statements = 7 total
         assert cur.execute.call_count == 7
@@ -459,14 +461,18 @@ class TestGrantSchemaPermissions:
         cur.fetchone.return_value = None  # role not found
 
         with patch("databricks_tellr.deploy.logger") as mock_logger:
-            _grant_schema_permissions(cur, "app_data", "client-123")
+            _grant_schema_permissions(
+            cur, "app_data", "12345678-abcd-abcd-0123-456789abcdef"
+        )
             mock_logger.warning.assert_called_once()
 
     def test_does_not_create_role(self):
         cur = Mock()
         cur.fetchone.return_value = (1,)
 
-        _grant_schema_permissions(cur, "app_data", "client-123")
+        _grant_schema_permissions(
+            cur, "app_data", "12345678-abcd-abcd-0123-456789abcdef"
+        )
 
         # Verify no CREATE ROLE statement was executed
         for call_args in cur.execute.call_args_list:
@@ -504,7 +510,10 @@ class TestUpdateDatabricks:
     @patch("databricks_tellr.deploy._write_app_yaml")
     @patch("databricks_tellr.deploy._write_requirements")
     @patch("databricks_tellr.deploy._get_or_create_lakebase")
-    @patch("databricks_tellr.deploy._read_existing_encryption_key", return_value="key")
+    # return_value=None: a truthy key would trigger the CRITICAL-3 migration
+    # (own coverage in test_deploy_encryption_key_migration.py); these tests
+    # pin lakebase-state passing only.
+    @patch("databricks_tellr.deploy._read_existing_encryption_key", return_value=None)
     def test_update_fetches_lakebase_state(
         self, _mock_key, mock_get_lakebase, _mock_req, _mock_yaml, _mock_upload
     ):
@@ -524,7 +533,10 @@ class TestUpdateDatabricks:
     @patch("databricks_tellr.deploy._write_app_yaml")
     @patch("databricks_tellr.deploy._write_requirements")
     @patch("databricks_tellr.deploy._get_or_create_lakebase")
-    @patch("databricks_tellr.deploy._read_existing_encryption_key", return_value="key")
+    # return_value=None: a truthy key would trigger the CRITICAL-3 migration
+    # (own coverage in test_deploy_encryption_key_migration.py); these tests
+    # pin lakebase-state passing only.
+    @patch("databricks_tellr.deploy._read_existing_encryption_key", return_value=None)
     def test_update_passes_lakebase_result_to_write_app_yaml(
         self, _mock_key, mock_get_lakebase, _mock_req, mock_yaml, _mock_upload
     ):
@@ -546,7 +558,10 @@ class TestUpdateDatabricks:
     @patch("databricks_tellr.deploy._write_requirements")
     @patch("databricks_tellr.deploy._reset_schema")
     @patch("databricks_tellr.deploy._get_or_create_lakebase")
-    @patch("databricks_tellr.deploy._read_existing_encryption_key", return_value="key")
+    # return_value=None: a truthy key would trigger the CRITICAL-3 migration
+    # (own coverage in test_deploy_encryption_key_migration.py); these tests
+    # pin lakebase-state passing only.
+    @patch("databricks_tellr.deploy._read_existing_encryption_key", return_value=None)
     def test_update_passes_lakebase_result_to_reset_schema(
         self, _mock_key, mock_get_lakebase, mock_reset, _mock_req, _mock_yaml, _mock_upload
     ):
@@ -568,7 +583,10 @@ class TestUpdateDatabricks:
     @patch("databricks_tellr.deploy._write_app_yaml")
     @patch("databricks_tellr.deploy._write_requirements")
     @patch("databricks_tellr.deploy._get_or_create_lakebase")
-    @patch("databricks_tellr.deploy._read_existing_encryption_key", return_value="key")
+    # return_value=None: a truthy key would trigger the CRITICAL-3 migration
+    # (own coverage in test_deploy_encryption_key_migration.py); these tests
+    # pin lakebase-state passing only.
+    @patch("databricks_tellr.deploy._read_existing_encryption_key", return_value=None)
     def test_update_returns_lakebase_type(
         self, _mock_key, mock_get_lakebase, _mock_req, _mock_yaml, _mock_upload
     ):
