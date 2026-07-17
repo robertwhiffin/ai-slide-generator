@@ -315,9 +315,13 @@ class TestGoogleSlidesAuthUnit:
         from src.services.google_slides_auth import GoogleSlidesAuth
 
         auth = GoogleSlidesAuth(credentials_json=VALID_CREDENTIALS)
-        url = auth.get_auth_url(redirect_uri="http://localhost/callback")
-        assert "accounts.google.com" in url
-        assert "http://localhost/callback" in url or "redirect_uri" in url
+        url, verifier = auth.get_auth_url(
+            redirect_uri="http://localhost/callback", state="nonce-abc"
+        )
+        assert "code_challenge=" in url
+        assert "state=nonce-abc" in url
+        assert verifier  # returned for server-side storage
+        assert verifier not in url  # never client-visible
 
     def test_get_credentials_raises_when_no_token(self):
         """get_credentials raises GoogleSlidesAuthError when not authorized."""

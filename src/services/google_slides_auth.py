@@ -226,35 +226,36 @@ class GoogleSlidesAuth:
         )
         return verifier, challenge
 
-    def get_auth_url(self, redirect_uri: str, state: str | None = None) -> str:
+    def get_auth_url(
+        self, redirect_uri: str, state: str | None = None
+    ) -> tuple[str, str]:
         """Generate the OAuth2 consent URL with PKCE.
 
-        A PKCE ``code_verifier`` is generated and embedded in the OAuth
-        ``state`` parameter so it round-trips through the callback and can
-        be passed to :pymeth:`authorize`.
+        SDR-4437 MEDIUM-3: the PKCE ``code_verifier`` is returned to the
+        caller for **server-side** storage (``oauth_states`` row) instead of
+        being embedded in the client-visible ``state`` parameter. ``state``
+        is passed through to Google untouched.
 
         Args:
             redirect_uri: The registered OAuth callback URI (no query params).
-            state: Optional JSON string carrying caller context (e.g. user
-                identity).  A ``code_verifier`` key will be injected into it.
+            state: Opaque state string (the server-issued nonce).
+
+        Returns:
+            (auth_url, code_verifier)
         """
         flow = self._build_flow(redirect_uri)
         verifier, challenge = self._generate_pkce()
-
-        # Inject code_verifier into the state payload
-        state_data = json.loads(state) if state else {}
-        state_data["code_verifier"] = verifier
 
         auth_url, _ = flow.authorization_url(
             access_type="offline",
             include_granted_scopes="true",
             prompt="consent",
-            state=json.dumps(state_data),
+            state=state,
             code_challenge=challenge,
             code_challenge_method="S256",
         )
         logger.info("Generated Google OAuth consent URL")
-        return auth_url
+        return auth_url, verifier
 
     def authorize(
         self,
