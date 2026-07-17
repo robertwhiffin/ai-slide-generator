@@ -83,3 +83,28 @@ def test_allowlisted_external_script_is_not_flagged(caplog):
     with caplog.at_level(logging.WARNING):
         build_slide_html(slide, deck)
     assert not any("Unsafe patterns" in r.message for r in caplog.records)
+
+
+def _csp_directives(policy: str) -> dict[str, set[str]]:
+    out = {}
+    for directive in policy.split(";"):
+        directive = directive.strip()
+        if not directive:
+            continue
+        name, *sources = directive.split()
+        out[name] = set(sources)
+    return out
+
+
+def test_document_csp_header_is_superset_of_slide_csp():
+    # SDR-4437 PR-1a: srcdoc iframes inherit the embedding document's CSP in
+    # addition to the SLIDE_CSP meta tag (both enforce; most restrictive
+    # wins). Every fetch source SLIDE_CSP grants must therefore also be
+    # granted by the document CSP header, or slide rendering breaks app-wide.
+    from src.api.middleware.security_headers import DOCUMENT_CSP
+
+    slide = _csp_directives(SLIDE_CSP)
+    doc = _csp_directives(DOCUMENT_CSP)
+    for directive in ("script-src", "style-src", "img-src", "font-src"):
+        missing = slide[directive] - doc[directive]
+        assert not missing, f"{directive}: document CSP header missing {missing}"
