@@ -85,7 +85,9 @@ class TestUploadEndpoint:
             files={"file": ("test.txt", b"not an image", "text/plain")},
         )
         assert response.status_code == 400
-        assert "not allowed" in response.json()["detail"]
+        # SDR-4437 MEDIUM-2: client detail is now generic; the specific reason
+        # (disallowed content-type) is logged server-side.
+        assert response.json()["detail"] == "Invalid image upload."
 
     def test_upload_rejects_oversized(self, client):
         big = b"x" * (5 * 1024 * 1024 + 1)
@@ -94,7 +96,9 @@ class TestUploadEndpoint:
             files={"file": ("big.png", big, "image/png")},
         )
         assert response.status_code == 400
-        assert "too large" in response.json()["detail"]
+        # SDR-4437 MEDIUM-2: client detail is now generic; the size reason is
+        # logged server-side.
+        assert response.json()["detail"] == "Invalid image upload."
 
     def test_upload_without_file_returns_422(self, client):
         response = client.post("/api/images/upload")
