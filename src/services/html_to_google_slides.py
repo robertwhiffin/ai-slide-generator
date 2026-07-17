@@ -4,7 +4,6 @@
 import ast
 import asyncio
 import base64
-import importlib.util
 import logging
 import re
 import shutil
@@ -16,6 +15,7 @@ from typing import Callable, Dict, List, Optional, Tuple
 
 from databricks.sdk import WorkspaceClient
 
+from src.services.converter_jail.codeprep import _fix_apostrophe_strings
 from src.services.google_slides_auth import GoogleSlidesAuth, GoogleSlidesAuthError
 from src.services.google_slides_prompts_defaults import (
     DEFAULT_GSLIDES_SYSTEM_PROMPT,
@@ -33,6 +33,12 @@ MAX_CONCURRENT_LLM = 5
 # Retry settings for Google Slides API 429 (rate limit) errors.
 _RETRY_MAX_ATTEMPTS = 5
 _RETRY_BASE_DELAY = 5  # seconds
+
+# SDR-4437 PR-5: safe basename for a tellr-asset:// filename. No path
+# separators, no leading dot-dot — a plain asset filename only. Both the
+# schema gate (_validate_requests) and the uploader (_upload_and_substitute_assets)
+# enforce this before the untrusted filename ever reaches the filesystem.
+_SAFE_ASSET_NAME_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
 
 
 def _is_rate_limit_error(exc: Exception) -> bool:
@@ -141,97 +147,6 @@ def _filter_requests(requests: list) -> list:
         filtered.append(req)
 
     return filtered
-
-
-# ---------------------------------------------------------------------------
-# Apostrophe-in-string syntax fixer
-# ---------------------------------------------------------------------------
-
-def _convert_single_to_double_quoted(line: str) -> str:
-    """Re-quote single-quoted strings that contain apostrophes as double-quoted.
-
-    Scans each single-quote-delimited token on *line*.  When an apostrophe is
-    surrounded by word characters (``\\w'\\w``) it is treated as part of the
-    content (not a closing delimiter), so the scanner continues until it finds a
-    genuine closing quote.  Those strings are then re-emitted with double-quote
-    delimiters so Python can parse them correctly.
-
-    Example::
-
-        'We didn't do it'  →  "We didn't do it"
-    """
-    result: list = []
-    i = 0
-    n = len(line)
-
-    while i < n:
-        if line[i] != "'":
-            result.append(line[i])
-            i += 1
-            continue
-
-        # Scan for the "real" closing quote, treating word-apostrophe-word as content.
-        j = i + 1
-        while j < n:
-            if line[j] == "'":
-                before_word = j > 0 and line[j - 1].isalnum()
-                after_word = (j + 1) < n and line[j + 1].isalnum()
-                if before_word and after_word:
-                    j += 1  # it's a contraction apostrophe — keep scanning
-                    continue
-                break  # genuine closing quote
-            j += 1
-
-        if j >= n:
-            # Never found a real closing quote — rest of line is broken content.
-            content = line[i + 1:]
-            result.append('"' + content.replace('"', '\\"') + '"')
-            break
-
-        content = line[i + 1: j]
-        if re.search(r"\w'\w", content):
-            # Content has an apostrophe → rewrite as double-quoted string.
-            result.append('"' + content.replace('"', '\\"') + '"')
-        else:
-            result.append(line[i: j + 1])
-
-        i = j + 1
-
-    return "".join(result)
-
-
-def _fix_apostrophe_strings(code: str) -> str:
-    """Fix single-quoted literals whose content contains apostrophes (contractions).
-
-    The LLM often emits ``'text': 'We don't ...'``.  The ``'`` in *don't* ends the
-    literal early; the parser may report ``unterminated string``, ``eol while
-    scanning``, or ``invalid character`` (e.g. em-dash) on the remainder.
-
-    Repeatedly ``ast.parse`` and rewrite the error line with
-    :func:`_convert_single_to_double_quoted` whenever that changes the line.
-    """
-    for _ in range(20):  # guard against infinite loops
-        try:
-            ast.parse(code)
-            return code
-        except SyntaxError as exc:
-            if exc.lineno is None:
-                return code
-
-            lines = code.splitlines()
-            line_idx = exc.lineno - 1
-            if line_idx >= len(lines):
-                return code
-
-            original = lines[line_idx]
-            fixed = _convert_single_to_double_quoted(original)
-            if fixed == original:
-                return code  # heuristic cannot improve this error
-
-            lines[line_idx] = fixed
-            code = "\n".join(lines)
-
-    return code
 
 
 # ---------------------------------------------------------------------------
@@ -537,40 +452,94 @@ class HtmlToGoogleSlidesConverter:
             extra={"total_slides": total, "duration_s": f"{time.time() - t0:.1f}"},
         )
 
-        # ── Phase 2: Sequential Google Slides API execution ───────────────
+        # ── Phase 2a: create all slide pages (host-side; page_ids known up front)
+        page_ids = []
+        for i in range(1, total + 1):
+            page_id = f"slide_{uuid.uuid4().hex[:12]}"
+            try:
+                _retry_api_call(
+                    lambda _pid=pres_id, _pg=page_id: slides_service.presentations().batchUpdate(
+                        presentationId=_pid,
+                        body={"requests": [{"createSlide": {
+                            "objectId": _pg,
+                            "slideLayoutReference": {"predefinedLayout": "BLANK"},
+                        }}]},
+                    ).execute(),
+                    label=f"createSlide {i}/{total}",
+                )
+                page_ids.append(page_id)
+            except Exception:
+                logger.error("Failed to create slide %d after retries", i, exc_info=True)
+                page_ids.append(None)
+
+        # ── Phase 2b: emit all batchUpdate requests inside the jail (no network)
+        import json as _json
+        import shutil as _shutil
+        from src.services.converter_jail import run_gslides_jail
+
+        job_dir = self._build_gslides_job_dir(codes, slide_inputs, page_ids)
+        requests_out = str(Path(job_dir) / "requests.json")
+        emitted = []
+        try:
+            # to_thread: the jail blocks on proc.wait for the whole deck and
+            # this coroutine runs on the event loop (same rationale as the
+            # PPTX call sites in Task 4).
+            result = await asyncio.to_thread(run_gslides_jail, job_dir, requests_out)
+            if result.timed_out or result.returncode != 0:
+                logger.error("GSlides jail failed rc=%s timeout=%s: %s",
+                             result.returncode, result.timed_out, result.stderr_tail)
+            else:
+                emitted = _json.loads(Path(requests_out).read_text())
+        finally:
+            _shutil.rmtree(job_dir, ignore_errors=True)
+        by_index = {e["index"]: e for e in emitted}
+
+        # ── Phase 2c: execute per slide on the host (validate, upload, chunked)
         for i, (code, (html_str, chart_files, content_files, assets_dir)) in enumerate(
             zip(codes, slide_inputs), 1,
         ):
-            print(f"[GSLIDES_CONVERTER] Executing slide {i}/{total}")
-            page_id = f"slide_{uuid.uuid4().hex[:12]}"
-            try:
-                create_body: dict = {
-                    "objectId": page_id,
-                    "slideLayoutReference": {"predefinedLayout": "BLANK"},
-                }
-                _retry_api_call(
-                    lambda _pid=pres_id, _body=create_body: (
-                        slides_service.presentations().batchUpdate(
-                            presentationId=_pid,
-                            body={"requests": [{"createSlide": _body}]},
-                        ).execute()
-                    ),
-                    label=f"createSlide {i}/{total}",
-                )
-            except Exception:
-                logger.error("Failed to create slide %d after retries", i, exc_info=True)
+            page_id = page_ids[i - 1]
+            if page_id is None:
                 continue
+            entry = by_index.get(i - 1)
+            requests = entry.get("requests") if entry else None
 
-            await self._execute_slide(
-                code, slides_service, drive_service, pres_id, page_id,
-                html_str, assets_dir, i, chart_files, content_files,
-            )
+            if requests is None:
+                logger.warning("Slide %d: no emitted requests, adding fallback", i)
+                self._add_fallback(slides_service, pres_id, page_id, i)
+            else:
+                err = self._execute_slide_requests(
+                    requests, slides_service, drive_service, pres_id, page_id,
+                    assets_dir, i,
+                )
+                if err is not None:
+                    fixed = await self._retry_with_error(
+                        code, err, html_str, chart_files, content_files,
+                    )
+                    retry_err = "no-retry-code"
+                    if fixed:
+                        retry_requests = self._emit_single_slide(fixed, html_str, assets_dir, page_id)
+                        if retry_requests is not None:
+                            retry_err = self._execute_slide_requests(
+                                retry_requests, slides_service, drive_service,
+                                pres_id, page_id, assets_dir, i,
+                            )
+                    if retry_err is not None:
+                        logger.warning("Slide %d: all attempts failed, fallback", i)
+                        self._add_fallback(slides_service, pres_id, page_id, i)
 
             if progress_callback:
                 try:
                     progress_callback(i, total, f"Building slide {i}/{total}…")
                 except Exception:
                     pass
+
+        # Best-effort Drive cleanup of uploaded asset files (generated code never did this).
+        for file_id in getattr(self, "_uploaded_file_ids", []):
+            try:
+                drive_service.files().delete(fileId=file_id).execute()
+            except Exception:
+                logger.debug("Asset cleanup failed for %s", file_id, exc_info=True)
 
         print(f"[GSLIDES_CONVERTER] Done: {url}")
         return {"presentation_id": pres_id, "presentation_url": url}
@@ -809,37 +778,6 @@ class HtmlToGoogleSlidesConverter:
             *(gen_one(h, c, ci) for h, c, ci, _ad in slide_inputs)
         ))
 
-    async def _execute_slide(
-        self, code: Optional[str], slides_service, drive_service,
-        pres_id: str, page_id: str, html_str: str, assets_dir: str,
-        slide_num: int, chart_images: List[str], content_images: List[str],
-    ) -> None:
-        """Execute generated code, retry once on failure, fallback on second failure."""
-        if not code:
-            logger.warning("No code for slide %d, adding fallback", slide_num)
-            self._add_fallback(slides_service, pres_id, page_id, slide_num)
-            return
-
-        error = self._execute_code(
-            code, slides_service, drive_service, pres_id, page_id, html_str,
-            assets_dir, slide_num,
-        )
-        if error is None:
-            return
-
-        logger.info("Retrying slide %d with error context", slide_num)
-        fixed = await self._retry_with_error(code, error, html_str, chart_images, content_images)
-        if fixed:
-            retry_err = self._execute_code(
-                fixed, slides_service, drive_service, pres_id, page_id,
-                html_str, assets_dir, slide_num,
-            )
-            if retry_err is None:
-                return
-
-        logger.warning("Slide %d: all attempts failed, adding fallback", slide_num)
-        self._add_fallback(slides_service, pres_id, page_id, slide_num)
-
     # -- LLM calls ---------------------------------------------------------
 
     async def _generate_code(self, html_str, chart_images, content_images=None):
@@ -861,12 +799,10 @@ class HtmlToGoogleSlidesConverter:
         return (
             f"CHART IMAGES in assets_dir: {files}\n"
             f"CRITICAL: You MUST use these pre-captured images. Do NOT recreate charts with matplotlib or any library.\n"
-            f"Steps for each image:\n"
-            f"  1. from googleapiclient.http import MediaFileUpload\n"
-            f"  2. media = MediaFileUpload(os.path.join(assets_dir, filename), mimetype='image/png')\n"
-            f"  3. Upload: file = drive_service.files().create(body={{'name': filename, 'mimeType': 'image/png'}}, media_body=media, fields='id').execute()\n"
-            f"  4. Permission: drive_service.permissions().create(fileId=file['id'], body={{'type':'anyone','role':'reader'}}).execute()\n"
-            f"  5. createImage with url=f'https://drive.google.com/uc?id={{file[\"id\"]}}'\n"
+            f"For each image filename, append ONE createImage request that references it by\n"
+            f"placeholder URL — do NOT upload anything, do NOT touch any Google service:\n"
+            f"  {{'createImage': {{'objectId': 'img_' + str(uuid.uuid4())[:8], 'url': 'tellr-asset://' + filename, 'elementProperties': {{'pageObjectId': page_id, 'size': {{...}}, 'transform': {{...}}}}}}}}\n"
+            f"The host uploads the file to Drive and substitutes the real URL before execution.\n"
             f"Position: If chart is the main content, use left=0.4\", top=1.1\", width=9.0\", height=4.0\" (fills body zone).\n"
             f"If chart + metrics side-by-side, use left=0.4\", top=1.1\", width=4.5\", height=3.0\"."
         )
@@ -876,13 +812,10 @@ class HtmlToGoogleSlidesConverter:
         return (
             f"\nCONTENT IMAGES (logos/icons) in assets_dir: {files}\n"
             f"These are logos/icons extracted from <img> tags in the HTML.\n"
-            f"CRITICAL: You MUST upload and add each content image to the slide.\n"
-            f"Steps for each content image:\n"
-            f"  1. from googleapiclient.http import MediaFileUpload\n"
-            f"  2. media = MediaFileUpload(os.path.join(assets_dir, filename), mimetype='image/png')\n"
-            f"  3. Upload: file = drive_service.files().create(body={{'name': filename, 'mimeType': 'image/png'}}, media_body=media, fields='id').execute()\n"
-            f"  4. Permission: drive_service.permissions().create(fileId=file['id'], body={{'type':'anyone','role':'reader'}}).execute()\n"
-            f"  5. createImage request: {{'createImage': {{'objectId': 'img_' + str(uuid.uuid4())[:8], 'url': f'https://drive.google.com/uc?id={{file[\"id\"]}}', 'elementProperties': {{'pageObjectId': page_id, 'size': {{'width': {{'magnitude': emu(w), 'unit': 'EMU'}}, 'height': {{'magnitude': emu(h), 'unit': 'EMU'}}}}, 'transform': {{'scaleX': 1, 'scaleY': 1, 'translateX': emu(left), 'translateY': emu(top), 'unit': 'EMU'}}}}}}}}\n"
+            f"CRITICAL: You MUST add each content image to the slide via a createImage\n"
+            f"request with url = 'tellr-asset://' + filename. NEVER upload; NEVER touch\n"
+            f"Drive yourself — the host uploads and substitutes the real URL before execution.\n"
+            f"  {{'createImage': {{'objectId': 'img_' + str(uuid.uuid4())[:8], 'url': 'tellr-asset://' + filename, 'elementProperties': {{'pageObjectId': page_id, 'size': {{'width': {{'magnitude': emu(w), 'unit': 'EMU'}}, 'height': {{'magnitude': emu(h), 'unit': 'EMU'}}}}, 'transform': {{'scaleX': 1, 'scaleY': 1, 'translateX': emu(left), 'translateY': emu(top), 'unit': 'EMU'}}}}}}}}\n"
             f"Position the image to match its placement in the HTML layout. "
             f"For logos/icons typically in the header area, use small sizes (e.g. width=0.6\"-1.0\", height=0.3\"-0.5\").\n"
         )
@@ -958,7 +891,7 @@ class HtmlToGoogleSlidesConverter:
                         "Your previous generation was TRUNCATED — the token limit was reached "
                         "before the function was complete (shown by the unclosed bracket/brace "
                         "at the end above). Using the HTML source below as your complete "
-                        "reference, write the COMPLETE add_slide_to_presentation function from "
+                        "reference, write the COMPLETE build_slide_requests function from "
                         "scratch. Keep the implementation concise: combine related requests into "
                         "fewer batchUpdate calls to stay within the token limit."
                     ),
@@ -984,7 +917,7 @@ class HtmlToGoogleSlidesConverter:
                     "guidance": (
                         "Your generated code had a syntax error (shown above). "
                         "Use the HTML source below as your complete reference and write the "
-                        "COMPLETE add_slide_to_presentation function from scratch — do not try "
+                        "COMPLETE build_slide_requests function from scratch — do not try "
                         "to patch only the lines shown above; the HTML is the source of truth "
                         "for all slide content and layout."
                     ),
@@ -1003,7 +936,7 @@ class HtmlToGoogleSlidesConverter:
                 "guidance": (
                     "Fix the Google Slides API error shown above. "
                     "Using the HTML source below as your reference for slide content, "
-                    "return the COMPLETE corrected add_slide_to_presentation function."
+                    "return the COMPLETE corrected build_slide_requests function."
                 ),
                 "concise_retry": False,
             }
@@ -1015,7 +948,7 @@ class HtmlToGoogleSlidesConverter:
             "code_excerpt": original_code[:6000],
             "guidance": (
                 "Fix the error shown above. Using the HTML source below as your reference, "
-                "return the COMPLETE add_slide_to_presentation function."
+                "return the COMPLETE build_slide_requests function."
             ),
             "concise_retry": False,
         }
@@ -1047,7 +980,7 @@ class HtmlToGoogleSlidesConverter:
             f"{ctx['code_section_label']}\n\n"
             f"```python\n{ctx['code_excerpt']}\n```\n"
             f"{html_content}{chart_note}\n"
-            f"Return ONLY the Python code for the complete add_slide_to_presentation function."
+            f"Return ONLY the Python code for the complete build_slide_requests function."
         )
         return await self._call_llm(
             self.SYSTEM_PROMPT, fix_prompt,
@@ -1207,38 +1140,204 @@ class HtmlToGoogleSlidesConverter:
 
         return code
 
-    # -- Code execution ----------------------------------------------------
+    # -- Host-side batchUpdate executor (SDR-4437 PR-5) --------------------
 
-    def _execute_code(self, code, slides_service, drive_service, pres_id, page_id,
-                      html_str, assets_dir, slide_num):
-        """Execute generated code. Returns None on success, error string on failure."""
-        code = self._prepare_code(code)
-        tmp = Path(tempfile.mktemp(suffix=".py", prefix="gslides_adder_"))
-        tmp.write_text(code, encoding="utf-8")
+    # Positive allowlist of batchUpdate request-type keys the host will execute.
+    # Derived from _SkipTracker._CREATE_KEYS (createShape, createTable,
+    # createImage, createLine, createSheetsChart) so the two sets cannot drift.
+    _ALLOWED_REQUEST_KEYS = frozenset(_SkipTracker._CREATE_KEYS) | frozenset({
+        "createSlide", "insertText", "deleteObject",
+        "updateTextStyle", "updateParagraphStyle", "updateShapeProperties",
+        "updatePageProperties", "updateTableCellProperties",
+        "createParagraphBullets", "insertTableRows", "insertTableColumns",
+        "updatePageElementTransform", "updateImageProperties",
+    })
 
+    def _validate_requests(self, requests):
+        """Schema-gate emitted requests. Raises GoogleSlidesConversionError on
+        any unknown top-level key or an image url that is not a
+        ``tellr-asset://<safe-basename>`` placeholder.
+
+        SDR-4437 PR-5 hardening: the ONLY accepted createImage url shape is the
+        placeholder scheme with a safe basename (``^[A-Za-z0-9_.-]+$``, no path
+        separators). Raw ``https://`` urls are rejected — every legitimate image
+        now flows through host-side upload of a ``tellr-asset://`` placeholder,
+        so accepting attacker-controlled ``https://`` would be a Google-side
+        SSRF (Google fetches the url server-side). Rejecting non-basename
+        filenames here is the first of two path-traversal guards; the second is
+        the resolved-path containment check in
+        ``_upload_and_substitute_assets``."""
+        if not isinstance(requests, list):
+            raise GoogleSlidesConversionError("requests must be a list")
+        from src.services.converter_jail import protocol
+        for req in requests:
+            if not isinstance(req, dict) or len(req) != 1:
+                raise GoogleSlidesConversionError(f"malformed request: {req!r}")
+            (key, val), = req.items()
+            if key not in self._ALLOWED_REQUEST_KEYS:
+                raise GoogleSlidesConversionError(f"disallowed request type: {key}")
+            if key == "createImage":
+                url = (val or {}).get("url", "")
+                if not url.startswith(protocol.ASSET_SCHEME):
+                    raise GoogleSlidesConversionError(f"disallowed image url: {url!r}")
+                filename = url[len(protocol.ASSET_SCHEME):]
+                if not _SAFE_ASSET_NAME_RE.match(filename):
+                    raise GoogleSlidesConversionError(
+                        f"unsafe asset filename: {filename!r}"
+                    )
+        return requests
+
+    def _upload_and_substitute_assets(self, requests, drive_service, assets_dir):
+        """Upload each tellr-asset:// referenced file to Drive and substitute
+        the real URL. Records uploaded file IDs on self._uploaded_file_ids.
+
+        SDR-4437 PR-5 hardening: the filename comes from untrusted LLM-emitted
+        request data, so before opening the file we confine the resolved path
+        to ``assets_dir``. This blocks absolute-path (``tellr-asset:///proc/self/environ``
+        — ``Path(base) / "/abs"`` discards ``base``) and traversal
+        (``tellr-asset://../../etc/passwd``) reads that would otherwise be
+        uploaded to Drive and made world-readable by the trusted host."""
+        from googleapiclient.http import MediaFileUpload
+        from src.services.converter_jail import protocol
+
+        if not hasattr(self, "_uploaded_file_ids"):
+            self._uploaded_file_ids = []
+        base = Path(assets_dir).resolve()
+        cache = {}
+        for req in requests:
+            if "createImage" not in req:
+                continue
+            url = req["createImage"].get("url", "")
+            if not url.startswith(protocol.ASSET_SCHEME):
+                continue
+            filename = url[len(protocol.ASSET_SCHEME):]
+            if filename not in cache:
+                if not _SAFE_ASSET_NAME_RE.match(filename):
+                    raise GoogleSlidesConversionError(
+                        f"unsafe asset filename: {filename!r}"
+                    )
+                path = (base / filename).resolve()
+                if not path.is_relative_to(base):
+                    raise GoogleSlidesConversionError(
+                        f"asset path escapes assets_dir: {filename!r}"
+                    )
+                media = MediaFileUpload(str(path), mimetype="image/png")
+                created = _retry_api_call(
+                    lambda: drive_service.files().create(
+                        body={"name": filename, "mimeType": "image/png"},
+                        media_body=media, fields="id",
+                    ).execute(),
+                    label=f"Upload {filename}",
+                )
+                file_id = created["id"]
+                _retry_api_call(
+                    lambda: drive_service.permissions().create(
+                        fileId=file_id, body={"type": "anyone", "role": "reader"},
+                    ).execute(),
+                    label=f"Share {filename}",
+                )
+                self._uploaded_file_ids.append(file_id)
+                cache[filename] = f"https://drive.google.com/uc?id={file_id}"
+            req["createImage"]["url"] = cache[filename]
+        return requests
+
+    def _execute_slide_requests(self, requests, slides_service, drive_service,
+                                pres_id, page_id, assets_dir, slide_num):
+        """Validate → upload+substitute → execute through _ChunkedSlidesService.
+        Returns None on success, error string on failure."""
         try:
-            spec = importlib.util.spec_from_file_location("temp_gslides_adder", str(tmp))
-            module = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(module)
-            wrapped_service = _ChunkedSlidesService(
+            self._validate_requests(requests)
+            requests = self._upload_and_substitute_assets(
+                requests, drive_service, assets_dir,
+            )
+            wrapped = _ChunkedSlidesService(
                 slides_service, chunk_size=4, slide_num=slide_num,
             )
-            module.add_slide_to_presentation(
-                wrapped_service, drive_service, pres_id, page_id, html_str, assets_dir,
-            )
+            wrapped.presentations().batchUpdate(
+                presentationId=pres_id, body={"requests": requests},
+            ).execute()
             return None
         except Exception as exc:
-            debug_dir = Path("logs/gslides_debug")
-            debug_dir.mkdir(parents=True, exist_ok=True)
-            try:
-                shutil.copy2(tmp, debug_dir / f"slide_{slide_num}_{tmp.stem}.py")
-            except Exception:
-                pass
-            logger.warning("Generated code failed for slide %d", slide_num, exc_info=True)
+            logger.warning("Slide %d host execution failed", slide_num, exc_info=True)
             return str(exc)
+
+    def _build_gslides_job_dir(self, codes, slide_inputs, page_ids) -> str:
+        """Write the jail job dir: manifest + per-slide code/html/assets, with
+        page_id per slide and AST-guarded snippets (rejected → has_code=false →
+        host fallback)."""
+        import json as _json
+        import os as _os
+        import shutil as _shutil
+        import tempfile as _tempfile
+        from src.services.converter_jail import protocol
+        from src.services.converter_jail.ast_guard import DisallowedImport, check_imports
+
+        job_dir = _tempfile.mkdtemp(prefix="gslides_jail_job_")
+        slides_manifest = []
+        for idx, (code, (html_str, _cf, _if, assets_dir)) in enumerate(
+            zip(codes, slide_inputs)
+        ):
+            sdir = Path(job_dir) / f"slide_{idx:03d}"
+            sdir.mkdir()
+            has_code = bool(code) and page_ids[idx] is not None
+            if has_code:
+                try:
+                    check_imports(code)
+                except (DisallowedImport, SyntaxError) as exc:
+                    logger.warning("GSlides slide %d snippet rejected pre-jail: %s", idx + 1, exc)
+                    has_code = False
+            if has_code:
+                (sdir / protocol.CODE_NAME).write_text(code, encoding="utf-8")
+                (sdir / protocol.HTML_NAME).write_text(html_str, encoding="utf-8")
+            dest = sdir / protocol.ASSETS_DIR
+            try:
+                _os.symlink(assets_dir, dest, target_is_directory=True)
+            except OSError:
+                _shutil.copytree(assets_dir, dest)
+            slides_manifest.append({
+                "index": idx, "has_code": has_code,
+                "dir": sdir.name, "page_id": page_ids[idx],
+            })
+        (Path(job_dir) / protocol.MANIFEST_NAME).write_text(
+            _json.dumps({"slides": slides_manifest})
+        )
+        return job_dir
+
+    def _emit_single_slide(self, code, html_str, assets_dir, page_id):
+        """Run one snippet through the jail to (re)emit its requests. Returns
+        the requests list or None on failure."""
+        import json as _json
+        import os as _os
+        import shutil as _shutil
+        import tempfile as _tempfile
+        from src.services.converter_jail import protocol, run_gslides_jail
+
+        job_dir = _tempfile.mkdtemp(prefix="gslides_retry_")
+        try:
+            sdir = Path(job_dir) / "slide_000"
+            (sdir / protocol.ASSETS_DIR).mkdir(parents=True)
+            # Reuse the already-prepared assets.
+            _shutil.rmtree(sdir / protocol.ASSETS_DIR)
+            try:
+                _os.symlink(assets_dir, sdir / protocol.ASSETS_DIR, target_is_directory=True)
+            except OSError:
+                _shutil.copytree(assets_dir, sdir / protocol.ASSETS_DIR)
+            (sdir / protocol.CODE_NAME).write_text(code, encoding="utf-8")
+            (sdir / protocol.HTML_NAME).write_text(html_str, encoding="utf-8")
+            (Path(job_dir) / protocol.MANIFEST_NAME).write_text(_json.dumps(
+                {"slides": [{"index": 0, "has_code": True,
+                             "dir": "slide_000", "page_id": page_id}]}
+            ))
+            out = str(Path(job_dir) / "requests.json")
+            result = run_gslides_jail(job_dir, out)
+            if result.timed_out or result.returncode != 0:
+                return None
+            data = _json.loads(Path(out).read_text())
+            return data[0].get("requests")
         finally:
-            if tmp.exists():
-                tmp.unlink()
+            _shutil.rmtree(job_dir, ignore_errors=True)
+
+    # -- Code execution ----------------------------------------------------
 
     def _add_fallback(self, slides_service, pres_id, page_id, slide_num):
         """Add a simple placeholder text box when all code-gen attempts fail."""
