@@ -350,7 +350,8 @@ async def _create_deck_impl(
         )
 
     try:
-        with mcp_auth_scope(request) as identity:
+        # SDR-4437 HIGH-7: deck generation runs the agent (Genie/UC/model tools) — user OBO token required.
+        with mcp_auth_scope(request, require_user_token=True) as identity:
             agent_config: dict[str, Any] = {"tools": []}
             # Mirror the browser chat flow: if the caller didn't specify a
             # style, fall back to the tellr-configured default
@@ -751,7 +752,8 @@ async def _edit_deck_impl(
         _check_contiguous(slide_indices)
 
     try:
-        with mcp_auth_scope(request) as identity:
+        # SDR-4437 HIGH-7: editing runs the agent — user OBO token required.
+        with mcp_auth_scope(request, require_user_token=True) as identity:
             if not permission_service.can_edit_deck(session_id):
                 raise MCPToolError(
                     "Deck not found or you do not have permission to edit it"
