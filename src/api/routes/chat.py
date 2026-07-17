@@ -106,7 +106,8 @@ def _check_chat_permission(session_id: str, db: DBSession) -> None:
                 try:
                     session_manager.require_editing_lock(session_id)
                 except PermissionError as e:
-                    raise HTTPException(status_code=423, detail=str(e))
+                    logger.warning("_check_chat_permission rejected: %s", e)
+                    raise HTTPException(status_code=423, detail="This deck is locked by another editing session. Try again shortly.")
                 return
 
         raise HTTPException(
@@ -261,7 +262,8 @@ async def send_message(
             detail=f"Session not found: {request.session_id}. Create a session first via POST /api/sessions",
         )
     except PermissionError as e:
-        raise HTTPException(status_code=423, detail=str(e))
+        logger.warning("send_message rejected: %s", e)
+        raise HTTPException(status_code=423, detail="This deck is locked by another editing session. Try again shortly.")
     except UnsafeContentError:
         raise HTTPException(
             status_code=422,
@@ -272,7 +274,7 @@ async def send_message(
         logger.error(f"Chat request failed: {e}", exc_info=True)
         raise HTTPException(
             status_code=500,
-            detail=f"Failed to process message: {str(e)}",
+            detail="Failed to process message",
         ) from e
     finally:
         await asyncio.to_thread(
@@ -549,8 +551,8 @@ async def submit_chat_async(
         await asyncio.to_thread(
             session_manager.release_session_lock, request.session_id
         )
-        logger.error(f"Failed to submit async chat: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"Failed to submit async chat: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to submit chat request")
 
 
 @router.get("/chat/poll/{request_id}")
