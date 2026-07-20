@@ -17,13 +17,18 @@ Resolution is SELECT-first, then race-safe INSERT-if-absent:
 3. ``INSERT ... ON CONFLICT (id) DO NOTHING`` + read-back, so concurrent
    workers/replicas converge on one key.
 
-There is deliberately NO env-var fallback: the deploy tool relocates the
-legacy ``GOOGLE_OAUTH_ENCRYPTION_KEY`` into this table at update time, and
-old-tool + new-wheel skew is unsupported (see the SDR-4437 remediation
-design, PR-3).
+The seed order on an empty table is env var → legacy key file → fresh generate
+(see ``_seed_value``). The ``GOOGLE_OAUTH_ENCRYPTION_KEY`` env-var read is the
+one-time legacy→table migration (SDR-4437 CRITICAL-3 follow-up): it reverses
+PR-3's original "no env-var fallback" decision, which caused silent data loss on
+any upgrade that did not go through the deploy tool. Because resolution is
+SELECT-first, the env var is consulted only on the cutover boot; every later
+boot reads the row. ``_scrub_app_yaml_key`` then removes the now-redundant
+plaintext key from the workspace app.yaml (best-effort).
 """
 
 import logging
+import os
 from functools import lru_cache
 from pathlib import Path
 
@@ -64,7 +69,20 @@ def _validated(key: bytes) -> bytes:
 
 
 def _seed_value() -> bytes:
-    """Pick the value to seed an empty encryption_keys table with."""
+    """Pick the value to seed an empty encryption_keys table with.
+
+    Priority (SELECT-first in get_encryption_key means this runs only when the
+    table is empty):
+    1. GOOGLE_OAUTH_ENCRYPTION_KEY env var — the one-time legacy→table
+       migration (SDR-4437 CRITICAL-3 follow-up). Present on the cutover boot
+       via the reused app.yaml (UI Deploy) or carry-forward (deploy tools).
+    2. legacy .encryption_key file (local dev — keeps dev ciphertext readable).
+    3. a freshly generated key (genuinely new install).
+    """
+    env_key = os.getenv("GOOGLE_OAUTH_ENCRYPTION_KEY")
+    if env_key and env_key.strip():
+        logger.info("Seeding encryption_keys from GOOGLE_OAUTH_ENCRYPTION_KEY (migration)")
+        return env_key.strip().encode()
     if _KEY_FILE.exists():
         key = _KEY_FILE.read_text().strip()
         if key:
