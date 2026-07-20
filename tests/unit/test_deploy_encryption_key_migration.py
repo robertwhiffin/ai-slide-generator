@@ -1,4 +1,4 @@
-"""CRITICAL-3 (SDR-4437): deploy-time relocation of the Fernet key into Lakebase."""
+"""CRITICAL-3 (SDR-4437): carry-forward of the Fernet key via app.yaml + strict reader."""
 
 from unittest.mock import MagicMock, patch
 

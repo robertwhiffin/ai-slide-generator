@@ -34,10 +34,8 @@ from databricks_tellr.deploy import (
     DeploymentError,
     _branch_exists,
     _delete_branch,
-    _get_lakebase_connection,
     _get_workspace_client,
     _get_or_create_lakebase,
-    _migrate_encryption_key_to_lakebase,
     _mlflow_flat_from_env_section,
     _mlflow_substitutions_for_app_yaml,
     _probe_autoscaling_available,
@@ -627,6 +625,12 @@ def update_local(
     print()
 
     try:
+        # Carry-forward of the legacy encryption key into the regenerated
+        # app.yaml (boot migrates it). Only the non-branching path reads a
+        # source key; the fork path inherits the key via the COW table, so it
+        # stays None here.
+        carry_forward_key: str | None = None
+
         # Branching mode: preflight + recreate branch
         if branch_from_env:
             print("Running branching preflight checks...")
@@ -699,21 +703,11 @@ def update_local(
             )
             legacy_key = _read_existing_encryption_key(ws, workspace_path)
             if legacy_key:
-                # CRITICAL-3: relocate before the keyless app.yaml overwrites it
-                print("Relocating encryption key into Lakebase (encryption_keys)...")
-                app_for_grant = ws.apps.get(name=app_name)
-                grant_client_id = _get_app_client_id(app_for_grant)
-                mig_conn, _ = _get_lakebase_connection(
-                    ws, lakebase_name, lakebase_result=lakebase_result
-                )
-                try:
-                    with mig_conn.cursor() as cur:
-                        _migrate_encryption_key_to_lakebase(
-                            cur, schema_name, grant_client_id, legacy_key
-                        )
-                finally:
-                    mig_conn.close()
-                print("   Key relocated")
+                # CRITICAL-3: carry the key forward into the regenerated
+                # app.yaml; boot seeds the table from it and scrubs. No more
+                # deploy-time DDL relocation.
+                carry_forward_key = legacy_key
+                print("   Carrying existing encryption key forward into app.yaml")
 
         lakebase_type = lakebase_result.get("type", "provisioned")
         print(f"   Lakebase: {lakebase_result['name']} (type={lakebase_type})")
@@ -772,6 +766,7 @@ def update_local(
                 seed_databricks_defaults=seed_databricks_defaults,
                 lakebase_result=lakebase_result,
                 mlflow_tracing=mlflow_subs,
+                encryption_key=carry_forward_key,
             )
             print("   Generated app.yaml")
 
