@@ -52,7 +52,7 @@ class TestDeploySitesValidate:
     """The deploy.py DDL sites reject bad identifiers BEFORE any execute.
 
     Validated sites (all call validate_schema_name before interpolating):
-    _migrate_encryption_key_to_lakebase, _setup_database_schema, _reset_schema,
+    _setup_database_schema, _reset_schema,
     _grant_schema_permissions, and _check_breaking_migrations (the last was the
     5th interpolation site MEDIUM-5's original "three sites" claim under-counted).
     """
