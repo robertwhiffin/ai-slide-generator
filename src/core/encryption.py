@@ -136,6 +136,15 @@ def _scrub_app_yaml_key() -> None:
     matches the validated table key, so it can only ever delete a redundant
     copy. No-op outside a Databricks Apps runtime. The rewritten app.yaml takes
     effect on the NEXT deploy; the table is already the runtime source of truth.
+
+    This is the ONLY automated remover of a still-present app.yaml key: the
+    deploy tools carry a present key forward (re-emit it), they do not drop it,
+    so a failed scrub here leaves the key until it is removed manually.
+
+    Note: the rewrite goes through ``yaml.safe_dump``, so the deployed app.yaml
+    loses its comments and its multi-line ``command`` block is reflowed. The
+    result is semantically identical (all env entries and the ``sh -c`` command
+    string reload unchanged), just visually reformatted.
     """
     app_name = os.getenv("DATABRICKS_APP_NAME")
     if not app_name:

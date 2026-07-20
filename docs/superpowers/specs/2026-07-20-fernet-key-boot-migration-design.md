@@ -40,17 +40,25 @@ performed the upgrade. The plaintext key must be removed from app.yaml at rest
 
 **Requirement framing (an honest tension to name up front):** the two goals above
 can conflict. The scrub (Unit 2) is best-effort and never blocks boot, so if the
-app SP lacks write ACL on its own source folder, boot-scrub cannot land. In that
-case the hard requirement is met only by a **tool-driven deploy** (`tellr.update`
-/ `deploy_local`) writing the keyless template — which becomes the *guaranteed*
-mechanism, not merely a backstop. Concretely: an install upgraded **only** via
-the UI Deploy button whose SP lacks source-folder write ACL will retain the
-plaintext key in app.yaml indefinitely (surfaced only by a boot log line) until a
-tool-driven deploy runs. The write-ACL probe (Unit 2) determines which regime we
-are in; the plan must decide whether a tool-driven deploy is therefore mandatory
-for SDR sign-off, or whether best-effort boot-scrub is accepted with the log as
-the escape hatch. We do NOT block boot to force the requirement — data
-availability outranks at-rest hygiene at boot time.
+app SP lacks write ACL on its own source folder, boot-scrub cannot land.
+**Boot-scrub is the ONLY automated mechanism that removes a still-present key
+from app.yaml.** A tool-driven deploy is *not* a backstop for this: Unit 3 is
+carry-forward — `tellr.update` / `deploy_local` read the existing app.yaml key
+and *re-emit* it into the regenerated app.yaml so boot can migrate it. When the
+key is still present (e.g. a prior boot-scrub failed on write-ACL), a tool deploy
+therefore **re-carries** it, not drops it; a tool deploy yields a keyless
+app.yaml only once the key is *already* gone. Consequence: an install whose SP
+lacks source-folder write ACL retains the plaintext key in app.yaml indefinitely
+(surfaced only by a boot log line) — no automated path removes it, and manual
+removal is required to satisfy the SDR hard requirement. Data safety is
+unaffected either way: SELECT-first makes the re-carried key inert (the table row
+wins), so a lingering app.yaml key never causes data loss — it is purely an
+at-rest-hygiene gap. The write-ACL probe (Unit 2 / Task 9) determines which
+regime we are in; the plan must decide whether, in the no-write-ACL regime, the
+SDR hard requirement is met by (a) documenting a manual key-removal step, or
+(b) accepting best-effort boot-scrub with the log as the escape hatch. We do NOT
+block boot to force the requirement — data availability outranks at-rest hygiene
+at boot time.
 
 ## Design decisions (settled with the user)
 
@@ -158,8 +166,11 @@ Two safety properties:
 **Empirical unknown (probe during implementation):** whether the app SP holds
 write ACL on its own `default_source_code_path` (often owned by the deploying
 human). If not, step 4's upload fails → caught → logged → boot proceeds, and the
-plaintext key persists until a tool-driven deploy overwrites it with the keyless
-template (Unit 3 is the backstop). Correctness holds either way.
+plaintext key persists in app.yaml. Note there is **no automated backstop**: Unit 3
+is carry-forward, which re-emits a still-present key rather than dropping it (see
+the Goal's "Requirement framing"), so a failed boot-scrub means the key stays
+until removed manually. Correctness holds either way — SELECT-first makes the
+lingering key inert, so this is an at-rest-hygiene gap, never data loss.
 
 ### Unit 3 — Deploy-tool carry-forward (item 1)
 
