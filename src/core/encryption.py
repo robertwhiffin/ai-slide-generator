@@ -32,6 +32,7 @@ import os
 from functools import lru_cache
 from pathlib import Path
 
+import yaml
 from cryptography.fernet import Fernet, InvalidToken
 from sqlalchemy import text
 
@@ -125,6 +126,73 @@ def ensure_encryption_key() -> None:
     local dev and replicas regardless).
     """
     get_encryption_key()
+
+
+def _scrub_app_yaml_key() -> None:
+    """Best-effort: remove the now-redundant plaintext GOOGLE_OAUTH_ENCRYPTION_KEY
+    from the deployed workspace app.yaml (SDR-4437 CRITICAL-3 hygiene).
+
+    NEVER raises and NEVER blocks boot. Only removes the entry when its value
+    matches the validated table key, so it can only ever delete a redundant
+    copy. No-op outside a Databricks Apps runtime. The rewritten app.yaml takes
+    effect on the NEXT deploy; the table is already the runtime source of truth.
+    """
+    app_name = os.getenv("DATABRICKS_APP_NAME")
+    if not app_name:
+        return  # local/SQLite/tests — nothing to scrub
+
+    try:
+        # 1. Re-read + validate the table key (never remove the last valid copy).
+        table_key = get_encryption_key()  # bytes; raises if corrupt
+        Fernet(table_key)  # explicit validation guard
+        table_key_str = table_key.decode()
+
+        # 2. Locate our own source folder.
+        from src.core.databricks_client import get_system_client
+
+        ws = get_system_client()
+        source_path = ws.apps.get(name=app_name).default_source_code_path
+        if not source_path:
+            logger.warning("Scrub: app has no default_source_code_path; skipping")
+            return
+
+        # 3. Download + parse the deployed app.yaml.
+        resp = ws.workspace.download(f"{source_path}/app.yaml")
+        raw = resp.read() if hasattr(resp, "read") else resp
+        content = raw.decode("utf-8") if isinstance(raw, bytes) else str(raw)
+        parsed = yaml.safe_load(content) or {}
+        env_list = parsed.get("env", [])
+
+        entry = next(
+            (e for e in env_list if e.get("name") == "GOOGLE_OAUTH_ENCRYPTION_KEY"),
+            None,
+        )
+        if entry is None:
+            return  # already scrubbed / never had it — idempotent
+
+        # 4. Only remove on exact value match with the validated table key.
+        if entry.get("value") != table_key_str:
+            logger.warning(
+                "Scrub: app.yaml GOOGLE_OAUTH_ENCRYPTION_KEY differs from the "
+                "table key — leaving it in place for manual inspection."
+            )
+            return
+
+        parsed["env"] = [
+            e for e in env_list if e.get("name") != "GOOGLE_OAUTH_ENCRYPTION_KEY"
+        ]
+        new_content = yaml.safe_dump(parsed, sort_keys=False)
+        from databricks.sdk.service.workspace import ImportFormat
+
+        ws.workspace.upload(
+            f"{source_path}/app.yaml",
+            new_content.encode("utf-8"),
+            format=ImportFormat.AUTO,
+            overwrite=True,
+        )
+        logger.info("Scrub: removed plaintext encryption key from deployed app.yaml")
+    except Exception as exc:  # never propagate — best-effort by contract
+        logger.warning("Scrub: could not remove key from app.yaml (%s)", exc)
 
 
 def encrypt_data(plaintext: str) -> str:

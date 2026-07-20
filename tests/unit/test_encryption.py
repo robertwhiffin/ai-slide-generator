@@ -1,8 +1,10 @@
 """Tests for the Lakebase-backed Fernet encryption utility (SDR-4437 CRITICAL-3)."""
 
 from contextlib import contextmanager
+from unittest.mock import MagicMock
 
 import pytest
+import yaml
 from cryptography.fernet import Fernet, InvalidToken
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
@@ -43,6 +45,7 @@ def db(tmp_path, monkeypatch):
 
     monkeypatch.setattr("src.core.database.get_db_session", _session)
     monkeypatch.setattr("src.core.encryption._KEY_FILE", tmp_path / ".encryption_key")
+    monkeypatch.delenv("GOOGLE_OAUTH_ENCRYPTION_KEY", raising=False)
     get_encryption_key.cache_clear()
     yield engine, _session
     get_encryption_key.cache_clear()
@@ -250,3 +253,94 @@ def test_init_database_exits_1_when_key_seed_fails(monkeypatch):
     with pytest.raises(SystemExit) as exc:
         run.init_database()
     assert exc.value.code == 1
+
+
+def _app_yaml_bytes(with_key: str | None) -> bytes:
+    env = [{"name": "ENVIRONMENT", "value": "production"}]
+    if with_key is not None:
+        env.append({"name": "GOOGLE_OAUTH_ENCRYPTION_KEY", "value": with_key})
+    return yaml.safe_dump({"name": "tellr", "env": env}).encode()
+
+
+def _mock_ws_with_app_yaml(content_bytes: bytes, source_path="/Workspace/x"):
+    ws = MagicMock()
+    ws.apps.get.return_value = MagicMock(default_source_code_path=source_path)
+    resp = MagicMock()
+    resp.read.return_value = content_bytes
+    ws.workspace.download.return_value = resp
+    return ws
+
+
+def test_scrub_noop_when_app_name_unset(db, monkeypatch):
+    """Local/SQLite/tests have no DATABRICKS_APP_NAME → scrub is a no-op."""
+    from src.core.encryption import _scrub_app_yaml_key
+    monkeypatch.delenv("DATABRICKS_APP_NAME", raising=False)
+    called = []
+    monkeypatch.setattr(
+        "src.core.databricks_client.get_system_client",
+        lambda *a, **k: called.append(1),
+    )
+    _scrub_app_yaml_key()
+    assert called == []  # never even built a client
+
+
+def test_scrub_removes_entry_on_value_match(db, monkeypatch):
+    from src.core.encryption import _scrub_app_yaml_key
+    # Seed the table so get_encryption_key returns a known key.
+    key = get_encryption_key().decode()
+    monkeypatch.setenv("DATABRICKS_APP_NAME", "tellr")
+    ws = _mock_ws_with_app_yaml(_app_yaml_bytes(with_key=key))
+    monkeypatch.setattr(
+        "src.core.databricks_client.get_system_client", lambda *a, **k: ws
+    )
+    _scrub_app_yaml_key()
+    # uploaded content must no longer contain the key entry
+    uploaded = ws.workspace.upload.call_args
+    assert uploaded is not None
+    body = uploaded.args[1] if len(uploaded.args) > 1 else uploaded.kwargs["content"]
+    text_body = body.decode() if isinstance(body, bytes) else (
+        body.read().decode() if hasattr(body, "read") else str(body)
+    )
+    assert "GOOGLE_OAUTH_ENCRYPTION_KEY" not in text_body
+
+
+def test_scrub_leaves_entry_on_value_mismatch(db, monkeypatch):
+    """A divergent key must NOT be removed — it might be the only copy of a
+    different key. Log and leave it."""
+    from src.core.encryption import _scrub_app_yaml_key
+    get_encryption_key()  # seed table
+    monkeypatch.setenv("DATABRICKS_APP_NAME", "tellr")
+    ws = _mock_ws_with_app_yaml(_app_yaml_bytes(with_key="a-different-key"))
+    monkeypatch.setattr(
+        "src.core.databricks_client.get_system_client", lambda *a, **k: ws
+    )
+    _scrub_app_yaml_key()
+    ws.workspace.upload.assert_not_called()
+
+
+def test_scrub_noop_when_no_key_entry(db, monkeypatch):
+    """Already-scrubbed app.yaml → nothing to do, no upload (idempotent)."""
+    from src.core.encryption import _scrub_app_yaml_key
+    get_encryption_key()
+    monkeypatch.setenv("DATABRICKS_APP_NAME", "tellr")
+    ws = _mock_ws_with_app_yaml(_app_yaml_bytes(with_key=None))
+    monkeypatch.setattr(
+        "src.core.databricks_client.get_system_client", lambda *a, **k: ws
+    )
+    _scrub_app_yaml_key()
+    ws.workspace.upload.assert_not_called()
+
+
+def test_scrub_swallows_download_failure(db, monkeypatch):
+    """Any failure (no ACL, download error) is caught — scrub never raises."""
+    from src.core.encryption import _scrub_app_yaml_key
+    get_encryption_key()
+    monkeypatch.setenv("DATABRICKS_APP_NAME", "tellr")
+    ws = MagicMock()
+    ws.apps.get.return_value = MagicMock(default_source_code_path="/Workspace/x")
+    ws.workspace.download.side_effect = OSError("no read ACL")
+    monkeypatch.setattr(
+        "src.core.databricks_client.get_system_client", lambda *a, **k: ws
+    )
+    _scrub_app_yaml_key()  # must NOT raise
+    ws.workspace.upload.assert_not_called()
