@@ -94,3 +94,38 @@ and run `ALTER`-bearing migrations against inherited prod tables. Ownership of
 deploy triggers a serverless job (running as a dedicated granter SP) that grants
 the instance's service principal into that role, so its migrations can alter the
 inherited tables. See `docs/technical/lakebase-table-ownership.md`.
+
+## Fernet key handling (why there is no dev/prod divergence)
+
+The Fernet master key that encrypts OAuth credentials lives in the
+`encryption_keys` Lakebase table (row `id = 1`), **not** in `app.yaml`. This is
+the runtime source of truth on every path (see `src/core/encryption.py`).
+
+**Boot owns the one-time legacy→table migration.** On the cutover boot, if the
+table is empty, boot seeds the row from the `GOOGLE_OAUTH_ENCRYPTION_KEY` env
+var (the old app.yaml location), then best-effort scrubs that plaintext key out
+of the deployed `app.yaml`. Because key resolution is SELECT-first, the env var
+is read only on that first boot; every later boot reads the row. The scrub never
+blocks boot and only deletes a copy that exactly matches the validated table key.
+
+**Deploy tools carry the key forward — they do not relocate it via DDL.** Both
+`tellr.update` and `deploy_local update` read any existing
+`GOOGLE_OAUTH_ENCRYPTION_KEY` out of the deployed `app.yaml` and re-emit it into
+the regenerated `app.yaml`, so the *next* boot can perform the migration above.
+The earlier deploy-time DDL relocation was removed: deploy tools no longer touch
+the `encryption_keys` table.
+
+**The devloop/fork path inherits the key via copy-on-write.** A forked branch
+already carries the seeded `encryption_keys` row from prod, so no key is written
+into the fork's `app.yaml`. This only works if the source env was migrated once
+first — the fork preflight (`_check_branching_preconditions`) deliberately
+**aborts** if the source env's `app.yaml` still carries a legacy key, telling you
+to update the source env first. Keep that check.
+
+**The rule this enforces:** boot performs the migration identically on every
+path — the UI **Deploy** button (which reuses the existing `app.yaml`),
+`tellr.update`, and `deploy_local update`. So code that works under
+`deploy_local` also works under a UI-button upgrade; there is no dev/prod
+divergence in key handling. This is the divergence that caused the original
+data-loss bug, and it is why the migration lives in boot rather than in a deploy
+step.

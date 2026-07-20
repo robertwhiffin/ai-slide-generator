@@ -71,6 +71,19 @@ role (via a serverless granter job) so its migrations run as owner through
 so the next fork inherits them too. See
 `docs/technical/lakebase-table-ownership.md` for the ownership model.
 
+## Fernet key handling (do not add a deploy-time migration)
+
+The Fernet master key lives in the `encryption_keys` Lakebase table, not
+`app.yaml`. **Boot** owns the one-time legacy→table migration: it seeds the row
+from `GOOGLE_OAUTH_ENCRYPTION_KEY` when the table is empty, then scrubs the
+plaintext key from `app.yaml`. The deploy tools only *carry any existing key
+forward* into the regenerated `app.yaml` so boot can migrate it — they do not
+relocate it via DDL, and neither should any future dev-loop change (that
+deploy-only divergence is exactly what caused the original bug). The devloop fork
+inherits the key by copy-on-write, so the fork preflight aborts unless the source
+env was migrated once first. See `docs/technical/dev-deploy.md` for the full
+rationale.
+
 ## Reading deploy logs
 
 App logs require OAuth (not PAT):
