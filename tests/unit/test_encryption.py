@@ -43,6 +43,7 @@ def db(tmp_path, monkeypatch):
 
     monkeypatch.setattr("src.core.database.get_db_session", _session)
     monkeypatch.setattr("src.core.encryption._KEY_FILE", tmp_path / ".encryption_key")
+    monkeypatch.delenv("GOOGLE_OAUTH_ENCRYPTION_KEY", raising=False)
     get_encryption_key.cache_clear()
     yield engine, _session
     get_encryption_key.cache_clear()
@@ -88,6 +89,46 @@ def test_legacy_key_file_seeds_empty_table(db, tmp_path):
     (tmp_path / ".encryption_key").write_text(legacy)
     assert get_encryption_key() == legacy.encode()
     assert _stored_key(engine) == legacy
+
+
+def test_env_var_seeds_empty_table(db, monkeypatch):
+    """SDR-4437: an empty table plus a GOOGLE_OAUTH_ENCRYPTION_KEY env var
+    seeds the table from that env value (the UI-button-upgrade net)."""
+    engine, _ = db
+    legacy = Fernet.generate_key().decode()
+    monkeypatch.setenv("GOOGLE_OAUTH_ENCRYPTION_KEY", legacy)
+    assert get_encryption_key() == legacy.encode()
+    assert _stored_key(engine) == legacy
+
+
+def test_env_var_takes_priority_over_key_file(db, tmp_path, monkeypatch):
+    """When both are present on an empty table, the env var (migration
+    source) wins over the legacy key file."""
+    engine, _ = db
+    env_key = Fernet.generate_key().decode()
+    file_key = Fernet.generate_key().decode()
+    (tmp_path / ".encryption_key").write_text(file_key)
+    monkeypatch.setenv("GOOGLE_OAUTH_ENCRYPTION_KEY", env_key)
+    assert get_encryption_key() == env_key.encode()
+    assert _stored_key(engine) == env_key
+
+
+def test_existing_row_ignores_env_var(db, monkeypatch):
+    """One-time cutover: once the row exists, the env var is never consulted.
+    Passes even pre-change because SELECT-first never calls _seed_value when
+    the row exists — that IS the invariant being locked."""
+    engine, session = db
+    existing = Fernet.generate_key().decode()
+    with session() as s:
+        s.execute(
+            text(
+                "INSERT INTO encryption_keys (id, key_value, created_at) "
+                "VALUES (1, :k, CURRENT_TIMESTAMP)"
+            ),
+            {"k": existing},
+        )
+    monkeypatch.setenv("GOOGLE_OAUTH_ENCRYPTION_KEY", Fernet.generate_key().decode())
+    assert get_encryption_key() == existing.encode()
 
 
 def test_concurrent_seed_converges_on_winner(db, monkeypatch):

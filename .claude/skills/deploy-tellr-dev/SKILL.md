@@ -43,6 +43,21 @@ Prod is unaffected: `pip` ignores pre-releases by default, so a bare
 
 3. Open the app URL and verify it loads.
 
+## Upgrade path & the encryption key (SDR-4437) — use the tool, not the UI button
+
+The Google-OAuth Fernet master key lives in the `encryption_keys` Lakebase
+table, not in `app.yaml`. `tellr.update` / `deploy_local` (run as the human)
+migrate a pre-key-table app: read the legacy `GOOGLE_OAUTH_ENCRYPTION_KEY` from
+the old `app.yaml`, seed the table, and write a **keyless** `app.yaml`.
+
+**Always upgrade via `deploy_local` / `tellr.update`, never the Databricks Apps
+UI "Deploy" button.** The UI button bypasses the tool and reuses the old
+key-bearing `app.yaml`, skipping the migration. The booting app has a safety net
+— it seeds the table from the injected `GOOGLE_OAUTH_ENCRYPTION_KEY` env var if
+the table is still empty — but the tool path is the only supported one. There is
+no boot-time `app.yaml` scrub (the app's SP can't write its own source). See
+`docs/technical/dev-deploy.md` for the full mechanism.
+
 ## Per-instance dev loop (`devloop`)
 
 For parallel/agentic loops, use `--env devloop --instance <id>` instead of
