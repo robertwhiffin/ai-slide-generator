@@ -74,6 +74,17 @@ def init_database(seed_databricks_defaults: bool = False) -> None:
         logger.error(f"Failed to ensure encryption key: {e}\n{tb}")
         raise SystemExit(1) from e
 
+    # Best-effort: remove the now-redundant plaintext key from the deployed
+    # app.yaml (SDR-4437 CRITICAL-3 hygiene). Deliberately a SEPARATE block with
+    # its own swallow-all except — a scrub failure must never abort boot, so it
+    # must not share the ensure_encryption_key block above (which SystemExits).
+    logger.info("Scrubbing legacy key from app.yaml (best-effort)...")
+    try:
+        from src.core.encryption import _scrub_app_yaml_key
+        _scrub_app_yaml_key()
+    except Exception as e:  # noqa: BLE001 — best-effort, never blocks boot
+        logger.warning(f"app.yaml key scrub skipped: {e}")
+
 
 def main() -> None:
     """Start the uvicorn server."""

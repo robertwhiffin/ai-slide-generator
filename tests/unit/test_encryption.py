@@ -255,6 +255,43 @@ def test_init_database_exits_1_when_key_seed_fails(monkeypatch):
     assert exc.value.code == 1
 
 
+def test_init_database_invokes_scrub_after_key_hook(monkeypatch):
+    """run.py::init_database calls _scrub_app_yaml_key after ensure_encryption_key."""
+    run = _load_run_module()
+    order = []
+    monkeypatch.setattr("src.core.database.init_db", lambda: None)
+    monkeypatch.setattr(
+        "src.core.init_default_profile.seed_defaults",
+        lambda include_databricks: None,
+    )
+    monkeypatch.setattr(
+        "src.core.encryption.ensure_encryption_key", lambda: order.append("ensure")
+    )
+    monkeypatch.setattr(
+        "src.core.encryption._scrub_app_yaml_key", lambda: order.append("scrub")
+    )
+    run.init_database()
+    assert order == ["ensure", "scrub"]
+
+
+def test_init_database_survives_scrub_failure(monkeypatch):
+    """A scrub failure must NOT abort boot (it is best-effort)."""
+    run = _load_run_module()
+    monkeypatch.setattr("src.core.database.init_db", lambda: None)
+    monkeypatch.setattr(
+        "src.core.init_default_profile.seed_defaults",
+        lambda include_databricks: None,
+    )
+    monkeypatch.setattr("src.core.encryption.ensure_encryption_key", lambda: None)
+
+    def _boom():
+        raise RuntimeError("scrub blew up")
+
+    monkeypatch.setattr("src.core.encryption._scrub_app_yaml_key", _boom)
+    # Must return normally — NO SystemExit.
+    run.init_database()
+
+
 def _app_yaml_bytes(with_key: str | None) -> bytes:
     env = [{"name": "ENVIRONMENT", "value": "production"}]
     if with_key is not None:
