@@ -27,7 +27,12 @@ def test_generated_app_yaml_has_no_custom_index_url(tmp_path: Path):
 
 
 def test_write_app_yaml_is_keyless():
-    """CRITICAL-3: app.yaml must not carry the Fernet key or accept one."""
+    """CRITICAL-3: app.yaml is keyless in steady state.
+
+    The Fernet-key boot migration adds an optional ``encryption_key``
+    param (default None) used only for the one-time legacy carry-forward;
+    with no key passed the generated app.yaml stays keyless.
+    """
     import inspect as _inspect
     import tempfile
     from pathlib import Path
@@ -35,7 +40,7 @@ def test_write_app_yaml_is_keyless():
     from databricks_tellr import deploy
 
     sig = _inspect.signature(deploy._write_app_yaml)
-    assert "encryption_key" not in sig.parameters
+    assert sig.parameters["encryption_key"].default is None
 
     with tempfile.TemporaryDirectory() as td:
         deploy._write_app_yaml(Path(td), "lb", "app_data")
