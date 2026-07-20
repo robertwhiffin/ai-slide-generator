@@ -67,3 +67,4 @@ env:
   # Set to "0" if you want to force-disable the fast path entirely.
   - name: HUASHU_PIPELINE_ENABLED
     value: "1"
+$ENCRYPTION_KEY_BLOCK

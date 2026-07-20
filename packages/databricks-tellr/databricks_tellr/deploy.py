@@ -1367,11 +1367,14 @@ def _write_app_yaml(
     seed_databricks_defaults: bool = False,
     lakebase_result: dict[str, Any] | None = None,
     mlflow_tracing: dict[str, str] | None = None,
+    encryption_key: str | None = None,
 ) -> None:
     """Generate app.yaml with environment variables.
 
-    The Fernet encryption key is deliberately NOT written here (SDR-4437
-    CRITICAL-3): the app reads/seeds it from the encryption_keys table.
+    The Fernet encryption key is written ONLY when ``encryption_key`` is
+    provided (the one-time legacy→table carry-forward). Boot seeds the
+    encryption_keys table from it and then scrubs it from app.yaml. When
+    ``encryption_key`` is None the app.yaml is keyless (steady state).
 
     Args:
         staging_dir: Directory to write the app.yaml file
@@ -1397,8 +1400,17 @@ def _write_app_yaml(
     if mlflow_tracing is None:
         mlflow_tracing = _mlflow_substitutions_for_app_yaml()
 
+    if encryption_key:
+        key_block = (
+            "  - name: GOOGLE_OAUTH_ENCRYPTION_KEY\n"
+            f'    value: "{encryption_key}"'
+        )
+    else:
+        key_block = ""
+
     template_content = _load_template("app.yaml.template")
     content = Template(template_content).substitute(
+        ENCRYPTION_KEY_BLOCK=key_block,
         LAKEBASE_INSTANCE=lakebase_name,
         LAKEBASE_SCHEMA=schema_name,
         INIT_DATABASE_CALL=init_call,

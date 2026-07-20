@@ -160,3 +160,32 @@ class TestUpdateDatabricksWiring:
             lakebase_name="lb", schema_name=SCHEMA,
         )
         mock_migrate.assert_not_called()
+
+
+class TestWriteAppYamlKeyBlock:
+    def _read_yaml(self, staging):
+        import yaml
+        return yaml.safe_load((staging / "app.yaml").read_text())
+
+    def test_keyless_when_no_key(self, tmp_path):
+        from databricks_tellr.deploy import _write_app_yaml
+        _write_app_yaml(
+            tmp_path, "lb", SCHEMA,
+            lakebase_result={"type": "provisioned"},
+        )
+        parsed = self._read_yaml(tmp_path)
+        names = [e["name"] for e in parsed["env"]]
+        assert "GOOGLE_OAUTH_ENCRYPTION_KEY" not in names
+
+    def test_emits_entry_when_key_present(self, tmp_path):
+        from databricks_tellr.deploy import _write_app_yaml
+        _write_app_yaml(
+            tmp_path, "lb", SCHEMA,
+            lakebase_result={"type": "provisioned"},
+            encryption_key=KEY,
+        )
+        parsed = self._read_yaml(tmp_path)
+        entry = next(
+            e for e in parsed["env"] if e["name"] == "GOOGLE_OAUTH_ENCRYPTION_KEY"
+        )
+        assert entry["value"] == KEY
