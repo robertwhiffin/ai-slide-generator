@@ -11,19 +11,28 @@ Resolution is SELECT-first, then race-safe INSERT-if-absent:
    load-bearing: on upgraded installs the table is created by the *deployer*
    role and the app SP holds an explicit SELECT, INSERT grant; reading first
    means INSERT privilege is never exercised when the row already exists.
-2. If absent, seed from a legacy ``.encryption_key`` file in the project root
-   (local dev — keeps pre-existing dev ciphertext decryptable), else generate
-   a fresh key.
+2. If absent, seed from the ``GOOGLE_OAUTH_ENCRYPTION_KEY`` env var (the
+   UI-button upgrade net — see below), else a legacy ``.encryption_key`` file
+   in the project root (local dev — keeps pre-existing dev ciphertext
+   decryptable), else generate a fresh key. See ``_seed_value``.
 3. ``INSERT ... ON CONFLICT (id) DO NOTHING`` + read-back, so concurrent
    workers/replicas converge on one key.
 
-There is deliberately NO env-var fallback: the deploy tool relocates the
-legacy ``GOOGLE_OAUTH_ENCRYPTION_KEY`` into this table at update time, and
-old-tool + new-wheel skew is unsupported (see the SDR-4437 remediation
-design, PR-3).
+The supported upgrade path is ``tellr.update`` / ``deploy_local``, which — run
+as the deploying human — reads the legacy ``GOOGLE_OAUTH_ENCRYPTION_KEY`` from
+the existing app.yaml, seeds it into this table, and writes a keyless app.yaml
+(SDR-4437 remediation, PR-3). As a safety net for a stray Databricks Apps UI
+"Deploy" button upgrade — which bypasses the tool and reuses the old,
+still-key-bearing app.yaml — ``_seed_value`` reads that same
+``GOOGLE_OAUTH_ENCRYPTION_KEY`` env var (Apps injects every app.yaml ``env:``
+entry into the process environment) so the booting app re-seeds the table from
+the injected key instead of fresh-generating one and orphaning existing
+ciphertext. Because resolution is SELECT-first, the env var is consulted only
+while the table is empty; after any successful migration the stored row wins.
 """
 
 import logging
+import os
 from functools import lru_cache
 from pathlib import Path
 
@@ -64,7 +73,24 @@ def _validated(key: bytes) -> bytes:
 
 
 def _seed_value() -> bytes:
-    """Pick the value to seed an empty encryption_keys table with."""
+    """Pick the value to seed an empty encryption_keys table with.
+
+    Priority (SELECT-first in get_encryption_key means this runs only when
+    the table is empty):
+    1. GOOGLE_OAUTH_ENCRYPTION_KEY env var — the safety net for a stray
+       Databricks Apps UI "Deploy" button upgrade of an un-migrated app
+       (SDR-4437 CRITICAL-3 follow-up). The supported upgrade path is
+       tellr.update, which seeds the table directly and writes a keyless
+       app.yaml; this env read only fires when someone bypasses it via the
+       UI button, whose reused app.yaml still carries the key (Apps injects
+       every app.yaml env entry into the process environment).
+    2. legacy .encryption_key file (local dev — keeps dev ciphertext readable).
+    3. a freshly generated key (genuinely new install).
+    """
+    env_key = os.getenv("GOOGLE_OAUTH_ENCRYPTION_KEY")
+    if env_key and env_key.strip():
+        logger.info("Seeding encryption_keys from GOOGLE_OAUTH_ENCRYPTION_KEY (migration)")
+        return env_key.strip().encode()
     if _KEY_FILE.exists():
         key = _KEY_FILE.read_text().strip()
         if key:
