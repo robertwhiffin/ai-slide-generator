@@ -26,7 +26,7 @@ from src.core.databricks_client import (
     get_service_principal_folder,
     get_system_client,
 )
-from src.domain.slide import Slide
+from src.domain.slide import Slide, has_slide_wrapper
 from src.domain.slide_deck import SlideDeck
 from src.api.schemas.agent_config import resolve_agent_config
 from src.services.agent_factory import build_agent_for_request
@@ -2623,8 +2623,11 @@ class ChatService:
         if index < 0 or index >= len(current_deck.slides):
             raise ValueError(f"Invalid slide index: {index}")
 
-        # Validate HTML has slide wrapper
-        if '<div class="slide"' not in html:
+        # Validate HTML has slide wrapper. Use the token-aware check so the
+        # visual editor's DOMParser round-trip (which may reorder attributes,
+        # switch quote style, or emit compound classes) doesn't trip a naive
+        # substring match on otherwise-valid slides.
+        if not has_slide_wrapper(html):
             raise ValueError("HTML must contain <div class='slide'> wrapper")
 
         # Preserve original slide's metadata and scripts before updating
