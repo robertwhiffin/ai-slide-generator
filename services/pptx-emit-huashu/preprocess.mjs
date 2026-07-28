@@ -480,36 +480,18 @@ export const PREPROCESS_SOURCE = `
       const borderRight = parseFloat(acs.borderRightWidth) || 0;
       const borderTop = parseFloat(acs.borderTopWidth) || 0;
       const borderBottom = parseFloat(acs.borderBottomWidth) || 0;
-      // Where to place the standalone pill depends on how the ORIGINAL inline
-      // element was positioned:
-      //
-      //   * Author-positioned (position: absolute / fixed) — e.g. a corner
-      //     "eyebrow" / "cadence" tag anchored top-left / top-right of the
-      //     slide. Preserve its measured position. Recentering these yanks
-      //     them to the geometric middle of their (slide-sized) ancestor —
-      //     the "corner pills drift to the centre on Google/PPTX export" bug.
-      //
-      //   * Normal flow (static / relative) — e.g. a badge inside a flattened
-      //     table cell. Centre it in the ancestor's content area so it sits on
-      //     the same baseline as the row label and the flex-centred plain-text
-      //     cells. This is the case emitInlineBackgrounds was written for.
+      // Center the pill within the cell's content area, both horizontally
+      // and vertically. Place it directly at the geometric middle of the
+      // cell's content area (cell height minus padding/border) instead of
+      // inheriting the span's measured position — that way the pill sits
+      // at the same y-baseline as the row label and the plain-text cells
+      // (which are also flex-centered in their cell-divs).
       const contentWidth =
         ancestorRect.width - padLeft - padRight - borderLeft - borderRight;
       const contentHeight =
         ancestorRect.height - padTop - padBottom - borderTop - borderBottom;
-      const isAuthorPositioned = cs.position === 'absolute' || cs.position === 'fixed';
-      let x, y;
-      if (isAuthorPositioned) {
-        // Offset from the ancestor's padding box (where absolute children
-        // anchor) = measured position, so the pill lands exactly where the
-        // author placed it. ancestor is promoted to a positioned context
-        // below, so the pill resolves against it rather than a higher one.
-        x = elRect.left - (ancestorRect.left + borderLeft);
-        y = elRect.top - (ancestorRect.top + borderTop);
-      } else {
-        x = Math.max(0, (contentWidth - elRect.width) / 2);
-        y = Math.max(0, (contentHeight - elRect.height) / 2);
-      }
+      const x = Math.max(0, (contentWidth - elRect.width) / 2);
+      const y = Math.max(0, (contentHeight - elRect.height) / 2);
 
       // Build the standalone pill: a positioned <div> with the bg,
       // border-radius, and same dims as the span, containing a <p>
