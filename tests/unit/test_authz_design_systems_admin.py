@@ -1,9 +1,19 @@
-"""Design-system mutation routes are admin-gated (SDR-4437 HIGH-3 alignment).
+"""Design-system mutation routes deny NON-AUTHOR non-admins (SDR-4437 HIGH-3).
 
 Aligns ``design_systems.py`` with the admin pattern robert established in
-``slide_styles.py`` / ``deck_prompts.py``: org-wide mutations are admin-only,
-reads stay open. The design-system router post-dates that sweep, so it was
-never gated.
+``slide_styles.py`` / ``deck_prompts.py``: org-wide mutations are gated, reads
+stay open. The design-system router post-dates that sweep, so it was never
+gated.
+
+SCOPE (Option C): ``set-default`` is ADMIN-ONLY, but rename/delete are
+CREATOR-OR-ADMIN — a user may manage the design system THEY uploaded. This file
+still asserts 403-for-non-admin on all three because ``seeded_ds`` is authored
+by ``owner@test.com`` while the caller authenticates as someone else, so the
+caller is a NON-AUTHOR here and the creator branch never applies. That
+mismatch is load-bearing: seeding ``created_by`` as the caller would turn the
+rename/delete rows of this table green-for-the-wrong-reason. The
+creator-allowed half of the model lives in
+``tests/unit/test_authz_design_systems_creator.py``.
 
 Test idiom copied from ``tests/unit/test_authz_settings_admin.py`` (the
 parametrized 403 table covering the slide-style / deck-prompt admin routes),
@@ -115,8 +125,28 @@ def _mutations(ds_id: int):
     ]
 
 
+def test_seeded_ds_is_authored_by_someone_other_than_the_caller():
+    """Guards this file's load-bearing premise (see the module docstring).
+
+    Under Option C, rename/delete are creator-or-admin, so the 403 table below
+    only means what it says while the fixture's author is NOT the caller. If a
+    future edit seeds ``created_by`` as the caller, those rows would pass via
+    the creator branch instead of the gate — this fails first and says why.
+    """
+    from src.core.user_context import get_current_user
+
+    seeded_author = "owner@test.com"
+    for caller in (get_current_user(), "user@test.com", "dev@local.dev"):
+        assert seeded_author != caller, (
+            "seeded_ds.created_by must differ from the authenticated caller, "
+            "otherwise the rename/delete 403 assertions below pass via the "
+            "creator-or-admin branch rather than the admin gate"
+        )
+
+
 @pytest.mark.parametrize("index", [0, 1, 2], ids=["set-default", "update", "delete"])
 def test_design_system_mutations_403_for_non_admin(client, seeded_ds, non_admin, index):
+    """403 for a non-admin who is ALSO not the author (see the module docstring)."""
     method, path, body = _mutations(int(seeded_ds.id))[index]
     resp = client.request(method, path, json=body)
     assert resp.status_code == 403, f"{method} {path} -> {resp.status_code} {resp.text}"
