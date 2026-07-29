@@ -141,3 +141,90 @@ test('SVG url() background is rasterized to a 2x PNG record', async ({ page }) =
   expect(Math.round(svgBgImage.w)).toBe(300);
   expect(Math.round(svgBgImage.h)).toBe(200);
 });
+
+// ─── aspect-ratio preservation (the stretched footer logo) ─────────────
+// A 3:1 logo in a flex-stretched, very wide box must be CONTAIN-fit, not
+// stretch-filled: the raster canvas still covers the layout box (placement
+// is unchanged), but the drawn artwork keeps its own ratio and the rest of
+// the canvas stays transparent. Same correction as the huashu path.
+const SVG_LOGO_240x80 =
+  'data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%22240%22%20height%3D%2280%22%20viewBox%3D%220%200%20240%2080%22%3E%3Crect%20width%3D%22240%22%20height%3D%2280%22%20fill%3D%22%230B3D66%22%2F%3E%3C%2Fsvg%3E';
+
+const STRETCHED_LOGO_PAGE = slidePage(`
+  <div style="position:absolute;left:88px;bottom:48px;display:flex;width:1104px;height:80px;align-items:stretch;">
+    <img id="footer-logo" alt="" src="${SVG_LOGO_240x80}" style="flex:1 1 auto;display:block;width:100%;height:80px;">
+  </div>
+`);
+
+const RATIO_TRUE_LOGO_PAGE = slidePage(`
+  <img id="logo" alt="" src="${SVG_LOGO_240x80}" style="position:absolute;left:88px;top:72px;width:240px;height:80px;">
+`);
+
+/** Horizontal extent of the non-transparent pixels, and the canvas size. */
+async function paintedExtent(page: Page, src: string) {
+  return page.evaluate(async (dataUri) => {
+    const img = new Image();
+    img.src = dataUri;
+    await img.decode();
+    const canvas = document.createElement('canvas');
+    canvas.width = img.naturalWidth;
+    canvas.height = img.naturalHeight;
+    const ctx = canvas.getContext('2d')!;
+    ctx.drawImage(img, 0, 0);
+    const { data } = ctx.getImageData(0, 0, canvas.width, canvas.height);
+    let first = -1;
+    let last = -1;
+    for (let x = 0; x < canvas.width; x++) {
+      let painted = false;
+      for (let y = 0; y < canvas.height; y++) {
+        if (data[(y * canvas.width + x) * 4 + 3] > 0) {
+          painted = true;
+          break;
+        }
+      }
+      if (painted) {
+        if (first === -1) first = x;
+        last = x;
+      }
+    }
+    return {
+      canvasWidth: canvas.width,
+      canvasHeight: canvas.height,
+      paintedWidth: first === -1 ? 0 : last - first + 1,
+    };
+  }, src);
+}
+
+test('a non-ratio-true box letterboxes the raster instead of stretching it', async ({ page }) => {
+  await loadWalker(page, STRETCHED_LOGO_PAGE);
+  const extract = await extractRecords(page, { prepare: true });
+
+  const image = (extract.records as unknown as WalkerImageRecord[]).find(
+    (r) => r.kind === 'image',
+  )!;
+  expect(image, 'footer logo should emit an image record').toBeTruthy();
+
+  const extent = await paintedExtent(page, image.src);
+  // Canvas still covers the full (very wide) layout box at 2x.
+  expect(extent.canvasWidth).toBe(2208);
+  expect(extent.canvasHeight).toBe(160);
+  // ...but the artwork keeps its own 3:1 ratio rather than filling it.
+  const drawnRatio = extent.paintedWidth / extent.canvasHeight;
+  expect(drawnRatio).toBeGreaterThan(2.6);
+  expect(drawnRatio).toBeLessThan(3.4);
+});
+
+test('a ratio-true box still fills its raster (no letterbox regression)', async ({ page }) => {
+  await loadWalker(page, RATIO_TRUE_LOGO_PAGE);
+  const extract = await extractRecords(page, { prepare: true });
+
+  const image = (extract.records as unknown as WalkerImageRecord[]).find(
+    (r) => r.kind === 'image',
+  )!;
+  const extent = await paintedExtent(page, image.src);
+  expect(extent.canvasWidth).toBe(480);
+  expect(extent.canvasHeight).toBe(160);
+  // 240x80 artwork in a 240x80 box: contain-fit is a no-op, so the artwork
+  // still spans the whole canvas — the fix must not introduce padding here.
+  expect(extent.paintedWidth).toBe(480);
+});

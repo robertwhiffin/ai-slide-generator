@@ -298,3 +298,56 @@ class TestHuashuEmitter:
             assert dims == [(480, 160), (600, 400)], (
                 f"expected 2x rasters of the 240x80 img and 300x200 bg div, got {dims}"
             )
+
+    def test_non_ratio_true_box_letterboxes_instead_of_stretching(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The stretched-footer-logo bug: a 3:1 logo in a 13.8:1 flex-stretched
+        box must be CONTAIN-fit (letterboxed), not stretch-filled.
+
+        The raster canvas still covers the layout box, so dimensions alone
+        cannot tell the two apart — the artwork's own geometry is what differs.
+        The fixture logo is a rounded navy rect on transparency, so with
+        contain-fit the drawn artwork occupies a centered 3:1 band and the far
+        left/right of the canvas stays EMPTY; a stretch-fill paints navy all
+        the way across. Asserting on the painted extent is therefore the
+        non-tautological check.
+        """
+        from PIL import Image
+
+        pptx = self._build(
+            monkeypatch,
+            "huashu_svg_stretched_logo.html",
+            "Stretched footer logo (huashu)",
+        )
+        with zipfile.ZipFile(BytesIO(pptx)) as zf:
+            media = _media_entries(zf)
+        assert media, "expected a rasterized PNG for the footer logo"
+
+        # The footer logo is the widest raster on the slide.
+        blob = max(media.values(), key=lambda b: _png_dimensions(b)[0])
+        width, height = _png_dimensions(blob)
+        assert width > height * 4, (
+            f"fixture should produce a very wide box raster, got {width}x{height}"
+        )
+
+        image = Image.open(BytesIO(blob)).convert("RGBA")
+        # Painted = any non-transparent pixel. Column extent of the artwork.
+        alpha = image.getchannel("A")
+        painted_columns = [
+            x
+            for x in range(image.width)
+            if alpha.crop((x, 0, x + 1, image.height)).getextrema()[1] > 0
+        ]
+        assert painted_columns, "raster is entirely transparent"
+        painted_width = painted_columns[-1] - painted_columns[0] + 1
+        drawn_ratio = painted_width / image.height
+
+        # Contain-fit keeps the source's 3:1 ratio (240x80). A stretch-fill
+        # would paint the full canvas width, i.e. ~13.8:1 here.
+        assert drawn_ratio == pytest.approx(3.0, abs=0.35), (
+            f"artwork drawn at {painted_width}x{image.height} (ratio "
+            f"{drawn_ratio:.2f}) in a {width}x{height} box — expected the "
+            "source 3:1 ratio to be preserved (contain-fit), not stretched to "
+            "fill the box"
+        )

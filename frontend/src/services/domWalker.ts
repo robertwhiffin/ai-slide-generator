@@ -346,6 +346,15 @@ export const WALKER_SOURCE = `
   // browser already decoded the SVG. 2x the layout box keeps it crisp.
   // Returns a PNG data URI, or null so the caller keeps the raw SVG src
   // (exactly the pre-fix payload).
+  // The raster must not DISTORT the artwork when the layout box's aspect
+  // ratio differs from the image's own (a footer logo box flex-stretched to
+  // the full row width smeared a 3:1 logo across ~14:1). The canvas keeps the
+  // BOX size — downstream record placement is unchanged — but the drawn
+  // geometry honours the image's fit intent: object-fit:cover fills the box by
+  // center-cropping the overflowing axis, anything else letterboxes
+  // (object-fit:contain). A ratio-true box is unaffected: the scale is then
+  // equal on both axes and the offsets are 0. Mirrors the same correction in
+  // services/pptx-emit-huashu/preprocess.mjs.
   function rasterizeSvgImage(el) {
     try {
       if (!el.complete || !el.naturalWidth) return null;
@@ -356,7 +365,22 @@ export const WALKER_SOURCE = `
       c.width = w; c.height = h;
       const ctx = c.getContext('2d');
       if (!ctx) return null;
-      ctx.drawImage(el, 0, 0, w, h);
+      const srcW = el.naturalWidth;
+      const srcH = el.naturalHeight;
+      const objectFit = getComputedStyle(el).objectFit;
+      if (!srcW || !srcH) {
+        ctx.drawImage(el, 0, 0, w, h);
+      } else if (objectFit === 'cover') {
+        const scale = Math.max(w / srcW, h / srcH);
+        const sw = Math.min(srcW, w / scale);
+        const sh = Math.min(srcH, h / scale);
+        ctx.drawImage(el, (srcW - sw) / 2, (srcH - sh) / 2, sw, sh, 0, 0, w, h);
+      } else {
+        const scale = Math.min(w / srcW, h / srcH);
+        const dw = srcW * scale;
+        const dh = srcH * scale;
+        ctx.drawImage(el, (w - dw) / 2, (h - dh) / 2, dw, dh);
+      }
       return c.toDataURL('image/png');
     } catch (e) {
       return null;
