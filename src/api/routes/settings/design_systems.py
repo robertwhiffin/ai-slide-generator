@@ -215,6 +215,22 @@ def _require_creator_or_admin(ds: DesignSystem) -> None:
     DELETE. ``set-default`` stays admin-only — it changes what EVERY user gets
     by default, so authorship does not buy it.
 
+    ORG-DEFAULT FREEZE (product owner's decision: "only admin when it's org
+    default"). Creator-or-admin alone was not enough: a non-admin CREATOR could
+    DELETE the ACTIVE ORG DEFAULT and get 204, leaving the row inactive and
+    unflagged while OTHER users' sessions still pointed at that id — so an
+    admin's act of promoting a system to org default could be undone by the
+    row's author. While ``ds.is_default`` is set, rename/delete on THAT row are
+    therefore ADMIN-ONLY; authorship stops buying them at exactly the moment the
+    row becomes org-wide state. Creators keep full control of every NON-default
+    system they uploaded, so the contribute-and-manage story is untouched.
+
+    ``is_default`` is read from the LOADED ROW, inside the caller's transaction —
+    never from request input, so a caller cannot present themselves a
+    non-default row to unfreeze one. The branch is evaluated FIRST, before the
+    authorship comparison, so the creator branch cannot short-circuit it; both
+    call sites run this gate before any mutation or expensive work.
+
     Identity comes from ``get_permission_context().user_name``, which the OBO
     middleware derives server-side from the caller's authenticated token
     (``src/api/main.py``: ``user_client.current_user.me()``, or ``DEV_USER_ID``
@@ -240,8 +256,37 @@ def _require_creator_or_admin(ds: DesignSystem) -> None:
     different principals and still fail closed.
 
     Raises:
-        HTTPException 403: caller is neither the author nor an admin.
+        HTTPException 403: caller is neither the author nor an admin, or the row
+            is the org default and the caller is not an admin.
     """
+    # The org default is org-wide state, so authorship does not buy managing it.
+    # Read off the LOADED ROW (never request input) and decided BEFORE the
+    # authorship comparison, so being the creator cannot bypass the freeze.
+    if bool(ds.is_default):
+        # Admin-only. require_admin is still the ONE admin primitive (SDR-4437) —
+        # its verdict is not reimplemented here; only the 403's detail is
+        # rewritten, so the reason is debuggable instead of a generic "Admin
+        # access required" that looks identical to the not-the-author denial.
+        #
+        # Non-disclosure: the message names the REASON (this row is the org
+        # default) and nothing about the row's contents or authorship. Reads on
+        # this router are OPEN by design, so any authenticated caller can already
+        # GET the row and see ``is_default`` — this reveals nothing they could not
+        # otherwise tell, and it is only ever reached for a row that was loaded
+        # (a missing row 404s earlier, in the handler).
+        try:
+            require_admin()
+        except HTTPException:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=(
+                    "This design system is the organization default; only a "
+                    "workspace admin can rename or delete it. Ask an admin to "
+                    "make a different design system the default first."
+                ),
+            ) from None
+        return
+
     perm_ctx = get_permission_context()
     caller = (perm_ctx.user_name or "").strip() if perm_ctx else ""
     created_by = (ds.created_by or "").strip() if ds.created_by else ""

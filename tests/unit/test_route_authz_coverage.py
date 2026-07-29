@@ -9,8 +9,10 @@ NOTE while PR-2 is in flight: this test is committed RED at the end of the
 serial gate and turns green as the per-router fan-out tasks land.
 """
 
+import ast
 import inspect
 import re
+import textwrap
 from typing import get_args
 
 from fastapi.routing import APIRoute
@@ -43,11 +45,13 @@ _PERMISSION_CALL_RE = re.compile(
     r"|_check_chat_permission"      # chat.py send/stream/async
     r"|_require_manage"             # deck_contributors.py
     r"|get_deck_permission"         # profiles.py / sessions.py inline checks
-    # design_systems.py PUT/DELETE: creator-or-admin (Option C). Verified
-    # enforcing — raises 403 unless the caller authored the row, else delegates
-    # to require_admin; blank/NULL created_by falls back to admin-only. Behavior
-    # is covered per-endpoint by test_authz_design_systems_creator.py, and the
-    # exact permission LEVEL of all three mutations is pinned by
+    # design_systems.py PUT/DELETE: creator-or-admin (Option C), and ADMIN-ONLY
+    # while the row is the ORG DEFAULT. Verified enforcing — raises 403 unless
+    # the caller authored the row, else delegates to require_admin; blank/NULL
+    # created_by falls back to admin-only; a row with is_default set requires
+    # admin regardless of authorship. Behavior is covered per-endpoint by
+    # test_authz_design_systems_creator.py, and the exact permission LEVEL of all
+    # three mutations — including the is_default condition — is pinned by
     # test_design_system_mutations_have_the_intended_permission_levels below.
     r"|_require_creator_or_admin"
     r")\s*[(,]"
@@ -101,7 +105,8 @@ FEEDBACK_WRITE_RATIONALE = (
 
 DESIGN_SYSTEM_READ_RATIONALE = (
     "Read-only library browse; the design-system prefix gates MUTATIONS only "
-    "(rename/delete = creator-or-admin, set-default = admin-only), a "
+    "(rename/delete = creator-or-admin, except admin-only while the row is the "
+    "org default; set-default = admin-only always), a "
     "contribution-friendly variant of HIGH-3's deck-prompt and slide-style "
     "pattern. Reads must stay open: any user picks "
     "a design system for their own deck, and the generation/preview path reads "
@@ -116,8 +121,9 @@ DESIGN_SYSTEM_CONTRIBUTE_RATIONALE = (
     "library's open upload. Contributing adds a NEW row owned by the caller; "
     "it does not mutate another principal's design system or change what other "
     "users get by default. Managing an EXISTING row is gated: rename/delete are "
-    "creator-or-admin (you manage what you uploaded), and set-default — the one "
-    "mutation with org-wide blast radius — stays admin-only."
+    "creator-or-admin (you manage what you uploaded) but become ADMIN-ONLY once "
+    "that row is the org default, and set-default — the one mutation with "
+    "org-wide blast radius — stays admin-only always."
 )
 
 # (method, path) -> rationale. Exemptions must be visible in review, not
@@ -330,27 +336,112 @@ def _has_creator_or_admin(route: APIRoute) -> bool:
     return bool(re.search(r"_require_creator_or_admin\s*\(", _handler_source(route)))
 
 
-# The design-system mutation permission model (Option C). Design systems are
-# org-shared, user-CONTRIBUTED content, so the intended level differs per route
-# and this table is the single place that says which is which:
+def _freezes_the_org_default(gate) -> bool:
+    """True if *gate* makes the org default admin-only, in the right ORDER.
+
+    Verified structurally (AST), not by grep: an ``if`` whose test reads
+    ``is_default`` must exist in the gate, must call ``require_admin`` on that
+    branch, and must appear BEFORE the authorship comparison. Ordering is part
+    of the requirement — an is_default branch placed after the creator branch
+    returns is dead code for exactly the caller the freeze exists to stop (the
+    row's author), so "the condition is present somewhere" is not sufficient.
+    """
+    if gate is None:
+        return False
+    try:
+        tree = ast.parse(textwrap.dedent(inspect.getsource(gate)))
+    except (OSError, TypeError, SyntaxError):
+        return False
+
+    def _reads_is_default(node) -> bool:
+        return any(
+            isinstance(sub, ast.Attribute) and sub.attr == "is_default"
+            for sub in ast.walk(node)
+        )
+
+    def _calls_require_admin(node) -> bool:
+        return any(
+            isinstance(sub, ast.Call)
+            and isinstance(sub.func, ast.Name)
+            and sub.func.id == "require_admin"
+            for sub in ast.walk(node)
+        )
+
+    freeze_lines = [
+        node.lineno
+        for node in ast.walk(tree)
+        if isinstance(node, ast.If)
+        and _reads_is_default(node.test)
+        and _calls_require_admin(node)
+    ]
+    if not freeze_lines:
+        return False
+
+    # The authorship comparison the freeze must precede. Located by the
+    # attribute read of ``created_by`` off the row, which is the gate's only
+    # authorship input.
+    authorship_lines = [
+        node.lineno
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Attribute) and node.attr == "created_by"
+    ]
+    if not authorship_lines:
+        # No authorship branch left at all — not the creator-or-admin gate this
+        # level describes; fail rather than pass by absence.
+        return False
+    return min(freeze_lines) < min(authorship_lines)
+
+
+def _gate_freezes_the_org_default(route: APIRoute) -> bool:
+    """True if the gate THIS route calls freezes the org default.
+
+    The gate is resolved from the route's OWN module rather than imported
+    directly, so rewiring one handler to a different helper that does not carry
+    the condition fails for that route specifically — per-route, not global.
+    """
+    module = inspect.getmodule(route.endpoint)
+    return _freezes_the_org_default(getattr(module, "_require_creator_or_admin", None))
+
+
+# The design-system mutation permission model (Option C + org-default freeze).
+# Design systems are org-shared, user-CONTRIBUTED content, so the intended level
+# differs per route and this table is the single place that says which is which:
 #
 #   "admin"            set-default — ORG-WIDE blast radius (changes what every
 #                      user gets by default), so authorship must not buy it.
-#   "creator_or_admin" rename/delete — manage what YOU uploaded; nobody may
-#                      touch someone else's; admins may manage anything.
+#                      ALWAYS admin, unconditionally.
+#   "creator_or_admin_except_org_default"
+#                      rename/delete — manage what YOU uploaded, EXCEPT while
+#                      that row is the org default, when it is ADMIN-ONLY.
+#                      Both halves are required: the creator-or-admin gate must
+#                      be called, AND its verdict must be conditioned on the
+#                      row's ``is_default``. Plain "creator_or_admin" is no
+#                      longer an accepted level for these two routes — a
+#                      non-admin CREATOR deleting the ACTIVE ORG DEFAULT
+#                      answered 204 and broke other users' sessions, so dropping
+#                      the condition is a REGRESSION, not a simplification.
 #   "open"             create/import — any user may CONTRIBUTE a new row.
 #
 # Asserting the exact LEVEL (not merely "is gated") is what makes this a real
-# tripwire: silently promoting rename/delete back to admin-only, demoting
-# set-default to creator-or-admin, or dropping either gate entirely all fail
-# here. Adding an ALLOWLIST entry cannot silence it.
+# tripwire: silently promoting rename/delete back to blanket admin-only,
+# demoting set-default to creator-or-admin, dropping either gate entirely, or
+# removing the is_default condition all fail here. Adding an ALLOWLIST entry
+# cannot silence it.
 DESIGN_SYSTEM_MUTATION_LEVELS = {
-    ("PUT", "/api/settings/design-systems/{ds_id}"): "creator_or_admin",
-    ("DELETE", "/api/settings/design-systems/{ds_id}"): "creator_or_admin",
+    ("PUT", "/api/settings/design-systems/{ds_id}"):
+        "creator_or_admin_except_org_default",
+    ("DELETE", "/api/settings/design-systems/{ds_id}"):
+        "creator_or_admin_except_org_default",
     ("POST", "/api/settings/design-systems/{ds_id}/set-default"): "admin",
     ("POST", "/api/settings/design-systems/import"): "open",
     ("POST", "/api/settings/design-systems"): "open",
 }
+
+# Levels the assertion below knows how to check. A typo'd or newly-invented
+# level must not silently fall through to the permissive "open" branch.
+_KNOWN_MUTATION_LEVELS = frozenset(
+    {"admin", "creator_or_admin_except_org_default", "open"}
+)
 
 
 def test_design_system_mutations_have_the_intended_permission_levels():
@@ -386,9 +477,9 @@ def test_design_system_mutations_have_the_intended_permission_levels():
                         f"{where} must stay ADMIN-ONLY — it changes what every "
                         "user gets by default; authorship must not grant it"
                     )
-            elif expected == "creator_or_admin":
+            elif expected == "creator_or_admin_except_org_default":
                 # Must be gated, but by the creator-or-admin gate specifically:
-                # neither wide open nor promoted back to blanket admin-only.
+                # neither wide open nor promoted back to blanket admin-only...
                 if not creator:
                     failures.append(
                         f"{where} mutates another principal's design system and "
@@ -399,12 +490,33 @@ def test_design_system_mutations_have_the_intended_permission_levels():
                         f"{where} must be CREATOR-OR-ADMIN, not admin-only — a "
                         "user must be able to manage the system they uploaded"
                     )
-            else:  # "open" — contributing is a deliberate product decision
+                # ...AND that gate's verdict must be conditioned on the row being
+                # the org default, checked BEFORE the authorship comparison.
+                # Without this half, a non-admin CREATOR deletes the ACTIVE ORG
+                # DEFAULT (204) and other users' sessions keep pointing at the
+                # dead id — the exact hole a cross-vendor review exploited.
+                if not _gate_freezes_the_org_default(route):
+                    failures.append(
+                        f"{where} must be ADMIN-ONLY while the row is the ORG "
+                        "DEFAULT: the gate it calls must branch on the loaded "
+                        "row's is_default to require_admin, BEFORE the "
+                        "authorship comparison"
+                    )
+            elif expected == "open":  # contributing is a deliberate decision
                 if admin or creator:
                     failures.append(
                         f"{where} must stay OPEN: any authenticated user may "
                         "CONTRIBUTE a design system"
                     )
+            else:
+                # An unrecognised level must never fall through to the most
+                # PERMISSIVE branch: a typo ("creator_or_admin", say, now that
+                # the level is conditional) would otherwise silently assert
+                # "open" and pass on a gated route.
+                failures.append(
+                    f"{where} declares unknown permission level {expected!r} — "
+                    f"expected one of {sorted(_KNOWN_MUTATION_LEVELS)}"
+                )
     assert not failures, "Design-system permission model drift:\n  " + "\n  ".join(failures)
     missing = set(DESIGN_SYSTEM_MUTATION_LEVELS) - seen
     assert not missing, f"design-system mutation routes missing: {missing}"
@@ -471,3 +583,44 @@ def test_every_design_system_mutation_route_is_explicitly_classified():
     assert not stale, (
         f"DESIGN_SYSTEM_MUTATION_LEVELS names route(s) that no longer exist: {stale}"
     )
+
+
+def test_org_default_freeze_detection_requires_the_condition_before_authorship():
+    """Self-test for the freeze detector, including its ORDERING half.
+
+    The detector must not be satisfied by an is_default branch that sits AFTER
+    the creator branch has already returned — that placement is dead code for
+    the row's author, who is exactly the principal the freeze exists to stop. A
+    positive-only self-test would pass against a detector that ignored order, so
+    this drives the real gate AND two deliberately-wrong stand-ins through the
+    same AST predicate.
+    """
+    from src.api.routes.settings import design_systems as ds_routes
+
+    # The real gate, correctly ordered, reached the way the route check reaches it.
+    route = next(
+        r for r in _api_routes()
+        if r.path == "/api/settings/design-systems/{ds_id}" and "DELETE" in r.methods
+    )
+    assert _gate_freezes_the_org_default(route)
+    assert _freezes_the_org_default(ds_routes._require_creator_or_admin)
+
+    def _late_gate(ds):
+        created_by = ds.created_by  # authorship compared FIRST
+        if created_by == "someone":
+            return
+        if ds.is_default:  # ...freeze checked too late to bind the author
+            require_admin()  # noqa: F821 - stand-in source, never executed
+
+    def _no_condition_gate(ds):
+        if ds.created_by == "someone":
+            return
+        require_admin()  # noqa: F821 - stand-in source, never executed
+
+    assert not _freezes_the_org_default(_late_gate), (
+        "detector accepted a gate whose is_default condition comes too LATE"
+    )
+    assert not _freezes_the_org_default(_no_condition_gate), (
+        "detector accepted a gate with NO is_default condition"
+    )
+    assert not _freezes_the_org_default(None)
