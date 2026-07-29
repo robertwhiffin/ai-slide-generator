@@ -1,5 +1,6 @@
 import { test, expect } from '@playwright/test';
 import { setupMocks } from '../helpers/setup-mocks';
+import { apiPath, apiPathMatching } from '../helpers/api-route';
 import { mockSessionWithSlides, TEST_SESSION_ID } from '../helpers/session-helpers';
 import {
   mockDesignSystems,
@@ -31,7 +32,7 @@ test.describe('AgentConfigBar — design system selector', () => {
     await setupMocks(page);
     await mockSessionWithSlides(page);
     // Populated design-systems list (registered after shared mocks → wins).
-    await page.route(/\/api\/settings\/design-systems(\?[^/]*)?$/, (route, request) => {
+    await page.route(apiPath('/api/settings/design-systems'), (route, request) => {
       if (request.method() === 'GET') {
         route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(mockDesignSystems) });
       } else {
@@ -42,7 +43,7 @@ test.describe('AgentConfigBar — design system selector', () => {
 
   test('choosing a design system sets design_system_id in the config PUT', async ({ page }) => {
     let capturedConfig: Record<string, unknown> | null = null;
-    await page.route(`http://127.0.0.1:8000/api/sessions/${TEST_SESSION_ID}/agent-config`, (route) => {
+    await page.route(apiPath(`/api/sessions/${TEST_SESSION_ID}/agent-config`), (route) => {
       if (route.request().method() === 'PUT') {
         capturedConfig = JSON.parse(route.request().postData() ?? '{}');
         route.fulfill({ status: 200, contentType: 'application/json', body: route.request().postData() ?? '{}' });
@@ -86,7 +87,7 @@ test.describe('AgentConfigBar — design system selector', () => {
       template_id: 1,
     };
     const configPuts: Record<string, unknown>[] = [];
-    await page.route(`http://127.0.0.1:8000/api/sessions/${TEST_SESSION_ID}/agent-config`, (route) => {
+    await page.route(apiPath(`/api/sessions/${TEST_SESSION_ID}/agent-config`), (route) => {
       if (route.request().method() === 'PUT') {
         serverConfig = JSON.parse(route.request().postData() ?? '{}');
         configPuts.push(serverConfig);
@@ -95,15 +96,15 @@ test.describe('AgentConfigBar — design system selector', () => {
     });
 
     // Templates of the selected design system (so the Template select renders).
-    await page.route(/\/api\/settings\/design-systems\/\d+\/templates$/, (route) => {
+    await page.route(apiPathMatching(/\/api\/settings\/design-systems\/\d+\/templates$/), (route) => {
       route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(mockDesignSystemTemplatesWithLive) });
     });
 
     // Editing lock + current user, so the chat input is enabled.
-    await page.route(/\/api\/user\/current$/, (route) => {
+    await page.route(apiPathMatching(/\/api\/user\/current$/), (route) => {
       route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ user: 'dev@local.dev' }) });
     });
-    await page.route(/\/api\/sessions\/[^/]+\/lock$/, (route, request) => {
+    await page.route(apiPathMatching(/\/api\/sessions\/[^/]+\/lock$/), (route, request) => {
       if (request.method() === 'POST') {
         route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ acquired: true, locked_by: null }) });
       } else if (request.method() === 'DELETE') {
@@ -121,7 +122,7 @@ test.describe('AgentConfigBar — design system selector', () => {
       external_scripts: [],
     };
     let completedGenerations = 0;
-    await page.route('http://127.0.0.1:8000/api/chat/stream', (route) => {
+    await page.route(apiPath('/api/chat/stream'), (route) => {
       completedGenerations += 1;
       route.fulfill({
         status: 200,
@@ -174,14 +175,14 @@ test.describe('AgentConfigBar — design system selector', () => {
     );
 
     // Fresh session: its agent-config is not persisted yet (local-uuid 404).
-    await page.route(`http://127.0.0.1:8000/api/sessions/${TEST_SESSION_ID}/agent-config`, (route, request) => {
+    await page.route(apiPath(`/api/sessions/${TEST_SESSION_ID}/agent-config`), (route, request) => {
       if (request.method() === 'GET') {
         route.fulfill({ status: 404, contentType: 'application/json', body: JSON.stringify({ detail: 'Session not found' }) });
         return;
       }
       route.fulfill({ status: 200, contentType: 'application/json', body: request.postData() ?? '{}' });
     });
-    await page.route(/\/api\/settings\/design-systems\/\d+\/templates$/, (route) => {
+    await page.route(apiPathMatching(/\/api\/settings\/design-systems\/\d+\/templates$/), (route) => {
       route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(mockDesignSystemTemplatesWithLive) });
     });
 
@@ -204,7 +205,7 @@ test.describe('AgentConfigBar — design system selector', () => {
     await mockSessionWithSlides(page, SESSION_B);
 
     const configPutBodies: string[] = [];
-    await page.route(/\/api\/sessions\/[^/]+\/agent-config$/, async (route, request) => {
+    await page.route(apiPathMatching(/\/api\/sessions\/[^/]+\/agent-config$/), async (route, request) => {
       const isA = request.url().includes(TEST_SESSION_ID);
       if (request.method() === 'PUT') {
         configPutBodies.push(request.postData() ?? '');
@@ -222,13 +223,13 @@ test.describe('AgentConfigBar — design system selector', () => {
         }),
       });
     });
-    await page.route(/\/api\/settings\/design-systems\/\d+\/templates$/, (route) => {
+    await page.route(apiPathMatching(/\/api\/settings\/design-systems\/\d+\/templates$/), (route) => {
       route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(mockDesignSystemTemplatesWithLive) });
     });
-    await page.route(/\/api\/user\/current$/, (route) => {
+    await page.route(apiPathMatching(/\/api\/user\/current$/), (route) => {
       route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ user: 'dev@local.dev' }) });
     });
-    await page.route(/\/api\/sessions\/[^/]+\/lock$/, (route, request) => {
+    await page.route(apiPathMatching(/\/api\/sessions\/[^/]+\/lock$/), (route, request) => {
       if (request.method() === 'POST') {
         route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ acquired: true, locked_by: null }) });
       } else if (request.method() === 'DELETE') {
@@ -239,7 +240,7 @@ test.describe('AgentConfigBar — design system selector', () => {
     });
 
     const streamBodies: string[] = [];
-    await page.route('http://127.0.0.1:8000/api/chat/stream', (route, request) => {
+    await page.route(apiPath('/api/chat/stream'), (route, request) => {
       streamBodies.push(request.postData() ?? '');
       route.fulfill({
         status: 200,
@@ -285,7 +286,7 @@ test.describe('AgentConfigBar — design system selector', () => {
     await mockSessionWithSlides(page, SESSION_C);
 
     // Sidebar needs all three sessions.
-    await page.route('http://127.0.0.1:8000/api/sessions?limit=5', (route) => {
+    await page.route(apiPath('/api/sessions'), (route) => {
       route.fulfill({
         status: 200,
         contentType: 'application/json',
@@ -304,7 +305,7 @@ test.describe('AgentConfigBar — design system selector', () => {
     });
 
     // A instant {ds:1,tpl:1}; B delayed 3s {ds:2,tpl:2}; C delayed 1s {ds:2,tpl:null}.
-    await page.route(/\/api\/sessions\/[^/]+\/agent-config$/, async (route, request) => {
+    await page.route(apiPathMatching(/\/api\/sessions\/[^/]+\/agent-config$/), async (route, request) => {
       if (request.method() !== 'GET') {
         route.fulfill({ status: 200, contentType: 'application/json', body: request.postData() ?? '{}' });
         return;
@@ -322,13 +323,13 @@ test.describe('AgentConfigBar — design system selector', () => {
         body: JSON.stringify({ ...mockDefaultAgentConfig, design_system_id: ds, template_id: tpl }),
       });
     });
-    await page.route(/\/api\/settings\/design-systems\/\d+\/templates$/, (route) => {
+    await page.route(apiPathMatching(/\/api\/settings\/design-systems\/\d+\/templates$/), (route) => {
       route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(mockDesignSystemTemplatesWithLive) });
     });
-    await page.route(/\/api\/user\/current$/, (route) => {
+    await page.route(apiPathMatching(/\/api\/user\/current$/), (route) => {
       route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ user: 'dev@local.dev' }) });
     });
-    await page.route(/\/api\/sessions\/[^/]+\/lock$/, (route, request) => {
+    await page.route(apiPathMatching(/\/api\/sessions\/[^/]+\/lock$/), (route, request) => {
       if (request.method() === 'POST') {
         route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ acquired: true, locked_by: null }) });
       } else if (request.method() === 'DELETE') {
@@ -338,7 +339,7 @@ test.describe('AgentConfigBar — design system selector', () => {
       }
     });
     const streamBodies: string[] = [];
-    await page.route('http://127.0.0.1:8000/api/chat/stream', (route, request) => {
+    await page.route(apiPath('/api/chat/stream'), (route, request) => {
       streamBodies.push(request.postData() ?? '');
       route.fulfill({
         status: 200,
@@ -387,7 +388,7 @@ test.describe('AgentConfigBar — design system selector', () => {
 
     const configPutBodies: string[] = [];
     let putCount = 0;
-    await page.route(/\/api\/sessions\/[^/]+\/agent-config$/, async (route, request) => {
+    await page.route(apiPathMatching(/\/api\/sessions\/[^/]+\/agent-config$/), async (route, request) => {
       const isA = request.url().includes(TEST_SESSION_ID);
       if (request.method() === 'PUT') {
         putCount += 1;
@@ -413,13 +414,13 @@ test.describe('AgentConfigBar — design system selector', () => {
         }),
       });
     });
-    await page.route(/\/api\/settings\/design-systems\/\d+\/templates$/, (route) => {
+    await page.route(apiPathMatching(/\/api\/settings\/design-systems\/\d+\/templates$/), (route) => {
       route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(mockDesignSystemTemplatesWithLive) });
     });
-    await page.route(/\/api\/user\/current$/, (route) => {
+    await page.route(apiPathMatching(/\/api\/user\/current$/), (route) => {
       route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ user: 'dev@local.dev' }) });
     });
-    await page.route(/\/api\/sessions\/[^/]+\/lock$/, (route, request) => {
+    await page.route(apiPathMatching(/\/api\/sessions\/[^/]+\/lock$/), (route, request) => {
       if (request.method() === 'POST') {
         route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ acquired: true, locked_by: null }) });
       } else {
@@ -457,7 +458,7 @@ test.describe('AgentConfigBar — design system selector', () => {
     const SESSION_B = 'a2c5f1d9-8ef7-48dc-be69-0ead7be316dd';
     await mockSessionWithSlides(page, SESSION_B);
 
-    await page.route(/\/api\/sessions\/[^/]+\/agent-config$/, async (route, request) => {
+    await page.route(apiPathMatching(/\/api\/sessions\/[^/]+\/agent-config$/), async (route, request) => {
       const isA = request.url().includes(TEST_SESSION_ID);
       if (request.method() === 'PUT') {
         await new Promise((r) => setTimeout(r, 300));
@@ -475,13 +476,13 @@ test.describe('AgentConfigBar — design system selector', () => {
         }),
       });
     });
-    await page.route(/\/api\/settings\/design-systems\/\d+\/templates$/, (route) => {
+    await page.route(apiPathMatching(/\/api\/settings\/design-systems\/\d+\/templates$/), (route) => {
       route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(mockDesignSystemTemplatesWithLive) });
     });
-    await page.route(/\/api\/user\/current$/, (route) => {
+    await page.route(apiPathMatching(/\/api\/user\/current$/), (route) => {
       route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ user: 'dev@local.dev' }) });
     });
-    await page.route(/\/api\/sessions\/[^/]+\/lock$/, (route, request) => {
+    await page.route(apiPathMatching(/\/api\/sessions\/[^/]+\/lock$/), (route, request) => {
       if (request.method() === 'POST') {
         route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ acquired: true, locked_by: null }) });
       } else {
@@ -519,7 +520,7 @@ test.describe('AgentConfigBar — design system selector', () => {
     const SESSION_C = 'c3d6e2f0-1234-4abc-9def-0123456789ab';
     await mockSessionWithSlides(page, SESSION_B);
     await mockSessionWithSlides(page, SESSION_C);
-    await page.route('http://127.0.0.1:8000/api/sessions?limit=5', (route) => {
+    await page.route(apiPath('/api/sessions'), (route) => {
       route.fulfill({
         status: 200,
         contentType: 'application/json',
@@ -534,7 +535,7 @@ test.describe('AgentConfigBar — design system selector', () => {
     });
 
     const putBodies: { url: string; body: string }[] = [];
-    await page.route(/\/api\/sessions\/[^/]+\/agent-config$/, async (route, request) => {
+    await page.route(apiPathMatching(/\/api\/sessions\/[^/]+\/agent-config$/), async (route, request) => {
       const url = request.url();
       if (request.method() === 'PUT') {
         putBodies.push({ url, body: request.postData() ?? '' });
@@ -563,13 +564,13 @@ test.describe('AgentConfigBar — design system selector', () => {
         body: JSON.stringify({ ...mockDefaultAgentConfig, design_system_id: ds, template_id: tpl }),
       });
     });
-    await page.route(/\/api\/settings\/design-systems\/\d+\/templates$/, (route) => {
+    await page.route(apiPathMatching(/\/api\/settings\/design-systems\/\d+\/templates$/), (route) => {
       route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(mockDesignSystemTemplatesWithLive) });
     });
-    await page.route(/\/api\/user\/current$/, (route) => {
+    await page.route(apiPathMatching(/\/api\/user\/current$/), (route) => {
       route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ user: 'dev@local.dev' }) });
     });
-    await page.route(/\/api\/sessions\/[^/]+\/lock$/, (route, request) => {
+    await page.route(apiPathMatching(/\/api\/sessions\/[^/]+\/lock$/), (route, request) => {
       if (request.method() === 'POST') {
         route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ acquired: true, locked_by: null }) });
       } else {
@@ -621,7 +622,7 @@ test.describe('AgentConfigBar — design system selector', () => {
     const SESSION_C = 'c3d6e2f0-1234-4abc-9def-0123456789ab';
     await mockSessionWithSlides(page, SESSION_B);
     await mockSessionWithSlides(page, SESSION_C);
-    await page.route('http://127.0.0.1:8000/api/sessions?limit=5', (route) => {
+    await page.route(apiPath('/api/sessions'), (route) => {
       route.fulfill({
         status: 200,
         contentType: 'application/json',
@@ -637,7 +638,7 @@ test.describe('AgentConfigBar — design system selector', () => {
 
     let bGetCount = 0;
     let bPutCount = 0;
-    await page.route(/\/api\/sessions\/[^/]+\/agent-config$/, async (route, request) => {
+    await page.route(apiPathMatching(/\/api\/sessions\/[^/]+\/agent-config$/), async (route, request) => {
       const url = request.url();
       if (request.method() === 'PUT') {
         if (url.includes(SESSION_B)) {
@@ -671,13 +672,13 @@ test.describe('AgentConfigBar — design system selector', () => {
         body: JSON.stringify({ ...mockDefaultAgentConfig, design_system_id: ds, template_id: tpl }),
       });
     });
-    await page.route(/\/api\/settings\/design-systems\/\d+\/templates$/, (route) => {
+    await page.route(apiPathMatching(/\/api\/settings\/design-systems\/\d+\/templates$/), (route) => {
       route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(mockDesignSystemTemplatesWithLive) });
     });
-    await page.route(/\/api\/user\/current$/, (route) => {
+    await page.route(apiPathMatching(/\/api\/user\/current$/), (route) => {
       route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ user: 'dev@local.dev' }) });
     });
-    await page.route(/\/api\/sessions\/[^/]+\/lock$/, (route, request) => {
+    await page.route(apiPathMatching(/\/api\/sessions\/[^/]+\/lock$/), (route, request) => {
       if (request.method() === 'POST') {
         route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ acquired: true, locked_by: null }) });
       } else {
@@ -722,7 +723,7 @@ test.describe('AgentConfigBar — design system selector', () => {
     const SESSION_B = 'a2c5f1d9-8ef7-48dc-be69-0ead7be316dd';
     await mockSessionWithSlides(page, SESSION_B);
 
-    await page.route(/\/api\/sessions\/[^/]+\/agent-config$/, async (route, request) => {
+    await page.route(apiPathMatching(/\/api\/sessions\/[^/]+\/agent-config$/), async (route, request) => {
       const isA = request.url().includes(TEST_SESSION_ID);
       if (request.method() === 'PUT') {
         route.fulfill({ status: 200, contentType: 'application/json', body: request.postData() ?? '{}' });
@@ -739,13 +740,13 @@ test.describe('AgentConfigBar — design system selector', () => {
         }),
       });
     });
-    await page.route(/\/api\/settings\/design-systems\/\d+\/templates$/, (route) => {
+    await page.route(apiPathMatching(/\/api\/settings\/design-systems\/\d+\/templates$/), (route) => {
       route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(mockDesignSystemTemplatesWithLive) });
     });
-    await page.route(/\/api\/user\/current$/, (route) => {
+    await page.route(apiPathMatching(/\/api\/user\/current$/), (route) => {
       route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ user: 'dev@local.dev' }) });
     });
-    await page.route(/\/api\/sessions\/[^/]+\/lock$/, (route, request) => {
+    await page.route(apiPathMatching(/\/api\/sessions\/[^/]+\/lock$/), (route, request) => {
       if (request.method() === 'POST') {
         route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ acquired: true, locked_by: null }) });
       } else {
@@ -788,7 +789,7 @@ test.describe('AgentConfigBar — design system selector', () => {
     const dsB = 1; // the value the successful edit sets
     const putBodies: string[] = [];
     let bPutCount = 0;
-    await page.route(/\/api\/sessions\/[^/]+\/agent-config$/, async (route, request) => {
+    await page.route(apiPathMatching(/\/api\/sessions\/[^/]+\/agent-config$/), async (route, request) => {
       const isB = request.url().includes(TEST_SESSION_ID);
       if (request.method() === 'PUT') {
         putBodies.push(request.postData() ?? '');
@@ -814,13 +815,13 @@ test.describe('AgentConfigBar — design system selector', () => {
         body: JSON.stringify({ ...mockDefaultAgentConfig, design_system_id: 2, template_id: 2 }),
       });
     });
-    await page.route(/\/api\/settings\/design-systems\/\d+\/templates$/, (route) => {
+    await page.route(apiPathMatching(/\/api\/settings\/design-systems\/\d+\/templates$/), (route) => {
       route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(mockDesignSystemTemplatesWithLive) });
     });
-    await page.route(/\/api\/user\/current$/, (route) => {
+    await page.route(apiPathMatching(/\/api\/user\/current$/), (route) => {
       route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ user: 'dev@local.dev' }) });
     });
-    await page.route(/\/api\/sessions\/[^/]+\/lock$/, (route, request) => {
+    await page.route(apiPathMatching(/\/api\/sessions\/[^/]+\/lock$/), (route, request) => {
       if (request.method() === 'POST') {
         route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ acquired: true, locked_by: null }) });
       } else {
@@ -862,7 +863,7 @@ test.describe('AgentConfigBar — design system selector', () => {
   test('B->C->B: a pre-round-trip stale B GET settling after return cannot regress B (generation)', async ({ page }) => {
     const SESSION_C = 'c3d6e2f0-1234-4abc-9def-0123456789ab';
     await mockSessionWithSlides(page, SESSION_C);
-    await page.route('http://127.0.0.1:8000/api/sessions?limit=5', (route) => {
+    await page.route(apiPath('/api/sessions'), (route) => {
       route.fulfill({
         status: 200,
         contentType: 'application/json',
@@ -878,7 +879,7 @@ test.describe('AgentConfigBar — design system selector', () => {
 
     const putBodies: { url: string; body: string }[] = [];
     let bGetCount = 0;
-    await page.route(/\/api\/sessions\/[^/]+\/agent-config$/, async (route, request) => {
+    await page.route(apiPathMatching(/\/api\/sessions\/[^/]+\/agent-config$/), async (route, request) => {
       const url = request.url();
       const isB = url.includes(TEST_SESSION_ID);
       const isC = url.includes(SESSION_C);
@@ -913,13 +914,13 @@ test.describe('AgentConfigBar — design system selector', () => {
       }
       route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(mockDefaultAgentConfig) });
     });
-    await page.route(/\/api\/settings\/design-systems\/\d+\/templates$/, (route) => {
+    await page.route(apiPathMatching(/\/api\/settings\/design-systems\/\d+\/templates$/), (route) => {
       route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(mockDesignSystemTemplatesWithLive) });
     });
-    await page.route(/\/api\/user\/current$/, (route) => {
+    await page.route(apiPathMatching(/\/api\/user\/current$/), (route) => {
       route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ user: 'dev@local.dev' }) });
     });
-    await page.route(/\/api\/sessions\/[^/]+\/lock$/, (route, request) => {
+    await page.route(apiPathMatching(/\/api\/sessions\/[^/]+\/lock$/), (route, request) => {
       if (request.method() === 'POST') {
         route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ acquired: true, locked_by: null }) });
       } else {
@@ -957,7 +958,7 @@ test.describe('AgentConfigBar — design system selector', () => {
   test('overlapping PUTs: an earlier-issued PUT settling later does not regress the stash', async ({ page }) => {
     const putBodies: string[] = [];
     let putSeen = 0;
-    await page.route(/\/api\/sessions\/[^/]+\/agent-config$/, async (route, request) => {
+    await page.route(apiPathMatching(/\/api\/sessions\/[^/]+\/agent-config$/), async (route, request) => {
       const isB = request.url().includes(TEST_SESSION_ID);
       if (request.method() === 'PUT') {
         putSeen += 1;
@@ -979,13 +980,13 @@ test.describe('AgentConfigBar — design system selector', () => {
       }
       route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ ...mockDefaultAgentConfig, design_system_id: 1, template_id: 1 }) });
     });
-    await page.route(/\/api\/settings\/design-systems\/\d+\/templates$/, (route) => {
+    await page.route(apiPathMatching(/\/api\/settings\/design-systems\/\d+\/templates$/), (route) => {
       route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(mockDesignSystemTemplatesWithLive) });
     });
-    await page.route(/\/api\/user\/current$/, (route) => {
+    await page.route(apiPathMatching(/\/api\/user\/current$/), (route) => {
       route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ user: 'dev@local.dev' }) });
     });
-    await page.route(/\/api\/sessions\/[^/]+\/lock$/, (route, request) => {
+    await page.route(apiPathMatching(/\/api\/sessions\/[^/]+\/lock$/), (route, request) => {
       if (request.method() === 'POST') {
         route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ acquired: true, locked_by: null }) });
       } else {
@@ -1030,7 +1031,7 @@ test.describe('AgentConfigBar — design system selector', () => {
     await mockSessionWithSlides(page, SESSION_B);
 
     const configPutBodies: string[] = [];
-    await page.route(/\/api\/sessions\/[^/]+\/agent-config$/, async (route, request) => {
+    await page.route(apiPathMatching(/\/api\/sessions\/[^/]+\/agent-config$/), async (route, request) => {
       const isA = request.url().includes(TEST_SESSION_ID);
       if (request.method() === 'PUT') {
         configPutBodies.push(request.postData() ?? '');
@@ -1048,13 +1049,13 @@ test.describe('AgentConfigBar — design system selector', () => {
         }),
       });
     });
-    await page.route(/\/api\/settings\/design-systems\/\d+\/templates$/, (route) => {
+    await page.route(apiPathMatching(/\/api\/settings\/design-systems\/\d+\/templates$/), (route) => {
       route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(mockDesignSystemTemplatesWithLive) });
     });
-    await page.route(/\/api\/user\/current$/, (route) => {
+    await page.route(apiPathMatching(/\/api\/user\/current$/), (route) => {
       route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ user: 'dev@local.dev' }) });
     });
-    await page.route(/\/api\/sessions\/[^/]+\/lock$/, (route, request) => {
+    await page.route(apiPathMatching(/\/api\/sessions\/[^/]+\/lock$/), (route, request) => {
       if (request.method() === 'POST') {
         route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ acquired: true, locked_by: null }) });
       } else {
@@ -1091,20 +1092,20 @@ test.describe('AgentConfigBar — design system selector', () => {
       design_system_id: dsId,
       template_id: null,
     };
-    await page.route(`http://127.0.0.1:8000/api/sessions/${TEST_SESSION_ID}/agent-config`, (route, request) => {
+    await page.route(apiPath(`/api/sessions/${TEST_SESSION_ID}/agent-config`), (route, request) => {
       if (request.method() === 'PUT') {
         serverConfig = JSON.parse(request.postData() ?? '{}');
         configPuts.push(serverConfig);
       }
       route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(serverConfig) });
     });
-    await page.route(/\/api\/settings\/design-systems\/\d+\/templates$/, (route) => {
+    await page.route(apiPathMatching(/\/api\/settings\/design-systems\/\d+\/templates$/), (route) => {
       route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(mockDesignSystemTemplatesWithLive) });
     });
-    await page.route(/\/api\/user\/current$/, (route) => {
+    await page.route(apiPathMatching(/\/api\/user\/current$/), (route) => {
       route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ user: 'dev@local.dev' }) });
     });
-    await page.route(/\/api\/sessions\/[^/]+\/lock$/, (route, request) => {
+    await page.route(apiPathMatching(/\/api\/sessions\/[^/]+\/lock$/), (route, request) => {
       if (request.method() === 'POST') {
         route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ acquired: true, locked_by: null }) });
       } else if (request.method() === 'DELETE') {
@@ -1114,7 +1115,7 @@ test.describe('AgentConfigBar — design system selector', () => {
       }
     });
     const streamBodies: string[] = [];
-    await page.route('http://127.0.0.1:8000/api/chat/stream', (route, request) => {
+    await page.route(apiPath('/api/chat/stream'), (route, request) => {
       streamBodies.push(request.postData() ?? '');
       route.fulfill({
         status: 200,
@@ -1148,24 +1149,24 @@ test.describe('AgentConfigBar — design system selector', () => {
     const dsId = mockDesignSystems.design_systems[0].id;
 
     const sessionConfigPuts: string[] = [];
-    await page.route(`http://127.0.0.1:8000/api/sessions/${TEST_SESSION_ID}/agent-config`, (route, request) => {
+    await page.route(apiPath(`/api/sessions/${TEST_SESSION_ID}/agent-config`), (route, request) => {
       if (request.method() === 'PUT') sessionConfigPuts.push(request.postData() ?? '');
       route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(mockDefaultAgentConfig) });
     });
-    await page.route(/\/api\/settings\/design-systems\/\d+$/, (route, request) => {
+    await page.route(apiPathMatching(/\/api\/settings\/design-systems\/\d+$/), (route, request) => {
       if (request.method() === 'GET') {
         route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(mockDesignSystemDetail) });
         return;
       }
       route.continue();
     });
-    await page.route(/\/api\/settings\/design-systems\/\d+\/templates$/, (route) => {
+    await page.route(apiPathMatching(/\/api\/settings\/design-systems\/\d+\/templates$/), (route) => {
       route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(mockDesignSystemTemplatesWithLive) });
     });
-    await page.route(/\/api\/settings\/design-systems\/\d+\/files$/, (route) => {
+    await page.route(apiPathMatching(/\/api\/settings\/design-systems\/\d+\/files$/), (route) => {
       route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ files: [], total: 0 }) });
     });
-    await page.route(/\/api\/settings\/design-systems\/\d+\/templates\/2\/source$/, (route) => {
+    await page.route(apiPathMatching(/\/api\/settings\/design-systems\/\d+\/templates\/2\/source$/), (route) => {
       route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ id: 2, name: 'Acme Content', layout_html: '<section></section>', token_css: null }) });
     });
 
@@ -1236,7 +1237,7 @@ test.describe('org-default design system vs. seeded legacy style default', () =>
   ) {
     await setupMocks(page);
     // The seeded default profile is what the browser loads pre-session.
-    await page.route(/\/api\/profiles$/, (route) => {
+    await page.route(apiPathMatching(/\/api\/profiles$/), (route) => {
       route.fulfill({
         status: 200,
         contentType: 'application/json',
@@ -1244,7 +1245,7 @@ test.describe('org-default design system vs. seeded legacy style default', () =>
       });
     });
     // An org-default design system exists.
-    await page.route(/\/api\/settings\/design-systems(\?[^/]*)?$/, (route, request) => {
+    await page.route(apiPath('/api/settings/design-systems'), (route, request) => {
       if (request.method() === 'GET') {
         route.fulfill({
           status: 200,
@@ -1341,7 +1342,7 @@ test.describe('org-default design system vs. seeded legacy style default', () =>
 
     const configPuts: Record<string, unknown>[] = [];
     await page.route(
-      `http://127.0.0.1:8000/api/sessions/${TEST_SESSION_ID}/agent-config`,
+      apiPath(`/api/sessions/${TEST_SESSION_ID}/agent-config`),
       (route, request) => {
         if (request.method() === 'PUT') {
           configPuts.push(JSON.parse(request.postData() ?? '{}'));
@@ -1386,7 +1387,7 @@ test.describe('org-default design system vs. seeded legacy style default', () =>
     await mockSessionWithSlides(page);
 
     await page.route(
-      `http://127.0.0.1:8000/api/sessions/${TEST_SESSION_ID}/agent-config`,
+      apiPath(`/api/sessions/${TEST_SESSION_ID}/agent-config`),
       (route, request) => {
         if (request.method() === 'PUT') {
           route.fulfill({ status: 200, contentType: 'application/json', body: request.postData() ?? '{}' });
@@ -1421,7 +1422,7 @@ test.describe('org-default design system vs. seeded legacy style default', () =>
   test('with NO org-default DS the seeded style default is left alone', async ({ page }) => {
     await mockOrgDefaults(page, seededDefaultProfile);
     // No design system is marked default.
-    await page.route(/\/api\/settings\/design-systems(\?[^/]*)?$/, (route, request) => {
+    await page.route(apiPath('/api/settings/design-systems'), (route, request) => {
       if (request.method() === 'GET') {
         route.fulfill({
           status: 200,
