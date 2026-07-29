@@ -332,6 +332,17 @@ def _template_names_and_ids(design_system_id: int) -> list[tuple[str, int]]:
         ]
 
 
+def _normalized_template_name(value: Optional[str]) -> str:
+    """The comparison key for template-name matching: casefolded, with all
+    whitespace runs collapsed to a single space.
+
+    Applied to BOTH sides so the notion of "the same name" is defined in exactly
+    one place — which is also what makes ambiguity detectable rather than
+    order-dependent.
+    """
+    return " ".join((value or "").split()).casefold()
+
+
 def _resolve_template_name(design_system_id: int, template_name: str) -> Optional[int]:
     """Resolve a template NAME to its id within *design_system_id*.
 
@@ -340,17 +351,39 @@ def _resolve_template_name(design_system_id: int, template_name: str) -> Optiona
     wants a specific layout pins it by name. Matching is case- and
     whitespace-insensitive.
 
+    Because matching is insensitive, two DISTINCT rows can both match one query
+    ("Two Column" and "two column"). That is AMBIGUOUS, and returning the first
+    hit made the winner depend on relationship load order — a caller could
+    silently get the other layout, and which one could change between requests.
+    An ambiguous name is therefore UNRESOLVED: treated exactly like a name that
+    matches nothing, and logged so the duplicate rows are discoverable.
+
     Returns ``None`` — never raises — when the design system is missing, the
-    name matches nothing, or the lookup fails. An unresolvable name must
-    degrade to "no pin" (the model then soft-picks as usual), never a 500.
+    name matches nothing, the name is ambiguous, or the lookup fails. An
+    unresolvable name must degrade to "no pin" (the model then soft-picks as
+    usual), never a 500.
     """
-    wanted = (template_name or "").strip().casefold()
+    wanted = _normalized_template_name(template_name)
     if not wanted:
         return None
     try:
-        for name, template_id in _template_names_and_ids(design_system_id):
-            if name.strip().casefold() == wanted:
-                return template_id
+        matches = [
+            template_id
+            for name, template_id in _template_names_and_ids(design_system_id)
+            if _normalized_template_name(name) == wanted
+        ]
+        if len(matches) == 1:
+            return matches[0]
+        if matches:
+            logger.warning(
+                "MCP template_name %r is ambiguous in design system %s: it matches "
+                "%d templates (ids %s). Ignoring the pin — the model soft-picks a "
+                "layout instead. Rename the duplicates to make the name unique.",
+                template_name,
+                design_system_id,
+                len(matches),
+                ", ".join(str(template_id) for template_id in sorted(matches)),
+            )
     except Exception:
         logger.exception(
             "Failed to resolve MCP template_name against design system %s",
