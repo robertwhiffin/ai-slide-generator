@@ -34,8 +34,10 @@ from databricks_tellr.deploy import (
     DeploymentError,
     _branch_exists,
     _delete_branch,
+    _get_lakebase_connection,
     _get_workspace_client,
     _get_or_create_lakebase,
+    _migrate_encryption_key_to_lakebase,
     _mlflow_flat_from_env_section,
     _mlflow_substitutions_for_app_yaml,
     _probe_autoscaling_available,
@@ -257,11 +259,13 @@ def upload_wheel(
 
 def _check_branching_preconditions(
     ws: WorkspaceClient, config: dict[str, Any]
-) -> str:
-    """Run preconditions for branching-mode deploy. Return prod's encryption key.
+) -> None:
+    """Run preconditions for branching-mode deploy.
 
     Raises DeploymentError if any precondition fails, BEFORE any mutating
-    ws.postgres call.
+    ws.postgres call. Post SDR-4437 PR-3 the fork inherits the Fernet key via
+    the copy-on-write encryption_keys table, so no key is returned — the
+    legacy-key read below is purely a "source env already migrated?" check.
     """
     branch_from_env = config["branch_from_env"]
     branch_from_workspace_path = config["branch_from_workspace_path"]
@@ -270,13 +274,26 @@ def _check_branching_preconditions(
     # 1+2 handled by load_deployment_config. By the time we get here,
     # branch_from_env is already resolved and database_name matches.
 
-    # 3 + 4: source app.yaml exists and has a key
-    encryption_key = _read_existing_encryption_key(ws, branch_from_workspace_path)
-    if not encryption_key:
+    # 3 + 4 in one download: the strict reader raises DeploymentError when
+    # app.yaml cannot be downloaded/parsed — which here means the source env
+    # is not deployed (or unreachable; the chained cause carries the detail).
+    # Re-raise with the preflight's actionable message.
+    try:
+        legacy_key = _read_existing_encryption_key(ws, branch_from_workspace_path)
+    except DeploymentError as e:
         raise DeploymentError(
             f"{branch_from_env} not deployed — deploy {branch_from_env} first "
-            f"(could not read GOOGLE_OAUTH_ENCRYPTION_KEY from "
-            f"{branch_from_workspace_path}/app.yaml)"
+            f"(could not read {branch_from_workspace_path}/app.yaml: {e})"
+        ) from e
+
+    # 4: source env must already be migrated off the app.yaml key. The fork
+    # template cannot carry a key, and seeding the fork's table here would
+    # need a human Postgres login (breaking SP-only dev-loop deploys).
+    if legacy_key:
+        raise DeploymentError(
+            f"{branch_from_env}'s app.yaml still carries a legacy encryption key. "
+            f"Update {branch_from_env} with the new deploy tool first (it relocates "
+            f"the key into the encryption_keys table), then re-run this deploy."
         )
 
     # 5: Lakebase is autoscaling
@@ -298,8 +315,6 @@ def _check_branching_preconditions(
         raise DeploymentError(
             f'source branch "{branch_from_env}" not found in project {project_name}'
         )
-
-    return encryption_key
 
 
 def _trigger_owner_grant_job(ws, job_id, new_sp_id, host, endpoint_name) -> None:
@@ -416,10 +431,9 @@ def create_local(
             print()
 
         # Branching mode: preflight + recreate branch
-        encryption_key = None
         if branch_from_env:
             print("Running branching preflight checks...")
-            encryption_key = _check_branching_preconditions(ws, config)
+            _check_branching_preconditions(ws, config)
             print(f"   Preflight OK (source: {branch_from_env})")
 
             print(f"Creating ephemeral branch '{target_branch}' off '{branch_from_env}'...")
@@ -464,7 +478,6 @@ def create_local(
                 lakebase_name,
                 schema_name,
                 seed_databricks_defaults=seed_databricks_defaults,
-                encryption_key=encryption_key,  # None → _write_app_yaml generates one
                 lakebase_result=lakebase_result,
                 mlflow_tracing=mlflow_subs,
             )
@@ -617,7 +630,7 @@ def update_local(
         # Branching mode: preflight + recreate branch
         if branch_from_env:
             print("Running branching preflight checks...")
-            encryption_key = _check_branching_preconditions(ws, config)
+            _check_branching_preconditions(ws, config)
             print(f"   Preflight OK (source: {branch_from_env})")
 
             # Verify the app exists BEFORE branch recreation so we don't leave
@@ -684,7 +697,23 @@ def update_local(
             lakebase_result = _get_or_create_lakebase(
                 ws, lakebase_name, config["lakebase_capacity"]
             )
-            encryption_key = _read_existing_encryption_key(ws, workspace_path)
+            legacy_key = _read_existing_encryption_key(ws, workspace_path)
+            if legacy_key:
+                # CRITICAL-3: relocate before the keyless app.yaml overwrites it
+                print("Relocating encryption key into Lakebase (encryption_keys)...")
+                app_for_grant = ws.apps.get(name=app_name)
+                grant_client_id = _get_app_client_id(app_for_grant)
+                mig_conn, _ = _get_lakebase_connection(
+                    ws, lakebase_name, lakebase_result=lakebase_result
+                )
+                try:
+                    with mig_conn.cursor() as cur:
+                        _migrate_encryption_key_to_lakebase(
+                            cur, schema_name, grant_client_id, legacy_key
+                        )
+                finally:
+                    mig_conn.close()
+                print("   Key relocated")
 
         lakebase_type = lakebase_result.get("type", "provisioned")
         print(f"   Lakebase: {lakebase_result['name']} (type={lakebase_type})")
@@ -741,7 +770,6 @@ def update_local(
                 lakebase_name,
                 schema_name,
                 seed_databricks_defaults=seed_databricks_defaults,
-                encryption_key=encryption_key,
                 lakebase_result=lakebase_result,
                 mlflow_tracing=mlflow_subs,
             )

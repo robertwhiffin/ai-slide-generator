@@ -67,6 +67,22 @@ def create_mock_slide_deck(slide_count: int, with_charts: bool = False) -> dict:
 # =============================================================================
 
 
+@pytest.fixture(autouse=True)
+def _bypass_deck_gate(monkeypatch):
+    # SDR-4437 PR-2 (Task 5): export session/job endpoints now require deck
+    # permission. These pre-existing export tests exercise the conversion
+    # layer with an unfixtured session_id, so no-op both gates here — never
+    # weaken them; their enforcement is covered by test_authz_export.py.
+    monkeypatch.setattr(
+        "src.api.routes.export._check_deck_permission_for_session",
+        lambda *a, **k: None,
+    )
+    monkeypatch.setattr(
+        "src.api.routes.export._require_export_job_access",
+        lambda *a, **k: None,
+    )
+
+
 @pytest.fixture
 def client():
     """Create test client."""

@@ -705,6 +705,7 @@ async def test_get_deck_denies_without_view_permission(fake_request, identity):
             )
 
 
+from src.api import mcp_server
 from src.api.mcp_server import _edit_deck_impl, _create_deck_impl, MCPToolError
 
 
@@ -718,13 +719,21 @@ async def test_edit_deck_blocks_injection():
         )
 
 
-@pytest.mark.asyncio
-async def test_edit_deck_rejects_overlong_instruction():
-    with pytest.raises(MCPToolError, match="too long"):
-        await _edit_deck_impl(request=None, session_id="s1", instruction="x" * 9000)
+def test_prompt_length_limit_disabled_by_default():
+    """The input length cap is disabled (None) for usability; the guard
+    wiring stays in place so it can be re-enabled by setting an int."""
+    assert mcp_server.MCP_PROMPT_LIMIT is None
 
 
 @pytest.mark.asyncio
-async def test_create_deck_rejects_overlong_prompt():
+async def test_edit_deck_length_guard_when_enabled(monkeypatch):
+    monkeypatch.setattr(mcp_server, "MCP_PROMPT_LIMIT", 100)
     with pytest.raises(MCPToolError, match="too long"):
-        await _create_deck_impl(request=None, prompt="x" * 9000)
+        await _edit_deck_impl(request=None, session_id="s1", instruction="x" * 200)
+
+
+@pytest.mark.asyncio
+async def test_create_deck_length_guard_when_enabled(monkeypatch):
+    monkeypatch.setattr(mcp_server, "MCP_PROMPT_LIMIT", 100)
+    with pytest.raises(MCPToolError, match="too long"):
+        await _create_deck_impl(request=None, prompt="x" * 200)

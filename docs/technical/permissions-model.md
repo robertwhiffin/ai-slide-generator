@@ -44,6 +44,7 @@ CAN_USE and CAN_VIEW are at the same priority tier — they are context-specific
 | Export (PPTX / Google Slides) | ✅ | ✅ | ✅ | ✅ |
 | Edit slides (direct + chat) | ✅ | ❌ | ✅ | ✅ |
 | Reorder / duplicate slides | ✅ | ❌ | ✅ | ✅ |
+| Duplicate deck (full copy) | ✅ | ✅ | ✅ | ✅ |
 | Delete slides | ✅ | ❌ | ❌ | ✅ |
 | Manage deck contributors | ✅ | ❌ | ❌ | ✅ |
 | Delete deck | ✅ | ❌ | ❌ | ✅ |

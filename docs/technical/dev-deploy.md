@@ -40,6 +40,29 @@ final on PyPI, bumps the patch (e.g. `0.3.9` → `0.3.10`), and publishes the ne
 free `0.3.10.devN`. Pass an explicit `version` to the workflow for minor/major dev
 builds (e.g. `0.4.0.dev1`).
 
+## Encryption key & the supported upgrade path (SDR-4437)
+
+The Google-OAuth Fernet master key lives in the **`encryption_keys` table** of
+the app's Lakebase database (schema-qualified), NOT in `app.yaml`. On a fresh
+install the app self-seeds it; on an upgrade of a pre-key-table app the
+**deploy tool migrates it**: `tellr.update` / `deploy_local` — run as the
+deploying human, who has the privilege — read the legacy
+`GOOGLE_OAUTH_ENCRYPTION_KEY` from the existing `app.yaml`, seed it into the
+table, and write a **keyless** `app.yaml`.
+
+**The supported upgrade path is `tellr.update` / `deploy_local`, NOT the
+Databricks Apps UI "Deploy" button.** The UI button bypasses the deploy tool
+and reuses the old, still-key-bearing `app.yaml`, so it never performs the
+migration. As a **safety net**, the booting app reads `GOOGLE_OAUTH_ENCRYPTION_KEY`
+from its process environment (Apps injects every `app.yaml` `env:` entry) and
+seeds the table from it if the table is still empty — so a stray UI-button
+upgrade re-seeds the existing key instead of generating a fresh one and
+orphaning all existing encrypted Google credentials. This net only fires while
+the table is empty; once seeded (by either path) the stored row always wins.
+There is **no boot-time `app.yaml` scrub** — the running app's service principal
+cannot write its own source `app.yaml`; removing the key from `app.yaml` is the
+deploy tool's job.
+
 ## The loop
 
 ```bash

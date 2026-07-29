@@ -78,10 +78,15 @@ def _patch_common(monkeypatch, cfg):
         deploy_local, "_get_workspace_client", lambda profile=None: MagicMock()
     )
     monkeypatch.setattr(
-        deploy_local, "_check_branching_preconditions", lambda ws, config: "enc-key"
+        deploy_local, "_check_branching_preconditions", lambda ws, config: None
     )
+    # None: a truthy legacy key would fire the CRITICAL-3 migration block in
+    # update_local's non-fork path (unstubbed _get_lakebase_connection /
+    # _migrate_encryption_key_to_lakebase); these tests pin schema-connection
+    # behaviour only — migration coverage lives in
+    # test_deploy_encryption_key_migration.py.
     monkeypatch.setattr(
-        deploy_local, "_read_existing_encryption_key", lambda *a, **k: "enc-key"
+        deploy_local, "_read_existing_encryption_key", lambda *a, **k: None
     )
     monkeypatch.setattr(
         deploy_local, "_recreate_ephemeral_branch",

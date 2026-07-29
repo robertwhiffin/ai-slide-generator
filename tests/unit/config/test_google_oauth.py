@@ -58,6 +58,31 @@ def session_factory(db_engine):
     return sessionmaker(autocommit=False, autoflush=False, bind=db_engine)
 
 
+@pytest.fixture(autouse=True)
+def _encryption_db(session_factory, monkeypatch):
+    """Route get_encryption_key's DB access to this module's engine (SDR-4437)."""
+    from contextlib import contextmanager
+
+    from src.core.encryption import get_encryption_key
+
+    @contextmanager
+    def _session():
+        s = session_factory()
+        try:
+            yield s
+            s.commit()
+        except Exception:
+            s.rollback()
+            raise
+        finally:
+            s.close()
+
+    monkeypatch.setattr("src.core.database.get_db_session", _session)
+    get_encryption_key.cache_clear()
+    yield
+    get_encryption_key.cache_clear()
+
+
 @pytest.fixture(scope="function")
 def db_session(session_factory, db_engine):
     """Function-scoped session with data cleanup between tests."""

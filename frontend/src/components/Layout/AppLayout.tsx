@@ -33,6 +33,7 @@ import { AppSidebar } from './app-sidebar';
 import { PageHeader } from './page-header';
 import { SimplePageHeader } from './simple-page-header';
 import { GenieDataButton } from './GenieDataButton';
+import { ConfirmDialog } from '../ConfirmDialog';
 
 type ViewMode = 'main' | 'profiles' | 'deck_prompts' | 'design_systems' | 'slide_styles' | 'images' | 'history' | 'help';
 
@@ -53,6 +54,8 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
   const [sessionsRefreshKey, setSessionsRefreshKey] = useState<number>(0);
   const [scrollTarget, setScrollTarget] = useState<{ index: number; key: number } | null>(null);
   const [exportStatus, setExportStatus] = useState<string | null>(null);
+  const [isDuplicating, setIsDuplicating] = useState(false);
+  const isDuplicatingRef = useRef(false);
   // Save Points / versioning
   const [versions, setVersions] = useState<SavePointVersion[]>([]);
   const [currentVersion, setCurrentVersion] = useState<number | null>(null);
@@ -62,6 +65,7 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
   const [previewMessages, setPreviewMessages] = useState<import('../../types/message').Message[] | null>(null);
   const [showRevertModal, setShowRevertModal] = useState(false);
   const [revertTargetVersion, setRevertTargetVersion] = useState<number | null>(null);
+  const [showDuplicateConfirm, setShowDuplicateConfirm] = useState(false);
   const chatPanelRef = useRef<ChatPanelHandle>(null);
   const slidePanelRef = useRef<SlidePanelHandle>(null);
   const slideDeckRef = useRef(slideDeck);
@@ -511,6 +515,43 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
     );
   }, [sessionId, showToast]);
 
+  const performDuplicate = useCallback(async () => {
+    if (!sessionId || !slideDeck) return;
+    if (isDuplicatingRef.current) return;
+    isDuplicatingRef.current = true;
+    try {
+      setIsDuplicating(true);
+      const result = await api.duplicateSession(sessionId, {
+        versionNumber: previewVersion ?? undefined,
+      });
+      setSessionsRefreshKey((k) => k + 1);
+      showToast(`Created "${result.title}"`, 'success');
+      navigate(`/sessions/${result.session_id}/edit`);
+    } catch (err) {
+      console.error('Failed to duplicate deck:', err);
+      const message = err && typeof err === 'object' && 'message' in err
+        ? String((err as { message: string }).message)
+        : 'Failed to duplicate deck';
+      showToast(message, 'error');
+    } finally {
+      isDuplicatingRef.current = false;
+      setIsDuplicating(false);
+    }
+  }, [sessionId, slideDeck, previewVersion, navigate, showToast]);
+
+  const handleDuplicateClick = useCallback(() => {
+    if (!sessionId || !slideDeck) return;
+    if (
+      previewVersion != null
+      && currentVersion != null
+      && previewVersion < currentVersion
+    ) {
+      setShowDuplicateConfirm(true);
+      return;
+    }
+    void performDuplicate();
+  }, [sessionId, slideDeck, previewVersion, currentVersion, performDuplicate]);
+
   // Save Points: preview a version
   const handlePreviewVersion = useCallback(async (versionNumber: number) => {
     if (!sessionId) return;
@@ -728,6 +769,20 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
       ? `${editingLockHolder} is currently editing this session`
       : undefined;
 
+  const duplicateHint =
+    previewVersion != null
+    && currentVersion != null
+    && previewVersion < currentVersion
+      ? `Save point v${previewVersion}, not latest (v${currentVersion})`
+      : undefined;
+
+  const duplicateTitle =
+    previewVersion != null
+      ? duplicateHint
+        ? `Create a copy of save point v${previewVersion}. Latest save point is v${currentVersion}.`
+        : `Create a copy of save point v${previewVersion}`
+      : 'Create a private copy in My Sessions';
+
   return (
     <SidebarProvider className="h-svh max-h-svh">
       <AppSidebar
@@ -749,6 +804,10 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
                 onSave={() => setShowSaveDialog(true)}
                 onShare={!viewOnly && sessionId ? handleShare : undefined}
                 onCopyLink={!viewOnly && sessionId ? handleCopyLink : undefined}
+                onDuplicate={sessionId && slideDeck ? handleDuplicateClick : undefined}
+                isDuplicating={isDuplicating}
+                duplicateTitle={duplicateTitle}
+                duplicateHint={duplicateHint}
                 onExportPPTX={slideDeck ? handleExportPPTX : undefined}
                 onExportPDF={slideDeck ? handleExportPDF : undefined}
                 onExportHTML={slideDeck ? handleExportHTML : undefined}
@@ -865,6 +924,7 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
                   onSessionSelect={handleSessionRestore}
                   onBack={() => setViewMode('main')}
                   refreshKey={sessionsRefreshKey}
+                  onSessionsChange={() => setSessionsRefreshKey((k) => k + 1)}
                 />
               </div>
             </div>
@@ -969,6 +1029,26 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
           setShowRevertModal(false);
           setRevertTargetVersion(null);
         }}
+      />
+
+      <ConfirmDialog
+        open={showDuplicateConfirm}
+        title="Duplicate older save point?"
+        message={
+          previewVersion != null && currentVersion != null
+            ? `You're previewing save point v${previewVersion}. The latest save point is v${currentVersion}. Your copy will use v${previewVersion}, not the latest version.`
+            : 'Your copy will use the save point you are previewing, not the latest version.'
+        }
+        confirmLabel={
+          previewVersion != null ? `Duplicate v${previewVersion}` : 'Duplicate'
+        }
+        cancelLabel="Cancel"
+        variant="default"
+        onConfirm={() => {
+          setShowDuplicateConfirm(false);
+          void performDuplicate();
+        }}
+        onCancel={() => setShowDuplicateConfirm(false)}
       />
 
       {/* Share Deck Dialog */}

@@ -1,5 +1,9 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import { api } from '../../services/api';
+import { api, type FeedbackItem } from '../../services/api';
+
+const CATEGORIES = ['Bug Report', 'Feature Request', 'UX Issue', 'Performance', 'Content Quality', 'Other'];
+const SEVERITIES = ['Low', 'Medium', 'High'];
+const PAGE_SIZE = 20;
 
 interface WeekStats {
   week_start: string;
@@ -44,6 +48,18 @@ export const FeedbackDashboard: React.FC = () => {
   const [statsWeeks, setStatsWeeks] = useState(12);
   const [summaryWeeks, setSummaryWeeks] = useState(4);
 
+  const [items, setItems] = useState<FeedbackItem[]>([]);
+  const [total, setTotal] = useState(0);
+  const [page, setPage] = useState(1);
+  const [category, setCategory] = useState('');
+  const [severity, setSeverity] = useState('');
+  const [browserWeeks, setBrowserWeeks] = useState(12);
+  const [browserLoading, setBrowserLoading] = useState(true);
+  const [browserError, setBrowserError] = useState<string | null>(null);
+  const [expandedId, setExpandedId] = useState<number | null>(null);
+  const [summaryOpen, setSummaryOpen] = useState(false);
+  const [summaryLoaded, setSummaryLoaded] = useState(false);
+
   const loadStats = useCallback(async () => {
     setStatsLoading(true);
     setStatsError(null);
@@ -72,8 +88,40 @@ export const FeedbackDashboard: React.FC = () => {
     }
   }, [summaryWeeks]);
 
+  const loadFeedback = useCallback(async () => {
+    setBrowserLoading(true);
+    setBrowserError(null);
+    try {
+      const data = await api.listFeedback({
+        weeks: browserWeeks,
+        category: category || undefined,
+        severity: severity || undefined,
+        page,
+        pageSize: PAGE_SIZE,
+      });
+      setItems(data.items);
+      setTotal(data.total);
+    } catch (err) {
+      setBrowserError(err instanceof Error ? err.message : 'Failed to load feedback');
+    } finally {
+      setBrowserLoading(false);
+    }
+  }, [browserWeeks, category, severity, page]);
+
   useEffect(() => { loadStats(); }, [loadStats]);
-  useEffect(() => { loadSummary(); }, [loadSummary]);
+  useEffect(() => { loadFeedback(); }, [loadFeedback]);
+  // Reset to page 1 when filters change
+  useEffect(() => { setPage(1); }, [browserWeeks, category, severity]);
+  // The AI summary is expensive: load it only after first expand (summaryLoaded),
+  // and reload when summaryWeeks changes (via loadSummary identity).
+  useEffect(() => { if (summaryLoaded) loadSummary(); }, [loadSummary, summaryLoaded]);
+
+  const openSummary = () => {
+    setSummaryOpen((open) => !open);
+    if (!summaryLoaded) {
+      setSummaryLoaded(true); // triggers the gated effect above to load the summary
+    }
+  };
 
   /** If the summary field is a JSON string, parse out the text and themes. */
   const parsedSummary = (() => {
@@ -185,10 +233,133 @@ export const FeedbackDashboard: React.FC = () => {
         </div>
       </section>
 
-      {/* AI Summary */}
+      {/* Raw Feedback Browser */}
       <section className="bg-white rounded-lg shadow-sm border border-gray-200">
-        <div className="px-6 py-4 border-b border-gray-200 flex items-center justify-between">
-          <h2 className="text-lg font-semibold text-gray-900">AI Feedback Summary</h2>
+        <div className="px-6 py-4 border-b border-gray-200 flex flex-wrap items-center justify-between gap-3">
+          <h2 className="text-lg font-semibold text-gray-900">Feedback Browser</h2>
+          <div className="flex flex-wrap items-center gap-3 text-sm">
+            <select value={category} onChange={(e) => setCategory(e.target.value)}
+              className="border border-gray-300 rounded px-2 py-1" aria-label="Filter by category">
+              <option value="">All categories</option>
+              {CATEGORIES.map((c) => <option key={c} value={c}>{c}</option>)}
+            </select>
+            <select value={severity} onChange={(e) => setSeverity(e.target.value)}
+              className="border border-gray-300 rounded px-2 py-1" aria-label="Filter by severity">
+              <option value="">All severities</option>
+              {SEVERITIES.map((s) => <option key={s} value={s}>{s}</option>)}
+            </select>
+            <select value={browserWeeks} onChange={(e) => setBrowserWeeks(Number(e.target.value))}
+              className="border border-gray-300 rounded px-2 py-1" aria-label="Weeks window">
+              {[4, 8, 12, 26, 52].map((w) => <option key={w} value={w}>{w} weeks</option>)}
+            </select>
+          </div>
+        </div>
+
+        <div className="p-6">
+          {browserLoading && <p className="text-sm text-gray-500">Loading feedback...</p>}
+          {browserError && <p className="text-sm text-red-600">{browserError}</p>}
+          {!browserLoading && !browserError && items.length === 0 && (
+            <p className="text-sm text-gray-500">No feedback in this window.</p>
+          )}
+
+          {!browserLoading && !browserError && items.length > 0 && (
+            <>
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="border-b border-gray-200 text-left text-gray-600">
+                    <th className="pb-2 pr-4 font-medium">Date</th>
+                    <th className="pb-2 pr-4 font-medium">Category</th>
+                    <th className="pb-2 pr-4 font-medium">Severity</th>
+                    <th className="pb-2 font-medium">Summary</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {items.map((item) => (
+                    <React.Fragment key={item.id}>
+                      <tr
+                        className="border-b border-gray-100 cursor-pointer hover:bg-gray-50"
+                        onClick={() => setExpandedId(expandedId === item.id ? null : item.id)}
+                      >
+                        <td className="py-2 pr-4 text-gray-700 whitespace-nowrap align-top">
+                          {new Date(item.created_at).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })}
+                        </td>
+                        <td className="py-2 pr-4 align-top">
+                          <span className="inline-block px-2 py-0.5 rounded-full text-xs font-medium bg-blue-50 text-blue-700">
+                            {item.category}
+                          </span>
+                        </td>
+                        <td className="py-2 pr-4 align-top">
+                          <span className={`inline-block px-2 py-0.5 rounded-full text-xs font-medium ${
+                            item.severity === 'High' ? 'bg-red-50 text-red-700'
+                              : item.severity === 'Medium' ? 'bg-amber-50 text-amber-700'
+                              : 'bg-gray-100 text-gray-600'
+                          }`}>
+                            {item.severity}
+                          </span>
+                        </td>
+                        <td className="py-2 text-gray-800 align-top">{item.summary}</td>
+                      </tr>
+                      {expandedId === item.id && (
+                        <tr className="border-b border-gray-100 bg-gray-50">
+                          <td colSpan={4} className="p-4">
+                            <h4 className="text-xs font-medium text-gray-500 uppercase mb-2">Full conversation</h4>
+                            <div className="space-y-2">
+                              {item.raw_conversation.map((msg, i) => (
+                                <div key={i} className={`text-sm rounded-lg px-3 py-2 max-w-3xl ${
+                                  msg.role === 'user' ? 'bg-blue-50 text-blue-900' : 'bg-white border border-gray-200 text-gray-700'
+                                }`}>
+                                  <span className="text-xs font-semibold uppercase text-gray-400 mr-2">{msg.role}</span>
+                                  {msg.content}
+                                </div>
+                              ))}
+                            </div>
+                          </td>
+                        </tr>
+                      )}
+                    </React.Fragment>
+                  ))}
+                </tbody>
+              </table>
+
+              <div className="flex items-center justify-between mt-4 text-sm text-gray-600">
+                <span>{total} item{total === 1 ? '' : 's'}</span>
+                <div className="flex items-center gap-2">
+                  <button
+                    disabled={page <= 1}
+                    onClick={() => setPage((p) => p - 1)}
+                    className="px-3 py-1 border border-gray-300 rounded disabled:opacity-40"
+                  >
+                    Previous
+                  </button>
+                  <span>Page {page} of {Math.max(1, Math.ceil(total / PAGE_SIZE))}</span>
+                  <button
+                    disabled={page >= Math.ceil(total / PAGE_SIZE)}
+                    onClick={() => setPage((p) => p + 1)}
+                    className="px-3 py-1 border border-gray-300 rounded disabled:opacity-40"
+                  >
+                    Next
+                  </button>
+                </div>
+              </div>
+            </>
+          )}
+        </div>
+      </section>
+
+      {/* AI Summary (collapsed by default; loads only on first expand) */}
+      <section className="bg-white rounded-lg shadow-sm border border-gray-200">
+        <button
+          type="button"
+          onClick={openSummary}
+          className="w-full px-6 py-4 flex items-center justify-between text-left"
+          aria-expanded={summaryOpen}
+        >
+          <h2 className="text-lg font-semibold text-gray-900">AI Summary (optional)</h2>
+          <span className="text-gray-400 text-sm">{summaryOpen ? 'Hide' : 'Show'}</span>
+        </button>
+
+        {summaryOpen && (
+        <div className="px-6 pb-6 space-y-4 border-t border-gray-200 pt-4">
           <div className="flex items-center gap-2">
             <label htmlFor="summary-weeks" className="text-sm text-gray-600">Weeks:</label>
             <select
@@ -202,9 +373,6 @@ export const FeedbackDashboard: React.FC = () => {
               ))}
             </select>
           </div>
-        </div>
-
-        <div className="p-6 space-y-4">
           {summaryLoading && <p className="text-sm text-gray-500">Generating summary...</p>}
           {summaryError && <p className="text-sm text-red-600">{summaryError}</p>}
 
@@ -248,6 +416,7 @@ export const FeedbackDashboard: React.FC = () => {
             </>
           )}
         </div>
+        )}
       </section>
     </div>
   );

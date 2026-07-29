@@ -4,6 +4,12 @@ from typing import Optional
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
+# Cap on user chat input length. The 8192 cap from the 2026-06 security
+# hardening materially hurt usability (pasting source material into the
+# prompt), so it is disabled; set an int here to re-enable it end-to-end
+# (MCP_PROMPT_LIMIT in src/api/mcp_server.py mirrors this value).
+CHAT_MESSAGE_MAX_LENGTH: Optional[int] = None
+
 
 class SlideContext(BaseModel):
     """Context about selected slides for editing."""
@@ -62,7 +68,7 @@ class ChatRequest(BaseModel):
         ...,
         description="Natural language message to the AI agent",
         min_length=1,
-        max_length=8192,
+        max_length=CHAT_MESSAGE_MAX_LENGTH,
     )
     slide_context: Optional[SlideContext] = Field(
         default=None,
@@ -127,4 +133,19 @@ class CreateSessionRequest(BaseModel):
         default=None,
         description="Optional session title",
         max_length=255,
+    )
+
+
+class DuplicateSessionRequest(BaseModel):
+    """Request model for duplicating an existing slide deck session."""
+
+    title: Optional[str] = Field(
+        default=None,
+        description="Optional title for the duplicated deck (default: Copy of {source title})",
+        max_length=255,
+    )
+    version_number: Optional[int] = Field(
+        default=None,
+        ge=1,
+        description="Optional save point version to copy instead of the live deck",
     )

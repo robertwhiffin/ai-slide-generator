@@ -108,6 +108,37 @@ class SlideDeck:
         self.css = merge_css(self.css, replacement_css)
 
     @classmethod
+    def from_dict(
+        cls,
+        deck_dict: Dict[str, Any],
+        *,
+        title: Optional[str] = None,
+    ) -> "SlideDeck":
+        """Reconstruct a SlideDeck from a persisted deck JSON snapshot."""
+        deck_dict = deck_dict or {}
+        slides: List[Slide] = []
+        for idx, slide_data in enumerate(deck_dict.get("slides") or []):
+            slides.append(
+                Slide(
+                    html=slide_data.get("html", ""),
+                    slide_id=slide_data.get("slide_id", f"slide_{idx}"),
+                    scripts=slide_data.get("scripts", ""),
+                    created_by=slide_data.get("created_by"),
+                    created_at=slide_data.get("created_at"),
+                    modified_by=slide_data.get("modified_by"),
+                    modified_at=slide_data.get("modified_at"),
+                )
+            )
+
+        return cls(
+            title=title if title is not None else deck_dict.get("title"),
+            css=deck_dict.get("css", ""),
+            external_scripts=list(deck_dict.get("external_scripts") or []),
+            slides=slides,
+            head_meta=dict(deck_dict.get("head_meta") or {}),
+        )
+
+    @classmethod
     def from_html(cls, html_path: str) -> 'SlideDeck':
         """Parse an HTML file and create a SlideDeck.
         
@@ -496,6 +527,7 @@ class SlideDeck:
             'external_scripts': self.external_scripts,
             'scripts': self.scripts,
             'slides': slides_list,
+            'head_meta': self.head_meta,
         }
 
     def to_html_document(self, chart_js_cdn: Optional[str] = None) -> str:

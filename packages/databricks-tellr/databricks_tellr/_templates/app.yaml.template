@@ -27,8 +27,6 @@ env:
     value: "${LAKEBASE_INSTANCE}"
   - name: LAKEBASE_SCHEMA
     value: "${LAKEBASE_SCHEMA}"
-  - name: GOOGLE_OAUTH_ENCRYPTION_KEY
-    value: "${GOOGLE_OAUTH_ENCRYPTION_KEY}"
   - name: LAKEBASE_TYPE
     value: "${LAKEBASE_TYPE}"
   - name: LAKEBASE_PG_HOST

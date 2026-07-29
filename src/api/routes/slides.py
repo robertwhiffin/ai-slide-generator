@@ -11,98 +11,27 @@ Slide access is controlled by session permissions:
 
 import asyncio
 import logging
-from typing import List, Optional, Tuple
+from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
+from src.api.routes._authz import (
+    _check_deck_permission_for_session,
+    _require_slide_permission,
+)
 from src.api.services.chat_service import get_chat_service
-from src.api.services.session_manager import SessionNotFoundError, VersionConflictError, get_session_manager
+from src.api.services.session_manager import VersionConflictError, get_session_manager
 from src.core.context_utils import run_in_thread_with_context
 from src.core.database import get_db
-from src.core.permission_context import get_permission_context
-from src.core.user_context import get_current_user
+from src.core.permission_context import get_permission_context  # noqa: F401 — patched by integration-test fixtures
+from src.core.user_context import get_current_user  # noqa: F401 — patched by integration-test fixtures
 from src.database.models.profile_contributor import PermissionLevel
-from src.services.permission_service import get_permission_service, PERMISSION_PRIORITY
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/slides", tags=["slides"])
-
-
-def _get_session_permission(
-    session_id: str,
-    db: Session,
-) -> Tuple[bool, Optional[PermissionLevel]]:
-    """Check if current user has access to a session's slides via deck_contributors.
-
-    Resolves to the root session (parent for contributor sessions) and checks
-    the DeckContributor table for the current user's permission level.
-
-    Args:
-        session_id: Session identifier (string)
-        db: Database session
-
-    Returns:
-        Tuple of (has_access, permission_level)
-    """
-    session_manager = get_session_manager()
-    ctx = get_permission_context()
-
-    try:
-        session_info = session_manager.get_session(session_id)
-    except SessionNotFoundError:
-        return False, None
-
-    perm_service = get_permission_service()
-    parent_internal_id = session_info.get("parent_session_internal_id")
-    root_session_id = parent_internal_id if parent_internal_id is not None else session_info.get("id")
-
-    perm = perm_service.get_deck_permission(
-        db, root_session_id,
-        user_id=ctx.user_id if ctx else None,
-        user_name=ctx.user_name if ctx else None,
-        group_ids=ctx.group_ids if ctx else None,
-    )
-    if perm is None:
-        return False, None
-    return True, perm
-
-
-def _require_slide_permission(
-    session_id: str,
-    db: Session,
-    min_permission: PermissionLevel = PermissionLevel.CAN_VIEW,
-) -> PermissionLevel:
-    """Require user has at least the specified permission level on slides.
-    
-    Args:
-        session_id: Session identifier
-        db: Database session
-        min_permission: Minimum required permission (default: CAN_VIEW)
-        
-    Returns:
-        The user's actual permission level
-        
-    Raises:
-        HTTPException 403: If user doesn't have required permission
-    """
-    has_access, permission = _get_session_permission(session_id, db)
-    
-    if not has_access or permission is None:
-        raise HTTPException(
-            status_code=403,
-            detail="You don't have permission to access these slides",
-        )
-    
-    if PERMISSION_PRIORITY[permission] < PERMISSION_PRIORITY[min_permission]:
-        raise HTTPException(
-            status_code=403,
-            detail=f"This action requires {min_permission.value} permission",
-        )
-    
-    return permission
 
 
 class ReorderRequest(BaseModel):
@@ -478,8 +407,11 @@ async def update_slide_verification(index: int, request: UpdateVerificationReque
     Raises:
         HTTPException: 400 for validation errors, 404 if slide not found, 500 on error
     """
+    # SDR-4437 HIGH-1: version/verification writes require CAN_EDIT.
+    _check_deck_permission_for_session(request.session_id, PermissionLevel.CAN_EDIT)
+
     from src.utils.slide_hash import compute_slide_hash
-    
+
     session_manager = get_session_manager()
 
     try:
@@ -588,6 +520,9 @@ async def create_version(request: CreateVersionRequest):
     Raises:
         HTTPException: 400 if no deck exists, 500 on error
     """
+    # SDR-4437 HIGH-1: version/verification writes require CAN_EDIT.
+    _check_deck_permission_for_session(request.session_id, PermissionLevel.CAN_EDIT)
+
     try:
         chat_service = get_chat_service()
         version_info = await asyncio.to_thread(
@@ -635,6 +570,9 @@ async def update_version_verification(
     Raises:
         HTTPException: 400 if version not found, 500 on error
     """
+    # SDR-4437 HIGH-1: version/verification writes require CAN_EDIT.
+    _check_deck_permission_for_session(request.session_id, PermissionLevel.CAN_EDIT)
+
     try:
         session_manager = get_session_manager()
         result = await asyncio.to_thread(
@@ -680,6 +618,9 @@ async def sync_latest_version_verification(request: SyncVerificationRequest):
     Returns:
         Updated version info, or empty dict if no versions exist
     """
+    # SDR-4437 HIGH-1: version/verification writes require CAN_EDIT.
+    _check_deck_permission_for_session(request.session_id, PermissionLevel.CAN_EDIT)
+
     try:
         session_manager = get_session_manager()
 
@@ -738,6 +679,9 @@ async def list_versions(session_id: str = Query(..., description="Session ID")):
     Raises:
         HTTPException: 404 if session not found, 500 on error
     """
+    # SDR-4437 HIGH-1: version reads require CAN_VIEW.
+    _check_deck_permission_for_session(session_id, PermissionLevel.CAN_VIEW)
+
     session_manager = get_session_manager()
 
     try:
@@ -757,6 +701,43 @@ async def list_versions(session_id: str = Query(..., description="Session ID")):
         return {"versions": [], "current_version": None}
     except Exception as e:
         logger.error(f"Failed to list versions: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# NOTE: must be registered BEFORE the parameterized "/versions/{version_number}"
+# route below — otherwise "current" matches {version_number}, fails int parsing,
+# and the request 422s before this handler (and its permission gate) ever runs.
+@router.get("/versions/current")
+async def get_current_version(session_id: str = Query(..., description="Session ID")):
+    """Get the current (latest) version number.
+
+    Args:
+        session_id: Session identifier
+
+    Returns:
+        Current version number or null if no versions exist
+
+    Raises:
+        HTTPException: 500 on error
+    """
+    # SDR-4437 HIGH-1: version reads require CAN_VIEW.
+    _check_deck_permission_for_session(session_id, PermissionLevel.CAN_VIEW)
+
+    session_manager = get_session_manager()
+
+    try:
+        version_number = await asyncio.to_thread(
+            session_manager.get_current_version_number,
+            session_id,
+        )
+
+        return {"current_version": version_number}
+
+    except SessionNotFoundError:
+        # Session hasn't been persisted yet (local UUID) - no versions
+        return {"current_version": None}
+    except Exception as e:
+        logger.error(f"Failed to get current version: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -780,6 +761,9 @@ async def preview_version(
     Raises:
         HTTPException: 404 if version not found, 500 on error
     """
+    # SDR-4437 HIGH-1: version reads require CAN_VIEW.
+    _check_deck_permission_for_session(session_id, PermissionLevel.CAN_VIEW)
+
     session_manager = get_session_manager()
 
     try:
@@ -829,6 +813,9 @@ async def restore_version(version_number: int, request: RestoreVersionRequest):
     Raises:
         HTTPException: 400 if version not found, 409 if session busy, 500 on error
     """
+    # SDR-4437 HIGH-1: restore is destructive (deletes newer versions) — CAN_MANAGE.
+    _check_deck_permission_for_session(request.session_id, PermissionLevel.CAN_MANAGE)
+
     session_manager = get_session_manager()
 
     locked = await asyncio.to_thread(
@@ -880,32 +867,3 @@ async def restore_version(version_number: int, request: RestoreVersionRequest):
         )
 
 
-@router.get("/versions/current")
-async def get_current_version(session_id: str = Query(..., description="Session ID")):
-    """Get the current (latest) version number.
-
-    Args:
-        session_id: Session identifier
-
-    Returns:
-        Current version number or null if no versions exist
-
-    Raises:
-        HTTPException: 500 on error
-    """
-    session_manager = get_session_manager()
-
-    try:
-        version_number = await asyncio.to_thread(
-            session_manager.get_current_version_number,
-            session_id,
-        )
-
-        return {"current_version": version_number}
-
-    except SessionNotFoundError:
-        # Session hasn't been persisted yet (local UUID) - no versions
-        return {"current_version": None}
-    except Exception as e:
-        logger.error(f"Failed to get current version: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))

@@ -168,8 +168,11 @@ class TestGetSessionSlidesPermission:
         mock_mgr.get_slide_deck.return_value = None
 
         with patch("src.api.routes.sessions.get_session_manager", return_value=mock_mgr), \
+             patch("src.api.routes._authz.get_session_manager", return_value=mock_mgr), \
              patch("src.api.routes.sessions.get_permission_context", return_value=_stranger_ctx()), \
-             patch("src.api.routes.sessions.get_db_session", _fake_db_session(db)):
+             patch("src.api.routes._authz.get_permission_context", return_value=_stranger_ctx()), \
+             patch("src.api.routes.sessions.get_db_session", _fake_db_session(db)), \
+             patch("src.api.routes._authz.get_db_session", _fake_db_session(db)):
             with pytest.raises(HTTPException) as exc_info:
                 _run(get_session_slides(owner_session.session_id))
             assert exc_info.value.status_code == 403
@@ -183,8 +186,11 @@ class TestGetSessionSlidesPermission:
         mock_mgr.get_slide_deck.return_value = None
 
         with patch("src.api.routes.sessions.get_session_manager", return_value=mock_mgr), \
+             patch("src.api.routes._authz.get_session_manager", return_value=mock_mgr), \
              patch("src.api.routes.sessions.get_permission_context", return_value=_viewer_ctx()), \
-             patch("src.api.routes.sessions.get_db_session", _fake_db_session(db)):
+             patch("src.api.routes._authz.get_permission_context", return_value=_viewer_ctx()), \
+             patch("src.api.routes.sessions.get_db_session", _fake_db_session(db)), \
+             patch("src.api.routes._authz.get_db_session", _fake_db_session(db)):
             result = _run(get_session_slides(owner_session.session_id))
             assert "session_id" in result
 
@@ -197,8 +203,11 @@ class TestGetSessionSlidesPermission:
         mock_mgr.get_slide_deck.return_value = None
 
         with patch("src.api.routes.sessions.get_session_manager", return_value=mock_mgr), \
+             patch("src.api.routes._authz.get_session_manager", return_value=mock_mgr), \
              patch("src.api.routes.sessions.get_permission_context", return_value=_owner_ctx()), \
-             patch("src.api.routes.sessions.get_db_session", _fake_db_session(db)):
+             patch("src.api.routes._authz.get_permission_context", return_value=_owner_ctx()), \
+             patch("src.api.routes.sessions.get_db_session", _fake_db_session(db)), \
+             patch("src.api.routes._authz.get_db_session", _fake_db_session(db)):
             result = _run(get_session_slides(owner_session.session_id))
             assert "session_id" in result
 
@@ -219,8 +228,11 @@ class TestExportSessionPermission:
         mock_mgr.get_session.return_value = _make_session_info(owner_session)
 
         with patch("src.api.routes.sessions.get_session_manager", return_value=mock_mgr), \
+             patch("src.api.routes._authz.get_session_manager", return_value=mock_mgr), \
              patch("src.api.routes.sessions.get_permission_context", return_value=_stranger_ctx()), \
-             patch("src.api.routes.sessions.get_db_session", _fake_db_session(db)):
+             patch("src.api.routes._authz.get_permission_context", return_value=_stranger_ctx()), \
+             patch("src.api.routes.sessions.get_db_session", _fake_db_session(db)), \
+             patch("src.api.routes._authz.get_db_session", _fake_db_session(db)):
             with pytest.raises(HTTPException) as exc_info:
                 _run(export_session(owner_session.session_id))
             assert exc_info.value.status_code == 403
@@ -234,8 +246,11 @@ class TestExportSessionPermission:
         mock_mgr.get_slide_deck.return_value = None
 
         with patch("src.api.routes.sessions.get_session_manager", return_value=mock_mgr), \
+             patch("src.api.routes._authz.get_session_manager", return_value=mock_mgr), \
              patch("src.api.routes.sessions.get_permission_context", return_value=_viewer_ctx()), \
+             patch("src.api.routes._authz.get_permission_context", return_value=_viewer_ctx()), \
              patch("src.api.routes.sessions.get_db_session", _fake_db_session(db)), \
+             patch("src.api.routes._authz.get_db_session", _fake_db_session(db)), \
              patch("src.api.routes.sessions.Path"):
             import builtins
             with patch.object(builtins, "open", MagicMock()):
@@ -259,9 +274,12 @@ class TestAcquireEditingLockPermission:
         mock_mgr.get_session.return_value = _make_session_info(owner_session)
 
         with patch("src.api.routes.sessions.get_session_manager", return_value=mock_mgr), \
+             patch("src.api.routes._authz.get_session_manager", return_value=mock_mgr), \
              patch("src.api.routes.sessions.get_current_user", return_value="stranger@test.com"), \
              patch("src.api.routes.sessions.get_permission_context", return_value=_stranger_ctx()), \
-             patch("src.api.routes.sessions.get_db_session", _fake_db_session(db)):
+             patch("src.api.routes._authz.get_permission_context", return_value=_stranger_ctx()), \
+             patch("src.api.routes.sessions.get_db_session", _fake_db_session(db)), \
+             patch("src.api.routes._authz.get_db_session", _fake_db_session(db)):
             with pytest.raises(HTTPException) as exc_info:
                 _run(acquire_editing_lock(owner_session.session_id))
             assert exc_info.value.status_code == 403
@@ -275,9 +293,12 @@ class TestAcquireEditingLockPermission:
         mock_mgr.get_session.return_value = _make_session_info(owner_session)
 
         with patch("src.api.routes.sessions.get_session_manager", return_value=mock_mgr), \
+             patch("src.api.routes._authz.get_session_manager", return_value=mock_mgr), \
              patch("src.api.routes.sessions.get_current_user", return_value="viewer@test.com"), \
              patch("src.api.routes.sessions.get_permission_context", return_value=_viewer_ctx()), \
-             patch("src.api.routes.sessions.get_db_session", _fake_db_session(db)):
+             patch("src.api.routes._authz.get_permission_context", return_value=_viewer_ctx()), \
+             patch("src.api.routes.sessions.get_db_session", _fake_db_session(db)), \
+             patch("src.api.routes._authz.get_db_session", _fake_db_session(db)):
             with pytest.raises(HTTPException) as exc_info:
                 _run(acquire_editing_lock(owner_session.session_id))
             assert exc_info.value.status_code == 403
@@ -290,9 +311,12 @@ class TestAcquireEditingLockPermission:
         mock_mgr.acquire_editing_lock.return_value = {"locked": True}
 
         with patch("src.api.routes.sessions.get_session_manager", return_value=mock_mgr), \
+             patch("src.api.routes._authz.get_session_manager", return_value=mock_mgr), \
              patch("src.api.routes.sessions.get_current_user", return_value="editor@test.com"), \
              patch("src.api.routes.sessions.get_permission_context", return_value=_editor_ctx()), \
-             patch("src.api.routes.sessions.get_db_session", _fake_db_session(db)):
+             patch("src.api.routes._authz.get_permission_context", return_value=_editor_ctx()), \
+             patch("src.api.routes.sessions.get_db_session", _fake_db_session(db)), \
+             patch("src.api.routes._authz.get_db_session", _fake_db_session(db)):
             result = _run(acquire_editing_lock(owner_session.session_id))
             assert result == {"locked": True}
 
@@ -310,9 +334,12 @@ class TestAcquireEditingLockPermission:
         )
 
         with patch("src.api.routes.sessions.get_session_manager", return_value=mock_mgr), \
+             patch("src.api.routes._authz.get_session_manager", return_value=mock_mgr), \
              patch("src.api.routes.sessions.get_current_user", return_value="editor@test.com"), \
              patch("src.api.routes.sessions.get_permission_context", return_value=_editor_ctx()), \
-             patch("src.api.routes.sessions.get_db_session", _fake_db_session(db)):
+             patch("src.api.routes._authz.get_permission_context", return_value=_editor_ctx()), \
+             patch("src.api.routes.sessions.get_db_session", _fake_db_session(db)), \
+             patch("src.api.routes._authz.get_db_session", _fake_db_session(db)):
             with pytest.raises(HTTPException) as exc_info:
                 _run(acquire_editing_lock(missing_id))
             assert exc_info.value.status_code == 404
@@ -330,9 +357,12 @@ class TestReleaseEditingLockPermission:
         mock_mgr.get_session.return_value = _make_session_info(owner_session)
 
         with patch("src.api.routes.sessions.get_session_manager", return_value=mock_mgr), \
+             patch("src.api.routes._authz.get_session_manager", return_value=mock_mgr), \
              patch("src.api.routes.sessions.get_current_user", return_value="stranger@test.com"), \
              patch("src.api.routes.sessions.get_permission_context", return_value=_stranger_ctx()), \
-             patch("src.api.routes.sessions.get_db_session", _fake_db_session(db)):
+             patch("src.api.routes._authz.get_permission_context", return_value=_stranger_ctx()), \
+             patch("src.api.routes.sessions.get_db_session", _fake_db_session(db)), \
+             patch("src.api.routes._authz.get_db_session", _fake_db_session(db)):
             with pytest.raises(HTTPException) as exc_info:
                 _run(release_editing_lock(owner_session.session_id))
             assert exc_info.value.status_code == 403
@@ -349,8 +379,11 @@ class TestGetEditingLockStatusPermission:
         mock_mgr.get_session.return_value = _make_session_info(owner_session)
 
         with patch("src.api.routes.sessions.get_session_manager", return_value=mock_mgr), \
+             patch("src.api.routes._authz.get_session_manager", return_value=mock_mgr), \
              patch("src.api.routes.sessions.get_permission_context", return_value=_stranger_ctx()), \
-             patch("src.api.routes.sessions.get_db_session", _fake_db_session(db)):
+             patch("src.api.routes._authz.get_permission_context", return_value=_stranger_ctx()), \
+             patch("src.api.routes.sessions.get_db_session", _fake_db_session(db)), \
+             patch("src.api.routes._authz.get_db_session", _fake_db_session(db)):
             with pytest.raises(HTTPException) as exc_info:
                 _run(get_editing_lock_status(owner_session.session_id))
             assert exc_info.value.status_code == 403
@@ -363,8 +396,11 @@ class TestGetEditingLockStatusPermission:
         mock_mgr.get_editing_lock_status.return_value = {"locked": False}
 
         with patch("src.api.routes.sessions.get_session_manager", return_value=mock_mgr), \
+             patch("src.api.routes._authz.get_session_manager", return_value=mock_mgr), \
              patch("src.api.routes.sessions.get_permission_context", return_value=_viewer_ctx()), \
-             patch("src.api.routes.sessions.get_db_session", _fake_db_session(db)):
+             patch("src.api.routes._authz.get_permission_context", return_value=_viewer_ctx()), \
+             patch("src.api.routes.sessions.get_db_session", _fake_db_session(db)), \
+             patch("src.api.routes._authz.get_db_session", _fake_db_session(db)):
             result = _run(get_editing_lock_status(owner_session.session_id))
             assert result == {"locked": False}
 
@@ -380,9 +416,12 @@ class TestHeartbeatEditingLockPermission:
         mock_mgr.get_session.return_value = _make_session_info(owner_session)
 
         with patch("src.api.routes.sessions.get_session_manager", return_value=mock_mgr), \
+             patch("src.api.routes._authz.get_session_manager", return_value=mock_mgr), \
              patch("src.api.routes.sessions.get_current_user", return_value="stranger@test.com"), \
              patch("src.api.routes.sessions.get_permission_context", return_value=_stranger_ctx()), \
-             patch("src.api.routes.sessions.get_db_session", _fake_db_session(db)):
+             patch("src.api.routes._authz.get_permission_context", return_value=_stranger_ctx()), \
+             patch("src.api.routes.sessions.get_db_session", _fake_db_session(db)), \
+             patch("src.api.routes._authz.get_db_session", _fake_db_session(db)):
             with pytest.raises(HTTPException) as exc_info:
                 _run(heartbeat_editing_lock(owner_session.session_id))
             assert exc_info.value.status_code == 403

@@ -29,6 +29,17 @@ def mock_session_manager():
 class TestGenieLinkWithSpaceId:
     """GET /api/verification/genie-link?session_id=X&space_id=Y"""
 
+    @pytest.fixture(autouse=True)
+    def _bypass_deck_gate(self, monkeypatch):
+        # SDR-4437 PR-2 (Task 7): genie-link now requires CAN_VIEW on the deck.
+        # These pre-existing tests use a mocked session manager without a
+        # permission fixture, so no-op the gate here — never weaken it; its
+        # enforcement is covered by tests/unit/test_authz_verification.py.
+        monkeypatch.setattr(
+            "src.api.routes.verification._check_deck_permission_for_session",
+            lambda *a, **k: None,
+        )
+
     def test_returns_link_for_specific_space(self, client, mock_session_manager):
         """When space_id is provided, should use agent_config to find conversation_id."""
         mock_session_manager.get_session.return_value = {

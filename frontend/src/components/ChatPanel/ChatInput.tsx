@@ -53,9 +53,10 @@ export const ChatInput: React.FC<ChatInputProps> = ({
       setUploading(true);
       try {
         const asset = await api.uploadImage(f, { saveToLibrary: false });
-        const previewUrl = asset.thumbnail_base64
-          ? `data:${asset.mime_type};base64,${asset.thumbnail_base64}`
-          : undefined;
+        // thumbnail_base64 is already a complete data URI (data:<mime>;base64,...)
+        // from the backend — use it as-is. Prepending another scheme here yields a
+        // doubled prefix and net::ERR_INVALID_URL.
+        const previewUrl = asset.thumbnail_base64 ?? undefined;
         addUploadedImage(asset.id, previewUrl);
       } catch (err) {
         console.warn('Paste image upload failed:', err);
@@ -75,9 +76,9 @@ export const ChatInput: React.FC<ChatInputProps> = ({
         for (const file of Array.from(files)) {
           if (!file.type.startsWith('image/')) continue;
           const asset = await api.uploadImage(file, { saveToLibrary: false });
-          const previewUrl = asset.thumbnail_base64
-            ? `data:${asset.mime_type};base64,${asset.thumbnail_base64}`
-            : undefined;
+          // thumbnail_base64 is already a complete data URI from the backend —
+          // use it as-is (see handlePaste).
+          const previewUrl = asset.thumbnail_base64 ?? undefined;
           addUploadedImage(asset.id, previewUrl);
         }
       } catch (err) {

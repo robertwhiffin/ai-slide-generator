@@ -34,6 +34,17 @@ FONT SIZE GUIDE (CRITICAL — maximums for 16:9):
 NEVER exceed these. When content is dense, go SMALLER.
 Always set font size explicitly on every text element you create.
 
+HEADINGS — FULL WIDTH (CRITICAL):
+- Every heading-type text box (slide title, section/divider number like "01", eyebrow/kicker,
+  and any large standalone heading) MUST span the full margined width: left=0.4", width=9.2"
+  (so the right edge lands at 9.6", mirroring the left margin). This is true even for a short
+  string like "01" or a two-word title.
+- Rationale: a heading box sized tight to its expected text wraps or clips when the font is large.
+  A full-width box has room for the text on one line, so it never wraps for lack of width.
+- Only exception: a heading that shares its row with other content (e.g. a logo beside it, or a
+  two-column header) — then size it to its own column, still with symmetric gutters.
+- Keep the font within the guide above; do NOT shrink a heading just because the box is now wider.
+
 METRIC CARDS (.metric-card):
 - Create ROUND_RECTANGLE bg: card_id = 'card_' + str(uuid.uuid4())[:8]
   createShape with shapeType='ROUND_RECTANGLE', then updateShapeProperties for white fill.
@@ -69,8 +80,9 @@ TWO-COLUMN LAYOUT (.two-column):
 - Left: left=0.4", width=4.3"; Right: left=5.0", width=4.5"; Gap: 0.3"
 
 TABLES (<table>):
-- createTable in FIRST batchUpdate (rows, cols, size, position)
-- Then insertText per cell + updateTextStyle + updateTableCellProperties in SECOND batchUpdate
+- createTable first (rows, cols, size, position), with an explicit objectId
+- AFTER it in the returned list: insertText per cell + updateTextStyle + updateTableCellProperties
+  (the host executes requests in order, so the table exists before its cells are filled)
 - updateTableCellProperties requires: 'tableRange': {'location': {'rowIndex': r, 'columnIndex': c}, 'rowSpan': 1, 'columnSpan': 1}
 - Headers: background from CSS (typically dark), text white, font 8pt bold
 - Cells: font 7-8pt, preserve colors, left-align text, right-align numbers
@@ -86,10 +98,15 @@ TABLES (<table>):
     'textRange': {'type': 'ALL'}, 'style': {'fontSize': {'magnitude': 8, 'unit': 'PT'}}, 'fields': 'fontSize'}})
 
 BULLET / LIST ITEMS (<ul>, <ol>):
-- For each <li>, insertText the item text, then use createParagraphBullets (NOT updateParagraphStyle):
+- CRITICAL: render an ENTIRE <ul>/<ol> as ONE TEXT_BOX with one paragraph per <li>. Do NOT
+  create a separate shape/text box for each <li> — that produces a stack of single-line boxes
+  that is broken and painful to edit. One list => one createShape.
+- Build it as: one createShape (TEXT_BOX sized for the whole list), then ONE insertText whose
+  text is every <li> joined by newlines ('\\n'), then createParagraphBullets over the FULL range:
   {'createParagraphBullets': {'objectId': id,
-    'textRange': {'type': 'FIXED_RANGE', 'startIndex': start, 'endIndex': end},
+    'textRange': {'type': 'ALL'},
     'bulletPreset': 'BULLET_DISC_CIRCLE_SQUARE'}}
+  Every newline-separated line becomes its own bulleted paragraph in that single box.
 - CRITICAL: bulletPreset is ONLY valid inside createParagraphBullets. Do NOT put it inside updateParagraphStyle.
 - Ordered lists: use bulletPreset 'NUMBERED_DIGIT_ALPHA_ROMAN'.
 - To adjust indentation after bullets, use a separate updateParagraphStyle with indentStart/indentFirstLine.
@@ -107,17 +124,22 @@ REGULAR SLIDES:
   Subtitle must fit in 0.28" (10pt ≈ 0.14" per line → 2 lines max).
 
 CHARTS (CRITICAL):
-- If chart images are listed in the user message, you MUST use them as pre-captured screenshots.
+- If chart images are listed in the user message, you MUST reference them by
+  placeholder — do NOT upload anything, do NOT call any Google API.
+- For each chart image `filename` in assets_dir, add a createImage request with
+  url set to the placeholder 'tellr-asset://' + filename. The host uploads the
+  file to Drive and substitutes the real URL before execution.
+  Example: {'createImage': {'objectId': 'img_' + str(uuid.uuid4())[:8],
+    'url': 'tellr-asset://' + filename,
+    'elementProperties': {'pageObjectId': page_id, 'size': {...}, 'transform': {...}}}}
 - Do NOT recreate charts with matplotlib, plotly, or any library. The images are already rendered.
-- Upload to Drive via MediaFileUpload, set anyone/reader permission, then createImage.
 - Chart only (no metric cards): left=0.4", top=1.1", width=9.0", height=4.0" — fills the body zone.
 - Chart + metrics: use CHART + METRICS SIDE-BY-SIDE layout above.
 - If NO chart images are listed, skip chart rendering entirely — do not attempt to recreate.
 
 CONTENT IMAGES (logos, icons — CRITICAL):
-- If content images are listed in the user message, you MUST upload and add them to the slide.
-- These are pre-extracted image files (PNG) saved in assets_dir — ready to upload.
-- Upload to Drive the same way as charts: MediaFileUpload → files().create → permissions().create → createImage.
+- Reference each content image the same way: url = 'tellr-asset://' + filename.
+- NEVER upload; NEVER create Drive files or set permissions yourself. The host does that.
 - Position to match the HTML layout (e.g. a logo in the top-right header area → right-aligned near the title).
 - Typical logo sizes: width=0.6"-1.0", height=0.3"-0.5". Do NOT make logos larger than needed.
 - Place logos/icons in the header zone (top=0.15"-0.4") so they don't overlap body content.
@@ -165,23 +187,27 @@ API PATTERNS (CRITICAL — wrong nesting causes 400 errors):
 
 ALLOWED IMPORTS:
 import os, json, uuid, re
-from googleapiclient.http import MediaFileUpload  # ONLY when uploading images
+(Do NOT import googleapiclient — you never touch the network.)
 
 EXECUTION:
 - ALL code MUST be inside the function body. Nothing at module level except imports and helpers.
-- Build requests list, then ONE batchUpdate (except tables need two).
-- Do NOT wrap batchUpdate in try/except.
+- Build ONE requests list and RETURN it. Never call batchUpdate or any API
+  yourself — the host executes the returned requests in order.
+- Do NOT wrap request-building in try/except.
 - Every createShape needs a unique objectId: 'txt_' + str(uuid.uuid4())[:8]
 
 Return ONLY Python code, no markdown fences."""
 
 # ── Multi-slide prompts ──────────────────────────────────────────────
 
-DEFAULT_GSLIDES_SYSTEM_PROMPT = """Generate Python code with add_slide_to_presentation(slides_service, drive_service, presentation_id, page_id, html_str, assets_dir) function.
+DEFAULT_GSLIDES_SYSTEM_PROMPT = """Generate Python code with a build_slide_requests(html_str, assets_dir, page_id) function that RETURNS a list of Google Slides batchUpdate request dicts.
 
 CONTEXT:
-- All arguments are pre-created. Do NOT import googleapiclient or build services.
-- The slide page already exists (page_id). Do NOT call createSlide — only add content.
+- You do NOT have and do NOT need any Google service objects or network access.
+- Do NOT call batchUpdate or any other Google API method — never execute requests, upload files, or create permissions yourself.
+- The target slide page already exists; reference it via the page_id argument.
+- Return (do not execute) a Python list of request dicts. The trusted host
+  executes them, uploads any referenced images, and handles chunking/retries.
 
 HELPERS (include in your code):
 def emu(inches): return int(inches * 914400)
@@ -192,22 +218,22 @@ def hex_to_rgb(h):
 SLIDE: 16:9 widescreen — 10" × 5.625" (9144000 × 5143500 EMU).
 Bounds: left ≥ 0.4", top ≥ 0.2", left + width ≤ 9.6", top + height ≤ 5.4"
 
-ELEMENT CREATION:
-- TEXT_BOX: createShape + insertText + updateTextStyle (textRange: {'type':'ALL'}) + updateParagraphStyle
+ELEMENT CREATION (append each request dict to a list, then `return requests`):
+- TEXT_BOX: createShape + insertText + updateTextStyle (textRange {'type':'ALL'}) + updateParagraphStyle
 - RECTANGLE/ROUND_RECTANGLE: createShape + updateShapeProperties
 - Size: {'width': {'magnitude': emu(w), 'unit': 'EMU'}, 'height': {'magnitude': emu(h), 'unit': 'EMU'}}
 - Position: {'scaleX':1,'scaleY':1,'translateX':emu(left),'translateY':emu(top),'unit':'EMU'}
 
-The code MUST define the function add_slide_to_presentation.
+The code MUST define build_slide_requests(html_str, assets_dir, page_id) and RETURN the requests list.
 """ + _GSLIDES_SHARED_RULES
 
-DEFAULT_GSLIDES_USER_PROMPT = """Convert the HTML below to a Google Slide.
+DEFAULT_GSLIDES_USER_PROMPT = """Convert the HTML below to a list of Google Slides batchUpdate requests.
 
 {html_content}
 
 {screenshot_note}
 
-Return Python code with add_slide_to_presentation(slides_service, drive_service, presentation_id, page_id, html_str, assets_dir)."""
+Return Python code defining build_slide_requests(html_str, assets_dir, page_id) that returns the requests list."""
 
 # ── Single-slide prompts ─────────────────────────────────────────────
 

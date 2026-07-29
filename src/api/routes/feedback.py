@@ -13,6 +13,7 @@ from src.api.schemas.feedback import (
     SurveySubmitRequest,
     SurveySubmitResponse,
 )
+from src.api.routes._authz import require_admin
 from src.api.services.feedback_service import FeedbackService
 from src.core.database import get_db
 
@@ -75,7 +76,7 @@ def submit_survey(request: SurveySubmitRequest, db: Session = Depends(get_db)):
         )
 
 
-@router.get("/report/stats")
+@router.get("/report/stats", dependencies=[Depends(require_admin)])
 def get_stats_report(weeks: int = Query(default=12, ge=1, le=52), db: Session = Depends(get_db)):
     try:
         service = FeedbackService()
@@ -88,7 +89,34 @@ def get_stats_report(weeks: int = Query(default=12, ge=1, le=52), db: Session = 
         )
 
 
-@router.get("/report/summary")
+@router.get("/list", dependencies=[Depends(require_admin)])
+def list_feedback(
+    weeks: int = Query(default=12, ge=1, le=52),
+    category: str | None = Query(default=None),
+    severity: str | None = Query(default=None),
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=20, ge=1, le=100),
+    db: Session = Depends(get_db),
+):
+    try:
+        service = FeedbackService()
+        return service.list_feedback(
+            db=db,
+            weeks=weeks,
+            category=category,
+            severity=severity,
+            page=page,
+            page_size=page_size,
+        )
+    except Exception as e:
+        logger.error(f"Feedback list error: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to list feedback",
+        )
+
+
+@router.get("/report/summary", dependencies=[Depends(require_admin)])
 def get_feedback_summary(weeks: int = Query(default=4, ge=1, le=52), db: Session = Depends(get_db)):
     try:
         service = FeedbackService()

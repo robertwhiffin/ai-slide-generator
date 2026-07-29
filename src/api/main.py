@@ -13,10 +13,10 @@ from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from src.api.routes import admin, agent_config, chat, export, feedback, images, profiles, sessions, slides, tools, tour, verification, version, google_slides, setup, local_version
+from src.api.routes import admin, admin_usage, agent_config, chat, export, feedback, images, profiles, sessions, slides, tools, tour, verification, version, google_slides, setup, local_version
 from src.api.routes.deck_contributors import router as deck_contributors_router
 from src.core.databricks_client import get_or_create_user_client, set_user_client
 from src.core.user_context import get_current_user as get_ctx_user, set_current_user
@@ -382,6 +382,14 @@ async def user_auth_middleware(request: Request, call_next):
     )
     set_permission_context(permission_ctx)
 
+    # Record login usage-event (visit-deduped, non-blocking, all envs)
+    if user_name:
+        try:
+            from src.api.services.usage_events import record_login
+            record_login(user_name)
+        except Exception as e:
+            logger.debug(f"Failed to record login usage event: {e}")
+
     # Record user login for local identity table (non-blocking)
     if user_id and user_name and IS_PRODUCTION:
         try:
@@ -410,8 +418,50 @@ from src.api.middleware.request_logging import RequestLoggingMiddleware
 
 app.add_middleware(RequestLoggingMiddleware)
 
+# === SDR-4437 Track A security middleware (PR-1a/PR-1b) ==================
+# Keep ALL security-middleware registration inside this delimited block
+# (PR-2 adds an exception handler below the middleware block — do not edit
+# outside these markers). Starlette wraps later-added middleware outermost;
+# ordering here is deliberate:
+#   SecurityHeaders (outermost, added last) -> CSRF -> RequestLogging ->
+#   user_auth -> CORS(dev) -> normalize_mcp_path -> routes
+# Headers must stamp EVERY response (including CSRF 403s); CSRF must reject
+# forged cross-site requests before OBO auth work and before request_logs
+# DB writes. CSRF runs outside normalize_mcp_path, so it sees the raw
+# un-rewritten /mcp path (its exemption handles both /mcp and /mcp/).
+from src.api.middleware.csrf import CSRFProtectionMiddleware  # noqa: E402
+from src.api.middleware.security_headers import SecurityHeadersMiddleware  # noqa: E402
+
+app.add_middleware(CSRFProtectionMiddleware)
+app.add_middleware(SecurityHeadersMiddleware)
+# === end SDR-4437 Track A security middleware =============================
+
+# ---------------------------------------------------------------------------
+# Exception handlers — keep BELOW the middleware-registration block above
+# (Track A of SDR-4437 owns that block; do not reorder or interleave).
+#
+# HIGH-6: when user_auth_middleware fails to build the OBO client, the request
+# used to proceed silently as the SP; now the first user-scoped call raises
+# UserClientRequiredError, mapped here to a clean 401 instead of a 500 from
+# deep inside a tool call.
+# ---------------------------------------------------------------------------
+from src.core.databricks_client import UserClientRequiredError
+
+
+@app.exception_handler(UserClientRequiredError)
+async def user_client_required_handler(request: Request, exc: UserClientRequiredError):
+    logger.warning("User-scoped call without a bound OBO client: %s", exc)
+    return JSONResponse(
+        status_code=401,
+        content={
+            "detail": "Your Databricks identity could not be resolved for this "
+            "request. Please refresh the page to re-authenticate."
+        },
+    )
+
 # Include API routers
 app.include_router(admin.router)
+app.include_router(admin_usage.router)
 app.include_router(agent_config.router)
 app.include_router(chat.router)
 app.include_router(feedback.router)

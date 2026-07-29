@@ -988,6 +988,8 @@ class TestSavePointErrorRecovery:
 
         # Mock session manager where save works but create_version fails
         mock_sm = MagicMock()
+        mock_sm.get_slide_deck.return_value = None  # deck lives in cache only
+        mock_sm.get_slide_deck_version.return_value = None
         mock_sm.get_verification_map.return_value = {}
         mock_sm.create_version.side_effect = Exception("DB connection lost during version creation")
 

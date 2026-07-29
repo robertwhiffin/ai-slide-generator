@@ -15,6 +15,7 @@ from unittest.mock import MagicMock, patch, AsyncMock
 
 from src.api.main import app
 from src.core.database import Base, get_db
+from src.database.models.profile_contributor import PermissionLevel
 from src.database.models import (  # noqa: F401
     ConfigGenieSpace,
     ConfigProfile,
@@ -108,13 +109,17 @@ def mock_session_manager(test_db):
          patch("src.api.routes.slides.get_session_manager") as mock_slides, \
          patch("src.api.routes.sessions.get_session_manager") as mock_sessions, \
          patch("src.api.routes.verification.get_session_manager") as mock_verify, \
+         patch("src.api.routes._authz.get_session_manager") as mock_authz, \
          patch("src.api.routes.chat.get_current_user", return_value="test@local.dev"), \
          patch("src.api.routes.slides.get_current_user", return_value="test@local.dev"), \
          patch("src.api.routes.sessions.get_current_user", return_value="test@local.dev"), \
+         patch("src.api.routes._authz.get_current_user", return_value="test@local.dev"), \
          patch("src.api.routes.chat.get_permission_context", return_value=perm_ctx), \
          patch("src.api.routes.slides.get_permission_context", return_value=perm_ctx), \
          patch("src.api.routes.sessions.get_permission_context", return_value=perm_ctx), \
-         patch("src.api.routes.sessions.get_db_session", _fake_db_session):
+         patch("src.api.routes._authz.get_permission_context", return_value=perm_ctx), \
+         patch("src.api.routes.sessions.get_db_session", _fake_db_session), \
+         patch("src.api.routes._authz.get_db_session", _fake_db_session):
 
         manager = MagicMock()
         manager.acquire_session_lock.return_value = True
@@ -131,6 +136,7 @@ def mock_session_manager(test_db):
         mock_slides.return_value = manager
         mock_sessions.return_value = manager
         mock_verify.return_value = manager
+        mock_authz.return_value = manager
         yield manager
 
 
@@ -647,7 +653,7 @@ class TestSessionEndpoints:
         assert data["count"] == 2
         # Verify the route passed the user identity to session_manager
         mock_session_manager.list_sessions.assert_called_once_with(
-            created_by="dev@local.dev", limit=50
+            created_by="dev@local.dev", limit=50, deck_only=False
         )
 
     def test_list_sessions_with_limit(self, client, mock_session_manager):
@@ -657,6 +663,19 @@ class TestSessionEndpoints:
         with patch("src.api.routes.sessions.get_current_user", return_value="dev@local.dev"):
             response = client.get("/api/sessions?limit=10")
         assert response.status_code == 200
+
+    def test_list_sessions_deck_only(self, client, mock_session_manager):
+        """GET /api/sessions?deck_only=true requests deck-only sessions."""
+        mock_session_manager.list_sessions.return_value = [
+            {"session_id": "deck-1", "title": "Deck 1", "has_slide_deck": True},
+        ]
+
+        with patch("src.api.routes.sessions.get_current_user", return_value="dev@local.dev"):
+            response = client.get("/api/sessions?limit=10&deck_only=true")
+        assert response.status_code == 200
+        mock_session_manager.list_sessions.assert_called_once_with(
+            created_by="dev@local.dev", limit=10, deck_only=True
+        )
 
     def test_list_sessions_limit_validation(self, client):
         """GET /api/sessions validates limit range."""
@@ -706,6 +725,13 @@ class TestSessionEndpoints:
             response = client.post("/api/sessions", json={})
         assert response.status_code == 500
 
+    def test_create_session_unauthenticated_returns_401(self, client, mock_session_manager):
+        """POST /api/sessions requires authentication."""
+        with patch("src.api.routes.sessions.get_current_user", return_value=None):
+            response = client.post("/api/sessions", json={})
+        assert response.status_code == 401
+        mock_session_manager.create_session.assert_not_called()
+
     def test_list_sessions_filters_by_current_user(self, client, mock_session_manager):
         """GET /api/sessions only returns sessions for the authenticated user."""
         mock_session_manager.list_sessions.return_value = [
@@ -716,8 +742,15 @@ class TestSessionEndpoints:
             response = client.get("/api/sessions")
         assert response.status_code == 200
         mock_session_manager.list_sessions.assert_called_once_with(
-            created_by="bob@example.com", limit=50
+            created_by="bob@example.com", limit=50, deck_only=False
         )
+
+    def test_list_sessions_unauthenticated_returns_401(self, client, mock_session_manager):
+        """GET /api/sessions requires authentication."""
+        with patch("src.api.routes.sessions.get_current_user", return_value=None):
+            response = client.get("/api/sessions")
+        assert response.status_code == 401
+        mock_session_manager.list_sessions.assert_not_called()
 
     def test_get_session_success(self, client, mock_session_manager):
         """GET /api/sessions/{id} returns session details."""
@@ -782,6 +815,107 @@ class TestSessionEndpoints:
 
         response = client.delete("/api/sessions/nonexistent")
         assert response.status_code == 404
+
+    def test_duplicate_session_success(self, client, mock_session_manager):
+        """POST /api/sessions/{id}/duplicate creates a new session copy."""
+        mock_session_manager.duplicate_session.return_value = {
+            "session_id": "copy-abc",
+            "title": "Copy of Test Session",
+            "created_by": "test@local.dev",
+            "created_at": "2024-01-01T12:00:00Z",
+            "slide_count": 4,
+            "source_session_id": "test-123",
+        }
+
+        response = client.post("/api/sessions/test-123/duplicate", json={})
+        assert response.status_code == 201
+        data = response.json()
+        assert data["session_id"] == "copy-abc"
+        assert data["source_session_id"] == "test-123"
+        mock_session_manager.duplicate_session.assert_called_once_with(
+            "test-123",
+            "test@local.dev",
+            None,
+            None,
+            min_permission=PermissionLevel.CAN_VIEW,
+        )
+
+    def test_duplicate_session_with_version_number(self, client, mock_session_manager):
+        """POST /api/sessions/{id}/duplicate accepts optional save point version."""
+        mock_session_manager.duplicate_session.return_value = {
+            "session_id": "copy-v2",
+            "title": "Copy of Test Session",
+            "created_by": "test@local.dev",
+            "created_at": "2024-01-01T12:00:00Z",
+            "slide_count": 2,
+            "source_session_id": "test-123",
+            "source_version_number": 2,
+        }
+
+        response = client.post(
+            "/api/sessions/test-123/duplicate",
+            json={"version_number": 2},
+        )
+        assert response.status_code == 201
+        mock_session_manager.duplicate_session.assert_called_once_with(
+            "test-123",
+            "test@local.dev",
+            None,
+            2,
+            min_permission=PermissionLevel.CAN_VIEW,
+        )
+
+    def test_duplicate_session_with_custom_title(self, client, mock_session_manager):
+        """POST /api/sessions/{id}/duplicate accepts optional title."""
+        mock_session_manager.duplicate_session.return_value = {
+            "session_id": "copy-xyz",
+            "title": "Forked Deck",
+            "created_by": "test@local.dev",
+            "created_at": "2024-01-01T12:00:00Z",
+            "slide_count": 2,
+            "source_session_id": "test-123",
+        }
+
+        response = client.post(
+            "/api/sessions/test-123/duplicate",
+            json={"title": "Forked Deck"},
+        )
+        assert response.status_code == 201
+        mock_session_manager.duplicate_session.assert_called_once_with(
+            "test-123",
+            "test@local.dev",
+            "Forked Deck",
+            None,
+            min_permission=PermissionLevel.CAN_VIEW,
+        )
+
+    def test_duplicate_session_not_found(self, client, mock_session_manager):
+        """POST /api/sessions/{id}/duplicate returns 404 for missing session."""
+        from src.api.services.session_manager import SessionNotFoundError
+        mock_session_manager.duplicate_session.side_effect = SessionNotFoundError("missing")
+
+        response = client.post("/api/sessions/missing/duplicate", json={})
+        assert response.status_code == 404
+        mock_session_manager.get_session.assert_not_called()
+
+    def test_duplicate_session_no_deck(self, client, mock_session_manager):
+        """POST /api/sessions/{id}/duplicate returns 400 when source has no deck."""
+        mock_session_manager.duplicate_session.side_effect = ValueError(
+            "Source session has no slide deck to duplicate"
+        )
+
+        response = client.post("/api/sessions/test-123/duplicate", json={})
+        assert response.status_code == 400
+        assert "no slide deck" in response.json()["detail"]
+
+    def test_duplicate_session_forbidden(self, client, mock_session_manager):
+        """POST /api/sessions/{id}/duplicate returns 403 without deck access."""
+        from src.api.services.session_manager import SessionAccessDeniedError
+        mock_session_manager.duplicate_session.side_effect = SessionAccessDeniedError()
+
+        response = client.post("/api/sessions/other-123/duplicate", json={})
+        assert response.status_code == 403
+        mock_session_manager.get_session.assert_not_called()
 
     def test_get_session_messages_success(self, client, mock_session_manager):
         """GET /api/sessions/{id}/messages returns messages."""
@@ -880,6 +1014,17 @@ class TestSessionEndpoints:
 
 class TestVerificationEndpoints:
     """Tests for /api/verification endpoints."""
+
+    @pytest.fixture(autouse=True)
+    def _bypass_deck_gate(self, monkeypatch):
+        # SDR-4437 PR-2 (Task 7): verification writes/genie-link now require
+        # deck permission. These pre-existing tests mock get_session with a
+        # minimal dict (no id/created_by), so the gate can't resolve a grant —
+        # no-op it here; enforcement is covered by test_authz_verification.py.
+        monkeypatch.setattr(
+            "src.api.routes.verification._check_deck_permission_for_session",
+            lambda *a, **k: None,
+        )
 
     def test_verify_slide_success(self, client, mock_session_manager):
         """POST /api/verification/{index} triggers verification."""

@@ -164,6 +164,7 @@ class TestSlideContextBase64Stripping:
             "agent_config": None,
         }
         mock_session_manager.get_slide_deck.return_value = None
+        mock_session_manager.get_slide_deck_version.return_value = None
 
         slide_context = {
             "indices": [0],

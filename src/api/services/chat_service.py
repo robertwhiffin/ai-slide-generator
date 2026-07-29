@@ -26,7 +26,7 @@ from src.core.databricks_client import (
     get_service_principal_folder,
     get_system_client,
 )
-from src.domain.slide import Slide
+from src.domain.slide import Slide, has_slide_wrapper
 from src.domain.slide_deck import SlideDeck
 from src.api.schemas.agent_config import resolve_agent_config
 from src.services.agent_factory import build_agent_for_request
@@ -105,6 +105,11 @@ class ChatService:
         # In-memory cache of slide decks (keyed by session_id)
         # This avoids re-parsing HTML on every request
         self._deck_cache: Dict[str, SlideDeck] = {}
+
+        # DB version each cached deck corresponds to. The cache is per-process
+        # while prod runs multiple uvicorn workers sharing one database, so a
+        # cache hit is only valid if the DB version hasn't moved on.
+        self._deck_cache_versions: Dict[str, int] = {}
 
         logger.info("ChatService initialized successfully")
 
@@ -678,7 +683,7 @@ class ChatService:
                     slide_deck_dict = current_deck.to_dict()
 
                 try:
-                    session_manager.save_slide_deck(
+                    save_result = session_manager.save_slide_deck(
                         session_id=session_id,
                         title=current_deck.title,
                         html_content=current_deck.knit(),
@@ -688,6 +693,7 @@ class ChatService:
                         modified_by=_user,
                         expected_version=_deck_version_before_llm,
                     )
+                    self._record_deck_version(session_id, save_result)
                 except VersionConflictError:
                     logger.warning(
                         "Chat save rejected: deck was edited during LLM call, reloading",
@@ -1476,7 +1482,7 @@ class ChatService:
                 slide_deck_dict = current_deck.to_dict()
 
             try:
-                session_manager.save_slide_deck(
+                save_result = session_manager.save_slide_deck(
                     session_id=session_id,
                     title=current_deck.title,
                     html_content=current_deck.knit(),
@@ -1486,6 +1492,7 @@ class ChatService:
                     modified_by=_user,
                     expected_version=_deck_version_before_llm,
                 )
+                self._record_deck_version(session_id, save_result)
             except VersionConflictError:
                 logger.warning(
                     "Chat save rejected: deck was edited during LLM call, reloading",
@@ -2082,18 +2089,63 @@ class ChatService:
             )
             return False
 
+    def _deck_versions(self) -> Dict[str, int]:
+        """Return the cached-deck version map, creating it if needed.
+
+        Lazy creation keeps instances built without __init__ (test harnesses
+        use ChatService.__new__) working. Callers must hold _cache_lock.
+        """
+        try:
+            return self._deck_cache_versions
+        except AttributeError:
+            self._deck_cache_versions = {}
+            return self._deck_cache_versions
+
+    def _record_deck_version(self, session_id: str, save_result: Optional[Dict[str, Any]]) -> None:
+        """Remember which DB version the cached deck now corresponds to.
+
+        Call after save_slide_deck so the next _get_or_load_deck cache hit
+        validates cleanly instead of reloading from the database.
+        """
+        version = (save_result or {}).get("version")
+        with self._cache_lock:
+            if version is not None:
+                self._deck_versions()[session_id] = version
+            else:
+                self._deck_versions().pop(session_id, None)
+
     def _get_or_load_deck(self, session_id: str) -> Optional[SlideDeck]:
         """Get deck from cache or load from database.
 
         Thread-safe access to deck cache using _cache_lock.
-        
+
+        The cache is per-process while prod runs multiple uvicorn workers
+        sharing one database, so a cached deck is only served if its recorded
+        version matches the current DB version; otherwise it is reloaded.
+
         Uses deck_dict (slides array with individual scripts) when available,
         falling back to from_html_string for legacy data.
         """
         # Check cache first (with lock)
         with self._cache_lock:
-            if session_id in self._deck_cache:
-                return self._deck_cache[session_id]
+            cached_deck = self._deck_cache.get(session_id)
+            cached_version = self._deck_versions().get(session_id)
+
+        if cached_deck is not None:
+            db_version = self._get_deck_version(session_id)
+            if db_version is None or cached_version == db_version:
+                return cached_deck
+            logger.info(
+                "Deck cache stale, reloading from database",
+                extra={
+                    "session_id": session_id,
+                    "cached_version": cached_version,
+                    "db_version": db_version,
+                },
+            )
+            with self._cache_lock:
+                self._deck_cache.pop(session_id, None)
+                self._deck_versions().pop(session_id, None)
 
         # Try to load from database (outside lock to avoid blocking)
         session_manager = get_session_manager()
@@ -2127,6 +2179,10 @@ class ChatService:
             # Store in cache (with lock)
             with self._cache_lock:
                 self._deck_cache[session_id] = deck
+                if deck_data.get("version") is not None:
+                    self._deck_versions()[session_id] = deck_data["version"]
+                else:
+                    self._deck_versions().pop(session_id, None)
             return deck
         except Exception as e:
             logger.warning(f"Failed to load deck from database: {e}")
@@ -2136,23 +2192,18 @@ class ChatService:
     def _get_deck_version(self, session_id: str) -> Optional[int]:
         """Read the current deck version from the database.
 
-        Called once before the LLM runs to capture the version for
-        optimistic locking. Uses the existing get_slide_deck which
-        returns the full deck dict including the version column.
-
-        On Lakebase/PostgreSQL this is a single-row indexed lookup (~1-2ms).
+        Used on every deck-cache hit (multi-worker cache validation) and
+        before LLM calls (optimistic locking), so it must stay cheap: a
+        single-column indexed lookup, never a full deck fetch.
 
         Returns:
             Current deck version number, or None if no deck exists.
         """
         session_manager = get_session_manager()
         try:
-            deck_data = session_manager.get_slide_deck(session_id)
-            if deck_data:
-                return deck_data.get("version")
+            return session_manager.get_slide_deck_version(session_id)
         except Exception:
-            pass
-        return None
+            return None
 
     @staticmethod
     def _reindex_slide_ids(deck: "SlideDeck") -> None:
@@ -2169,6 +2220,7 @@ class ChatService:
         """Remove the cached deck for a session so the next read hits the DB."""
         with self._cache_lock:
             self._deck_cache.pop(session_id, None)
+            self._deck_versions().pop(session_id, None)
 
     def _replace_slide_htmls_from_cache(self, session_id: str, slide_context: Dict[str, Any]) -> Dict[str, Any]:
         """Replace frontend-supplied slide_htmls with backend cache versions.
@@ -2203,33 +2255,14 @@ class ChatService:
 
     def _reconstruct_deck_from_dict(self, deck_data: Dict[str, Any]) -> SlideDeck:
         """Reconstruct SlideDeck from stored dict (preserves individual slide scripts).
-        
+
         Args:
             deck_data: Dictionary from get_slide_deck with slides array
-            
+
         Returns:
             Reconstructed SlideDeck with proper per-slide scripts and metadata
         """
-        slides = []
-        for slide_data in deck_data.get("slides", []):
-            slide = Slide(
-                html=slide_data.get("html", ""),
-                slide_id=slide_data.get("slide_id", f"slide_{len(slides)}"),
-                scripts=slide_data.get("scripts", ""),
-                created_by=slide_data.get("created_by"),
-                created_at=slide_data.get("created_at"),
-                modified_by=slide_data.get("modified_by"),
-                modified_at=slide_data.get("modified_at"),
-            )
-            slides.append(slide)
-        
-        deck = SlideDeck(
-            slides=slides,
-            css=deck_data.get("css", ""),
-            external_scripts=deck_data.get("external_scripts", []),
-            title=deck_data.get("title"),
-        )
-        return deck
+        return SlideDeck.from_dict(deck_data)
 
     def reload_deck_from_database(self, session_id: str) -> Optional[SlideDeck]:
         """Force reload deck from database (clears cache first).
@@ -2703,7 +2736,7 @@ class ChatService:
         # Persist to database
         deck_dict = current_deck.to_dict()
         session_manager = get_session_manager()
-        session_manager.save_slide_deck(
+        save_result = session_manager.save_slide_deck(
             session_id=session_id,
             title=current_deck.title,
             html_content=current_deck.knit(),
@@ -2712,6 +2745,7 @@ class ChatService:
             deck_dict=deck_dict,
             expected_version=expected_version,
         )
+        self._record_deck_version(session_id, save_result)
 
         # Create save point
         try:
@@ -2752,8 +2786,11 @@ class ChatService:
         if index < 0 or index >= len(current_deck.slides):
             raise ValueError(f"Invalid slide index: {index}")
 
-        # Validate HTML has slide wrapper
-        if '<div class="slide"' not in html:
+        # Validate HTML has slide wrapper. Use the token-aware check so the
+        # visual editor's DOMParser round-trip (which may reorder attributes,
+        # switch quote style, or emit compound classes) doesn't trip a naive
+        # substring match on otherwise-valid slides.
+        if not has_slide_wrapper(html):
             raise ValueError("HTML must contain <div class='slide'> wrapper")
 
         # Preserve original slide's metadata and scripts before updating
@@ -2779,7 +2816,7 @@ class ChatService:
         # Persist to database
         deck_dict = current_deck.to_dict()
         session_manager = get_session_manager()
-        session_manager.save_slide_deck(
+        save_result = session_manager.save_slide_deck(
             session_id=session_id,
             title=current_deck.title,
             html_content=current_deck.knit(),
@@ -2788,6 +2825,7 @@ class ChatService:
             deck_dict=deck_dict,
             expected_version=expected_version,
         )
+        self._record_deck_version(session_id, save_result)
 
         # Create save point immediately after persisting
         try:
@@ -2844,7 +2882,7 @@ class ChatService:
         # Persist to database
         deck_dict = current_deck.to_dict()
         session_manager = get_session_manager()
-        session_manager.save_slide_deck(
+        save_result = session_manager.save_slide_deck(
             session_id=session_id,
             title=current_deck.title,
             html_content=current_deck.knit(),
@@ -2853,6 +2891,7 @@ class ChatService:
             deck_dict=deck_dict,
             expected_version=expected_version,
         )
+        self._record_deck_version(session_id, save_result)
 
         # Create save point
         try:
@@ -2907,7 +2946,7 @@ class ChatService:
         # Persist to database
         deck_dict = current_deck.to_dict()
         session_manager = get_session_manager()
-        session_manager.save_slide_deck(
+        save_result = session_manager.save_slide_deck(
             session_id=session_id,
             title=current_deck.title,
             html_content=current_deck.knit(),
@@ -2916,6 +2955,7 @@ class ChatService:
             deck_dict=deck_dict,
             expected_version=expected_version,
         )
+        self._record_deck_version(session_id, save_result)
 
         # Create save point
         try:
