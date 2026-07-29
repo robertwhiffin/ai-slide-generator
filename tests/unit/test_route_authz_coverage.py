@@ -425,3 +425,49 @@ def test_permission_call_detection_matches_to_thread_form():
         if r.path == "/api/sessions/{session_id}/slides" and "GET" in r.methods
     )
     assert _has_permission_call(route)
+
+
+# The prefix every design-system route lives under. Derived from the entry the
+# ADMIN_PATH_PREFIXES list already carries, so the two cannot drift apart.
+_DESIGN_SYSTEM_PREFIX = "/api/settings/design-systems"
+
+
+def _design_system_mutation_routes() -> set[tuple[str, str]]:
+    """Every NON-GET design-system route currently mounted on the app.
+
+    HEAD/OPTIONS are framework-generated rather than product surface, so they are
+    not mutations and are excluded.
+    """
+    return {
+        (method, route.path)
+        for route in _api_routes()
+        if route.path == _DESIGN_SYSTEM_PREFIX
+        or route.path.startswith(f"{_DESIGN_SYSTEM_PREFIX}/")
+        for method in route.methods
+        if method not in ("GET", "HEAD", "OPTIONS")
+    }
+
+
+def test_every_design_system_mutation_route_is_explicitly_classified():
+    """The level table must be EXHAUSTIVE, not merely consistent.
+
+    ``test_design_system_mutations_have_the_intended_permission_levels`` iterates
+    the mapping and skips routes absent from it, so a NEW mutation route — say a
+    creator-gated PATCH — would sail through review while unclassified: nothing
+    forced anyone to state its intended level. Asserting set EQUALITY makes
+    classification mandatory, so adding any non-GET design-system route fails
+    here until its permission level is written down.
+    """
+    live = _design_system_mutation_routes()
+    mapped = set(DESIGN_SYSTEM_MUTATION_LEVELS)
+
+    unclassified = sorted(live - mapped)
+    assert not unclassified, (
+        "New design-system mutation route(s) are not classified in "
+        "DESIGN_SYSTEM_MUTATION_LEVELS — add each with its intended permission "
+        f"level ('admin', 'creator_or_admin' or 'open'): {unclassified}"
+    )
+    stale = sorted(mapped - live)
+    assert not stale, (
+        f"DESIGN_SYSTEM_MUTATION_LEVELS names route(s) that no longer exist: {stale}"
+    )
