@@ -51,7 +51,12 @@ def _seed(session):
     return victim.assets[0].id, attacker.id, attacker.assets[0].id
 
 
-def test_pptx_export_does_not_leak_foreign_ds_asset_bytes():
+def test_pptx_export_does_not_leak_foreign_ds_asset_bytes(monkeypatch):
+    monkeypatch.setattr(
+        "src.api.routes.export._check_deck_permission_for_session",
+        lambda *args, **kwargs: None,
+    )
+
     engine = create_engine(
         "sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool
     )

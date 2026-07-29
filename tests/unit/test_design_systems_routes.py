@@ -501,7 +501,9 @@ class TestReferenceValidation:
         assert config.template_id is None
         assert "424242" in caplog.text
 
-    def test_reupload_scenario_stale_pin_autoclears_and_put_succeeds(self, db_session):
+    def test_reupload_scenario_stale_pin_autoclears_and_put_succeeds(
+        self, db_session, monkeypatch
+    ):
         """Regression for the wedged-config failure: delete+re-upload of a
         design system re-materializes templates with NEW ids, so a persisted
         config can hold a stale pin. Every later PUT must still succeed, with
@@ -509,6 +511,11 @@ class TestReferenceValidation:
         effective config returned so the frontend state syncs."""
         from src.database.models import DesignSystemTemplate, UserSession
         from src.services.design_system_templates import materialize_templates
+
+        monkeypatch.setattr(
+            "src.api.routes.agent_config._check_deck_permission_for_session",
+            lambda *args, **kwargs: None,
+        )
 
         ds = self._templated_ds(db_session)
         old_template_id = ds.templates[0].id
