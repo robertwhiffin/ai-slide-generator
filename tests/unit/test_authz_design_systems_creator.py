@@ -6,13 +6,23 @@ PUT/DELETE. The product model design systems actually implement:
     all GETs              OPEN
     POST /import          OPEN  — any user may CONTRIBUTE
     POST ""    (create)   OPEN  — any user may CONTRIBUTE
-    PUT    /{ds_id}       CREATOR OR ADMIN  — manage what you uploaded
-    DELETE /{ds_id}       CREATOR OR ADMIN  — manage what you uploaded
-    POST /{ds_id}/set-default   ADMIN ONLY  — org-wide blast radius
+    PUT    /{ds_id}       CREATOR OR ADMIN, except ADMIN-ONLY while is_default
+    DELETE /{ds_id}       CREATOR OR ADMIN, except ADMIN-ONLY while is_default
+    POST /{ds_id}/set-default   ADMIN ONLY  — org-wide blast radius (always)
 
 Design systems are org-shared, user-contributed content: any user may add one
 AND manage the ones they uploaded, nobody may touch someone else's, and admins
 may manage anything.
+
+ORG-DEFAULT FREEZE (product owner's decision: "only admin when it's org
+default"). Creator-or-admin was not sufficient on its own: a non-admin CREATOR
+could delete the ACTIVE ORG DEFAULT design system and get 204, leaving the row
+inactive/non-default while OTHER users' sessions still pointed at it. So an
+admin's act of promoting a system to org default could be undone by its author.
+The moment a row becomes the org default, rename/delete on THAT row require
+admin; creators keep full control of every NON-default system they uploaded.
+The verdict reads ``is_default`` off the LOADED ROW inside the handler's
+transaction — never from client input.
 
 IDENTITY (why these tests are honest): the caller is resolved server-side from
 ``get_permission_context().user_name``, which the OBO middleware
@@ -84,8 +94,13 @@ def client(db_session):
     app.dependency_overrides.clear()
 
 
-def _seed(db_session, created_by, name="Acme Synthetic DS"):
-    """Seed a real, active design system authored by ``created_by``."""
+def _seed(db_session, created_by, name="Acme Synthetic DS", is_default=False):
+    """Seed a real, active design system authored by ``created_by``.
+
+    ``is_default`` seeds the row as the ORG DEFAULT, which is what the freeze
+    tests below toggle. It is written to the DB row, never sent by the client —
+    the guard must read it from the row it loaded.
+    """
     ds = DesignSystem(
         name=name,
         description="synthetic fixture",
@@ -93,7 +108,7 @@ def _seed(db_session, created_by, name="Acme Synthetic DS"):
         updated_by=created_by,
         version=1,
         published=False,
-        is_default=False,
+        is_default=is_default,
         is_active=True,
     )
     db_session.add(ds)
@@ -136,23 +151,27 @@ def as_other_user(monkeypatch):
     monkeypatch.setenv("DEV_USER_ID", OTHER)
 
 
-# --- (a)/(b) the creator may manage their OWN design system -----------------
+# --- (a)/(b) the creator may manage their OWN NON-DEFAULT design system -----
+#
+# ``_seed`` defaults to ``is_default=False``, which is now load-bearing: these
+# two cases are the NON-default half of the org-default freeze, and they must
+# stay green (creators keep full control of what they uploaded).
 
 
-def test_creator_non_admin_can_rename_own_design_system(
+def test_creator_non_admin_can_rename_own_non_default_design_system(
     client, db_session, non_admin, as_creator
 ):
-    """(a) A plain user renames the design system they uploaded."""
+    """(a) A plain user renames the NON-DEFAULT design system they uploaded."""
     ds = _seed(db_session, CREATOR)
     resp = client.put(f"{BASE}/{ds.id}", json={"name": "Acme DS renamed by its author"})
     assert resp.status_code == 200, resp.text
     assert resp.json()["name"] == "Acme DS renamed by its author"
 
 
-def test_creator_non_admin_can_delete_own_design_system(
+def test_creator_non_admin_can_delete_own_non_default_design_system(
     client, db_session, non_admin, as_creator
 ):
-    """(b) A plain user deletes the design system they uploaded."""
+    """(b) A plain user deletes the NON-DEFAULT design system they uploaded."""
     ds = _seed(db_session, CREATOR)
     resp = client.delete(f"{BASE}/{ds.id}")
     assert resp.status_code == 204, resp.text
@@ -394,3 +413,205 @@ def test_owner_and_caller_differing_by_invisibles_are_not_the_same_principal(
     )
     db_session.refresh(ds)
     assert ds.is_active is True
+
+
+# --- (j) ORG-DEFAULT FREEZE: admin-only while the row IS the org default ----
+#
+# The hole an independent cross-vendor review PROVED by running it: a non-admin
+# CREATOR deleted the ACTIVE ORG DEFAULT design system and got 204. The row went
+# inactive/non-default while ANOTHER user's session still pointed at the
+# now-broken id, so an admin's promotion could be undone by the row's author.
+#
+# Product owner's decision, verbatim: "only admin when it's org default".
+#
+# These cases seed the SAME author and call as the SAME caller as the (a)/(b)
+# cases above — the ONLY difference is ``is_default``. That is what makes the
+# new condition load-bearing rather than incidental: identical setups must give
+# OPPOSITE verdicts, which the flip test below asserts inside a single test body.
+
+
+def test_creator_non_admin_cannot_rename_own_design_system_while_org_default(
+    client, db_session, non_admin, as_creator
+):
+    """(j1) The author may NOT rename their own system while it IS the org default."""
+    ds = _seed(db_session, CREATOR, is_default=True)
+    resp = client.put(f"{BASE}/{ds.id}", json={"name": "Renamed under the admin's feet"})
+    assert resp.status_code == 403, resp.text
+    db_session.refresh(ds)
+    assert ds.name == "Acme Synthetic DS", "denied rename must not mutate the row"
+    assert ds.is_default is True, "denied rename must leave the org default intact"
+    assert ds.version == 1, "denied rename must not bump the version"
+
+
+def test_creator_non_admin_cannot_delete_own_design_system_while_org_default(
+    client, db_session, non_admin, as_creator
+):
+    """(j2) The author may NOT delete their own system while it IS the org default.
+
+    This is the reviewer's exact reproduction: it answered 204 before the freeze.
+    """
+    ds = _seed(db_session, CREATOR, is_default=True)
+    resp = client.delete(f"{BASE}/{ds.id}")
+    assert resp.status_code == 403, resp.text
+    db_session.refresh(ds)
+    assert ds.is_active is True, "denied delete must not deactivate the org default"
+    assert ds.is_default is True, "denied delete must not clear the org default"
+
+
+def test_admin_can_rename_design_system_that_is_org_default(
+    client, db_session, admin, as_other_user
+):
+    """(j3) An ADMIN may still rename the org default (the freeze is admin-ONLY,
+    not nobody-may)."""
+    ds = _seed(db_session, CREATOR, is_default=True)
+    resp = client.put(f"{BASE}/{ds.id}", json={"name": "Org default renamed by an admin"})
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["name"] == "Org default renamed by an admin"
+
+
+def test_admin_can_delete_design_system_that_is_org_default(
+    client, db_session, admin, as_other_user
+):
+    """(j3) An ADMIN may still delete the org default."""
+    ds = _seed(db_session, CREATOR, is_default=True)
+    resp = client.delete(f"{BASE}/{ds.id}")
+    assert resp.status_code == 204, resp.text
+    db_session.refresh(ds)
+    assert ds.is_active is False
+    assert ds.is_default is False, "deleting the default must not leave it flagged default"
+
+
+def test_org_default_flag_alone_flips_the_verdict_for_the_same_creator(
+    client, db_session, non_admin, as_creator
+):
+    """(j4) THE FLIP TEST — one row, one author, one caller, opposite verdicts.
+
+    Everything is held constant: the SAME design system row, authored by the
+    SAME principal, called by the SAME non-admin caller, over the SAME route.
+    The ONLY thing that changes between the two halves is ``is_default`` on the
+    row. If the guard ignored ``is_default``, both halves would return the same
+    status and this test fails — which is what makes the new condition provably
+    load-bearing rather than incidentally satisfied by some other difference.
+    """
+    ds = _seed(db_session, CREATOR)
+    ds_id = ds.id
+
+    # --- is_default OFF -> the creator branch applies -> ALLOWED -------------
+    assert ds.is_default is False
+    allowed = client.put(f"{BASE}/{ds_id}", json={"name": "Allowed while not default"})
+    assert allowed.status_code == 200, (
+        f"creator must manage their own NON-default system: {allowed.status_code} {allowed.text}"
+    )
+
+    # --- flip the SAME row to the org default (server-side, not client input) -
+    db_session.refresh(ds)
+    ds.is_default = True
+    db_session.commit()
+    db_session.refresh(ds)
+    assert ds.is_default is True
+    name_while_default = ds.name
+
+    # --- is_default ON -> admin-only -> DENIED -------------------------------
+    denied = client.put(f"{BASE}/{ds_id}", json={"name": "Denied while default"})
+    assert denied.status_code == 403, (
+        f"same row+author+caller, is_default=True must be DENIED: "
+        f"{denied.status_code} {denied.text}"
+    )
+    db_session.refresh(ds)
+    assert ds.name == name_while_default, "denied rename must not mutate the row"
+
+    # --- and flip it BACK OFF -> allowed again (the condition is the ONLY gate)
+    ds.is_default = False
+    db_session.commit()
+    reallowed = client.put(f"{BASE}/{ds_id}", json={"name": "Allowed again once not default"})
+    assert reallowed.status_code == 200, (
+        f"clearing is_default must restore creator control: "
+        f"{reallowed.status_code} {reallowed.text}"
+    )
+
+
+def test_org_default_flag_alone_flips_the_delete_verdict_for_the_same_creator(
+    client, db_session, non_admin, as_creator
+):
+    """(j5) The flip test for DELETE — the route the reviewer actually exploited.
+
+    DELETE is destructive, so the two halves cannot reuse one row (the allowed
+    half consumes it). Two rows with the SAME author, called by the SAME
+    non-admin caller, differing ONLY in ``is_default``, must give opposite
+    verdicts.
+    """
+    non_default = _seed(db_session, CREATOR, name="Acme Non-Default")
+    default = _seed(db_session, CREATOR, name="Acme Org Default", is_default=True)
+
+    allowed = client.delete(f"{BASE}/{non_default.id}")
+    assert allowed.status_code == 204, (
+        f"creator must delete their own NON-default system: "
+        f"{allowed.status_code} {allowed.text}"
+    )
+
+    denied = client.delete(f"{BASE}/{default.id}")
+    assert denied.status_code == 403, (
+        f"same author+caller, is_default=True must be DENIED: "
+        f"{denied.status_code} {denied.text}"
+    )
+    db_session.refresh(default)
+    assert default.is_active is True
+    assert default.is_default is True
+
+
+def test_frozen_org_default_is_denied_before_any_mutation_or_recompute(
+    client, db_session, non_admin, as_creator, monkeypatch
+):
+    """(j6) ORDERING: the freeze must deny BEFORE the handler does any work.
+
+    A gate that runs after the mutation (or after the expensive compile) would
+    still answer 403 while having already changed the row or burned the work, so
+    a status-code-only assertion cannot tell a correctly-ordered gate from a
+    late one. This installs a landmine in ``recompute_compiled_style_content``
+    — the PUT path's expensive step — and asserts the denied request never
+    reaches it, then asserts the row is byte-for-byte untouched.
+    """
+    from src.api.routes.settings import design_systems as ds_routes
+
+    ds = _seed(db_session, CREATOR, is_default=True)
+    before = (ds.name, ds.description, ds.version, ds.is_default, ds.is_active)
+
+    def _landmine(*args, **kwargs):
+        raise AssertionError(
+            "recompute_compiled_style_content ran on a DENIED request: the "
+            "org-default gate is ordered AFTER the handler's expensive work"
+        )
+
+    monkeypatch.setattr(ds_routes, "recompute_compiled_style_content", _landmine)
+
+    resp = client.put(
+        f"{BASE}/{ds.id}",
+        json={"name": "Renamed past the gate", "description": "and re-described"},
+    )
+    assert resp.status_code == 403, resp.text
+
+    db_session.refresh(ds)
+    assert (ds.name, ds.description, ds.version, ds.is_default, ds.is_active) == before, (
+        "a denied request must leave the row completely unmodified"
+    )
+
+
+def test_frozen_org_default_denial_explains_why_without_leaking_the_row(
+    client, db_session, non_admin, as_creator
+):
+    """(j7) The 403 detail must be debuggable — it names the org-default REASON,
+    so this is distinguishable from the not-the-author denial — while disclosing
+    nothing about the row (no name, no author, no id) beyond what the OPEN read
+    endpoints already return to any authenticated caller."""
+    ds = _seed(db_session, CREATOR, name="Acme Confidential Fixture", is_default=True)
+
+    resp = client.delete(f"{BASE}/{ds.id}")
+    assert resp.status_code == 403, resp.text
+    detail = resp.json()["detail"]
+
+    assert "default" in detail.lower(), f"denial must name the reason: {detail!r}"
+    assert detail != "Admin access required", (
+        "the freeze denial must be distinguishable from a plain admin denial"
+    )
+    for leak in ("Acme Confidential Fixture", CREATOR):
+        assert leak not in detail, f"denial leaked {leak!r}: {detail!r}"
