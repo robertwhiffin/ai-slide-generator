@@ -90,15 +90,19 @@ function readStoredConfig(): AgentConfig | null {
   }
 }
 
-/**
- * Resolve the default slide style ID from user preference or system default.
- * Priority: user localStorage > server is_default > server is_system.
- * Returns null if no default can be determined (caller should leave style as-is).
- */
-async function resolveDefaultStyleId(): Promise<number | null> {
+/** The user's OWN explicit "make this my default style" preference, if any. */
+function userPreferredStyleId(): number | null {
   const userStyleId = localStorage.getItem('userDefaultSlideStyleId');
-  if (userStyleId) return Number(userStyleId);
+  return userStyleId ? Number(userStyleId) : null;
+}
 
+/**
+ * The slide style the SERVER seeds as its default — the id that
+ * `init_default_profile.py` writes into the default profile's
+ * `selected_slide_style_id`, and therefore the value that means "nobody chose
+ * this" rather than "a user picked this".
+ */
+async function seededDefaultStyleId(): Promise<number | null> {
   try {
     const { styles } = await configApi.listSlideStyles();
     const defaultStyle = styles.find(s => s.is_default) ?? styles.find(s => s.is_system);
@@ -106,6 +110,15 @@ async function resolveDefaultStyleId(): Promise<number | null> {
   } catch {
     return null;
   }
+}
+
+/**
+ * Resolve the default slide style ID from user preference or system default.
+ * Priority: user localStorage > server is_default > server is_system.
+ * Returns null if no default can be determined (caller should leave style as-is).
+ */
+async function resolveDefaultStyleId(): Promise<number | null> {
+  return userPreferredStyleId() ?? (await seededDefaultStyleId());
 }
 
 /**
@@ -128,19 +141,42 @@ async function resolveDefaultDesignSystemId(): Promise<number | null> {
  * Fill in whichever style SOURCE a config is missing, honouring the product
  * decision that an org-default design system OUTRANKS the default slide style.
  *
- * Mutates and returns a copy. Only ever fills a gap: a config that already
- * names a design system or a slide style is left alone, so an explicit user
- * choice (including an explicitly chosen slide style) is never overridden and
- * two competing style sources are never seeded at once. Mirrors the backend's
+ * Mutates and returns a copy. Only ever fills a gap — with one deliberate
+ * exception: a slide-style id that is merely the SERVER-SEEDED default is
+ * treated as an unfilled gap, not as a choice. The server-seeded default
+ * profile always populates `slide_style_id` with that id
+ * (`init_default_profile.py`, and the profile -> agent_config migration), and
+ * the browser loads that profile before resolving defaults, so honouring it as
+ * an explicit choice meant the org-default design system could never win in the
+ * real browser flow.
+ *
+ * A user's OWN slide-style choice is still respected, distinguished by
+ * provenance rather than by value:
+ *  - their personal `userDefaultSlideStyleId` preference, or
+ *  - any style id that is not the server's seeded default.
+ * Either of those suppresses the design-system default, so a user who picked a
+ * style never gets a brand layered over it. Mirrors the backend's
  * `_apply_org_default_style_source`, which covers MCP and the chat routes.
  */
 async function withResolvedStyleSource(config: AgentConfig): Promise<AgentConfig> {
-  if (config.design_system_id != null || config.slide_style_id != null) return config;
+  if (config.design_system_id != null) return config;
+
+  if (config.slide_style_id != null) {
+    // Only the seeded default is overridable; anything else is a real choice.
+    const seededId = await seededDefaultStyleId();
+    if (seededId == null || config.slide_style_id !== seededId) return config;
+    // It IS the seed. The user's own style preference outranks both the seed
+    // and the org-default design system, so it claims the slot here.
+    const userPreferred = userPreferredStyleId();
+    if (userPreferred != null) return { ...config, slide_style_id: userPreferred };
+  }
 
   const designSystemId = await resolveDefaultDesignSystemId();
   if (designSystemId != null) {
-    return { ...config, design_system_id: designSystemId };
+    // Clear the seeded style so the two sources never compete in one prompt.
+    return { ...config, design_system_id: designSystemId, slide_style_id: null };
   }
+  if (config.slide_style_id != null) return config;
   return { ...config, slide_style_id: await resolveDefaultStyleId() };
 }
 
@@ -287,8 +323,12 @@ export const AgentConfigProvider: React.FC<{ children: React.ReactNode }> = ({ c
 
     // If we have a stored config with tools already configured, it's a real
     // user-modified config — keep it as-is and just fill in missing defaults.
+    // A stored config can still carry the seeded style default (it was mirrored
+    // from the seeded profile), so the style source is re-resolved unless a
+    // design system is already named; `withResolvedStyleSource` is what decides
+    // whether the stored style is a real choice.
     if (storedConfig && storedConfig.tools.length > 0) {
-      if (storedConfig.slide_style_id == null || storedConfig.deck_prompt_id == null) {
+      if (storedConfig.design_system_id == null || storedConfig.deck_prompt_id == null) {
         void withResolvedStyleSource(storedConfig).then(resolved => {
           const updated = { ...resolved };
           if (updated.deck_prompt_id == null) updated.deck_prompt_id = resolveDefaultDeckPromptId();

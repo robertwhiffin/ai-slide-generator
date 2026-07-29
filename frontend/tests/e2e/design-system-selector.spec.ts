@@ -1186,3 +1186,177 @@ test.describe('AgentConfigBar — design system selector', () => {
       .toMatchObject({ design_system_id: dsId, template_id: null });
   });
 });
+
+// ---------------------------------------------------------------------------
+// Org-default design system vs. the server-seeded LEGACY slide-style default
+// ---------------------------------------------------------------------------
+
+/**
+ * The product decision is that an org-default DESIGN SYSTEM outranks the legacy
+ * default slide style. But the server-seeded default profile carries the legacy
+ * default slide-style id (`init_default_profile.py` / the profile ->
+ * agent_config migration both populate `selected_slide_style_id`), and the
+ * browser loads that profile BEFORE resolving defaults. Backend tests omit
+ * `agent_config` entirely, so they never see this: in the real browser flow the
+ * seeded style always occupied the slot and the org default never applied.
+ *
+ * A USER'S OWN explicit slide-style choice must still win, so these tests pin
+ * both halves of the distinction. All fixtures synthetic.
+ */
+test.describe('org-default design system vs. seeded legacy style default', () => {
+  const ORG_DEFAULT_DS_ID = mockDesignSystems.design_systems[0].id; // is_default: true
+  const SEEDED_STYLE_ID = 1; // mockSlideStyles' is_system + is_default style
+
+  /**
+   * The default profile exactly as the server seeds it: is_default, and an
+   * agent_config whose slide_style_id is the legacy default style.
+   */
+  const seededDefaultProfile = {
+    id: 1,
+    name: 'Default',
+    description: 'Server-seeded default profile.',
+    is_default: true,
+    agent_config: {
+      tools: [],
+      slide_style_id: SEEDED_STYLE_ID,
+      design_system_id: null,
+      template_id: null,
+      deck_prompt_id: null,
+      system_prompt: null,
+      slide_editing_instructions: null,
+    },
+    created_at: '2026-01-08T20:10:29.720015',
+    created_by: 'system',
+    updated_at: '2026-01-08T20:10:29.720025',
+  };
+
+  async function mockOrgDefaults(
+    page: import('@playwright/test').Page,
+    profile: Record<string, unknown>,
+  ) {
+    await setupMocks(page);
+    // The seeded default profile is what the browser loads pre-session.
+    await page.route(/\/api\/profiles$/, (route) => {
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify([profile]),
+      });
+    });
+    // An org-default design system exists.
+    await page.route(/\/api\/settings\/design-systems(\?[^/]*)?$/, (route, request) => {
+      if (request.method() === 'GET') {
+        route.fulfill({
+          status: 200,
+          contentType: 'application/json',
+          body: JSON.stringify(mockDesignSystems),
+        });
+      } else {
+        route.continue();
+      }
+    });
+    await page.addInitScript(() => {
+      localStorage.removeItem('pendingAgentConfig');
+      localStorage.removeItem('userDefaultSlideStyleId');
+      localStorage.removeItem('userDefaultProfileId');
+    });
+  }
+
+  /** The pre-session config the app would send with the first message. */
+  async function pendingConfig(page: import('@playwright/test').Page) {
+    return await expect
+      .poll(async () => {
+        const raw = await page.evaluate(() => localStorage.getItem('pendingAgentConfig'));
+        return raw ? JSON.parse(raw) : null;
+      })
+      .not.toBeNull()
+      .then(async () => {
+        const raw = await page.evaluate(() => localStorage.getItem('pendingAgentConfig'));
+        return JSON.parse(raw ?? '{}') as Record<string, unknown>;
+      });
+  }
+
+  test('the org-default DS wins over the seeded legacy style default', async ({ page }) => {
+    await mockOrgDefaults(page, seededDefaultProfile);
+
+    await page.goto('/');
+    await expect(page.getByTestId('agent-config-bar')).toBeVisible();
+    await page.getByTestId('agent-config-toggle').click();
+
+    // The org default is preselected, and the legacy seeded style did not
+    // occupy the slot instead.
+    await expect(page.getByTestId('design-system-selector')).toHaveValue(
+      String(ORG_DEFAULT_DS_ID),
+    );
+    const config = await pendingConfig(page);
+    expect(config.design_system_id).toBe(ORG_DEFAULT_DS_ID);
+    expect(config.slide_style_id).toBeNull();
+  });
+
+  test("a USER'S OWN explicit style choice still beats the org-default DS", async ({ page }) => {
+    // Distinguished from the seeded default by provenance: this user actively
+    // picked a style, recorded as their personal preference.
+    await mockOrgDefaults(page, seededDefaultProfile);
+    await page.addInitScript(
+      ([key, value]) => localStorage.setItem(key, value),
+      ['userDefaultSlideStyleId', String(2)] as [string, string],
+    );
+
+    await page.goto('/');
+    await expect(page.getByTestId('agent-config-bar')).toBeVisible();
+    await page.getByTestId('agent-config-toggle').click();
+
+    const config = await pendingConfig(page);
+    expect(config.slide_style_id).toBe(2);
+    expect(config.design_system_id).toBeNull();
+  });
+
+  test('a profile style that is NOT the seeded default is treated as a real choice', async ({
+    page,
+  }) => {
+    // A profile someone deliberately built around a specific non-default style
+    // is an explicit choice, not the seed — it must not be overridden.
+    await mockOrgDefaults(page, {
+      ...seededDefaultProfile,
+      agent_config: { ...seededDefaultProfile.agent_config, slide_style_id: 2 },
+    });
+
+    await page.goto('/');
+    await expect(page.getByTestId('agent-config-bar')).toBeVisible();
+    await page.getByTestId('agent-config-toggle').click();
+
+    const config = await pendingConfig(page);
+    expect(config.slide_style_id).toBe(2);
+    expect(config.design_system_id).toBeNull();
+  });
+
+  test('with NO org-default DS the seeded style default is left alone', async ({ page }) => {
+    await mockOrgDefaults(page, seededDefaultProfile);
+    // No design system is marked default.
+    await page.route(/\/api\/settings\/design-systems(\?[^/]*)?$/, (route, request) => {
+      if (request.method() === 'GET') {
+        route.fulfill({
+          status: 200,
+          contentType: 'application/json',
+          body: JSON.stringify({
+            design_systems: mockDesignSystems.design_systems.map(ds => ({
+              ...ds,
+              is_default: false,
+            })),
+            total: mockDesignSystems.design_systems.length,
+          }),
+        });
+      } else {
+        route.continue();
+      }
+    });
+
+    await page.goto('/');
+    await expect(page.getByTestId('agent-config-bar')).toBeVisible();
+    await page.getByTestId('agent-config-toggle').click();
+
+    const config = await pendingConfig(page);
+    expect(config.design_system_id).toBeNull();
+    expect(config.slide_style_id).toBe(SEEDED_STYLE_ID);
+  });
+});
