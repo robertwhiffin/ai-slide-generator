@@ -165,6 +165,314 @@ async def test_create_deck_skips_default_lookup_when_slide_style_id_provided(
 
 
 @pytest.mark.asyncio
+async def test_create_deck_defaults_to_org_default_design_system(
+    fake_request, identity
+):
+    """MCP-created decks could not reach a design system at all: create_deck
+    only ever set slide_style_id. With an org default configured it must be
+    applied — and, per the precedence decision, the slide-style default must
+    NOT also be seeded."""
+    from src.api import mcp_server
+
+    with patch("src.api.mcp_server.mcp_auth_scope") as auth_scope, \
+         patch("src.api.mcp_server.get_session_manager") as get_sm, \
+         patch("src.api.mcp_server.get_default_design_system_id") as get_default_ds, \
+         patch("src.api.mcp_server.get_default_slide_style_id") as get_default_style, \
+         patch("src.api.mcp_server.enqueue_create_job") as enqueue:
+
+        auth_scope.return_value.__enter__.return_value = identity
+        auth_scope.return_value.__exit__.return_value = False
+
+        sm = MagicMock()
+        sm.create_session.return_value = {"session_id": "sess-123"}
+        get_sm.return_value = sm
+        get_default_ds.return_value = 5
+        get_default_style.return_value = 17
+
+        async def _fake_enqueue(**kwargs):
+            return "req-42"
+
+        enqueue.side_effect = _fake_enqueue
+
+        await mcp_server._create_deck_impl(
+            request=fake_request, prompt="a deck about widgets"
+        )
+
+        agent_config = sm.create_session.call_args.kwargs["agent_config"]
+        assert agent_config["design_system_id"] == 5
+        assert "slide_style_id" not in agent_config
+
+
+@pytest.mark.asyncio
+async def test_create_deck_explicit_design_system_wins(fake_request, identity):
+    from src.api import mcp_server
+
+    with patch("src.api.mcp_server.mcp_auth_scope") as auth_scope, \
+         patch("src.api.mcp_server.get_session_manager") as get_sm, \
+         patch("src.api.mcp_server.get_default_design_system_id") as get_default_ds, \
+         patch("src.api.mcp_server.enqueue_create_job") as enqueue:
+
+        auth_scope.return_value.__enter__.return_value = identity
+        auth_scope.return_value.__exit__.return_value = False
+
+        sm = MagicMock()
+        sm.create_session.return_value = {"session_id": "sess-123"}
+        get_sm.return_value = sm
+
+        async def _fake_enqueue(**kwargs):
+            return "req-42"
+
+        enqueue.side_effect = _fake_enqueue
+
+        await mcp_server._create_deck_impl(
+            request=fake_request, prompt="deck", design_system_id=8
+        )
+
+        get_default_ds.assert_not_called()
+        agent_config = sm.create_session.call_args.kwargs["agent_config"]
+        assert agent_config["design_system_id"] == 8
+
+
+@pytest.mark.asyncio
+async def test_create_deck_explicit_slide_style_suppresses_default_ds(
+    fake_request, identity
+):
+    """A caller who explicitly names a slide style must not silently get a
+    design system layered over it."""
+    from src.api import mcp_server
+
+    with patch("src.api.mcp_server.mcp_auth_scope") as auth_scope, \
+         patch("src.api.mcp_server.get_session_manager") as get_sm, \
+         patch("src.api.mcp_server.get_default_design_system_id") as get_default_ds, \
+         patch("src.api.mcp_server.enqueue_create_job") as enqueue:
+
+        auth_scope.return_value.__enter__.return_value = identity
+        auth_scope.return_value.__exit__.return_value = False
+
+        sm = MagicMock()
+        sm.create_session.return_value = {"session_id": "sess-123"}
+        get_sm.return_value = sm
+        get_default_ds.return_value = 5
+
+        async def _fake_enqueue(**kwargs):
+            return "req-42"
+
+        enqueue.side_effect = _fake_enqueue
+
+        await mcp_server._create_deck_impl(
+            request=fake_request, prompt="deck", slide_style_id=9
+        )
+
+        agent_config = sm.create_session.call_args.kwargs["agent_config"]
+        assert agent_config["slide_style_id"] == 9
+        assert "design_system_id" not in agent_config
+
+
+@pytest.mark.asyncio
+async def test_create_deck_falls_back_to_slide_style_when_no_default_ds(
+    fake_request, identity
+):
+    """No org-default DS configured -> the pre-existing slide-style behavior."""
+    from src.api import mcp_server
+
+    with patch("src.api.mcp_server.mcp_auth_scope") as auth_scope, \
+         patch("src.api.mcp_server.get_session_manager") as get_sm, \
+         patch("src.api.mcp_server.get_default_design_system_id") as get_default_ds, \
+         patch("src.api.mcp_server.get_default_slide_style_id") as get_default_style, \
+         patch("src.api.mcp_server.enqueue_create_job") as enqueue:
+
+        auth_scope.return_value.__enter__.return_value = identity
+        auth_scope.return_value.__exit__.return_value = False
+
+        sm = MagicMock()
+        sm.create_session.return_value = {"session_id": "sess-123"}
+        get_sm.return_value = sm
+        get_default_ds.return_value = None
+        get_default_style.return_value = 17
+
+        async def _fake_enqueue(**kwargs):
+            return "req-42"
+
+        enqueue.side_effect = _fake_enqueue
+
+        await mcp_server._create_deck_impl(request=fake_request, prompt="deck")
+
+        agent_config = sm.create_session.call_args.kwargs["agent_config"]
+        assert agent_config["slide_style_id"] == 17
+        assert "design_system_id" not in agent_config
+
+
+# ---- create_deck: optional template_name pin ----------------------------
+
+
+def _ds_with_templates(*names):
+    """A stand-in design system exposing named templates (ids 101, 102, ...)."""
+    ds = MagicMock()
+    ds.templates = []
+    for offset, name in enumerate(names):
+        template = MagicMock()
+        template.id = 101 + offset
+        template.name = name
+        ds.templates.append(template)
+    return ds
+
+
+@pytest.mark.asyncio
+async def test_create_deck_resolves_template_name_to_a_pin(fake_request, identity):
+    """The optional template_name parameter pins that template by name."""
+    from src.api import mcp_server
+
+    with patch("src.api.mcp_server.mcp_auth_scope") as auth_scope, \
+         patch("src.api.mcp_server.get_session_manager") as get_sm, \
+         patch("src.api.mcp_server.get_default_design_system_id") as get_default_ds, \
+         patch("src.api.mcp_server._resolve_template_name") as resolve_name, \
+         patch("src.api.mcp_server.enqueue_create_job") as enqueue:
+
+        auth_scope.return_value.__enter__.return_value = identity
+        auth_scope.return_value.__exit__.return_value = False
+
+        sm = MagicMock()
+        sm.create_session.return_value = {"session_id": "sess-123"}
+        get_sm.return_value = sm
+        get_default_ds.return_value = 5
+        resolve_name.return_value = 102
+
+        async def _fake_enqueue(**kwargs):
+            return "req-42"
+
+        enqueue.side_effect = _fake_enqueue
+
+        await mcp_server._create_deck_impl(
+            request=fake_request, prompt="deck", template_name="Two Column"
+        )
+
+        resolve_name.assert_called_once_with(5, "Two Column")
+        agent_config = sm.create_session.call_args.kwargs["agent_config"]
+        assert agent_config["design_system_id"] == 5
+        assert agent_config["template_id"] == 102
+
+
+@pytest.mark.asyncio
+async def test_create_deck_ignores_unmatched_template_name_without_error(
+    fake_request, identity, caplog
+):
+    """An unmatched template_name is ignored + logged — never a 500. The deck
+    still generates, and the model soft-picks a template as usual."""
+    import logging
+
+    from src.api import mcp_server
+
+    with patch("src.api.mcp_server.mcp_auth_scope") as auth_scope, \
+         patch("src.api.mcp_server.get_session_manager") as get_sm, \
+         patch("src.api.mcp_server.get_default_design_system_id") as get_default_ds, \
+         patch("src.api.mcp_server._resolve_template_name") as resolve_name, \
+         patch("src.api.mcp_server.enqueue_create_job") as enqueue:
+
+        auth_scope.return_value.__enter__.return_value = identity
+        auth_scope.return_value.__exit__.return_value = False
+
+        sm = MagicMock()
+        sm.create_session.return_value = {"session_id": "sess-123"}
+        get_sm.return_value = sm
+        get_default_ds.return_value = 5
+        resolve_name.return_value = None  # no such template
+
+        async def _fake_enqueue(**kwargs):
+            return "req-42"
+
+        enqueue.side_effect = _fake_enqueue
+
+        with caplog.at_level(logging.WARNING):
+            result = await mcp_server._create_deck_impl(
+                request=fake_request, prompt="deck", template_name="Nonexistent"
+            )
+
+        assert result["status"] == "pending"  # no error surfaced
+        agent_config = sm.create_session.call_args.kwargs["agent_config"]
+        assert "template_id" not in agent_config
+        assert "Nonexistent" in caplog.text
+        assert "matched no template" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_create_deck_ignores_template_name_without_a_design_system(
+    fake_request, identity
+):
+    """template_name is meaningless with no design system in play (templates
+    belong to a design system) — ignored, never a crash."""
+    from src.api import mcp_server
+
+    with patch("src.api.mcp_server.mcp_auth_scope") as auth_scope, \
+         patch("src.api.mcp_server.get_session_manager") as get_sm, \
+         patch("src.api.mcp_server.get_default_design_system_id") as get_default_ds, \
+         patch("src.api.mcp_server.get_default_slide_style_id") as get_default_style, \
+         patch("src.api.mcp_server.enqueue_create_job") as enqueue:
+
+        auth_scope.return_value.__enter__.return_value = identity
+        auth_scope.return_value.__exit__.return_value = False
+
+        sm = MagicMock()
+        sm.create_session.return_value = {"session_id": "sess-123"}
+        get_sm.return_value = sm
+        get_default_ds.return_value = None
+        get_default_style.return_value = 17
+
+        async def _fake_enqueue(**kwargs):
+            return "req-42"
+
+        enqueue.side_effect = _fake_enqueue
+
+        result = await mcp_server._create_deck_impl(
+            request=fake_request, prompt="deck", template_name="Two Column"
+        )
+
+        assert result["status"] == "pending"
+        agent_config = sm.create_session.call_args.kwargs["agent_config"]
+        assert "template_id" not in agent_config
+
+
+class TestResolveTemplateName:
+    """Name -> template-id resolution, scoped to the owning design system."""
+
+    def test_matches_by_exact_name(self):
+        from src.api.mcp_server import _resolve_template_name
+
+        ds = _ds_with_templates("Title Slide", "Two Column")
+        with patch("src.api.mcp_server._load_design_system", return_value=ds):
+            assert _resolve_template_name(5, "Two Column") == 102
+
+    def test_match_is_case_and_whitespace_insensitive(self):
+        from src.api.mcp_server import _resolve_template_name
+
+        ds = _ds_with_templates("Title Slide", "Two Column")
+        with patch("src.api.mcp_server._load_design_system", return_value=ds):
+            assert _resolve_template_name(5, "  two column  ") == 102
+
+    def test_returns_none_for_unknown_name(self):
+        from src.api.mcp_server import _resolve_template_name
+
+        ds = _ds_with_templates("Title Slide")
+        with patch("src.api.mcp_server._load_design_system", return_value=ds):
+            assert _resolve_template_name(5, "Nope") is None
+
+    def test_returns_none_when_design_system_missing(self):
+        from src.api.mcp_server import _resolve_template_name
+
+        with patch("src.api.mcp_server._load_design_system", return_value=None):
+            assert _resolve_template_name(999, "Two Column") is None
+
+    def test_never_raises_when_lookup_explodes(self):
+        """A DB failure must degrade to "no pin", never a 500."""
+        from src.api.mcp_server import _resolve_template_name
+
+        with patch(
+            "src.api.mcp_server._load_design_system",
+            side_effect=RuntimeError("db down"),
+        ):
+            assert _resolve_template_name(5, "Two Column") is None
+
+
+@pytest.mark.asyncio
 async def test_create_deck_rejects_empty_prompt(fake_request, identity):
     from src.api import mcp_server
     from src.api.mcp_server import MCPToolError
