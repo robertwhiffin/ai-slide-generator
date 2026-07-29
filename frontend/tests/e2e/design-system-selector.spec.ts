@@ -1330,6 +1330,94 @@ test.describe('org-default design system vs. seeded legacy style default', () =>
     expect(config.design_system_id).toBeNull();
   });
 
+  test('an EXISTING configured session keeps its explicit None across a reload', async ({
+    page,
+  }) => {
+    // Default seeding is a NEW-SESSION default. A user who picked Design
+    // System = None and saved it must not have the org default silently
+    // restored when they come back to the session.
+    await mockOrgDefaults(page, seededDefaultProfile);
+    await mockSessionWithSlides(page);
+
+    const configPuts: Record<string, unknown>[] = [];
+    await page.route(
+      `http://127.0.0.1:8000/api/sessions/${TEST_SESSION_ID}/agent-config`,
+      (route, request) => {
+        if (request.method() === 'PUT') {
+          configPuts.push(JSON.parse(request.postData() ?? '{}'));
+          route.fulfill({ status: 200, contentType: 'application/json', body: request.postData() ?? '{}' });
+          return;
+        }
+        // The session's SAVED config: explicitly configured, explicitly no
+        // style source at all.
+        route.fulfill({
+          status: 200,
+          contentType: 'application/json',
+          body: JSON.stringify({
+            tools: [],
+            slide_style_id: null,
+            design_system_id: null,
+            template_id: null,
+            deck_prompt_id: null,
+            system_prompt: null,
+            slide_editing_instructions: null,
+            is_configured: true,
+          }),
+        });
+      },
+    );
+
+    await page.goto(`/sessions/${TEST_SESSION_ID}/edit`);
+    await expect(page.getByTestId('agent-config-bar')).toBeVisible();
+    await page.getByTestId('agent-config-toggle').click();
+    await expect(page.getByTestId('design-system-selector')).toBeVisible();
+
+    // Both selectors stay empty: the saved "None" survived the reload…
+    await expect(page.getByTestId('design-system-selector')).toHaveValue('');
+    await expect(page.getByTestId('style-selector')).toHaveValue('');
+    // …and nothing was written back to the session.
+    expect(configPuts).toEqual([]);
+  });
+
+  test('an UNCONFIGURED session still gets the org default', async ({ page }) => {
+    // The counterpart: a session that never had a config saved is effectively
+    // new, so the org default does apply.
+    await mockOrgDefaults(page, seededDefaultProfile);
+    await mockSessionWithSlides(page);
+
+    await page.route(
+      `http://127.0.0.1:8000/api/sessions/${TEST_SESSION_ID}/agent-config`,
+      (route, request) => {
+        if (request.method() === 'PUT') {
+          route.fulfill({ status: 200, contentType: 'application/json', body: request.postData() ?? '{}' });
+          return;
+        }
+        route.fulfill({
+          status: 200,
+          contentType: 'application/json',
+          body: JSON.stringify({
+            tools: [],
+            slide_style_id: null,
+            design_system_id: null,
+            template_id: null,
+            deck_prompt_id: null,
+            system_prompt: null,
+            slide_editing_instructions: null,
+            is_configured: false,
+          }),
+        });
+      },
+    );
+
+    await page.goto(`/sessions/${TEST_SESSION_ID}/edit`);
+    await expect(page.getByTestId('agent-config-bar')).toBeVisible();
+    await page.getByTestId('agent-config-toggle').click();
+
+    await expect(page.getByTestId('design-system-selector')).toHaveValue(
+      String(ORG_DEFAULT_DS_ID),
+    );
+  });
+
   test('with NO org-default DS the seeded style default is left alone', async ({ page }) => {
     await mockOrgDefaults(page, seededDefaultProfile);
     // No design system is marked default.

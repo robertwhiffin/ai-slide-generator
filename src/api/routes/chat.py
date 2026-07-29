@@ -162,9 +162,27 @@ def _maybe_create_session(request: ChatRequest, session_manager) -> bool:
         config = AgentConfig.model_validate(request.agent_config)
         explicit_config = config.model_dump()
 
-    # Build full agent_config_data with defaults (used for session creation)
     agent_config_data = explicit_config or AgentConfig().model_dump()
-    _apply_org_default_style_source(agent_config_data)
+
+    def _seeded_for_new_session(config_data: dict) -> dict:
+        """The org-default style source, applied ONLY when creating a session.
+
+        Default seeding is a NEW-SESSION default. It used to run here for every
+        request, before the branch on ``request.session_id`` below, with two
+        consequences: an EXISTING session whose config was explicitly null got
+        rewritten to the org default and PERSISTED — silently discarding a saved
+        "Design System = None" — and an org-default change became retroactive to
+        old sessions instead of session-isolated.
+
+        A client that SENT an agent_config has already chosen its style source,
+        including the choice of neither (two explicit nulls), so only a config
+        the client never configured is seeded.
+        """
+        if explicit_config is not None:
+            return config_data
+        seeded = dict(config_data)
+        _apply_org_default_style_source(seeded)
+        return seeded
 
     def _without_template_pin(config_data: dict) -> dict:
         """Session-CREATING requests never seed a template pin.
@@ -205,7 +223,9 @@ def _maybe_create_session(request: ChatRequest, session_manager) -> bool:
                 current_user = get_current_user()
                 session_manager.create_session(
                     session_id=request.session_id,
-                    agent_config=_without_template_pin(agent_config_data),
+                    agent_config=_without_template_pin(
+                        _seeded_for_new_session(agent_config_data)
+                    ),
                     created_by=current_user,
                 )
                 logger.info(
@@ -219,7 +239,7 @@ def _maybe_create_session(request: ChatRequest, session_manager) -> bool:
 
     current_user = get_current_user()
     session = session_manager.create_session(
-        agent_config=_without_template_pin(agent_config_data),
+        agent_config=_without_template_pin(_seeded_for_new_session(agent_config_data)),
         created_by=current_user,
     )
     request.session_id = session["session_id"]

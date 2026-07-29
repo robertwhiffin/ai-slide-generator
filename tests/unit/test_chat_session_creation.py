@@ -495,6 +495,150 @@ class TestOrgDefaultDesignSystemPreselect:
         assert config["design_system_id"] == 7
         assert config["template_id"] is None
 
+    def test_explicit_no_style_source_wins_on_a_new_session(
+        self, client, mock_session_manager, mock_chat_service
+    ):
+        """The case the class docstring claims but never covered: a client that
+        explicitly sends BOTH ids as null has chosen "no design system", and
+        that choice must survive even on session creation."""
+        with patch("src.api.routes.chat.get_default_design_system_id", return_value=7), \
+             patch("src.api.routes.chat.get_default_slide_style_id", return_value=42):
+            config = self._created_config(
+                client, mock_session_manager, mock_chat_service,
+                {"message": "Create slides",
+                 "agent_config": {
+                     "tools": [],
+                     "design_system_id": None,
+                     "slide_style_id": None,
+                 }},
+            )
+        assert config["design_system_id"] is None
+        assert config["slide_style_id"] is None
+
+
+class TestOrgDefaultIsNewSessionOnly:
+    """Default seeding is a NEW-SESSION default only.
+
+    `_apply_org_default_style_source()` ran before `_maybe_create_session()`
+    branched on `request.session_id`, so a request for an EXISTING session whose
+    config was explicitly null got rewritten to the org default and PERSISTED —
+    silently discarding a saved "Design System = None" and making an org-default
+    change retroactive to old sessions instead of session-isolated.
+    """
+
+    EXISTING_SESSION_ID = "e8f1c2d3-4b5a-6789-abcd-ef0123456789"
+
+    def _complete_stream(self, mock_chat_service):
+        from src.api.schemas.streaming import StreamEvent
+
+        mock_chat_service.send_message_streaming.return_value = iter(
+            [StreamEvent(type=StreamEventType.COMPLETE, slides={"slides": []})]
+        )
+
+    def _synced_config(self, client, mock_session_manager, mock_chat_service, agent_config):
+        """POST to an EXISTING session and return the config written to its row."""
+        from src.database.models import UserSession
+
+        self._complete_stream(mock_chat_service)
+        mock_session_manager.get_session.return_value = {
+            "session_id": self.EXISTING_SESSION_ID
+        }
+
+        session_row = UserSession(
+            session_id=self.EXISTING_SESSION_ID,
+            created_by="test-user",
+            agent_config={"tools": [], "design_system_id": None, "slide_style_id": None},
+        )
+        db = MagicMock()
+        db.query.return_value.filter.return_value.first.return_value = session_row
+
+        with patch("src.core.database.get_db_session") as mock_get_db:
+            mock_get_db.return_value.__enter__ = MagicMock(return_value=db)
+            mock_get_db.return_value.__exit__ = MagicMock(return_value=False)
+            response = client.post(
+                "/api/chat/stream",
+                json={
+                    "message": "Keep my choice",
+                    "session_id": self.EXISTING_SESSION_ID,
+                    "agent_config": agent_config,
+                },
+            )
+        assert response.status_code == 200
+        return session_row.agent_config
+
+    def test_existing_session_with_explicit_nulls_is_not_rewritten(
+        self, client, mock_session_manager, mock_chat_service
+    ):
+        """A user picked Design System = None and saved it; sending a message
+        must not resurrect the org default onto that session."""
+        with patch("src.api.routes.chat.get_default_design_system_id", return_value=7), \
+             patch("src.api.routes.chat.get_default_slide_style_id", return_value=42):
+            synced = self._synced_config(
+                client, mock_session_manager, mock_chat_service,
+                {"tools": [], "design_system_id": None, "slide_style_id": None},
+            )
+
+        assert synced["design_system_id"] is None, (
+            "org default was written onto an existing session's explicit None"
+        )
+        assert synced["slide_style_id"] is None
+
+    def test_existing_session_keeps_its_explicit_design_system(
+        self, client, mock_session_manager, mock_chat_service
+    ):
+        """An explicit choice on an existing session is still synced through."""
+        with patch("src.api.routes.chat.get_default_design_system_id", return_value=7):
+            synced = self._synced_config(
+                client, mock_session_manager, mock_chat_service,
+                {"tools": [], "design_system_id": 3},
+            )
+
+        assert synced["design_system_id"] == 3
+
+    def test_an_existing_session_never_consults_the_org_default_at_all(
+        self, client, mock_session_manager, mock_chat_service
+    ):
+        """Session-isolation: changing the org default must not reach into an
+        existing session, so its resolver is never even called on that path."""
+        with patch(
+            "src.api.routes.chat.get_default_design_system_id"
+        ) as resolver:
+            self._synced_config(
+                client, mock_session_manager, mock_chat_service,
+                {"tools": [], "design_system_id": None, "slide_style_id": None},
+            )
+
+        resolver.assert_not_called()
+
+    def test_a_client_generated_id_that_was_never_persisted_keeps_explicit_nulls(
+        self, client, mock_session_manager, mock_chat_service
+    ):
+        """This path CREATES a session, so seeding is allowed in principle — but
+        the client still sent explicit nulls, and that choice rides into the new
+        session rather than being replaced by the org default."""
+        from src.api.services.session_manager import SessionNotFoundError
+
+        self._complete_stream(mock_chat_service)
+        mock_session_manager.get_session.side_effect = SessionNotFoundError("nope")
+
+        with patch("src.api.routes.chat.get_default_design_system_id", return_value=7):
+            response = client.post(
+                "/api/chat/stream",
+                json={
+                    "message": "Create slides",
+                    "session_id": self.EXISTING_SESSION_ID,
+                    "agent_config": {
+                        "tools": [],
+                        "design_system_id": None,
+                        "slide_style_id": None,
+                    },
+                },
+            )
+        assert response.status_code == 200
+        config = mock_session_manager.create_session.call_args.kwargs["agent_config"]
+        assert config["design_system_id"] is None
+        assert config["slide_style_id"] is None
+
 
 class TestGetDefaultDesignSystemId:
     """Backend helper mirroring ``get_default_slide_style_id``."""
