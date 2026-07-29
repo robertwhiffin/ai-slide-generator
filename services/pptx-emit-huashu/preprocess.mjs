@@ -610,6 +610,33 @@ export const PREPROCESS_SOURCE = `
   // those may not have finished loading. Per-image try/catch: an
   // undecodable SVG keeps its raw src, which is exactly the pre-existing
   // pipeline behavior.
+  // Destination rect for drawing a srcW x srcH image into a w x h canvas
+  // WITHOUT distorting it: scale by the smaller axis ratio and center the
+  // result (letterbox, i.e. CSS object-fit: contain). The stretch-fill this
+  // replaces baked distortion into the PNG whenever the layout box's aspect
+  // ratio differed from the artwork's — the reported symptom was a footer
+  // logo box flex-stretched to the full row width, which smeared a 3:1 logo
+  // across ~14:1. A ratio-true box (slide 1's logo) is unaffected: the
+  // computed scale is then identical on both axes and the offsets are 0.
+  function containFitRect(srcW, srcH, w, h) {
+    if (!srcW || !srcH) return { dx: 0, dy: 0, dw: w, dh: h };
+    const scale = Math.min(w / srcW, h / srcH);
+    const dw = srcW * scale;
+    const dh = srcH * scale;
+    return { dx: (w - dw) / 2, dy: (h - dh) / 2, dw: dw, dh: dh };
+  }
+
+  // Source rect for object-fit: cover — fill the destination box by
+  // CROPPING the overflowing axis, centered — never by stretching (a
+  // background minted with background-size:cover carries this intent).
+  function coverFitSourceRect(srcW, srcH, w, h) {
+    if (!srcW || !srcH) return { sx: 0, sy: 0, sw: srcW, sh: srcH };
+    const scale = Math.max(w / srcW, h / srcH);
+    const sw = Math.min(srcW, w / scale);
+    const sh = Math.min(srcH, h / scale);
+    return { sx: (srcW - sw) / 2, sy: (srcH - sh) / 2, sw: sw, sh: sh };
+  }
+
   async function rasterizeSvgDataUriImages() {
     let count = 0;
     const imgs = Array.from(document.querySelectorAll('img')).filter((img) =>
@@ -625,7 +652,21 @@ export const PREPROCESS_SOURCE = `
         c.width = w;
         c.height = h;
         const ctx = c.getContext('2d');
-        ctx.drawImage(img, 0, 0, w, h);
+        // Honour the image's own fit intent, but NEVER by stretching:
+        // cover fills the box by center-cropping the overflowing axis,
+        // anything else letterboxes. The canvas keeps the BOX size so
+        // downstream placement is unchanged — only the drawn geometry inside
+        // it is corrected. replaceBackgroundImageWithImg mints its
+        // <img>s with an explicit object-fit, so a background-size:cover
+        // layer still fills its box.
+        const objectFit = window.getComputedStyle(img).objectFit;
+        if (objectFit === 'cover') {
+          const src = coverFitSourceRect(img.naturalWidth, img.naturalHeight, w, h);
+          ctx.drawImage(img, src.sx, src.sy, src.sw, src.sh, 0, 0, w, h);
+        } else {
+          const fit = containFitRect(img.naturalWidth, img.naturalHeight, w, h);
+          ctx.drawImage(img, fit.dx, fit.dy, fit.dw, fit.dh);
+        }
         const dataUrl = c.toDataURL('image/png');
         // Pin the rendered size before the swap: an <img> sized by its
         // intrinsic dimensions would otherwise reflow when the 2x PNG
