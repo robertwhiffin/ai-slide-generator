@@ -936,3 +936,220 @@ class TestThumbnailPixelCeiling:
         bomb = next(a for a in body["assets"] if a["filename"] == "huge-claim.png")
         assert bomb["width"] is None
         assert bomb["height"] is None
+
+
+# ---------------------------------------------------------------------------
+# What OTHER users' sessions experience when a design system is DELETED
+# ---------------------------------------------------------------------------
+#
+# The DELETE route is reachable by the row's creator (and by admins), so a
+# design system that OTHER users have pinned in their sessions can disappear
+# underneath them. These tests pin the parts of that behaviour that were
+# measured SAFE, so a future change cannot silently make them unsafe. They do
+# NOT assert a policy for the part that is NOT safe (the agent-config PUT 422s
+# on a dangling design_system_id) — that is a product decision, reported
+# separately rather than invented here.
+#
+# Measured empirically against a REAL deleted row (soft and hard), not mocks.
+
+
+class TestDeletedDesignSystemAndOtherUsersSessions:
+    """Regression pins for the DELETE path's effect on a foreign session."""
+
+    def _patched_db(self, db_session):
+        cm = MagicMock()
+        cm.__enter__ = MagicMock(return_value=db_session)
+        cm.__exit__ = MagicMock(return_value=False)
+        return patch("src.core.database.get_db_session", return_value=cm)
+
+    def _import(self, db_session, name=None):
+        from src.services.design_system_service import import_bundle
+        from tests.unit.conftest_design_system import (
+            templated_bundle_files,
+            templated_manifest,
+        )
+
+        manifest = templated_manifest()
+        if name:
+            manifest["name"] = name
+        return import_bundle(
+            db_session,
+            zip_bytes=make_bundle_zip(manifest=manifest, files=templated_bundle_files()),
+            user="creator@test.com",
+        )
+
+    def _prompt(self, db_session, config):
+        from src.services.agent_factory import _get_prompt_content
+
+        with self._patched_db(db_session):
+            return _get_prompt_content(config, mode="generate")["system_prompt"]
+
+    @pytest.mark.parametrize("hard", [False, True], ids=["soft_delete", "hard_delete"])
+    def test_generation_for_a_deleted_pin_is_the_no_design_system_prompt(
+        self, db_session, hard
+    ):
+        """GENERATION self-heals, and provably so: the assembled prompt is
+        BYTE-IDENTICAL to what a session with no design system at all receives.
+
+        Length or "does not crash" would not be enough — a partially-branded
+        prompt, or one still carrying {{ds-asset:ID}} handles that can no longer
+        resolve, would also "not crash" while sending the model a broken
+        reference. Byte identity to the no-DS baseline is what rules that out.
+        """
+        from src.api.schemas.agent_config import AgentConfig
+        from src.database.models import DesignSystem
+
+        ds = self._import(db_session)
+        ds_id, template_id = ds.id, ds.templates[0].id
+
+        baseline = self._prompt(db_session, AgentConfig())
+        branded = self._prompt(
+            db_session, AgentConfig(design_system_id=ds_id, template_id=template_id)
+        )
+        # The control must actually differ, otherwise the assertion below is
+        # vacuous (it would hold for a prompt builder that ignores design
+        # systems entirely).
+        assert branded != baseline, "control failed: a live design system must brand the prompt"
+        assert "[ds-compiler" in branded
+
+        if hard:
+            db_session.query(DesignSystem).filter_by(id=ds_id).delete()
+        else:
+            ds.is_active = False
+        db_session.commit()
+
+        dangling = self._prompt(
+            db_session, AgentConfig(design_system_id=ds_id, template_id=template_id)
+        )
+        assert dangling == baseline, (
+            "a deleted design system must degrade to EXACTLY the no-design-system "
+            "prompt, with no partial branding left behind"
+        )
+        assert "ds-asset" not in dangling, (
+            "the fallback prompt must not carry {{ds-asset:ID}} handles that can "
+            "no longer resolve"
+        )
+
+    @pytest.mark.parametrize("hard", [False, True], ids=["soft_delete", "hard_delete"])
+    def test_deleted_design_system_disappears_from_the_picker_list(
+        self, db_session, client, hard
+    ):
+        """The LIST endpoint stops offering it, so no other user can newly pin a
+        deleted system (soft-deleted rows are excluded by default)."""
+        from src.database.models import DesignSystem
+
+        ds = self._import(db_session)
+        survivor = self._import(db_session, name="Acme Survivor")
+        assert {d["id"] for d in client.get("/api/settings/design-systems").json()[
+            "design_systems"
+        ]} == {ds.id, survivor.id}
+
+        if hard:
+            db_session.query(DesignSystem).filter_by(id=ds.id).delete()
+        else:
+            ds.is_active = False
+        db_session.commit()
+
+        visible = {
+            d["id"]
+            for d in client.get("/api/settings/design-systems").json()["design_systems"]
+        }
+        assert visible == {survivor.id}, "a deleted design system must leave the picker"
+
+    def test_reading_a_foreign_sessions_agent_config_still_works_after_delete(
+        self, db_session, client
+    ):
+        """B can still LOAD the session: the GET is lenient and echoes the stale
+        pin rather than 500ing, so the session opens instead of being bricked."""
+        from src.database.models import UserSession
+
+        ds = self._import(db_session)
+        ds_id, template_id = ds.id, ds.templates[0].id
+        db_session.add(
+            UserSession(
+                session_id="sess-foreign",
+                created_by="user-b@test.com",
+                agent_config={"design_system_id": ds_id, "template_id": template_id},
+            )
+        )
+        db_session.commit()
+
+        ds.is_active = False
+        db_session.commit()
+
+        with patch(
+            "src.api.routes.agent_config._check_deck_permission_for_session",
+            lambda *a, **k: None,
+        ), patch("src.api.routes.agent_config.get_session_manager") as mgr:
+            mgr.return_value.get_session.return_value = {
+                "session_id": "sess-foreign",
+                "agent_config": {
+                    "design_system_id": ds_id,
+                    "template_id": template_id,
+                },
+            }
+            resp = client.get("/api/sessions/sess-foreign/agent-config")
+
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["design_system_id"] == ds_id
+
+    def test_template_pin_whose_parent_design_system_is_gone_is_auto_cleared(
+        self, db_session
+    ):
+        """A template pin with NO surviving parent selection self-heals.
+
+        This is the half of the Phase 4 auto-clear that DOES cover deletion: once
+        ``design_system_id`` is absent, the stale ``template_id`` is cleared in
+        place instead of rejected. (When the dangling design_system_id is ALSO
+        still present, the strict design-system branch raises FIRST and this
+        clear never runs — see the reported finding.)
+        """
+        from src.api.routes.agent_config import _validate_references
+        from src.api.schemas.agent_config import AgentConfig
+        from src.database.models import DesignSystem
+
+        ds = self._import(db_session)
+        template_id = ds.templates[0].id
+        db_session.query(DesignSystem).filter_by(id=ds.id).delete()
+        db_session.commit()
+
+        config = AgentConfig(template_id=template_id)
+        cm = MagicMock()
+        cm.__enter__ = MagicMock(return_value=db_session)
+        cm.__exit__ = MagicMock(return_value=False)
+        with patch("src.api.routes.agent_config.get_db_session", return_value=cm):
+            _validate_references(config)  # must not raise
+        assert config.template_id is None
+
+    def test_agent_config_put_rejects_a_dangling_design_system_pin(self, db_session):
+        """CHARACTERIZATION (not an endorsement): the strict design-system branch
+        422s a config carrying a deleted ``design_system_id``.
+
+        Recorded so the CURRENT behaviour is visible and any deliberate change to
+        it is a conscious test edit rather than a silent drift. The product
+        consequence — every agent-config save from a session holding that pin
+        fails until the user re-picks a design system — is reported to the product
+        owner for a decision; this test asserts only what the code does today.
+        """
+        from fastapi import HTTPException
+
+        from src.api.routes.agent_config import _validate_references
+        from src.api.schemas.agent_config import AgentConfig
+
+        ds = self._import(db_session)
+        ds_id, template_id = ds.id, ds.templates[0].id
+        ds.is_active = False
+        db_session.commit()
+
+        config = AgentConfig(design_system_id=ds_id, template_id=template_id)
+        cm = MagicMock()
+        cm.__enter__ = MagicMock(return_value=db_session)
+        cm.__exit__ = MagicMock(return_value=False)
+        with patch("src.api.routes.agent_config.get_db_session", return_value=cm):
+            with pytest.raises(HTTPException) as exc:
+                _validate_references(config)
+        assert exc.value.status_code == 422
+        assert str(ds_id) in exc.value.detail
+        # The template pin is left untouched: the design-system branch raises
+        # before the Phase 4 auto-clear is reached.
+        assert config.template_id == template_id
