@@ -21,9 +21,19 @@
  *
  * Run with: npx playwright test tests/e2e/css-bg-export.spec.ts
  */
+import { execFileSync } from 'node:child_process';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
 import { test, expect, type Page } from '@playwright/test';
 import { WALKER_SOURCE } from '../../src/services/domWalker';
-import { pngDimensions } from '../helpers/pptxZip';
+import { pngDimensions, readZipEntries } from '../helpers/pptxZip';
+
+const SIDECAR_BUNDLE = fileURLToPath(
+  new URL('../../../services/pptx-emit/emit.bundle.mjs', import.meta.url),
+);
 
 // Synthetic assets — same palette as the Phase-5 spec fixtures.
 const PNG_NAVY_24x16 =
@@ -140,6 +150,59 @@ test('SVG url() background is rasterized to a 2x PNG record', async ({ page }) =
   expect(Math.round(svgBgImage.x)).toBe(400);
   expect(Math.round(svgBgImage.w)).toBe(300);
   expect(Math.round(svgBgImage.h)).toBe(200);
+});
+
+// ─── end-to-end: a CSS-background-ONLY deck reaches the .pptx ──────────
+// The walker-level tests above prove the record is emitted; this proves the
+// asset survives the WHOLE records export path (walker -> real sidecar
+// bundle -> PPTX media). A deck whose ONLY asset reference is a CSS
+// background-image is the exact shape suspected of being dropped.
+
+const CSS_BG_ONLY_PAGE = slidePage(`
+  <div id="only-asset" style="position:absolute;left:88px;top:72px;width:240px;height:160px;background-image:url('${PNG_NAVY_24x16}');background-size:cover;"></div>
+  <h1 style="position:absolute;left:88px;top:320px;width:600px;margin:0;font-size:40px;color:#0B3D66;">CSS Background Only</h1>
+`);
+
+test('end-to-end: a CSS-background-only deck keeps its asset in the .pptx', async ({ page }) => {
+  await loadWalker(page, CSS_BG_ONLY_PAGE);
+  const extract = await extractRecords(page, { prepare: true });
+
+  // Sanity: the deck really has no <img> of its own — the background IS the
+  // only asset reference, so a drop here would mean zero media in the pptx.
+  const imageRecords = (extract.records as unknown as WalkerImageRecord[]).filter(
+    (r) => r.kind === 'image',
+  );
+  expect(imageRecords).toHaveLength(1);
+
+  const payload = {
+    title: 'CSS background only (records e2e)',
+    font_mode: 'universal',
+    slides: [
+      { width: extract.width, height: extract.height, records: extract.records, notes: '' },
+    ],
+  };
+
+  const workDir = mkdtempSync(join(tmpdir(), 'css-bg-records-e2e-'));
+  try {
+    const outPath = join(workDir, 'out.pptx');
+    execFileSync('node', [SIDECAR_BUNDLE, '-', outPath], {
+      input: JSON.stringify(payload),
+    });
+    const entries = readZipEntries(readFileSync(outPath));
+    const mediaNames = [...entries.keys()].filter(
+      (n) => n.startsWith('ppt/media/') && !n.endsWith('/'),
+    );
+
+    // The asset is PRESENT in the exported deck...
+    expect(mediaNames).toHaveLength(1);
+    expect(pngDimensions(entries.get(mediaNames[0])!)).toEqual({ width: 24, height: 16 });
+
+    // ...and the slide actually references it.
+    const slideXml = entries.get('ppt/slides/slide1.xml')!.toString('utf8');
+    expect(slideXml).toContain('<p:pic>');
+  } finally {
+    rmSync(workDir, { recursive: true, force: true });
+  }
 });
 
 // ─── aspect-ratio preservation (the stretched footer logo) ─────────────
