@@ -395,6 +395,152 @@ class TestSessionManagerAgentConfig:
         assert "agent_config" in sig.parameters
 
 
+class TestOrgDefaultDesignSystemPreselect:
+    """An org-default design system must actually be CONSUMED: a new session
+    preselects it, and per the product decision it TAKES PRECEDENCE over the
+    legacy default slide style (a DS is the richer, more specific instruction —
+    resolving both would inject two competing style sources).
+
+    The org default only fills a GAP: an explicit choice from the client always
+    wins, including the explicit choice of "no design system".
+    """
+
+    def _complete_stream(self, mock_chat_service):
+        from src.api.schemas.streaming import StreamEvent
+
+        mock_chat_service.send_message_streaming.return_value = iter(
+            [StreamEvent(type=StreamEventType.COMPLETE, slides={"slides": []})]
+        )
+
+    def _created_config(self, client, mock_session_manager, mock_chat_service, payload):
+        self._complete_stream(mock_chat_service)
+        response = client.post("/api/chat/stream", json=payload)
+        assert response.status_code == 200
+        return mock_session_manager.create_session.call_args.kwargs["agent_config"]
+
+    def test_new_session_preselects_org_default_design_system(
+        self, client, mock_session_manager, mock_chat_service
+    ):
+        with patch("src.api.routes.chat.get_default_design_system_id", return_value=7), \
+             patch("src.api.routes.chat.get_default_slide_style_id", return_value=42):
+            config = self._created_config(
+                client, mock_session_manager, mock_chat_service,
+                {"message": "Create slides"},
+            )
+        assert config["design_system_id"] == 7
+
+    def test_org_default_ds_takes_precedence_over_default_slide_style(
+        self, client, mock_session_manager, mock_chat_service
+    ):
+        """Explicit product decision: when an org-default DS exists it wins, so
+        the legacy default slide style must NOT also be seeded."""
+        with patch("src.api.routes.chat.get_default_design_system_id", return_value=7), \
+             patch("src.api.routes.chat.get_default_slide_style_id", return_value=42):
+            config = self._created_config(
+                client, mock_session_manager, mock_chat_service,
+                {"message": "Create slides"},
+            )
+        assert config["design_system_id"] == 7
+        assert config["slide_style_id"] is None
+
+    def test_falls_back_to_default_slide_style_when_no_org_default_ds(
+        self, client, mock_session_manager, mock_chat_service
+    ):
+        """No org-default DS configured -> the legacy behavior is unchanged."""
+        with patch("src.api.routes.chat.get_default_design_system_id", return_value=None), \
+             patch("src.api.routes.chat.get_default_slide_style_id", return_value=42):
+            config = self._created_config(
+                client, mock_session_manager, mock_chat_service,
+                {"message": "Create slides"},
+            )
+        assert config["slide_style_id"] == 42
+        assert config.get("design_system_id") is None
+
+    def test_explicit_design_system_beats_org_default(
+        self, client, mock_session_manager, mock_chat_service
+    ):
+        with patch("src.api.routes.chat.get_default_design_system_id", return_value=7):
+            config = self._created_config(
+                client, mock_session_manager, mock_chat_service,
+                {"message": "Create slides",
+                 "agent_config": {"tools": [], "design_system_id": 3}},
+            )
+        assert config["design_system_id"] == 3
+
+    def test_explicit_slide_style_suppresses_org_default_ds(
+        self, client, mock_session_manager, mock_chat_service
+    ):
+        """A user who explicitly picked a slide style must not silently get a
+        design system layered on top of it."""
+        with patch("src.api.routes.chat.get_default_design_system_id", return_value=7), \
+             patch("src.api.routes.chat.get_default_slide_style_id", return_value=42):
+            config = self._created_config(
+                client, mock_session_manager, mock_chat_service,
+                {"message": "Create slides",
+                 "agent_config": {"tools": [], "slide_style_id": 5}},
+            )
+        assert config["slide_style_id"] == 5
+        assert config.get("design_system_id") is None
+
+    def test_org_default_ds_does_not_seed_a_template_pin(
+        self, client, mock_session_manager, mock_chat_service
+    ):
+        """A NEW session always starts with template = None: preselecting the
+        org-default DS must not smuggle in a pin."""
+        with patch("src.api.routes.chat.get_default_design_system_id", return_value=7):
+            config = self._created_config(
+                client, mock_session_manager, mock_chat_service,
+                {"message": "Create slides"},
+            )
+        assert config["design_system_id"] == 7
+        assert config["template_id"] is None
+
+
+class TestGetDefaultDesignSystemId:
+    """Backend helper mirroring ``get_default_slide_style_id``."""
+
+    def test_resolves_active_default_row(self, test_db):
+        from src.core.settings_db import get_default_design_system_id
+        from src.database.models.design_system import DesignSystem
+
+        test_db.add(DesignSystem(name="Acme Default DS", is_default=True))
+        test_db.add(DesignSystem(name="Acme Other DS", is_default=False))
+        test_db.commit()
+
+        with patch("src.core.settings_db.get_db_session") as mock_get_db:
+            mock_get_db.return_value.__enter__ = MagicMock(return_value=test_db)
+            mock_get_db.return_value.__exit__ = MagicMock(return_value=False)
+            resolved = get_default_design_system_id()
+
+        expected = test_db.query(DesignSystem).filter_by(name="Acme Default DS").one()
+        assert resolved == expected.id
+
+    def test_returns_none_when_no_default_configured(self, test_db):
+        from src.core.settings_db import get_default_design_system_id
+        from src.database.models.design_system import DesignSystem
+
+        test_db.add(DesignSystem(name="Acme Only DS", is_default=False))
+        test_db.commit()
+
+        with patch("src.core.settings_db.get_db_session") as mock_get_db:
+            mock_get_db.return_value.__enter__ = MagicMock(return_value=test_db)
+            mock_get_db.return_value.__exit__ = MagicMock(return_value=False)
+            # No arbitrary bundle is substituted — "no default" stays None.
+            assert get_default_design_system_id() is None
+
+    def test_soft_deleted_default_does_not_resolve(self, test_db):
+        from src.core.settings_db import get_default_design_system_id
+        from src.database.models.design_system import DesignSystem
+
+        test_db.add(DesignSystem(name="Acme Deleted DS", is_default=True, is_active=False))
+        test_db.commit()
+
+        with patch("src.core.settings_db.get_db_session") as mock_get_db:
+            mock_get_db.return_value.__enter__ = MagicMock(return_value=test_db)
+            mock_get_db.return_value.__exit__ = MagicMock(return_value=False)
+            assert get_default_design_system_id() is None
+
+
 class TestSessionCreatingRequestsNeverSeedTemplatePin:
     """template_id is session-scoped: a pin is chosen IN a session. A pin
     arriving on the request that CREATES the session can only be another
