@@ -17,6 +17,9 @@ import React, { useEffect, useRef, useState } from 'react';
 import { Layers } from 'lucide-react';
 import { configApi, resolveApiUrl } from '../../api/config';
 import type { DesignSystemTemplate } from '../../api/config';
+// The hardened preview-document builder (CSP + inert parse) lives in its own
+// module so the thumbnail and the expanded viewer share ONE renderer.
+import { buildTemplatePreviewDoc, countTemplateSlides } from './templatePreviewDoc';
 
 const TEMPLATE_W = 1280;
 const TEMPLATE_H = 720;
@@ -58,76 +61,43 @@ export const LazyMount: React.FC<{ className?: string; children: React.ReactNode
   );
 };
 
-/**
- * CSP for the preview document: uploaded template HTML/CSS must not be able
- * to trigger ANY external network fetch from the frame (img/link tags, css
- * url()/@import — passive egress). The legit live render only needs inline
- * styles plus data:/blob: resources: the /source endpoint resolves
- * {{ds-asset:ID}} handles to data: URIs at serve time, and token CSS arrives
- * inline. sandbox="" on the iframe already blocks scripts/same-origin; this
- * closes the passive-fetch channel sandbox does not.
- */
-const PREVIEW_CSP =
-  "default-src 'none'; style-src 'unsafe-inline'; img-src data: blob:; font-src data:;";
-
-/**
- * A {{ds-asset:ID}} handle that still reaches the builder (a backend that
- * predates serve-time resolution, or an id its resolver could not satisfy)
- * would resolve as a relative URL inside the frame and be refused by the CSP
- * above — one failed-resource console error per occurrence, in every card.
- * Neutralize to the inert `data:,` placeholder (the import rewrite's own
- * convention for unresolvable refs): renders as nothing, never fetches.
- */
-const DS_ASSET_HANDLE_RE = /\{\{ds-asset:\d+\}\}/g;
-
-/**
- * Compose the preview document: the template layout with its token
- * stylesheet resolved and preview-only overflow clipping. Rendered ONLY in a
- * fully-sandboxed iframe.
- *
- * The wrapper is SYNTHESIZED — the CSP meta is the first fetch-capable byte
- * of the document, unconditionally. Injecting into a found <head> is not
- * enough: malformed-but-parser-preserved markup (e.g. an <img> BEFORE the
- * <html> tag) would declare resources ahead of the policy. DOMParser gives
- * browser-grade handling of malformed input without fetching or executing
- * anything; the parsed head content is re-emitted AFTER the guard block and
- * the parsed body (attributes included, via its own serialization) follows.
- */
-function buildTemplatePreviewDoc(layoutHtml: string, tokenCss: string | null): string {
-  const inlineLayout = layoutHtml.replace(DS_ASSET_HANDLE_RE, 'data:,');
-  const inlineTokenCss = tokenCss ? tokenCss.replace(DS_ASSET_HANDLE_RE, 'data:,') : tokenCss;
-  const cspMeta = `<meta http-equiv="Content-Security-Policy" content="${PREVIEW_CSP}">`;
-  const previewReset = '<style>html,body{margin:0;overflow:hidden}</style>';
-  const guard = cspMeta + (inlineTokenCss ? `<style>${inlineTokenCss}</style>` : '') + previewReset;
-  const parsed = new DOMParser().parseFromString(inlineLayout, 'text/html');
-  const templateHead = parsed.head?.innerHTML ?? '';
-  const templateBody = parsed.body?.outerHTML ?? '<body></body>';
-  return `<!DOCTYPE html><html><head>${guard}${templateHead}</head>${templateBody}</html>`;
-}
-
 const FramePlaceholder: React.FC = () => (
   <span className="absolute inset-0 flex items-center justify-center text-muted-foreground/40">
     <Layers className="size-5" />
   </span>
 );
 
-/** The scaled/clipped live frame (SlideTile's fixed-frame pattern). */
-const LiveTemplateFrame: React.FC<{ dsId: number; templateId: number; name: string }> = ({
-  dsId,
-  templateId,
-  name,
-}) => {
+/**
+ * The scaled/clipped live frame (SlideTile's fixed-frame pattern).
+ *
+ * `slideIndex` renders just one of a multi-slide template's sections — the
+ * viewer's pagination. Exported so the expanded viewer reuses THIS frame
+ * (sandbox="" + the no-egress CSP + data:-resolved assets) rather than
+ * standing up a second, weaker renderer.
+ */
+export const LiveTemplateFrame: React.FC<{
+  dsId: number;
+  templateId: number;
+  name: string;
+  slideIndex?: number;
+  onSlideCount?: (count: number) => void;
+  /** Set by the expanded viewer; also opts the frame into the a11y tree. */
+  testId?: string;
+}> = ({ dsId, templateId, name, slideIndex, onSlideCount, testId }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const [scale, setScale] = useState(0);
   const [doc, setDoc] = useState<string | null>(null);
   const [failed, setFailed] = useState(false);
+  const [source, setSource] = useState<{ layout_html: string; token_css: string | null } | null>(
+    null,
+  );
 
   useEffect(() => {
     let cancelled = false;
     configApi
       .getDesignSystemTemplateSource(dsId, templateId)
       .then((src) => {
-        if (!cancelled) setDoc(buildTemplatePreviewDoc(src.layout_html, src.token_css));
+        if (!cancelled) setSource({ layout_html: src.layout_html, token_css: src.token_css });
       })
       .catch((err) => {
         console.error(`Failed to load template ${templateId} source for preview:`, err);
@@ -137,6 +107,17 @@ const LiveTemplateFrame: React.FC<{ dsId: number; templateId: number; name: stri
       cancelled = true;
     };
   }, [dsId, templateId]);
+
+  // Report the section count once per fetched source so the viewer can build
+  // its pager without parsing the layout a second time.
+  useEffect(() => {
+    if (source && onSlideCount) onSlideCount(countTemplateSlides(source.layout_html));
+  }, [source, onSlideCount]);
+
+  useEffect(() => {
+    if (!source) return;
+    setDoc(buildTemplatePreviewDoc(source.layout_html, source.token_css, slideIndex));
+  }, [source, slideIndex]);
 
   useEffect(() => {
     const el = containerRef.current;
@@ -164,8 +145,12 @@ const LiveTemplateFrame: React.FC<{ dsId: number; templateId: number; name: stri
           sandbox=""
           scrolling="no"
           tabIndex={-1}
-          aria-hidden="true"
-          data-testid="template-live-preview"
+          // A thumbnail is decorative (the card names the template); the
+          // expanded viewer is the content the user came to read, so it is
+          // exposed to assistive tech. The SANDBOX and CSP are identical in
+          // both cases — only the a11y framing differs.
+          aria-hidden={testId === undefined ? true : undefined}
+          data-testid={testId ?? 'template-live-preview'}
           className="border-0"
           style={{
             width: `${TEMPLATE_W}px`,
