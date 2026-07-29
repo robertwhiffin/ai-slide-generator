@@ -88,7 +88,11 @@ _STYLE_HEADER = "SLIDE VISUAL STYLE"
 # carries NO outer margin (print-preview roots shifted content past the 720px
 # clip on every surface), and decorative imagery never overlaps text content
 # (cover-art bled over titles/subtitles/list items).
-COMPILER_VERSION = 6
+# v7: font-size ramp tokens are surfaced ONLY as BRAND TYPE SCALE — they are no
+# longer reprinted under TYPOGRAPHY/SPACING TOKENS, killing the competing role
+# cue that made a mislabeled ``fs-64: 64px`` read as a gap value (measured: 56px
+# covers against a 64px spec, content titles at 32px against a 40px floor).
+COMPILER_VERSION = 7
 _COMPILER_VERSION_MARKER = f"[ds-compiler v{COMPILER_VERSION}]"
 
 # Canonical color-group ordering -> deterministic, human-meaningful sections.
@@ -210,6 +214,11 @@ def _slug(value: str) -> str:
 _TYPE_SIZE_NAME_RE = re.compile(r"^(?:fs|font-?size|text)[-_]?\d*($|[-_])", re.IGNORECASE)
 _PX_VALUE_RE = re.compile(r"^\s*(\d+(?:\.\d+)?)\s*px\s*$", re.IGNORECASE)
 
+# A usable ramp needs at least this many distinct sizes; below it the tokens are
+# NOT a scale, so they keep their original group listing (never dropped) and the
+# neutral bands apply.
+_MIN_RAMP_SIZES = 3
+
 # Body band bounds for role mapping (which ramp entries read as body text).
 # These bound the SELECTION out of the ramp — the emitted numbers themselves
 # always come from the tokens.
@@ -260,6 +269,28 @@ def _font_size_ramp(grouped: dict[str, list[tuple[str, str]]]) -> dict[float, st
     return ramp
 
 
+def _ramp_token_pairs(
+    grouped: dict[str, list[tuple[str, str]]]
+) -> frozenset[tuple[str, str]]:
+    """The exact ``(name, value)`` token pairs the BRAND TYPE SCALE consumes.
+
+    Used to suppress those pairs from the type/spacing rule lists so each size
+    carries exactly ONE role cue (see ``_scale_section``). Returns empty when the
+    ramp is too short to be usable — those tokens are not surfaced as a scale, so
+    they must keep their original group listing rather than vanish.
+    """
+    ramp = _font_size_ramp(grouped)
+    if len(ramp) < _MIN_RAMP_SIZES:
+        return frozenset()
+    ramp_names = set(ramp.values())
+    return frozenset(
+        (name, value)
+        for entries in grouped.values()
+        for name, value in entries
+        if (name or "").strip() in ramp_names and _PX_VALUE_RE.match(value or "")
+    )
+
+
 def _type_scale_section(grouped: dict[str, list[tuple[str, str]]]) -> str:
     """Build the BRAND TYPE SCALE block (always emitted; see comment above).
 
@@ -271,7 +302,7 @@ def _type_scale_section(grouped: dict[str, list[tuple[str, str]]]) -> str:
     """
     ramp = _font_size_ramp(grouped)
     sizes = sorted(ramp)
-    if len(sizes) < 3:
+    if len(sizes) < _MIN_RAMP_SIZES:
         return _TYPE_SCALE_NEUTRAL_BLOCK
 
     floor_px = sizes[0]
@@ -304,6 +335,95 @@ def _type_scale_section(grouped: dict[str, list[tuple[str, str]]]) -> str:
             f"- Floor: never render ANY text below {_fmt_px(floor_px)} (token "
             f"{ramp[floor_px]}), the bottom of the brand ramp.",
             _TYPE_SCALE_ANTI_SHRINK_LINE,
+        ]
+    )
+
+
+# --- Late numeric re-assertion (salience) ----------------------------------
+#
+# The compiled artifact is prompt block #2: ``build_generation_system_prompt``
+# appends ``slide_style`` BEFORE ``BASE_PROMPT`` and every generic styling block.
+# So a type scale stated only inside the compiled blob is always read EARLY,
+# buried in a ~10k-char brand manual, and competes with the generic instructions
+# that follow it. The measured consequence was the model falling back to trained
+# priors (56px covers against a 64px spec; content titles at 32px against a 40px
+# floor). This block restates the SAME derived numbers as the LAST thing in the
+# assembled prompt — last instruction wins — plus a pre-emit self-check. It is
+# appended at PROMPT-ASSEMBLY time (``agent_factory``) like the SELECTED-TEMPLATE
+# block, so the persisted artifact is unchanged and the no-DS golden prompts stay
+# byte-identical.
+TYPE_SCALE_REASSERTION_HEADING = "FINAL CHECK — TITLE TYPE SCALE (do this last):"
+
+# Role lines carry the derived numbers; the anti-shrink line is prose already
+# restated below, so it is not echoed twice.
+_REASSERTION_ROLE_PREFIXES = (
+    "- Cover/hero",
+    "- Section/slide",
+    "- Floor:",
+)
+
+_TYPE_SCALE_SELF_CHECK_LINE = (
+    "- Before emitting, re-read every slide you have written and verify each "
+    "title's font-size meets the required scale above. Fix any that fall short "
+    "BEFORE you output the deck."
+)
+
+# When a template is PINNED its own CSS sizes are authoritative — re-asserting
+# ramp numbers here could contradict them (e.g. a template shipping a 56px
+# ``.action-title`` against a 64px ramp top). A pinned deck was observed
+# inline-shrinking that 56px title to 26px, so the pinned variant forbids
+# shrinking below the template's sizes instead of restating numbers.
+_TYPE_SCALE_PINNED_BLOCK = "\n".join(
+    [
+        TYPE_SCALE_REASSERTION_HEADING,
+        "- The pinned template's own heading/title font sizes are AUTHORITATIVE: "
+        "use them exactly as the template's CSS ships them, on every slide type "
+        "including the cover and closing slide.",
+        "- Never shrink a title below the template's size — not with an inline "
+        "style, not with an overriding rule, not on a 'denser' slide. To make "
+        "content fit, trim it or split it across more slides.",
+        "- Before emitting, re-read every slide you have written and verify no "
+        "title renders smaller than the template's own size for that slide type. "
+        "Fix any that do BEFORE you output the deck.",
+    ]
+)
+
+
+def build_type_scale_reassertion(
+    type_scale_block: str, *, template_pinned: bool = False
+) -> str:
+    """Build the LAST-position restatement of the title type-scale contract.
+
+    *type_scale_block* is the BRAND TYPE SCALE section this design system already
+    compiled; its role lines are echoed VERBATIM so the re-asserted numbers are
+    by construction the bundle's own (nothing is recomputed or hardcoded here).
+    When *template_pinned* is True the pinned template's CSS sizes win instead —
+    see :data:`_TYPE_SCALE_PINNED_BLOCK`.
+    """
+    if template_pinned:
+        return _TYPE_SCALE_PINNED_BLOCK
+
+    role_lines = [
+        line
+        for line in (type_scale_block or "").splitlines()
+        if line.startswith(_REASSERTION_ROLE_PREFIXES)
+    ]
+    if not role_lines:
+        # No parseable role lines (e.g. the neutral block's differently-worded
+        # bands): echo the whole block's bullets rather than losing the contract.
+        role_lines = [
+            line
+            for line in (type_scale_block or "").splitlines()
+            if line.startswith("- ") and "NEVER shrink" not in line
+        ]
+
+    return "\n".join(
+        [
+            TYPE_SCALE_REASSERTION_HEADING,
+            *role_lines,
+            "- These are REQUIRED minimums for titles, not suggestions. Do NOT "
+            "substitute your own default heading sizes.",
+            _TYPE_SCALE_SELF_CHECK_LINE,
         ]
     )
 
@@ -413,10 +533,23 @@ def _shadow_sections(grouped: dict[str, list[tuple[str, str]]]) -> list[str]:
 
 
 def _scale_section(
-    grouped: dict[str, list[tuple[str, str]]], group: str, heading: str
+    grouped: dict[str, list[tuple[str, str]]],
+    group: str,
+    heading: str,
+    *,
+    exclude: frozenset[tuple[str, str]] = frozenset(),
 ) -> Optional[str]:
-    """Render a non-color token group (type/spacing) as a simple rule list."""
-    entries = grouped.get(group)
+    """Render a non-color token group (type/spacing) as a simple rule list.
+
+    ``exclude`` holds ``(name, value)`` pairs already surfaced authoritatively
+    elsewhere — the font-size ramp, which BRAND TYPE SCALE owns. Reprinting a
+    ramp entry here would restate a font size under a heading that names a
+    DIFFERENT role (``SPACING TOKENS:`` for a Claude-Design-mislabeled ramp),
+    which is the competing role cue that made the model read ``fs-64: 64px`` as
+    a gap value and fall back to its own title sizes. Returns ``None`` when the
+    group has no entries LEFT to render, so no empty heading is emitted.
+    """
+    entries = [pair for pair in (grouped.get(group) or []) if pair not in exclude]
     if not entries:
         return None
     lines = [heading]
@@ -608,12 +741,17 @@ def compile_design_system(
             ", ".join(sorted(_RECOGNIZED_GROUPS)),
         )
 
-    # Tokens: color, type, spacing, shadow — all uncapped.
+    # Tokens: color, type, spacing, shadow — all uncapped. Font-size ramp tokens
+    # are EXCLUDED from the type/spacing rule lists: BRAND TYPE SCALE below is
+    # their authoritative presentation, and listing a size a second time under a
+    # heading naming another role (Claude Design mislabels the ramp as "spacing")
+    # is the competing role cue that produced under-sized titles.
+    ramp_pairs = _ramp_token_pairs(grouped)
     parts.extend(_color_sections(grouped))
-    typography = _scale_section(grouped, "type", "TYPOGRAPHY TOKENS:")
+    typography = _scale_section(grouped, "type", "TYPOGRAPHY TOKENS:", exclude=ramp_pairs)
     if typography:
         parts.append(typography)
-    spacing = _scale_section(grouped, "spacing", "SPACING TOKENS:")
+    spacing = _scale_section(grouped, "spacing", "SPACING TOKENS:", exclude=ramp_pairs)
     if spacing:
         parts.append(spacing)
     parts.extend(_shadow_sections(grouped))
@@ -645,6 +783,26 @@ def compile_design_system(
     parts.append(_ASSET_CONTRACT)
 
     return "\n\n".join(parts)
+
+
+_TYPE_SCALE_HEADING_PREFIX = "BRAND TYPE SCALE"
+
+
+def extract_type_scale_block(compiled: Optional[str]) -> Optional[str]:
+    """Recover the BRAND TYPE SCALE section from a compiled artifact.
+
+    The prompt-assembly seam re-asserts the scale's numbers LAST
+    (:func:`build_type_scale_reassertion`) and reads them back out of the text it
+    is about to inject — which may be a PERSISTED artifact rather than a fresh
+    compile — so the re-assertion can never drift from what the model was shown.
+    Returns ``None`` when the text carries no such block (e.g. a legacy
+    hand-pasted style blob), in which case no re-assertion is appended.
+    """
+    if not compiled or _TYPE_SCALE_HEADING_PREFIX not in compiled:
+        return None
+    block = compiled[compiled.index(_TYPE_SCALE_HEADING_PREFIX):]
+    # Sections are joined by a blank line; the first one ends the block.
+    return block.split("\n\n", 1)[0]
 
 
 def _brand_manual_text_from_files(

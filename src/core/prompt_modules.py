@@ -338,6 +338,7 @@ def build_generation_system_prompt(
     deck_prompt: Optional[str] = None,
     image_guidelines: Optional[str] = None,
     design_system_active: bool = False,
+    type_scale_reassertion: Optional[str] = None,
 ) -> str:
     """Assemble a complete system prompt for slide *generation* mode.
 
@@ -347,6 +348,14 @@ def build_generation_system_prompt(
     slide-style source (set by agent_factory._get_prompt_content). It gates the
     DS-only precedence + brand-asset blocks; when False the assembled prompt is
     BYTE-IDENTICAL to the legacy/default output (no-DS invariant).
+
+    ``type_scale_reassertion`` is the design system's title type-scale contract
+    restated for LAST position (built by
+    ``design_system_compiler.build_type_scale_reassertion``). The compiled design
+    system arrives as block #2 — before every generic block — so its numeric title
+    contract needs the final word; appending it here is what gives it that
+    salience. ``None`` on the no-DS/legacy path, which keeps that output
+    byte-identical.
     """
     parts: list[str] = []
 
@@ -367,6 +376,11 @@ def build_generation_system_prompt(
     if design_system_active:
         parts.append(DESIGN_SYSTEM_PRECEDENCE)
     parts.append(_build_image_section(image_guidelines, design_system_active=design_system_active))
+    # LAST — deliberately after the image block: the title type scale is the
+    # contract the model measurably ignored when it was stated only early, so it
+    # gets the final word (plus a pre-emit self-check). DS path only.
+    if type_scale_reassertion and type_scale_reassertion.strip():
+        parts.append(type_scale_reassertion.strip())
 
     return "\n\n".join(parts)
 
