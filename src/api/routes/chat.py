@@ -31,7 +31,7 @@ from src.api.services.session_manager import SessionNotFoundError, get_session_m
 from src.core.context_utils import run_in_thread_with_context
 from src.core.database import get_db
 from src.core.permission_context import get_permission_context
-from src.core.settings_db import get_default_slide_style_id
+from src.core.settings_db import get_default_design_system_id, get_default_slide_style_id
 from src.core.user_context import get_current_user
 from src.database.models.profile_contributor import PermissionLevel
 from src.services.agent import UnsafeContentError
@@ -120,6 +120,34 @@ def _check_chat_permission(session_id: str, db: DBSession) -> None:
     )
 
 
+def _apply_org_default_style_source(agent_config_data: dict) -> None:
+    """Fill in the org-default style SOURCE for a new session, in place.
+
+    Precedence (product decision): an org-default DESIGN SYSTEM outranks the
+    legacy default slide style. A design system is the richer, more specific
+    instruction, and seeding both would inject two competing style sources into
+    the same prompt — so when a default design system resolves, the slide-style
+    default is deliberately NOT applied.
+
+    Only ever fills a GAP. An explicit choice from the client always wins,
+    including the explicit choice of a slide style (which suppresses the
+    design-system default, so a user who picked a style does not silently get a
+    brand layered over it). ``template_id`` is untouched: it is session-scoped
+    and a session-creating request never seeds a pin (see
+    ``_without_template_pin``).
+    """
+    if agent_config_data.get("design_system_id") is not None:
+        return
+    if agent_config_data.get("slide_style_id") is None:
+        default_ds_id = get_default_design_system_id()
+        if default_ds_id is not None:
+            agent_config_data["design_system_id"] = default_ds_id
+            return
+        default_style_id = get_default_slide_style_id()
+        if default_style_id is not None:
+            agent_config_data["slide_style_id"] = default_style_id
+
+
 def _maybe_create_session(request: ChatRequest, session_manager) -> bool:
     """Create a session if request.session_id is missing, or sync agent_config if provided.
 
@@ -136,10 +164,7 @@ def _maybe_create_session(request: ChatRequest, session_manager) -> bool:
 
     # Build full agent_config_data with defaults (used for session creation)
     agent_config_data = explicit_config or AgentConfig().model_dump()
-    if agent_config_data.get("slide_style_id") is None:
-        default_id = get_default_slide_style_id()
-        if default_id is not None:
-            agent_config_data["slide_style_id"] = default_id
+    _apply_org_default_style_source(agent_config_data)
 
     def _without_template_pin(config_data: dict) -> dict:
         """Session-CREATING requests never seed a template pin.

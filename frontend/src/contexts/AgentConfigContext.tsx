@@ -109,6 +109,42 @@ async function resolveDefaultStyleId(): Promise<number | null> {
 }
 
 /**
+ * Resolve the org-default DESIGN SYSTEM id, or null when none is configured.
+ *
+ * The design-system counterpart of {@link resolveDefaultStyleId}. Design
+ * systems are org-shared with no per-user override, so there is no
+ * localStorage tier here — the server's `is_default` flag is the only source.
+ */
+async function resolveDefaultDesignSystemId(): Promise<number | null> {
+  try {
+    const { design_systems } = await configApi.listDesignSystems();
+    return design_systems.find(ds => ds.is_default && ds.is_active)?.id ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Fill in whichever style SOURCE a config is missing, honouring the product
+ * decision that an org-default design system OUTRANKS the default slide style.
+ *
+ * Mutates and returns a copy. Only ever fills a gap: a config that already
+ * names a design system or a slide style is left alone, so an explicit user
+ * choice (including an explicitly chosen slide style) is never overridden and
+ * two competing style sources are never seeded at once. Mirrors the backend's
+ * `_apply_org_default_style_source`, which covers MCP and the chat routes.
+ */
+async function withResolvedStyleSource(config: AgentConfig): Promise<AgentConfig> {
+  if (config.design_system_id != null || config.slide_style_id != null) return config;
+
+  const designSystemId = await resolveDefaultDesignSystemId();
+  if (designSystemId != null) {
+    return { ...config, design_system_id: designSystemId };
+  }
+  return { ...config, slide_style_id: await resolveDefaultStyleId() };
+}
+
+/**
  * Resolve the default deck prompt ID from user preference.
  * Priority: user localStorage only (no server-side default for deck prompts).
  */
@@ -253,9 +289,8 @@ export const AgentConfigProvider: React.FC<{ children: React.ReactNode }> = ({ c
     // user-modified config — keep it as-is and just fill in missing defaults.
     if (storedConfig && storedConfig.tools.length > 0) {
       if (storedConfig.slide_style_id == null || storedConfig.deck_prompt_id == null) {
-        resolveDefaultStyleId().then(styleId => {
-          const updated = { ...storedConfig };
-          if (updated.slide_style_id == null) updated.slide_style_id = styleId;
+        void withResolvedStyleSource(storedConfig).then(resolved => {
+          const updated = { ...resolved };
           if (updated.deck_prompt_id == null) updated.deck_prompt_id = resolveDefaultDeckPromptId();
           settleForSurface(null, () => setAgentConfig(updated));
         });
@@ -271,13 +306,11 @@ export const AgentConfigProvider: React.FC<{ children: React.ReactNode }> = ({ c
         const defaultProfile = userProfileId
           ? profiles.find(p => p.id === Number(userProfileId)) ?? profiles.find(p => p.is_default)
           : profiles.find(p => p.is_default);
-        const config = defaultProfile?.agent_config
+        let config = defaultProfile?.agent_config
           ? { ...defaultProfile.agent_config }
           : { ...DEFAULT_AGENT_CONFIG };
 
-        if (config.slide_style_id == null) {
-          config.slide_style_id = await resolveDefaultStyleId();
-        }
+        config = await withResolvedStyleSource(config);
         if (config.deck_prompt_id == null) {
           config.deck_prompt_id = resolveDefaultDeckPromptId();
         }
@@ -339,9 +372,7 @@ export const AgentConfigProvider: React.FC<{ children: React.ReactNode }> = ({ c
           }
         }
 
-        if (config.slide_style_id == null) {
-          config.slide_style_id = await resolveDefaultStyleId();
-        }
+        config = await withResolvedStyleSource(config);
         if (config.deck_prompt_id == null) {
           config.deck_prompt_id = resolveDefaultDeckPromptId();
         }

@@ -1,12 +1,12 @@
 import { test, expect, Page } from '@playwright/test';
-import { mockSlideStyles } from '../fixtures/mocks';
+import { mockDesignSystems, mockSlideStyles } from '../fixtures/mocks';
 
 /**
  * Admin Page E2E Tests
  *
- * Tests the consolidated admin page with Feedback, Google Slides, and
- * Slide Style tabs. Frontend at baseURL (localhost:3000), backend at
- * http://127.0.0.1:8000.
+ * Tests the consolidated admin page with Feedback, Google Slides, Design
+ * System, and Slide Style tabs. Frontend at baseURL (localhost:3000), backend
+ * at http://127.0.0.1:8000.
  *
  * Run with: npx playwright test e2e/admin-page.spec.ts
  */
@@ -19,6 +19,30 @@ async function setupSlideStyleMocks(page: Page) {
       status: 200,
       contentType: 'application/json',
       body: JSON.stringify(mockSlideStyles),
+    });
+  });
+}
+
+// Same for the design-systems listing behind the Design System tab. A
+// soft-deleted row is appended to the shared fixture (which ships only active
+// ones) so the "inactive rows offer no action" case is covered.
+const inactiveDesignSystem = {
+  ...mockDesignSystems.design_systems[1],
+  id: 3,
+  name: 'Acme Retired DS',
+  description: 'Soft-deleted; cannot become the org default.',
+  is_default: false,
+  is_active: false,
+};
+
+const designSystemRows = [...mockDesignSystems.design_systems, inactiveDesignSystem];
+
+async function setupDesignSystemMocks(page: Page) {
+  await page.route('**/api/settings/design-systems', (route) => {
+    route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ design_systems: designSystemRows, total: designSystemRows.length }),
     });
   });
 }
@@ -156,6 +180,102 @@ test.describe('Admin Page', () => {
     await expect(
       page.getByTestId('slide-style-row-1').getByText('System default', { exact: true }),
     ).toHaveCount(0);
+  });
+
+  test('Design System tab renders each design system name', async ({ page }) => {
+    await setupDesignSystemMocks(page);
+    await page.goto('/admin');
+    await page.getByRole('tab', { name: 'Design System' }).click();
+    await expect(
+      page.getByRole('heading', { name: 'Org Default Design System' }),
+    ).toBeVisible();
+    await expect(page.getByText('Acme Design System', { exact: true })).toBeVisible();
+    await expect(page.getByText('Nimbus Theme', { exact: true })).toBeVisible();
+  });
+
+  test('Design System tab marks the is_default row with an Org default badge', async ({ page }) => {
+    await setupDesignSystemMocks(page);
+    await page.goto('/admin');
+    await page.getByRole('tab', { name: 'Design System' }).click();
+    await expect(page.getByTestId('design-system-default-badge-1')).toBeVisible();
+    await expect(page.getByTestId('design-system-default-badge-2')).toHaveCount(0);
+  });
+
+  test('Set as org default shows only on non-default active design systems', async ({ page }) => {
+    await setupDesignSystemMocks(page);
+    await page.goto('/admin');
+    await page.getByRole('tab', { name: 'Design System' }).click();
+    // The current default offers no action...
+    await expect(
+      page.getByTestId('design-system-row-1').getByRole('button', { name: 'Set as org default' }),
+    ).toHaveCount(0);
+    // ...an active non-default one does...
+    await expect(
+      page.getByTestId('design-system-row-2').getByRole('button', { name: 'Set as org default' }),
+    ).toBeVisible();
+    // ...and an INACTIVE one does not (the backend rejects it with a 400).
+    await expect(
+      page.getByTestId('design-system-row-3').getByRole('button', { name: 'Set as org default' }),
+    ).toHaveCount(0);
+  });
+
+  test('Clicking Set as org default calls the endpoint and moves the badge', async ({ page }) => {
+    let setDefaultUrl: string | null = null;
+    let setDefaultFired = false;
+    await page.route('**/api/settings/design-systems/*/set-default', (route, req) => {
+      setDefaultUrl = req.url();
+      setDefaultFired = true;
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ ...mockDesignSystems.design_systems[1], is_default: true }),
+      });
+    });
+    await page.route('**/api/settings/design-systems', (route) => {
+      const design_systems = setDefaultFired
+        ? designSystemRows.map(ds => ({ ...ds, is_default: ds.id === 2 }))
+        : designSystemRows;
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ design_systems, total: design_systems.length }),
+      });
+    });
+
+    await page.goto('/admin');
+    await page.getByRole('tab', { name: 'Design System' }).click();
+    await page
+      .getByTestId('design-system-row-2')
+      .getByRole('button', { name: 'Set as org default' })
+      .click();
+
+    await expect
+      .poll(() => setDefaultUrl)
+      .toContain('/api/settings/design-systems/2/set-default');
+    await expect(page.getByTestId('design-system-default-badge-2')).toBeVisible();
+    await expect(page.getByTestId('design-system-default-badge-1')).toHaveCount(0);
+  });
+
+  test('A failed Set as org default surfaces an error toast', async ({ page }) => {
+    await setupDesignSystemMocks(page);
+    await page.route('**/api/settings/design-systems/*/set-default', (route) => {
+      route.fulfill({
+        status: 500,
+        contentType: 'application/json',
+        body: JSON.stringify({ detail: 'boom' }),
+      });
+    });
+
+    await page.goto('/admin');
+    await page.getByRole('tab', { name: 'Design System' }).click();
+    await page
+      .getByTestId('design-system-row-2')
+      .getByRole('button', { name: 'Set as org default' })
+      .click();
+
+    const toast = page.getByTestId('toast');
+    await expect(toast).toBeVisible();
+    await expect(toast).toContainText(/failed|error|boom/i);
   });
 
   test('Feedback tab renders FeedbackDashboard content', async ({ page }) => {

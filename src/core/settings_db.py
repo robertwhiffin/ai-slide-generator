@@ -104,6 +104,41 @@ def get_default_slide_style_id() -> Optional[int]:
         return None
 
 
+def get_default_design_system_id() -> Optional[int]:
+    """Return the ID of the org-default design system, or ``None``.
+
+    The design-system counterpart of :func:`get_default_slide_style_id`:
+    resolves the ``is_default=True`` row from ``design_system``, restricted to
+    ACTIVE (non-soft-deleted) rows so a deleted default never resolves. Used by
+    both the browser chat flow and the MCP ``create_deck`` tool so new sessions
+    pick up the configured org default when no explicit ``design_system_id`` is
+    supplied.
+
+    There is deliberately no ``is_system`` fallback (the slide-style helper's
+    mid-migration safety net): design systems are all user-uploaded, so "no
+    default configured" is a normal state that must resolve to ``None`` rather
+    than to an arbitrary bundle. Swallows errors for pre-migration databases
+    where the column may not exist yet, matching the slide-style helper.
+    """
+    from src.database.models import DesignSystem
+
+    try:
+        with get_db_session() as db:
+            row = (
+                db.query(DesignSystem.id)
+                .filter(
+                    DesignSystem.is_default == True,  # noqa: E712
+                    DesignSystem.is_active == True,  # noqa: E712
+                )
+                .order_by(DesignSystem.id)
+                .first()
+            )
+            return row.id if row else None
+    except Exception:
+        # Column/table may not exist yet (pre-migration)
+        return None
+
+
 class GenieSettings(BaseSettings):
     """Genie configuration settings."""
 
