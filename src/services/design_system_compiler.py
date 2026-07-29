@@ -92,7 +92,12 @@ _STYLE_HEADER = "SLIDE VISUAL STYLE"
 # longer reprinted under TYPOGRAPHY/SPACING TOKENS, killing the competing role
 # cue that made a mislabeled ``fs-64: 64px`` read as a gap value (measured: 56px
 # covers against a 64px spec, content titles at 32px against a 40px floor).
-COMPILER_VERSION = 7
+# v8: the BRAND TYPE SCALE heading carries the compiler-owned
+# ``[ds-type-scale]`` marker so ``extract_type_scale_block`` anchors the late
+# re-assertion to the COMPILER's section instead of the first prose occurrence
+# of the phrase. Persisted v7 rows carry no marker, so the bump is what makes
+# them recompile and regain an extractable block.
+COMPILER_VERSION = 8
 _COMPILER_VERSION_MARKER = f"[ds-compiler v{COMPILER_VERSION}]"
 
 # Canonical color-group ordering -> deterministic, human-meaningful sections.
@@ -198,6 +203,18 @@ def _slug(value: str) -> str:
     return slug or "token"
 
 
+def _strip_compiler_markers(text: str) -> str:
+    """Remove compiler-owned anchor markers from a stretch of user-supplied text.
+
+    Applied to every emitted section EXCEPT the compiler's own BRAND TYPE SCALE
+    (see :func:`compile_design_system`), which is what makes
+    :data:`_TYPE_SCALE_MARKER` an anchor uploaded prose cannot forge: a README,
+    SKILL.md, token name, font family, or template description that contains the
+    marker literally has it stripped before it reaches the artifact.
+    """
+    return text.replace(_TYPE_SCALE_MARKER, "")
+
+
 # BRAND TYPE SCALE (the "small titles" fix). A DS deck bypasses
 # ``DEFAULT_SLIDE_STYLE`` — the only place H1/H2/body size anchors used to
 # live — so a compiled artifact without its own anchors leaves the model in a
@@ -226,6 +243,20 @@ _BODY_BAND_MIN_PX = 16.0
 _BODY_BAND_MAX_PX = 22.0
 _BODY_BAND_IDEAL_PX = 18.0
 
+# Compiler-owned anchor for the BRAND TYPE SCALE section. The late re-assertion
+# (``build_type_scale_reassertion``) reads its numbers back out of the compiled
+# text, so whichever section the extractor selects WINS the title contract.
+# Searching for the bare "BRAND TYPE SCALE" phrase let uploaded prose win: the
+# brand manual is injected BEFORE this section (so it took the first occurrence)
+# and manifest template names/descriptions land AFTER it (so "last occurrence"
+# would be no safer) — a brand README using that phrase as a heading silently
+# substituted its own numbers for the ramp-derived ones. This marker is emitted
+# ONLY here, and ``_strip_compiler_markers`` scrubs it from every user-supplied
+# string the compiler embeds, so uploaded text cannot forge the anchor.
+# It TRAILS the heading line (like ``[ds-compiler vN]`` on the header line) so
+# the heading's prose reads unbroken to the model and stays greppable.
+_TYPE_SCALE_MARKER = "[ds-type-scale]"
+
 _TYPE_SCALE_ANTI_SHRINK_LINE = (
     "- These sizes are REQUIRED, not suggestions: titles at or above their "
     "band, body inside its band. To make content fit, trim it or split it "
@@ -237,7 +268,7 @@ _TYPE_SCALE_ANTI_SHRINK_LINE = (
 _TYPE_SCALE_NEUTRAL_BLOCK = "\n".join(
     [
         "BRAND TYPE SCALE (REQUIRED — this design system ships no font-size "
-        "ramp, so use the app's neutral bands):",
+        f"ramp, so use the app's neutral bands): {_TYPE_SCALE_MARKER}",
         "- Cover/hero and slide titles (H1): 40-52px, bold.",
         "- Section headers (H2): 28-36px.",
         "- Body text: 16-18px.",
@@ -326,7 +357,7 @@ def _type_scale_section(grouped: dict[str, list[tuple[str, str]]]) -> str:
     return "\n".join(
         [
             "BRAND TYPE SCALE (REQUIRED — derived from this design system's "
-            "own tokens):",
+            f"own tokens): {_TYPE_SCALE_MARKER}",
             f"- Cover/hero titles: {_fmt_px(hero_px)} (token {ramp[hero_px]}) — "
             "the top of the brand ramp.",
             f"- Section/slide titles: {_fmt_px(section_px)} (token "
@@ -759,6 +790,9 @@ def compile_design_system(
     # Type-size role anchors — ALWAYS present (ramp-derived or neutral), so a
     # DS deck never generates in the size vacuum left by bypassing
     # DEFAULT_SLIDE_STYLE. Emitted right after the token sections it reads.
+    # Its index is remembered so the marker scrub below can spare THIS section
+    # alone — see the scrub's comment.
+    type_scale_index = len(parts)
     parts.append(_type_scale_section(grouped))
 
     # Fonts: inline @font-face references + family listing (both uncapped).
@@ -782,25 +816,44 @@ def compile_design_system(
     # enumerated. The contract is always present when a design system compiles.
     parts.append(_ASSET_CONTRACT)
 
+    # Scrub the type-scale anchor from every section EXCEPT the one that owns it,
+    # so exactly one occurrence survives and it is the compiler's. Every other
+    # section embeds user-supplied text somewhere (name, description, README /
+    # SKILL, token names and values, font families, template names) — scrubbing
+    # by position rather than per-site means a future section cannot forget to.
+    parts = [
+        part if index == type_scale_index else _strip_compiler_markers(part)
+        for index, part in enumerate(parts)
+    ]
+
     return "\n\n".join(parts)
 
 
-_TYPE_SCALE_HEADING_PREFIX = "BRAND TYPE SCALE"
-
-
 def extract_type_scale_block(compiled: Optional[str]) -> Optional[str]:
-    """Recover the BRAND TYPE SCALE section from a compiled artifact.
+    """Recover the compiler's BRAND TYPE SCALE section from a compiled artifact.
 
     The prompt-assembly seam re-asserts the scale's numbers LAST
     (:func:`build_type_scale_reassertion`) and reads them back out of the text it
     is about to inject — which may be a PERSISTED artifact rather than a fresh
     compile — so the re-assertion can never drift from what the model was shown.
-    Returns ``None`` when the text carries no such block (e.g. a legacy
-    hand-pasted style blob), in which case no re-assertion is appended.
+
+    Anchored to :data:`_TYPE_SCALE_MARKER`, which only :func:`_type_scale_section`
+    emits and which ``_strip_compiler_markers`` removes from every user-supplied
+    string: matching the bare heading phrase instead let an uploaded brand manual
+    that happens to use it as a heading hijack the numeric contract (the manual
+    is injected before this section, so it won the first-occurrence search).
+
+    Returns ``None`` when the text carries no marked block — a legacy
+    hand-pasted style blob, or a pre-v8 artifact — in which case no re-assertion
+    is appended. Stale persisted rows are recompiled before they reach here
+    (``ensure_compiled_style_content_current``), so they regain the block.
     """
-    if not compiled or _TYPE_SCALE_HEADING_PREFIX not in compiled:
+    if not compiled or _TYPE_SCALE_MARKER not in compiled:
         return None
-    block = compiled[compiled.index(_TYPE_SCALE_HEADING_PREFIX):]
+    marker_at = compiled.index(_TYPE_SCALE_MARKER)
+    # Back up to the start of the marker's own line so the heading is included.
+    line_start = compiled.rfind("\n", 0, marker_at) + 1
+    block = compiled[line_start:]
     # Sections are joined by a blank line; the first one ends the block.
     return block.split("\n\n", 1)[0]
 
