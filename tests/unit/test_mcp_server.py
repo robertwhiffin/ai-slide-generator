@@ -576,6 +576,54 @@ class TestResolveTemplateNameAcrossTheRealSessionBoundary:
         assert self._resolve(db_factory, ds_a, "Beta Only") is None
         assert self._resolve(db_factory, ds_b, "Beta Only") == templates_b["Beta Only"]
 
+    # --- AMBIGUOUS names resolve to nothing --------------------------------
+    #
+    # Matching is casefold + whitespace insensitive, so two DISTINCT rows can
+    # both match one query ("Two Column" and "two column"). The loop returned the
+    # first hit in whatever order the relationship happened to load, making the
+    # winner undefined — a caller asking for one layout could silently get the
+    # other, and which one could change between requests. An ambiguous name is
+    # not resolvable, so it is treated like an unmatched name: ignored (the model
+    # soft-picks as usual) and logged. Never a guess, never a 500.
+
+    def test_casefold_duplicate_names_resolve_to_nothing(self, db_factory, caplog):
+        """Real duplicate rows: two templates whose names differ only by case."""
+        import logging
+
+        ds_id, templates = self._seed(db_factory, "Two Column", "two column")
+        assert len(templates) == 2, "fixture must persist two distinct rows"
+
+        with caplog.at_level(logging.WARNING):
+            resolved = self._resolve(db_factory, ds_id, "Two Column")
+
+        assert resolved is None, (
+            f"ambiguous name guessed template {resolved} instead of declining"
+        )
+        assert "ambiguous" in caplog.text.lower()
+        assert "Two Column" in caplog.text
+
+    def test_whitespace_variant_duplicates_resolve_to_nothing(self, db_factory):
+        """The same ambiguity via whitespace rather than case."""
+        ds_id, templates = self._seed(db_factory, "Two Column", " Two  Column ")
+        assert len(templates) == 2
+
+        assert self._resolve(db_factory, ds_id, "two column") is None
+
+    def test_ambiguity_does_not_raise(self, db_factory):
+        """An unresolvable pin must degrade, never surface as a 500."""
+        ds_id, _ = self._seed(db_factory, "Two Column", "TWO COLUMN")
+
+        assert self._resolve(db_factory, ds_id, "TWO COLUMN") is None
+
+    def test_an_unambiguous_name_alongside_duplicates_still_resolves(self, db_factory):
+        """Only the ambiguous name is refused; distinct siblings are unaffected."""
+        ds_id, templates = self._seed(
+            db_factory, "Two Column", "two column", "Title Slide"
+        )
+
+        assert self._resolve(db_factory, ds_id, "Title Slide") == templates["Title Slide"]
+        assert self._resolve(db_factory, ds_id, "Two Column") is None
+
 
 @pytest.mark.asyncio
 async def test_create_deck_rejects_empty_prompt(fake_request, identity):
