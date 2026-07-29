@@ -581,6 +581,22 @@ export const mockDesignSystemTemplateSource = {
   token_css: ":root { --brand-core-primary: #123456; }",
 };
 
+// A MULTI-SLIDE template source: the expanded viewer paginates one slide
+// section at a time, so it needs a layout with several `.slide` roots.
+// Each section is identifiable by its own heading text. Synthetic Acme only.
+export const mockDesignSystemTemplateSourceMultiSlide = {
+  id: 2,
+  name: "Acme Content",
+  layout_html:
+    '<!doctype html><html><head><style>.slide{width:1280px;height:720px;background:var(--brand-core-primary);color:#ffffff;}</style></head>' +
+    '<body>' +
+    '<section class="slide"><h1>Acme Slide One</h1></section>' +
+    '<section class="slide"><h1>Acme Slide Two</h1></section>' +
+    '<section class="slide"><h1>Acme Slide Three</h1></section>' +
+    '</body></html>',
+  token_css: ":root { --brand-core-primary: #123456; }",
+};
+
 // GET /api/settings/design-systems/{id}/files -> retained source-file tree (Phase 6)
 export const mockDesignSystemFiles = {
   files: [

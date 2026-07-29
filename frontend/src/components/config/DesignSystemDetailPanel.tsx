@@ -14,6 +14,7 @@ import {
   Check,
   ChevronDown,
   ChevronRight,
+  Expand,
   Layers,
   Palette,
   Pencil,
@@ -34,6 +35,7 @@ import { useAgentConfig } from '../../contexts/AgentConfigContext';
 import { useToast } from '../../contexts/ToastContext';
 import { DesignSystemFileBrowser } from './DesignSystemFileBrowser';
 import { LazyMount, TemplateThumbnail } from './TemplateThumbnail';
+import { TemplateViewerModal } from './TemplateViewerModal';
 
 interface DesignSystemDetailPanelProps {
   detail: DesignSystemDetail | null;
@@ -155,9 +157,13 @@ export const DesignSystemDetailPanel: React.FC<DesignSystemDetailPanelProps> = (
   // source files were retained have none — the manifest listing is the fallback.
   const [entityTemplates, setEntityTemplates] = useState<DesignSystemTemplate[]>([]);
   const [templatesLoading, setTemplatesLoading] = useState(false);
+  // The template currently expanded in the read-only viewer popup (null = closed).
+  const [viewerTemplate, setViewerTemplate] = useState<DesignSystemTemplate | null>(null);
   const detailId = detail?.id ?? null;
 
   useEffect(() => {
+    // Switching design systems closes a viewer left open on the old one.
+    setViewerTemplate(null);
     if (detailId == null) {
       setEntityTemplates([]);
       return;
@@ -365,11 +371,26 @@ export const DesignSystemDetailPanel: React.FC<DesignSystemDetailPanelProps> = (
                   className="flex flex-col overflow-hidden rounded-md border border-border bg-muted/20"
                   data-testid="template-card"
                 >
-                  <TemplateThumbnail
-                    dsId={detail.id}
-                    template={tmpl}
-                    className="aspect-video w-full border-b border-border bg-background"
-                  />
+                  <div className="group relative">
+                    <TemplateThumbnail
+                      dsId={detail.id}
+                      template={tmpl}
+                      className="aspect-video w-full border-b border-border bg-background"
+                    />
+                    {/* Expand → read-only viewer popup. Sits over the
+                        thumbnail (which is inert: pointer-events:none) so the
+                        card layout is unchanged. */}
+                    <button
+                      type="button"
+                      onClick={() => setViewerTemplate(tmpl)}
+                      aria-label={`Expand ${tmpl.name} preview`}
+                      title="Expand preview"
+                      data-testid="expand-template-button"
+                      className="absolute right-1.5 top-1.5 rounded bg-background/80 p-1 text-muted-foreground opacity-0 shadow-sm backdrop-blur-sm transition-opacity hover:text-foreground focus:opacity-100 focus-visible:opacity-100 group-hover:opacity-100"
+                    >
+                      <Expand className="size-3.5" />
+                    </button>
+                  </div>
                   <div className="flex flex-1 flex-col gap-1 p-3">
                     <div className="text-sm font-medium text-foreground">{tmpl.name}</div>
                     {tmpl.description && (
@@ -520,6 +541,15 @@ export const DesignSystemDetailPanel: React.FC<DesignSystemDetailPanelProps> = (
 
       {/* Source files — the "Open source file" browser (Phase 6) */}
       <DesignSystemFileBrowser dsId={detail.id} templates={entityTemplates} />
+
+      {/* Expanded template viewer (read-only; same sandboxed renderer). */}
+      {viewerTemplate && (
+        <TemplateViewerModal
+          dsId={detail.id}
+          template={viewerTemplate}
+          onClose={() => setViewerTemplate(null)}
+        />
+      )}
     </div>
   );
 };
