@@ -28,7 +28,7 @@ from src.api.services.job_queue import enqueue_job, get_job_status
 from src.api.services.session_manager import get_session_manager
 from src.core.database import get_db_session
 from src.core.permission_context import get_permission_context
-from src.core.settings_db import get_default_slide_style_id
+from src.core.settings_db import get_default_design_system_id, get_default_slide_style_id
 from src.domain.slide_deck import SlideDeck
 from src.services.permission_service import get_permission_service
 
@@ -292,6 +292,61 @@ def _request_from_context(ctx: Context) -> Request:
     return req
 
 
+def _load_design_system(design_system_id: int) -> Optional[Any]:
+    """Fetch an ACTIVE design system with its templates materialized.
+
+    Split out so name resolution can be tested without a database.
+    """
+    from src.core.database import get_db_session
+    from src.database.models import DesignSystem
+    from src.services.design_system_templates import materialize_templates
+
+    with get_db_session() as db:
+        design_system = (
+            db.query(DesignSystem)
+            .filter_by(id=design_system_id, is_active=True)
+            .first()
+        )
+        if design_system is None:
+            return None
+        # Templates may not have been materialized yet (systems imported
+        # before the table existed); this is the same idempotent derivation
+        # the generation path uses.
+        materialize_templates(design_system)
+        return design_system
+
+
+def _resolve_template_name(design_system_id: int, template_name: str) -> Optional[int]:
+    """Resolve a template NAME to its id within *design_system_id*.
+
+    MCP callers have no template ids — they see names (the compiler injects
+    the name+description catalog as soft-pick guidance), so a caller that
+    wants a specific layout pins it by name. Matching is case- and
+    whitespace-insensitive.
+
+    Returns ``None`` — never raises — when the design system is missing, the
+    name matches nothing, or the lookup fails. An unresolvable name must
+    degrade to "no pin" (the model then soft-picks as usual), never a 500.
+    """
+    wanted = (template_name or "").strip().casefold()
+    if not wanted:
+        return None
+    try:
+        design_system = _load_design_system(design_system_id)
+        if design_system is None:
+            return None
+        for template in getattr(design_system, "templates", None) or []:
+            name = (getattr(template, "name", None) or "").strip().casefold()
+            if name == wanted:
+                return getattr(template, "id", None)
+    except Exception:
+        logger.exception(
+            "Failed to resolve MCP template_name against design system %s",
+            design_system_id,
+        )
+    return None
+
+
 @mcp.tool(
     name="create_deck",
     description=(
@@ -301,7 +356,10 @@ def _request_from_context(ctx: Context) -> Request:
         "appears in their tellr UI. v1 runs prompt-only: the agent does not "
         "invoke Genie, Vector Search, or other tools. Callers that want data-"
         "backed decks should gather the data themselves and include it in the "
-        "prompt."
+        "prompt. The deck uses the org-default design system unless "
+        "design_system_id or slide_style_id says otherwise; pass template_name "
+        "to pin one of that design system's named templates (otherwise the "
+        "model picks the best-matching one)."
     ),
 )
 async def create_deck(
@@ -309,6 +367,8 @@ async def create_deck(
     prompt: str,
     num_slides: Optional[int] = None,
     slide_style_id: Optional[int] = None,
+    design_system_id: Optional[int] = None,
+    template_name: Optional[str] = None,
     deck_prompt_id: Optional[int] = None,
     correlation_id: Optional[str] = None,
 ) -> dict:
@@ -317,6 +377,8 @@ async def create_deck(
         prompt=prompt,
         num_slides=num_slides,
         slide_style_id=slide_style_id,
+        design_system_id=design_system_id,
+        template_name=template_name,
         deck_prompt_id=deck_prompt_id,
         correlation_id=correlation_id,
     )
@@ -327,6 +389,8 @@ async def _create_deck_impl(
     prompt: str,
     num_slides: Optional[int] = None,
     slide_style_id: Optional[int] = None,
+    design_system_id: Optional[int] = None,
+    template_name: Optional[str] = None,
     deck_prompt_id: Optional[int] = None,
     correlation_id: Optional[str] = None,
 ) -> dict:
@@ -352,16 +416,48 @@ async def _create_deck_impl(
     try:
         with mcp_auth_scope(request) as identity:
             agent_config: dict[str, Any] = {"tools": []}
-            # Mirror the browser chat flow: if the caller didn't specify a
-            # style, fall back to the tellr-configured default
-            # (slide_style_library.is_default=True) rather than the
-            # hardcoded DEFAULT_SLIDE_STYLE constant that agent_factory
-            # uses when agent_config.slide_style_id is absent.
-            effective_style_id = slide_style_id
-            if effective_style_id is None:
-                effective_style_id = get_default_slide_style_id()
-            if effective_style_id is not None:
-                agent_config["slide_style_id"] = effective_style_id
+            # Resolve the style SOURCE exactly as the browser chat flow does
+            # (see routes/chat.py::_apply_org_default_style_source): a design
+            # system outranks a slide style, an explicit choice always wins,
+            # and only ONE source is ever seeded so the prompt never carries
+            # two competing style authorities. Before this, MCP decks could not
+            # reach a design system at all — only slide_style_id was ever set,
+            # so they always got the default slide style.
+            effective_ds_id = design_system_id
+            if effective_ds_id is None and slide_style_id is None:
+                effective_ds_id = get_default_design_system_id()
+
+            if effective_ds_id is not None:
+                agent_config["design_system_id"] = effective_ds_id
+                # Templates belong to a design system, so a name is only
+                # meaningful here. Unresolvable -> no pin (logged), and the
+                # model soft-picks from the catalog the compiler injects.
+                if template_name and template_name.strip():
+                    template_id = _resolve_template_name(effective_ds_id, template_name)
+                    if template_id is not None:
+                        agent_config["template_id"] = template_id
+                    else:
+                        logger.warning(
+                            "MCP create_deck: template_name %r matched no template "
+                            "on design system %s; generating without a pin",
+                            template_name,
+                            effective_ds_id,
+                        )
+            else:
+                # No design system in play: fall back to the tellr-configured
+                # default slide style rather than the hardcoded
+                # DEFAULT_SLIDE_STYLE constant agent_factory would otherwise use.
+                effective_style_id = slide_style_id
+                if effective_style_id is None:
+                    effective_style_id = get_default_slide_style_id()
+                if effective_style_id is not None:
+                    agent_config["slide_style_id"] = effective_style_id
+                if template_name and template_name.strip():
+                    logger.warning(
+                        "MCP create_deck: template_name %r ignored — templates "
+                        "require a design system and none is selected",
+                        template_name,
+                    )
             if deck_prompt_id is not None:
                 agent_config["deck_prompt_id"] = deck_prompt_id
             if num_slides is not None:
