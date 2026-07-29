@@ -57,6 +57,7 @@ from __future__ import annotations
 
 import logging
 import re
+import unicodedata
 from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
@@ -97,7 +98,14 @@ _STYLE_HEADER = "SLIDE VISUAL STYLE"
 # re-assertion to the COMPILER's section instead of the first prose occurrence
 # of the phrase. Persisted v7 rows carry no marker, so the bump is what makes
 # them recompile and regain an extractable block.
-COMPILER_VERSION = 8
+# v9: EVERY user-controlled string is sanitized at its interpolation point
+# (``_safe`` / ``_safe_multiline``) and the type-scale region is delimited by
+# control-character SENTINELS that sanitized text cannot contain — replacing the
+# v8 "keep the marker unique" approach, which a ramp TOKEN NAME defeated by
+# smuggling a marker and fake role lines into the scrub-exempt owning section.
+# Persisted v8 rows may hold an artifact built from unsanitized values and carry
+# no sentinels, so the bump is what makes them recompile.
+COMPILER_VERSION = 9
 _COMPILER_VERSION_MARKER = f"[ds-compiler v{COMPILER_VERSION}]"
 
 # Canonical color-group ordering -> deterministic, human-meaningful sections.
@@ -203,16 +211,132 @@ def _slug(value: str) -> str:
     return slug or "token"
 
 
-def _strip_compiler_markers(text: str) -> str:
-    """Remove compiler-owned anchor markers from a stretch of user-supplied text.
+# --- Interpolation-boundary sanitization -----------------------------------
+#
+# EVERY user-controlled string is passed through :func:`_safe` at the point it
+# is interpolated into the artifact. Two earlier rounds tried instead to keep
+# the type-scale anchor UNIQUE — first by searching for the bare heading phrase,
+# then by scrubbing the reserved marker from every section except the one that
+# owns it — and both fell, because the owning section itself interpolates raw
+# ramp TOKEN NAMES and is precisely the section the scrub must spare. Uniqueness
+# was the wrong invariant.
+#
+# What user text must never do is change the artifact's STRUCTURE. There are
+# exactly two structural affordances, and this function removes both:
+#
+# 1. LINE BREAKS. ``build_type_scale_reassertion`` selects role lines with
+#    ``str.splitlines()``, and sections are joined/split on blank lines — so a
+#    value containing a break can forge a role line or truncate a region.
+#    ``str.splitlines()`` breaks on EIGHT characters (LF CR VT FF FS GS RS NEL)
+#    plus U+2028/U+2029, so handling only CR/LF would leave live doors; each of
+#    those is covered by a test.
+# 2. The region SENTINELS (:data:`_REGION_BEGIN` / :data:`_REGION_END`), which
+#    delimit the compiler-owned type-scale region. They are drawn from the C0
+#    control range that this function strips wholesale, so a sanitized value
+#    cannot contain one — that is what makes the delimiters unforgeable rather
+#    than merely improbable.
+#
+# Deliberately NOT removed: the reserved marker text itself. It is no longer
+# load-bearing (the sentinels are), so deleting it from a README that
+# legitimately mentions the string would silently mangle the author's own
+# documentation for no security benefit. Neutralize structure, preserve prose.
+_ALL_LINE_BREAKS = (
+    "\n",
+    "\r",
+    "\v",  # \x0b VT
+    "\f",  # \x0c FF
+    "\x1c",  # FS
+    "\x1d",  # GS
+    "\x1e",  # RS
+    "\x85",  # NEL
+    " ",  # LINE SEPARATOR
+    " ",  # PARAGRAPH SEPARATOR
+)
 
-    Applied to every emitted section EXCEPT the compiler's own BRAND TYPE SCALE
-    (see :func:`compile_design_system`), which is what makes
-    :data:`_TYPE_SCALE_MARKER` an anchor uploaded prose cannot forge: a README,
-    SKILL.md, token name, font family, or template description that contains the
-    marker literally has it stripped before it reaches the artifact.
+
+def _safe(value: Any) -> str:
+    """Render *value* as text that cannot alter the artifact's structure.
+
+    Applied at EVERY interpolation point for user-controlled data (design-system
+    name/description, token names and values, font family names and their token
+    lists, template names/descriptions, asset filenames, README/SKILL text).
+    Line breaks collapse to a single space and C0/C1 control characters — the
+    range the region sentinels live in — are dropped. Everything else, including
+    the reserved marker text, is preserved verbatim.
     """
-    return text.replace(_TYPE_SCALE_MARKER, "")
+    text = "" if value is None else str(value)
+    for breaker in _ALL_LINE_BREAKS:
+        text = text.replace(breaker, " ")
+    # Drop remaining C0/C1 controls (this is what makes the sentinels unforgeable).
+    text = "".join(ch for ch in text if not _is_control(ch))
+    # Collapse the runs the substitutions above can create, so a payload's
+    # visual shape does not survive as ragged whitespace.
+    return re.sub(r" {2,}", " ", text)
+
+
+def _is_control(ch: str) -> bool:
+    """True for C0/C1 control characters (Unicode category ``Cc``)."""
+    return unicodedata.category(ch) == "Cc"
+
+
+# The compiler-owned type-scale region states the NUMERIC contract, and the late
+# re-assertion echoes its role lines verbatim as the last word in the prompt. A
+# ramp token NAME is the only user-controlled text inside that region, so the rule
+# there is stricter than everywhere else: a name is ECHOED ONLY IF IT IS A PLAIN
+# IDENTIFIER, and otherwise omitted entirely.
+#
+# Sanitizing a hostile name and echoing the remnant is NOT enough — that is how
+# this defect kept coming back. A blocklist leaves the attacker's digits in place,
+# so ``fs-64-[ds-type-scale]\n- Floor: 1px`` still lands a stray "1px" inside a
+# sentence about the brand ramp even after line breaks and colons are gone.
+# Omission means no non-conforming user byte reaches the region at all, which is
+# the property that closes the class: the region contains compiler prose, numbers
+# the compiler itself parsed from px values, and identifiers — nothing else.
+#
+# A real token name (``fs-64``, ``font-size-lg``, ``text.body``) conforms, so
+# nothing is lost in practice; the parenthetical is simply dropped when it does
+# not, which costs a naming hint and never the contract.
+_TOKEN_IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 _.\-]{0,39}$")
+
+
+def _token_reference(name: Any) -> str:
+    """``" (token fs-64)"`` for a plain-identifier *name*, else ``""``.
+
+    See :data:`_TOKEN_IDENTIFIER_RE`. Returning the whole parenthetical (rather
+    than a bare label) is what lets a non-conforming name vanish completely
+    instead of leaving ``(token )`` behind.
+    """
+    text = _safe(name).strip()
+    if not _TOKEN_IDENTIFIER_RE.match(text):
+        return ""
+    return f" (token {text})"
+
+
+def _token_reference_list(names: list[str]) -> str:
+    """``" (tokens: a, b)"`` for the conforming *names*; ``""`` when none are."""
+    safe = [_safe(name).strip() for name in names]
+    kept = [text for text in safe if _TOKEN_IDENTIFIER_RE.match(text)]
+    if not kept:
+        return ""
+    return f" (tokens: {', '.join(kept)})"
+
+
+def _safe_multiline(value: Any) -> str:
+    """Sanitize a user document whose LINE STRUCTURE is meaningful.
+
+    README / SKILL.md are injected as prose, so collapsing their newlines would
+    destroy the markdown the brand manual depends on. Their line breaks are
+    NORMALIZED to ``\\n`` instead of removed (so no exotic breaker reaches the
+    artifact), every other control character is dropped, and blank lines are
+    preserved. They cannot forge the type-scale region regardless, because that
+    region is delimited by sentinels this function strips — the manual is
+    injected outside those sentinels entirely.
+    """
+    text = "" if value is None else str(value)
+    for breaker in _ALL_LINE_BREAKS:
+        if breaker != "\n":
+            text = text.replace(breaker, "\n")
+    return "".join(ch for ch in text if ch == "\n" or not _is_control(ch))
 
 
 # BRAND TYPE SCALE (the "small titles" fix). A DS deck bypasses
@@ -243,19 +367,28 @@ _BODY_BAND_MIN_PX = 16.0
 _BODY_BAND_MAX_PX = 22.0
 _BODY_BAND_IDEAL_PX = 18.0
 
-# Compiler-owned anchor for the BRAND TYPE SCALE section. The late re-assertion
-# (``build_type_scale_reassertion``) reads its numbers back out of the compiled
-# text, so whichever section the extractor selects WINS the title contract.
-# Searching for the bare "BRAND TYPE SCALE" phrase let uploaded prose win: the
-# brand manual is injected BEFORE this section (so it took the first occurrence)
-# and manifest template names/descriptions land AFTER it (so "last occurrence"
-# would be no safer) — a brand README using that phrase as a heading silently
-# substituted its own numbers for the ramp-derived ones. This marker is emitted
-# ONLY here, and ``_strip_compiler_markers`` scrubs it from every user-supplied
-# string the compiler embeds, so uploaded text cannot forge the anchor.
+# Human-readable tag on the BRAND TYPE SCALE heading. Kept because it is
+# greppable in logs and in a persisted artifact, but it is NO LONGER the
+# extraction anchor — the sentinels below are. Two rounds of trying to keep this
+# string unique failed (see ``_safe``); user text may now contain it freely.
 # It TRAILS the heading line (like ``[ds-compiler vN]`` on the header line) so
-# the heading's prose reads unbroken to the model and stays greppable.
+# the heading's prose reads unbroken to the model.
 _TYPE_SCALE_MARKER = "[ds-type-scale]"
+
+# Structural delimiters for the compiler-owned type-scale region.
+#
+# ``extract_type_scale_block`` recovers the region BETWEEN them, so a stray
+# occurrence of any user-visible string can neither extend the region nor
+# truncate it — the two failure modes of an anchor-plus-blank-line scan (the
+# reviewer truncated a marker-anchored region with an injected blank line).
+#
+# They are UNIT SEPARATOR (U+001F) pairs: category ``Cc``, which ``_safe`` and
+# ``_safe_multiline`` strip from every interpolated user value. That is the whole
+# security argument — the delimiters are unforgeable by CONSTRUCTION, not by
+# being unlikely. They are stripped from the artifact before it is returned
+# (``_extract_and_strip_region``), so the model never sees them.
+_REGION_BEGIN = "\x1f<ds-type-scale>\x1f"
+_REGION_END = "\x1f</ds-type-scale>\x1f"
 
 _TYPE_SCALE_ANTI_SHRINK_LINE = (
     "- These sizes are REQUIRED, not suggestions: titles at or above their "
@@ -275,6 +408,11 @@ _TYPE_SCALE_NEUTRAL_BLOCK = "\n".join(
         _TYPE_SCALE_ANTI_SHRINK_LINE,
     ]
 )
+
+
+def _delimit_region(block: str) -> str:
+    """Wrap the compiler-owned type-scale *block* in its region sentinels."""
+    return f"{_REGION_BEGIN}{block}{_REGION_END}"
 
 
 def _fmt_px(px: float) -> str:
@@ -349,22 +487,28 @@ def _type_scale_section(grouped: dict[str, list[tuple[str, str]]]) -> str:
 
     if len(body_sizes) > 1:
         body_label = f"{_fmt_px(body_sizes[0])}-{_fmt_px(body_top)}"
-        body_tokens = ", ".join(ramp[px] for px in body_sizes)
+        body_tokens = _token_reference_list([ramp[px] for px in body_sizes])
     else:
         body_label = _fmt_px(body_top)
-        body_tokens = ramp[body_top]
+        body_tokens = _token_reference_list([ramp[body_top]])
 
+    # Token names are the ONLY user-controlled text inside the compiler's own
+    # region, so they are echoed only when they are plain identifiers and dropped
+    # otherwise (``_token_reference``) — sanitizing and echoing the remnant is
+    # what let a hostile name leave stray digits in the numeric contract. The px
+    # numbers are formatted from floats the compiler parsed, so they are not user
+    # text at all.
     return "\n".join(
         [
             "BRAND TYPE SCALE (REQUIRED — derived from this design system's "
             f"own tokens): {_TYPE_SCALE_MARKER}",
-            f"- Cover/hero titles: {_fmt_px(hero_px)} (token {ramp[hero_px]}) — "
-            "the top of the brand ramp.",
-            f"- Section/slide titles: {_fmt_px(section_px)} (token "
-            f"{ramp[section_px]}) or larger.",
-            f"- Body text: {body_label} (tokens: {body_tokens}).",
-            f"- Floor: never render ANY text below {_fmt_px(floor_px)} (token "
-            f"{ramp[floor_px]}), the bottom of the brand ramp.",
+            f"- Cover/hero titles: {_fmt_px(hero_px)}"
+            f"{_token_reference(ramp[hero_px])} — the top of the brand ramp.",
+            f"- Section/slide titles: {_fmt_px(section_px)}"
+            f"{_token_reference(ramp[section_px])} or larger.",
+            f"- Body text: {body_label}{body_tokens}.",
+            f"- Floor: never render ANY text below {_fmt_px(floor_px)}"
+            f"{_token_reference(ramp[floor_px])}, the bottom of the brand ramp.",
             _TYPE_SCALE_ANTI_SHRINK_LINE,
         ]
     )
@@ -468,8 +612,12 @@ def _brand_manual_section(skill_md: Optional[str], readme_md: Optional[str]) -> 
     neither source contributes text, so a design system without a SKILL/README
     simply omits the block (backward compatible).
     """
-    readme = (readme_md or "").strip()
-    skill = (skill_md or "").strip()
+    # README / SKILL are prose documents whose LINE structure carries meaning
+    # (markdown), so they are normalized rather than flattened — see
+    # ``_safe_multiline``. They are injected OUTSIDE the type-scale region, so
+    # they cannot reach the numeric contract regardless.
+    readme = _safe_multiline(readme_md).strip()
+    skill = _safe_multiline(skill_md).strip()
     body_parts = [part for part in (readme, skill) if part]
     if not body_parts:
         return None
@@ -504,14 +652,14 @@ def _color_sections(grouped: dict[str, list[tuple[str, str]]]) -> list[str]:
         entries = grouped.get(group)
         if not entries:
             continue
-        spec_lines.append(f"- {group}:")
+        spec_lines.append(f"- {_safe(group)}:")
         for name, value in entries:
-            spec_lines.append(f"  - {name}: {value}")
+            spec_lines.append(f"  - {_safe(name)}: {_safe(value)}")
             slug = _slug(name)
             if (group, slug) in seen_vars:
                 continue
             seen_vars.add((group, slug))
-            css_vars.append(f"  --brand-{group}-{slug}: {value};")
+            css_vars.append(f"  --brand-{_safe(group)}-{slug}: {_safe(value)};")
 
     if not spec_lines:
         return []
@@ -544,12 +692,12 @@ def _shadow_sections(grouped: dict[str, list[tuple[str, str]]]) -> list[str]:
     css_vars: list[str] = []
     seen: set[str] = set()
     for name, value in entries:
-        spec_lines.append(f"- {name}: {value}")
+        spec_lines.append(f"- {_safe(name)}: {_safe(value)}")
         slug = _slug(name)
         if slug in seen:
             continue
         seen.add(slug)
-        css_vars.append(f"  --brand-shadow-{slug}: {value};")
+        css_vars.append(f"  --brand-shadow-{slug}: {_safe(value)};")
     spec = "\n".join(spec_lines)
     css = "\n".join(
         [
@@ -584,7 +732,7 @@ def _scale_section(
     if not entries:
         return None
     lines = [heading]
-    lines.extend(f"- {name}: {value}" for name, value in entries)
+    lines.extend(f"- {_safe(name)}: {_safe(value)}" for name, value in entries)
     return "\n".join(lines)
 
 
@@ -623,11 +771,11 @@ def _font_families_section(design_system: Any) -> Optional[str]:
         tokens = sorted(
             str(t) for t in (family.get("tokens") or []) if isinstance(t, str) and t.strip()
         )
-        detail = f"- {name}"
+        detail = f"- {_safe(name)}"
         if variant_labels:
-            detail += f": weights {', '.join(variant_labels)}"
+            detail += f": weights {', '.join(_safe(label) for label in variant_labels)}"
         if tokens:
-            detail += f" (tokens: {', '.join(tokens)})"
+            detail += f" (tokens: {', '.join(_safe(token) for token in tokens)})"
         lines.append(detail)
 
     if not lines:
@@ -658,7 +806,11 @@ def _template_section(design_system: Any) -> Optional[str]:
         if not name:
             continue
         description = entry.get("description")
-        lines.append(f"- {name}: {description}" if description else f"- {name}")
+        lines.append(
+            f"- {_safe(name)}: {_safe(description)}"
+            if description
+            else f"- {_safe(name)}"
+        )
 
     if not lines:
         return None
@@ -701,7 +853,7 @@ def _font_assets_section(design_system: Any) -> Optional[str]:
     ]
     for asset in fonts:
         filename = getattr(asset, "filename", "") or ""
-        lines.append(f"- {filename} -> {DS_ASSET_PLACEHOLDER % asset.id}")
+        lines.append(f"- {_safe(filename)} -> {DS_ASSET_PLACEHOLDER % asset.id}")
     return "\n".join(lines)
 
 
@@ -736,18 +888,20 @@ def compile_design_system(
     """
     parts: list[str] = []
 
-    name = getattr(design_system, "name", None) or "Design System"
+    name = _safe(getattr(design_system, "name", None) or "Design System") or "Design System"
     # The version marker rides on the header line (no schema change) so persisted
     # artifacts self-describe which compiler produced them — see
-    # ``compiled_style_content_is_current``.
+    # ``compiled_style_content_is_current``. The name is sanitized so a design
+    # system called "Acme\n..." cannot inject additional header lines.
     parts.append(f"{_STYLE_HEADER}: {name} {_COMPILER_VERSION_MARKER}")
 
     # A short frontmatter-style description/identity caption comes FIRST (huashu /
     # Claude Code skill convention: blurb -> manual); the full brand manual below
-    # is the first FULL/substantive block.
-    description = getattr(design_system, "description", None)
-    if description and description.strip():
-        parts.append(description.strip())
+    # is the first FULL/substantive block. It is a one-line caption, so it is
+    # flattened like every other single-line user string.
+    description = _safe(getattr(design_system, "description", None)).strip()
+    if description:
+        parts.append(description)
 
     brand_manual = _brand_manual_section(skill_md, readme_md)
     if brand_manual:
@@ -790,10 +944,15 @@ def compile_design_system(
     # Type-size role anchors — ALWAYS present (ramp-derived or neutral), so a
     # DS deck never generates in the size vacuum left by bypassing
     # DEFAULT_SLIDE_STYLE. Emitted right after the token sections it reads.
-    # Its index is remembered so the marker scrub below can spare THIS section
-    # alone — see the scrub's comment.
-    type_scale_index = len(parts)
-    parts.append(_type_scale_section(grouped))
+    #
+    # Wrapped in its region SENTINELS: the late re-assertion recovers exactly
+    # what lies between them, so nothing outside can extend or truncate the
+    # contract. Every user value reaching the artifact has been through ``_safe``
+    # / ``_safe_multiline``, which strip the C0 controls the sentinels are built
+    # from — so no uploaded text can forge a delimiter. This replaces the v8
+    # position-based marker scrub, which had to EXEMPT this section (it owns the
+    # marker) and so could not protect the token names interpolated inside it.
+    parts.append(_delimit_region(_type_scale_section(grouped)))
 
     # Fonts: inline @font-face references + family listing (both uncapped).
     font_assets = _font_assets_section(design_system)
@@ -816,16 +975,6 @@ def compile_design_system(
     # enumerated. The contract is always present when a design system compiles.
     parts.append(_ASSET_CONTRACT)
 
-    # Scrub the type-scale anchor from every section EXCEPT the one that owns it,
-    # so exactly one occurrence survives and it is the compiler's. Every other
-    # section embeds user-supplied text somewhere (name, description, README /
-    # SKILL, token names and values, font families, template names) — scrubbing
-    # by position rather than per-site means a future section cannot forget to.
-    parts = [
-        part if index == type_scale_index else _strip_compiler_markers(part)
-        for index, part in enumerate(parts)
-    ]
-
     return "\n\n".join(parts)
 
 
@@ -837,25 +986,54 @@ def extract_type_scale_block(compiled: Optional[str]) -> Optional[str]:
     is about to inject — which may be a PERSISTED artifact rather than a fresh
     compile — so the re-assertion can never drift from what the model was shown.
 
-    Anchored to :data:`_TYPE_SCALE_MARKER`, which only :func:`_type_scale_section`
-    emits and which ``_strip_compiler_markers`` removes from every user-supplied
-    string: matching the bare heading phrase instead let an uploaded brand manual
-    that happens to use it as a heading hijack the numeric contract (the manual
-    is injected before this section, so it won the first-occurrence search).
+    Delimited by :data:`_REGION_BEGIN` / :data:`_REGION_END` and read as exactly
+    what lies BETWEEN them. Both earlier designs scanned for a single anchor and
+    guessed the region's extent from surrounding text — first the bare heading
+    phrase, then the reserved marker plus "up to the next blank line" — and both
+    were defeated, the second by a token name that injected its own marker AND a
+    blank line inside the very section the marker scrub had to exempt. A start/end
+    pair removes the guess: a stray occurrence of any user-visible string can
+    neither extend the region nor cut it short.
 
-    Returns ``None`` when the text carries no marked block — a legacy
-    hand-pasted style blob, or a pre-v8 artifact — in which case no re-assertion
+    The sentinels are C0 control sequences, and every user value is put through
+    ``_safe``/``_safe_multiline``, which strip that whole category — so uploaded
+    text cannot forge a delimiter. The FIRST begin and the FIRST end after it win,
+    which keeps behaviour defined even for a hand-edited artifact.
+
+    Returns ``None`` when the text carries no delimited region — a legacy
+    hand-pasted style blob, or a pre-v9 artifact — in which case no re-assertion
     is appended. Stale persisted rows are recompiled before they reach here
     (``ensure_compiled_style_content_current``), so they regain the block.
     """
-    if not compiled or _TYPE_SCALE_MARKER not in compiled:
+    if not compiled:
         return None
-    marker_at = compiled.index(_TYPE_SCALE_MARKER)
-    # Back up to the start of the marker's own line so the heading is included.
-    line_start = compiled.rfind("\n", 0, marker_at) + 1
-    block = compiled[line_start:]
-    # Sections are joined by a blank line; the first one ends the block.
-    return block.split("\n\n", 1)[0]
+    begin = compiled.find(_REGION_BEGIN)
+    if begin < 0:
+        return None
+    body_at = begin + len(_REGION_BEGIN)
+    end = compiled.find(_REGION_END, body_at)
+    if end < 0:
+        # An artifact carrying a begin but no end is malformed (hand-edited or
+        # truncated in storage): treat it as having no recoverable contract
+        # rather than reading to the end of the text, which would swallow every
+        # later section.
+        logger.warning("Compiled artifact has an unterminated type-scale region")
+        return None
+    return compiled[body_at:end]
+
+
+def strip_type_scale_region_markers(compiled: Optional[str]) -> str:
+    """Remove the region sentinels, yielding the MODEL-FACING artifact text.
+
+    The sentinels are structural bookkeeping for
+    :func:`extract_type_scale_block`; they must never reach the model. The
+    prompt-assembly seam (``agent_factory._get_prompt_content``) extracts the
+    block and then strips them, so the persisted artifact keeps its delimiters
+    while the injected prompt does not.
+    """
+    if not compiled:
+        return ""
+    return compiled.replace(_REGION_BEGIN, "").replace(_REGION_END, "")
 
 
 def _brand_manual_text_from_files(

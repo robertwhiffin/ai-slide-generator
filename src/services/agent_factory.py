@@ -124,6 +124,10 @@ def _get_prompt_content(
     # True only when a design system actually resolves to compiled content — gates
     # the DS-only precedence/brand blocks so the no-DS/legacy path stays identical.
     design_system_active = False
+    # The compiled artifact WITH its type-scale region sentinels intact. The
+    # model-facing ``slide_style`` has them stripped, so the re-assertion reads
+    # the region out of this copy instead.
+    design_system_compiled: Optional[str] = None
     # True only when a pinned template's block actually made it into the prompt —
     # its own CSS title sizes then outrank the design system's ramp numbers in the
     # late type-scale re-assertion.
@@ -138,6 +142,7 @@ def _get_prompt_content(
             from src.database.models import DesignSystem
             from src.services.design_system_compiler import (
                 ensure_compiled_style_content_current,
+                strip_type_scale_region_markers,
             )
 
             with get_db_session() as db:
@@ -156,6 +161,13 @@ def _get_prompt_content(
                     # get_db_session commits on exit, persisting the refresh
                     # (lazy backfill-on-read, no batch machinery).
                     slide_style = ensure_compiled_style_content_current(design_system)
+                    # The persisted artifact delimits the compiler-owned
+                    # type-scale region with control-character sentinels so the
+                    # late re-assertion can recover it unambiguously. They are
+                    # bookkeeping, not content: extract first (below), then strip
+                    # them before the text reaches the model.
+                    design_system_compiled = slide_style
+                    slide_style = strip_type_scale_region_markers(slide_style)
                     design_system_active = True
                     if config.template_id is not None:
                         # A pinned template appends its SELECTED-TEMPLATE block
@@ -275,7 +287,9 @@ def _get_prompt_content(
                 extract_type_scale_block,
             )
 
-            type_scale_block = extract_type_scale_block(slide_style)
+            # Read the region out of the SENTINEL-BEARING copy: ``slide_style``
+            # has had them stripped for the model.
+            type_scale_block = extract_type_scale_block(design_system_compiled)
             if type_scale_block or template_pinned:
                 type_scale_reassertion = build_type_scale_reassertion(
                     type_scale_block or "", template_pinned=template_pinned
