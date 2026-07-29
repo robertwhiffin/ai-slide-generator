@@ -40,9 +40,31 @@ export type ToolType = 'genie' | 'mcp' | 'vector_index' | 'model_endpoint' | 'ag
 
 export type ToolEntry = GenieTool | MCPTool | VectorIndexTool | ModelEndpointTool | AgentBricksTool;
 
+/**
+ * Where a config's style source CAME FROM — persisted, never inferred.
+ *
+ * `'seeded'`  the server put it there (the seeded default profile's
+ *             `slide_style_id`), meaning "nobody chose this".
+ * `'user'`    a person picked it in the UI, or loaded a profile built around it.
+ * `undefined` a LEGACY config stored before provenance existed.
+ *
+ * Provenance cannot be recovered by comparing the stored id to the current
+ * default: the two are equal both when the server seeded the default AND when a
+ * user deliberately selected that same style, and flipping `is_default` later
+ * would silently reinterpret configs already stored. So it is recorded at the
+ * moment it is known and read back verbatim.
+ */
+export type StyleSource = 'seeded' | 'user';
+
 export interface AgentConfig {
   tools: ToolEntry[];
   slide_style_id: number | null;
+  /**
+   * Provenance of `slide_style_id` — see {@link StyleSource}. Optional so
+   * configs stored before this field existed still parse; those are treated as
+   * `'seeded'` (what they in fact were).
+   */
+  style_source?: StyleSource;
   /**
    * Selected design system. When set, it compiles to prompt text and takes
    * precedence over slide_style_id (backend precedence:

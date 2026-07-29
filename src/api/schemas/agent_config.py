@@ -59,6 +59,15 @@ class AgentConfig(BaseModel):
     """Agent configuration stored as JSON on sessions and profiles."""
     tools: list[ToolEntry] = Field(default_factory=list)
     slide_style_id: Optional[int] = None
+    # PROVENANCE of the style slot: "seeded" = the server put this here (nobody
+    # chose it), "user" = a person decided it — including deciding on NEITHER a
+    # style nor a design system. Persisted so the client never has to infer it by
+    # comparing the stored id to the current default, which cannot distinguish a
+    # seeded value from a deliberate choice of that same value, and which made a
+    # later `is_default` change retroactively reinterpret stored configs.
+    # Optional: configs written before this field existed carry None and are
+    # treated as seeded (what they in fact were).
+    style_source: Optional[Literal["seeded", "user"]] = None
     # A selected design system compiles to prompt text and, when set, takes
     # precedence over slide_style_id (see agent_factory._get_prompt_content).
     design_system_id: Optional[int] = None

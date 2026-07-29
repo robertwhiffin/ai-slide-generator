@@ -810,3 +810,139 @@ class TestSessionCreatingRequestsNeverSeedTemplatePin:
             "template_id": 2,
         }
         mock_session_manager.create_session.assert_not_called()
+
+
+class TestNewSessionSeedingTruthTable:
+    """ONE documented truth table for how a chat request's ``agent_config``
+    decides the seeded style source on session CREATION.
+
+    The bug this pins: seeding was gated on ``if request.agent_config:`` —
+    TRUTHINESS. An empty dict is falsy, so ``{}`` was indistinguishable from a
+    request that sent no config at all and got the org default seeded, while
+    ``{"tools": []}`` (truthy, same intent) did not. Whether the client's style
+    keys were seeded therefore depended on whether some OTHER key happened to be
+    present.
+
+    The rule now: seeding is decided by (a) whether ``agent_config`` was sent at
+    all (``is not None``) and (b) which FIELDS the client actually set
+    (Pydantic's ``model_fields_set``) — never by truthiness, and never by a
+    field's defaulted value. Only a style key the client genuinely did not send
+    is seeded, so an explicit ``null`` is a CHOICE and is preserved.
+
+    Fixture defaults for every row below: org-default DS = 7, default style = 42.
+
+    | # | request agent_config                          | design_system_id | slide_style_id |
+    |---|-----------------------------------------------|------------------|----------------|
+    | 1 | (key absent — no config at all)               | 7 (seeded)       | None           |
+    | 2 | ``{}``                                        | 7 (seeded)       | None           |
+    | 3 | ``{"tools": []}``                             | 7 (seeded)       | None           |
+    | 4 | ``{"slide_style_id": null}``                  | None             | None (explicit)|
+    | 5 | ``{"design_system_id": null}``                | None (explicit)  | 42 (seeded)    |
+    | 6 | ``{"design_system_id": null, "slide_style_id": null}`` | None     | None           |
+
+    Rows 1-3 send NO style key, so both are gaps and the org default fills them
+    (DS outranks style, so the style stays None). Row 4 pins the style slot
+    closed by choice, and because the DS default may not silently take over a
+    user's decision to have no style source it does not fill the other slot
+    either. Row 5 pins the DS slot closed, leaving the legacy default style to
+    fill the still-unspecified style slot. Row 6 is "no style source at all".
+    """
+
+    DEFAULT_DS_ID = 7
+    DEFAULT_STYLE_ID = 42
+
+    def _complete_stream(self, mock_chat_service):
+        from src.api.schemas.streaming import StreamEvent
+
+        mock_chat_service.send_message_streaming.return_value = iter(
+            [StreamEvent(type=StreamEventType.COMPLETE, slides={"slides": []})]
+        )
+
+    def _created_config(self, client, mock_session_manager, mock_chat_service, payload):
+        self._complete_stream(mock_chat_service)
+        with patch(
+            "src.api.routes.chat.get_default_design_system_id",
+            return_value=self.DEFAULT_DS_ID,
+        ), patch(
+            "src.api.routes.chat.get_default_slide_style_id",
+            return_value=self.DEFAULT_STYLE_ID,
+        ):
+            response = client.post("/api/chat/stream", json=payload)
+        assert response.status_code == 200
+        return mock_session_manager.create_session.call_args.kwargs["agent_config"]
+
+    # (label, agent_config or ABSENT, expected design_system_id, expected slide_style_id)
+    ABSENT = object()
+
+    _ROWS = [
+        ("no_config_at_all", ABSENT, 7, None),
+        ("empty_dict", {}, 7, None),
+        ("tools_only", {"tools": []}, 7, None),
+        ("explicit_null_style", {"slide_style_id": None}, None, None),
+        ("explicit_null_design_system", {"design_system_id": None}, None, 42),
+        (
+            "both_explicit_null",
+            {"design_system_id": None, "slide_style_id": None},
+            None,
+            None,
+        ),
+    ]
+
+    @pytest.mark.parametrize(
+        ("label", "agent_config", "expected_ds", "expected_style"),
+        _ROWS,
+        ids=[row[0] for row in _ROWS],
+    )
+    def test_truth_table_row(
+        self,
+        client,
+        mock_session_manager,
+        mock_chat_service,
+        label,
+        agent_config,
+        expected_ds,
+        expected_style,
+    ):
+        payload = {"message": "Create slides"}
+        if agent_config is not self.ABSENT:
+            payload["agent_config"] = agent_config
+
+        config = self._created_config(
+            client, mock_session_manager, mock_chat_service, payload
+        )
+
+        assert config.get("design_system_id") == expected_ds, (
+            f"row {label}: design_system_id"
+        )
+        assert config.get("slide_style_id") == expected_style, (
+            f"row {label}: slide_style_id"
+        )
+
+    def test_empty_dict_and_tools_only_agree(
+        self, client, mock_session_manager, mock_chat_service
+    ):
+        """The specific inconsistency: `{}` is falsy and `{"tools": []}` is
+        truthy, yet they express the same thing. They must seed identically."""
+        empty = self._created_config(
+            client, mock_session_manager, mock_chat_service,
+            {"message": "m", "agent_config": {}},
+        )
+        tools_only = self._created_config(
+            client, mock_session_manager, mock_chat_service,
+            {"message": "m", "agent_config": {"tools": []}},
+        )
+
+        assert empty.get("design_system_id") == tools_only.get("design_system_id")
+        assert empty.get("slide_style_id") == tools_only.get("slide_style_id")
+
+    def test_a_tools_only_config_does_not_lose_its_style_seeding(
+        self, client, mock_session_manager, mock_chat_service
+    ):
+        """A config carrying ONLY tools never mentioned a style source, so both
+        slots are gaps — the org default applies exactly as for no config."""
+        config = self._created_config(
+            client, mock_session_manager, mock_chat_service,
+            {"message": "m", "agent_config": {"tools": []}},
+        )
+
+        assert config["design_system_id"] == self.DEFAULT_DS_ID

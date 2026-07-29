@@ -1449,3 +1449,285 @@ test.describe('org-default design system vs. seeded legacy style default', () =>
     expect(config.slide_style_id).toBe(SEEDED_STYLE_ID);
   });
 });
+
+
+/**
+ * PROVENANCE: "the server seeded this" vs "the user chose this" (round 2).
+ *
+ * The previous fix inferred provenance by comparing a stored `slide_style_id` to
+ * the CURRENT seeded-default id. Value equality cannot express that distinction,
+ * and it broke two ways:
+ *
+ *  - A user who DELIBERATELY selects the style that also happens to be the
+ *    seeded default had their choice discarded and replaced by the org-default
+ *    design system.
+ *  - Flipping `is_default` later retroactively reinterpreted configs that were
+ *    already stored, because the comparison is re-evaluated on every load.
+ *
+ * Provenance is therefore PERSISTED alongside the config (`style_source`), and
+ * the resolver reads it instead of comparing ids. All fixtures synthetic.
+ */
+test.describe('persisted style provenance', () => {
+  const ORG_DEFAULT_DS_ID = mockDesignSystems.design_systems[0].id;
+  const SEEDED_STYLE_ID = 1; // mockSlideStyles' is_system + is_default style
+
+  const seededDefaultProfile = {
+    id: 1,
+    name: 'Default',
+    description: 'Server-seeded default profile.',
+    is_default: true,
+    agent_config: {
+      tools: [],
+      slide_style_id: SEEDED_STYLE_ID,
+      design_system_id: null,
+      template_id: null,
+      deck_prompt_id: null,
+      system_prompt: null,
+      slide_editing_instructions: null,
+    },
+    created_at: '2026-01-08T20:10:29.720015',
+    created_by: 'system',
+    updated_at: '2026-01-08T20:10:29.720025',
+  };
+
+  async function mockOrgDefaults(page: import('@playwright/test').Page) {
+    await setupMocks(page);
+    await page.route(apiPathMatching(/\/api\/profiles$/), (route) => {
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify([seededDefaultProfile]),
+      });
+    });
+    await page.route(apiPath('/api/settings/design-systems'), (route, request) => {
+      if (request.method() === 'GET') {
+        route.fulfill({
+          status: 200,
+          contentType: 'application/json',
+          body: JSON.stringify(mockDesignSystems),
+        });
+      } else {
+        route.continue();
+      }
+    });
+  }
+
+  async function readStored(page: import('@playwright/test').Page) {
+    const raw = await page.evaluate(() => localStorage.getItem('pendingAgentConfig'));
+    return raw ? (JSON.parse(raw) as Record<string, unknown>) : null;
+  }
+
+  async function seedStoredConfig(
+    page: import('@playwright/test').Page,
+    config: Record<string, unknown>,
+  ) {
+    await page.addInitScript(
+      ([key, value]) => {
+        localStorage.setItem(key, value);
+        localStorage.removeItem('userDefaultSlideStyleId');
+        localStorage.removeItem('userDefaultProfileId');
+      },
+      ['pendingAgentConfig', JSON.stringify(config)] as [string, string],
+    );
+  }
+
+  const baseConfig = {
+    tools: [],
+    slide_style_id: SEEDED_STYLE_ID,
+    design_system_id: null,
+    template_id: null,
+    deck_prompt_id: null,
+    system_prompt: null,
+    slide_editing_instructions: null,
+  };
+
+  test('deliberately choosing the style that IS the seeded default survives a reload', async ({
+    page,
+  }) => {
+    // The reviewer's repro: the user actively picked style 1. That it is also
+    // the server's seeded default is a coincidence, not evidence of provenance.
+    await mockOrgDefaults(page);
+    await seedStoredConfig(page, { ...baseConfig, style_source: 'user' });
+
+    await page.goto('/');
+    await expect(page.getByTestId('agent-config-bar')).toBeVisible();
+    await page.getByTestId('agent-config-toggle').click();
+
+    await expect(page.getByTestId('style-selector')).toHaveValue(String(SEEDED_STYLE_ID));
+    const stored = await readStored(page);
+    expect(stored?.slide_style_id).toBe(SEEDED_STYLE_ID);
+    expect(stored?.design_system_id ?? null).toBeNull();
+  });
+
+  test('a SERVER-SEEDED style is still overridden by the org-default design system', async ({
+    page,
+  }) => {
+    // The other half of the same distinction: same id, seeded provenance.
+    await mockOrgDefaults(page);
+    await seedStoredConfig(page, { ...baseConfig, style_source: 'seeded' });
+
+    await page.goto('/');
+    await expect(page.getByTestId('agent-config-bar')).toBeVisible();
+    await page.getByTestId('agent-config-toggle').click();
+
+    await expect(page.getByTestId('design-system-selector')).toHaveValue(
+      String(ORG_DEFAULT_DS_ID),
+    );
+  });
+
+  test('flipping is_default later does NOT reinterpret an already-stored config', async ({
+    page,
+  }) => {
+    // Style 2 was the user's explicit choice; the org later makes style 2 the
+    // seeded default. Under value-comparison the stored choice would suddenly
+    // read as "seeded" and be discarded. Stored provenance is immutable.
+    await mockOrgDefaults(page);
+    await page.route(apiPath('/api/settings/slide-styles'), (route, request) => {
+      if (request.method() === 'GET') {
+        route.fulfill({
+          status: 200,
+          contentType: 'application/json',
+          body: JSON.stringify({
+            styles: [
+              { id: 1, name: 'System Default', category: 'System', is_active: true, is_system: true, is_default: false },
+              { id: 2, name: 'Corporate Theme', category: 'Brand', is_active: true, is_system: false, is_default: true },
+            ],
+          }),
+        });
+      } else {
+        route.continue();
+      }
+    });
+    await seedStoredConfig(page, {
+      ...baseConfig,
+      slide_style_id: 2,
+      style_source: 'user',
+    });
+
+    await page.goto('/');
+    await expect(page.getByTestId('agent-config-bar')).toBeVisible();
+    await page.getByTestId('agent-config-toggle').click();
+
+    await expect(page.getByTestId('style-selector')).toHaveValue('2');
+    expect((await readStored(page))?.design_system_id ?? null).toBeNull();
+  });
+
+  test('a LEGACY stored config with no provenance field behaves safely', async ({ page }) => {
+    // Written before provenance existed. Such a config was mirrored from the
+    // seeded profile, so it is treated as SEEDED — exactly the behaviour those
+    // configs already had, so the safe default cannot resurrect the old bug.
+    await mockOrgDefaults(page);
+    await seedStoredConfig(page, { ...baseConfig });
+
+    await page.goto('/');
+    await expect(page.getByTestId('agent-config-bar')).toBeVisible();
+    await page.getByTestId('agent-config-toggle').click();
+
+    await expect(page.getByTestId('design-system-selector')).toHaveValue(
+      String(ORG_DEFAULT_DS_ID),
+    );
+  });
+
+  test('choosing a style through the UI records USER provenance', async ({ page }) => {
+    await mockOrgDefaults(page);
+    await page.addInitScript(() => localStorage.removeItem('pendingAgentConfig'));
+
+    await page.goto('/');
+    await expect(page.getByTestId('agent-config-bar')).toBeVisible();
+    await page.getByTestId('agent-config-toggle').click();
+    await page.getByTestId('style-selector').selectOption('2');
+
+    await expect.poll(async () => (await readStored(page))?.style_source).toBe('user');
+    expect((await readStored(page))?.slide_style_id).toBe(2);
+  });
+});
+
+/**
+ * Design System = None must survive a reload (round 2).
+ *
+ * A stored config with ZERO TOOLS was discarded outright, so the deliberate
+ * `design_system_id: null` inside it was thrown away and the org default
+ * re-seeded on the next load. A config with no tools is still a real user
+ * configuration. All fixtures synthetic.
+ */
+test.describe('explicit Design System = None survives', () => {
+  const ORG_DEFAULT_DS_ID = mockDesignSystems.design_systems[0].id;
+
+  async function mockWithOrgDefault(page: import('@playwright/test').Page) {
+    await setupMocks(page);
+    await page.route(apiPath('/api/settings/design-systems'), (route, request) => {
+      if (request.method() === 'GET') {
+        route.fulfill({
+          status: 200,
+          contentType: 'application/json',
+          body: JSON.stringify(mockDesignSystems),
+        });
+      } else {
+        route.continue();
+      }
+    });
+  }
+
+  async function readStored(page: import('@playwright/test').Page) {
+    const raw = await page.evaluate(() => localStorage.getItem('pendingAgentConfig'));
+    return raw ? (JSON.parse(raw) as Record<string, unknown>) : null;
+  }
+
+  test('pre-session: choosing None then reloading keeps None', async ({ page }) => {
+    await mockWithOrgDefault(page);
+    // Clear the mirror for the FIRST load only. `addInitScript` runs on every
+    // navigation including `reload()`, so an unconditional clear here would wipe
+    // the very state this test reloads to inspect.
+    await page.addInitScript(() => {
+      if (!sessionStorage.getItem('specDidClearConfig')) {
+        sessionStorage.setItem('specDidClearConfig', '1');
+        localStorage.removeItem('pendingAgentConfig');
+      }
+    });
+
+    await page.goto('/');
+    await expect(page.getByTestId('agent-config-bar')).toBeVisible();
+    await page.getByTestId('agent-config-toggle').click();
+    // The org default is preselected; the user explicitly clears it.
+    await page.getByTestId('design-system-selector').selectOption('');
+    await expect
+      .poll(async () => (await readStored(page))?.design_system_id ?? null)
+      .toBeNull();
+
+    // Reload: the stored config has ZERO tools, and must not be discarded.
+    await page.reload();
+    await expect(page.getByTestId('agent-config-bar')).toBeVisible();
+    await page.getByTestId('agent-config-toggle').click();
+
+    await expect(page.getByTestId('design-system-selector')).toHaveValue('');
+    const stored = await readStored(page);
+    expect(stored?.design_system_id ?? null).toBeNull();
+  });
+
+  test('a stored zero-tool config is authoritative, not discarded', async ({ page }) => {
+    await mockWithOrgDefault(page);
+    await page.addInitScript(
+      ([key, value]) => localStorage.setItem(key, value),
+      [
+        'pendingAgentConfig',
+        JSON.stringify({
+          tools: [],
+          slide_style_id: null,
+          design_system_id: null,
+          template_id: null,
+          deck_prompt_id: null,
+          system_prompt: null,
+          slide_editing_instructions: null,
+          style_source: 'user',
+        }),
+      ] as [string, string],
+    );
+
+    await page.goto('/');
+    await expect(page.getByTestId('agent-config-bar')).toBeVisible();
+    await page.getByTestId('agent-config-toggle').click();
+
+    await expect(page.getByTestId('design-system-selector')).toHaveValue('');
+    expect((await readStored(page))?.design_system_id ?? null).toBeNull();
+  });
+});
