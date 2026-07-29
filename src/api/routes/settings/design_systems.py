@@ -26,6 +26,7 @@ from sqlalchemy.orm import Session
 
 from src.api.routes._authz import require_admin
 from src.core.database import get_db
+from src.core.permission_context import get_permission_context
 from src.database.models.design_system import (
     MAX_BUNDLE_SIZE_BYTES,
     DesignSystem,
@@ -175,6 +176,46 @@ def _current_user() -> str:
         return get_user_client().current_user.me().user_name or "system"
     except Exception:
         return "system"
+
+
+def _require_creator_or_admin(ds: DesignSystem) -> None:
+    """Require the caller to be ``ds``'s author, or a workspace admin.
+
+    Design systems are org-shared, user-CONTRIBUTED content: any user may add
+    one (create/import stay open) and manage the ones they uploaded, nobody may
+    touch someone else's, and admins may manage anything. Used by PUT and
+    DELETE. ``set-default`` stays admin-only — it changes what EVERY user gets
+    by default, so authorship does not buy it.
+
+    Identity comes from ``get_permission_context().user_name``, which the OBO
+    middleware derives server-side from the caller's authenticated token
+    (``src/api/main.py``: ``user_client.current_user.me()``, or ``DEV_USER_ID``
+    locally). It is never read from the request body, query string or a client
+    header, so a caller cannot assert someone else's identity. The creator half
+    of the check follows the house pattern at ``src/api/routes/profiles.py:191``
+    (``perm_ctx.user_name == created_by``, guarded on both values being
+    truthy); the admin half delegates to the SDR-4437 ``require_admin``
+    primitive unchanged.
+
+    ``design_system.created_by`` is NULLABLE and legacy rows may hold NULL or a
+    blank string. Such rows are ADMIN-ONLY: an author-less row must never
+    become "anyone may manage this", and a blank/unresolved CALLER must never
+    match a blank OWNER, so both sides must be non-blank for the creator branch
+    to fire. Anything else falls through to ``require_admin``.
+
+    Raises:
+        HTTPException 403: caller is neither the author nor an admin.
+    """
+    perm_ctx = get_permission_context()
+    caller = (perm_ctx.user_name or "").strip() if perm_ctx else ""
+    created_by = (ds.created_by or "").strip() if ds.created_by else ""
+    is_creator = bool(caller) and bool(created_by) and caller == created_by
+    if is_creator:
+        return
+    # Not the author (or authorship is unknown/blank) — admin-only from here.
+    # require_admin raises 403 itself; same status as the creator-denied path,
+    # so an unauthorised caller cannot tell the two apart.
+    require_admin()
 
 
 def _template_count(manifest_json: Optional[dict]) -> int:
@@ -419,8 +460,10 @@ def get_design_system(ds_id: int, db: Session = Depends(get_db)):
         )
 
 
-# SDR-4437 HIGH-3: workspace-global library writes are admin-only.
-@router.put("/{ds_id}", response_model=DesignSystemDetail, dependencies=[Depends(require_admin)])
+# SDR-4437 HIGH-3 / Option C: rename is CREATOR-OR-ADMIN. The gate needs the
+# row (to read created_by), so it runs in the handler rather than as a route
+# dependency — see _require_creator_or_admin.
+@router.put("/{ds_id}", response_model=DesignSystemDetail)
 def update_design_system(
     ds_id: int,
     request: DesignSystemUpdate,
@@ -434,6 +477,7 @@ def update_design_system(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"Design system {ds_id} not found",
             )
+        _require_creator_or_admin(ds)
 
         if request.name and request.name != ds.name:
             clash = (
@@ -480,10 +524,10 @@ def update_design_system(
         )
 
 
-# SDR-4437 HIGH-3: workspace-global library writes are admin-only.
-@router.delete(
-    "/{ds_id}", status_code=status.HTTP_204_NO_CONTENT, dependencies=[Depends(require_admin)]
-)
+# SDR-4437 HIGH-3 / Option C: delete is CREATOR-OR-ADMIN. The gate needs the
+# row (to read created_by), so it runs in the handler rather than as a route
+# dependency — see _require_creator_or_admin.
+@router.delete("/{ds_id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_design_system(
     ds_id: int,
     hard_delete: bool = False,
@@ -497,6 +541,7 @@ def delete_design_system(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"Design system {ds_id} not found",
             )
+        _require_creator_or_admin(ds)
 
         # A deleted design system can't remain the org default. There is no
         # protected "system" design system to reassign to (unlike slide styles),

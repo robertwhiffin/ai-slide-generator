@@ -43,6 +43,13 @@ _PERMISSION_CALL_RE = re.compile(
     r"|_check_chat_permission"      # chat.py send/stream/async
     r"|_require_manage"             # deck_contributors.py
     r"|get_deck_permission"         # profiles.py / sessions.py inline checks
+    # design_systems.py PUT/DELETE: creator-or-admin (Option C). Verified
+    # enforcing — raises 403 unless the caller authored the row, else delegates
+    # to require_admin; blank/NULL created_by falls back to admin-only. Behavior
+    # is covered per-endpoint by test_authz_design_systems_creator.py, and the
+    # exact permission LEVEL of all three mutations is pinned by
+    # test_design_system_mutations_have_the_intended_permission_levels below.
+    r"|_require_creator_or_admin"
     r")\s*[(,]"
     # images.py PUT/DELETE enforce HIGH-1 owner-scoping with a bespoke inline
     # check rather than a deck-permission helper: `if image.uploaded_by !=
@@ -93,9 +100,10 @@ FEEDBACK_WRITE_RATIONALE = (
 )
 
 DESIGN_SYSTEM_READ_RATIONALE = (
-    "Read-only library browse; the design-system prefix admin-gates the "
-    "ORG-WIDE mutations only (PUT/DELETE/set-default), matching HIGH-3's "
-    "deck-prompt and slide-style pattern. Reads must stay open: any user picks "
+    "Read-only library browse; the design-system prefix gates MUTATIONS only "
+    "(rename/delete = creator-or-admin, set-default = admin-only), a "
+    "contribution-friendly variant of HIGH-3's deck-prompt and slide-style "
+    "pattern. Reads must stay open: any user picks "
     "a design system for their own deck, and the generation/preview path reads "
     "its templates, assets and files. Per-design-system scoping (a template or "
     "asset is only served through its OWNING system) is enforced in the "
@@ -107,8 +115,9 @@ DESIGN_SYSTEM_CONTRIBUTE_RATIONALE = (
     "create and import stay open — the same shape as the shared image "
     "library's open upload. Contributing adds a NEW row owned by the caller; "
     "it does not mutate another principal's design system or change what other "
-    "users get by default. The org-wide mutations that DO affect everyone "
-    "(rename, delete, set-default) are admin-gated in the router."
+    "users get by default. Managing an EXISTING row is gated: rename/delete are "
+    "creator-or-admin (you manage what you uploaded), and set-default — the one "
+    "mutation with org-wide blast radius — stays admin-only."
 )
 
 # (method, path) -> rationale. Exemptions must be visible in review, not
@@ -164,11 +173,12 @@ ALLOWLIST = {
         "Read-only library browse; HIGH-3 admin-gates writes only.",
     ("GET", "/api/settings/slide-styles/{style_id}"):
         "Read-only library browse; HIGH-3 admin-gates writes only.",
-    # Design systems mirror the deck-prompt / slide-style library shape: the
-    # three ORG-WIDE mutations (PUT, DELETE, POST .../set-default) are
-    # admin-gated in the router, so they are absent here. Reads stay open — any
-    # user browses the library to pick a system, and the generation path needs
-    # its assets/templates/files.
+    # Design systems adapt the deck-prompt / slide-style library shape to
+    # user-contributed content: rename/delete are creator-or-admin and
+    # set-default is admin-only (see DESIGN_SYSTEM_MUTATION_LEVELS), so all
+    # three mutations are gated and absent here. Reads stay open — any user
+    # browses the library to pick a system, and the generation path needs its
+    # assets/templates/files.
     ("GET", "/api/settings/design-systems"): DESIGN_SYSTEM_READ_RATIONALE,
     ("GET", "/api/settings/design-systems/{ds_id}"): DESIGN_SYSTEM_READ_RATIONALE,
     ("GET", "/api/settings/design-systems/{ds_id}/templates"): DESIGN_SYSTEM_READ_RATIONALE,
@@ -308,31 +318,96 @@ def test_trigger_detection_recurses_into_body_models():
     assert "session_id" in _route_param_names(route)
 
 
-def test_design_system_org_wide_mutations_are_admin_gated():
+def _handler_source(route: APIRoute) -> str:
+    try:
+        return inspect.getsource(route.endpoint)
+    except (OSError, TypeError):
+        return ""
+
+
+def _has_creator_or_admin(route: APIRoute) -> bool:
+    """True if the handler invokes the creator-or-admin gate on its own row."""
+    return bool(re.search(r"_require_creator_or_admin\s*\(", _handler_source(route)))
+
+
+# The design-system mutation permission model (Option C). Design systems are
+# org-shared, user-CONTRIBUTED content, so the intended level differs per route
+# and this table is the single place that says which is which:
+#
+#   "admin"            set-default — ORG-WIDE blast radius (changes what every
+#                      user gets by default), so authorship must not buy it.
+#   "creator_or_admin" rename/delete — manage what YOU uploaded; nobody may
+#                      touch someone else's; admins may manage anything.
+#   "open"             create/import — any user may CONTRIBUTE a new row.
+#
+# Asserting the exact LEVEL (not merely "is gated") is what makes this a real
+# tripwire: silently promoting rename/delete back to admin-only, demoting
+# set-default to creator-or-admin, or dropping either gate entirely all fail
+# here. Adding an ALLOWLIST entry cannot silence it.
+DESIGN_SYSTEM_MUTATION_LEVELS = {
+    ("PUT", "/api/settings/design-systems/{ds_id}"): "creator_or_admin",
+    ("DELETE", "/api/settings/design-systems/{ds_id}"): "creator_or_admin",
+    ("POST", "/api/settings/design-systems/{ds_id}/set-default"): "admin",
+    ("POST", "/api/settings/design-systems/import"): "open",
+    ("POST", "/api/settings/design-systems"): "open",
+}
+
+
+def test_design_system_mutations_have_the_intended_permission_levels():
     """Self-test for the design-system prefix (the gap that let the missing
-    set-default gate through review).
+    set-default gate through review), now level-aware.
 
     The prefix's presence in ADMIN_PATH_PREFIXES only makes those routes
-    SENSITIVE — an ALLOWLIST entry would still silence them. This asserts the
-    three org-wide mutations are actually gated, so no future entry can exempt
-    one: dropping `Depends(require_admin)` from set-default makes this fail.
+    SENSITIVE — an ALLOWLIST entry would still silence them. This pins each
+    mutation to its INTENDED permission level, so no future entry can exempt one
+    and no refactor can quietly change which level a route enforces.
     """
-    org_wide = {
-        ("PUT", "/api/settings/design-systems/{ds_id}"),
-        ("DELETE", "/api/settings/design-systems/{ds_id}"),
-        ("POST", "/api/settings/design-systems/{ds_id}/set-default"),
-    }
     seen = set()
+    failures = []
     for route in _api_routes():
         for method in route.methods:
-            if (method, route.path) not in org_wide:
+            expected = DESIGN_SYSTEM_MUTATION_LEVELS.get((method, route.path))
+            if expected is None:
                 continue
             seen.add((method, route.path))
-            assert _has_require_admin(route), (
-                f"{method} {route.path} mutates the org-wide design-system "
-                "library and must carry Depends(require_admin)"
-            )
-    assert seen == org_wide, f"org-wide design-system routes missing: {org_wide - seen}"
+            admin = _has_require_admin(route)
+            creator = _has_creator_or_admin(route)
+            where = f"{method} {route.path}"
+            if expected == "admin":
+                # Must be admin-only: require_admin in the dependency tree, and
+                # NOT softened to the creator-or-admin gate.
+                if not admin:
+                    failures.append(
+                        f"{where} has ORG-WIDE blast radius and must carry "
+                        "Depends(require_admin)"
+                    )
+                if creator:
+                    failures.append(
+                        f"{where} must stay ADMIN-ONLY — it changes what every "
+                        "user gets by default; authorship must not grant it"
+                    )
+            elif expected == "creator_or_admin":
+                # Must be gated, but by the creator-or-admin gate specifically:
+                # neither wide open nor promoted back to blanket admin-only.
+                if not creator:
+                    failures.append(
+                        f"{where} mutates another principal's design system and "
+                        "must call _require_creator_or_admin(ds)"
+                    )
+                if admin:
+                    failures.append(
+                        f"{where} must be CREATOR-OR-ADMIN, not admin-only — a "
+                        "user must be able to manage the system they uploaded"
+                    )
+            else:  # "open" — contributing is a deliberate product decision
+                if admin or creator:
+                    failures.append(
+                        f"{where} must stay OPEN: any authenticated user may "
+                        "CONTRIBUTE a design system"
+                    )
+    assert not failures, "Design-system permission model drift:\n  " + "\n  ".join(failures)
+    missing = set(DESIGN_SYSTEM_MUTATION_LEVELS) - seen
+    assert not missing, f"design-system mutation routes missing: {missing}"
 
 
 def test_permission_call_detection_matches_to_thread_form():
