@@ -24,6 +24,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
+from src.api.routes._authz import require_admin
 from src.core.database import get_db
 from src.database.models.design_system import (
     MAX_BUNDLE_SIZE_BYTES,
@@ -418,7 +419,8 @@ def get_design_system(ds_id: int, db: Session = Depends(get_db)):
         )
 
 
-@router.put("/{ds_id}", response_model=DesignSystemDetail)
+# SDR-4437 HIGH-3: workspace-global library writes are admin-only.
+@router.put("/{ds_id}", response_model=DesignSystemDetail, dependencies=[Depends(require_admin)])
 def update_design_system(
     ds_id: int,
     request: DesignSystemUpdate,
@@ -478,7 +480,10 @@ def update_design_system(
         )
 
 
-@router.delete("/{ds_id}", status_code=status.HTTP_204_NO_CONTENT)
+# SDR-4437 HIGH-3: workspace-global library writes are admin-only.
+@router.delete(
+    "/{ds_id}", status_code=status.HTTP_204_NO_CONTENT, dependencies=[Depends(require_admin)]
+)
 def delete_design_system(
     ds_id: int,
     hard_delete: bool = False,
@@ -518,7 +523,11 @@ def delete_design_system(
         )
 
 
-@router.post("/{ds_id}/set-default", response_model=DesignSystemDetail)
+# SDR-4437 HIGH-3: workspace-global library writes are admin-only.
+@router.post(
+    "/{ds_id}/set-default", response_model=DesignSystemDetail,
+    dependencies=[Depends(require_admin)],
+)
 def set_default_design_system(ds_id: int, db: Session = Depends(get_db)):
     """Set a design system as the single org-wide default.
 
