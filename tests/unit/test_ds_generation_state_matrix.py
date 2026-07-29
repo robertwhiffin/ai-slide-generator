@@ -236,8 +236,15 @@ class TestStateTemplatePinned:
         sp = self._prompt(ds, template_id=template.id)
 
         block = build_selected_template_block(template)
+        # The model-facing artifact is the stored one minus its type-scale region
+        # sentinels (extractor bookkeeping — see ``strip_type_scale_region_markers``).
+        from src.services.design_system_compiler import (
+            strip_type_scale_region_markers,
+        )
+
+        artifact = strip_type_scale_region_markers(ds.compiled_style_content)
         expected = build_generation_system_prompt(
-            slide_style=f"{ds.compiled_style_content}\n\n{block}",
+            slide_style=f"{artifact}\n\n{block}",
             deck_prompt=None,
             image_guidelines=None,
             design_system_active=True,
@@ -257,12 +264,14 @@ class TestStateTemplatePinned:
         from src.services.design_system_compiler import (
             build_type_scale_reassertion,
             extract_type_scale_block,
+            strip_type_scale_region_markers,
         )
 
         ds = self._templated_ds(session)
         sp = self._prompt(ds, template_id=None)
         expected = build_generation_system_prompt(
-            slide_style=ds.compiled_style_content,
+            # Model-facing artifact: stored text minus the region sentinels.
+            slide_style=strip_type_scale_region_markers(ds.compiled_style_content),
             deck_prompt=None,
             image_guidelines=None,
             design_system_active=True,
@@ -425,4 +434,11 @@ class TestStateStaleCompiledContent:
                 AgentConfig(design_system_id=ds.id), _dispatching_db(design_system=ds)
             )["system_prompt"]
         recompute_spy.assert_not_called()
-        assert ds.compiled_style_content in sp  # stored artifact injected verbatim
+        # The stored artifact is injected unchanged apart from its type-scale
+        # region SENTINELS, which are storage-side bookkeeping for the extractor
+        # and are stripped before the text reaches the model.
+        from src.services.design_system_compiler import (
+            strip_type_scale_region_markers,
+        )
+
+        assert strip_type_scale_region_markers(ds.compiled_style_content) in sp

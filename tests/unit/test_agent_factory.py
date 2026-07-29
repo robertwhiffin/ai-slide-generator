@@ -409,6 +409,11 @@ def test_design_system_recompute_failure_falls_back_to_default():
     config = AgentConfig(design_system_id=99)
     ds = MagicMock()
     ds.compiled_style_content = None  # stale/missing -> recompute path
+    # Make walking the relationships the thing that fails, which is what the
+    # docstring describes. (A bare MagicMock no longer suffices: the compiler
+    # sanitizes every interpolated value through ``str()``, so mock attributes
+    # serialize instead of raising.)
+    ds.tokens.__iter__.side_effect = RuntimeError("relationship cannot be walked")
     db = _dispatching_db(design_system=ds)
 
     result = _run_with_db(config, db)
