@@ -294,3 +294,103 @@ def test_blank_caller_cannot_match_blank_creator(client, db_session, non_admin, 
     assert resp.status_code == 403, resp.text
     db_session.refresh(ds)
     assert ds.is_active is True
+
+
+# --- (i) VISUALLY EMPTY authorship is blank too -----------------------------
+#
+# ``str.strip()`` removes ASCII and Unicode WHITESPACE (Zs/Zl/Zp), but a
+# zero-width character is category Cf — ``isspace()`` is False and ``strip()``
+# leaves it untouched. So a ``created_by`` of ZERO WIDTH SPACE passed the
+# non-blank test on BOTH sides and satisfied the creator branch, handing
+# "anyone may manage this" to an author-less row.
+#
+# The fix normalizes (NFKC) and strips format/separator characters before the
+# non-blank test, so any value that is semantically empty is BLANK -> admin-only.
+# Case sensitivity is deliberately NOT relaxed: differing case still fails
+# closed, which the existing suite pins.
+
+# Cf format characters (zero-width and friends), plus combinations with real
+# whitespace. Each must read as BLANK.
+_INVISIBLE_BLANKS = [
+    ("zwsp", "​"),          # ZERO WIDTH SPACE
+    ("zwnj", "‌"),          # ZERO WIDTH NON-JOINER
+    ("zwj", "‍"),           # ZERO WIDTH JOINER
+    ("bom", "﻿"),           # ZERO WIDTH NO-BREAK SPACE / BOM
+    ("word_joiner", "⁠"),   # WORD JOINER
+    ("soft_hyphen", "­"),   # SOFT HYPHEN (Cf)
+    ("lrm", "‎"),           # LEFT-TO-RIGHT MARK
+    ("mixed_zw_and_spaces", "  ​ ﻿\t‌  "),
+    ("zw_with_nbsp", " ​ "),
+    ("ideographic_space_zw", "　‍"),
+]
+
+
+@pytest.mark.parametrize(
+    ("label", "blank"), _INVISIBLE_BLANKS, ids=[label for label, _ in _INVISIBLE_BLANKS]
+)
+def test_zero_width_authorship_is_admin_only_for_non_admin(
+    client, db_session, non_admin, monkeypatch, label, blank
+):
+    """(i) A visually empty ``created_by`` is admin-only, even when the CALLER
+    presents the very same invisible string."""
+    monkeypatch.setenv("DEV_USER_ID", blank)
+    ds = _seed(db_session, blank)
+
+    put = client.put(f"{BASE}/{ds.id}", json={"name": "Claimed via invisible authorship"})
+    assert put.status_code == 403, (
+        f"PUT with {label} caller+owner -> {put.status_code} {put.text}"
+    )
+    delete = client.delete(f"{BASE}/{ds.id}")
+    assert delete.status_code == 403, (
+        f"DELETE with {label} caller+owner -> {delete.status_code} {delete.text}"
+    )
+    db_session.refresh(ds)
+    assert ds.name == "Acme Synthetic DS"
+    assert ds.is_active is True
+
+
+@pytest.mark.parametrize(
+    ("label", "blank"), _INVISIBLE_BLANKS, ids=[label for label, _ in _INVISIBLE_BLANKS]
+)
+def test_zero_width_authorship_still_manageable_by_admin(
+    client, db_session, admin, monkeypatch, label, blank
+):
+    """(i) The admin fallback still applies, so these rows stay cleanable."""
+    monkeypatch.setenv("DEV_USER_ID", blank)
+    ds = _seed(db_session, blank)
+
+    resp = client.put(f"{BASE}/{ds.id}", json={"name": "Adopted by an admin"})
+    assert resp.status_code == 200, resp.text
+
+
+# Owner and caller that differ ONLY by invisible characters. These are not
+# "blank vs blank" — they are a REAL name against a decorated variant, which
+# must not be treated as the same principal.
+_INVISIBLE_DIFFERENCES = [
+    ("owner_has_zwsp", f"{CREATOR}​", CREATOR),
+    ("caller_has_zwsp", CREATOR, f"{CREATOR}​"),
+    ("owner_has_bom_prefix", f"﻿{CREATOR}", CREATOR),
+    ("caller_has_soft_hyphen", CREATOR, "cre­ator@test.com"),
+    ("owner_zwj_inside", "cre‍ator@test.com", CREATOR),
+]
+
+
+@pytest.mark.parametrize(
+    ("label", "owner", "caller"),
+    _INVISIBLE_DIFFERENCES,
+    ids=[label for label, _, _ in _INVISIBLE_DIFFERENCES],
+)
+def test_owner_and_caller_differing_by_invisibles_are_not_the_same_principal(
+    client, db_session, non_admin, monkeypatch, label, owner, caller
+):
+    """(i) Stripping invisibles must not become a LOOSER comparison: a caller
+    whose name merely resembles the owner's is still denied."""
+    monkeypatch.setenv("DEV_USER_ID", caller)
+    ds = _seed(db_session, owner)
+
+    delete = client.delete(f"{BASE}/{ds.id}")
+    assert delete.status_code == 403, (
+        f"DELETE with {label} -> {delete.status_code} {delete.text}"
+    )
+    db_session.refresh(ds)
+    assert ds.is_active is True

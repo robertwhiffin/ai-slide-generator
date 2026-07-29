@@ -16,6 +16,7 @@ silently overwritten; the caller supplies a different name (import accepts a
 import logging
 import os
 import re
+import unicodedata
 from collections import OrderedDict
 from typing import Any, List, Optional
 
@@ -178,6 +179,33 @@ def _current_user() -> str:
         return "system"
 
 
+# Unicode categories that carry no visible content: Cf (format — the zero-width
+# family, BOM, soft hyphen, bidi marks), Cc (control), Zs/Zl/Zp (separators).
+# A string made only of these is semantically EMPTY however long it is.
+_INVISIBLE_CATEGORIES = frozenset({"Cf", "Cc", "Zs", "Zl", "Zp"})
+
+
+def _is_blank_identity(value: Optional[str]) -> bool:
+    """True when *value* carries no visible characters, so it names nobody.
+
+    ``str.strip()`` is not sufficient: it removes whitespace (Zs/Zl/Zp) but a
+    zero-width character is category Cf — ``isspace()`` is False and ``strip()``
+    leaves it in place, so ``"\\u200b"`` read as a real principal on both sides of
+    an authorship check and satisfied the creator branch on an author-less row.
+
+    Normalizes NFKC first (so compatibility forms cannot smuggle a visible-looking
+    but empty character past the category test), then asks whether ANY character
+    survives as visible content. Used ONLY to decide blankness — never to compare
+    two identities, which stays an exact match.
+    """
+    if not value:
+        return True
+    normalized = unicodedata.normalize("NFKC", value)
+    return all(
+        unicodedata.category(ch) in _INVISIBLE_CATEGORIES for ch in normalized
+    )
+
+
 def _require_creator_or_admin(ds: DesignSystem) -> None:
     """Require the caller to be ``ds``'s author, or a workspace admin.
 
@@ -203,13 +231,25 @@ def _require_creator_or_admin(ds: DesignSystem) -> None:
     match a blank OWNER, so both sides must be non-blank for the creator branch
     to fire. Anything else falls through to ``require_admin``.
 
+    "Non-blank" is decided by :func:`_is_blank_identity`, which treats anything
+    VISUALLY empty as blank — ``str.strip()`` alone let a zero-width character
+    (category Cf: not ``isspace()``, untouched by ``strip()``) present as a real
+    name on both sides and satisfy the creator branch. The blankness TEST is the
+    only thing that normalizes; the identity COMPARISON below stays exact, so
+    two principals whose names differ only by invisible characters remain
+    different principals and still fail closed.
+
     Raises:
         HTTPException 403: caller is neither the author nor an admin.
     """
     perm_ctx = get_permission_context()
     caller = (perm_ctx.user_name or "").strip() if perm_ctx else ""
     created_by = (ds.created_by or "").strip() if ds.created_by else ""
-    is_creator = bool(caller) and bool(created_by) and caller == created_by
+    is_creator = (
+        not _is_blank_identity(caller)
+        and not _is_blank_identity(created_by)
+        and caller == created_by
+    )
     if is_creator:
         return
     # Not the author (or authorship is unknown/blank) — admin-only from here.
