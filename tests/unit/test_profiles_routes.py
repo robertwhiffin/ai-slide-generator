@@ -8,10 +8,16 @@ from fastapi.testclient import TestClient
 
 
 @pytest.fixture
-def client():
+def client(monkeypatch):
     """Create a test client with mocked dependencies."""
     from src.api.main import app
 
+    # SDR-4437 PR-2: these tests exercise route behaviour, not authz — no-op the
+    # deck-permission gate (gate behaviour is covered in test_authz_agent_config.py).
+    monkeypatch.setattr(
+        "src.api.routes.profiles._check_deck_permission_for_session",
+        lambda *a, **k: None,
+    )
     return TestClient(app)
 
 
@@ -155,6 +161,36 @@ class TestSaveFromSession:
         data = response.json()
         # Should have default agent config (empty tools, null ids)
         assert data["agent_config"]["tools"] == []
+
+    @patch("src.api.routes.profiles.get_db_session")
+    @patch("src.api.routes.profiles.get_session_manager")
+    @patch("src.api.routes.profiles.get_permission_context", return_value=_mock_permission_context())
+    def test_save_from_session_rejects_null_existing_default_config(
+        self, mock_ctx, mock_get_mgr, mock_get_db, client
+    ):
+        """Default session config conflicts with an existing profile whose agent_config is NULL."""
+        mgr = MagicMock()
+        mgr.get_session.return_value = {
+            "session_id": "sess-1",
+            "created_by": "creator@test.com",
+            "agent_config": None,
+        }
+        mock_get_mgr.return_value = mgr
+
+        existing_profile = _make_profile(id=99, name="Existing Default", agent_config=None)
+
+        mock_db = MagicMock()
+        mock_db.__enter__ = MagicMock(return_value=mock_db)
+        mock_db.__exit__ = MagicMock(return_value=False)
+        mock_db.query.return_value.filter.return_value.all.return_value = [existing_profile]
+        mock_get_db.return_value = mock_db
+
+        response = client.post(
+            "/api/profiles/save-from-session/sess-1",
+            json={"name": "Another Default"},
+        )
+        assert response.status_code == 409
+        assert "Existing Default" in response.json()["detail"]
 
     @patch("src.api.routes.profiles.get_db_session")
     @patch("src.api.routes.profiles.get_session_manager")

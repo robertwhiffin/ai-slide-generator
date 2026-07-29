@@ -101,8 +101,8 @@ The frontend sends the full conversation history each call (stateless on the ser
 
 | File | Responsibility |
 |------|----------------|
-| `src/api/routes/feedback.py` | 5 endpoints: chat, submit, survey, report/stats, report/summary |
-| `src/api/services/feedback_service.py` | LLM chat, DB persistence, stats aggregation, AI summary generation |
+| `src/api/routes/feedback.py` | 6 endpoints: chat, submit, survey, report/stats, list, report/summary |
+| `src/api/services/feedback_service.py` | LLM chat, DB persistence, stats aggregation, paginated feedback listing, AI summary generation |
 | `src/api/schemas/feedback.py` | Pydantic validation for all request/response types |
 | `src/database/models/feedback.py` | `FeedbackConversation` and `SurveyResponse` SQLAlchemy models |
 
@@ -116,9 +116,9 @@ The frontend sends the full conversation history each call (stateless on the ser
 | `frontend/src/components/Feedback/StarRating.tsx` | 5-star interactive rating |
 | `frontend/src/components/Feedback/NPSScale.tsx` | 0-10 numbered button row |
 | `frontend/src/components/Feedback/TimeSavedPills.tsx` | Pill buttons: 15min, 30min, 1hr, 2hrs, 4hrs, 8hrs |
-| `frontend/src/components/Feedback/FeedbackDashboard.tsx` | Hidden `/admin` page (Feedback tab) — stats table, totals, AI summary (no nav link) |
+| `frontend/src/components/Feedback/FeedbackDashboard.tsx` | Hidden `/admin` page (Feedback tab) — stats table, totals, raw feedback browser, lazy collapsed AI summary (no nav link) |
 | `frontend/src/hooks/useSurveyTrigger.ts` | 30s post-generation timer with 7-day localStorage cooldown |
-| `frontend/src/services/api.ts` | `feedbackChat()`, `submitFeedback()`, `submitSurvey()`, `getReportStats()`, `getReportSummary()` |
+| `frontend/src/services/api.ts` | `feedbackChat()`, `submitFeedback()`, `submitSurvey()`, `getReportStats()`, `listFeedback()`, `getReportSummary()` |
 
 ---
 
@@ -148,14 +148,15 @@ The frontend sends the full conversation history each call (stateless on the ser
 
 ### Feedback Dashboard (Hidden Page)
 
-The feedback dashboard is rendered on the `/admin` page as a tab, sharing the layout with Google Slides configuration. The `/feedback` route redirects to `/admin`. The admin page is **not linked** from the navigation bar — access it by typing the URL directly (e.g. `https://<host>/admin`).
+The feedback dashboard is rendered on the `/admin` page as a tab, sharing the layout with Google Slides configuration. The admin page now **defaults to the Usage tab** (usage analytics — see [Usage Analytics](./usage-analytics.md)); click the Feedback tab for feedback data. The `/feedback` route redirects to `/admin`. The admin page is **not linked** from the navigation bar — access it by typing the URL directly (e.g. `https://<host>/admin`).
 
 The Feedback tab shows:
 - **Summary cards** — overall average star rating, NPS, total time saved, total responses.
 - **Weekly stats table** — one row per week with response count, avg stars, avg NPS, and time saved.
-- **AI-generated summary** — narrative analysis of feedback themes, category breakdown, and top themes.
+- **Raw feedback browser** (headline section) — paginated table of date / category / severity / summary, newest first, with category and severity filters; expanding a row reveals the full raw conversation as a chat transcript. Backed by `GET /api/feedback/list`. Anonymous — no user data exists.
+- **AI-generated summary** — narrative analysis of feedback themes, category breakdown, and top themes. Demoted to a **collapsed section at the bottom, loaded lazily only on expand** (the expensive LLM call no longer runs on every page load).
 
-Both the stats and summary sections have a configurable week-range selector.
+The stats, feedback list, and summary sections have configurable week-range selectors.
 
 ---
 
@@ -167,6 +168,7 @@ Both the stats and summary sections have a configurable week-range selector.
 | `POST` | `/api/feedback/submit` | Submit confirmed feedback (summary + raw conversation) |
 | `POST` | `/api/feedback/survey` | Submit satisfaction survey response |
 | `GET` | `/api/feedback/report/stats?weeks=12` | Weekly aggregated stats (star avg, NPS avg, time saved sum) |
+| `GET` | `/api/feedback/list?weeks=12&category=&severity=&page=1&page_size=20` | Paginated raw feedback conversations, newest first, optional category/severity filters (anonymous) |
 | `GET` | `/api/feedback/report/summary?weeks=4` | AI-generated narrative summary of feedback themes |
 
 ---

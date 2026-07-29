@@ -53,6 +53,31 @@ def session_factory(db_engine):
     return sessionmaker(autocommit=False, autoflush=False, bind=db_engine)
 
 
+@pytest.fixture(autouse=True)
+def _encryption_db(session_factory, monkeypatch):
+    """Route get_encryption_key's DB access to this module's engine (SDR-4437)."""
+    from contextlib import contextmanager
+
+    from src.core.encryption import get_encryption_key
+
+    @contextmanager
+    def _session():
+        s = session_factory()
+        try:
+            yield s
+            s.commit()
+        except Exception:
+            s.rollback()
+            raise
+        finally:
+            s.close()
+
+    monkeypatch.setattr("src.core.database.get_db_session", _session)
+    get_encryption_key.cache_clear()
+    yield
+    get_encryption_key.cache_clear()
+
+
 @pytest.fixture(scope="module")
 def test_client(db_engine, session_factory):
     from src.api.main import app
@@ -217,6 +242,18 @@ class TestAuthCallback:
 # ---------------------------------------------------------------------------
 
 class TestExportEndpoint:
+
+    @pytest.fixture(autouse=True)
+    def _bypass_deck_gate(self, monkeypatch):
+        # SDR-4437 PR-2 (Task 13): these legacy tests post an unfixtured
+        # session_id to assert the 400/401 credential paths. The new CAN_VIEW
+        # deck gate would 404 first ("Session not found"), so no-op it here —
+        # never weaken the gate itself; its enforcement is covered by
+        # tests/unit/test_authz_google_slides.py.
+        monkeypatch.setattr(
+            "src.api.routes.google_slides._check_deck_permission_for_session",
+            lambda *a, **k: None,
+        )
 
     def test_export_no_credentials_returns_400(self, test_client):
         """No global credentials → 400."""

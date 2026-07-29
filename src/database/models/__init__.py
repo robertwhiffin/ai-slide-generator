@@ -8,6 +8,7 @@ from src.database.models.design_system import (
     DesignSystemTemplate,
     DesignSystemToken,
 )
+from src.database.models.encryption_key import EncryptionKey
 from src.database.models.feedback import FeedbackConversation, SurveyResponse
 from src.database.models.genie_space import ConfigGenieSpace
 from src.database.models.google_global_credentials import GoogleGlobalCredentials
@@ -33,6 +34,7 @@ from src.database.models.session import (
 )
 from src.database.models.slide_deck_prompt import SlideDeckPromptLibrary
 from src.database.models.slide_style_library import SlideStyleLibrary
+from src.database.models.usage_event import UsageEvent
 from src.database.models.user_preference import UserProfilePreference
 
 __all__ = [
@@ -40,6 +42,7 @@ __all__ = [
     "ChatRequest",
     "ConfigGenieSpace",
     "DeckContributor",
+    "EncryptionKey",
     "ConfigProfile",
     "ConfigProfileContributor",
     "ConfigPrompts",
@@ -63,6 +66,7 @@ __all__ = [
     "SlideDeckVersion",
     "SlideStyleLibrary",
     "SurveyResponse",
+    "UsageEvent",
     "UserProfilePreference",
     "UserSession",
 ]

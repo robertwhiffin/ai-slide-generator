@@ -41,9 +41,10 @@ export function DeckHistory({
   const [sessions, setSessions] = useState<Session[]>([])
   const [loadError, setLoadError] = useState<string | null>(null)
   const [deleteTarget, setDeleteTarget] = useState<string | null>(null)
+  const recentDeckLimit = 10
 
   const loadSessions = () => {
-    api.listSessions(5)
+    api.listSessions(recentDeckLimit, { deckOnly: true })
       .then(result => {
         setSessions(result.sessions)
         setLoadError(null)

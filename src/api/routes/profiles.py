@@ -7,12 +7,18 @@ from typing import Any, Optional
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
-from src.api.schemas.agent_config import AgentConfig, GenieTool, resolve_agent_config
+from src.api.routes._authz import _check_deck_permission_for_session
+from src.api.schemas.agent_config import (
+    AgentConfig,
+    resolve_agent_config,
+    sanitize_agent_config_for_persist,
+)
 from src.api.services.session_manager import SessionNotFoundError, get_session_manager
 from src.core.database import get_db_session
 from src.core.permission_context import get_permission_context
 from src.core.user_context import get_current_user
 from src.database.models.profile import ConfigProfile
+from src.database.models.profile_contributor import PermissionLevel
 from src.database.models.session import UserSession
 from src.services.permission_service import get_permission_service
 
@@ -62,6 +68,12 @@ def _without_template_id(agent_config: Any) -> Optional[dict]:
     return {**agent_config, "template_id": None}
 
 
+def _sanitize_profile_config(raw: Optional[dict | AgentConfig]) -> Optional[dict]:
+    """Strip all session-scoped state before storing or comparing a profile."""
+    sanitized = sanitize_agent_config_for_persist(raw)
+    return _without_template_id(sanitized)
+
+
 def _profile_to_dict(profile: ConfigProfile) -> dict:
     """Serialize a profile to a dict, eagerly reading all fields."""
     return {
@@ -74,6 +86,16 @@ def _profile_to_dict(profile: ConfigProfile) -> dict:
         "created_by": profile.created_by,
         "updated_at": profile.updated_at.isoformat() if profile.updated_at else None,
     }
+
+
+def _normalized_config_for_compare(raw: Optional[dict | AgentConfig]) -> dict:
+    """Normalize agent_config for duplicate-profile comparison."""
+    if isinstance(raw, AgentConfig):
+        resolved = raw
+    else:
+        resolved = resolve_agent_config(raw)
+    normalized = _sanitize_profile_config(resolved)
+    return normalized if normalized is not None else AgentConfig().model_dump()
 
 
 def _get_profile(db, profile_id: int) -> ConfigProfile:
@@ -122,16 +144,7 @@ async def list_profiles():
 @router.post("", status_code=201)
 async def create_profile(body: CreateProfileRequest):
     """Create a profile directly from a provided agent_config (no session required)."""
-    config = body.agent_config
-
-    # Strip session-scoped state before persisting: Genie conversation_ids
-    # AND the template pin (template_id is a per-session choice).
-    for tool in config.tools:
-        if isinstance(tool, GenieTool):
-            tool.conversation_id = None
-    config.template_id = None
-
-    config_dict = config.model_dump()
+    config_dict = _sanitize_profile_config(body.agent_config)
 
     with get_db_session() as db:
         # Check for duplicate agent_config among non-deleted profiles
@@ -141,12 +154,8 @@ async def create_profile(body: CreateProfileRequest):
             .all()
         )
         for existing in existing_profiles:
-            existing_config = resolve_agent_config(existing.agent_config)
-            for tool in existing_config.tools:
-                if isinstance(tool, GenieTool):
-                    tool.conversation_id = None
-            existing_config.template_id = None
-            if existing_config.model_dump() == config_dict:
+            existing_config = _normalized_config_for_compare(existing.agent_config)
+            if existing_config == config_dict:
                 raise HTTPException(
                     status_code=409,
                     detail=f"A profile with this configuration already exists: '{existing.name}'",
@@ -198,16 +207,12 @@ async def save_from_session(session_id: str, body: SaveProfileRequest):
             )
 
     # Prefer client-side config (has resolved defaults) over session's stored config
-    config = body.agent_config if body.agent_config else resolve_agent_config(session.get("agent_config"))
-
-    # Strip session-scoped state before persisting: Genie conversation_ids
-    # AND the template pin (template_id is a per-session choice).
-    for tool in config.tools:
-        if isinstance(tool, GenieTool):
-            tool.conversation_id = None
-    config.template_id = None
-
-    config_dict = config.model_dump()
+    if body.agent_config:
+        config_dict = _sanitize_profile_config(body.agent_config)
+    else:
+        config_dict = _sanitize_profile_config(
+            resolve_agent_config(session.get("agent_config"))
+        )
 
     with get_db_session() as db:
         # Check for duplicate agent_config among non-deleted profiles
@@ -217,13 +222,8 @@ async def save_from_session(session_id: str, body: SaveProfileRequest):
             .all()
         )
         for existing in existing_profiles:
-            existing_config = resolve_agent_config(existing.agent_config)
-            # Strip session-scoped state from existing for fair comparison
-            for tool in existing_config.tools:
-                if isinstance(tool, GenieTool):
-                    tool.conversation_id = None
-            existing_config.template_id = None
-            if existing_config.model_dump() == config_dict:
+            existing_config = _normalized_config_for_compare(existing.agent_config)
+            if existing_config == config_dict:
                 raise HTTPException(
                     status_code=409,
                     detail=f"A profile with this configuration already exists: '{existing.name}'",
@@ -246,6 +246,10 @@ async def save_from_session(session_id: str, body: SaveProfileRequest):
 @load_router.post("/{session_id}/load-profile/{profile_id}")
 async def load_profile_into_session(session_id: str, profile_id: int):
     """Copy a profile's agent_config into a session. Requires CAN_USE on the profile."""
+    # SDR-4437 HIGH-1 (found in plan verification): loading a profile writes
+    # session.agent_config into an arbitrary session_id — same write as the
+    # agent-config PUT, same gate: CAN_MANAGE on the session's deck.
+    _check_deck_permission_for_session(session_id, PermissionLevel.CAN_MANAGE)
     perm_service = get_permission_service()
     with get_db_session() as db:
         perm_service.require_use_profile(db, profile_id)

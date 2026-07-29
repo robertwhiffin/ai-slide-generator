@@ -476,10 +476,17 @@ class TestWebAPISupport:
         assert 'slide_id' in first_slide
         assert first_slide['index'] == 0
 
+    def test_from_dict_round_trip_preserves_head_meta(self, sample_deck):
+        """from_dict should rebuild decks serialized via to_dict."""
+        sample_deck.head_meta = {"charset": "utf-8", "viewport": "width=device-width"}
+        restored = SlideDeck.from_dict(sample_deck.to_dict())
+        assert restored.head_meta == sample_deck.head_meta
+        assert restored.knit() == sample_deck.knit()
+
 
 class TestFileOperations:
     """Test file I/O operations."""
-    
+
     def test_save(self, sample_deck, tmp_path):
         """Test saving deck to file."""
         output_file = tmp_path / "test_output.html"

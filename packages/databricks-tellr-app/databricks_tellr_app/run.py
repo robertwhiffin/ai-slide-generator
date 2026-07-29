@@ -62,6 +62,18 @@ def init_database(seed_databricks_defaults: bool = False) -> None:
         logger.error(f"Failed to seed defaults: {e}\n{tb}")
         raise SystemExit(1) from e
 
+    # Seed/load the Fernet master key pre-fork (SDR-4437 CRITICAL-3) so all
+    # uvicorn workers find the encryption_keys row already present.
+    logger.info("Ensuring encryption key...")
+    try:
+        from src.core.encryption import ensure_encryption_key
+        ensure_encryption_key()
+        logger.info("Encryption key ready")
+    except Exception as e:
+        tb = traceback.format_exc()
+        logger.error(f"Failed to ensure encryption key: {e}\n{tb}")
+        raise SystemExit(1) from e
+
 
 def main() -> None:
     """Start the uvicorn server."""
