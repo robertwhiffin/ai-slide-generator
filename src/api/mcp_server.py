@@ -292,10 +292,22 @@ def _request_from_context(ctx: Context) -> Request:
     return req
 
 
-def _load_design_system(design_system_id: int) -> Optional[Any]:
-    """Fetch an ACTIVE design system with its templates materialized.
+def _template_names_and_ids(design_system_id: int) -> list[tuple[str, int]]:
+    """The ACTIVE design system's ``(template name, template id)`` pairs.
 
-    Split out so name resolution can be tested without a database.
+    Eagerly materialized to PLAIN values while the DB session is still OPEN.
+    This replaces a helper that returned the ``DesignSystem`` ORM instance
+    itself: ``get_db_session()`` commits and closes on exit, and the
+    sessionmaker uses SQLAlchemy's default ``expire_on_commit=True``, so that
+    instance was detached with its ``templates`` relationship expired. Reading
+    it raised ``DetachedInstanceError``, which the resolver caught and reported
+    as "name matched nothing" — silently ignoring every valid production
+    ``template_name``. Returning plain values makes that class of bug
+    unavailable rather than merely fixed.
+
+    Returns an empty list when the design system is missing or inactive, so the
+    caller's "no match -> no pin" path is unchanged. Scoped to the ONE design
+    system, so a name can never pin another system's template.
     """
     from src.core.database import get_db_session
     from src.database.models import DesignSystem
@@ -308,12 +320,16 @@ def _load_design_system(design_system_id: int) -> Optional[Any]:
             .first()
         )
         if design_system is None:
-            return None
-        # Templates may not have been materialized yet (systems imported
-        # before the table existed); this is the same idempotent derivation
-        # the generation path uses.
+            return []
+        # Same idempotent derivation the generation path uses, for systems
+        # imported before the templates table existed.
         materialize_templates(design_system)
-        return design_system
+        db.flush()  # newly materialized rows need ids before we read them
+        return [
+            (str(getattr(template, "name", None) or ""), int(template.id))
+            for template in (getattr(design_system, "templates", None) or [])
+            if getattr(template, "id", None) is not None
+        ]
 
 
 def _resolve_template_name(design_system_id: int, template_name: str) -> Optional[int]:
@@ -332,13 +348,9 @@ def _resolve_template_name(design_system_id: int, template_name: str) -> Optiona
     if not wanted:
         return None
     try:
-        design_system = _load_design_system(design_system_id)
-        if design_system is None:
-            return None
-        for template in getattr(design_system, "templates", None) or []:
-            name = (getattr(template, "name", None) or "").strip().casefold()
-            if name == wanted:
-                return getattr(template, "id", None)
+        for name, template_id in _template_names_and_ids(design_system_id):
+            if name.strip().casefold() == wanted:
+                return template_id
     except Exception:
         logger.exception(
             "Failed to resolve MCP template_name against design system %s",
