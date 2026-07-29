@@ -410,9 +410,14 @@ export const AgentConfigProvider: React.FC<{ children: React.ReactNode }> = ({ c
           } catch {
             // Non-critical — continue with defaults
           }
+          // Default seeding is a NEW-SESSION default, so it applies only to a
+          // session that has never been configured. Resolving on EVERY GET
+          // meant a user who chose Design System = None, saved, and reloaded
+          // got the org default silently restored — and made an org-default
+          // change retroactive to old sessions instead of session-isolated.
+          config = await withResolvedStyleSource(config);
         }
 
-        config = await withResolvedStyleSource(config);
         if (config.deck_prompt_id == null) {
           config.deck_prompt_id = resolveDefaultDeckPromptId();
         }
