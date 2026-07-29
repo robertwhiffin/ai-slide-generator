@@ -99,6 +99,11 @@ class TestVerifySlideRouteWithAssetOnlySession:
 
         fake_manager = FakeSessionManager()
         monkeypatch.setattr(
+            verification_route,
+            "_check_deck_permission_for_session",
+            lambda *args, **kwargs: None,
+        )
+        monkeypatch.setattr(
             verification_route, "get_session_manager", lambda: fake_manager
         )
 
