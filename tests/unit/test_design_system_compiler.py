@@ -5,8 +5,10 @@ drop-in equivalent of ``slide_style_library.style_content``. The Phase-2 reset
 makes it README/SKILL-central and UNCAPPED, matching the huashu / Claude-Design
 "brand operating manual" model:
 
-- The FULL README then the FULL SKILL.md are injected FIRST, UNFILTERED and
-  UNTRUNCATED (no rule-only keyword filter, no char budget).
+- The FULL README then the FULL SKILL.md are injected as the first SUBSTANTIVE
+  block, UNFILTERED and UNTRUNCATED (no rule-only keyword filter, no char
+  budget). The emitted order is: header -> short description caption -> full
+  README -> full SKILL -> tokens -> fonts -> templates -> asset contract.
 - ALL tokens (color/type/spacing/shadow) and ALL fonts (@font-face refs + family
   listing) are emitted UNCAPPED.
 - Brand IMAGE assets are NOT enumerated: the compiled content carries a short
@@ -18,6 +20,8 @@ Everything is pure and deterministic. All fixtures are SYNTHETIC (fake "Acme"
 brand, dummy hex, placeholder bytes) — no real brand content.
 """
 
+from unittest.mock import MagicMock, patch
+
 import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
@@ -25,6 +29,40 @@ from sqlalchemy.pool import StaticPool
 
 import src.database.models  # noqa: F401 - register models with Base.metadata
 from src.core.database import Base
+
+
+def _dispatching_db(*, design_system=None, slide_style=None):
+    """A ``get_db_session`` stand-in that dispatches by queried model.
+
+    Mirrors ``tests/unit/test_prompt_precedence_fixes.py`` so the prompt-seam
+    assertions here exercise the real ``agent_factory._get_prompt_content``
+    resolution without a live database.
+    """
+    from src.database.models import DesignSystem, SlideDeckPromptLibrary, SlideStyleLibrary
+
+    mapping = {
+        DesignSystem: design_system,
+        SlideStyleLibrary: slide_style,
+        SlideDeckPromptLibrary: None,
+    }
+    db = MagicMock()
+
+    def _query(model):
+        q = MagicMock()
+        q.filter_by.return_value.first.return_value = mapping.get(model)
+        return q
+
+    db.query.side_effect = _query
+    return db
+
+
+def _prompts_with_db(config, db, mode="generate"):
+    from src.services.agent_factory import _get_prompt_content
+
+    with patch("src.core.database.get_db_session") as mock_get_db:
+        mock_get_db.return_value.__enter__ = MagicMock(return_value=db)
+        mock_get_db.return_value.__exit__ = MagicMock(return_value=False)
+        return _get_prompt_content(config, mode=mode)
 
 
 @pytest.fixture
@@ -1340,3 +1378,322 @@ class TestBrandTypeScale:
         out = compile_design_system(ds)
         assert out.index("SPACING TOKENS") < out.index("BRAND TYPE SCALE")
         assert out.index("BRAND TYPE SCALE") < out.index("BRAND FONTS")
+
+
+# ---------------------------------------------------------------------------
+# Ramp tokens are surfaced as a TYPE SCALE ONLY — never also as SPACING
+# ---------------------------------------------------------------------------
+
+
+class TestRampNotPresentedAsSpacing:
+    """The measured root cause of the "small titles" symptom: Claude Design
+    manifests label the font-size ramp (fs-12 … fs-64) kind "spacing", so the
+    compiler faithfully reprinted ``- fs-64: 64px`` under a heading literally
+    called ``SPACING TOKENS:``. The model then read the brand's cover size as a
+    GAP value, and a competing role cue beat the prose type scale.
+
+    Ramp-shaped tokens must therefore be surfaced as the authoritative BRAND
+    TYPE SCALE and REMOVED from the spacing list, while genuinely-spacing
+    tokens keep appearing as spacing. All fixtures SYNTHETIC.
+    """
+
+    _MISLABELED_RAMP = [
+        {"group": "spacing", "name": f"fs-{px}", "value": f"{px}px"}
+        for px in (12, 14, 16, 18, 20, 24, 32, 40, 48, 64)
+    ]
+    _REAL_SPACING = [
+        {"group": "spacing", "name": "sp-4", "value": "4px"},
+        {"group": "spacing", "name": "gap-8", "value": "8px"},
+        {"group": "spacing", "name": "section-gap", "value": "48px"},
+    ]
+
+    def _spacing_block(self, out):
+        """The SPACING TOKENS block only (up to the next blank-line boundary)."""
+        if "SPACING TOKENS" not in out:
+            return ""
+        block = out[out.index("SPACING TOKENS"):]
+        return block[: block.index("\n\n")] if "\n\n" in block else block
+
+    def test_ramp_tokens_absent_from_spacing_block(self, session):
+        from src.services.design_system_compiler import compile_design_system
+
+        out = compile_design_system(
+            _make_ds(session, tokens=self._MISLABELED_RAMP + self._REAL_SPACING)
+        )
+        spacing = self._spacing_block(out)
+        # The ramp is a TYPE scale, not spacing: no fs-* line may appear here.
+        for px in (12, 40, 64):
+            assert f"fs-{px}" not in spacing, (
+                f"ramp token fs-{px} still presented as a SPACING value:\n{spacing}"
+            )
+
+    def test_genuine_spacing_tokens_still_rendered_as_spacing(self, session):
+        from src.services.design_system_compiler import compile_design_system
+
+        out = compile_design_system(
+            _make_ds(session, tokens=self._MISLABELED_RAMP + self._REAL_SPACING)
+        )
+        spacing = self._spacing_block(out)
+        assert "sp-4: 4px" in spacing
+        assert "gap-8: 8px" in spacing
+        assert "section-gap: 48px" in spacing
+
+    def test_ramp_still_surfaced_as_the_type_scale(self, session):
+        """Removing them from spacing must not lose them — they become the scale."""
+        from src.services.design_system_compiler import compile_design_system
+
+        out = compile_design_system(
+            _make_ds(session, tokens=self._MISLABELED_RAMP + self._REAL_SPACING)
+        )
+        block = out[out.index("BRAND TYPE SCALE"):]
+        assert "Cover/hero titles: 64px (token fs-64)" in block
+
+    def test_spacing_section_omitted_when_only_ramp_tokens_present(self, session):
+        """A spacing group made up ENTIRELY of ramp tokens leaves no spacing
+        list at all — rather than an empty ``SPACING TOKENS:`` heading."""
+        from src.services.design_system_compiler import compile_design_system
+
+        out = compile_design_system(_make_ds(session, tokens=self._MISLABELED_RAMP))
+        assert "SPACING TOKENS" not in out
+
+    def test_ramp_in_type_group_also_leaves_typography_tokens(self, session):
+        """The same de-duplication applies to a correctly-labeled ramp: sizes
+        move to the scale, while non-size type tokens (font families) remain."""
+        from src.services.design_system_compiler import compile_design_system
+
+        tokens = [
+            {"group": "type", "name": "heading-font", "value": "Acme Sans, sans-serif"},
+            *[
+                {"group": "type", "name": f"fs-{px}", "value": f"{px}px"}
+                for px in (14, 18, 28, 44)
+            ],
+        ]
+        out = compile_design_system(_make_ds(session, tokens=tokens))
+        typography = out[out.index("TYPOGRAPHY TOKENS"):]
+        typography = typography[: typography.index("\n\n")]
+        assert "heading-font: Acme Sans, sans-serif" in typography
+        for px in (14, 44):
+            assert f"fs-{px}" not in typography, (
+                f"ramp token fs-{px} still duplicated under TYPOGRAPHY TOKENS"
+            )
+
+
+# ---------------------------------------------------------------------------
+# Late numeric re-assertion (salience: last instruction wins)
+# ---------------------------------------------------------------------------
+
+
+class TestLateTypeScaleReassertion:
+    """The compiled artifact is prompt block #2 (``build_generation_system_prompt``
+    appends ``slide_style`` before BASE_PROMPT and every generic block), so a type
+    scale stated only inside the DS blob is always EARLY and low-salience. The
+    numeric contract is therefore RE-ASSERTED at the very end of prompt assembly,
+    with a pre-emit self-check. Gated on ``design_system_active`` so the no-DS
+    golden prompts stay byte-identical. All fixtures SYNTHETIC.
+    """
+
+    _RAMP = [
+        {"group": "spacing", "name": f"fs-{px}", "value": f"{px}px"}
+        for px in (12, 16, 18, 24, 40, 64)
+    ]
+
+    def test_reassertion_present_and_is_the_last_block(self, session):
+        from src.api.schemas.agent_config import AgentConfig
+        from src.services.design_system_compiler import (
+            TYPE_SCALE_REASSERTION_HEADING,
+            recompute_compiled_style_content,
+        )
+
+        ds = _make_ds(session, tokens=self._RAMP)
+        recompute_compiled_style_content(ds)
+        session.commit()
+        sp = _prompts_with_db(
+            AgentConfig(design_system_id=ds.id), _dispatching_db(design_system=ds)
+        )["system_prompt"]
+
+        assert TYPE_SCALE_REASSERTION_HEADING in sp
+        tail = sp[sp.index(TYPE_SCALE_REASSERTION_HEADING):]
+        # Nothing structural after it: it is the FINAL instruction the model reads.
+        for later_marker in ("IMAGE SUPPORT", "DESIGN SYSTEM PRECEDENCE", "CRITICAL"):
+            assert later_marker not in tail, (
+                f"'{later_marker}' appears AFTER the type-scale re-assertion; the "
+                "re-assertion must be the last block"
+            )
+
+    def test_reassertion_restates_the_bundles_own_numbers(self, session):
+        """Derived from the bundle ramp — not hardcoded: the re-assertion must
+        carry THIS design system's cover/section numbers."""
+        from src.api.schemas.agent_config import AgentConfig
+        from src.services.design_system_compiler import (
+            TYPE_SCALE_REASSERTION_HEADING,
+            recompute_compiled_style_content,
+        )
+
+        ds = _make_ds(session, tokens=self._RAMP)
+        recompute_compiled_style_content(ds)
+        session.commit()
+        sp = _prompts_with_db(
+            AgentConfig(design_system_id=ds.id), _dispatching_db(design_system=ds)
+        )["system_prompt"]
+        tail = sp[sp.index(TYPE_SCALE_REASSERTION_HEADING):]
+        assert "64px" in tail  # top of the fixture ramp = cover
+        assert "40px" in tail  # next tier = section/slide titles
+
+    def test_reassertion_carries_a_pre_emit_self_check(self, session):
+        from src.api.schemas.agent_config import AgentConfig
+        from src.services.design_system_compiler import (
+            TYPE_SCALE_REASSERTION_HEADING,
+            recompute_compiled_style_content,
+        )
+
+        ds = _make_ds(session, tokens=self._RAMP)
+        recompute_compiled_style_content(ds)
+        session.commit()
+        sp = _prompts_with_db(
+            AgentConfig(design_system_id=ds.id), _dispatching_db(design_system=ds)
+        )["system_prompt"]
+        tail = sp[sp.index(TYPE_SCALE_REASSERTION_HEADING):].lower()
+        assert "before emitting" in tail
+        assert "verify" in tail
+
+    def test_different_bundle_ramp_yields_different_reassertion_numbers(self, session):
+        """Nothing brand-specific is hardcoded: a second synthetic bundle with a
+        DIFFERENT ramp produces DIFFERENT re-asserted numbers."""
+        from src.api.schemas.agent_config import AgentConfig
+        from src.services.design_system_compiler import (
+            TYPE_SCALE_REASSERTION_HEADING,
+            recompute_compiled_style_content,
+        )
+
+        other = _make_ds(
+            session,
+            name="Other Synthetic DS",
+            tokens=[
+                {"group": "spacing", "name": f"fs-{px}", "value": f"{px}px"}
+                for px in (11, 17, 29, 53)
+            ],
+        )
+        recompute_compiled_style_content(other)
+        session.commit()
+        sp = _prompts_with_db(
+            AgentConfig(design_system_id=other.id), _dispatching_db(design_system=other)
+        )["system_prompt"]
+        tail = sp[sp.index(TYPE_SCALE_REASSERTION_HEADING):]
+        assert "53px" in tail
+        assert "64px" not in tail  # the other fixture's number must not leak
+
+    def test_no_ds_prompt_has_no_reassertion(self):
+        """HARD RULE: the no-DS / legacy / default prompt is untouched."""
+        from src.core.defaults import DEFAULT_SLIDE_STYLE
+        from src.core.prompt_modules import build_generation_system_prompt
+        from src.services.design_system_compiler import TYPE_SCALE_REASSERTION_HEADING
+
+        assert TYPE_SCALE_REASSERTION_HEADING not in build_generation_system_prompt(
+            slide_style=DEFAULT_SLIDE_STYLE
+        )
+        assert TYPE_SCALE_REASSERTION_HEADING not in build_generation_system_prompt(
+            slide_style="LEGACY-STYLE-MARKER", image_guidelines="Use logo.png"
+        )
+
+    def test_neutral_fallback_reasserted_when_bundle_has_no_ramp(self, session):
+        """No ramp -> the neutral bands are re-asserted, so the salience fix
+        never leaves a vacuum either."""
+        from src.api.schemas.agent_config import AgentConfig
+        from src.services.design_system_compiler import (
+            TYPE_SCALE_REASSERTION_HEADING,
+            recompute_compiled_style_content,
+        )
+
+        ds = _make_ds(session, name="No Ramp DS", tokens=_TOKENS)
+        recompute_compiled_style_content(ds)
+        session.commit()
+        sp = _prompts_with_db(
+            AgentConfig(design_system_id=ds.id), _dispatching_db(design_system=ds)
+        )["system_prompt"]
+        tail = sp[sp.index(TYPE_SCALE_REASSERTION_HEADING):]
+        assert "40" in tail and "52" in tail  # neutral H1 band
+
+
+# ---------------------------------------------------------------------------
+# Pinned-template reconciliation (the template's own sizes are authoritative)
+# ---------------------------------------------------------------------------
+
+
+class TestPinnedTemplateTypeScaleReconciliation:
+    """A pinned template ships its OWN title sizes in its CSS. Those are
+    authoritative — a pinned deck was observed inline-shrinking a 56px
+    ``.action-title`` to 26px. When a template is pinned the re-assertion must
+    defer to the template's sizes and forbid shrinking below them, instead of
+    restating ramp numbers that could contradict the template. SYNTHETIC.
+    """
+
+    def test_pinned_reassertion_defers_to_template_css_sizes(self, session):
+        from src.services.design_system_compiler import (
+            TYPE_SCALE_REASSERTION_HEADING,
+            build_type_scale_reassertion,
+        )
+
+        out = build_type_scale_reassertion(
+            "BRAND TYPE SCALE (REQUIRED — derived from this design system's own "
+            "tokens):\n- Cover/hero titles: 64px (token fs-64) — the top of the "
+            "brand ramp.",
+            template_pinned=True,
+        )
+        assert out.startswith(TYPE_SCALE_REASSERTION_HEADING)
+        lowered = out.lower()
+        assert "template" in lowered
+        assert "never shrink" in lowered
+        # It must NOT re-assert ramp numbers that could fight the template CSS.
+        assert "64px" not in out
+
+    def test_unpinned_reassertion_carries_the_numbers(self, session):
+        from src.services.design_system_compiler import build_type_scale_reassertion
+
+        out = build_type_scale_reassertion(
+            "BRAND TYPE SCALE (REQUIRED — derived from this design system's own "
+            "tokens):\n- Cover/hero titles: 64px (token fs-64) — the top of the "
+            "brand ramp.\n- Section/slide titles: 40px (token fs-40) or larger.",
+            template_pinned=False,
+        )
+        assert "64px" in out
+        assert "40px" in out
+
+    def test_pinned_deck_prompt_reasserts_template_authority(self, session):
+        """End-to-end through the prompt seam with a pinned template."""
+        from src.api.schemas.agent_config import AgentConfig
+        from src.database.models.design_system import DesignSystemTemplate
+        from src.services.design_system_compiler import (
+            TYPE_SCALE_REASSERTION_HEADING,
+            recompute_compiled_style_content,
+        )
+
+        ds = _make_ds(
+            session,
+            name="Pinned DS",
+            tokens=[
+                {"group": "spacing", "name": f"fs-{px}", "value": f"{px}px"}
+                for px in (12, 16, 18, 40, 64)
+            ],
+        )
+        ds.templates.append(
+            DesignSystemTemplate(
+                name="Action Title",
+                description="Synthetic pinned template.",
+                entry_path="templates/action-title/index.html",
+                layout_html=(
+                    '<style>.action-title{font-size:56px}</style>'
+                    '<section class="slide"><h1 class="action-title">T</h1></section>'
+                ),
+            )
+        )
+        recompute_compiled_style_content(ds)
+        session.commit()
+        session.refresh(ds)
+
+        sp = _prompts_with_db(
+            AgentConfig(design_system_id=ds.id, template_id=ds.templates[0].id),
+            _dispatching_db(design_system=ds),
+        )["system_prompt"]
+        tail = sp[sp.index(TYPE_SCALE_REASSERTION_HEADING):]
+        assert "template" in tail.lower()
+        assert "never shrink" in tail.lower()

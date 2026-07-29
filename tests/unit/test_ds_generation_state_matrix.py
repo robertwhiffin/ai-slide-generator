@@ -228,6 +228,7 @@ class TestStateTemplatePinned:
 
     def test_pinned_template_appends_block_after_compiled_artifact(self, session):
         from src.core.prompt_modules import build_generation_system_prompt
+        from src.services.design_system_compiler import build_type_scale_reassertion
         from src.services.design_system_templates import build_selected_template_block
 
         ds = self._templated_ds(session)
@@ -240,6 +241,11 @@ class TestStateTemplatePinned:
             deck_prompt=None,
             image_guidelines=None,
             design_system_active=True,
+            # A pinned template's own CSS sizes are authoritative, so the late
+            # type-scale re-assertion takes its pinned form.
+            type_scale_reassertion=build_type_scale_reassertion(
+                "", template_pinned=True
+            ),
         )
         assert sp == expected  # block appended at assembly, byte-exact
         assert "SELECTED SLIDE TEMPLATE: Acme Corporate" in sp
@@ -248,6 +254,10 @@ class TestStateTemplatePinned:
 
     def test_no_template_id_is_byte_identical_to_ds_only_path(self, session):
         from src.core.prompt_modules import build_generation_system_prompt
+        from src.services.design_system_compiler import (
+            build_type_scale_reassertion,
+            extract_type_scale_block,
+        )
 
         ds = self._templated_ds(session)
         sp = self._prompt(ds, template_id=None)
@@ -256,6 +266,12 @@ class TestStateTemplatePinned:
             deck_prompt=None,
             image_guidelines=None,
             design_system_active=True,
+            # Unpinned: the re-assertion restates this design system's OWN
+            # derived scale numbers.
+            type_scale_reassertion=build_type_scale_reassertion(
+                extract_type_scale_block(ds.compiled_style_content) or "",
+                template_pinned=False,
+            ),
         )
         assert sp == expected
         assert "SELECTED SLIDE TEMPLATE" not in sp

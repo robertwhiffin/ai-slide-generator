@@ -124,6 +124,10 @@ def _get_prompt_content(
     # True only when a design system actually resolves to compiled content — gates
     # the DS-only precedence/brand blocks so the no-DS/legacy path stays identical.
     design_system_active = False
+    # True only when a pinned template's block actually made it into the prompt —
+    # its own CSS title sizes then outrank the design system's ramp numbers in the
+    # late type-scale re-assertion.
+    template_pinned = False
 
     # Resolve the slide-style source. A design system (if selected) takes
     # precedence over a legacy slide style; each degrades to DEFAULT_SLIDE_STYLE
@@ -175,6 +179,7 @@ def _get_prompt_content(
                         )
                         if block:
                             slide_style = f"{slide_style}\n\n{block}"
+                            template_pinned = True
                 else:
                     logger.warning(
                         "Design system not found, using default",
@@ -258,11 +263,29 @@ def _get_prompt_content(
             image_guidelines=image_guidelines,
         )
     else:
+        # The compiled design system lands as prompt block #2, so its numeric
+        # title contract is restated LAST (salience: the model measurably fell
+        # back to its own heading sizes when the scale was only stated early).
+        # The numbers are read back out of the text about to be injected, so the
+        # re-assertion can never drift from what the model is shown.
+        type_scale_reassertion: Optional[str] = None
+        if design_system_active:
+            from src.services.design_system_compiler import (
+                build_type_scale_reassertion,
+                extract_type_scale_block,
+            )
+
+            type_scale_block = extract_type_scale_block(slide_style)
+            if type_scale_block or template_pinned:
+                type_scale_reassertion = build_type_scale_reassertion(
+                    type_scale_block or "", template_pinned=template_pinned
+                )
         assembled = build_generation_system_prompt(
             slide_style=slide_style,
             deck_prompt=deck_prompt,
             image_guidelines=image_guidelines,
             design_system_active=design_system_active,
+            type_scale_reassertion=type_scale_reassertion,
         )
 
     return {
