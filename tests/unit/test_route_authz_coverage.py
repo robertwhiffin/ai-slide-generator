@@ -57,6 +57,7 @@ ADMIN_PATH_PREFIXES = (
     "/api/admin",                     # admin.py + admin_usage.py
     "/api/settings/deck-prompts",     # HIGH-3
     "/api/settings/slide-styles",     # HIGH-3
+    "/api/settings/design-systems",   # HIGH-3 (same org-shared library shape)
 )
 
 FEEDBACK_READ_PATHS = {
@@ -89,6 +90,25 @@ IDENTITIES_RATIONALE = (
 
 FEEDBACK_WRITE_RATIONALE = (
     "Feedback write endpoint: how regular users submit feedback; stays open."
+)
+
+DESIGN_SYSTEM_READ_RATIONALE = (
+    "Read-only library browse; the design-system prefix admin-gates the "
+    "ORG-WIDE mutations only (PUT/DELETE/set-default), matching HIGH-3's "
+    "deck-prompt and slide-style pattern. Reads must stay open: any user picks "
+    "a design system for their own deck, and the generation/preview path reads "
+    "its templates, assets and files. Per-design-system scoping (a template or "
+    "asset is only served through its OWNING system) is enforced in the "
+    "handlers and covered by the cross-design-system disclosure tests."
+)
+
+DESIGN_SYSTEM_CONTRIBUTE_RATIONALE = (
+    "Deliberate product decision: ANY user may CONTRIBUTE a design system, so "
+    "create and import stay open — the same shape as the shared image "
+    "library's open upload. Contributing adds a NEW row owned by the caller; "
+    "it does not mutate another principal's design system or change what other "
+    "users get by default. The org-wide mutations that DO affect everyone "
+    "(rename, delete, set-default) are admin-gated in the router."
 )
 
 # (method, path) -> rationale. Exemptions must be visible in review, not
@@ -144,6 +164,28 @@ ALLOWLIST = {
         "Read-only library browse; HIGH-3 admin-gates writes only.",
     ("GET", "/api/settings/slide-styles/{style_id}"):
         "Read-only library browse; HIGH-3 admin-gates writes only.",
+    # Design systems mirror the deck-prompt / slide-style library shape: the
+    # three ORG-WIDE mutations (PUT, DELETE, POST .../set-default) are
+    # admin-gated in the router, so they are absent here. Reads stay open — any
+    # user browses the library to pick a system, and the generation path needs
+    # its assets/templates/files.
+    ("GET", "/api/settings/design-systems"): DESIGN_SYSTEM_READ_RATIONALE,
+    ("GET", "/api/settings/design-systems/{ds_id}"): DESIGN_SYSTEM_READ_RATIONALE,
+    ("GET", "/api/settings/design-systems/{ds_id}/templates"): DESIGN_SYSTEM_READ_RATIONALE,
+    ("GET", "/api/settings/design-systems/{ds_id}/templates/{template_id}/thumbnail"):
+        DESIGN_SYSTEM_READ_RATIONALE,
+    ("GET", "/api/settings/design-systems/{ds_id}/templates/{template_id}/source"):
+        DESIGN_SYSTEM_READ_RATIONALE,
+    ("GET", "/api/settings/design-systems/{ds_id}/assets/{asset_id}"):
+        DESIGN_SYSTEM_READ_RATIONALE,
+    ("GET", "/api/settings/design-systems/{ds_id}/assets/{asset_id}/thumbnail"):
+        DESIGN_SYSTEM_READ_RATIONALE,
+    ("GET", "/api/settings/design-systems/{ds_id}/files"): DESIGN_SYSTEM_READ_RATIONALE,
+    # NOTE: APIRoute.path preserves the raw ":path" converter suffix.
+    ("GET", "/api/settings/design-systems/{ds_id}/files/{file_path:path}"):
+        DESIGN_SYSTEM_READ_RATIONALE,
+    ("POST", "/api/settings/design-systems/import"): DESIGN_SYSTEM_CONTRIBUTE_RATIONALE,
+    ("POST", "/api/settings/design-systems"): DESIGN_SYSTEM_CONTRIBUTE_RATIONALE,
     ("GET", "/api/tools/available"): TOOLS_DISCOVERY_RATIONALE,
     ("GET", "/api/tools/discover/genie"): TOOLS_DISCOVERY_RATIONALE,
     ("GET", "/api/tools/discover/vector"): TOOLS_DISCOVERY_RATIONALE,
@@ -264,6 +306,33 @@ def test_trigger_detection_recurses_into_body_models():
     )
     # session_id exists ONLY as an ExportPPTXRequest body field here.
     assert "session_id" in _route_param_names(route)
+
+
+def test_design_system_org_wide_mutations_are_admin_gated():
+    """Self-test for the design-system prefix (the gap that let the missing
+    set-default gate through review).
+
+    The prefix's presence in ADMIN_PATH_PREFIXES only makes those routes
+    SENSITIVE — an ALLOWLIST entry would still silence them. This asserts the
+    three org-wide mutations are actually gated, so no future entry can exempt
+    one: dropping `Depends(require_admin)` from set-default makes this fail.
+    """
+    org_wide = {
+        ("PUT", "/api/settings/design-systems/{ds_id}"),
+        ("DELETE", "/api/settings/design-systems/{ds_id}"),
+        ("POST", "/api/settings/design-systems/{ds_id}/set-default"),
+    }
+    seen = set()
+    for route in _api_routes():
+        for method in route.methods:
+            if (method, route.path) not in org_wide:
+                continue
+            seen.add((method, route.path))
+            assert _has_require_admin(route), (
+                f"{method} {route.path} mutates the org-wide design-system "
+                "library and must carry Depends(require_admin)"
+            )
+    assert seen == org_wide, f"org-wide design-system routes missing: {org_wide - seen}"
 
 
 def test_permission_call_detection_matches_to_thread_form():
