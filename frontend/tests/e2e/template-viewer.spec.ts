@@ -147,6 +147,8 @@ async function openAcmeDetail(page: Page) {
 async function openViewer(page: Page) {
   await openAcmeDetail(page);
   const card = page.locator('[data-testid="template-card"]').first();
+  // Wait for the templates fetch to paint the cards before reaching in.
+  await expect(card).toBeVisible();
   await card.locator('[data-testid="expand-template-button"]').click();
   const modal = page.getByTestId('template-viewer-modal');
   await expect(modal).toBeVisible();
@@ -162,8 +164,10 @@ test.describe('Template viewer popup', () => {
     await setupDesignSystemMocks(page);
     await openAcmeDetail(page);
     const cards = page.locator('[data-testid="template-card"]');
+    // The cards render after the templates fetch resolves — wait for them
+    // rather than sampling count() immediately (the fixture ships 2).
+    await expect(cards).toHaveCount(2);
     const count = await cards.count();
-    expect(count).toBeGreaterThan(0);
     for (let i = 0; i < count; i++) {
       await expect(cards.nth(i).locator('[data-testid="expand-template-button"]')).toHaveCount(1);
     }
