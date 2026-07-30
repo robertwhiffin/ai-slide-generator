@@ -392,17 +392,18 @@ class TestReferenceValidation:
         cm.__exit__ = MagicMock(return_value=False)
         return patch("src.api.routes.agent_config.get_db_session", return_value=cm)
 
-    def test_rejects_unknown_design_system_id(self, db_session):
-        from fastapi import HTTPException
-
+    def test_clears_unknown_design_system_id(self, db_session):
+        """An unresolvable design-system pin SELF-HEALS (it is not a client
+        error: the row can be deleted by its creator under a live session).
+        Previously a 422, which wedged every later save — see
+        ``TestDeletedDesignSystemAndOtherUsersSessions``."""
         from src.api.routes.agent_config import _validate_references
         from src.api.schemas.agent_config import AgentConfig
 
+        config = AgentConfig(design_system_id=4242)
         with self._patched_db(db_session):
-            with pytest.raises(HTTPException) as exc:
-                _validate_references(AgentConfig(design_system_id=4242))
-        assert exc.value.status_code == 422
-        assert "4242" in exc.value.detail
+            _validate_references(config)  # no raise
+        assert config.design_system_id is None
 
     def test_accepts_active_design_system_id(self, db_session):
         from src.api.routes.agent_config import _validate_references
@@ -413,9 +414,8 @@ class TestReferenceValidation:
         with self._patched_db(db_session):
             _validate_references(AgentConfig(design_system_id=ds.id))  # no raise
 
-    def test_rejects_soft_deleted_design_system_id(self, db_session):
-        from fastapi import HTTPException
-
+    def test_clears_soft_deleted_design_system_id(self, db_session):
+        """A soft-deleted design system is inactive, so the pin self-heals too."""
         from src.api.routes.agent_config import _validate_references
         from src.api.schemas.agent_config import AgentConfig
         from src.services.design_system_service import import_bundle
@@ -423,10 +423,10 @@ class TestReferenceValidation:
         ds = import_bundle(db_session, zip_bytes=make_bundle_zip(), user="u")
         ds.is_active = False
         db_session.commit()
+        config = AgentConfig(design_system_id=ds.id)
         with self._patched_db(db_session):
-            with pytest.raises(HTTPException) as exc:
-                _validate_references(AgentConfig(design_system_id=ds.id))
-        assert exc.value.status_code == 422
+            _validate_references(config)  # no raise
+        assert config.design_system_id is None
 
     def _templated_ds(self, db_session, name=None):
         from src.services.design_system_service import import_bundle
@@ -1059,8 +1059,10 @@ class TestDeletedDesignSystemAndOtherUsersSessions:
     def test_reading_a_foreign_sessions_agent_config_still_works_after_delete(
         self, db_session, client
     ):
-        """B can still LOAD the session: the GET is lenient and echoes the stale
-        pin rather than 500ing, so the session opens instead of being bricked."""
+        """B can still LOAD the session rather than being bricked. The GET now
+        also SANITISES the dangling pin instead of echoing it, so the dropdown
+        shows "None" instead of binding to an id that no longer exists (see
+        ``test_config_load_returns_null_for_a_dangling_pin``)."""
         from src.database.models import UserSession
 
         ds = self._import(db_session)
@@ -1091,7 +1093,7 @@ class TestDeletedDesignSystemAndOtherUsersSessions:
             resp = client.get("/api/sessions/sess-foreign/agent-config")
 
         assert resp.status_code == 200, resp.text
-        assert resp.json()["design_system_id"] == ds_id
+        assert resp.json()["design_system_id"] is None
 
     def test_template_pin_whose_parent_design_system_is_gone_is_auto_cleared(
         self, db_session
@@ -1121,24 +1123,35 @@ class TestDeletedDesignSystemAndOtherUsersSessions:
             _validate_references(config)  # must not raise
         assert config.template_id is None
 
-    def test_agent_config_put_rejects_a_dangling_design_system_pin(self, db_session):
-        """CHARACTERIZATION (not an endorsement): the strict design-system branch
-        422s a config carrying a deleted ``design_system_id``.
+    # --- A DANGLING design_system_id SELF-HEALS (product owner's decision) ---
+    #
+    # The previous round recorded, as characterization only, that the strict
+    # design-system branch 422s a config carrying a deleted ``design_system_id``.
+    # The product consequence was severe and is now ruled out: because the
+    # frontend PUTs the WHOLE config, user A pinning a design system whose creator
+    # later deletes it could no longer change slide style, deck prompt, template,
+    # tools or model — every agent-config save failed 422 — and the dropdown
+    # rendered blank with no explanation. Generation already degraded correctly to
+    # the no-DS prompt (pinned above), so the pin was purely destructive.
+    #
+    # The design system pin now behaves EXACTLY like the template pin one branch
+    # below: cleared in place with a warning, config persisted and returned
+    # sanitized, 200. These tests are the deliberate replacement of that
+    # characterization.
 
-        Recorded so the CURRENT behaviour is visible and any deliberate change to
-        it is a conscious test edit rather than a silent drift. The product
-        consequence — every agent-config save from a session holding that pin
-        fails until the user re-picks a design system — is reported to the product
-        owner for a decision; this test asserts only what the code does today.
-        """
-        from fastapi import HTTPException
-
+    @pytest.mark.parametrize("hard", [False, True], ids=["soft_delete", "hard_delete"])
+    def test_dangling_design_system_pin_is_cleared_not_rejected(self, db_session, hard):
+        """(i) The core reversal: validation SANITIZES instead of raising."""
         from src.api.routes.agent_config import _validate_references
         from src.api.schemas.agent_config import AgentConfig
+        from src.database.models import DesignSystem
 
         ds = self._import(db_session)
         ds_id, template_id = ds.id, ds.templates[0].id
-        ds.is_active = False
+        if hard:
+            db_session.query(DesignSystem).filter_by(id=ds_id).delete()
+        else:
+            ds.is_active = False
         db_session.commit()
 
         config = AgentConfig(design_system_id=ds_id, template_id=template_id)
@@ -1146,10 +1159,187 @@ class TestDeletedDesignSystemAndOtherUsersSessions:
         cm.__enter__ = MagicMock(return_value=db_session)
         cm.__exit__ = MagicMock(return_value=False)
         with patch("src.api.routes.agent_config.get_db_session", return_value=cm):
-            with pytest.raises(HTTPException) as exc:
-                _validate_references(config)
-        assert exc.value.status_code == 422
-        assert str(ds_id) in exc.value.detail
-        # The template pin is left untouched: the design-system branch raises
-        # before the Phase 4 auto-clear is reached.
-        assert config.template_id == template_id
+            _validate_references(config)  # must NOT raise
+
+        assert config.design_system_id is None, "stale design-system pin was not cleared"
+        # Its template pin cannot outlive it — the parent selection is gone.
+        assert config.template_id is None
+
+    def test_put_changing_only_slide_style_succeeds_and_persists(self, db_session, client):
+        """(i) THE user-facing scenario: user A changes ONLY the slide style while
+        holding a dangling design-system pin. It must save."""
+        from src.api.schemas.agent_config import AgentConfig
+        from src.database.models import DesignSystem, SlideStyleLibrary, UserSession
+
+        ds = self._import(db_session)
+        ds_id = ds.id
+        style = SlideStyleLibrary(name="Acme Chosen Style", style_content="s")
+        db_session.add(style)
+        db_session.add(
+            UserSession(
+                session_id="sess-heal",
+                created_by="user-a@test.com",
+                agent_config={"design_system_id": ds_id, "tools": []},
+            )
+        )
+        db_session.commit()
+        style_id = style.id
+
+        db_session.query(DesignSystem).filter_by(id=ds_id).delete()
+        db_session.commit()
+
+        cm = MagicMock()
+        cm.__enter__ = MagicMock(return_value=db_session)
+        cm.__exit__ = MagicMock(return_value=False)
+        with patch(
+            "src.api.routes.agent_config._check_deck_permission_for_session",
+            lambda *a, **k: None,
+        ), patch("src.api.routes.agent_config.get_db_session", return_value=cm):
+            resp = client.put(
+                "/api/sessions/sess-heal/agent-config",
+                json={
+                    "tools": [],
+                    "design_system_id": ds_id,
+                    "slide_style_id": style_id,
+                },
+            )
+
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        # The change the user actually made persisted...
+        assert body["slide_style_id"] == style_id
+        # ...and the stale pin came back SANITISED, so the frontend state syncs.
+        assert body["design_system_id"] is None
+
+        stored = (
+            db_session.query(UserSession)
+            .filter_by(session_id="sess-heal")
+            .one()
+            .agent_config
+        )
+        assert stored["slide_style_id"] == style_id
+        assert stored["design_system_id"] is None, (
+            "the sanitised config must be what is PERSISTED, not just returned"
+        )
+        _ = AgentConfig.model_validate(stored)  # still a valid config
+
+    def test_config_load_returns_null_for_a_dangling_pin(self, db_session, client):
+        """(ii) LOAD self-heals too, so the dropdown shows 'None' rather than a
+        blank select bound to an id that no longer exists."""
+        from src.database.models import DesignSystem, UserSession
+
+        ds = self._import(db_session)
+        ds_id, template_id = ds.id, ds.templates[0].id
+        db_session.add(
+            UserSession(
+                session_id="sess-load-heal",
+                created_by="user-b@test.com",
+                agent_config={"design_system_id": ds_id, "template_id": template_id},
+            )
+        )
+        db_session.commit()
+        db_session.query(DesignSystem).filter_by(id=ds_id).delete()
+        db_session.commit()
+
+        cm = MagicMock()
+        cm.__enter__ = MagicMock(return_value=db_session)
+        cm.__exit__ = MagicMock(return_value=False)
+        with patch(
+            "src.api.routes.agent_config._check_deck_permission_for_session",
+            lambda *a, **k: None,
+        ), patch("src.api.routes.agent_config.get_db_session", return_value=cm), patch(
+            "src.api.routes.agent_config.get_session_manager"
+        ) as mgr:
+            mgr.return_value.get_session.return_value = {
+                "session_id": "sess-load-heal",
+                "agent_config": {
+                    "design_system_id": ds_id,
+                    "template_id": template_id,
+                },
+            }
+            resp = client.get("/api/sessions/sess-load-heal/agent-config")
+
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["design_system_id"] is None
+        assert resp.json()["template_id"] is None
+
+    def test_clearing_a_dangling_pin_logs_a_warning_with_ids(self, db_session, client, caplog):
+        """(iii) The clear is observable: the warning names the stale id AND the
+        session, so support can tell why a user's selection disappeared."""
+        import logging
+
+        from src.database.models import DesignSystem, UserSession
+
+        ds = self._import(db_session)
+        ds_id = ds.id
+        db_session.add(
+            UserSession(
+                session_id="sess-warn",
+                created_by="user-a@test.com",
+                agent_config={"design_system_id": ds_id, "tools": []},
+            )
+        )
+        db_session.commit()
+        db_session.query(DesignSystem).filter_by(id=ds_id).delete()
+        db_session.commit()
+
+        cm = MagicMock()
+        cm.__enter__ = MagicMock(return_value=db_session)
+        cm.__exit__ = MagicMock(return_value=False)
+        with caplog.at_level(logging.WARNING, logger="src.api.routes.agent_config"):
+            with patch(
+                "src.api.routes.agent_config._check_deck_permission_for_session",
+                lambda *a, **k: None,
+            ), patch("src.api.routes.agent_config.get_db_session", return_value=cm):
+                resp = client.put(
+                    "/api/sessions/sess-warn/agent-config",
+                    json={"tools": [], "design_system_id": ds_id},
+                )
+
+        assert resp.status_code == 200, resp.text
+        warnings = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
+        assert any(str(ds_id) in message for message in warnings), (
+            f"no warning named the stale design-system id: {warnings}"
+        )
+        assert any("sess-warn" in message for message in warnings), (
+            f"no warning named the session: {warnings}"
+        )
+
+    def test_a_valid_design_system_id_is_never_cleared(self, db_session):
+        """(iv) The guard must be surgical: a live pin survives untouched, so
+        this is a self-heal and not a blanket "clear the design system"."""
+        from src.api.routes.agent_config import _validate_references
+        from src.api.schemas.agent_config import AgentConfig
+
+        ds = self._import(db_session)
+        ds_id, template_id = ds.id, ds.templates[0].id
+
+        config = AgentConfig(design_system_id=ds_id, template_id=template_id)
+        cm = MagicMock()
+        cm.__enter__ = MagicMock(return_value=db_session)
+        cm.__exit__ = MagicMock(return_value=False)
+        with patch("src.api.routes.agent_config.get_db_session", return_value=cm):
+            _validate_references(config)
+
+        assert config.design_system_id == ds_id, "a LIVE design system was cleared"
+        assert config.template_id == template_id, "a valid template pin was cleared"
+
+    def test_other_strict_references_still_reject(self, db_session):
+        """The leniency is scoped to design_system_id (which a foreign user can
+        delete underneath you). A bogus slide style or deck prompt is a CLIENT
+        error and still 422s, so this change does not silently widen input."""
+        from fastapi import HTTPException
+
+        from src.api.routes.agent_config import _validate_references
+        from src.api.schemas.agent_config import AgentConfig
+
+        cm = MagicMock()
+        cm.__enter__ = MagicMock(return_value=db_session)
+        cm.__exit__ = MagicMock(return_value=False)
+        for field in ("slide_style_id", "deck_prompt_id"):
+            config = AgentConfig(**{field: 987654})
+            with patch("src.api.routes.agent_config.get_db_session", return_value=cm):
+                with pytest.raises(HTTPException) as exc:
+                    _validate_references(config)
+            assert exc.value.status_code == 422, field
+            assert "987654" in exc.value.detail

@@ -22,27 +22,33 @@ router = APIRouter(prefix="/api/sessions/{session_id}/agent-config", tags=["agen
 # ── helpers ──────────────────────────────────────────────────────────────
 
 
-def _validate_references(config: AgentConfig) -> None:
-    """Validate the library references and SANITIZE the template pin, in place.
+def _sanitize_stale_pins(config: AgentConfig, *, session_id: str | None = None) -> bool:
+    """Clear ``design_system_id`` / ``template_id`` when they no longer resolve.
 
-    ``design_system_id``, ``slide_style_id`` and ``deck_prompt_id`` stay STRICT
-    (422 on a missing/inactive entry — the existing convention). The template
-    pin is SELF-HEALING instead: template ids are re-minted by the sanctioned
-    delete+re-upload workflow, so a persisted config can legitimately hold a
-    stale pin — rejecting it would wedge EVERY later config update. When
-    ``template_id`` does not resolve to a template belonging to the selected
-    design system (pin with no design system, another system's template, or a
-    missing/re-materialized template), it is cleared in place with a warning;
-    the caller persists and returns the sanitized config so the frontend state
-    syncs. This mirrors the deliberately lenient generation path.
+    Both pins can be invalidated by SOMEONE ELSE while a user's config
+    legitimately holds them: template ids are re-minted by the sanctioned
+    delete+re-upload workflow, and a design system can be DELETED by its creator
+    (or an admin) while other users' sessions still point at it. So neither is a
+    client error, and rejecting either wedges every later config update.
+
+    The design-system pin used to be STRICT, and the consequence was severe:
+    because the frontend PUTs the WHOLE config, a user whose pinned design system
+    had been deleted could no longer change their slide style, deck prompt,
+    template, tools or model — every save returned 422 — and the dropdown
+    rendered blank with no explanation. Generation already degraded to the no-DS
+    prompt, so the strictness bought nothing and cost the session.
+
+    A ``design_system_id`` that does not resolve to an ACTIVE row is therefore
+    cleared in place with a warning naming the stale id and *session_id*; that
+    also invalidates any ``template_id`` hanging off it, which the template branch
+    then clears for the same reason. Run on BOTH write and read, so what is
+    persisted and what the client is shown agree.
+
+    Returns True when anything was cleared (callers may persist the repair).
     """
-    from src.database.models import (
-        DesignSystem,
-        DesignSystemTemplate,
-        SlideDeckPromptLibrary,
-        SlideStyleLibrary,
-    )
+    from src.database.models import DesignSystem, DesignSystemTemplate
 
+    cleared = False
     with get_db_session() as db:
         if config.design_system_id is not None:
             design_system = (
@@ -54,10 +60,15 @@ def _validate_references(config: AgentConfig) -> None:
                 .first()
             )
             if not design_system:
-                raise HTTPException(
-                    status_code=422,
-                    detail=f"design_system_id {config.design_system_id} not found",
+                logger.warning(
+                    "Clearing stale design_system_id %s (session_id=%s): the "
+                    "design system no longer exists or is inactive (deleted by "
+                    "its creator or an admin); serving the config without it",
+                    config.design_system_id,
+                    session_id,
                 )
+                config.design_system_id = None
+                cleared = True
         if config.template_id is not None:
             template = None
             if config.design_system_id is not None:
@@ -71,13 +82,36 @@ def _validate_references(config: AgentConfig) -> None:
                 )
             if template is None:
                 logger.warning(
-                    "Clearing stale template pin %s (design_system_id=%s): the "
-                    "template does not exist or does not belong to the selected "
-                    "design system; saving the config without it",
+                    "Clearing stale template pin %s (design_system_id=%s, "
+                    "session_id=%s): the template does not exist or does not "
+                    "belong to the selected design system; serving the config "
+                    "without it",
                     config.template_id,
                     config.design_system_id,
+                    session_id,
                 )
                 config.template_id = None
+                cleared = True
+    return cleared
+
+
+def _validate_references(config: AgentConfig, *, session_id: str | None = None) -> None:
+    """Sanitize the stale pins, then STRICTLY validate the remaining references.
+
+    ``slide_style_id`` and ``deck_prompt_id`` stay strict (422 on a
+    missing/inactive entry — the existing convention): those libraries are
+    admin-managed and are not deleted out from under a session, so a bad id there
+    is a CLIENT error and must not be silently swallowed.
+
+    The self-healing half lives in :func:`_sanitize_stale_pins`, which the READ
+    path calls on its own (a bogus slide style must not make a session
+    unloadable — only unsaveable).
+    """
+    from src.database.models import SlideDeckPromptLibrary, SlideStyleLibrary
+
+    _sanitize_stale_pins(config, session_id=session_id)
+
+    with get_db_session() as db:
         if config.slide_style_id is not None:
             style = (
                 db.query(SlideStyleLibrary)
@@ -146,6 +180,16 @@ async def get_agent_config(session_id: str):
 
     raw = session.get("agent_config")
     config = resolve_agent_config(raw)
+    # LOAD self-heals the same pins the PUT does. Without this the dropdown binds
+    # to an id that no longer exists and renders BLANK — no selection, no
+    # explanation — and the very next save (which PUTs the whole config) would
+    # have to clear it anyway. Sanitizing on read means the client is shown
+    # "None", which is the truth.
+    #
+    # Only the PIN sanitizer runs here, never the strict half: a bogus
+    # slide_style_id must not make a session UNLOADABLE (it is already
+    # unsaveable), and a read is not the place to reject stored state.
+    await asyncio.to_thread(_sanitize_stale_pins, config, session_id=session_id)
     result = config.model_dump()
     result["is_configured"] = raw is not None
     return result
@@ -157,10 +201,10 @@ async def put_agent_config(session_id: str, config: AgentConfig):
     # SDR-4437 HIGH-1: agent-config writes repoint the session's tools — CAN_MANAGE.
     _check_deck_permission_for_session(session_id, PermissionLevel.CAN_MANAGE)
     # Pydantic already validated duplicates via model_validator.
-    # Now validate foreign-key references; a stale template pin is sanitized
-    # (cleared in place) rather than rejected, so what is persisted and
-    # returned below is the effective config.
-    _validate_references(config)
+    # Now validate foreign-key references; a stale design-system or template pin
+    # is sanitized (cleared in place) rather than rejected, so what is persisted
+    # and returned below is the effective config.
+    _validate_references(config, session_id=session_id)
 
     try:
         result = await asyncio.to_thread(_save_agent_config, session_id, config)

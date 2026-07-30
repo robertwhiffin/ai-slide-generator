@@ -685,6 +685,193 @@ class TestGetDefaultDesignSystemId:
             assert get_default_design_system_id() is None
 
 
+class TestDefaultLookupsAreDeterministicallyOrdered:
+    """Backend and frontend must pick the SAME default when several rows tie.
+
+    ``get_default_slide_style_id`` used an unordered ``.first()`` on both its
+    ``is_default`` query and its ``is_system`` fallback, while the frontend's
+    ``pickSeededDefaultStyle`` sorts by id and takes the LOWEST. With more than
+    one candidate row the two sides could therefore disagree — non-deterministically,
+    since an unordered SELECT's row order is not guaranteed — which is how "the
+    seeded style occupies the slot" could come back on one side only.
+
+    Rows are inserted OUT OF ID ORDER (the higher id committed first) so a query
+    that happens to return insertion order fails these.
+
+    The value assertions alone are NOT sufficient evidence: SQLite returns rowid
+    order for an unordered SELECT, so they pass even against the unordered query
+    and would be tautological on their own. ``test_default_lookups_emit_order_by``
+    is the one that actually fails before the fix — it inspects the SQL that is
+    EXECUTED, which is where "deterministic" either is or is not expressed. The
+    value tests then pin the resulting behaviour. All fixtures SYNTHETIC.
+    """
+
+    @staticmethod
+    def _resolve(test_db, resolver):
+        with patch("src.core.settings_db.get_db_session") as mock_get_db:
+            mock_get_db.return_value.__enter__ = MagicMock(return_value=test_db)
+            mock_get_db.return_value.__exit__ = MagicMock(return_value=False)
+            return resolver()
+
+    @staticmethod
+    def _executed_sql(test_db, resolver):
+        """Every SQL statement the resolver actually runs, captured from the engine."""
+        from sqlalchemy import event
+
+        statements = []
+
+        def _before_cursor_execute(conn, cursor, statement, *args):
+            statements.append(statement)
+
+        engine = test_db.get_bind()
+        event.listen(engine, "before_cursor_execute", _before_cursor_execute)
+        try:
+            with patch("src.core.settings_db.get_db_session") as mock_get_db:
+                mock_get_db.return_value.__enter__ = MagicMock(return_value=test_db)
+                mock_get_db.return_value.__exit__ = MagicMock(return_value=False)
+                resolver()
+        finally:
+            event.remove(engine, "before_cursor_execute", _before_cursor_execute)
+        return statements
+
+    def test_default_lookups_emit_order_by(self, test_db):
+        """THE non-tautological assertion: an unordered SELECT ... LIMIT 1 has no
+        defined row order, so the ordering must be in the QUERY, not left to what
+        the engine happens to return."""
+        from src.core.settings_db import (
+            get_default_design_system_id,
+            get_default_slide_style_id,
+        )
+        from src.database.models import SlideStyleLibrary
+        from src.database.models.design_system import DesignSystem
+
+        # Two tying candidates per table, so both branches are exercised.
+        test_db.add(SlideStyleLibrary(
+            id=91, name="Acme Style A", style_content="s", is_default=True,
+        ))
+        test_db.add(SlideStyleLibrary(
+            id=11, name="Acme Style B", style_content="s", is_default=True,
+        ))
+        test_db.add(DesignSystem(id=92, name="Acme DS A", is_default=True))
+        test_db.add(DesignSystem(id=12, name="Acme DS B", is_default=True))
+        test_db.commit()
+
+        for label, resolver, table in (
+            ("slide style", get_default_slide_style_id, "slide_style_library"),
+            ("design system", get_default_design_system_id, "design_system"),
+        ):
+            selects = [
+                sql for sql in self._executed_sql(test_db, resolver)
+                if sql.lstrip().upper().startswith("SELECT") and table in sql
+            ]
+            assert selects, f"no {label} SELECT was captured"
+            for sql in selects:
+                assert "ORDER BY" in sql.upper(), (
+                    f"{label} default lookup runs an UNORDERED query, so backend "
+                    f"and frontend can disagree:\n{sql}"
+                )
+
+    def test_system_style_fallback_also_emits_order_by(self, test_db):
+        """The ``is_system`` fallback is a second query and needs it too."""
+        from src.core.settings_db import get_default_slide_style_id
+        from src.database.models import SlideStyleLibrary
+
+        # No is_default row at all -> the fallback branch runs.
+        test_db.add(SlideStyleLibrary(
+            id=81, name="Acme System A", style_content="s", is_system=True,
+        ))
+        test_db.add(SlideStyleLibrary(
+            id=21, name="Acme System B", style_content="s", is_system=True,
+        ))
+        test_db.commit()
+
+        selects = [
+            sql for sql in self._executed_sql(test_db, get_default_slide_style_id)
+            if sql.lstrip().upper().startswith("SELECT")
+        ]
+        assert len(selects) >= 2, (
+            f"expected the is_default query AND the is_system fallback: {selects}"
+        )
+        for sql in selects:
+            assert "ORDER BY" in sql.upper(), f"unordered fallback query:\n{sql}"
+
+    def test_lowest_id_wins_among_several_default_styles(self, test_db):
+        from src.core.settings_db import get_default_slide_style_id
+        from src.database.models import SlideStyleLibrary
+
+        # Committed high-id FIRST, so insertion order != id order.
+        test_db.add(SlideStyleLibrary(
+            id=90, name="Acme Style High", style_content="s", is_default=True,
+        ))
+        test_db.commit()
+        test_db.add(SlideStyleLibrary(
+            id=10, name="Acme Style Low", style_content="s", is_default=True,
+        ))
+        test_db.commit()
+
+        assert self._resolve(test_db, get_default_slide_style_id) == 10
+
+    def test_lowest_id_wins_among_several_system_styles_fallback(self, test_db):
+        """The ``is_system`` fallback needs the same ordering — it is the branch
+        the frontend's ``?? byId.find(is_system)`` mirrors."""
+        from src.core.settings_db import get_default_slide_style_id
+        from src.database.models import SlideStyleLibrary
+
+        test_db.add(SlideStyleLibrary(
+            id=80, name="Acme System High", style_content="s", is_system=True,
+        ))
+        test_db.commit()
+        test_db.add(SlideStyleLibrary(
+            id=20, name="Acme System Low", style_content="s", is_system=True,
+        ))
+        test_db.commit()
+
+        assert self._resolve(test_db, get_default_slide_style_id) == 20
+
+    def test_explicit_default_still_outranks_a_lower_id_system_style(self, test_db):
+        """Ordering must not reorder the PRECEDENCE: is_default wins over
+        is_system even when the system row has the lower id."""
+        from src.core.settings_db import get_default_slide_style_id
+        from src.database.models import SlideStyleLibrary
+
+        test_db.add(SlideStyleLibrary(
+            id=5, name="Acme System Lowest", style_content="s", is_system=True,
+        ))
+        test_db.add(SlideStyleLibrary(
+            id=70, name="Acme Explicit Default", style_content="s", is_default=True,
+        ))
+        test_db.commit()
+
+        assert self._resolve(test_db, get_default_slide_style_id) == 70
+
+    def test_inactive_rows_are_still_excluded(self, test_db):
+        from src.core.settings_db import get_default_slide_style_id
+        from src.database.models import SlideStyleLibrary
+
+        test_db.add(SlideStyleLibrary(
+            id=3, name="Acme Inactive Default", style_content="s",
+            is_default=True, is_active=False,
+        ))
+        test_db.add(SlideStyleLibrary(
+            id=40, name="Acme Active Default", style_content="s", is_default=True,
+        ))
+        test_db.commit()
+
+        assert self._resolve(test_db, get_default_slide_style_id) == 40
+
+    def test_lowest_id_wins_among_several_default_design_systems(self, test_db):
+        """The design-system helper already orders; pin it so it cannot regress."""
+        from src.core.settings_db import get_default_design_system_id
+        from src.database.models.design_system import DesignSystem
+
+        test_db.add(DesignSystem(id=95, name="Acme DS High", is_default=True))
+        test_db.commit()
+        test_db.add(DesignSystem(id=15, name="Acme DS Low", is_default=True))
+        test_db.commit()
+
+        assert self._resolve(test_db, get_default_design_system_id) == 15
+
+
 class TestSessionCreatingRequestsNeverSeedTemplatePin:
     """template_id is session-scoped: a pin is chosen IN a session. A pin
     arriving on the request that CREATES the session can only be another
