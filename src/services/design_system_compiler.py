@@ -126,7 +126,19 @@ _STYLE_HEADER = "SLIDE VISUAL STYLE"
 # are sanitized exactly like every other user string — sanitize-not-reject, no
 # length cap, no script restriction. Persisted v10 rows are missing every token in
 # a non-canonical group, so the bump is what makes them recompile and regain them.
-COMPILER_VERSION = 11
+# v12: the font-size exclusion is UNCONDITIONAL. It was gated on the ramp having
+# 3+ distinct sizes, which COUPLED a labeling question ("is this token a font
+# size?", true at any count) to a numeric-contract one ("is the ramp long enough to
+# derive role bands from?"), so a design system shipping ONE or TWO font-size
+# tokens still printed them under ``SPACING TOKENS:`` — the v7 small-titles
+# mislabel, still live below the threshold. Both the exclusion and its BRAND
+# FONT-SIZE TOKENS home now apply at any count; only the numeric block still
+# consults ``_MIN_RAMP_SIZES``, falling back to the neutral bands. The generic
+# section's heading is now CONSTANT (the group name is no longer interpolated into
+# it) and the version marker moved to a FIXED, name-independent header position.
+# Persisted v11 rows hold short-ramp font sizes labeled as spacing, so the bump is
+# what makes them recompile.
+COMPILER_VERSION = 12
 _COMPILER_VERSION_MARKER = f"[ds-compiler v{COMPILER_VERSION}]"
 
 # Canonical color-group ordering -> deterministic, human-meaningful sections.
@@ -517,15 +529,33 @@ def _font_size_ramp(grouped: dict[str, list[tuple[str, str]]]) -> dict[float, st
 def _ramp_token_pairs(
     grouped: dict[str, list[tuple[str, str]]]
 ) -> frozenset[tuple[str, str]]:
-    """The exact ``(name, value)`` token pairs the BRAND TYPE SCALE consumes.
+    """The exact ``(name, value)`` token pairs BRAND FONT-SIZE TOKENS owns.
 
-    Used to suppress those pairs from the type/spacing rule lists so each size
-    carries exactly ONE role cue (see ``_scale_section``). Returns empty when the
-    ramp is too short to be usable — those tokens are not surfaced as a scale, so
-    they must keep their original group listing rather than vanish.
+    Used to suppress those pairs from the type/spacing rule lists and the generic
+    sections so each size carries exactly ONE role cue (see ``_scale_section``).
+
+    UNCONDITIONAL as of v12. This was gated on the ramp reaching
+    :data:`_MIN_RAMP_SIZES`, which COUPLED two unrelated questions:
+
+    1. "Is this token a font size?" — a LABELING question. True of ``fs-16: 16px``
+       whether the bundle ships one such token or twenty.
+    2. "Is the ramp long enough to derive role BANDS from?" — a question about the
+       numeric contract, legitimately answered by ``_MIN_RAMP_SIZES``.
+
+    Because one flag answered both, a design system shipping ONE or TWO font-size
+    tokens printed them under ``SPACING TOKENS:`` — presenting brand type sizes to
+    the model as gap values, which is precisely the v7 mislabel that produced the
+    under-sized titles this compiler exists to prevent. A short ramp must not
+    re-enable the defect.
+
+    So the two decisions are now separate: this function answers (1) at ANY count,
+    and only :func:`_type_scale_section` consults ``_MIN_RAMP_SIZES` for (2),
+    falling back to the neutral bands. Nothing is dropped by the wider exclusion —
+    :func:`_font_size_token_section` is likewise unconditional, so every excluded
+    token is listed there under a heading that names its real role.
     """
     ramp = _font_size_ramp(grouped)
-    if len(ramp) < _MIN_RAMP_SIZES:
+    if not ramp:
         return frozenset()
     ramp_names = set(ramp.values())
     return frozenset(
@@ -888,8 +918,15 @@ def _font_size_token_section(
     dropped and nothing is mislabeled.
 
     Ordered by px value (the ramp's own order, ascending) then name, so output
-    stays deterministic. Returns ``None`` when there is no usable ramp — those
-    tokens keep their original group listing, so there is nothing to re-home.
+    stays deterministic. Returns ``None`` only when the design system ships no
+    font-size-shaped token at all, so there is nothing to re-home.
+
+    UNCONDITIONAL as of v12, tracking ``_ramp_token_pairs``: this section is the
+    HOME of every excluded font size, so it must exist whenever the exclusion does.
+    Gating it on a 3+ ramp while the exclusion was gated the same way kept the two
+    consistent but left the v7 mislabel live below that threshold; now both apply
+    at any count and the pairing still holds — nothing is excluded without being
+    re-homed here.
 
     The heading deliberately does NOT contain the words "BRAND TYPE SCALE": that
     phrase is how callers (and tests) locate the compiler-owned numeric region by
@@ -904,10 +941,15 @@ def _font_size_token_section(
         return float(match.group(1)) if match else 0.0
 
     entries = sorted(ramp_pairs, key=lambda pair: (_px_of(pair[1]), pair[0]))
+    # The heading names the tokens' ROLE without promising that the block below
+    # derives its bands from them: with fewer than ``_MIN_RAMP_SIZES`` distinct
+    # sizes the numeric contract falls back to the neutral bands, so wording that
+    # asserted "the required sizes for each role are stated below" would have been
+    # false for exactly the short-ramp case this decoupling introduced.
     return "\n".join(
         [
-            "BRAND FONT-SIZE TOKENS (the type ramp; the required sizes for each "
-            "role are stated below):",
+            "BRAND FONT-SIZE TOKENS (this design system's font-size tokens; they "
+            "are TYPE sizes, never spacing or gap values):",
             *(f"- {_safe(name)}: {_safe(value)}" for name, value in entries),
         ]
     )

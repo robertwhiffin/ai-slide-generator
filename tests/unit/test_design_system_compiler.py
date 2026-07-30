@@ -2903,3 +2903,103 @@ class TestEveryTokenGroupIsKept:
         assert compiled_style_content_is_current(compile_design_system(ds))
         stale = "SLIDE VISUAL STYLE: Acme Design System [ds-compiler v10]\n\nSand"
         assert not compiled_style_content_is_current(stale)
+
+
+class TestFontSizeNeverLabeledSpacingAtAnyRampLength:
+    """BLOCKING (round 5, cross-review): the v7 small-titles defect was still
+    reachable. The font-size exclusion was gated on the detected ramp having at
+    least ``_MIN_RAMP_SIZES`` (3) entries, so a design system shipping ONE or TWO
+    font-size tokens printed them under ``SPACING TOKENS:`` — presenting brand type
+    sizes to the model as gap values, which is exactly the mislabel that measurably
+    produced under-sized titles.
+
+    The gate was a COUPLING of two unrelated decisions: "is this ramp long enough
+    to derive role bands from?" (a numeric-contract question, legitimately 3+) and
+    "is this token a font size?" (a labeling question, true at any count). The fix
+    decouples them: a font-size-shaped token is NEVER listed as spacing, whatever
+    the count, and always has its own correctly-labeled home.
+
+    Keep-everything still holds: each token must still appear in the artifact.
+    All fixtures SYNTHETIC.
+    """
+
+    @pytest.mark.parametrize("count", [1, 2, 3, 10])
+    def test_font_size_tokens_never_appear_under_spacing_heading(self, session, count):
+        from src.services.design_system_compiler import compile_design_system
+
+        pxs = [12, 64, 16, 40, 24, 32, 48, 20, 14, 80][:count]
+        tokens = [
+            {"group": "spacing", "name": f"fs-{px}", "value": f"{px}px"} for px in pxs
+        ]
+        # A genuine spacing token, so the section exists and stays correct.
+        tokens.append({"group": "spacing", "name": "gap-8", "value": "8px"})
+        out = compile_design_system(_make_ds(session, tokens=tokens))
+
+        tail = out[out.index("SPACING TOKENS:"):]
+        spacing_block = tail[: tail.index("\n\n")] if "\n\n" in tail else tail
+        for px in pxs:
+            assert f"fs-{px}" not in spacing_block, (
+                f"ramp of {count}: font-size token fs-{px} mislabeled as SPACING "
+                f"(the v7 small-titles defect):\n{spacing_block}"
+            )
+        # Genuine spacing is untouched.
+        assert "gap-8: 8px" in spacing_block
+        # NOTHING DROPPED: every font-size token still reaches the artifact, under
+        # a heading that names its real role.
+        assert "BRAND FONT-SIZE TOKENS" in out
+        for px in pxs:
+            assert f"fs-{px}: {px}px" in out, (
+                f"ramp of {count}: font-size token fs-{px} was DROPPED"
+            )
+
+    @pytest.mark.parametrize("count", [1, 2, 3, 10])
+    def test_font_size_tokens_never_appear_in_a_generic_group_section(
+        self, session, count
+    ):
+        """The same decoupling must hold for the generic (unknown-group) path."""
+        from src.services.design_system_compiler import compile_design_system
+
+        pxs = [12, 64, 16, 40, 24, 32, 48, 20, 14, 80][:count]
+        tokens = [
+            {"group": "brandish", "name": f"font-size-{px}", "value": f"{px}px"}
+            for px in pxs
+        ]
+        tokens.append({"group": "brandish", "name": "duration", "value": "200ms"})
+        out = compile_design_system(_make_ds(session, tokens=tokens))
+
+        heading = "ADDITIONAL BRAND TOKENS"
+        tail = out[out.index(heading):] if heading in out else ""
+        generic_block = (
+            tail[: tail.index("\n\n")] if tail and "\n\n" in tail else tail
+        )
+        for px in pxs:
+            assert f"font-size-{px}" not in generic_block, (
+                f"ramp of {count}: font size restated in the generic section:\n"
+                f"{generic_block}"
+            )
+        assert "duration: 200ms" in generic_block
+        for px in pxs:
+            assert f"font-size-{px}: {px}px" in out, (
+                f"ramp of {count}: font-size token font-size-{px} was DROPPED"
+            )
+
+    @pytest.mark.parametrize("count", [1, 2])
+    def test_short_ramp_still_uses_neutral_bands_for_the_numeric_contract(
+        self, session, count
+    ):
+        """Decoupling must NOT change the numeric contract: two sizes are still not
+        enough to derive role bands from, so the neutral bands remain."""
+        from src.services.design_system_compiler import compile_design_system
+
+        pxs = [16, 64][:count]
+        out = compile_design_system(
+            _make_ds(
+                session,
+                tokens=[
+                    {"group": "spacing", "name": f"fs-{px}", "value": f"{px}px"}
+                    for px in pxs
+                ],
+            )
+        )
+        assert "this design system ships no font-size ramp" in out
+        assert "40-52px" in out
