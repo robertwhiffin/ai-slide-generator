@@ -8,7 +8,12 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field, ValidationError
 
 from src.api.routes._authz import _check_deck_permission_for_session
-from src.api.schemas.agent_config import AgentConfig, ToolEntry, resolve_agent_config
+from src.api.schemas.agent_config import (
+    AgentConfig,
+    ToolEntry,
+    normalize_style_source_exclusivity,
+    resolve_agent_config,
+)
 from src.api.services.session_manager import SessionNotFoundError, get_session_manager
 from src.core.database import get_db_session
 from src.database.models import UserSession
@@ -239,6 +244,12 @@ async def put_agent_config(session_id: str, config: AgentConfig):
     # is sanitized (cleared in place) rather than rejected, so what is persisted
     # and returned below is the effective config.
     _validate_references(config, session_id=session_id)
+    # THEN make the style sources exclusive. Order matters: reference validation
+    # clears a DANGLING design system first, so a user who picks a slide style
+    # while holding a dead pin keeps their style. Normalising first would drop the
+    # style for a design system that is about to be cleared anyway, leaving them
+    # with neither.
+    normalize_style_source_exclusivity(config, session_id=session_id)
 
     try:
         result = await asyncio.to_thread(_save_agent_config, session_id, config)

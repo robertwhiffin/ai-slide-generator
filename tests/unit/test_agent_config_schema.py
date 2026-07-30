@@ -372,3 +372,112 @@ class TestMalformedStyleSourceFailsSoft:
 
         with _pytest.raises(ValidationError):
             AgentConfig(style_source="bogus")
+
+
+# ---------------------------------------------------------------------------
+# Style-source exclusivity is enforced SERVER-side (write path)
+# ---------------------------------------------------------------------------
+#
+# Round 2 review: exclusivity was frontend-only, so an API or MCP caller could
+# persist BOTH slide_style_id and design_system_id (PUT answered 200) and
+# generation silently applied design-system precedence. Now that MCP sets
+# design_system_id, that is a real path.
+#
+# CONTRACT CHOSEN: deterministic NORMALISATION to design-system-wins with a
+# warning, NOT a 422. Reasoning:
+#   * It matches what generation has always done (agent_factory resolves the
+#     design system first), so nothing about the rendered deck changes — the
+#     stored row simply stops disagreeing with the behaviour.
+#   * A 422 would WEDGE the legacy rows this must not break: the frontend PUTs
+#     the WHOLE config, so a user sitting on a stored both-set row who changed
+#     only their deck prompt would get 422 on every save — precisely the
+#     dangling-design-system bug fixed one round earlier, reintroduced.
+#   * The precedence is already the documented product rule, so silently
+#     honouring it is not inventing policy.
+# Normalisation is WRITE-side only; reads of legacy rows keep both values.
+
+
+class TestStyleSourceExclusivityOnWrite:
+    def test_both_set_normalises_to_design_system_wins(self):
+        from src.api.schemas.agent_config import (
+            AgentConfig,
+            normalize_style_source_exclusivity,
+        )
+
+        config = AgentConfig(slide_style_id=42, design_system_id=7)
+        assert normalize_style_source_exclusivity(config) is True
+        assert config.design_system_id == 7
+        assert config.slide_style_id is None, (
+            "the slide style must be dropped so the prompt carries ONE authority"
+        )
+
+    def test_normalisation_logs_a_warning(self, caplog):
+        import logging
+
+        from src.api.schemas.agent_config import (
+            AgentConfig,
+            normalize_style_source_exclusivity,
+        )
+
+        with caplog.at_level(logging.WARNING, logger="src.api.schemas.agent_config"):
+            normalize_style_source_exclusivity(
+                AgentConfig(slide_style_id=42, design_system_id=7), session_id="sess-x"
+            )
+
+        messages = [r.getMessage() for r in caplog.records]
+        assert any("slide_style_id" in m and "design_system_id" in m for m in messages), (
+            f"the normalisation must be observable: {messages}"
+        )
+        assert any("sess-x" in m for m in messages)
+
+    def test_either_alone_is_untouched(self):
+        from src.api.schemas.agent_config import (
+            AgentConfig,
+            normalize_style_source_exclusivity,
+        )
+
+        style_only = AgentConfig(slide_style_id=42)
+        assert normalize_style_source_exclusivity(style_only) is False
+        assert style_only.slide_style_id == 42
+
+        ds_only = AgentConfig(design_system_id=7)
+        assert normalize_style_source_exclusivity(ds_only) is False
+        assert ds_only.design_system_id == 7
+
+    def test_neither_set_is_untouched(self):
+        """"Neither" is a legitimate choice and must not be disturbed."""
+        from src.api.schemas.agent_config import (
+            AgentConfig,
+            normalize_style_source_exclusivity,
+        )
+
+        config = AgentConfig()
+        assert normalize_style_source_exclusivity(config) is False
+        assert config.slide_style_id is None
+        assert config.design_system_id is None
+
+    def test_a_legacy_stored_row_with_both_still_loads_unchanged(self):
+        """The hard requirement: reads must keep working AND must not rewrite the
+        stored row. Normalisation is write-side only, so a legacy row still
+        reports both values — which is what the config bar's precedence hint
+        needs in order to explain itself."""
+        from src.api.schemas.agent_config import resolve_agent_config
+
+        config = resolve_agent_config(
+            {"tools": [], "slide_style_id": 42, "design_system_id": 7}
+        )
+        assert config.design_system_id == 7
+        assert config.slide_style_id == 42, (
+            "a READ must not silently rewrite a legacy both-set row"
+        )
+
+    def test_normalisation_is_idempotent(self):
+        from src.api.schemas.agent_config import (
+            AgentConfig,
+            normalize_style_source_exclusivity,
+        )
+
+        config = AgentConfig(slide_style_id=42, design_system_id=7)
+        assert normalize_style_source_exclusivity(config) is True
+        assert normalize_style_source_exclusivity(config) is False  # nothing left
+        assert config.model_dump()["slide_style_id"] is None
