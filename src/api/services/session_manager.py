@@ -13,7 +13,10 @@ from typing import Any, Dict, List, Optional
 from sqlalchemy import func, or_
 from sqlalchemy.orm import Session, joinedload
 
-from src.api.schemas.agent_config import sanitize_agent_config_for_persist
+from src.api.schemas.agent_config import (
+    normalize_agent_config_dict,
+    sanitize_agent_config_for_persist,
+)
 from src.core.database import get_db_session
 from src.database.models.profile_contributor import PermissionLevel
 from src.database.models.session import (
@@ -121,11 +124,21 @@ class SessionManager:
             title: Optional session title
             session_id: Optional session ID (if not provided, one is generated)
             created_by: Username of the authenticated user creating the session
-            agent_config: Optional agent configuration JSON (tools, style, prompts)
+            agent_config: Optional agent configuration JSON (tools, style, prompts).
+                Normalized through the shared persistence serializer before storage
+                (see below), so a caller cannot persist a config that carries BOTH
+                style authorities.
 
         Returns:
             Dictionary with session info including session_id
         """
+        # This method takes a RAW DICT and used to assign it straight to the ORM row,
+        # which made it a live bypass of style-source exclusivity: a caller passing
+        # both slide_style_id and design_system_id had both stored, and generation
+        # then silently applied design-system precedence — a row disagreeing with
+        # the deck it produced. Normalizing here (rather than at each of this
+        # method's several callers) keeps the single-chokepoint shape.
+        agent_config = normalize_agent_config_dict(agent_config)
         if session_id is None:
             session_id = secrets.token_urlsafe(32)
 

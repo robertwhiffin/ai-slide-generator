@@ -4,7 +4,13 @@ from __future__ import annotations
 import logging
 from typing import Annotated, Any, Final, Literal, Optional, Union
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    Field,
+    field_validator,
+    model_serializer,
+    model_validator,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -119,41 +125,61 @@ class AgentConfig(BaseModel):
             seen.add(key)
         return self
 
-    def model_dump(self, *args: Any, **kwargs: Any) -> dict:
+    @model_serializer(mode="wrap")
+    def _one_style_authority(self, handler: Any, info: Any) -> dict:
         """Serialize, enforcing ONE style authority.
 
-        THE CHOKEPOINT for style-source exclusivity. Every write path that persists
-        an agent config — the agent-config PUT, PATCH /tools and the GET stale-pin
-        heal, the three chat branches, MCP create, profile create/update, profile
-        load, and session duplicate — produces its stored dict by calling this
-        method, directly or through :func:`sanitize_agent_config_for_persist`. So
+        THE CHOKEPOINT for style-source exclusivity, at the only altitude that
+        actually is one. Every write path that persists an agent config — the
+        agent-config PUT, PATCH /tools and the GET stale-pin heal, the three chat
+        branches, MCP create, profile create/update, profile load, and session
+        duplicate — produces its stored dict by serializing this model, so
         normalizing HERE means every one of them inherits the rule, including a path
         added tomorrow that nobody remembers to annotate.
 
-        This replaces per-route enforcement, which was the wrong altitude. Five
-        routes were fixed one at a time (chat-create, chat-client-id, chat-update,
-        agent-put, mcp-create) and three were still bypassing it — ``_save_agent_config``
-        (reached by PATCH /tools and the GET heal), ``create_profile``, and
-        ``duplicate_session`` — each persisting ``slide_style_id`` AND
-        ``design_system_id``, which generation then silently disambiguated by
-        design-system precedence: a stored row disagreeing with the deck it produced.
-        Adding a fourth call would have left the same hole open for the fifth path.
+        A ``model_dump`` OVERRIDE was not enough, which is the round-7 fix. Overriding
+        one method only covers callers who choose that method, and four ways to
+        serialize bypassed it entirely:
+
+        * ``model_dump_json()`` — pydantic v2 serializes through its Rust core and
+          never calls a python ``model_dump`` override, so the json form carried BOTH
+          ids;
+        * ``dict(model)`` — iterates the instance, calling no dump at all;
+        * raw ORM assignment and a SQLAlchemy bulk update — persist the attributes
+          themselves.
+
+        A ``@model_serializer`` is what every one of those funnels through (dict, json
+        and nested serialization alike), so the invariant is no longer contingent on
+        the caller's choice of serializer. Attribute-level writers are handled where
+        they persist: ``SessionManager.create_session`` normalizes the raw dict it is
+        handed.
+
+        Normalization stays at SERIALIZATION rather than moving to a model validator,
+        deliberately. ``put_agent_config`` must validate DB references BEFORE making
+        the sources exclusive, because a DANGLING design system can only be detected
+        with a lookup; if the object could not hold both transiently, a user holding a
+        dead pin AND a real slide style would be left with NEITHER. Serialization also
+        must not have side effects on the object being serialized (a GET that dumps
+        for a RESPONSE would otherwise silently edit the caller's in-memory config),
+        so the DUMP is normalized and the model is untouched.
 
         Semantics are unchanged from :func:`normalize_style_source_exclusivity`:
         DESIGN SYSTEM WINS and the slide style is dropped, never a 422 — a 422 would
         wedge legacy both-set rows on every save (the frontend PUTs the WHOLE config,
         so a user holding such a row could not save an unrelated edit). Legacy
-        both-set rows therefore HEAL on write.
+        both-set rows therefore HEAL on write. Routes that need the model itself
+        normalized still call :func:`normalize_style_source_exclusivity` explicitly,
+        and the two agree by construction: both drop exactly ``slide_style_id``.
 
-        The dump is normalized rather than the model mutated: serialization must not
-        have side effects on the object being serialized (a GET that dumps for a
-        RESPONSE would otherwise silently edit the caller's in-memory config).
-        Routes that need the model itself normalized — the PUT, which must order this
-        AFTER its DB reference validation — still call
-        :func:`normalize_style_source_exclusivity` explicitly, and the two agree by
-        construction: both drop exactly ``slide_style_id``.
+        The slide style is REMOVED rather than set to ``None``. Assigning ``None``
+        made ``model_dump(exclude_none=True)`` emit an explicit ``slide_style_id:
+        None`` — the one option whose entire purpose is to omit nulls — so the key is
+        dropped when nulls are excluded and nulled otherwise, which is what each
+        caller asked for.
         """
-        dumped = super().model_dump(*args, **kwargs)
+        dumped = handler(self)
+        if not isinstance(dumped, dict):  # pragma: no cover - defensive
+            return dumped
         # Guard the key lookups: a caller may dump a subset (``include=``/
         # ``exclude=``), in which case there is nothing to reconcile.
         if (
@@ -168,7 +194,10 @@ class AgentConfig(BaseModel):
                 dumped["slide_style_id"],
                 dumped["design_system_id"],
             )
-            dumped["slide_style_id"] = None
+            if getattr(info, "exclude_none", False):
+                dumped.pop("slide_style_id", None)
+            else:
+                dumped["slide_style_id"] = None
         return dumped
 
 
@@ -249,6 +278,42 @@ def normalize_style_source_exclusivity(
     )
     config.slide_style_id = None
     return True
+
+
+def normalize_agent_config_dict(raw: Optional[dict]) -> Optional[dict]:
+    """Route a RAW agent-config dict through the model's persistence serializer.
+
+    For writers that are handed a plain dict rather than an ``AgentConfig`` and
+    persist it directly — today that is ``SessionManager.create_session``, which
+    assigned its ``agent_config`` argument straight onto the ORM row, so a both-set
+    config was stored verbatim and generation then silently disambiguated it by
+    design-system precedence.
+
+    This is NOT a per-call-site rule: it applies no policy of its own. It parses the
+    dict into the model and serializes it back, so whatever the model's serializer
+    enforces — currently ONE style authority — is what the dict inherits, and a rule
+    added there later flows here for free.
+
+    Unlike :func:`sanitize_agent_config_for_persist` it does NOT strip
+    session-scoped state: this is a normalizer for a config being written where it
+    was authored, not a copy being handed to a different session.
+
+    FAILS SOFT. A dict this cannot parse is returned unchanged rather than raising,
+    because ``create_session`` has always accepted whatever its caller passed and a
+    normalizer must not turn a previously-working create into a 500. ``None`` stays
+    ``None`` (no config at all is not an empty config).
+    """
+    if raw is None:
+        return None
+    try:
+        return resolve_agent_config(raw).model_dump()
+    except Exception:
+        logger.warning(
+            "agent_config could not be parsed for normalization; storing it as "
+            "supplied. Style-source exclusivity is NOT enforced on this row",
+            exc_info=True,
+        )
+        return raw
 
 
 def sanitize_agent_config_for_persist(
