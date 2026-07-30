@@ -1263,6 +1263,231 @@ class TestDeletedDesignSystemAndOtherUsersSessions:
         assert resp.json()["design_system_id"] is None
         assert resp.json()["template_id"] is None
 
+    # --- GET must PERSIST the heal, not merely mask it ----------------------
+    #
+    # Cross-vendor review: the GET sanitized a DETACHED Pydantic object and
+    # returned it without saving, so the stored row kept the dangling ids
+    # forever. The response looked healed while the database was not, and every
+    # subsequent GET re-emitted the same warnings.
+    #
+    # A side-effecting read is not unprecedented here: the compiler already does
+    # lazy recompute-on-read for compiled_style_content. This follows that
+    # precedent, with three constraints — write ONLY when something was actually
+    # cleared, stay idempotent, and degrade to the old masking behaviour rather
+    # than 500ing the GET if the write fails.
+
+    def _committing_db(self, db_session):
+        """A ``get_db_session`` stand-in that COMMITS on exit, like the real one.
+
+        ``MagicMock.__exit__`` returning False does not commit, so a write made
+        inside the block stays pending and ``expire_all()`` discards it — which
+        reads exactly like "the route never persisted" while the route is in fact
+        correct. Any test asserting on the stored ROW must use this.
+        """
+        cm = MagicMock()
+        cm.__enter__ = MagicMock(return_value=db_session)
+
+        def _exit(*_args):
+            db_session.commit()
+            return False
+
+        cm.__exit__ = MagicMock(side_effect=_exit)
+        return cm
+
+    def test_get_persists_the_healed_config(self, db_session, client):
+        """The ROW itself must be clean after one GET."""
+        from src.database.models import DesignSystem, UserSession
+
+        ds = self._import(db_session)
+        ds_id, template_id = ds.id, ds.templates[0].id
+        session_row = UserSession(
+            session_id="sess-persist-heal",
+            created_by="user-a@test.com",
+            agent_config={
+                "tools": [],
+                "design_system_id": ds_id,
+                "template_id": template_id,
+            },
+        )
+        db_session.add(session_row)
+        db_session.commit()
+        db_session.query(DesignSystem).filter_by(id=ds_id).delete()
+        db_session.commit()
+
+        cm = self._committing_db(db_session)
+        with patch(
+            "src.api.routes.agent_config._check_deck_permission_for_session",
+            lambda *a, **k: None,
+        ), patch("src.api.routes.agent_config.get_db_session", return_value=cm), patch(
+            "src.api.routes.agent_config.get_session_manager"
+        ) as mgr:
+            mgr.return_value.get_session.return_value = {
+                "session_id": "sess-persist-heal",
+                "agent_config": {
+                    "tools": [],
+                    "design_system_id": ds_id,
+                    "template_id": template_id,
+                },
+            }
+            resp = client.get("/api/sessions/sess-persist-heal/agent-config")
+
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["design_system_id"] is None
+
+        db_session.expire_all()
+        stored = (
+            db_session.query(UserSession)
+            .filter_by(session_id="sess-persist-heal")
+            .one()
+            .agent_config
+        )
+        assert stored["design_system_id"] is None, (
+            f"the GET masked the stale pin instead of persisting the heal: {stored}"
+        )
+        assert stored["template_id"] is None
+
+    def test_second_get_emits_no_warning(self, db_session, client, caplog):
+        """Because the row is genuinely healed, the second read is silent — the
+        observable difference between healing and masking."""
+        import logging
+
+        from src.database.models import DesignSystem, UserSession
+
+        ds = self._import(db_session)
+        ds_id = ds.id
+        db_session.add(
+            UserSession(
+                session_id="sess-quiet-heal",
+                created_by="user-a@test.com",
+                agent_config={"tools": [], "design_system_id": ds_id},
+            )
+        )
+        db_session.commit()
+        db_session.query(DesignSystem).filter_by(id=ds_id).delete()
+        db_session.commit()
+
+        cm = self._committing_db(db_session)
+
+        def _do_get():
+            with patch(
+                "src.api.routes.agent_config._check_deck_permission_for_session",
+                lambda *a, **k: None,
+            ), patch(
+                "src.api.routes.agent_config.get_db_session", return_value=cm
+            ), patch("src.api.routes.agent_config.get_session_manager") as mgr:
+                db_session.expire_all()
+                current = (
+                    db_session.query(UserSession)
+                    .filter_by(session_id="sess-quiet-heal")
+                    .one()
+                    .agent_config
+                )
+                mgr.return_value.get_session.return_value = {
+                    "session_id": "sess-quiet-heal",
+                    "agent_config": current,
+                }
+                return client.get("/api/sessions/sess-quiet-heal/agent-config")
+
+        with caplog.at_level(logging.WARNING, logger="src.api.routes.agent_config"):
+            first = _do_get()
+        assert first.status_code == 200
+        assert any(
+            str(ds_id) in record.getMessage() for record in caplog.records
+        ), "the FIRST get should have warned about the stale id"
+
+        caplog.clear()
+        with caplog.at_level(logging.WARNING, logger="src.api.routes.agent_config"):
+            second = _do_get()
+        assert second.status_code == 200
+        assert second.json()["design_system_id"] is None
+        assert [r.getMessage() for r in caplog.records] == [], (
+            "a second GET still warned, so the row was not actually healed"
+        )
+
+    def test_clean_read_performs_no_write(self, db_session, client):
+        """Never write on a clean read: reads stay reads unless there is a repair
+        to make."""
+        from src.database.models import UserSession
+
+        ds = self._import(db_session)
+        ds_id, template_id = ds.id, ds.templates[0].id  # both VALID
+        db_session.add(
+            UserSession(
+                session_id="sess-clean-read",
+                created_by="user-a@test.com",
+                agent_config={
+                    "tools": [],
+                    "design_system_id": ds_id,
+                    "template_id": template_id,
+                },
+            )
+        )
+        db_session.commit()
+
+        cm = MagicMock()
+        cm.__enter__ = MagicMock(return_value=db_session)
+        cm.__exit__ = MagicMock(return_value=False)
+        with patch(
+            "src.api.routes.agent_config._check_deck_permission_for_session",
+            lambda *a, **k: None,
+        ), patch("src.api.routes.agent_config.get_db_session", return_value=cm), patch(
+            "src.api.routes.agent_config.get_session_manager"
+        ) as mgr, patch(
+            "src.api.routes.agent_config._save_agent_config"
+        ) as save:
+            mgr.return_value.get_session.return_value = {
+                "session_id": "sess-clean-read",
+                "agent_config": {
+                    "tools": [],
+                    "design_system_id": ds_id,
+                    "template_id": template_id,
+                },
+            }
+            resp = client.get("/api/sessions/sess-clean-read/agent-config")
+
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["design_system_id"] == ds_id
+        save.assert_not_called()
+
+    def test_a_failed_persist_degrades_to_masking_not_a_500(self, db_session, client):
+        """If the repair write fails, the READ must still succeed with the
+        sanitised view — never bubble a 500 out of a GET."""
+        from src.database.models import DesignSystem, UserSession
+
+        ds = self._import(db_session)
+        ds_id = ds.id
+        db_session.add(
+            UserSession(
+                session_id="sess-heal-fails",
+                created_by="user-a@test.com",
+                agent_config={"tools": [], "design_system_id": ds_id},
+            )
+        )
+        db_session.commit()
+        db_session.query(DesignSystem).filter_by(id=ds_id).delete()
+        db_session.commit()
+
+        cm = MagicMock()
+        cm.__enter__ = MagicMock(return_value=db_session)
+        cm.__exit__ = MagicMock(return_value=False)
+        with patch(
+            "src.api.routes.agent_config._check_deck_permission_for_session",
+            lambda *a, **k: None,
+        ), patch("src.api.routes.agent_config.get_db_session", return_value=cm), patch(
+            "src.api.routes.agent_config.get_session_manager"
+        ) as mgr, patch(
+            "src.api.routes.agent_config._save_agent_config",
+            side_effect=RuntimeError("write refused"),
+        ):
+            mgr.return_value.get_session.return_value = {
+                "session_id": "sess-heal-fails",
+                "agent_config": {"tools": [], "design_system_id": ds_id},
+            }
+            resp = client.get("/api/sessions/sess-heal-fails/agent-config")
+
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["design_system_id"] is None
+
     def test_clearing_a_dangling_pin_logs_a_warning_with_ids(self, db_session, client, caplog):
         """(iii) The clear is observable: the warning names the stale id AND the
         session, so support can tell why a user's selection disappeared."""
